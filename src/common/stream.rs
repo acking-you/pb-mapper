@@ -1,4 +1,6 @@
+#[cfg(not(target_os = "windows"))]
 use std::os::fd::AsFd;
+use std::os::windows::io::AsSocket;
 use std::time::Duration;
 
 use snafu::ResultExt;
@@ -101,17 +103,31 @@ const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(20);
 /// `tcp_keepalive_intvl`
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 /// The number of times a keepalive probe packet is performed to be sent,in Linux it
-/// is `tcp_keepalive_probes`
+/// is `tcp_keepalive_probes`. Not available on Windows platform
+#[cfg(not(target_os = "windows"))]
 const TCP_KEEPALIVE_PROBES: u32 = 3;
 
 /// Local and remote TCP connections must have keepalive enabled to ensure that the remote server's
 /// resources are not wasted
+#[cfg(not(target_os = "windows"))]
 pub fn set_tcp_keep_alive<S: AsFd>(stream: &S) -> std::result::Result<(), std::io::Error> {
     let sock_ref = socket2::SockRef::from(stream);
     let mut ka = socket2::TcpKeepalive::new();
     ka = ka.with_time(TCP_KEEPALIVE_TIME);
     ka = ka.with_interval(TCP_KEEPALIVE_INTERVAL);
     ka = ka.with_retries(TCP_KEEPALIVE_PROBES);
+
+    sock_ref.set_tcp_keepalive(&ka)
+}
+
+/// Local and remote TCP connections must have keepalive enabled to ensure that the remote server's
+/// resources are not wasted
+#[cfg(target_os = "windows")]
+pub fn set_tcp_keep_alive<S: AsSocket>(stream: &S) -> std::result::Result<(), std::io::Error> {
+    let sock_ref = socket2::SockRef::from(stream);
+    let mut ka = socket2::TcpKeepalive::new();
+    ka = ka.with_time(TCP_KEEPALIVE_TIME);
+    ka = ka.with_interval(TCP_KEEPALIVE_INTERVAL);
 
     sock_ref.set_tcp_keepalive(&ka)
 }
