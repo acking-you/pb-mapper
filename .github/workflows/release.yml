@@ -1,0 +1,153 @@
+name: build and deploy
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    name: Build and upload
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        # You can add more, for any target you'd like!
+        include:
+          - build: x86_64-linux-musl
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+
+          - build: armv7-linux-musl
+            os: ubuntu-latest
+            target: armv7-unknown-linux-musleabi
+
+          - build: s390x-linux-gnu
+            os: ubuntu-latest
+            target: s390x-unknown-linux-gnu
+
+          - build: x86_64-macos
+            os: macos-latest
+            target: x86_64-apple-darwin
+
+          - build: aarch64-macos
+            os: macos-latest
+            target: aarch64-apple-darwin
+
+          - build: x86_64-windows-msvc
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Get the release version from the tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        # Arguments to pass in
+        with:
+          # Make Rust compile to our target (defined in the matrix)
+          toolchain: nightly-2023-11-17
+          targets: ${{ matrix.target }}
+
+      - name: Build pb-mapper-server
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --bin pb-mapper-server --verbose --release --target ${{ matrix.target }}
+
+      - name: Build pb-mapper-server-cli
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --bin pb-mapper-server-cli --verbose --release --target ${{ matrix.target }}
+
+      - name: Build pb-mapper-client-cli
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --bin pb-mapper-client-cli --verbose --release --target ${{ matrix.target }}
+
+      - name: Archive pb-mapper-server
+        shell: bash
+        run: |
+          # Replace with the name of your binary
+          binary_name="pb-mapper-server"
+
+          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
+          mkdir "$dirname"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
+          else
+            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
+          fi
+
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "$dirname.zip" "$dirname"
+            echo "CLI_ASSET=$dirname.zip" >> $GITHUB_ENV
+          else
+            tar -czf "$dirname.tar.gz" "$dirname"
+            echo "CLI_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Archive pb-mapper-server-cli
+        shell: bash
+        run: |
+          # Replace with the name of your binary
+          binary_name="pb-mapper-server-cli"
+
+          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
+          mkdir "$dirname"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
+          else
+            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
+          fi
+
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "$dirname.zip" "$dirname"
+            echo "CLIENT_ASSET=$dirname.zip" >> $GITHUB_ENV
+          else
+            tar -czf "$dirname.tar.gz" "$dirname"
+            echo "CLIENT_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Archive pb-mapper-server-cli
+        shell: bash
+        run: |
+          # Replace with the name of your binary
+          binary_name="pb-mapper-server-cli"
+
+          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
+          mkdir "$dirname"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
+          else
+            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
+          fi
+
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "$dirname.zip" "$dirname"
+            echo "SERVER_ASSET=$dirname.zip" >> $GITHUB_ENV
+          else
+            tar -czf "$dirname.tar.gz" "$dirname"
+            echo "SERVER_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Release binary
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ env.SERVER_ASSET }}
+            ${{ env.CLIENT_ASSET }}
+            ${{ env.CLI_ASSET }}
