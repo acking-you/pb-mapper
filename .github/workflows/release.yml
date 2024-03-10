@@ -122,11 +122,11 @@ jobs:
             echo "CLIENT_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
           fi
 
-      - name: Archive pb-mapper-server-cli
+      - name: Archive pb-mapper-client-cli
         shell: bash
         run: |
           # Replace with the name of your binary
-          binary_name="pb-mapper-server-cli"
+          binary_name="pb-mapper-client-cli"
 
           dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
           mkdir "$dirname"
