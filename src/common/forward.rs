@@ -82,9 +82,14 @@ pub async fn start_forward<
 ) {
     let client_to_server = copy(client_reader, server_writer);
     let server_to_client = copy(server_reader, client_writer);
-    let (r1, r2) = futures::future::join(client_to_server, server_to_client).await;
-    handle_forward_result(r1, "client -> server");
-    handle_forward_result(r2, "server -> client");
+    tokio::select! {
+        result = client_to_server =>{
+            handle_forward_result( result,"client->server");
+        },
+        result = server_to_client =>{
+            handle_forward_result( result,"server->client");
+        }
+    }
 }
 
 fn handle_forward_result(result: Result<usize>, detail: &'static str) {
