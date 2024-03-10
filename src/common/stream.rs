@@ -1,5 +1,6 @@
 #[cfg(not(target_os = "windows"))]
 use std::os::fd::AsFd;
+#[cfg(target_os = "windows")]
 use std::os::windows::io::AsSocket;
 use std::time::Duration;
 
