@@ -7,14 +7,19 @@ use std::time::Duration;
 use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
-use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::net::TcpStream;
 
 use super::error::{Result, StmConnectStreamSnafu};
+use crate::utils::addr::{each_addr, ToSocketAddrs};
+use crate::utils::udp::{UdpStream, UdpStreamReadHalf, UdpStreamWriteHalf};
 
-pub trait NetStream: StreamSplit + AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static {}
+pub trait NetworkStream:
+    StreamSplit + AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static
+{
+}
 
 pub trait StreamProvider {
-    type Item: NetStream;
+    type Item: NetworkStream;
 
     fn from_addr<A: ToSocketAddrs + Send>(
         addr: A,
@@ -32,45 +37,55 @@ pub trait StreamSplit {
     fn split(&mut self) -> (Self::ReaderRef<'_>, Self::WriterRef<'_>);
 }
 
-pub struct TcpStreamProvider;
+macro_rules! gen_stream_impl {
+    ($struct_name:ident, $inner_ty:ty) => {
+        pub struct $struct_name($inner_ty);
 
-pub struct TcpStreamImpl(pub(super) TcpStream);
+        impl $struct_name {
+            pub fn new(stream: $inner_ty) -> Self {
+                Self(stream)
+            }
+        }
 
-impl NetStream for TcpStreamImpl {}
+        impl AsyncRead for $struct_name {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+            }
+        }
 
-impl AsyncRead for TcpStreamImpl {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
-    }
+        impl AsyncWrite for $struct_name {
+            fn poll_write(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &[u8],
+            ) -> std::task::Poll<std::prelude::v1::Result<usize, std::io::Error>> {
+                std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+            }
+
+            fn poll_flush(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::prelude::v1::Result<(), std::io::Error>> {
+                std::pin::Pin::new(&mut self.0).poll_flush(cx)
+            }
+
+            fn poll_shutdown(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::prelude::v1::Result<(), std::io::Error>> {
+                std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+            }
+        }
+    };
 }
 
-impl AsyncWrite for TcpStreamImpl {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::prelude::v1::Result<usize, std::io::Error>> {
-        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
-    }
+gen_stream_impl!(TcpStreamImpl, TcpStream);
 
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::prelude::v1::Result<(), std::io::Error>> {
-        std::pin::Pin::new(&mut self.0).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::prelude::v1::Result<(), std::io::Error>> {
-        std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
-    }
-}
+gen_stream_impl!(UdpStreamImpl, UdpStream);
 
 impl StreamSplit for TcpStreamImpl {
     type ReaderRef<'a> = ReadHalf<'a>
@@ -85,14 +100,45 @@ impl StreamSplit for TcpStreamImpl {
     }
 }
 
+impl StreamSplit for UdpStreamImpl {
+    type ReaderRef<'a> = UdpStreamReadHalf<'static>;
+    type WriterRef<'a> = UdpStreamWriteHalf<'a>
+    where
+        Self: 'a;
+
+    fn split(&mut self) -> (Self::ReaderRef<'_>, Self::WriterRef<'_>) {
+        self.0.split()
+    }
+}
+
+impl NetworkStream for TcpStreamImpl {}
+
+impl NetworkStream for UdpStreamImpl {}
+
+pub struct TcpStreamProvider;
+
 impl StreamProvider for TcpStreamProvider {
     type Item = TcpStreamImpl;
 
     async fn from_addr<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Item> {
         Ok(TcpStreamImpl(
-            TcpStream::connect(addr)
+            each_addr(addr, TcpStream::connect)
                 .await
                 .context(StmConnectStreamSnafu { stream_type: "TCP" })?,
+        ))
+    }
+}
+
+pub struct UdpStreamProvider;
+
+impl StreamProvider for UdpStreamProvider {
+    type Item = UdpStreamImpl;
+
+    async fn from_addr<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Item> {
+        Ok(UdpStreamImpl(
+            UdpStream::connect(addr)
+                .await
+                .context(StmConnectStreamSnafu { stream_type: "UDP" })?,
         ))
     }
 }

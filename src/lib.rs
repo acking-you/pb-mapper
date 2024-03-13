@@ -1,6 +1,7 @@
 pub mod common;
 pub mod local;
 pub mod pb_server;
+pub mod utils;
 
 mod tests {
 

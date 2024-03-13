@@ -5,7 +5,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use snafu::ResultExt;
-use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::net::TcpStream;
 use tracing::instrument;
 
 use self::error::{
@@ -18,6 +18,7 @@ use crate::common::message::{
     NormalMessageWriter, PbConnRequest, PbConnResponse,
 };
 use crate::common::stream::{set_tcp_keep_alive, StreamProvider};
+use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_handle};
 
 #[instrument]
@@ -29,7 +30,7 @@ pub async fn run_server_side_cli<
     remote_addr: A,
     key: Arc<str>,
 ) {
-    let mut manager_stream = TcpStream::connect(remote_addr)
+    let mut manager_stream = each_addr(remote_addr, TcpStream::connect)
         .await
         .expect("connect remote pb server never fails");
 

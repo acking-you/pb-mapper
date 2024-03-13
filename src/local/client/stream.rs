@@ -2,7 +2,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use snafu::ResultExt;
-use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::net::TcpStream;
 use tracing::{info_span, instrument};
 
 use super::error::{
@@ -14,19 +14,20 @@ use crate::common::message::{
     MessageReader, MessageSerializer, MessageWriter, NormalMessageReader, NormalMessageWriter,
     PbConnRequest, PbConnResponse,
 };
-use crate::common::stream::{set_tcp_keep_alive, NetStream};
+use crate::common::stream::{set_tcp_keep_alive, NetworkStream};
 use crate::snafu_error_handle;
+use crate::utils::addr::{each_addr, ToSocketAddrs};
 
 #[instrument(skip(local_stream))]
 pub async fn handle_local_stream<
-    LocalStream: NetStream,
+    LocalStream: NetworkStream,
     A: ToSocketAddrs + Debug + Send + 'static,
 >(
     mut local_stream: LocalStream,
     key: Arc<str>,
     remote_addr: A,
 ) -> Result<()> {
-    let mut remote_stream = TcpStream::connect(remote_addr)
+    let mut remote_stream = each_addr(remote_addr, TcpStream::connect)
         .await
         .context(ConnectRemoteStreamSnafu)?;
     snafu_error_handle!(

@@ -5,7 +5,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use snafu::ResultExt;
-use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::net::TcpStream;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
 use self::stream::handle_local_stream;
@@ -15,6 +15,7 @@ use crate::common::message::{
     MessageReader, MessageSerializer, MessageWriter, NormalMessageReader, NormalMessageWriter,
     PbConnRequest, PbConnResponse, PbConnStatusReq,
 };
+use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_return, snafu_error_handle};
 
 pub async fn run_client_side_cli<
@@ -43,7 +44,8 @@ pub async fn show_status<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
     req: PbConnStatusReq,
 ) {
     let msg = snafu_error_get_or_return!(PbConnRequest::Status(req).encode());
-    let mut remote_stream = snafu_error_get_or_return!(TcpStream::connect(remote_addr).await);
+    let mut remote_stream =
+        snafu_error_get_or_return!(each_addr(remote_addr, TcpStream::connect).await);
 
     // send status request
     {

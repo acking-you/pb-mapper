@@ -15,11 +15,12 @@ graph TD
 ## Todos
 - [x] Public server handler: used to deploy to public network. The role is to provide `server-side` registration and `client-side` subscription to the client's local machine
 - [x] Local server handler: used to map local server to a public service [TCP]
-- [ ] Local server handler: used to map local server to a public service [UDP]
+- [x] Local server handler: used to map local server to a public service [UDP]
 - [x] Local client handler: Get the services that have been mapped to the public server [TCP]
-- [ ] Local client handler: Get the services that have been mapped to the public server [UDP]
+- [x] Local client handler: Get the services that have been mapped to the public server [UDP]
 - [x] Show remote server status: Displays the current operational status of the public server, such as the assigned conn_id, and the keys of the registered servers
 - [x] Latency testing: Test the latency of the server that is mapped locally to complete the entire request
+- [ ] Check for key existence before `client-side-cli` connection is started
 - [ ] Github CI/CD
-- [ ] Docker deployment
+- [x] Docker deployment
 - [ ] Adding Documentation and Notes: such as `#![deny(missing_docs, rustdoc::broken_intra_doc_links)]` 
