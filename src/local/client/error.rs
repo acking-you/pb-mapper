@@ -13,6 +13,19 @@ pub enum Error {
     ConnectRemoteStream { source: std::io::Error },
     #[snafu(display("encode subcribe request error"))]
     EncodeSubcribeReq { source: common::error::Error },
+    #[snafu(display("encode status request error"))]
+    EncodeStatusReq { source: common::error::Error },
+    #[snafu(display("write status request error"))]
+    WriteStatusReq { source: common::error::Error },
+    #[snafu(display("read status response error"))]
+    ReadStatusResp { source: common::error::Error },
+    #[snafu(display("decode status response error"))]
+    DecodeStatusResp { source: common::error::Error },
+    #[snafu(display("we expected `PbConnResponse::Status`,but actual response is `{resp}`"))]
+    StatusRespNotMatch {
+        // Structured representation of response
+        resp: String,
+    },
     #[snafu(display("write subcribe request error"))]
     WriteSubcribeReq { source: common::error::Error },
     #[snafu(display("read subcribe response error"))]

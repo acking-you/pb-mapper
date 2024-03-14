@@ -1,4 +1,5 @@
 pub mod error;
+mod status;
 mod stream;
 
 use std::fmt::Debug;
@@ -8,13 +9,11 @@ use snafu::ResultExt;
 use tokio::net::TcpStream;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
+use self::status::get_status;
 use self::stream::handle_local_stream;
 use crate::common::config::StatusOp;
 use crate::common::listener::{ListenerProvider, StreamAccept};
-use crate::common::message::{
-    MessageReader, MessageSerializer, MessageWriter, NormalMessageReader, NormalMessageWriter,
-    PbConnRequest, PbConnResponse, PbConnStatusReq,
-};
+use crate::common::message::{PbConnStatusReq, PbConnStatusResp};
 use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_return, snafu_error_handle};
 
@@ -26,6 +25,30 @@ pub async fn run_client_side_cli<
     remote_addr: A,
     key: Arc<str>,
 ) {
+    let mut stream = snafu_error_get_or_return!(
+        each_addr(remote_addr, TcpStream::connect).await,
+        "get status stream"
+    );
+
+    let status_resp =
+        snafu_error_get_or_return!(get_status(&mut stream, PbConnStatusReq::Keys).await);
+
+    let keys = if let PbConnStatusResp::Keys(keys) = &status_resp {
+        keys
+    } else {
+        tracing::error!("We expected status response,but got {status_resp:?}");
+        return;
+    };
+
+    if !keys.iter().any(|k| k == key.as_ref()) {
+        tracing::error!("Not valid key:{key},valid keys:{keys:?}");
+        return;
+    }
+
+    drop(status_resp);
+
+    tracing::info!("Subcribe server:{key} successful!");
+
     let listener = snafu_error_get_or_return!(LocalListener::bind(local_addr)
         .await
         .context(BindLocalListenerSnafu));
@@ -43,26 +66,13 @@ pub async fn show_status<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
     remote_addr: A,
     req: PbConnStatusReq,
 ) {
-    let msg = snafu_error_get_or_return!(PbConnRequest::Status(req).encode());
-    let mut remote_stream =
-        snafu_error_get_or_return!(each_addr(remote_addr, TcpStream::connect).await);
-
-    // send status request
-    {
-        let mut msg_writer = NormalMessageWriter::new(&mut remote_stream);
-        snafu_error_get_or_return!(msg_writer.write_msg(&msg).await);
-    }
-
-    // get status
-    {
-        let mut msg_reader = NormalMessageReader::new(&mut remote_stream);
-        let msg = snafu_error_get_or_return!(msg_reader.read_msg().await);
-        let resp = snafu_error_get_or_return!(PbConnResponse::decode(msg));
-        println!(
-            "{}",
-            snafu_error_get_or_return!(serde_json::to_string_pretty(&resp))
-        );
-    }
+    let mut stream = snafu_error_get_or_return!(
+        each_addr(remote_addr, TcpStream::connect).await,
+        "get status stream"
+    );
+    let status = snafu_error_get_or_return!(get_status(&mut stream, req).await);
+    let status = snafu_error_get_or_return!(serde_json::to_string_pretty(&status));
+    println!("Status:{status}");
 }
 
 #[inline]

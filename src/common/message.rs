@@ -193,12 +193,12 @@ async fn set_msg_len<T: AsyncWriteExt + Unpin>(writer: &mut T, len: DataLenType)
     write_datalen(writer, len).await
 }
 
-pub struct NormalMessageReader<'a, T: AsyncReadExt + Unpin> {
+pub struct NormalMessageReader<'a, T: AsyncReadExt + Send + Unpin> {
     reader: &'a mut T,
     buffer: CommonBuffer,
 }
 
-impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
+impl<'a, T: AsyncReadExt + Send + Unpin> NormalMessageReader<'a, T> {
     pub fn new(reader: &'a mut T) -> Self {
         Self {
             reader,
@@ -220,11 +220,11 @@ impl<'a, T: AsyncReadExt + Unpin + Send> MessageReader for NormalMessageReader<'
     }
 }
 
-pub struct NormalMessageWriter<'a, T: AsyncWriteExt + Unpin> {
+pub struct NormalMessageWriter<'a, T: AsyncWriteExt + Send + Unpin> {
     writer: &'a mut T,
 }
 
-impl<'a, T: AsyncWriteExt + Unpin> NormalMessageWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Send + Unpin> NormalMessageWriter<'a, T> {
     pub fn new(writer: &'a mut T) -> Self {
         Self { writer }
     }
