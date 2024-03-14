@@ -1,7 +1,7 @@
 use clap::Parser;
 use mimalloc_rust::GlobalMiMalloc;
 use pb_mapper::common::config::{get_pb_mapper_server, get_sockaddr, init_tracing, LocalService};
-use pb_mapper::common::stream::TcpStreamProvider;
+use pb_mapper::common::stream::{TcpStreamProvider, UdpStreamProvider};
 use pb_mapper::local::client::handle_status_cli;
 use pb_mapper::local::server::run_server_side_cli;
 use pb_mapper::snafu_error_get_or_return;
@@ -27,7 +27,14 @@ async fn main() {
     let cli = Cli::parse();
     init_tracing();
     match cli.local_server {
-        LocalService::UdpServer { .. } => todo!(),
+        LocalService::UdpServer { key, addr } => {
+            run_server_side_cli::<UdpStreamProvider, _>(
+                snafu_error_get_or_return!(get_sockaddr(&addr)),
+                snafu_error_get_or_return!(get_pb_mapper_server(cli.pb_mapper_server.as_deref())),
+                key.into(),
+            )
+            .await
+        }
         LocalService::TcpServer { key, addr } => {
             run_server_side_cli::<TcpStreamProvider, _>(
                 snafu_error_get_or_return!(get_sockaddr(&addr)),
