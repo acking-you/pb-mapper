@@ -1,12 +1,20 @@
+use std::time::Duration;
+
 use pb_mapper::common::config::init_tracing;
 use pb_mapper::common::listener::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
-use pb_mapper::common::stream::{StreamProvider, TcpStreamProvider, UdpStreamProvider};
+use pb_mapper::common::message::{
+    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
+};
+use pb_mapper::common::stream::{
+    StreamProvider, StreamSplit, TcpStreamProvider, UdpStreamProvider,
+};
 use pb_mapper::local::client::run_client_side_cli;
 use pb_mapper::local::server::run_server_side_cli;
 use pb_mapper::pb_server::run_server;
 use pb_mapper::utils::addr::ToSocketAddrs;
+use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::Instant;
+use tokio::time::{sleep, Instant};
 
 struct TimerTickGurad {
     ins: Instant,
@@ -101,7 +109,7 @@ async fn run_pb_mapper_tcp_server_cli() {
 #[tokio::test]
 async fn run_pb_mapper_udp_server_cli() {
     init_tracing();
-    run_server_side_cli::<UdpStreamProvider, _>("127.0.0.1:33333", "127.0.0.1:11111", "b".into())
+    run_server_side_cli::<UdpStreamProvider, _>("127.0.0.1:33333", "114.55.60.46:7666", "b".into())
         .await;
 }
 
@@ -117,22 +125,37 @@ async fn run_pb_mapper_tcp_client_cli() {
 #[tokio::test]
 async fn run_pb_mapper_udp_client_cli() {
     init_tracing();
-    run_client_side_cli::<UdpListenerProvider, _>("0.0.0.0:23456", "127.0.0.1:11111", "b".into())
+    run_client_side_cli::<UdpListenerProvider, _>("0.0.0.0:23456", "114.55.60.46:7666", "b".into())
         .await;
+}
+
+/// get random message
+fn gen_random_msg() -> Vec<u8> {
+    let len = rand::thread_rng().gen_range(0_usize..2000);
+    let mut vec = Vec::new();
+    for _ in 0..len {
+        vec.push(rand::thread_rng().gen_range(0..212));
+    }
+    vec
 }
 
 async fn echo_delay<P: StreamProvider, A: ToSocketAddrs + 'static + Send>(addr: A) {
     let mut stream = P::from_addr(addr).await.unwrap();
-    let mut buf = [0; 1024];
-    let expected = b"abc";
-    for _ in 0..10 {
-        let n = {
-            let _guard = TimerTickGurad::new();
-            stream.write_all(expected).await.unwrap();
-            stream.read(&mut buf).await.unwrap()
-        };
+    let (mut reader, mut writer) = stream.split();
+    let mut reader = NormalMessageReader::new(&mut reader);
+    let mut writer = NormalMessageWriter::new(&mut writer);
+    loop {
+        let expected = gen_random_msg();
+        for _ in 0..100 {
+            let msg = {
+                let _guard = TimerTickGurad::new();
+                writer.write_msg(&expected).await.unwrap();
+                reader.read_msg().await.unwrap()
+            };
 
-        assert_eq!(expected, &buf[..n]);
+            assert_eq!(expected, msg);
+        }
+        sleep(Duration::from_secs(15)).await
     }
 }
 

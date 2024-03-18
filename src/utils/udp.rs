@@ -9,8 +9,9 @@ use bytes::{Buf, Bytes, BytesMut};
 use hashbrown::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
+use tokio::time::Sleep;
 
-use self::impl_inner::{UdpStreamReadContext, UdpStreamWriteContext};
+use self::impl_inner::{get_sleep, UdpStreamReadContext, UdpStreamWriteContext};
 use super::addr::{each_addr, ToSocketAddrs};
 use crate::snafu_error_get_or_continue;
 
@@ -21,13 +22,17 @@ type Result<T, E = std::io::Error> = std::result::Result<T, E>;
 
 mod impl_inner {
 
-    use futures::StreamExt;
+    use std::time::Duration;
+
+    use futures::{FutureExt, StreamExt};
+    use tokio::time::{sleep, Instant, Sleep};
 
     use super::*;
 
     pub(super) trait UdpStreamReadContext {
         fn get_mut_remaining_bytes(&mut self) -> &mut Option<Bytes>;
         fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes>;
+        fn get_sleep(&mut self) -> &mut Pin<Box<Sleep>>;
     }
 
     pub(super) trait UdpStreamWriteContext {
@@ -40,15 +45,36 @@ mod impl_inner {
         cx: &mut Context,
         buf: &mut ReadBuf,
     ) -> Poll<Result<()>> {
-        if let Some(remaining) = read_ctx.get_mut_remaining_bytes() {
+        // timeout
+        if read_ctx.get_sleep().poll_unpin(cx).is_ready() {
+            buf.clear();
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("UdpStream timeout with duration:{:?}", get_timeout()),
+            )));
+        }
+
+        let is_remaining_consume = if let Some(remaining) = read_ctx.get_mut_remaining_bytes() {
             if buf.remaining() < remaining.len() {
                 buf.put_slice(&remaining.split_to(buf.remaining())[..]);
             } else {
                 buf.put_slice(&remaining[..]);
                 *read_ctx.get_mut_remaining_bytes() = None;
             }
-            return Poll::Ready(Ok(()));
+            true
+        } else {
+            false
         };
+
+        if is_remaining_consume {
+            // update timeout
+            read_ctx
+                .get_sleep()
+                .as_mut()
+                .reset(Instant::now() + get_timeout());
+            return Poll::Ready(Ok(()));
+        }
+
         let remaining = match read_ctx.get_receiver_stream().poll_next_unpin(cx) {
             Poll::Ready(Some(mut inner_buf)) => {
                 let remaining = if buf.remaining() < inner_buf.len() {
@@ -67,6 +93,12 @@ mod impl_inner {
             }
             Poll::Pending => return Poll::Pending,
         };
+
+        // last update
+        read_ctx
+            .get_sleep()
+            .as_mut()
+            .reset(Instant::now() + get_timeout());
         *read_ctx.get_mut_remaining_bytes() = remaining;
         Poll::Ready(Ok(()))
     }
@@ -79,6 +111,17 @@ mod impl_inner {
         write_ctx
             .get_socket()
             .poll_send_to(cx, buf, *write_ctx.get_peer_addr())
+    }
+
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
+
+    pub(super) fn get_sleep() -> Sleep {
+        sleep(get_timeout())
+    }
+
+    #[inline]
+    pub(super) fn get_timeout() -> Duration {
+        DEFAULT_TIMEOUT
     }
 }
 
@@ -135,7 +178,9 @@ impl UdpListener {
                         let peer_addr = snafu_error_get_or_continue!(ret,"UDPListener clean conn");
                         streams.remove(&peer_addr);
                     }
-                    Ok((len, peer_addr)) = socket.recv_buf_from(&mut buf) => {
+                    ret = socket.recv_buf_from(&mut buf) => {
+                        let (len,peer_addr) = snafu_error_get_or_continue!(ret,"UDPListener `recv_buf_from`");
+
                         match streams.get(&peer_addr) {
                             Some(tx) => {
                                 if let Err(err) =  tx.send_async(buf.copy_to_bytes(len)).await{
@@ -156,6 +201,7 @@ impl UdpListener {
                                     local_addr,
                                     peer_addr,
                                     recv_stream: child_rx.into_stream(),
+                                    timeout: Box::pin(get_sleep()),
                                     socket: socket.clone(),
                                     _handler_guard: None,
                                     _listener_guard: Some(ListenerCleanGuard{sender:drop_tx.clone(),peer_addr}),
@@ -217,13 +263,14 @@ impl Drop for TaskJoinHandleGuard {
 /// An I/O object representing a UDP stream connected to a remote endpoint.
 ///
 /// A UDP stream can either be created by connecting to an endpoint, via the
-/// [`connect`] method, or by [accepting] a connection from a [listener].
+/// [`connect`] method, or by accepting a connection from a listener.
 pub struct UdpStream {
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
     socket: Arc<tokio::net::UdpSocket>,
     recv_stream: flume::r#async::RecvStream<'static, Bytes>,
     remaining: Option<Bytes>,
+    timeout: Pin<Box<Sleep>>,
     _handler_guard: Option<TaskJoinHandleGuard>,
     _listener_guard: Option<ListenerCleanGuard>,
 }
@@ -286,6 +333,7 @@ impl UdpStream {
             peer_addr,
             recv_stream: rx.into_stream(),
             socket,
+            timeout: Box::pin(get_sleep()),
             _handler_guard: Some(TaskJoinHandleGuard(handler)),
             _listener_guard: None,
             remaining: None,
@@ -305,6 +353,7 @@ impl UdpStream {
             UdpStreamReadHalf {
                 recv_stream: self.recv_stream.clone(),
                 remaining: self.remaining.clone(),
+                timeout: Box::pin(get_sleep()),
             },
             UdpStreamWriteHalf {
                 socket: &self.socket,
@@ -321,6 +370,10 @@ impl UdpStreamReadContext for std::pin::Pin<&mut UdpStream> {
 
     fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes> {
         &mut self.recv_stream
+    }
+
+    fn get_sleep(&mut self) -> &mut Pin<Box<Sleep>> {
+        &mut self.timeout
     }
 }
 
@@ -357,6 +410,7 @@ impl AsyncWrite for UdpStream {
 pub struct UdpStreamReadHalf<'a> {
     recv_stream: flume::r#async::RecvStream<'a, Bytes>,
     remaining: Option<Bytes>,
+    timeout: Pin<Box<Sleep>>,
 }
 
 impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamReadHalf<'static>> {
@@ -366,6 +420,10 @@ impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamReadHalf<'static>> {
 
     fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes> {
         &mut self.recv_stream
+    }
+
+    fn get_sleep(&mut self) -> &mut Pin<Box<Sleep>> {
+        &mut self.timeout
     }
 }
 
