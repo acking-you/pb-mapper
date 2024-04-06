@@ -21,7 +21,7 @@ use crate::utils::addr::{each_addr, ToSocketAddrs};
 
 pub async fn handle_stream<
     LocalStream: StreamProvider,
-    A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
+    A: ToSocketAddrs + Debug + Copy + Clone + Send,
 >(
     local_addr: A,
     remote_addr: A,

@@ -17,27 +17,37 @@ use crate::common::message::{
     LocalServerRequest, MessageReader, MessageSerializer, MessageWriter, NormalMessageReader,
     NormalMessageWriter, PbConnRequest, PbConnResponse,
 };
-use crate::common::stream::{set_tcp_keep_alive, StreamProvider};
+use crate::common::stream::{got_one_socket_addr, set_tcp_keep_alive, StreamProvider};
 use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_handle};
 
 #[instrument]
 pub async fn run_server_side_cli<
+    const KEEP_ALIVE: bool,
     LocalStream: StreamProvider,
-    A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
+    A: ToSocketAddrs + Debug,
 >(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
 ) {
+    let local_addr = got_one_socket_addr(local_addr)
+        .await
+        .expect("at least one socket addr be parsed from `local_addr`");
+    let remote_addr = got_one_socket_addr(remote_addr)
+        .await
+        .expect("at least one socket addr be parsed from `remote_addr`");
+
     let mut manager_stream = each_addr(remote_addr, TcpStream::connect)
         .await
         .expect("connect remote pb server never fails");
 
-    snafu_error_handle!(
-        set_tcp_keep_alive(&manager_stream),
-        "manager stream set tcp keep alive"
-    );
+    if KEEP_ALIVE {
+        snafu_error_handle!(
+            set_tcp_keep_alive(&manager_stream),
+            "manager stream set tcp keep alive"
+        );
+    }
 
     // start register server with key
     {

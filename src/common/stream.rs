@@ -1,15 +1,16 @@
+use std::net::SocketAddr;
 #[cfg(not(target_os = "windows"))]
 use std::os::fd::AsFd;
 #[cfg(target_os = "windows")]
 use std::os::windows::io::AsSocket;
 use std::time::Duration;
 
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
-use super::error::{Result, StmConnectStreamSnafu};
+use super::error::{Result, StmConnectStreamSnafu, StmGotOneAddrFromIterSnafu, StmGotOneAddrSnafu};
 use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::utils::udp::{UdpStream, UdpStreamReadHalf, UdpStreamWriteHalf};
 
@@ -177,4 +178,9 @@ pub fn set_tcp_keep_alive<S: AsSocket>(stream: &S) -> std::result::Result<(), st
     ka = ka.with_interval(TCP_KEEPALIVE_INTERVAL);
 
     sock_ref.set_tcp_keepalive(&ka)
+}
+
+pub async fn got_one_socket_addr<A: ToSocketAddrs>(addr: A) -> Result<SocketAddr> {
+    let mut iter = addr.to_socket_addrs().await.context(StmGotOneAddrSnafu)?;
+    iter.next().context(StmGotOneAddrFromIterSnafu)
 }

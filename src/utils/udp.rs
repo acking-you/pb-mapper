@@ -131,20 +131,7 @@ mod impl_inner {
 /// various forms of processing.
 ///
 /// # Examples
-///
-/// ```no_run
-/// async fn process_socket<T>(_socket: T) {}
-///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn Error>> {
-///     let mut listener = UdpListener::bind(SocketAddr::from_str("127.0.0.1:8080")?).await?;
-///
-///     loop {
-///         let (socket, _) = listener.accept().await?;
-///         process_socket(socket).await;
-///     }
-/// }
-/// ```
+/// See [tokio::net::TcpListener]
 pub struct UdpListener {
     handler: tokio::task::JoinHandle<()>,
     receiver: flume::Receiver<(UdpStream, SocketAddr)>,

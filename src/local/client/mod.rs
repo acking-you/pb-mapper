@@ -14,17 +14,22 @@ use self::stream::handle_local_stream;
 use crate::common::config::StatusOp;
 use crate::common::listener::{ListenerProvider, StreamAccept};
 use crate::common::message::{PbConnStatusReq, PbConnStatusResp};
+use crate::common::stream::got_one_socket_addr;
 use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_return, snafu_error_handle};
 
-pub async fn run_client_side_cli<
-    LocalListener: ListenerProvider,
-    A: ToSocketAddrs + Debug + Copy + Send + 'static,
->(
+pub async fn run_client_side_cli<LocalListener: ListenerProvider, A: ToSocketAddrs>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
 ) {
+    let local_addr = got_one_socket_addr(local_addr)
+        .await
+        .expect("at least one socket addr be parsed from `local_addr`");
+    let remote_addr = got_one_socket_addr(remote_addr)
+        .await
+        .expect("at least one socket addr be parsed from `remote_addr`");
+
     let mut stream = snafu_error_get_or_return!(
         each_addr(remote_addr, TcpStream::connect).await,
         "get status stream"

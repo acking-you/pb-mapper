@@ -61,6 +61,10 @@ pub enum Error {
         stream_type: &'static str,
         source: std::io::Error,
     },
+    #[snafu(display("failed to got one addr from iter"))]
+    StmGotOneAddrFromIter,
+    #[snafu(display("failed to got one addr when parsing address"))]
+    StmGotOneAddr { source: std::io::Error },
     /// Error for listener
     #[snafu(display("listener failed to bind addr, type:`{listener_type}`"))]
     LsnListenerBind {
