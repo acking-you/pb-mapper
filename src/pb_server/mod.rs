@@ -154,7 +154,7 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                     .context(TaskCenterSendStatusRespSnafu { conn_id }));
             }
             ManagerTask::Accept(stream) => {
-                let conn_id = manager.get_conn_id();
+                let conn_id = manager.get_conn_id(server_conn_map.iter().map(|(_, &id)| id));
                 let manager_task_sender = manager.get_task_sender();
                 tokio::spawn(async move {
                     snafu_error_handle!(handle_conn(conn_id, manager_task_sender, stream).await);

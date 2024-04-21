@@ -99,10 +99,15 @@ impl<
         format!("list:{list:?}",)
     }
 
-    pub fn get_conn_id(&mut self) -> ConnIdType {
+    pub fn get_conn_id(
+        &mut self,
+        mut action_server_ids: impl Iterator<Item = ConnIdType>,
+    ) -> ConnIdType {
         match self.idle_conn_id_list.pop() {
             Some(conn_id) => {
-                if self.conn_id_provider.is_valid_id(&conn_id) {
+                if self.conn_id_provider.is_valid_id(&conn_id)
+                    && !action_server_ids.any(|id| conn_id == id)
+                {
                     conn_id
                 } else {
                     tracing::warn!(
