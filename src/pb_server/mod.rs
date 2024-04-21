@@ -139,6 +139,7 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                 let resp = match status {
                     PbConnStatusReq::RemoteId => {
                         PbConnResponse::Status(PbConnStatusResp::RemoteId {
+                            server_map: format!("{server_conn_map:?}"),
                             active: manager.active_conn_id_msg(),
                             idle: manager.idle_conn_id_msg(),
                         })

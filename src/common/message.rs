@@ -28,7 +28,11 @@ pub enum PbConnStatusReq {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnStatusResp {
-    RemoteId { active: String, idle: String },
+    RemoteId {
+        server_map: String,
+        active: String,
+        idle: String,
+    },
     Keys(Vec<String>),
 }
 
@@ -42,7 +46,7 @@ pub enum PbConnRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnResponse {
-    Register,
+    Register(u32),
     Subcribe { client_id: u32, server_id: u32 },
     Stream,
     Status(PbConnStatusResp),

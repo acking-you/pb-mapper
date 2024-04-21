@@ -65,9 +65,10 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
         let resp = snafu_error_get_or_return!(
             PbConnResponse::decode(msg).context(DecodeRegisterRespSnafu)
         );
-        if !matches!(resp, PbConnResponse::Register) {
+        let PbConnResponse::Register(conn_id) = resp else {
             snafu_error_get_or_return!(RegisterRespNotMatchSnafu {}.fail())
-        }
+        };
+        tracing::info!("Server Register Ok: key:{key}, conn_id:{conn_id}");
     }
 
     // start listen stream request

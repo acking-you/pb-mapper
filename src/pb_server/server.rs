@@ -91,12 +91,12 @@ pub async fn handle_server_conn(
     let mut msg_writer = NormalMessageWriter::new(&mut conn);
     // response msg to local server to indicate that register handling has finished
     {
-        let msg = PbConnResponse::Register
-            .encode()
-            .context(ServerConnEncodeRegisterRespSnafu {
+        let msg = PbConnResponse::Register(conn_id.into()).encode().context(
+            ServerConnEncodeRegisterRespSnafu {
                 key: key.clone(),
                 conn_id,
-            })?;
+            },
+        )?;
         msg_writer
             .write_msg(&msg)
             .await
