@@ -30,10 +30,12 @@ pub async fn handle_local_stream<
     let mut remote_stream = each_addr(remote_addr, TcpStream::connect)
         .await
         .context(ConnectRemoteStreamSnafu)?;
+
     snafu_error_handle!(
         set_tcp_keep_alive(&remote_stream),
         "remote stream set keepalive"
     );
+
     // start subcribe
     let (client_id, server_id) = {
         // handle request

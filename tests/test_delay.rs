@@ -12,7 +12,7 @@ use pb_mapper::common::stream::{
 };
 use pb_mapper::local::client::run_client_side_cli;
 use pb_mapper::local::server::run_server_side_cli;
-use pb_mapper::pb_server::run_server_with_keepalive;
+use pb_mapper::pb_server::run_server;
 use pb_mapper::utils::addr::ToSocketAddrs;
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -94,7 +94,7 @@ async fn run_echo_server(
 }
 
 async fn run_pb_mapper_server(addr: &str) {
-    run_server_with_keepalive(addr, false).await;
+    run_server(addr).await;
 }
 
 async fn run_pb_mapper_server_cli(
@@ -105,12 +105,10 @@ async fn run_pb_mapper_server_cli(
 ) {
     match server_type {
         ServerType::Udp => {
-            run_server_side_cli::<false, UdpStreamProvider, _>(local_addr, remote_addr, key.into())
-                .await
+            run_server_side_cli::<UdpStreamProvider, _>(local_addr, remote_addr, key.into()).await
         }
         ServerType::Tcp => {
-            run_server_side_cli::<false, TcpStreamProvider, _>(local_addr, remote_addr, key.into())
-                .await
+            run_server_side_cli::<TcpStreamProvider, _>(local_addr, remote_addr, key.into()).await
         }
     }
 }

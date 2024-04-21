@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use clap::{Subcommand, ValueEnum};
+use once_cell::sync::Lazy;
 use snafu::ResultExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, Layer};
@@ -50,6 +51,23 @@ pub fn get_sockaddr(addr: &str) -> Result<SocketAddr> {
 }
 
 const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
+
+/// Env to control whether the keep-alive option of TCP is enabled
+pub const PB_MAPPER_KEEP_ALIVE: &str = "PB_MAPPER_KEEP_ALIVE";
+
+/// Controls whether the keepalive option for TCP is enabled, depending on the value of the
+/// environment variable `PB_MAPPER_KEEP_ALIVE`
+pub static IS_KEEPALIVE: Lazy<bool> = Lazy::new(|| {
+    if std::env::var(PB_MAPPER_KEEP_ALIVE).is_ok() {
+        tracing::info!(
+            "TCP keep-alive is already on, due to the setting of the env:`{PB_MAPPER_KEEP_ALIVE}` "
+        );
+        true
+    } else {
+        tracing::info!("By default TCP keep-alive is off");
+        false
+    }
+});
 
 #[inline]
 pub fn get_pb_mapper_server(addr: Option<&str>) -> Result<SocketAddr> {

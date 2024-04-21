@@ -159,6 +159,11 @@ const TCP_KEEPALIVE_PROBES: u32 = 3;
 /// resources are not wasted
 #[cfg(not(target_os = "windows"))]
 pub fn set_tcp_keep_alive<S: AsFd>(stream: &S) -> std::result::Result<(), std::io::Error> {
+    use super::config::IS_KEEPALIVE;
+
+    if !*IS_KEEPALIVE {
+        return Ok(());
+    }
     let sock_ref = socket2::SockRef::from(stream);
     let mut ka = socket2::TcpKeepalive::new();
     ka = ka.with_time(TCP_KEEPALIVE_TIME);
@@ -172,6 +177,11 @@ pub fn set_tcp_keep_alive<S: AsFd>(stream: &S) -> std::result::Result<(), std::i
 /// resources are not wasted
 #[cfg(target_os = "windows")]
 pub fn set_tcp_keep_alive<S: AsSocket>(stream: &S) -> std::result::Result<(), std::io::Error> {
+    use super::config::IS_KEEPALIVE;
+
+    if !*IS_KEEPALIVE {
+        return Ok(());
+    }
     let sock_ref = socket2::SockRef::from(stream);
     let mut ka = socket2::TcpKeepalive::new();
     ka = ka.with_time(TCP_KEEPALIVE_TIME);

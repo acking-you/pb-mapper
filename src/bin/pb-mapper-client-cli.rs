@@ -1,6 +1,8 @@
 use clap::Parser;
 use mimalloc_rust::GlobalMiMalloc;
-use pb_mapper::common::config::{get_pb_mapper_server, get_sockaddr, init_tracing, LocalService};
+use pb_mapper::common::config::{
+    get_pb_mapper_server, get_sockaddr, init_tracing, LocalService, PB_MAPPER_KEEP_ALIVE,
+};
 use pb_mapper::common::listener::{TcpListenerProvider, UdpListenerProvider};
 use pb_mapper::local::client::{handle_status_cli, run_client_side_cli};
 use pb_mapper::snafu_error_get_or_return;
@@ -19,12 +21,24 @@ struct Cli {
     /// variable `PB_MAPPER_SERVER`, and if that value is still null, we report an error
     #[arg(short, long, value_name = "PB_MAPPER_SERVER")]
     pb_mapper_server: Option<String>,
+    /// [optional] keep-alive for local client stream. by default, it is false. Note that
+    /// keep-alive is also controlled by the env:`PB_MAPPER_KEEP_ALIVE`.
+    #[arg(
+        short,
+        long,
+        value_name = "PB_MAPPER_KEEP_ALIVE",
+        default_value_t = false
+    )]
+    keep_alive: bool,
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
     init_tracing();
+    if cli.keep_alive {
+        std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
+    }
     match cli.local_server {
         LocalService::UdpServer { key, addr } => {
             run_client_side_cli::<UdpListenerProvider, _>(

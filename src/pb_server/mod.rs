@@ -112,7 +112,7 @@ impl ConnIdProvider<RemoteConnId> for RemoteIdProvider {
 }
 type ServerMananger = TaskManager<ManagerTask, ConnTask, RemoteConnId, RemoteIdProvider>;
 
-pub async fn run_server_with_keepalive<A: ToSocketAddrs>(addr: A, is_keep_alive: bool) {
+pub async fn run_server<A: ToSocketAddrs>(addr: A) {
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
     // represent the mapping of the `key` to the id of the server-side conn
     let mut server_conn_map = ServerConnMap::new();
@@ -124,11 +124,7 @@ pub async fn run_server_with_keepalive<A: ToSocketAddrs>(addr: A, is_keep_alive:
     let task_sender = manager.get_task_sender();
 
     tokio::spawn(async move {
-        if is_keep_alive {
-            snafu_error_handle!(handle_listener::<true>(task_sender, listener).await);
-        } else {
-            snafu_error_handle!(handle_listener::<false>(task_sender, listener).await);
-        }
+        snafu_error_handle!(handle_listener(task_sender, listener).await);
     });
 
     loop {
@@ -255,10 +251,7 @@ pub async fn run_server_with_keepalive<A: ToSocketAddrs>(addr: A, is_keep_alive:
     }
 }
 
-async fn handle_listener<const KEEP_ALIVE: bool>(
-    task_sender: ManagerTaskSender,
-    listener: TcpListener,
-) -> Result<()> {
+async fn handle_listener(task_sender: ManagerTaskSender, listener: TcpListener) -> Result<()> {
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -269,9 +262,7 @@ async fn handle_listener<const KEEP_ALIVE: bool>(
             }
         };
         // set keepalive
-        if KEEP_ALIVE {
-            snafu_error_handle!(set_tcp_keep_alive(&stream).context(TaskCenterSetKeepAliveSnafu));
-        }
+        snafu_error_handle!(set_tcp_keep_alive(&stream).context(TaskCenterSetKeepAliveSnafu));
         task_sender
             .send_async(ManagerTask::Accept(stream))
             .await

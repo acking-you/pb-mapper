@@ -22,11 +22,7 @@ use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_handle};
 
 #[instrument]
-pub async fn run_server_side_cli<
-    const KEEP_ALIVE: bool,
-    LocalStream: StreamProvider,
-    A: ToSocketAddrs + Debug,
->(
+pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs + Debug>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
@@ -42,12 +38,10 @@ pub async fn run_server_side_cli<
         .await
         .expect("connect remote pb server never fails");
 
-    if KEEP_ALIVE {
-        snafu_error_handle!(
-            set_tcp_keep_alive(&manager_stream),
-            "manager stream set tcp keep alive"
-        );
-    }
+    snafu_error_handle!(
+        set_tcp_keep_alive(&manager_stream),
+        "manager stream set tcp keep alive"
+    );
 
     // start register server with key
     {
