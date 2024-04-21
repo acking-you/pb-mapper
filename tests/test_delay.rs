@@ -94,7 +94,7 @@ async fn run_echo_server(
 }
 
 async fn run_pb_mapper_server(addr: &str) {
-    run_server_with_keepalive(addr).await;
+    run_server_with_keepalive(addr, false).await;
 }
 
 async fn run_pb_mapper_server_cli(
