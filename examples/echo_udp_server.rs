@@ -12,7 +12,7 @@ const UDP_BUFFER_SIZE: usize = 16 * 1024; // 16kb
 async fn main() -> Result<(), Box<dyn Error>> {
     init_tracing();
 
-    let listener = UdpListener::bind(SocketAddr::from_str("127.0.0.1:8080")?).await?;
+    let listener = UdpListener::bind(SocketAddr::from_str("[::1]:8080")?).await?;
     loop {
         let (mut stream, _) = listener.accept().await?;
         tracing::info!("start handle addr:{}", stream.peer_addr().unwrap());

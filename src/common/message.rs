@@ -53,8 +53,16 @@ pub enum PbConnResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum LocalServerRequest {
+pub enum PbServerRequest {
+    Ping,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum LocalServer {
+    /// pb server makes a stream request to local server
     Stream { client_id: u32 },
+    /// pb server response a pong msg when it receive a ping request
+    Pong,
 }
 
 const CONTENT_SHOW_LIMIT_SIZE: usize = 1024;
@@ -92,7 +100,8 @@ macro_rules! gen_impl_msg_serializer {
 
 gen_impl_msg_serializer!(PbConnRequest);
 gen_impl_msg_serializer!(PbConnResponse);
-gen_impl_msg_serializer!(LocalServerRequest);
+gen_impl_msg_serializer!(PbServerRequest);
+gen_impl_msg_serializer!(LocalServer);
 
 /// This message protocol contains header and body, and the header
 /// includes checksum, datalen,respectively, u32, u32, where datalen

@@ -8,6 +8,7 @@ use super::error::{MngWaitForTaskSnafu, Result};
 /// by the client. The [`ConnId::remote_id`] and [`ConnId::local_id`] of the client can be used to
 /// uniquely identify a socket connection with that client on the server side. So for now, the
 /// server-side local_id has no effect.
+#[derive(Debug)]
 pub struct ForwardMessage {
     pub from: ConnId,
     pub to: ConnId,

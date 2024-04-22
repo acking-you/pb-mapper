@@ -147,3 +147,25 @@ macro_rules! snafu_error_get_or_return {
         }
     };
 }
+
+#[macro_export]
+macro_rules! snafu_error_get_or_return_ok {
+    ($func_call:expr) => {
+        match $func_call {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("{}", snafu::Report::from_error(e));
+                return Ok(());
+            }
+        }
+    };
+    ($func_call:expr, $msg:expr) => {
+        match $func_call {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("{},detail:{}", $msg, snafu::Report::from_error(e));
+                return Ok(());
+            }
+        }
+    };
+}

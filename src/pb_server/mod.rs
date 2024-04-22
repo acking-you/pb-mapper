@@ -68,6 +68,7 @@ pub enum ManagerTask {
 }
 
 /// TODO: Add a task that notifies the writer to release
+#[derive(Debug)]
 pub enum ConnTask {
     Forward(ForwardMessage),
     RegisterResp,

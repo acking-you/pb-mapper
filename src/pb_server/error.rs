@@ -110,18 +110,29 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: common::error::Error,
     },
-    #[snafu(display(
-        "server conn receive conn task error with `key:{key}` `server_id:{conn_id}`"
-    ))]
-    ServerConnRecvConnTask {
-        key: Arc<str>,
-        conn_id: RemoteConnId,
-        source: flume::RecvError,
-    },
+    #[snafu(display("server conn receive conn task error"))]
+    ServerConnRecvConnTask { source: flume::RecvError },
     #[snafu(display(
         "server conn write stream request to network error with `key:{key}` `server_id:{conn_id}`"
     ))]
     ServerConnWriteStreamRequest {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+        source: common::error::Error,
+    },
+    #[snafu(display(
+        "server conn write pong response to local server error with `key:{key}` \
+         `server_id:{conn_id}`"
+    ))]
+    ServerConnWritePongResp {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+        source: common::error::Error,
+    },
+    #[snafu(display(
+        "server conn decode stream request error with `key:{key}` `server_id:{conn_id}`"
+    ))]
+    ServerConnDecodeStreamRequest {
         key: Arc<str>,
         conn_id: RemoteConnId,
         source: common::error::Error,

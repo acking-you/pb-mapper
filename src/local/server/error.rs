@@ -36,6 +36,8 @@ pub enum Error {
         // Structured representation of response
         resp: String,
     },
+    #[snafu(display("Failed to write ping message"))]
+    WritePingMsg { source: common::error::Error },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

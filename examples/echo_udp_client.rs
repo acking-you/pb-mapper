@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn main() -> Result<(), Box<dyn Error>> {
     init_tracing();
 
-    let mut stream = UdpStream::connect("127.0.0.1:8080").await?;
+    let mut stream = UdpStream::connect("[::1]:8080").await?;
     tracing::info!("Ready to Connected to {}", &stream.peer_addr()?);
     let mut buffer = String::new();
     loop {
