@@ -86,7 +86,7 @@ pub(crate) type ConnTaskSender = SenderChan<ConnTask>;
 
 pub type ImutableKey = Arc<str>;
 
-pub type ServerConnMap = hashbrown::HashMap<ImutableKey, RemoteConnId>;
+pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<RemoteConnId>>;
 
 struct RemoteIdProvider {
     next_id: RemoteConnId,
@@ -155,14 +155,19 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                     .context(TaskCenterSendStatusRespSnafu { conn_id }));
             }
             ManagerTask::Accept(stream) => {
-                let conn_id = manager.get_conn_id(server_conn_map.iter().map(|(_, &id)| id));
+                let conn_id =
+                    manager.get_conn_id(server_conn_map.iter().flat_map(|(_, ids)| ids).copied());
                 let manager_task_sender = manager.get_task_sender();
                 tokio::spawn(async move {
                     snafu_error_handle!(handle_conn(conn_id, manager_task_sender, stream).await);
                 });
             }
             ManagerTask::DeRegisterServerConn { key, conn_id } => {
-                server_conn_map.remove(key.as_ref());
+                if let Some(ids) = server_conn_map.get_mut(&key) {
+                    if let Some(idx) = ids.iter().position(|&v| v == conn_id) {
+                        ids.remove(idx);
+                    }
+                }
                 manager.deregister_conn(conn_id);
                 tracing::info!("DeRegister Server ok! `{key}:{conn_id}`");
             }
@@ -185,7 +190,14 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
             } => {
                 // sign up server connection
                 manager.sign_up_conn_sender(conn_id, conn_sender.clone());
-                server_conn_map.insert(key.clone(), conn_id);
+                match server_conn_map.entry(key.clone()) {
+                    hashbrown::hash_map::Entry::Occupied(mut o) => {
+                        o.get_mut().push(conn_id);
+                    }
+                    hashbrown::hash_map::Entry::Vacant(v) => {
+                        v.insert(vec![conn_id]);
+                    }
+                }
 
                 // response registered ok
                 tracing::info!("Register Server ok! `{key}:{conn_id}`");
@@ -214,13 +226,14 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
             } => {
                 // sign up client connection
                 manager.sign_up_conn_sender(conn_id, conn_sender.clone());
-                let server_conn_id = snafu_error_get_or_continue!(server_conn_map
+                let server_conn_id_list = snafu_error_get_or_continue!(server_conn_map
                     .get(&key)
                     .context(TaskCenterSubcribeServerConnKeyNotExistSnafu {
                         key: key.clone(),
                         conn_id
                     }));
-                {
+                // Get at least one available server_conn_id from the list
+                for server_conn_id in server_conn_id_list {
                     let server_conn_sender = snafu_error_get_or_continue!(manager
                         .get_conn_sender_chan(server_conn_id)
                         .context(TaskCenterSubcribeServerConnIdNotExistSnafu {
@@ -247,6 +260,7 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                         "Subcribe Server ok! \
                          key:{key},server_conn_id:{server_conn_id},client_conn_id:{conn_id}"
                     );
+                    break;
                 }
             }
         }
