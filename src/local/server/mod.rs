@@ -76,7 +76,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
                     timeout_count.count()
                 );
                 tokio::time::sleep(Duration::from_secs(retry_interval)).await;
-                retry_interval *= 2;
+                retry_interval = RETRY_INTERVAL << ((RETRY_TIMES - timeout_count.count()) + 1);
             }
         }
     }
@@ -171,6 +171,7 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
             _ = tokio::time::sleep_until(timeout) =>{
                 if timeout_count.validate(){
                     tracing::info!("[timeout retry] local retry count:{}",timeout_count.count());
+                    timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
                 }else{
                     tracing::warn!("Timeout traggier! `{timeout:?}`");
                     return Err(Status::Timeout);
