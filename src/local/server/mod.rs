@@ -22,7 +22,10 @@ use crate::common::message::{
 use crate::common::stream::{got_one_socket_addr, set_tcp_keep_alive, StreamProvider};
 use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::utils::timeout::TimeoutCount;
-use crate::{snafu_error_get_or_continue, snafu_error_get_or_return_ok, snafu_error_handle};
+use crate::{
+    snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_get_or_return_ok,
+    snafu_error_handle,
+};
 
 /// Each time a request is received from the public server, the connection time out will be increase
 /// `LOCAL_SERVER_TIMEOUT`
@@ -36,6 +39,8 @@ const RETRY_TIMES: usize = 5;
 
 enum Status {
     Timeout,
+    ReadMsg,
+    SendPing,
 }
 
 pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
@@ -58,7 +63,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
             return;
         };
         match status {
-            Status::Timeout => {
+            Status::Timeout | Status::ReadMsg | Status::SendPing => {
                 tracing::info!(
                     "We will try to re-connect the pb-server:`{:?} <-`{}`-> {:?}` after \
                      {RETRY_INTERVAL:?}, global-retry-Count:{}",
@@ -137,7 +142,7 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
     loop {
         tokio::select! {
             ret = msg_reader.read_msg() =>{
-                let msg = snafu_error_get_or_return_ok!(ret.context(ReadStreamReqSnafu));
+                let msg = snafu_error_get_or_return!(ret.context(ReadStreamReqSnafu),"[read msg]",Err(Status::ReadMsg));
                 // timeout will reset by this function
                 snafu_error_get_or_continue!(
                     handle_request::<LocalStream,_>(msg,local_addr,remote_addr,key.clone(),conn_id,
@@ -149,8 +154,10 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
             }
             // handle ping interval
             _ = tokio::time::sleep(PING_INTERVAL) =>{
-                snafu_error_get_or_return_ok!(
-                    handle_ping_interval(&ping_msg,&mut msg_writer,key.clone(),conn_id).await
+                snafu_error_get_or_return!(
+                    handle_ping_interval(&ping_msg,&mut msg_writer,key.clone(),conn_id).await,
+                    "[read msg]",
+                    Err(Status::SendPing)
                 );
                 tracing::info!("ping trigger:{PING_INTERVAL:?}");
             }
