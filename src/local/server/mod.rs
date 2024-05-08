@@ -33,7 +33,8 @@ const LOCAL_SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
-const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+/// Timeout duration in seconds
+const RETRY_INTERVAL: u64 = 4;
 
 const RETRY_TIMES: usize = 5;
 
@@ -50,6 +51,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
     key: Arc<str>,
 ) {
     let mut timeout_count = TimeoutCount::new(RETRY_TIMES);
+    let mut retry_interval = RETRY_INTERVAL;
     while timeout_count.validate() {
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
             &mut timeout_count,
@@ -67,13 +69,14 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
             Status::Timeout | Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
                 tracing::info!(
                     "We will try to re-connect the pb-server:`{:?} <-`{}`-> {:?}` after \
-                     {RETRY_INTERVAL:?}, global-retry-Count:{}",
+                     {retry_interval}s, global-retry-Count:{}",
                     local_addr,
                     key,
                     remote_addr,
                     timeout_count.count()
                 );
-                tokio::time::sleep(RETRY_INTERVAL).await;
+                tokio::time::sleep(Duration::from_secs(retry_interval)).await;
+                retry_interval *= 2;
             }
         }
     }
