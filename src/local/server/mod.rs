@@ -41,6 +41,7 @@ enum Status {
     Timeout,
     ReadMsg,
     SendPing,
+    ConnectRemote,
 }
 
 pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
@@ -63,7 +64,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
             return;
         };
         match status {
-            Status::Timeout | Status::ReadMsg | Status::SendPing => {
+            Status::Timeout | Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
                 tracing::info!(
                     "We will try to re-connect the pb-server:`{:?} <-`{}`-> {:?}` after \
                      {RETRY_INTERVAL:?}, global-retry-Count:{}",
@@ -92,9 +93,11 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
         .await
         .expect("at least one socket addr be parsed from `remote_addr`");
 
-    let mut manager_stream = each_addr(remote_addr, TcpStream::connect)
-        .await
-        .expect("connect remote pb server never fails");
+    let mut manager_stream = snafu_error_get_or_return!(
+        each_addr(remote_addr, TcpStream::connect).await,
+        "[connect remote stream]",
+        Err(Status::ConnectRemote)
+    );
 
     snafu_error_handle!(
         set_tcp_keep_alive(&manager_stream),
