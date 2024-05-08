@@ -233,7 +233,7 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                         conn_id
                     }));
                 // Get at least one available server_conn_id from the list
-                for server_conn_id in server_conn_id_list {
+                for server_conn_id in server_conn_id_list.iter().rev() {
                     let server_conn_sender = snafu_error_get_or_continue!(manager
                         .get_conn_sender_chan(server_conn_id)
                         .context(TaskCenterSubcribeServerConnIdNotExistSnafu {

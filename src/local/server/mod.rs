@@ -21,6 +21,7 @@ use crate::common::message::{
 };
 use crate::common::stream::{got_one_socket_addr, set_tcp_keep_alive, StreamProvider};
 use crate::utils::addr::{each_addr, ToSocketAddrs};
+use crate::utils::timeout::TimeoutCount;
 use crate::{snafu_error_get_or_continue, snafu_error_get_or_return_ok, snafu_error_handle};
 
 /// Each time a request is received from the public server, the connection time out will be increase
@@ -29,21 +30,28 @@ const LOCAL_SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
+const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+const RETRY_TIMES: usize = 5;
+
 enum Status {
     Timeout,
 }
-
-const RETRY_TIMES: usize = 5;
 
 pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
 ) {
-    let mut retry_times = RETRY_TIMES;
-    while retry_times != 0 {
-        let status = if let Err(status) =
-            run_server_side_cli_inner::<LocalStream, _>(local_addr, remote_addr, key.clone()).await
+    let mut timeout_count = TimeoutCount::new(RETRY_TIMES);
+    while timeout_count.validate() {
+        let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
+            &mut timeout_count,
+            local_addr,
+            remote_addr,
+            key.clone(),
+        )
+        .await
         {
             status
         } else {
@@ -52,13 +60,14 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
         match status {
             Status::Timeout => {
                 tracing::info!(
-                    "We will try to re-connect the pb-server:`{:?} <-`{}`-> {:?}`, Times:{}",
+                    "We will try to re-connect the pb-server:`{:?} <-`{}`-> {:?}` after \
+                     {RETRY_INTERVAL:?}, global-retry-Count:{}",
                     local_addr,
                     key,
                     remote_addr,
-                    RETRY_TIMES - retry_times + 1
+                    timeout_count.count()
                 );
-                retry_times -= 1;
+                tokio::time::sleep(RETRY_INTERVAL).await;
             }
         }
     }
@@ -66,6 +75,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
 
 #[instrument]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
+    global_timeout_cnt: &mut TimeoutCount,
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
@@ -120,14 +130,21 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
 
     // start listen stream request
     let mut timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
+    let mut timeout_count = TimeoutCount::new(RETRY_TIMES);
     let ping_msg = snafu_error_get_or_return_ok!(PbServerRequest::Ping.encode());
+    // regiseter ok,and reset global timeout count
+    global_timeout_cnt.reset(RETRY_TIMES);
     loop {
         tokio::select! {
             ret = msg_reader.read_msg() =>{
                 let msg = snafu_error_get_or_return_ok!(ret.context(ReadStreamReqSnafu));
                 // timeout will reset by this function
                 snafu_error_get_or_continue!(
-                    handle_request::<LocalStream,_>(msg,local_addr,remote_addr,key.clone(),conn_id,&mut timeout).await
+                    handle_request::<LocalStream,_>(msg,local_addr,remote_addr,key.clone(),conn_id,
+                    TimeoutContext {
+                        timeout_count: &mut timeout_count,
+                         timeout: &mut timeout
+                    }).await
                 );
             }
             // handle ping interval
@@ -139,8 +156,13 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
             }
             // handle timeout
             _ = tokio::time::sleep_until(timeout) =>{
-                tracing::warn!("Timeout traggier! `{timeout:?}`");
-                return Err(Status::Timeout);
+                if timeout_count.validate(){
+                    tracing::info!("[timeout retry] local retry count:{}",timeout_count.count());
+                }else{
+                    tracing::warn!("Timeout traggier! `{timeout:?}`");
+                    return Err(Status::Timeout);
+                }
+
             }
         }
     }
@@ -156,7 +178,12 @@ async fn handle_ping_interval<T: MessageWriter>(
     writer.write_msg(ping_msg).await.context(WritePingMsgSnafu)
 }
 
-#[instrument(skip(msg, timeout))]
+struct TimeoutContext<'a, 'b> {
+    timeout_count: &'a mut TimeoutCount,
+    timeout: &'b mut Instant,
+}
+
+#[instrument(skip(msg, timeout_ctx))]
 async fn handle_request<
     LocalStream: StreamProvider,
     A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
@@ -166,7 +193,7 @@ async fn handle_request<
     remote_addr: A,
     key: Arc<str>,
     conn_id: u32,
-    timeout: &mut Instant,
+    timeout_ctx: TimeoutContext<'_, '_>,
 ) -> error::Result<()> {
     let req = LocalServer::decode(msg).context(DecodeStreamReqSnafu)?;
 
@@ -184,7 +211,7 @@ async fn handle_request<
             tracing::info!("got pong message! we will reset timeout");
         }
     }
-
-    *timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
+    timeout_ctx.timeout_count.reset(RETRY_TIMES);
+    *timeout_ctx.timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
     Ok(())
 }

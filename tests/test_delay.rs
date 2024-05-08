@@ -42,6 +42,7 @@ impl<'a> Drop for TimerTickGurad<'a> {
 }
 
 use pb_mapper::common::listener::StreamAccept;
+use tracing::instrument;
 
 async fn echo_server<P: ListenerProvider>(
     server_addr: &str,
@@ -179,6 +180,7 @@ enum ServerType {
     Tcp,
 }
 
+#[derive(Debug, Clone)]
 struct ServerAddr {
     echo_server: Arc<str>,
     pb_mapper_server: Arc<str>,
@@ -187,14 +189,15 @@ struct ServerAddr {
     server_key: Arc<str>,
 }
 
+#[instrument(ret(Debug))]
 fn get_addr_from_env() -> ServerAddr {
     println!("{:?}", env::current_dir().unwrap());
     dotenvy::from_filename(env::current_dir().unwrap().join("tests").join(".env")).unwrap();
-    let pb_mapper_server = env::var("PB_MAPPER_SERVER").unwrap().into();
-    let local_server = env::var("LOCAL_SERVER").unwrap().into();
-    let echo_server = env::var("ECHO_SERVER").unwrap().into();
-    let server_key = env::var("SERVER_KEY").unwrap().into();
-    let server_type = if env::var("SERVER_TYPE").unwrap() == "UDP" {
+    let pb_mapper_server = env::var("PB_MAPPER_TEST_SERVER").unwrap().into();
+    let local_server = env::var("LOCAL_TEST_SERVER").unwrap().into();
+    let echo_server = env::var("ECHO_TEST_SERVER").unwrap().into();
+    let server_key = env::var("SERVER_TEST_KEY").unwrap().into();
+    let server_type = if env::var("SERVER_TEST_TYPE").unwrap() == "UDP" {
         ServerType::Udp
     } else {
         ServerType::Tcp
@@ -230,7 +233,7 @@ async fn test_pb_mapper_server() {
         run_pb_mapper_server(&pb_server).await;
     });
     // slepp some time to wait for pb server
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     // run subcribe server cli
     let key = server_key.clone();
     let subcribe_remote = pb_mapper_server.clone();
@@ -238,7 +241,7 @@ async fn test_pb_mapper_server() {
         run_pb_mapper_server_cli(server_type, &echo_server, &subcribe_remote, &key).await;
     });
     // slepp some time to wait for pb server cli
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     // run register client cli
     let key = server_key.clone();
     let local_echo = local_server.clone();
@@ -247,7 +250,7 @@ async fn test_pb_mapper_server() {
         run_pb_mapper_client_cli(server_type, &local_echo, &register_remote, &key).await;
     });
     // slepp some time to wait for pb client cli
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     // run echo test
     match server_type {
         ServerType::Udp => run_echo_delay::<UdpStreamProvider, _>(local_server.as_ref(), 10).await,
