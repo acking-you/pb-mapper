@@ -1,0 +1,10 @@
+version: '3.8'
+services:
+  pb-mapper:
+    container_name: pb-mapper
+    image: ackingliu/pb-mapper:x86_64_musl
+    environment:
+      RUST_LOG: error
+    ports:
+      - "7666:7666"
+    restart: unless-stopped
