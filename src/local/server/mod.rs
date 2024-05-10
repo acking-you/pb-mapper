@@ -27,16 +27,13 @@ use crate::{
     snafu_error_handle,
 };
 
-/// Each time a request is received from the public server, the connection time out will be increase
-/// `LOCAL_SERVER_TIMEOUT`
-const LOCAL_SERVER_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCAL_SERVER_TIMEOUT: Duration = Duration::from_secs(64);
 
-const PING_INTERVAL: Duration = Duration::from_secs(10);
+const PING_INTERVAL: Duration = Duration::from_secs(16);
 
-/// Timeout duration in seconds
-const RETRY_INTERVAL: u64 = 4;
+const GLOBAL_RETRY_TIMES: u32 = 16;
 
-const RETRY_TIMES: usize = 5;
+const LOCAL_RETRY_TIMES: u32 = 8;
 
 enum Status {
     Timeout,
@@ -50,8 +47,8 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
     remote_addr: A,
     key: Arc<str>,
 ) {
-    let mut timeout_count = TimeoutCount::new(RETRY_TIMES);
-    let mut retry_interval = RETRY_INTERVAL;
+    let mut timeout_count = TimeoutCount::new(GLOBAL_RETRY_TIMES);
+    let mut retry_interval = timeout_count.get_interval_by_count();
     while timeout_count.validate() {
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
             &mut timeout_count,
@@ -69,14 +66,14 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
             Status::Timeout | Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
                 tracing::info!(
                     "We will try to re-connect the pb-server:`{:?} <-`{}`-> {:?}` after \
-                     {retry_interval}s, global-retry-Count:{}",
+                     {retry_interval}s, global-retry-count:{}",
                     local_addr,
                     key,
                     remote_addr,
                     timeout_count.count()
                 );
                 tokio::time::sleep(Duration::from_secs(retry_interval)).await;
-                retry_interval = RETRY_INTERVAL << ((RETRY_TIMES - timeout_count.count()) + 1);
+                retry_interval = timeout_count.get_interval_by_count();
             }
         }
     }
@@ -141,10 +138,10 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
 
     // start listen stream request
     let mut timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
-    let mut timeout_count = TimeoutCount::new(RETRY_TIMES);
+    let mut timeout_count = TimeoutCount::new(LOCAL_RETRY_TIMES);
     let ping_msg = snafu_error_get_or_return_ok!(PbServerRequest::Ping.encode());
     // regiseter ok,and reset global timeout count
-    global_timeout_cnt.reset(RETRY_TIMES);
+    global_timeout_cnt.reset();
     loop {
         tokio::select! {
             ret = msg_reader.read_msg() =>{
@@ -225,7 +222,7 @@ async fn handle_request<
             tracing::info!("got pong message! we will reset timeout");
         }
     }
-    timeout_ctx.timeout_count.reset(RETRY_TIMES);
+    timeout_ctx.timeout_count.reset();
     *timeout_ctx.timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
     Ok(())
 }
