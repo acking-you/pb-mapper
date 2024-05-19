@@ -19,6 +19,9 @@ use crate::common::stream::{set_tcp_keep_alive, StreamProvider, StreamSplit};
 use crate::snafu_error_handle;
 use crate::utils::addr::{each_addr, ToSocketAddrs};
 
+/// Handle a stream connection and establish a forward network traffic forwarding.
+/// This function handles both local and remote streams, sets up message writers and readers,
+/// and starts forwarding network traffic between the two endpoints.
 pub async fn handle_stream<
     LocalStream: StreamProvider,
     A: ToSocketAddrs + Debug + Copy + Clone + Send,

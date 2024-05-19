@@ -1,0 +1,12 @@
+[Unit]
+Description=Public Mapper Server Service
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+ExecStart=/bin/sh -c 'ulimit -n 65535 && export RUST_LOG=error && exec {your command}'
+Restart=on-failure
+RestartSec=5s
+[Install]
+WantedBy=multi-user.target
