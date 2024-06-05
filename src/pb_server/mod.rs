@@ -167,6 +167,9 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                     if let Some(idx) = ids.iter().position(|&v| v == conn_id) {
                         ids.remove(idx);
                     }
+                    if ids.is_empty() {
+                        server_conn_map.remove(&key);
+                    }
                 }
                 manager.deregister_conn(conn_id);
                 tracing::info!("DeRegister Server ok! `{key}:{conn_id}`");
