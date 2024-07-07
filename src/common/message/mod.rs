@@ -1,17 +1,21 @@
 //! Define message protocols and tools for reading and writing
 //! messages
 pub mod command;
+pub mod forward;
+use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
 use snafu::{ensure, ResultExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
 use super::checksum::{get_checksum, valid_checksum};
 use super::error::{
-    MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,
+    self, MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,
     MsgNetworkReadDatalenSnafu, MsgNetworkWriteBodySnafu, MsgNetworkWriteCheckSumSnafu,
-    MsgNetworkWriteDatalenSnafu, Result,
+    MsgNetworkWriteCodecMsgSnafu, MsgNetworkWriteCodecTagSnafu, MsgNetworkWriteDatalenSnafu,
+    Result,
 };
 use crate::common::error::MsgDatalenExceededSnafu;
+use crate::utils::codec::{Decryptor, Encryptor};
 
 /// This message protocol contains header and body, and the header
 /// includes checksum, datalen,respectively, u32, u32, where datalen
@@ -92,6 +96,20 @@ gen_read_network_with_error!(
 
 gen_write_network_with_error!(write_msg_body, write_all, MsgNetworkWriteBodySnafu, &[u8]);
 
+gen_write_network_with_error!(
+    write_codec_msg,
+    write_all,
+    MsgNetworkWriteCodecMsgSnafu,
+    &[u8]
+);
+
+gen_write_network_with_error!(
+    write_codec_tag,
+    write_all,
+    MsgNetworkWriteCodecTagSnafu,
+    &[u8]
+);
+
 #[inline]
 async fn get_msg_len<T: AsyncReadExt + Unpin>(reader: &mut T) -> Result<DataLenType> {
     let checksum = read_checksum(reader).await?;
@@ -162,5 +180,73 @@ impl<'a, T: AsyncWriteExt + Unpin> NormalMessageWriter<'a, T> {
 impl<'a, T: AsyncWriteExt + Unpin> MessageWriter for NormalMessageWriter<'a, T> {
     async fn write_msg(&mut self, msg: &[u8]) -> Result<()> {
         self.write_msg_inner(msg).await
+    }
+}
+
+pub struct CodecMessageReader<'a, T: AsyncReadExt + Unpin, D: Decryptor> {
+    reader: NormalMessageReader<'a, T>,
+    decryptor: D,
+}
+
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecMessageReader<'a, T, D> {
+    pub fn new(reader: &'a mut T, decryptor: D) -> Self {
+        Self {
+            reader: NormalMessageReader::new(reader),
+            decryptor,
+        }
+    }
+}
+
+impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageReader<'a, T, D> {
+    async fn read_msg(&mut self) -> Result<&'_ [u8]> {
+        let n = self.reader.read_msg().await?.len();
+        let v = self
+            .decryptor
+            .decrypt(&mut self.reader.buffer.buffer_mut()[..n])
+            .map_err(|e| error::Error::MsgCodec {
+                action: "decrypt",
+                detail: format!("got {e} when we read msg"),
+            })?;
+        Ok(v)
+    }
+}
+
+pub struct CodecMessageWriter<'a, T: AsyncWriteExt + Unpin, E: Encryptor> {
+    writer: &'a mut T,
+    encryptor: E,
+}
+
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecMessageWriter<'a, T, E> {
+    pub fn new(writer: &'a mut T, encryptor: E) -> Self {
+        Self { writer, encryptor }
+    }
+}
+
+impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> MessageWriter for CodecMessageWriter<'a, T, E> {
+    /// SAFETY: The use of `unsafe` here to convert external `&[u8]` into `&mut [u8]`.  Given the
+    /// logic of the [`MessageWriter`] trait, the `msg` should ideally be immutable. Otherwise,
+    /// it would affect the use of other features. However, the encryption API requires a
+    /// mutable reference `&mut`. To avoid unnecessary copying, `unsafe` is used here as a
+    /// compromise for the encryption API.
+    async fn write_msg(&mut self, msg: &[u8]) -> Result<()> {
+        if msg.is_empty() {
+            return Ok(());
+        }
+        // Pay attention here, &T -> &mut T
+        let raw_ptr = msg.as_ptr() as *mut u8;
+        let mut_msg = unsafe { std::slice::from_raw_parts_mut(raw_ptr, msg.len()) };
+
+        let tag = self
+            .encryptor
+            .encrypt(mut_msg)
+            .map_err(|e| error::Error::MsgCodec {
+                action: "encrypt",
+                detail: format!("got {e} when we read msg"),
+            })?;
+        let msg_len = (mut_msg.len() + TAG_LEN) as DataLenType;
+
+        set_msg_len(self.writer, msg_len).await?;
+        write_codec_msg(self.writer, mut_msg).await?;
+        write_codec_tag(self.writer, tag.as_ref()).await
     }
 }

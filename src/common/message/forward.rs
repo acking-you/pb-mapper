@@ -1,15 +1,15 @@
 use snafu::ResultExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::buffer::{BufferReader, BufferedReader};
+use super::super::buffer::{BufferReader, BufferedReader};
 use super::error::{FwdNetworkWriteWithNormalSnafu, Result};
 
 pub trait ForwardReader {
-    fn read(&mut self) -> impl std::future::Future<Output = Result<&'_ [u8]>> + Send;
+    async fn read(&mut self) -> Result<&'_ [u8]>;
 }
 
 pub trait ForwardWriter {
-    fn write(&mut self, src: &[u8]) -> impl std::future::Future<Output = Result<()>> + Send;
+    async fn write(&mut self, src: &[u8]) -> Result<()>;
 }
 
 pub struct NormalForwardReader<'a, T> {
@@ -25,8 +25,8 @@ impl<'a, T: AsyncReadExt + Send + Unpin> NormalForwardReader<'a, T> {
 }
 
 impl<'a, T: AsyncReadExt + Send + Unpin> ForwardReader for NormalForwardReader<'a, T> {
-    fn read(&mut self) -> impl std::future::Future<Output = Result<&'_ [u8]>> + Send {
-        self.buffered_reader.read()
+    async fn read(&mut self) -> Result<&'_ [u8]> {
+        self.buffered_reader.read().await
     }
 }
 
@@ -34,7 +34,7 @@ pub struct NormalForwardWriter<'a, T> {
     writer: &'a mut T,
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> NormalForwardWriter<'a, T> {
+impl<'a, T: AsyncWriteExt + Unpin> NormalForwardWriter<'a, T> {
     pub fn new(writer: &'a mut T) -> Self {
         Self { writer }
     }
@@ -47,9 +47,9 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> NormalForwardWriter<'a, T> {
     }
 }
 
-impl<'a, T: AsyncWriteExt + Unpin + Send> ForwardWriter for NormalForwardWriter<'a, T> {
-    fn write(&mut self, src: &[u8]) -> impl std::future::Future<Output = Result<()>> + Send {
-        self.write_inner(src)
+impl<'a, T: AsyncWriteExt + Unpin> ForwardWriter for NormalForwardWriter<'a, T> {
+    async fn write(&mut self, src: &[u8]) -> Result<()> {
+        self.write_inner(src).await
     }
 }
 

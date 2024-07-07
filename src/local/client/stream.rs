@@ -9,8 +9,8 @@ use super::error::{
     ConnectRemoteStreamSnafu, DecodeSubcribeRespSnafu, EncodeSubcribeReqSnafu,
     ReadSubcribeRespSnafu, Result, SubcribeRespNotMatchSnafu, WriteSubcribeReqSnafu,
 };
-use crate::common::forward::{start_forward, NormalForwardReader, NormalForwardWriter};
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
+use crate::common::message::forward::{start_forward, NormalForwardReader, NormalForwardWriter};
 use crate::common::message::{
     MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };

@@ -24,6 +24,10 @@ pub enum Error {
     MsgNetworkWriteDatalen { source: std::io::Error },
     #[snafu(display("write `msg_body` to network error"))]
     MsgNetworkWriteBody { source: std::io::Error },
+    #[snafu(display("write `codec_msg` to network error"))]
+    MsgNetworkWriteCodecMsg { source: std::io::Error },
+    #[snafu(display("write `codec_tag` to network error"))]
+    MsgNetworkWriteCodecTag { source: std::io::Error },
     #[snafu(display(
         "`datalen` exceeded! the length must be less than {max}, but the actual length is {actual}"
     ))]
@@ -47,6 +51,13 @@ pub enum Error {
         // must be structures that need to be serialized or messages that need to be deserialized
         content: String,
         source: serde_json::Error,
+    },
+    #[snafu(display("`{action}` failed with the specific error: `{detail}`"))]
+    MsgCodec {
+        // must be "encrypt" or "decrypt"
+        action: &'static str,
+        // specific error explanation
+        detail: String,
     },
     /// Error for manager
     #[snafu(display("`TaskManager` fails while waiting for a task"))]
