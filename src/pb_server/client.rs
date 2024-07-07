@@ -12,8 +12,11 @@ use super::error::{
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::forward::{start_forward, NormalForwardReader, NormalForwardWriter};
+use crate::common::message::command::{
+    MessageSerializer,  PbConnResponse,
+};
 use crate::common::message::{
-    MessageSerializer, MessageWriter, NormalMessageWriter, PbConnResponse,
+    MessageWriter, NormalMessageWriter,
 };
 use crate::pb_server::error::{ClientConnEncodeStreamRespSnafu, ClientConnWriteStreamRespSnafu};
 use crate::snafu_error_handle;

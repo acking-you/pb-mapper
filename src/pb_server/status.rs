@@ -8,9 +8,8 @@ use super::error::{
 };
 use super::{ConnTask, ManagerTask, ManagerTaskSender};
 use crate::common::conn_id::RemoteConnId;
-use crate::common::message::{
-    MessageSerializer, MessageWriter, NormalMessageWriter, PbConnStatusReq,
-};
+use crate::common::message::command::{MessageSerializer, PbConnStatusReq};
+use crate::common::message::{MessageWriter, NormalMessageWriter};
 use crate::pb_server::error::StatusSendDeregisterSnafu;
 use crate::snafu_error_handle;
 

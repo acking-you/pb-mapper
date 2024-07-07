@@ -11,9 +11,9 @@ use super::error::{
     WritePbConnStreamReqSnafu,
 };
 use crate::common::forward::{start_forward, NormalForwardReader, NormalForwardWriter};
+use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::{
-    MessageReader, MessageSerializer, MessageWriter, NormalMessageReader, NormalMessageWriter,
-    PbConnRequest, PbConnResponse,
+    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };
 use crate::common::stream::{set_tcp_keep_alive, StreamProvider, StreamSplit};
 use crate::snafu_error_handle;

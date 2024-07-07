@@ -1,5 +1,10 @@
 //! Define the buffer interface for reading data in different situations
 
+use snafu::ResultExt;
+use tokio::io::AsyncReadExt;
+
+use super::error::MsgNetworkReadBufferdRawDataSnafu;
+
 const INIT_BUF_SIZE: usize = 8 * 1024;
 const MAX_BUF_SIZE: usize = 8 * 1024 * 1024;
 /// Buffer for situations where the length of the data to be read is not known
@@ -94,5 +99,42 @@ impl BufferGetter for CommonBuffer {
     #[inline]
     fn buffer_mut(&mut self) -> &'_ mut [u8] {
         &mut self.buffer
+    }
+}
+
+/// This trait is used for buffered reads where the packet length is not known
+pub trait BufferedReader {
+    fn read(&mut self) -> impl std::future::Future<Output = super::error::Result<&'_ [u8]>> + Send;
+}
+
+pub struct BufferReader<'a, T> {
+    reader: &'a mut T,
+    buffer: CommonBuffer,
+}
+impl<'reader, T: AsyncReadExt + Unpin> BufferReader<'reader, T> {
+    pub fn new(reader: &'reader mut T) -> Self {
+        Self {
+            reader,
+            buffer: CommonBuffer::new(),
+        }
+    }
+
+    async fn read_inner<'a>(&'a mut self) -> super::error::Result<&'a [u8]> {
+        if self.buffer.need_resize() {
+            self.buffer.dyn_resize()
+        }
+        let n = self
+            .reader
+            .read(self.buffer.buffer_mut())
+            .await
+            .context(MsgNetworkReadBufferdRawDataSnafu)?;
+        self.buffer.update_need_size(n);
+        Ok(&self.buffer.buffer()[0..n])
+    }
+}
+
+impl<'reader, T: AsyncReadExt + Send + Unpin> BufferedReader for BufferReader<'reader, T> {
+    fn read(&mut self) -> impl std::future::Future<Output = super::error::Result<&'_ [u8]>> + Send {
+        self.read_inner()
     }
 }

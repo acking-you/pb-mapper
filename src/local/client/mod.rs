@@ -13,7 +13,7 @@ use self::status::get_status;
 use self::stream::handle_local_stream;
 use crate::common::config::StatusOp;
 use crate::common::listener::{ListenerProvider, StreamAccept};
-use crate::common::message::{PbConnStatusReq, PbConnStatusResp};
+use crate::common::message::command::{PbConnStatusReq, PbConnStatusResp};
 use crate::common::stream::got_one_socket_addr;
 use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_return, snafu_error_handle};

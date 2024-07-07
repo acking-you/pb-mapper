@@ -5,9 +5,11 @@ use super::error::{
     DecodeStatusRespSnafu, EncodeStatusReqSnafu, ReadStatusRespSnafu, StatusRespNotMatchSnafu,
     WriteStatusReqSnafu,
 };
+use crate::common::message::command::{
+    MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
+};
 use crate::common::message::{
-    MessageReader, MessageSerializer, MessageWriter, NormalMessageReader, NormalMessageWriter,
-    PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
+    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };
 
 pub async fn get_status<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(

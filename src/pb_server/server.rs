@@ -13,9 +13,11 @@ use super::error::{
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use crate::common::conn_id::RemoteConnId;
+use crate::common::message::command::{
+    LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
+};
 use crate::common::message::{
-    LocalServer, MessageReader, MessageSerializer, MessageWriter, NormalMessageReader,
-    NormalMessageWriter, PbConnResponse, PbServerRequest,
+    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };
 use crate::pb_server::error::ServerConnSendDeregisterServerSnafu;
 use crate::{snafu_error_get_or_continue, snafu_error_get_or_return_ok, snafu_error_handle};

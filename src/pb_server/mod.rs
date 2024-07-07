@@ -23,10 +23,10 @@ use self::server::handle_server_conn;
 use self::status::handle_show_status;
 use crate::common::conn_id::{ConnIdProvider, RemoteConnId};
 use crate::common::manager::{ForwardMessage, SenderChan, TaskManager};
-use crate::common::message::{
-    MessageReader, MessageSerializer, NormalMessageReader, PbConnRequest, PbConnResponse,
-    PbConnStatusReq, PbConnStatusResp,
+use crate::common::message::command::{
+    MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
 };
+use crate::common::message::{MessageReader, NormalMessageReader};
 use crate::common::stream::set_tcp_keep_alive;
 use crate::pb_server::error::{
     TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,

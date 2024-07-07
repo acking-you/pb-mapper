@@ -1,8 +1,8 @@
 use snafu::ResultExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::buffer::{BufferReader, BufferedReader};
 use super::error::{FwdNetworkWriteWithNormalSnafu, Result};
-use super::message::{BufferReader, BufferedReader};
 
 pub trait ForwardReader {
     fn read(&mut self) -> impl std::future::Future<Output = Result<&'_ [u8]>> + Send;

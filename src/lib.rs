@@ -1,3 +1,4 @@
+#[allow(async_fn_in_trait)]
 pub mod common;
 pub mod local;
 pub mod pb_server;
@@ -7,7 +8,7 @@ mod tests {
 
     #[test]
     fn test_serde_mapper_header() {
-        use crate::common::message::PbConnRequest;
+        use crate::common::message::command::PbConnRequest;
         let mapper = PbConnRequest::Register { key: "test".into() };
         let json_value = serde_json::to_string(&mapper).unwrap();
         let raw_json_str = r##"{"Register":{"key":"test"}}"##;

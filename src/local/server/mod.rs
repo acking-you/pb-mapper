@@ -15,9 +15,11 @@ use self::error::{
     ReadStreamReqSnafu, RegisterRespNotMatchSnafu, SendRegisterReqSnafu, WritePingMsgSnafu,
 };
 use self::stream::handle_stream;
+use crate::common::message::command::{
+    LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbServerRequest,
+};
 use crate::common::message::{
-    LocalServer, MessageReader, MessageSerializer, MessageWriter, NormalMessageReader,
-    NormalMessageWriter, PbConnRequest, PbConnResponse, PbServerRequest,
+    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };
 use crate::common::stream::{got_one_socket_addr, set_tcp_keep_alive, StreamProvider};
 use crate::utils::addr::{each_addr, ToSocketAddrs};
