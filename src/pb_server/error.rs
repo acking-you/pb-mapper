@@ -78,6 +78,12 @@ pub enum Error {
     #[snafu(display("remote stream to set keepalive error,when handle_listener"))]
     TaskCenterSetKeepAlive { source: std::io::Error },
     /// server handler error
+    #[snafu(display("Server connection create header tool:`{tool}` fails!"))]
+    ServerConnCreateHeaderTool {
+        /// Must be `reader` or `writer`
+        tool: &'static str,
+        source: common::error::Error,
+    },
     #[snafu(display(
         "server conn receive registered response error with `key:{key}` `server_id:{conn_id}`"
     ))]
@@ -150,6 +156,12 @@ pub enum Error {
         source: flume::SendError<ManagerTask>,
     },
     /// client handler error
+    #[snafu(display("Client connection create header tool:`{tool}` fails!"))]
+    ClientConnCreateHeaderTool {
+        /// Must be `reader` or `writer`
+        tool: &'static str,
+        source: common::error::Error,
+    },
     #[snafu(display(
         "send deregister client task error with `key:{key}` `server:{server_id:?}` <-> \
          `client:{client_id}`"
@@ -227,6 +239,12 @@ pub enum Error {
         source: common::error::Error,
     },
     /// status handle error
+    #[snafu(display("Status handler create header tool:`{tool}` fails!"))]
+    StatusCreateHeaderTool {
+        /// Must be `reader` or `writer`
+        tool: &'static str,
+        source: common::error::Error,
+    },
     #[snafu(display("send status manager task error"))]
     StatusSendManagerTask {
         source: flume::SendError<ManagerTask>,

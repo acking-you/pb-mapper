@@ -88,6 +88,13 @@ impl Aes256GcmEnCodec {
             seal: SealingKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
         })
     }
+
+    pub fn new(key: UnboundKey) -> Self {
+        let counter = CounterNonceSequence::default();
+        Self {
+            seal: SealingKey::new(key, counter),
+        }
+    }
 }
 
 impl Encryptor for Aes256GcmEnCodec {
@@ -107,6 +114,13 @@ impl Aes256GcmDeCodec {
         Ok(Self {
             open: OpeningKey::new(UnboundKey::new(&AES_256_GCM, key)?, counter),
         })
+    }
+
+    pub fn new(key: UnboundKey) -> Self {
+        let counter = CounterNonceSequence::default();
+        Self {
+            open: OpeningKey::new(key, counter),
+        }
     }
 }
 
@@ -141,6 +155,7 @@ pub trait Decryptor {
 
 #[cfg(test)]
 mod tests {
+    use std::slice::from_raw_parts_mut;
     use std::time::Instant;
 
     use crate::utils::codec::Aes256GcmCodec;
@@ -163,6 +178,20 @@ mod tests {
         fn drop(&mut self) {
             println!("{} consume time:{:?}", self.hint, self.ins.elapsed());
         }
+    }
+
+    fn write_slice(slice: &[u8]) {
+        let ptr = slice.as_ptr() as *mut u8;
+        let mut_slice = unsafe { from_raw_parts_mut(ptr, slice.len()) };
+        mut_slice[1] = b'a';
+        println!("{mut_slice:?}")
+    }
+
+    #[test]
+    fn test_write_mut_slice() {
+        let vec: Vec<u8> = "bbc".into();
+        write_slice(&vec);
+        assert_eq!(vec[1], b'a');
     }
 
     #[test]

@@ -54,9 +54,15 @@ pub enum Error {
     },
     #[snafu(display("`{action}` failed with the specific error: `{detail}`"))]
     MsgCodec {
-        // must be "encrypt" or "decrypt"
+        // must be "encrypt" or "decrypt" or "create encodec" or "create decodec"
         action: &'static str,
         // specific error explanation
+        detail: String,
+    },
+    #[snafu(display("`{action}` forward message failed with detail:`{detail}`"))]
+    MsgForward {
+        // must be "read" or "write"
+        action: &'static str,
         detail: String,
     },
     /// Error for manager

@@ -3,13 +3,13 @@ use tokio::net::TcpStream;
 use tracing::info_span;
 
 use super::error::{
-    Result, StatusConnTaskNotMatchSnafu, StatusEncodeRespSnafu, StatusRecvConnTaskSnafu,
-    StatusSendManagerTaskSnafu, StatusWriteRespSnafu,
+    Result, StatusConnTaskNotMatchSnafu, StatusCreateHeaderToolSnafu, StatusEncodeRespSnafu,
+    StatusRecvConnTaskSnafu, StatusSendManagerTaskSnafu, StatusWriteRespSnafu,
 };
 use super::{ConnTask, ManagerTask, ManagerTaskSender};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{MessageSerializer, PbConnStatusReq};
-use crate::common::message::{MessageWriter, NormalMessageWriter};
+use crate::common::message::{get_header_msg_writer, MessageWriter};
 use crate::pb_server::error::StatusSendDeregisterSnafu;
 use crate::snafu_error_handle;
 
@@ -58,7 +58,8 @@ pub async fn handle_show_status(
     let resp = rx.recv_async().await.context(StatusRecvConnTaskSnafu)?;
     if let ConnTask::StatusResp(resp) = resp {
         let msg = resp.encode().context(StatusEncodeRespSnafu)?;
-        let mut msg_writer = NormalMessageWriter::new(&mut conn);
+        let mut msg_writer = get_header_msg_writer(&mut conn)
+            .context(StatusCreateHeaderToolSnafu { tool: "writer" })?;
         msg_writer
             .write_msg(&msg)
             .await

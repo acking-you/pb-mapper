@@ -2,14 +2,14 @@ use snafu::ResultExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::error::{
-    DecodeStatusRespSnafu, EncodeStatusReqSnafu, ReadStatusRespSnafu, StatusRespNotMatchSnafu,
-    WriteStatusReqSnafu,
+    CreateHeaderToolSnafu, DecodeStatusRespSnafu, EncodeStatusReqSnafu, ReadStatusRespSnafu,
+    StatusRespNotMatchSnafu, WriteStatusReqSnafu,
 };
 use crate::common::message::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
 };
 use crate::common::message::{
-    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
+    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
 
 pub async fn get_status<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
@@ -22,7 +22,8 @@ pub async fn get_status<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
 
     // send status request
     {
-        let mut msg_writer = NormalMessageWriter::new(remote_stream);
+        let mut msg_writer = get_header_msg_writer(remote_stream)
+            .context(CreateHeaderToolSnafu { action: "writer" })?;
         msg_writer
             .write_msg(&msg)
             .await
@@ -30,7 +31,8 @@ pub async fn get_status<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
     }
 
     // get status
-    let mut msg_reader = NormalMessageReader::new(remote_stream);
+    let mut msg_reader =
+        get_header_msg_reader(remote_stream).context(CreateHeaderToolSnafu { action: "reader" })?;
     let msg = msg_reader.read_msg().await.context(ReadStatusRespSnafu)?;
     let resp = PbConnResponse::decode(msg).context(DecodeStatusRespSnafu)?;
     match resp {

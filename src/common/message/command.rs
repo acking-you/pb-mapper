@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use super::super::error::{MsgSerializeSnafu, Result};
+use crate::common::checksum::AesKeyType;
 
 pub trait MessageSerializer {
     fn encode(&self) -> Result<Vec<u8>>;
@@ -28,7 +29,7 @@ pub enum PbConnStatusResp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub enum PbConnRequest {
-    Register { key: String },
+    Register { need_codec: bool, key: String },
     Subcribe { key: String },
     Status(PbConnStatusReq),
     Stream { key: String, dst_id: u32 },
@@ -37,8 +38,14 @@ pub enum PbConnRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnResponse {
     Register(u32),
-    Subcribe { client_id: u32, server_id: u32 },
-    Stream,
+    Subcribe {
+        codec_key: Option<AesKeyType>,
+        client_id: u32,
+        server_id: u32,
+    },
+    Stream {
+        codec_key: Option<AesKeyType>,
+    },
     Status(PbConnStatusResp),
 }
 

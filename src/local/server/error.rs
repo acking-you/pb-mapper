@@ -38,6 +38,12 @@ pub enum Error {
     },
     #[snafu(display("Failed to write ping message"))]
     WritePingMsg { source: common::error::Error },
+    #[snafu(display("header msg tool:`{action}` create failed!"))]
+    CreateHeaderTool {
+        // Must be `reader/writer`
+        action: &'static str,
+        source: common::error::Error,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

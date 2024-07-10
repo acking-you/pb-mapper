@@ -29,3 +29,6 @@ ring = "0.17.8"
 
 [dev-dependencies]
 dotenvy = "0.15.7"
+
+[features]
+udp-timeout = []

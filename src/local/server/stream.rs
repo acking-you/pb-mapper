@@ -11,13 +11,20 @@ use super::error::{
     WritePbConnStreamReqSnafu,
 };
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
-use crate::common::message::forward::{start_forward, NormalForwardReader, NormalForwardWriter};
+use crate::common::message::forward::{
+    start_forward, CodecForwardReader, CodecForwardWriter, NormalForwardReader, NormalForwardWriter,
+};
 use crate::common::message::{
-    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
+    get_decodec, get_encodec, get_header_msg_reader, get_header_msg_writer, MessageReader,
+    MessageWriter,
 };
 use crate::common::stream::{set_tcp_keep_alive, StreamProvider, StreamSplit};
-use crate::snafu_error_handle;
+use crate::local::server::error::CreateHeaderToolSnafu;
 use crate::utils::addr::{each_addr, ToSocketAddrs};
+use crate::{
+    create_component, snafu_error_get_or_return_ok, snafu_error_handle,
+    start_forward_with_codec_key,
+};
 
 /// Handle a stream connection and establish a forward network traffic forwarding.
 /// This function handles both local and remote streams, sets up message writers and readers,
@@ -51,25 +58,28 @@ pub async fn handle_stream<
     );
 
     // write stream request and read response
-    {
-        let mut msg_writer = NormalMessageWriter::new(&mut remote_stream);
+    let codec_key = {
+        let mut msg_writer = get_header_msg_writer(&mut remote_stream)
+            .context(CreateHeaderToolSnafu { action: "writer" })?;
         msg_writer
             .write_msg(&msg)
             .await
             .context(WritePbConnStreamReqSnafu)?;
-        let mut msg_reader = NormalMessageReader::new(&mut remote_stream);
+        let mut msg_reader = get_header_msg_reader(&mut remote_stream)
+            .context(CreateHeaderToolSnafu { action: "reader" })?;
         let msg = msg_reader
             .read_msg()
             .await
             .context(ReadPbConnStreamRespSnafu)?;
         let resp = PbConnResponse::decode(msg).context(DecodePbConnStreamRespSnafu)?;
-        if !matches!(resp, PbConnResponse::Stream) {
-            PbConnStreamRespNotMatchSnafu {
+        match resp {
+            PbConnResponse::Stream { codec_key } => codec_key,
+            _ => PbConnStreamRespNotMatchSnafu {
                 resp: format!("{resp:?}"),
             }
-            .fail()?
+            .fail()?,
         }
-    }
+    };
 
     // start forward network traffic
     let mut local_stream = LocalStream::from_addr(local_addr)
@@ -79,13 +89,17 @@ pub async fn handle_stream<
     let (mut client_reader, mut client_writer) = remote_stream.split();
     let (mut server_reader, mut server_writer) = local_stream.split();
 
-    start_forward(
-        NormalForwardReader::new(&mut client_reader),
-        NormalForwardWriter::new(&mut client_writer),
-        NormalForwardReader::new(&mut server_reader),
-        NormalForwardWriter::new(&mut server_writer),
-    )
-    .await;
+    start_forward_with_codec_key!(
+        codec_key,
+        &mut client_reader,
+        &mut client_writer,
+        &mut server_reader,
+        &mut server_writer,
+        true,
+        true,
+        false,
+        false
+    );
 
     Ok(())
 }

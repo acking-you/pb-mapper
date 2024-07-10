@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use rand::Rng;
 
 use super::message::DataLenType;
 
@@ -43,6 +44,21 @@ pub fn get_checksum(datalen: DataLenType) -> ChecksumType {
 #[inline]
 pub fn valid_checksum(datalen: DataLenType, checksum: ChecksumType) -> bool {
     datalen == (checksum ^ MSG_HEADER_KEY.1)
+}
+
+pub type AesKeyType = [u8; 32];
+
+pub fn gen_random_key() -> [u8; 32] {
+    const CHARSET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+
+    let mut rng = rand::thread_rng();
+    let mut random_key: AesKeyType = [0; 32];
+    (0..32).for_each(|i| {
+        let idx = rng.gen_range(0..CHARSET.len());
+        random_key[i] = CHARSET[idx];
+    });
+
+    random_key
 }
 
 mod tests {

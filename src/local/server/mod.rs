@@ -19,7 +19,7 @@ use crate::common::message::command::{
     LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbServerRequest,
 };
 use crate::common::message::{
-    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
+    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
 use crate::common::stream::{got_one_socket_addr, set_tcp_keep_alive, StreamProvider};
 use crate::utils::addr::{each_addr, ToSocketAddrs};
@@ -48,6 +48,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
+    need_codec: bool,
 ) {
     let mut timeout_count = TimeoutCount::new(GLOBAL_RETRY_TIMES);
     let mut retry_interval = timeout_count.get_interval_by_count();
@@ -57,6 +58,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
             local_addr,
             remote_addr,
             key.clone(),
+            need_codec,
         )
         .await
         {
@@ -87,6 +89,7 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
+    need_codec: bool,
 ) -> std::result::Result<(), Status> {
     let local_addr = got_one_socket_addr(local_addr)
         .await
@@ -110,18 +113,22 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
     {
         let msg = snafu_error_get_or_return_ok!(PbConnRequest::Register {
             key: key.to_string(),
+            need_codec
         }
         .encode()
         .context(EncodeRegisterReqSnafu));
-        let mut msg_writer = NormalMessageWriter::new(&mut manager_stream);
+        let mut msg_writer = get_header_msg_writer(&mut manager_stream)
+            .expect("remote stream create header msg writer nerver fails!");
         snafu_error_get_or_return_ok!(msg_writer
             .write_msg(&msg)
             .await
             .context(SendRegisterReqSnafu));
     }
     let (mut reader, mut writer) = manager_stream.split();
-    let mut msg_reader = NormalMessageReader::new(&mut reader);
-    let mut msg_writer = NormalMessageWriter::new(&mut writer);
+    let mut msg_reader =
+        get_header_msg_reader(&mut reader).expect("generate remote header reader nerver fails");
+    let mut msg_writer =
+        get_header_msg_writer(&mut writer).expect("generate remote header writer nerver fails");
     // read register resp to indicate that register has finished
     let (key, conn_id) = {
         let msg = snafu_error_get_or_return_ok!(msg_reader

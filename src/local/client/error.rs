@@ -37,6 +37,18 @@ pub enum Error {
         // Structured representation of response
         resp: String,
     },
+    #[snafu(display("`{action}` failed!"))]
+    GetCodec {
+        // Must be `client/server-reader/writer-decode/encode`
+        action: &'static str,
+        source: common::error::Error,
+    },
+    #[snafu(display("header msg tool:`{action}` create failed!"))]
+    CreateHeaderTool {
+        // Must be `reader/writer`
+        action: &'static str,
+        source: common::error::Error,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

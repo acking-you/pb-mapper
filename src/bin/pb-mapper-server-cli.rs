@@ -30,16 +30,20 @@ struct Cli {
         default_value_t = false
     )]
     keep_alive: bool,
+    /// [optional] enable codec mode when forward message
+    #[arg(short, long)]
+    codec: bool,
 }
 
 async fn run_register<LocalStream: StreamProvider>(
+    need_codec: bool,
     key: String,
     local_addr: &str,
     remote_addr: Option<&str>,
 ) {
     let local_addr = snafu_error_get_or_return!(get_sockaddr(local_addr));
     let remote_addr = snafu_error_get_or_return!(get_pb_mapper_server(remote_addr));
-    run_server_side_cli::<LocalStream, _>(local_addr, remote_addr, key.into()).await
+    run_server_side_cli::<LocalStream, _>(local_addr, remote_addr, key.into(), need_codec).await
 }
 
 #[tokio::main]
@@ -51,10 +55,22 @@ async fn main() {
     }
     match cli.local_server {
         LocalService::UdpServer { key, addr } => {
-            run_register::<UdpStreamProvider>(key, &addr, cli.pb_mapper_server.as_deref()).await
+            run_register::<UdpStreamProvider>(
+                cli.codec,
+                key,
+                &addr,
+                cli.pb_mapper_server.as_deref(),
+            )
+            .await
         }
         LocalService::TcpServer { key, addr } => {
-            run_register::<TcpStreamProvider>(key, &addr, cli.pb_mapper_server.as_deref()).await
+            run_register::<TcpStreamProvider>(
+                cli.codec,
+                key,
+                &addr,
+                cli.pb_mapper_server.as_deref(),
+            )
+            .await
         }
         LocalService::Status { op } => {
             handle_status_cli(

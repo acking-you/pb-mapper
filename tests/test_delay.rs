@@ -1,7 +1,7 @@
 use std::env;
-use std::sync::Arc;
 use std::time::Duration;
 
+use once_cell::sync::Lazy;
 use pb_mapper::common::config::init_tracing;
 use pb_mapper::common::listener::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 use pb_mapper::common::message::{
@@ -42,7 +42,6 @@ impl<'a> Drop for TimerTickGurad<'a> {
 }
 
 use pb_mapper::common::listener::StreamAccept;
-use tracing::instrument;
 
 async fn echo_server<P: ListenerProvider>(
     server_addr: &str,
@@ -103,13 +102,26 @@ async fn run_pb_mapper_server_cli(
     local_addr: &str,
     remote_addr: &str,
     key: &str,
+    need_codec: bool,
 ) {
     match server_type {
         ServerType::Udp => {
-            run_server_side_cli::<UdpStreamProvider, _>(local_addr, remote_addr, key.into()).await
+            run_server_side_cli::<UdpStreamProvider, _>(
+                local_addr,
+                remote_addr,
+                key.into(),
+                need_codec,
+            )
+            .await
         }
         ServerType::Tcp => {
-            run_server_side_cli::<TcpStreamProvider, _>(local_addr, remote_addr, key.into()).await
+            run_server_side_cli::<TcpStreamProvider, _>(
+                local_addr,
+                remote_addr,
+                key.into(),
+                need_codec,
+            )
+            .await
         }
     }
 }
@@ -180,51 +192,42 @@ enum ServerType {
     Tcp,
 }
 
-#[derive(Debug, Clone)]
-struct ServerAddr {
-    echo_server: Arc<str>,
-    pb_mapper_server: Arc<str>,
-    local_server: Arc<str>,
-    server_type: ServerType,
-    server_key: Arc<str>,
-}
+static PB_MAPPER_SERVER: Lazy<String> = Lazy::new(|| env::var("PB_MAPPER_TEST_SERVER").unwrap());
 
-#[instrument(ret(Debug))]
-fn get_addr_from_env() -> ServerAddr {
-    println!("{:?}", env::current_dir().unwrap());
-    dotenvy::from_filename(env::current_dir().unwrap().join("tests").join(".env")).unwrap();
-    let pb_mapper_server = env::var("PB_MAPPER_TEST_SERVER").unwrap().into();
-    let local_server = env::var("LOCAL_TEST_SERVER").unwrap().into();
-    let echo_server = env::var("ECHO_TEST_SERVER").unwrap().into();
-    let server_key = env::var("SERVER_TEST_KEY").unwrap().into();
-    let server_type = if env::var("SERVER_TEST_TYPE").unwrap() == "UDP" {
+static LOCAL_SERVER: Lazy<String> = Lazy::new(|| env::var("LOCAL_TEST_SERVER").unwrap());
+
+static ECHO_SERVER: Lazy<String> = Lazy::new(|| env::var("ECHO_TEST_SERVER").unwrap());
+
+static SERVER_KEY: Lazy<String> = Lazy::new(|| env::var("SERVER_TEST_KEY").unwrap());
+
+static SERVER_TYPE: Lazy<ServerType> = Lazy::new(|| {
+    if env::var("SERVER_TEST_TYPE").unwrap() == "UDP" {
         ServerType::Udp
     } else {
         ServerType::Tcp
-    };
-    ServerAddr {
-        echo_server,
-        pb_mapper_server,
-        local_server,
-        server_type,
-        server_key,
     }
-}
+});
+
+static INIT_TRACING: Lazy<()> = Lazy::new(|| {
+    println!("{:?}", env::current_dir().unwrap());
+    dotenvy::from_filename(env::current_dir().unwrap().join("tests").join(".env")).unwrap();
+    init_tracing();
+});
 
 /// This is only for testing the correctness of the logic, for performance testing of latency,
 /// please run a separate binary.
+#[ignore = "run codec test enough"]
 #[tokio::test]
-async fn test_pb_mapper_server() {
-    init_tracing();
-    let ServerAddr {
-        echo_server,
-        pb_mapper_server,
-        local_server,
-        server_type,
-        server_key,
-    } = get_addr_from_env();
+async fn test_pb_mapper_server_no_codec() {
+    *INIT_TRACING;
     // run echo server
-    let remote_echo = echo_server.clone();
+    let remote_echo = ECHO_SERVER.clone();
+    let server_type = *SERVER_TYPE;
+    let pb_mapper_server = PB_MAPPER_SERVER.clone();
+    let server_key = SERVER_KEY.clone();
+    let echo_server = ECHO_SERVER.clone();
+    let local_server = LOCAL_SERVER.clone();
+
     let echo_server_handle =
         tokio::spawn(async move { run_echo_server(server_type, &remote_echo).await.unwrap() });
     // run pb-mapper-server
@@ -238,7 +241,7 @@ async fn test_pb_mapper_server() {
     let key = server_key.clone();
     let subcribe_remote = pb_mapper_server.clone();
     let pb_mapper_server_cli_handle = tokio::spawn(async move {
-        run_pb_mapper_server_cli(server_type, &echo_server, &subcribe_remote, &key).await;
+        run_pb_mapper_server_cli(server_type, &echo_server, &subcribe_remote, &key, false).await;
     });
     // slepp some time to wait for pb server cli
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -253,9 +256,62 @@ async fn test_pb_mapper_server() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     // run echo test
     match server_type {
-        ServerType::Udp => run_echo_delay::<UdpStreamProvider, _>(local_server.as_ref(), 10).await,
+        ServerType::Udp => run_echo_delay::<UdpStreamProvider, _>(local_server.as_str(), 10).await,
 
-        ServerType::Tcp => run_echo_delay::<TcpStreamProvider, _>(local_server.as_ref(), 10).await,
+        ServerType::Tcp => run_echo_delay::<TcpStreamProvider, _>(local_server.as_str(), 10).await,
+    }
+
+    // abort all thread
+    echo_server_handle.abort();
+    pb_mapper_server_handle.abort();
+    pb_mapper_server_cli_handle.abort();
+    pb_mapper_client_cli_handle.abort();
+}
+
+/// This is only for testing the correctness of the logic, for performance testing of latency,
+/// please run a separate binary.
+#[tokio::test]
+async fn test_pb_mapper_server_codec() {
+    *INIT_TRACING;
+    // run echo server
+    let remote_echo = ECHO_SERVER.clone();
+    let server_type = *SERVER_TYPE;
+    let pb_mapper_server = PB_MAPPER_SERVER.clone();
+    let server_key = SERVER_KEY.clone();
+    let echo_server = ECHO_SERVER.clone();
+    let local_server = LOCAL_SERVER.clone();
+
+    let echo_server_handle =
+        tokio::spawn(async move { run_echo_server(server_type, &remote_echo).await.unwrap() });
+    // run pb-mapper-server
+    let pb_server = pb_mapper_server.clone();
+    let pb_mapper_server_handle = tokio::spawn(async move {
+        run_pb_mapper_server(&pb_server).await;
+    });
+    // slepp some time to wait for pb server
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // run subcribe server cli
+    let key = server_key.clone();
+    let subcribe_remote = pb_mapper_server.clone();
+    let pb_mapper_server_cli_handle = tokio::spawn(async move {
+        run_pb_mapper_server_cli(server_type, &echo_server, &subcribe_remote, &key, true).await;
+    });
+    // slepp some time to wait for pb server cli
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // run register client cli
+    let key = server_key.clone();
+    let local_echo = local_server.clone();
+    let register_remote = pb_mapper_server.clone();
+    let pb_mapper_client_cli_handle = tokio::spawn(async move {
+        run_pb_mapper_client_cli(server_type, &local_echo, &register_remote, &key).await;
+    });
+    // slepp some time to wait for pb client cli
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // run echo test
+    match server_type {
+        ServerType::Udp => run_echo_delay::<UdpStreamProvider, _>(local_server.as_str(), 10).await,
+
+        ServerType::Tcp => run_echo_delay::<TcpStreamProvider, _>(local_server.as_str(), 10).await,
     }
 
     // abort all thread

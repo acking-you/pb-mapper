@@ -104,7 +104,7 @@ impl BufferGetter for CommonBuffer {
 
 /// This trait is used for buffered reads where the packet length is not known
 pub trait BufferedReader {
-    fn read(&mut self) -> impl std::future::Future<Output = super::error::Result<&'_ [u8]>> + Send;
+    async fn read(&mut self) -> super::error::Result<&'_ [u8]>;
 }
 
 pub struct BufferReader<'a, T> {
@@ -133,8 +133,8 @@ impl<'reader, T: AsyncReadExt + Unpin> BufferReader<'reader, T> {
     }
 }
 
-impl<'reader, T: AsyncReadExt + Send + Unpin> BufferedReader for BufferReader<'reader, T> {
-    fn read(&mut self) -> impl std::future::Future<Output = super::error::Result<&'_ [u8]>> + Send {
-        self.read_inner()
+impl<'reader, T: AsyncReadExt + Unpin> BufferedReader for BufferReader<'reader, T> {
+    async fn read(&mut self) -> super::error::Result<&'_ [u8]> {
+        self.read_inner().await
     }
 }

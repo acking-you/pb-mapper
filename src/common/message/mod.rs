@@ -2,12 +2,11 @@
 //! messages
 pub mod command;
 pub mod forward;
-use ring::aead::chacha20_poly1305_openssh::TAG_LEN;
 use snafu::{ensure, ResultExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
-use super::checksum::{get_checksum, valid_checksum};
+use super::checksum::{get_checksum, valid_checksum, MSG_HEADER_KEY};
 use super::error::{
     self, MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,
     MsgNetworkReadDatalenSnafu, MsgNetworkWriteBodySnafu, MsgNetworkWriteCheckSumSnafu,
@@ -15,7 +14,7 @@ use super::error::{
     Result,
 };
 use crate::common::error::MsgDatalenExceededSnafu;
-use crate::utils::codec::{Decryptor, Encryptor};
+use crate::utils::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor, Encryptor};
 
 /// This message protocol contains header and body, and the header
 /// includes checksum, datalen,respectively, u32, u32, where datalen
@@ -211,6 +210,11 @@ impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageRe
     }
 }
 
+/// SAFETY: The use of `unsafe` here to convert external `&[u8]` into `&mut [u8]`.  Given the
+/// logic of the [`MessageWriter`] trait, the `msg` should ideally be immutable. Otherwise,
+/// it would affect the use of other features. However, the encryption API requires a
+/// mutable reference `&mut`. To avoid unnecessary copying, `unsafe` is used here as a
+/// compromise for the encryption API.
 pub struct CodecMessageWriter<'a, T: AsyncWriteExt + Unpin, E: Encryptor> {
     writer: &'a mut T,
     encryptor: E,
@@ -243,10 +247,56 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> MessageWriter for CodecMessageW
                 action: "encrypt",
                 detail: format!("got {e} when we read msg"),
             })?;
-        let msg_len = (mut_msg.len() + TAG_LEN) as DataLenType;
+        let msg_len = (mut_msg.len() + tag.as_ref().len()) as DataLenType;
 
         set_msg_len(self.writer, msg_len).await?;
         write_codec_msg(self.writer, mut_msg).await?;
         write_codec_tag(self.writer, tag.as_ref()).await
     }
+}
+
+#[inline]
+pub fn get_header_msg_reader<T: AsyncReadExt + Unpin>(
+    reader: &mut T,
+) -> Result<CodecMessageReader<'_, T, Aes256GcmDeCodec>> {
+    Ok(CodecMessageReader::new(reader, get_default_decodec()?))
+}
+
+#[inline]
+pub fn get_header_msg_writer<T: AsyncWriteExt + Unpin>(
+    writer: &mut T,
+) -> Result<CodecMessageWriter<'_, T, Aes256GcmEnCodec>> {
+    Ok(CodecMessageWriter::new(writer, get_default_encodec()?))
+}
+
+#[inline]
+pub fn get_default_encodec() -> Result<Aes256GcmEnCodec> {
+    Aes256GcmEnCodec::try_new(&MSG_HEADER_KEY.0).map_err(|e| error::Error::MsgCodec {
+        action: "create default encodec",
+        detail: format!("{e}"),
+    })
+}
+
+#[inline]
+pub fn get_default_decodec() -> Result<Aes256GcmDeCodec> {
+    Aes256GcmDeCodec::try_new(&MSG_HEADER_KEY.0).map_err(|e| error::Error::MsgCodec {
+        action: "create default decodec",
+        detail: format!("{e}"),
+    })
+}
+
+#[inline]
+pub fn get_encodec(key: &[u8]) -> Result<Aes256GcmEnCodec> {
+    Aes256GcmEnCodec::try_new(key).map_err(|e| error::Error::MsgCodec {
+        action: "create encodec",
+        detail: format!("{e}"),
+    })
+}
+
+#[inline]
+pub fn get_decodec(key: &[u8]) -> Result<Aes256GcmDeCodec> {
+    Aes256GcmDeCodec::try_new(key).map_err(|e| error::Error::MsgCodec {
+        action: "create decodec",
+        detail: format!("{e}"),
+    })
 }

@@ -10,12 +10,21 @@ use super::error::{
     ClientConnWriteSubcribeRespSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
+use crate::common::checksum::{gen_random_key, AesKeyType};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{MessageSerializer, PbConnResponse};
-use crate::common::message::forward::{start_forward, NormalForwardReader, NormalForwardWriter};
-use crate::common::message::{MessageWriter, NormalMessageWriter};
-use crate::pb_server::error::{ClientConnEncodeStreamRespSnafu, ClientConnWriteStreamRespSnafu};
-use crate::snafu_error_handle;
+use crate::common::message::forward::{
+    start_forward, CodecForwardReader, CodecForwardWriter, NormalForwardReader, NormalForwardWriter,
+};
+use crate::common::message::{get_decodec, get_encodec, get_header_msg_writer, MessageWriter};
+use crate::pb_server::error::{
+    ClientConnCreateHeaderToolSnafu, ClientConnEncodeStreamRespSnafu,
+    ClientConnWriteStreamRespSnafu,
+};
+use crate::{
+    create_component, snafu_error_get_or_return_ok, snafu_error_handle,
+    start_forward_with_codec_key,
+};
 
 /// Ensure that client-side connections are properly deregistered before a normal connection is
 /// disconnected or an exception occurs
@@ -54,7 +63,7 @@ pub async fn handle_client_conn(
     mut conn: TcpStream,
 ) -> Result<()> {
     let prev_time = Instant::now();
-    let (mut server_stream, server_id) = {
+    let (mut server_stream, server_id, codec_key) = {
         match get_server_stream(&mut conn, key.clone(), conn_id, task_sender.clone()).await {
             Ok(res) => res,
             Err(e) => {
@@ -88,13 +97,14 @@ pub async fn handle_client_conn(
 
     // response message to server to indicate that stream handling has finished
     {
-        let mut msg_writer = NormalMessageWriter::new(&mut server_writer);
-        let msg = PbConnResponse::Stream
-            .encode()
-            .context(ClientConnEncodeStreamRespSnafu {
+        let mut msg_writer = get_header_msg_writer(&mut server_writer)
+            .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
+        let msg = PbConnResponse::Stream { codec_key }.encode().context(
+            ClientConnEncodeStreamRespSnafu {
                 key: key.clone(),
                 conn_id,
-            })?;
+            },
+        )?;
         msg_writer
             .write_msg(&msg)
             .await
@@ -104,13 +114,17 @@ pub async fn handle_client_conn(
             })?;
     }
 
-    start_forward(
-        NormalForwardReader::new(&mut client_reader),
-        NormalForwardWriter::new(&mut client_writer),
-        NormalForwardReader::new(&mut server_reader),
-        NormalForwardWriter::new(&mut server_writer),
-    )
-    .await;
+    start_forward_with_codec_key!(
+        codec_key,
+        &mut client_reader,
+        &mut client_writer,
+        &mut server_reader,
+        &mut server_writer,
+        true,
+        true,
+        true,
+        true
+    );
 
     Ok(())
 }
@@ -120,7 +134,7 @@ async fn get_server_stream(
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
-) -> Result<(TcpStream, RemoteConnId)> {
+) -> Result<(TcpStream, RemoteConnId, Option<AesKeyType>)> {
     let (tx, rx) = flume::bounded(DEFAULT_CLIENT_CHAN_CAP);
     task_sender
         .send_async(ManagerTask::Subcribe {
@@ -142,13 +156,22 @@ async fn get_server_stream(
             conn_id,
         })?;
 
-    if !matches!(resp, ConnTask::SubcribeResp) {
-        ClientConnSubcribeRespNotMatchSnafu {
+    // Note: A key will be generated for encrypting messages that are forwarded, and this key will
+    // apply to all endpoints.
+    let codec_key = match resp {
+        ConnTask::SubcribeResp { need_codec } => {
+            if need_codec {
+                Some(gen_random_key())
+            } else {
+                None
+            }
+        }
+        _ => ClientConnSubcribeRespNotMatchSnafu {
             key: key.clone(),
             conn_id,
         }
-        .fail()?
-    }
+        .fail()?,
+    };
 
     let resp = rx.recv_async().await.context(ClientConnRecvStreamSnafu {
         key: key.clone(),
@@ -157,8 +180,10 @@ async fn get_server_stream(
 
     if let ConnTask::StreamResp { server_id, stream } = resp {
         // response message to client to indicate that subcribe handling has finished
-        let mut msg_writer = NormalMessageWriter::new(conn);
+        let mut msg_writer = get_header_msg_writer(conn)
+            .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
         let msg = PbConnResponse::Subcribe {
+            codec_key,
             client_id: conn_id.into(),
             server_id: server_id.into(),
         }
@@ -174,7 +199,7 @@ async fn get_server_stream(
                 key: key.clone(),
                 conn_id,
             })?;
-        Ok((stream, server_id))
+        Ok((stream, server_id, codec_key))
     } else {
         ClientConnStreamRespNotMatchSnafu {
             key: key.clone(),

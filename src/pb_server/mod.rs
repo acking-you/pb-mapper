@@ -26,7 +26,7 @@ use crate::common::manager::{ForwardMessage, SenderChan, TaskManager};
 use crate::common::message::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
 };
-use crate::common::message::{MessageReader, NormalMessageReader};
+use crate::common::message::{get_header_msg_reader, MessageReader};
 use crate::common::stream::set_tcp_keep_alive;
 use crate::pb_server::error::{
     TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,
@@ -40,6 +40,7 @@ pub enum ManagerTask {
     Register {
         key: ImutableKey,
         conn_id: RemoteConnId,
+        need_codec: bool,
         conn_sender: ConnTaskSender,
     },
     Subcribe {
@@ -72,7 +73,9 @@ pub enum ManagerTask {
 pub enum ConnTask {
     Forward(ForwardMessage),
     RegisterResp,
-    SubcribeResp,
+    SubcribeResp {
+        need_codec: bool,
+    },
     StreamReq(RemoteConnId),
     StreamResp {
         server_id: RemoteConnId,
@@ -86,7 +89,7 @@ pub(crate) type ConnTaskSender = SenderChan<ConnTask>;
 
 pub type ImutableKey = Arc<str>;
 
-pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<RemoteConnId>>;
+pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<(RemoteConnId, bool)>>;
 
 struct RemoteIdProvider {
     next_id: RemoteConnId,
@@ -155,8 +158,11 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                     .context(TaskCenterSendStatusRespSnafu { conn_id }));
             }
             ManagerTask::Accept(stream) => {
-                let conn_id =
-                    manager.get_conn_id(server_conn_map.iter().flat_map(|(_, ids)| ids).copied());
+                let conn_id = manager.get_conn_id(
+                    server_conn_map
+                        .iter()
+                        .flat_map(|(_, ids)| ids.iter().map(|v| v.0)),
+                );
                 let manager_task_sender = manager.get_task_sender();
                 tokio::spawn(async move {
                     snafu_error_handle!(handle_conn(conn_id, manager_task_sender, stream).await);
@@ -164,7 +170,7 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
             }
             ManagerTask::DeRegisterServerConn { key, conn_id } => {
                 if let Some(ids) = server_conn_map.get_mut(&key) {
-                    if let Some(idx) = ids.iter().position(|&v| v == conn_id) {
+                    if let Some(idx) = ids.iter().position(|(id, _)| *id == conn_id) {
                         ids.remove(idx);
                     }
                     if ids.is_empty() {
@@ -190,15 +196,16 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                 key,
                 conn_id,
                 conn_sender,
+                need_codec,
             } => {
                 // sign up server connection
                 manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                 match server_conn_map.entry(key.clone()) {
                     hashbrown::hash_map::Entry::Occupied(mut o) => {
-                        o.get_mut().push(conn_id);
+                        o.get_mut().push((conn_id, need_codec));
                     }
                     hashbrown::hash_map::Entry::Vacant(v) => {
-                        v.insert(vec![conn_id]);
+                        v.insert(vec![(conn_id, need_codec)]);
                     }
                 }
 
@@ -236,11 +243,11 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                         conn_id
                     }));
                 // Get at least one available server_conn_id from the list
-                for server_conn_id in server_conn_id_list.iter().rev() {
+                for &(server_conn_id, need_codec) in server_conn_id_list.iter().rev() {
                     let server_conn_sender = snafu_error_get_or_continue!(manager
-                        .get_conn_sender_chan(server_conn_id)
+                        .get_conn_sender_chan(&server_conn_id)
                         .context(TaskCenterSubcribeServerConnIdNotExistSnafu {
-                            conn_id: *server_conn_id,
+                            conn_id: server_conn_id,
                             key: key.clone(),
                         }));
                     // 1. Send a request to get server stream
@@ -253,7 +260,7 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
                         }));
                     // 2. Response subcribe ok
                     snafu_error_get_or_continue!(conn_sender
-                        .send_async(ConnTask::SubcribeResp)
+                        .send_async(ConnTask::SubcribeResp { need_codec })
                         .await
                         .context(TaskCenterSendSubcribeRespSnafu {
                             key: key.clone(),
@@ -298,8 +305,8 @@ async fn handle_conn(
     // handle by action
     let init_request = get_init_request(&mut conn, conn_id).await?;
     match init_request {
-        PbConnRequest::Register { key } => {
-            handle_server_conn(key.into(), conn_id, manager_task_sender, conn).await?;
+        PbConnRequest::Register { key, need_codec } => {
+            handle_server_conn(key.into(), need_codec, conn_id, manager_task_sender, conn).await?;
         }
         PbConnRequest::Subcribe { key } => {
             handle_client_conn(key.into(), conn_id, manager_task_sender, conn).await?;
@@ -326,7 +333,8 @@ pub async fn get_init_request(
     conn: &mut TcpStream,
     conn_id: RemoteConnId,
 ) -> Result<PbConnRequest> {
-    let mut reader = NormalMessageReader::new(conn);
+    let mut reader =
+        get_header_msg_reader(conn).context(TaskCenterReadInitRequestSnafu { conn_id })?;
     let msg = reader
         .read_msg()
         .await

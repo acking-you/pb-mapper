@@ -5,10 +5,10 @@ use tokio::net::TcpStream;
 use tracing::instrument;
 
 use super::error::{
-    ServerConnDecodeStreamRequestSnafu, ServerConnEncodeRegisterRespSnafu,
-    ServerConnRecvConnTaskSnafu, ServerConnRecvServerRegisteredRespSnafu,
-    ServerConnRegisteredRespNotMatchSnafu, ServerConnSendRegisterSnafu,
-    ServerConnWritePongRespSnafu, ServerConnWriteRegisteredOkSnafu,
+    ServerConnCreateHeaderToolSnafu, ServerConnDecodeStreamRequestSnafu,
+    ServerConnEncodeRegisterRespSnafu, ServerConnRecvConnTaskSnafu,
+    ServerConnRecvServerRegisteredRespSnafu, ServerConnRegisteredRespNotMatchSnafu,
+    ServerConnSendRegisterSnafu, ServerConnWritePongRespSnafu, ServerConnWriteRegisteredOkSnafu,
     ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
@@ -17,7 +17,7 @@ use crate::common::message::command::{
     LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
 };
 use crate::common::message::{
-    MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
+    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
 use crate::pb_server::error::ServerConnSendDeregisterServerSnafu;
 use crate::{snafu_error_get_or_continue, snafu_error_get_or_return_ok, snafu_error_handle};
@@ -58,6 +58,7 @@ const SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 #[instrument(skip(task_sender))]
 pub async fn handle_server_conn(
     key: ImutableKey,
+    need_codec: bool,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
     mut conn: TcpStream,
@@ -69,6 +70,7 @@ pub async fn handle_server_conn(
         .send_async(ManagerTask::Register {
             key: key.clone(),
             conn_id,
+            need_codec,
             conn_sender: tx,
         })
         .await
@@ -100,8 +102,10 @@ pub async fn handle_server_conn(
         sender: &task_sender,
     };
     let (mut reader, mut writer) = conn.split();
-    let mut msg_writer = NormalMessageWriter::new(&mut writer);
-    let mut msg_reader = NormalMessageReader::new(&mut reader);
+    let mut msg_writer = get_header_msg_writer(&mut writer)
+        .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+    let mut msg_reader = get_header_msg_reader(&mut reader)
+        .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
     // response msg to local server to indicate that register handling has finished
     {
         let msg = PbConnResponse::Register(conn_id.into()).encode().context(
