@@ -22,7 +22,9 @@ pub static MSG_HEADER_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
             key.to_vec()
         }
         Err(_) => {
-            tracing::warn!("No ENV:`SECRET_KEY` provided,we use default key:{DEFAULT_KEY}");
+            tracing::warn!(
+                "No ENV:`{ENV_MSG_HEADER_KEY}` provided,we use default key:{DEFAULT_KEY}"
+            );
             DEFAULT_KEY.as_bytes().to_vec()
         }
     };
