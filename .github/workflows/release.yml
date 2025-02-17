@@ -54,7 +54,7 @@ jobs:
         # Arguments to pass in
         with:
           # Make Rust compile to our target (defined in the matrix)
-          toolchain: nightly-2024-05-28
+          toolchain: nightly-2024-08-25
           targets: ${{ matrix.target }}
 
       - name: Build pb-mapper-server
