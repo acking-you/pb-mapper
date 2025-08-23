@@ -50,11 +50,11 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@stable
         # Arguments to pass in
         with:
           # Make Rust compile to our target (defined in the matrix)
-          toolchain: nightly-2024-08-25
+          toolchain: 1.88.0
           targets: ${{ matrix.target }}
 
       - name: Build pb-mapper-server

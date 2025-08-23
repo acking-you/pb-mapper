@@ -402,7 +402,7 @@ impl UdpStream {
 
     /// Split into read side and write side to avoid borrow check, note that ownership is not
     /// transferred
-    pub fn split(&self) -> (UdpStreamReadHalf<'static>, UdpStreamWriteHalf) {
+    pub fn split(&'_ self) -> (UdpStreamReadHalf<'static>, UdpStreamWriteHalf<'_>) {
         (
             UdpStreamReadHalf {
                 recv_stream: self.recv_stream.clone(),
