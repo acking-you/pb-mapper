@@ -1,7 +1,7 @@
 use std::env;
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use once_cell::sync::Lazy;
 use pb_mapper::common::config::init_tracing;
 use pb_mapper::common::listener::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 use pb_mapper::common::message::{
@@ -154,10 +154,10 @@ async fn run_pb_mapper_client_cli(
 
 /// get random message
 fn gen_random_msg() -> Vec<u8> {
-    let len = rand::thread_rng().gen_range(0_usize..2000);
+    let len = rand::rng().random_range(0_usize..2000);
     let mut vec = Vec::new();
     for _ in 0..len {
-        vec.push(rand::thread_rng().gen_range(0..212));
+        vec.push(rand::rng().random_range(0..212));
     }
     vec
 }
@@ -192,15 +192,16 @@ enum ServerType {
     Tcp,
 }
 
-static PB_MAPPER_SERVER: Lazy<String> = Lazy::new(|| env::var("PB_MAPPER_TEST_SERVER").unwrap());
+static PB_MAPPER_SERVER: LazyLock<String> =
+    LazyLock::new(|| env::var("PB_MAPPER_TEST_SERVER").unwrap());
 
-static LOCAL_SERVER: Lazy<String> = Lazy::new(|| env::var("LOCAL_TEST_SERVER").unwrap());
+static LOCAL_SERVER: LazyLock<String> = LazyLock::new(|| env::var("LOCAL_TEST_SERVER").unwrap());
 
-static ECHO_SERVER: Lazy<String> = Lazy::new(|| env::var("ECHO_TEST_SERVER").unwrap());
+static ECHO_SERVER: LazyLock<String> = LazyLock::new(|| env::var("ECHO_TEST_SERVER").unwrap());
 
-static SERVER_KEY: Lazy<String> = Lazy::new(|| env::var("SERVER_TEST_KEY").unwrap());
+static SERVER_KEY: LazyLock<String> = LazyLock::new(|| env::var("SERVER_TEST_KEY").unwrap());
 
-static SERVER_TYPE: Lazy<ServerType> = Lazy::new(|| {
+static SERVER_TYPE: LazyLock<ServerType> = LazyLock::new(|| {
     if env::var("SERVER_TEST_TYPE").unwrap() == "UDP" {
         ServerType::Udp
     } else {
@@ -208,7 +209,7 @@ static SERVER_TYPE: Lazy<ServerType> = Lazy::new(|| {
     }
 });
 
-static INIT_TRACING: Lazy<()> = Lazy::new(|| {
+static INIT_TRACING: LazyLock<()> = LazyLock::new(|| {
     println!("{:?}", env::current_dir().unwrap());
     dotenvy::from_filename(env::current_dir().unwrap().join("tests").join(".env")).unwrap();
     init_tracing();
