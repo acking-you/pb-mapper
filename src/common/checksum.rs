@@ -1,4 +1,5 @@
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
+
 use rand::Rng;
 
 use super::message::DataLenType;
@@ -8,7 +9,7 @@ pub type ChecksumType = u32;
 const DEFAULT_KEY: &str = "abcdefghijklmnopqlsn123456789j01";
 
 /// 256-bit key,must be 256/8 = 32 byte key and hashcode
-pub static MSG_HEADER_KEY: Lazy<(Vec<u8>, u32)> = Lazy::new(|| {
+pub static MSG_HEADER_KEY: LazyLock<(Vec<u8>, u32)> = LazyLock::new(|| {
     const ENV_MSG_HEADER_KEY: &str = "MSG_HEADER_KEY";
     let key = match std::env::var(ENV_MSG_HEADER_KEY) {
         Ok(k) => {
@@ -53,10 +54,10 @@ pub type AesKeyType = [u8; 32];
 pub fn gen_random_key() -> [u8; 32] {
     const CHARSET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut random_key: AesKeyType = [0; 32];
     (0..32).for_each(|i| {
-        let idx = rng.gen_range(0..CHARSET.len());
+        let idx = rng.random_range(0..CHARSET.len());
         random_key[i] = CHARSET[idx];
     });
 

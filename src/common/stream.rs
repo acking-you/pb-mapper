@@ -89,10 +89,12 @@ gen_stream_impl!(TcpStreamImpl, TcpStream);
 gen_stream_impl!(UdpStreamImpl, UdpStream);
 
 impl StreamSplit for TcpStreamImpl {
-    type ReaderRef<'a> = ReadHalf<'a>
+    type ReaderRef<'a>
+        = ReadHalf<'a>
     where
         Self: 'a;
-    type WriterRef<'a> = WriteHalf<'a>
+    type WriterRef<'a>
+        = WriteHalf<'a>
     where
         Self: 'a;
 
@@ -103,7 +105,8 @@ impl StreamSplit for TcpStreamImpl {
 
 impl StreamSplit for UdpStreamImpl {
     type ReaderRef<'a> = UdpStreamReadHalf<'static>;
-    type WriterRef<'a> = UdpStreamWriteHalf<'a>
+    type WriterRef<'a>
+        = UdpStreamWriteHalf<'a>
     where
         Self: 'a;
 
