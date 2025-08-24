@@ -1,34 +1,57 @@
-# Development
+# ui
 
-Your new jumpstart project includes basic organization with an organized `assets` folder and a `components` folder.
-If you chose to develop with the router feature, you will also have a `views` folder.
+A new Flutter project.
 
+## Getting Started
+
+This project is a starting point for a Flutter application.
+
+A few resources to get you started if this is your first Flutter project:
+
+- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
+- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+
+For help getting started with Flutter development, view the
+[online documentation](https://docs.flutter.dev/), which offers tutorials,
+samples, guidance on mobile development, and a full API reference.
+
+## Using Rust Inside Flutter
+
+This project leverages Flutter for GUI and Rust for the backend logic,
+utilizing the capabilities of the
+[Rinf](https://pub.dev/packages/rinf) framework.
+
+To run and build this app, you need to have
+[Flutter SDK](https://docs.flutter.dev/get-started/install)
+and [Rust toolchain](https://www.rust-lang.org/tools/install)
+installed on your system.
+You can check that your system is ready with the commands below.
+Note that all the Flutter subcomponents should be installed.
+
+```shell
+rustc --version
+flutter doctor
 ```
-project/
-├─ assets/ # Any assets that are used by the app should be placed here
-├─ src/
-│  ├─ main.rs # The entrypoint for the app. It also defines the routes for the app.
-│  ├─ components/
-│  │  ├─ mod.rs # Defines the components module
-│  │  ├─ hero.rs # The Hero component for use in the home page
-│  │  ├─ echo.rs # The echo component uses server functions to communicate with the server
-│  ├─ views/ # The views each route will render in the app.
-│  │  ├─ mod.rs # Defines the module for the views route and re-exports the components for each route
-│  │  ├─ blog.rs # The component that will render at the /blog/:id route
-│  │  ├─ home.rs # The component that will render at the / route
-├─ Cargo.toml # The Cargo.toml file defines the dependencies and feature flags for your project
+
+You also need to have the CLI tool for Rinf ready.
+
+```shell
+cargo install rinf_cli
 ```
 
-### Serving Your App
+Signals sent between Dart and Rust are implemented using signal attributes.
+If you've modified the signal structs, run the following command
+to generate the corresponding Dart classes:
 
-Run the following command in the root of your project to start developing with the default platform:
-
-```bash
-dx serve --platform desktop
+```shell
+rinf gen
 ```
 
-To run for a different platform, use the `--platform platform` flag. E.g.
-```bash
-dx serve --platform desktop
+Now you can run and build this app just like any other Flutter projects.
+
+```shell
+flutter run
 ```
 
+For detailed instructions on writing Rust and Flutter together,
+please refer to Rinf's [documentation](https://rinf.cunarist.com).
