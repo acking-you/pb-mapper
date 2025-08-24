@@ -36,7 +36,7 @@ The system works by creating a bridge between local services and remote clients 
 
 ## UI Module Requirements
 
-The UI module needs to provide a graphical interface that replaces all functionality of the command-line tools. The UI should have the following features:
+The UI module needs to provide a graphical interface that replaces all functionality of the command-line tools. The UI is implemented using Flutter with the Rinf framework for Rust-Flutter integration. The UI should have the following features:
 
 ### 1. Server Management Interface
 - Start/stop the pb-mapper-server
@@ -90,7 +90,7 @@ The UI module needs to provide a graphical interface that replaces all functiona
 - Service registration with unique keys
 - Status checking capabilities
 - Docker deployment support
-- Graphical UI interface (Dioxus-based) to replace CLI tools
+- Graphical UI interface (Flutter-based with Rinf framework) to replace CLI tools
 
 ## Development Notes
 
@@ -103,3 +103,13 @@ The UI module needs to provide a graphical interface that replaces all functiona
 - UI should provide form inputs for all CLI arguments and environment variables
 - UI should display real-time status information and logs
 - UI should handle error conditions gracefully and provide user feedback
+
+## Rinf Framework Usage
+
+The UI is implemented using the Rinf framework which enables communication between Rust and Flutter. Rinf uses a message-passing mechanism for communication between the two layers.
+
+### Documentation
+
+For detailed information about Rinf framework usage, refer to the documentation in `ui/documentation/`:
+- Tutorial: `ui/documentation/source/tutorial.md`
+- Full documentation: `ui/documentation/source/`
