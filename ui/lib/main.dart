@@ -1,6 +1,11 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
+import 'package:ui/src/views/client_connection_view.dart';
+import 'package:ui/src/views/configuration_view.dart';
+import 'package:ui/src/views/server_management_view.dart';
+import 'package:ui/src/views/service_registration_view.dart';
+import 'package:ui/src/views/status_monitoring_view.dart';
 import 'src/bindings/bindings.dart';
 
 Future<void> main() async {
@@ -60,26 +65,45 @@ class _MyAppState extends State<MyApp> {
   }
 }
 
-class MyHomePage extends StatelessWidget {
-  const MyHomePage({super.key});
+class MainScreen extends StatefulWidget {
+  const MainScreen({super.key});
+
+  @override
+  State<MainScreen> createState() => _MainScreenState();
+}
+
+class _MainScreenState extends State<MainScreen> {
+  int _currentIndex = 0;
+
+  final List<Widget> _views = [
+    ServerManagementView(),
+    ServiceRegistrationView(),
+    ClientConnectionView(),
+    StatusMonitoringView(),
+    ConfigurationView(),
+  ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(child: MyColumn()),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          // The `sendSignalToRust` method is generated
-          // on structs that derive `DartSignal`.
-          SampleNumberInput(
-            letter: 'HELLO FROM DART!',
-            dummyOne: 25,
-            dummyTwo: SampleSchema(sampleFieldOne: true, sampleFieldTwo: false),
-            dummyThree: [4, 5, 6],
-          ).sendSignalToRust();
-        },
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+      appBar: AppBar(title: const Text('pb-mapper UI')),
+      body: _views[_currentIndex],
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentIndex,
+        onTap: (index) => setState(() => _currentIndex = index),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Server'),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.add_circle),
+            label: 'Register',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.connect_without_contact),
+            label: 'Connect',
+          ),
+          BottomNavigationBarItem(icon: Icon(Icons.list), label: 'Status'),
+          BottomNavigationBarItem(icon: Icon(Icons.build), label: 'Config'),
+        ],
       ),
     );
   }
@@ -90,67 +114,30 @@ class MyColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final children = [
-      // `StreamBuilder` listens to a stream
-      // and rebuilds the widget accordingly.
-      StreamBuilder(
-        stream: SampleFractal.rustSignalStream,
-        builder: (context, snapshot) {
-          final signalPack = snapshot.data;
-          if (signalPack == null) {
-            return Container(
-              margin: const EdgeInsets.all(20),
-              width: 256,
-              height: 256,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(24.0),
-                color: Colors.black,
-              ),
-            );
-          }
-          final imageData = signalPack.binary;
-          return Container(
-            margin: const EdgeInsets.all(20),
-            width: 256,
-            height: 256,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24.0),
-              child: FittedBox(
-                fit: BoxFit.contain,
-                child: Image.memory(
-                  imageData,
-                  width: 256,
-                  height: 256,
-                  gaplessPlayback: true,
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-      StreamBuilder(
-        // This stream is generated
-        // on structs that derive `RustSignal`.
-        stream: SampleNumberOutput.rustSignalStream,
-        builder: (context, snapshot) {
-          final signalPack = snapshot.data;
-          // If the app has just started and widget is built
-          // without receiving a Rust signal,
-          // the snapshot data will be null.
-          // It's when the widget is being built for the first time.
-          if (signalPack == null) {
-            // Return the initial widget if the snapshot data is null.
-            return Text('Initial value 0');
-          }
-          final sampleNumberOutput = signalPack.message;
-          final currentNumber = sampleNumberOutput.currentNumber;
-          return Text('Current value is $currentNumber');
-        },
-      ),
-    ];
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
-      children: children,
+      children: [
+        StreamBuilder(
+          stream: SampleNumberOutput.rustSignalStream,
+          builder: (context, snapshot) {
+            final signalPack = snapshot.data;
+            if (signalPack == null) {
+              return const Text('Initial value 0');
+            }
+            final currentNumber = signalPack.message.currentNumber;
+            return Text('Current value is $currentNumber');
+          },
+        ),
+      ],
     );
+  }
+}
+
+class MyHomePage extends StatelessWidget {
+  const MyHomePage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const MainScreen();
   }
 }
