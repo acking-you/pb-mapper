@@ -60,94 +60,103 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Connect to Service',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 16),
-                  DropdownButtonFormField<String>(
-                    value: _selectedProtocol,
-                    items: ['TCP', 'UDP']
-                        .map(
-                          (protocol) => DropdownMenuItem(
-                            value: protocol,
-                            child: Text(protocol),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (value) {
-                      setState(() => _selectedProtocol = value!);
-                    },
-                    decoration: const InputDecoration(
-                      labelText: 'Protocol',
-                      border: OutlineInputBorder(),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Connect to Service',
+                      style: Theme.of(context).textTheme.titleLarge,
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _serviceKeyController,
-                    decoration: const InputDecoration(
-                      labelText: 'Service Key',
-                      hintText: 'service-to-connect',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _localAddressController,
-                    decoration: const InputDecoration(
-                      labelText: 'Local Address',
-                      hintText: '127.0.0.1:9090',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  SwitchListTile(
-                    title: const Text('Enable TCP Keep-Alive'),
-                    value: _isKeepAliveEnabled,
-                    onChanged: (value) {
-                      setState(() => _isKeepAliveEnabled = value);
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    decoration: InputDecoration(
-                      labelText: 'Server Address',
-                      hintText: _serverAddress,
-                      border: const OutlineInputBorder(),
-                      suffixIcon: IconButton(
-                        icon: const Icon(Icons.edit),
-                        onPressed: () {
-                          // TODO: Implement server address configuration
-                        },
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      value: _selectedProtocol,
+                      items: ['TCP', 'UDP']
+                          .map(
+                            (protocol) => DropdownMenuItem(
+                              value: protocol,
+                              child: Text(protocol),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        setState(() => _selectedProtocol = value!);
+                      },
+                      decoration: const InputDecoration(
+                        labelText: 'Protocol',
+                        border: OutlineInputBorder(),
                       ),
                     ),
-                    readOnly: true,
-                  ),
-                ],
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _serviceKeyController,
+                      decoration: const InputDecoration(
+                        labelText: 'Service Key',
+                        hintText: 'service-to-connect',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _localAddressController,
+                      decoration: const InputDecoration(
+                        labelText: 'Local Address',
+                        hintText: '127.0.0.1:9090',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SwitchListTile(
+                      title: const Text('Enable TCP Keep-Alive'),
+                      value: _isKeepAliveEnabled,
+                      onChanged: (value) {
+                        setState(() => _isKeepAliveEnabled = value);
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      decoration: InputDecoration(
+                        labelText: 'Server Address',
+                        hintText: _serverAddress,
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.edit),
+                          onPressed: () {
+                            // TODO: Implement server address configuration
+                          },
+                        ),
+                      ),
+                      readOnly: true,
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 16),
-          ElevatedButton(
-            onPressed: _isConnected ? _disconnectService : _connectService,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _isConnected ? Colors.red : null,
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 48,
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _isConnected ? _disconnectService : _connectService,
+                style: ElevatedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                ),
+                child: Text(
+                  _isConnected ? 'Disconnect' : 'Connect',
+                  style: const TextStyle(fontSize: 16),
+                ),
+              ),
             ),
-            child: Text(_isConnected ? 'Disconnect' : 'Connect'),
-          ),
-          const SizedBox(height: 24),
-          Expanded(
-            child: Card(
+            const SizedBox(height: 24),
+            Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
                 child: Column(
@@ -173,20 +182,19 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                       'Connection Logs:',
                       style: TextStyle(fontWeight: FontWeight.bold),
                     ),
-                    const Expanded(
-                      child: SingleChildScrollView(
-                        child: Text(
-                          'Connection logs will appear here...',
-                          textAlign: TextAlign.left,
-                        ),
+                    const SizedBox(height: 8),
+                    const SingleChildScrollView(
+                      child: Text(
+                        'Connection logs will appear here...',
+                        textAlign: TextAlign.left,
                       ),
                     ),
                   ],
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

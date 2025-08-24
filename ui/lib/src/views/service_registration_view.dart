@@ -50,98 +50,110 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Register Service',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 16),
-                  DropdownButtonFormField<String>(
-                    value: _selectedProtocol,
-                    items: ['TCP', 'UDP']
-                        .map(
-                          (protocol) => DropdownMenuItem(
-                            value: protocol,
-                            child: Text(protocol),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (value) {
-                      setState(() => _selectedProtocol = value!);
-                    },
-                    decoration: const InputDecoration(
-                      labelText: 'Protocol',
-                      border: OutlineInputBorder(),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Register Service',
+                      style: Theme.of(context).textTheme.titleLarge,
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _serviceKeyController,
-                    decoration: const InputDecoration(
-                      labelText: 'Service Key',
-                      hintText: 'unique-service-key',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _localAddressController,
-                    decoration: const InputDecoration(
-                      labelText: 'Local Address',
-                      hintText: '127.0.0.1:8080',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  SwitchListTile(
-                    title: const Text('Enable Encryption'),
-                    value: _isEncryptionEnabled,
-                    onChanged: (value) {
-                      setState(() => _isEncryptionEnabled = value);
-                    },
-                  ),
-                  SwitchListTile(
-                    title: const Text('Enable TCP Keep-Alive'),
-                    value: _isKeepAliveEnabled,
-                    onChanged: (value) {
-                      setState(() => _isKeepAliveEnabled = value);
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    decoration: InputDecoration(
-                      labelText: 'Server Address',
-                      hintText: _serverAddress,
-                      border: const OutlineInputBorder(),
-                      suffixIcon: IconButton(
-                        icon: const Icon(Icons.edit),
-                        onPressed: () {
-                          // TODO: Implement server address configuration
-                        },
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      value: _selectedProtocol,
+                      items: ['TCP', 'UDP']
+                          .map(
+                            (protocol) => DropdownMenuItem(
+                              value: protocol,
+                              child: Text(protocol),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        setState(() => _selectedProtocol = value!);
+                      },
+                      decoration: const InputDecoration(
+                        labelText: 'Protocol',
+                        border: OutlineInputBorder(),
                       ),
                     ),
-                    readOnly: true,
-                  ),
-                ],
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _serviceKeyController,
+                      decoration: const InputDecoration(
+                        labelText: 'Service Key',
+                        hintText: 'unique-service-key',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _localAddressController,
+                      decoration: const InputDecoration(
+                        labelText: 'Local Address',
+                        hintText: '127.0.0.1:8080',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SwitchListTile(
+                      title: const Text('Enable Encryption'),
+                      value: _isEncryptionEnabled,
+                      onChanged: (value) {
+                        setState(() => _isEncryptionEnabled = value);
+                      },
+                    ),
+                    SwitchListTile(
+                      title: const Text('Enable TCP Keep-Alive'),
+                      value: _isKeepAliveEnabled,
+                      onChanged: (value) {
+                        setState(() => _isKeepAliveEnabled = value);
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      decoration: InputDecoration(
+                        labelText: 'Server Address',
+                        hintText: _serverAddress,
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.edit),
+                          onPressed: () {
+                            // TODO: Implement server address configuration
+                          },
+                        ),
+                      ),
+                      readOnly: true,
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 16),
-          ElevatedButton(
-            onPressed: _registerService,
-            child: const Text('Register Service'),
-          ),
-          const SizedBox(height: 24),
-          Expanded(
-            child: Card(
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 48,
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _registerService,
+                style: ElevatedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                ),
+                child: const Text(
+                  'Register Service',
+                  style: TextStyle(fontSize: 16),
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
                 child: Column(
@@ -163,19 +175,13 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                       },
                     ),
                     const SizedBox(height: 16),
-                    Expanded(
-                      child: ListView(
-                        children: [
-                          // This will be populated by the StreamBuilder
-                        ],
-                      ),
-                    ),
+                    const Text('Registered services will appear here...'),
                   ],
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

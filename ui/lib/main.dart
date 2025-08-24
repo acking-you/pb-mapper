@@ -1,11 +1,10 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
-import 'package:ui/src/views/client_connection_view.dart';
-import 'package:ui/src/views/configuration_view.dart';
-import 'package:ui/src/views/server_management_view.dart';
-import 'package:ui/src/views/service_registration_view.dart';
-import 'package:ui/src/views/status_monitoring_view.dart';
+import 'package:ui/src/views/client_connection_page.dart';
+import 'package:ui/src/views/main_landing_view.dart';
+import 'package:ui/src/views/server_management_page.dart';
+import 'package:ui/src/views/service_registration_page.dart';
 import 'src/bindings/bindings.dart';
 
 Future<void> main() async {
@@ -31,6 +30,8 @@ class _MyAppState extends State<MyApp> {
   /// properly dropping Rust objects before shutdown,
   /// creating this listener is not necessary.
   late final AppLifecycleListener _listener;
+  ThemeMode _themeMode = ThemeMode.system;
+  int _currentPage = 0; // 0 = landing, 1 = server, 2 = register, 3 = connect
 
   @override
   void initState() {
@@ -49,95 +50,82 @@ class _MyAppState extends State<MyApp> {
     super.dispose();
   }
 
+  void _navigateToPage(int page) {
+    setState(() {
+      _currentPage = page;
+    });
+  }
+
+  void _goBack() {
+    setState(() {
+      _currentPage = 0;
+    });
+  }
+
+  void toggleTheme() {
+    setState(() {
+      if (_themeMode == ThemeMode.light) {
+        _themeMode = ThemeMode.dark;
+      } else {
+        _themeMode = ThemeMode.light;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    Widget homeWidget;
+
+    switch (_currentPage) {
+      case 1:
+        homeWidget = ServerManagementPage(
+          onBack: _goBack,
+          onToggleTheme: toggleTheme,
+        );
+        break;
+      case 2:
+        homeWidget = ServiceRegistrationPage(
+          onBack: _goBack,
+          onToggleTheme: toggleTheme,
+        );
+        break;
+      case 3:
+        homeWidget = ClientConnectionPage(
+          onBack: _goBack,
+          onToggleTheme: toggleTheme,
+        );
+        break;
+      default:
+        homeWidget = MainLandingView(
+          onServerManagement: () => _navigateToPage(1),
+          onServiceRegistration: () => _navigateToPage(2),
+          onClientConnection: () => _navigateToPage(3),
+          onToggleTheme: toggleTheme,
+        );
+    }
+
     return MaterialApp(
-      title: 'Rinf Demo',
+      title: 'pb-mapper UI',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blueGrey,
-          brightness: MediaQuery.platformBrightnessOf(context),
-        ),
         useMaterial3: true,
-      ),
-      home: MyHomePage(),
-    );
-  }
-}
-
-class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
-
-  @override
-  State<MainScreen> createState() => _MainScreenState();
-}
-
-class _MainScreenState extends State<MainScreen> {
-  int _currentIndex = 0;
-
-  final List<Widget> _views = [
-    ServerManagementView(),
-    ServiceRegistrationView(),
-    ClientConnectionView(),
-    StatusMonitoringView(),
-    ConfigurationView(),
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('pb-mapper UI')),
-      body: _views[_currentIndex],
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentIndex,
-        onTap: (index) => setState(() => _currentIndex = index),
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Server'),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.add_circle),
-            label: 'Register',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.connect_without_contact),
-            label: 'Connect',
-          ),
-          BottomNavigationBarItem(icon: Icon(Icons.list), label: 'Status'),
-          BottomNavigationBarItem(icon: Icon(Icons.build), label: 'Config'),
-        ],
-      ),
-    );
-  }
-}
-
-class MyColumn extends StatelessWidget {
-  const MyColumn({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        StreamBuilder(
-          stream: SampleNumberOutput.rustSignalStream,
-          builder: (context, snapshot) {
-            final signalPack = snapshot.data;
-            if (signalPack == null) {
-              return const Text('Initial value 0');
-            }
-            final currentNumber = signalPack.message.currentNumber;
-            return Text('Current value is $currentNumber');
-          },
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
+        // Improve overall text and icon visibility
+        textTheme: const TextTheme(
+          titleLarge: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
         ),
-      ],
+      ),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.indigo,
+          brightness: Brightness.dark,
+        ),
+        textTheme: const TextTheme(
+          titleLarge: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+        ),
+      ),
+      themeMode: _themeMode,
+      home: homeWidget,
     );
-  }
-}
-
-class MyHomePage extends StatelessWidget {
-  const MyHomePage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return const MainScreen();
   }
 }
