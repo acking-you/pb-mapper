@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:ui/src/common/theme_change_button.dart';
 import 'package:ui/src/views/client_connection_view.dart';
 import 'package:ui/src/views/status_monitoring_view.dart';
 
@@ -30,16 +31,7 @@ class _ClientConnectionPageState extends State<ClientConnectionPage> {
           icon: const Icon(Icons.arrow_back),
           onPressed: widget.onBack,
         ),
-        actions: [
-          IconButton(
-            icon: Icon(
-              Theme.of(context).brightness == Brightness.dark
-                  ? Icons.light_mode
-                  : Icons.dark_mode,
-            ),
-            onPressed: widget.onToggleTheme,
-          ),
-        ],
+        actions: [getThemeChangeButton(widget.onToggleTheme, context)],
         elevation: 4,
       ),
       body: _views[_currentIndex],

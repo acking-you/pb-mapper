@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:ui/src/common/theme_change_button.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class MainLandingView extends StatelessWidget {
@@ -28,19 +29,7 @@ class MainLandingView extends StatelessWidget {
       appBar: AppBar(
         title: const Text('pb-mapper UI'),
         elevation: 4,
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 8.0),
-            child: IconButton(
-              icon: Icon(
-                Theme.of(context).brightness == Brightness.dark
-                    ? Icons.light_mode
-                    : Icons.dark_mode,
-              ),
-              onPressed: onToggleTheme,
-            ),
-          ),
-        ],
+        actions: [getThemeChangeButton(onToggleTheme, context)],
       ),
       body: Center(
         child: ConstrainedBox(

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:ui/src/common/theme_change_button.dart';
 import 'package:ui/src/views/service_registration_view.dart';
 import 'package:ui/src/views/status_monitoring_view.dart';
 
@@ -13,7 +14,8 @@ class ServiceRegistrationPage extends StatefulWidget {
   });
 
   @override
-  State<ServiceRegistrationPage> createState() => _ServiceRegistrationPageState();
+  State<ServiceRegistrationPage> createState() =>
+      _ServiceRegistrationPageState();
 }
 
 class _ServiceRegistrationPageState extends State<ServiceRegistrationPage> {
@@ -33,16 +35,7 @@ class _ServiceRegistrationPageState extends State<ServiceRegistrationPage> {
           icon: const Icon(Icons.arrow_back),
           onPressed: widget.onBack,
         ),
-        actions: [
-          IconButton(
-            icon: Icon(
-              Theme.of(context).brightness == Brightness.dark
-                  ? Icons.light_mode
-                  : Icons.dark_mode,
-            ),
-            onPressed: widget.onToggleTheme,
-          ),
-        ],
+        actions: [getThemeChangeButton(widget.onToggleTheme, context)],
         elevation: 4,
       ),
       body: _views[_currentIndex],
@@ -57,10 +50,7 @@ class _ServiceRegistrationPageState extends State<ServiceRegistrationPage> {
             icon: Icon(Icons.add_circle),
             label: 'Register',
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.list),
-            label: 'Status',
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.list), label: 'Status'),
         ],
       ),
     );

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:ui/src/bindings/bindings.dart';
+import 'package:ui/src/views/log_display_widget.dart';
 
 class StatusMonitoringView extends StatefulWidget {
   const StatusMonitoringView({super.key});
@@ -110,7 +111,8 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                       stream: ActiveConnectionsUpdate.rustSignalStream,
                       builder: (context, snapshot) {
                         if (snapshot.hasData) {
-                          final connections = snapshot.data!.message.connections;
+                          final connections =
+                              snapshot.data!.message.connections;
                           if (connections.isEmpty) {
                             return const Text('No active connections');
                           }
@@ -122,7 +124,9 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                               final connection = connections[index];
                               return ListTile(
                                 title: Text(connection.serviceKey),
-                                subtitle: Text('Client: ${connection.clientId}'),
+                                subtitle: Text(
+                                  'Client: ${connection.clientId}',
+                                ),
                                 trailing: Text(connection.status),
                               );
                             },
@@ -135,6 +139,8 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                 ),
               ),
             ),
+            const SizedBox(height: 16),
+            const LogDisplayWidget(),
           ],
         ),
       ),

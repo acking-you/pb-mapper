@@ -886,6 +886,8 @@ dependencies = [
  "serde",
  "tokio",
  "tokio_with_wasm",
+ "tracing",
+ "tracing-subscriber",
  "wasm-bindgen",
 ]
 

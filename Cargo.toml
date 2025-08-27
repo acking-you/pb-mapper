@@ -31,7 +31,7 @@ dotenvy = "0.15.7"
 udp-timeout = []
 
 [workspace]
-members = ["ui/native/hub"]
+members = ["ui/native/*"]
 
 [workspace.package]
 version = "0.1.0"

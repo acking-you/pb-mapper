@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:ui/src/common/theme_change_button.dart';
 import 'package:ui/src/views/server_management_view.dart';
 import 'package:ui/src/views/status_monitoring_view.dart';
 
@@ -19,10 +20,7 @@ class ServerManagementPage extends StatefulWidget {
 class _ServerManagementPageState extends State<ServerManagementPage> {
   int _currentIndex = 0;
 
-  final List<Widget> _views = [
-    ServerManagementView(),
-    StatusMonitoringView(),
-  ];
+  final List<Widget> _views = [ServerManagementView(), StatusMonitoringView()];
 
   @override
   Widget build(BuildContext context) {
@@ -33,16 +31,7 @@ class _ServerManagementPageState extends State<ServerManagementPage> {
           icon: const Icon(Icons.arrow_back),
           onPressed: widget.onBack,
         ),
-        actions: [
-          IconButton(
-            icon: Icon(
-              Theme.of(context).brightness == Brightness.dark
-                  ? Icons.light_mode
-                  : Icons.dark_mode,
-            ),
-            onPressed: widget.onToggleTheme,
-          ),
-        ],
+        actions: [getThemeChangeButton(widget.onToggleTheme, context)],
         elevation: 4,
       ),
       body: _views[_currentIndex],
@@ -53,14 +42,8 @@ class _ServerManagementPageState extends State<ServerManagementPage> {
         showSelectedLabels: true,
         showUnselectedLabels: true,
         items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.settings),
-            label: 'Server',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.list),
-            label: 'Status',
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Server'),
+          BottomNavigationBarItem(icon: Icon(Icons.list), label: 'Status'),
         ],
       ),
     );

@@ -17,6 +17,8 @@ expect_used = "deny"
 wildcard_imports = "deny"
 
 [dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
 rinf = "8.7.2"
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.45.0", features = ["rt", "sync", "time", "macros"] }
@@ -31,4 +33,6 @@ async-trait = "0.1.87"
 messages = "0.3.1"
 anyhow = "1.0.89"
 sample_crate = { path = "../sample_crate" }
+
+
 pb-mapper = { path = "../../../" }

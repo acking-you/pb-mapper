@@ -95,3 +95,11 @@ pub struct ConfigStatusUpdate {
     pub server_address: String,
     pub keep_alive_enabled: bool,
 }
+
+// Log Signals
+#[derive(Serialize, RustSignal)]
+pub struct LogMessage {
+    pub level: String,
+    pub message: String,
+    pub timestamp: u64,
+}
