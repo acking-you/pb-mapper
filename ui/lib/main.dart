@@ -5,6 +5,7 @@ import 'package:ui/src/views/client_connection_page.dart';
 import 'package:ui/src/views/main_landing_view.dart';
 import 'package:ui/src/views/server_management_page.dart';
 import 'package:ui/src/views/service_registration_page.dart';
+import 'package:ui/src/common/log_manager.dart';
 import 'src/bindings/bindings.dart';
 
 Future<void> main() async {
@@ -36,8 +37,13 @@ class _MyAppState extends State<MyApp> {
   @override
   void initState() {
     super.initState();
+
+    // Initialize the global log manager
+    LogManager().initialize();
+
     _listener = AppLifecycleListener(
       onExitRequested: () async {
+        LogManager().dispose(); // Clean up log manager
         finalizeRust(); // This line shuts down the async Rust runtime.
         return AppExitResponse.exit;
       },
