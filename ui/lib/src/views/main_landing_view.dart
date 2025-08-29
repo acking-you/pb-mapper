@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:ui/src/common/theme_change_button.dart';
+import 'package:ui/src/common/responsive_layout.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class MainLandingView extends StatelessWidget {
   final VoidCallback onServerManagement;
   final VoidCallback onServiceRegistration;
   final VoidCallback onClientConnection;
+  final VoidCallback? onStatusMonitoring;
   final VoidCallback onToggleTheme;
 
   const MainLandingView({
@@ -13,6 +15,7 @@ class MainLandingView extends StatelessWidget {
     required this.onServerManagement,
     required this.onServiceRegistration,
     required this.onClientConnection,
+    this.onStatusMonitoring,
     required this.onToggleTheme,
   });
 
@@ -23,102 +26,161 @@ class MainLandingView extends StatelessWidget {
     }
   }
 
+  Widget _buildNavigationButton({
+    required BuildContext context,
+    required VoidCallback onPressed,
+    required String text,
+  }) {
+    return SizedBox(
+      height: ResponsiveLayout.getButtonHeight(context),
+      width: ResponsiveLayout.isMobile(context) ? double.infinity : 300,
+      child: ElevatedButton(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(
+              ResponsiveLayout.isMobile(context) ? 24 : 35,
+            ),
+          ),
+        ),
+        child: Text(
+          text,
+          style: TextStyle(fontSize: ResponsiveLayout.getFontSize(context, 20)),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final bool showAppBar = ResponsiveLayout.isMobile(context);
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('pb-mapper UI'),
-        elevation: 4,
-        actions: [getThemeChangeButton(onToggleTheme, context)],
-      ),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 600),
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: _launchGitHub,
-                    child: const Text(
-                      'pb-mapper',
-                      style: TextStyle(
-                        fontSize: 48,
-                        fontWeight: FontWeight.bold,
-                        fontFamily: 'Pacifico',
-                      ),
+      appBar: showAppBar
+          ? AppBar(
+              title: const Text('pb-mapper UI'),
+              elevation: 4,
+              actions: [getThemeChangeButton(onToggleTheme, context)],
+            )
+          : null,
+      body: ResponsiveLayout.wrapWithMaxWidth(
+        context: context,
+        child: Padding(
+          padding: ResponsiveLayout.getScreenPadding(context),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: _launchGitHub,
+                  child: Text(
+                    'pb-mapper',
+                    style: TextStyle(
+                      fontSize: ResponsiveLayout.isMobile(context) ? 36 : 48,
+                      fontWeight: FontWeight.bold,
+                      fontFamily: 'Pacifico',
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Network Tunneling Solution',
-                  style: TextStyle(fontSize: 20, color: Colors.grey),
-                  textAlign: TextAlign.center,
+              ),
+              SizedBox(height: ResponsiveLayout.getVerticalSpacing(context)),
+              Text(
+                'Network Tunneling Solution',
+                style: TextStyle(
+                  fontSize: ResponsiveLayout.getFontSize(context, 20),
+                  color: Colors.grey,
                 ),
-                const SizedBox(height: 64),
-                SizedBox(
-                  height: 70,
-                  width: 300,
-                  child: ElevatedButton(
-                    onPressed: onServerManagement,
-                    style: ElevatedButton.styleFrom(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(35),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(
+                height: ResponsiveLayout.getVerticalSpacing(context) * 2,
+              ),
+              if (ResponsiveLayout.isMobile(context))
+                Column(
+                  children: [
+                    _buildNavigationButton(
+                      context: context,
+                      onPressed: onServerManagement,
+                      text: 'Server Management',
+                    ),
+                    SizedBox(
+                      height: ResponsiveLayout.getVerticalSpacing(context),
+                    ),
+                    _buildNavigationButton(
+                      context: context,
+                      onPressed: onServiceRegistration,
+                      text: 'Service Registration',
+                    ),
+                    SizedBox(
+                      height: ResponsiveLayout.getVerticalSpacing(context),
+                    ),
+                    _buildNavigationButton(
+                      context: context,
+                      onPressed: onClientConnection,
+                      text: 'Client Connection',
+                    ),
+                    if (onStatusMonitoring != null) ...[
+                      SizedBox(
+                        height: ResponsiveLayout.getVerticalSpacing(context),
                       ),
-                    ),
-                    child: const Text(
-                      'Server Management',
-                      style: TextStyle(fontSize: 20),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 32),
-                SizedBox(
-                  height: 70,
-                  width: 300,
-                  child: ElevatedButton(
-                    onPressed: onServiceRegistration,
-                    style: ElevatedButton.styleFrom(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(35),
+                      _buildNavigationButton(
+                        context: context,
+                        onPressed: onStatusMonitoring!,
+                        text: 'Status Monitoring',
                       ),
+                    ],
+                  ],
+                )
+              else
+                Column(
+                  children: [
+                    _buildNavigationButton(
+                      context: context,
+                      onPressed: onServerManagement,
+                      text: 'Server Management',
                     ),
-                    child: const Text(
-                      'Service Registration',
-                      style: TextStyle(fontSize: 20),
+                    SizedBox(
+                      height: ResponsiveLayout.getVerticalSpacing(context),
                     ),
-                  ),
-                ),
-                const SizedBox(height: 32),
-                SizedBox(
-                  height: 70,
-                  width: 300,
-                  child: ElevatedButton(
-                    onPressed: onClientConnection,
-                    style: ElevatedButton.styleFrom(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(35),
+                    _buildNavigationButton(
+                      context: context,
+                      onPressed: onServiceRegistration,
+                      text: 'Service Registration',
+                    ),
+                    SizedBox(
+                      height: ResponsiveLayout.getVerticalSpacing(context),
+                    ),
+                    _buildNavigationButton(
+                      context: context,
+                      onPressed: onClientConnection,
+                      text: 'Client Connection',
+                    ),
+                    if (onStatusMonitoring != null) ...[
+                      SizedBox(
+                        height: ResponsiveLayout.getVerticalSpacing(context),
                       ),
-                    ),
-                    child: const Text(
-                      'Client Connection',
-                      style: TextStyle(fontSize: 20),
-                    ),
-                  ),
+                      _buildNavigationButton(
+                        context: context,
+                        onPressed: onStatusMonitoring!,
+                        text: 'Status Monitoring',
+                      ),
+                    ],
+                  ],
                 ),
-                const SizedBox(height: 64),
-                const Text(
-                  '🌟 Welcome! Choose a function to unlock the power of pb-mapper 🚀',
-                  style: TextStyle(fontSize: 16, color: Colors.grey),
-                  textAlign: TextAlign.center,
+              SizedBox(
+                height: ResponsiveLayout.getVerticalSpacing(context) * 2,
+              ),
+              Text(
+                '🌟 Welcome! Choose a function to unlock the power of pb-mapper 🚀',
+                style: TextStyle(
+                  fontSize: ResponsiveLayout.getFontSize(context, 16),
+                  color: Colors.grey,
                 ),
-              ],
-            ),
+                textAlign: TextAlign.center,
+              ),
+            ],
           ),
         ),
       ),

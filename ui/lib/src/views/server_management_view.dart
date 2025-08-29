@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:ui/src/bindings/bindings.dart';
+import 'package:ui/src/common/responsive_layout.dart';
 
 class ServerManagementView extends StatefulWidget {
   const ServerManagementView({super.key});
@@ -38,14 +39,16 @@ class _ServerManagementViewState extends State<ServerManagementView> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.all(16.0),
+      padding: ResponsiveLayout.getScreenPadding(context),
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
+                padding: EdgeInsets.all(
+                  ResponsiveLayout.getCardPadding(context),
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -53,7 +56,9 @@ class _ServerManagementViewState extends State<ServerManagementView> {
                       'Server Configuration',
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(
+                      height: ResponsiveLayout.getVerticalSpacing(context),
+                    ),
                     TextField(
                       controller: _portController,
                       decoration: const InputDecoration(
@@ -62,7 +67,9 @@ class _ServerManagementViewState extends State<ServerManagementView> {
                       ),
                       keyboardType: TextInputType.number,
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(
+                      height: ResponsiveLayout.getVerticalSpacing(context),
+                    ),
                     SwitchListTile(
                       title: const Text('Enable IPv6'),
                       value: _isIPv6Enabled,
@@ -81,8 +88,9 @@ class _ServerManagementViewState extends State<ServerManagementView> {
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            Row(
+            SizedBox(height: ResponsiveLayout.getVerticalSpacing(context)),
+            ResponsiveLayout.buildResponsiveRow(
+              context: context,
               children: [
                 Expanded(
                   child: SizedBox(
@@ -101,7 +109,10 @@ class _ServerManagementViewState extends State<ServerManagementView> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 16),
+                if (!ResponsiveLayout.isMobile(context))
+                  SizedBox(
+                    width: ResponsiveLayout.getHorizontalPadding(context),
+                  ),
                 Expanded(
                   child: SizedBox(
                     height: 48,
@@ -121,10 +132,14 @@ class _ServerManagementViewState extends State<ServerManagementView> {
                 ),
               ],
             ),
-            const SizedBox(height: 24),
+            SizedBox(
+              height: ResponsiveLayout.getVerticalSpacing(context) * 1.5,
+            ),
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
+                padding: EdgeInsets.all(
+                  ResponsiveLayout.getCardPadding(context),
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -132,7 +147,9 @@ class _ServerManagementViewState extends State<ServerManagementView> {
                       'Server Status',
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(
+                      height: ResponsiveLayout.getVerticalSpacing(context),
+                    ),
                     StreamBuilder(
                       stream: ServerStatusUpdate.rustSignalStream,
                       builder: (context, snapshot) {
@@ -143,7 +160,9 @@ class _ServerManagementViewState extends State<ServerManagementView> {
                         return const Text('Status: Not running');
                       },
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(
+                      height: ResponsiveLayout.getVerticalSpacing(context),
+                    ),
                     const Text(
                       'Log Output:',
                       style: TextStyle(fontWeight: FontWeight.bold),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:ui/src/common/log_manager.dart';
+import 'package:ui/src/common/responsive_layout.dart';
 import 'package:ui/src/bindings/bindings.dart';
 import 'dart:async';
 
@@ -143,151 +144,235 @@ class _LogViewPageState extends State<LogViewPage> {
       appBar: AppBar(
         title: const Text('Logs'),
         actions: [
-          // Level filter dropdown
-          Padding(
-            padding: const EdgeInsets.only(right: 8.0),
-            child: DropdownButton<String?>(
-              value: _levelFilter,
-              hint: const Text('All'),
-              items: const [
-                DropdownMenuItem(value: null, child: Text('All')),
-                DropdownMenuItem(value: 'ERROR', child: Text('ERROR')),
-                DropdownMenuItem(value: 'WARN', child: Text('WARN')),
-                DropdownMenuItem(value: 'INFO', child: Text('INFO')),
-                DropdownMenuItem(value: 'DEBUG', child: Text('DEBUG')),
-                DropdownMenuItem(value: 'TRACE', child: Text('TRACE')),
-              ],
-              onChanged: (value) {
-                if (mounted) {
-                  setState(() {
-                    _levelFilter = value;
-                    _currentLogs = _levelFilter != null
-                        ? _logManager.getFilteredLogs(_levelFilter)
-                        : _logManager.logs;
-                  });
+          if (!ResponsiveLayout.isMobile(context)) ...[
+            // Level filter dropdown
+            Padding(
+              padding: const EdgeInsets.only(right: 8.0),
+              child: DropdownButton<String?>(
+                value: _levelFilter,
+                hint: const Text('All'),
+                items: const [
+                  DropdownMenuItem(value: null, child: Text('All')),
+                  DropdownMenuItem(value: 'ERROR', child: Text('ERROR')),
+                  DropdownMenuItem(value: 'WARN', child: Text('WARN')),
+                  DropdownMenuItem(value: 'INFO', child: Text('INFO')),
+                  DropdownMenuItem(value: 'DEBUG', child: Text('DEBUG')),
+                  DropdownMenuItem(value: 'TRACE', child: Text('TRACE')),
+                ],
+                onChanged: (value) {
+                  if (mounted) {
+                    setState(() {
+                      _levelFilter = value;
+                      _currentLogs = _levelFilter != null
+                          ? _logManager.getFilteredLogs(_levelFilter)
+                          : _logManager.logs;
+                    });
+                  }
+                },
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.copy),
+              onPressed: _copyAllLogs,
+              tooltip: 'Copy all logs',
+            ),
+            IconButton(
+              icon: const Icon(Icons.clear),
+              onPressed: _clearLogs,
+              tooltip: 'Clear logs',
+            ),
+            IconButton(
+              icon: const Icon(Icons.arrow_downward),
+              onPressed: _scrollToBottom,
+              tooltip: 'Scroll to bottom',
+            ),
+          ] else ...[
+            PopupMenuButton<String>(
+              onSelected: (value) {
+                switch (value) {
+                  case 'copy':
+                    _copyAllLogs();
+                    break;
+                  case 'clear':
+                    _clearLogs();
+                    break;
+                  case 'scroll':
+                    _scrollToBottom();
+                    break;
                 }
               },
+              itemBuilder: (context) => [
+                const PopupMenuItem(value: 'copy', child: Text('Copy Logs')),
+                const PopupMenuItem(value: 'clear', child: Text('Clear Logs')),
+                const PopupMenuItem(
+                  value: 'scroll',
+                  child: Text('Scroll to Bottom'),
+                ),
+              ],
             ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.copy),
-            onPressed: _copyAllLogs,
-            tooltip: 'Copy all logs',
-          ),
-          IconButton(
-            icon: const Icon(Icons.clear),
-            onPressed: _clearLogs,
-            tooltip: 'Clear logs',
-          ),
-          IconButton(
-            icon: const Icon(Icons.arrow_downward),
-            onPressed: _scrollToBottom,
-            tooltip: 'Scroll to bottom',
+          ],
+        ],
+      ),
+      body: Column(
+        children: [
+          if (ResponsiveLayout.isMobile(context))
+            Container(
+              padding: ResponsiveLayout.getScreenPadding(context),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: DropdownButton<String?>(
+                      value: _levelFilter,
+                      hint: const Text('Filter by level'),
+                      isExpanded: true,
+                      items: const [
+                        DropdownMenuItem(value: null, child: Text('All')),
+                        DropdownMenuItem(value: 'ERROR', child: Text('ERROR')),
+                        DropdownMenuItem(value: 'WARN', child: Text('WARN')),
+                        DropdownMenuItem(value: 'INFO', child: Text('INFO')),
+                        DropdownMenuItem(value: 'DEBUG', child: Text('DEBUG')),
+                        DropdownMenuItem(value: 'TRACE', child: Text('TRACE')),
+                      ],
+                      onChanged: (value) {
+                        if (mounted) {
+                          setState(() {
+                            _levelFilter = value;
+                            _currentLogs = _levelFilter != null
+                                ? _logManager.getFilteredLogs(_levelFilter)
+                                : _logManager.logs;
+                          });
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Expanded(
+            child: Container(
+              margin: ResponsiveLayout.getScreenPadding(context),
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: isDarkMode
+                      ? Colors.grey.shade700
+                      : Colors.grey.shade300,
+                ),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (notification) {
+                  if (notification is UserScrollNotification) {
+                    if (notification.direction == ScrollDirection.forward ||
+                        notification.direction == ScrollDirection.reverse) {
+                      _userScrolling = true;
+                      _debounceTimer?.cancel();
+                    } else if (notification.direction == ScrollDirection.idle) {
+                      _debounceTimer?.cancel();
+                      _debounceTimer = Timer(
+                        const Duration(milliseconds: 300),
+                        () {
+                          if (mounted) {
+                            if (_scrollController.hasClients &&
+                                _scrollController
+                                    .position
+                                    .hasContentDimensions) {
+                              try {
+                                final maxScroll =
+                                    _scrollController.position.maxScrollExtent;
+                                final currentScroll =
+                                    _scrollController.position.pixels;
+                                setState(() {
+                                  _userScrolling =
+                                      maxScroll - currentScroll > 20;
+                                });
+                              } catch (e) {
+                                setState(() {
+                                  _userScrolling = false;
+                                });
+                              }
+                            } else {
+                              setState(() {
+                                _userScrolling = false;
+                              });
+                            }
+                          }
+                        },
+                      );
+                    }
+                  }
+                  return false;
+                },
+                child: Scrollbar(
+                  controller: _scrollController,
+                  child: ListView.builder(
+                    controller: _scrollController,
+                    itemCount: _currentLogs.length,
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: ResponsiveLayout.getScreenPadding(context),
+                    itemBuilder: (context, index) {
+                      final log = _currentLogs[index];
+                      final timestamp = DateTime.fromMillisecondsSinceEpoch(
+                        log.timestamp.toInt() * 1000,
+                      ).toString().split('.')[0];
+
+                      final baseFontSize = ResponsiveLayout.isMobile(context)
+                          ? 14.0
+                          : 16.0;
+
+                      return Padding(
+                        padding: EdgeInsets.only(
+                          bottom:
+                              ResponsiveLayout.getVerticalSpacing(context) / 3,
+                        ),
+                        child: SelectableText.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: '[${log.level.padRight(5)}] ',
+                                style: TextStyle(
+                                  fontSize: baseFontSize,
+                                  fontFamily: 'monospace',
+                                  color: _getLevelColor(log.level, isDarkMode),
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              TextSpan(
+                                text: '$timestamp : ',
+                                style: TextStyle(
+                                  fontSize: baseFontSize,
+                                  fontFamily: 'monospace',
+                                  color: _getTimestampColor(isDarkMode),
+                                ),
+                              ),
+                              TextSpan(
+                                text: log.message,
+                                style: TextStyle(
+                                  fontSize: baseFontSize,
+                                  fontFamily: 'monospace',
+                                  color: _getTextColor(isDarkMode),
+                                ),
+                              ),
+                            ],
+                          ),
+                          style: const TextStyle(height: 1.3),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
-      body: Container(
-        margin: const EdgeInsets.all(16.0),
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: isDarkMode ? Colors.grey.shade700 : Colors.grey.shade300,
-          ),
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: NotificationListener<ScrollNotification>(
-          onNotification: (notification) {
-            if (notification is UserScrollNotification) {
-              if (notification.direction == ScrollDirection.forward ||
-                  notification.direction == ScrollDirection.reverse) {
-                _userScrolling = true;
-                _debounceTimer?.cancel();
-              } else if (notification.direction == ScrollDirection.idle) {
-                _debounceTimer?.cancel();
-                _debounceTimer = Timer(const Duration(milliseconds: 300), () {
-                  if (mounted) {
-                    if (_scrollController.hasClients &&
-                        _scrollController.position.hasContentDimensions) {
-                      try {
-                        final maxScroll =
-                            _scrollController.position.maxScrollExtent;
-                        final currentScroll = _scrollController.position.pixels;
-                        setState(() {
-                          _userScrolling = maxScroll - currentScroll > 20;
-                        });
-                      } catch (e) {
-                        setState(() {
-                          _userScrolling = false;
-                        });
-                      }
-                    } else {
-                      setState(() {
-                        _userScrolling = false;
-                      });
-                    }
-                  }
-                });
-              }
-            }
-            return false;
-          },
-          child: Scrollbar(
-            controller: _scrollController,
-            child: ListView.builder(
-              controller: _scrollController,
-              itemCount: _currentLogs.length,
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.all(16.0),
-              itemBuilder: (context, index) {
-                final log = _currentLogs[index];
-                final timestamp = DateTime.fromMillisecondsSinceEpoch(
-                  log.timestamp.toInt() * 1000,
-                ).toString().split('.')[0];
-
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 4.0),
-                  child: SelectableText.rich(
-                    TextSpan(
-                      children: [
-                        TextSpan(
-                          text: '[${log.level.padRight(5)}] ',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontFamily: 'monospace',
-                            color: _getLevelColor(log.level, isDarkMode),
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        TextSpan(
-                          text: '$timestamp : ',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontFamily: 'monospace',
-                            color: _getTimestampColor(isDarkMode),
-                          ),
-                        ),
-                        TextSpan(
-                          text: log.message,
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontFamily: 'monospace',
-                            color: _getTextColor(isDarkMode),
-                          ),
-                        ),
-                      ],
-                    ),
-                    style: const TextStyle(height: 1.3),
-                  ),
-                );
-              },
-            ),
-          ),
-        ),
-      ),
       bottomNavigationBar: Container(
-        padding: const EdgeInsets.all(16.0),
+        padding: ResponsiveLayout.getScreenPadding(context),
         child: Text(
           '${_currentLogs.length}/${_logManager.maxLogLines} logs${_levelFilter != null ? ' (filtered by $_levelFilter)' : ''}',
-          style: TextStyle(fontSize: 12, color: _getTimestampColor(isDarkMode)),
+          style: TextStyle(
+            fontSize: ResponsiveLayout.getFontSize(context, 12),
+            color: _getTimestampColor(isDarkMode),
+          ),
           textAlign: TextAlign.center,
         ),
       ),

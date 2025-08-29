@@ -1,11 +1,15 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
-import 'package:ui/src/views/client_connection_page.dart';
+import 'package:ui/src/views/client_connection_view.dart';
 import 'package:ui/src/views/main_landing_view.dart';
-import 'package:ui/src/views/server_management_page.dart';
-import 'package:ui/src/views/service_registration_page.dart';
+import 'package:ui/src/views/server_management_view.dart';
+import 'package:ui/src/views/service_registration_view.dart';
+import 'package:ui/src/views/status_monitoring_view.dart';
+import 'package:ui/src/views/configuration_view.dart';
 import 'package:ui/src/common/log_manager.dart';
+import 'package:ui/src/common/desktop_layout.dart';
+import 'package:ui/src/common/responsive_layout.dart';
 import 'src/bindings/bindings.dart';
 
 Future<void> main() async {
@@ -32,7 +36,8 @@ class _MyAppState extends State<MyApp> {
   /// creating this listener is not necessary.
   late final AppLifecycleListener _listener;
   ThemeMode _themeMode = ThemeMode.system;
-  int _currentPage = 0; // 0 = landing, 1 = server, 2 = register, 3 = connect
+  int _currentPage =
+      0; // 0 = landing, 1 = server, 2 = register, 3 = connect, 4 = status, 5 = config
 
   @override
   void initState() {
@@ -83,44 +88,36 @@ class _MyAppState extends State<MyApp> {
     });
   }
 
-  @override
-  Widget build(BuildContext context) {
-    Widget homeWidget;
-
+  Widget _getCurrentPageContent() {
     switch (_currentPage) {
       case 1:
-        homeWidget = ServerManagementPage(
-          onBack: _goBack,
-          onToggleTheme: toggleTheme,
-        );
-        break;
+        return const ServerManagementView();
       case 2:
-        homeWidget = ServiceRegistrationPage(
-          onBack: _goBack,
-          onToggleTheme: toggleTheme,
-        );
-        break;
+        return const ServiceRegistrationView();
       case 3:
-        homeWidget = ClientConnectionPage(
-          onBack: _goBack,
-          onToggleTheme: toggleTheme,
-        );
-        break;
+        return const ClientConnectionView();
+      case 4:
+        return const StatusMonitoringView();
+      case 5:
+        return const ConfigurationView();
       default:
-        homeWidget = MainLandingView(
+        return MainLandingView(
           onServerManagement: () => _navigateToPage(1),
           onServiceRegistration: () => _navigateToPage(2),
           onClientConnection: () => _navigateToPage(3),
+          onStatusMonitoring: () => _navigateToPage(4),
           onToggleTheme: toggleTheme,
         );
     }
+  }
 
+  @override
+  Widget build(BuildContext context) {
     return MaterialApp(
       title: 'pb-mapper UI',
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-        // Improve overall text and icon visibility
         textTheme: const TextTheme(
           titleLarge: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
         ),
@@ -136,7 +133,102 @@ class _MyAppState extends State<MyApp> {
         ),
       ),
       themeMode: _themeMode,
-      home: homeWidget,
+      home: Builder(
+        builder: (context) => ResponsiveLayout.isMobile(context)
+            ? _buildMobileApp()
+            : _buildDesktopApp(),
+      ),
     );
+  }
+
+  Widget _buildMobileApp() {
+    if (_currentPage == 0) {
+      return _getCurrentPageContent();
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_getPageTitle() ?? 'pb-mapper UI'),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => _navigateToPage(0),
+        ),
+        actions: [
+          IconButton(
+            icon: Icon(
+              _themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode,
+            ),
+            onPressed: toggleTheme,
+          ),
+        ],
+      ),
+      body: _getCurrentPageContent(),
+      bottomNavigationBar: _currentPage != 0
+          ? BottomNavigationBar(
+              type: BottomNavigationBarType.fixed,
+              selectedItemColor: Theme.of(context).colorScheme.primary,
+              unselectedItemColor: Colors.grey,
+              currentIndex: _currentPage - 1,
+              onTap: (index) => _navigateToPage(index + 1),
+              items: const [
+                BottomNavigationBarItem(icon: Icon(Icons.dns), label: 'Server'),
+                BottomNavigationBarItem(
+                  icon: Icon(Icons.app_registration),
+                  label: 'Register',
+                ),
+                BottomNavigationBarItem(
+                  icon: Icon(Icons.cable),
+                  label: 'Connect',
+                ),
+                BottomNavigationBarItem(
+                  icon: Icon(Icons.monitor),
+                  label: 'Status',
+                ),
+              ],
+            )
+          : null,
+    );
+  }
+
+  Widget _buildDesktopApp() {
+    return DesktopLayout(
+      selectedIndex: _currentPage,
+      onNavigationChanged: _navigateToPage,
+      child: ResponsiveScaffold(
+        title: _getPageTitle(),
+        body: _getCurrentPageContent(),
+        actions: _currentPage == 0
+            ? [
+                IconButton(
+                  icon: Icon(
+                    _themeMode == ThemeMode.dark
+                        ? Icons.light_mode
+                        : Icons.dark_mode,
+                  ),
+                  onPressed: toggleTheme,
+                ),
+              ]
+            : null,
+      ),
+    );
+  }
+
+  String? _getPageTitle() {
+    switch (_currentPage) {
+      case 0:
+        return null;
+      case 1:
+        return 'Server Management';
+      case 2:
+        return 'Service Registration';
+      case 3:
+        return 'Client Connection';
+      case 4:
+        return 'Status Monitoring';
+      case 5:
+        return 'Configuration';
+      default:
+        return null;
+    }
   }
 }
