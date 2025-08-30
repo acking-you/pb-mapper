@@ -1,5 +1,5 @@
 pub mod error;
-mod status;
+pub mod status;
 mod stream;
 
 use std::fmt::Debug;

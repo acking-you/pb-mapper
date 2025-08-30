@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:ui/src/bindings/bindings.dart';
 import 'package:ui/src/common/responsive_layout.dart';
+import 'package:ui/src/views/log_view_button.dart';
 
 class ServerManagementView extends StatefulWidget {
   const ServerManagementView({super.key});
@@ -11,7 +12,6 @@ class ServerManagementView extends StatefulWidget {
 
 class _ServerManagementViewState extends State<ServerManagementView> {
   final _portController = TextEditingController(text: '7666');
-  bool _isIPv6Enabled = false;
   bool _isKeepAliveEnabled = true;
   bool _isServerRunning = false;
 
@@ -25,7 +25,6 @@ class _ServerManagementViewState extends State<ServerManagementView> {
     final port = int.tryParse(_portController.text) ?? 7666;
     StartServerRequest(
       port: port,
-      enableIpv6: _isIPv6Enabled,
       enableKeepAlive: _isKeepAliveEnabled,
     ).sendSignalToRust();
     setState(() => _isServerRunning = true);
@@ -69,13 +68,6 @@ class _ServerManagementViewState extends State<ServerManagementView> {
                     ),
                     SizedBox(
                       height: ResponsiveLayout.getVerticalSpacing(context),
-                    ),
-                    SwitchListTile(
-                      title: const Text('Enable IPv6'),
-                      value: _isIPv6Enabled,
-                      onChanged: (value) {
-                        setState(() => _isIPv6Enabled = value);
-                      },
                     ),
                     SwitchListTile(
                       title: const Text('Enable TCP Keep-Alive'),
@@ -135,49 +127,8 @@ class _ServerManagementViewState extends State<ServerManagementView> {
             SizedBox(
               height: ResponsiveLayout.getVerticalSpacing(context) * 1.5,
             ),
-            Card(
-              child: Padding(
-                padding: EdgeInsets.all(
-                  ResponsiveLayout.getCardPadding(context),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Server Status',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    SizedBox(
-                      height: ResponsiveLayout.getVerticalSpacing(context),
-                    ),
-                    StreamBuilder(
-                      stream: ServerStatusUpdate.rustSignalStream,
-                      builder: (context, snapshot) {
-                        if (snapshot.hasData) {
-                          final status = snapshot.data!.message;
-                          return Text('Status: ${status.status}');
-                        }
-                        return const Text('Status: Not running');
-                      },
-                    ),
-                    SizedBox(
-                      height: ResponsiveLayout.getVerticalSpacing(context),
-                    ),
-                    const Text(
-                      'Log Output:',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 8),
-                    const SingleChildScrollView(
-                      child: Text(
-                        'Server logs will appear here...',
-                        textAlign: TextAlign.left,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+            // Replace the server status card with log view button
+            const LogViewButton(),
           ],
         ),
       ),

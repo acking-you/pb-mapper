@@ -298,12 +298,126 @@ The UI leverages the Rinf framework for seamless Rust-Flutter integration, enabl
 - **Actor Model**: Concurrent processing in `native/hub/src/actors/`
 - **Signal Handlers**: Business logic implementation in `native/hub/src/signals/`
 
+### Actor Usage Pattern
+
+The core business logic is implemented using an actor-based pattern with the `messages` crate:
+
+#### 1. Actor Definition (`pb_mapper_actor.rs`)
+```rust
+use messages::prelude::{Context, Address, Notifiable};
+
+pub struct PbMapperActor {
+    // State fields
+    config: AppConfig,
+    server_handle: Option<JoinHandle<()>>,
+    // ... other state
+}
+
+impl PbMapperActor {
+    pub fn new(self_addr: Address<Self>) -> Self {
+        let mut owned_tasks = OwnedTasks::new();
+        
+        // Spawn signal listeners for each DartSignal type
+        owned_tasks.spawn(Self::listen_to_start_server(self_addr.clone()));
+        owned_tasks.spawn(Self::listen_to_update_config(self_addr.clone()));
+        // ... other listeners
+        
+        Self { /* initialize fields */ }
+    }
+}
+```
+
+#### 2. Signal Listeners
+Each DartSignal type requires a dedicated listener method:
+```rust
+async fn listen_to_update_config(mut self_addr: Address<Self>) {
+    let receiver = UpdateConfigRequest::get_dart_signal_receiver();
+    while let Some(signal_pack) = receiver.recv().await {
+        let _ = self_addr.notify(signal_pack.message).await;
+    }
+}
+```
+
+#### 3. Business Logic Implementation
+Business logic is implemented via `Notifiable` trait:
+```rust
+#[async_trait]
+impl Notifiable<UpdateConfigRequest> for PbMapperActor {
+    async fn notify(&mut self, msg: UpdateConfigRequest, _: &Context<Self>) {
+        // Update configuration in memory
+        self.config.server_address = msg.server_address;
+        self.config.keep_alive_enabled = msg.enable_keep_alive;
+        
+        // Save to file and send feedback
+        match self.save_config() {
+            Ok(_) => {
+                ConfigSaveResult {
+                    success: true,
+                    message: "Configuration saved successfully".to_string(),
+                }.send_signal_to_dart();
+                
+                // Trigger status update to refresh UI
+                self.send_config_status().await;
+            }
+            Err(e) => {
+                ConfigSaveResult {
+                    success: false,
+                    message: format!("Failed to save configuration: {}", e),
+                }.send_signal_to_dart();
+            }
+        }
+    }
+}
+```
+
+#### 4. Actor Registration
+The actor is created and started in `actors/mod.rs`:
+```rust
+pub async fn create_actors() {
+    let start_receiver = CreateActors::get_dart_signal_receiver();
+    start_receiver.recv().await;
+
+    let pb_mapper_context = Context::new();
+    let pb_mapper_addr = pb_mapper_context.address();
+    
+    let pb_mapper_actor = PbMapperActor::new(pb_mapper_addr);
+    spawn(pb_mapper_context.run(pb_mapper_actor));
+}
+```
+
 ### Communication Flow
 
-1. **Flutter → Rust**: UI sends signals (e.g., `StartServerRequest`) to Rust
-2. **Rust Processing**: Actor system handles requests asynchronously
-3. **Rust → Flutter**: Status updates sent back via signals (e.g., `ServerStatusUpdate`)
-4. **UI Updates**: Flutter rebuilds interface based on received signals
+1. **Flutter → Rust**: UI sends signals (e.g., `UpdateConfigRequest`) to Rust
+2. **Signal Reception**: Dedicated listener receives signal via `get_dart_signal_receiver()`
+3. **Actor Notification**: Listener calls `self_addr.notify(message)` to forward to actor
+4. **Business Logic**: Actor's `Notifiable` implementation processes the request
+5. **Rust → Flutter**: Actor sends response signals (e.g., `ConfigSaveResult`) back to UI
+6. **UI Updates**: Flutter rebuilds interface based on received signals
+
+### Signal Types and Patterns
+
+#### DartSignal (Flutter → Rust)
+```rust
+#[derive(Deserialize, DartSignal)]
+pub struct UpdateConfigRequest {
+    pub server_address: String,
+    pub enable_keep_alive: bool,
+}
+```
+- Requires listener method: `listen_to_update_config()`
+- Requires `Notifiable` implementation for business logic
+- Sent from Flutter: `UpdateConfigRequest(...).sendSignalToRust()`
+
+#### RustSignal (Rust → Flutter)
+```rust
+#[derive(Serialize, RustSignal)]
+pub struct ConfigSaveResult {
+    pub success: bool,
+    pub message: String,
+}
+```
+- Sent from Rust: `ConfigSaveResult {...}.send_signal_to_dart()`
+- Received in Flutter: `ConfigSaveResult.rustSignalStream.listen(...)`
 
 ### Key Integration Points
 
@@ -312,6 +426,58 @@ The UI leverages the Rinf framework for seamless Rust-Flutter integration, enabl
 - **Client Connections**: Establish connections with status monitoring
 - **Configuration**: Persist and sync settings between Rust and Flutter
 - **Logging**: Real-time log streaming from Rust to Flutter UI
+
+### Implementation Requirements
+
+For each new DartSignal type, you must implement:
+
+1. **Signal Definition** in `src/signals/server_signals.rs`:
+   ```rust
+   #[derive(Deserialize, DartSignal)]
+   pub struct YourRequest {
+       pub field: String,
+   }
+   ```
+
+2. **Listener Method** in `pb_mapper_actor.rs`:
+   ```rust
+   async fn listen_to_your_request(mut self_addr: Address<Self>) {
+       let receiver = YourRequest::get_dart_signal_receiver();
+       while let Some(signal_pack) = receiver.recv().await {
+           let _ = self_addr.notify(signal_pack.message).await;
+       }
+   }
+   ```
+
+3. **Spawn Listener** in actor's `new()` method:
+   ```rust
+   owned_tasks.spawn(Self::listen_to_your_request(self_addr.clone()));
+   ```
+
+4. **Business Logic** via `Notifiable` trait:
+   ```rust
+   #[async_trait]
+   impl Notifiable<YourRequest> for PbMapperActor {
+       async fn notify(&mut self, msg: YourRequest, _: &Context<Self>) {
+           // Implement your business logic here
+           // Send response signals as needed
+       }
+   }
+   ```
+
+### Error Handling Patterns
+
+- Use `Result<(), String>` for methods that need Send trait compatibility
+- Always send feedback signals for user-initiated actions
+- Use `tracing::error!` for logging errors in actor methods
+- Handle actor notification failures gracefully with `let _ = self_addr.notify(...).await;`
+
+### State Management
+
+- Actor state is mutable and thread-safe within the actor context
+- Use `Arc<RwLock<T>>` for shared state between actor and spawned tasks
+- Configuration persistence should be handled synchronously in the actor
+- Status updates should be triggered after state changes
 
 ### Rinf Documentation
 

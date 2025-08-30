@@ -45,6 +45,9 @@ class _MyAppState extends State<MyApp> {
 
     // Initialize the global log manager
     LogManager().initialize();
+    
+    // Set up global navigation manager
+    AppNavigationManager.setNavigationFunction(_navigateToPage);
 
     _listener = AppLifecycleListener(
       onExitRequested: () async {
@@ -64,12 +67,6 @@ class _MyAppState extends State<MyApp> {
   void _navigateToPage(int page) {
     setState(() {
       _currentPage = page;
-    });
-  }
-
-  void _goBack() {
-    setState(() {
-      _currentPage = 0;
     });
   }
 
@@ -106,6 +103,7 @@ class _MyAppState extends State<MyApp> {
           onServiceRegistration: () => _navigateToPage(2),
           onClientConnection: () => _navigateToPage(3),
           onStatusMonitoring: () => _navigateToPage(4),
+          onConfiguration: () => _navigateToPage(5),
           onToggleTheme: toggleTheme,
         );
     }
@@ -150,7 +148,7 @@ class _MyAppState extends State<MyApp> {
       appBar: AppBar(
         title: Text(_getPageTitle() ?? 'pb-mapper UI'),
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
+          icon: const Icon(Icons.home),
           onPressed: () => _navigateToPage(0),
         ),
         actions: [
@@ -163,30 +161,32 @@ class _MyAppState extends State<MyApp> {
         ],
       ),
       body: _getCurrentPageContent(),
-      bottomNavigationBar: _currentPage != 0
-          ? BottomNavigationBar(
-              type: BottomNavigationBarType.fixed,
-              selectedItemColor: Theme.of(context).colorScheme.primary,
-              unselectedItemColor: Colors.grey,
-              currentIndex: _currentPage - 1,
-              onTap: (index) => _navigateToPage(index + 1),
-              items: const [
-                BottomNavigationBarItem(icon: Icon(Icons.dns), label: 'Server'),
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.app_registration),
-                  label: 'Register',
-                ),
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.cable),
-                  label: 'Connect',
-                ),
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.monitor),
-                  label: 'Status',
-                ),
-              ],
-            )
-          : null,
+      bottomNavigationBar: BottomNavigationBar(
+        type: BottomNavigationBarType.fixed,
+        selectedItemColor: Theme.of(context).colorScheme.primary,
+        unselectedItemColor: Colors.grey,
+        currentIndex: _currentPage - 1,
+        onTap: (index) => _navigateToPage(index + 1),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.dns), label: 'Server'),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.app_registration),
+            label: 'Register',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.cable),
+            label: 'Connect',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.monitor),
+            label: 'Status',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.settings),
+            label: 'Config',
+          ),
+        ],
+      ),
     );
   }
 
@@ -208,7 +208,16 @@ class _MyAppState extends State<MyApp> {
                   onPressed: toggleTheme,
                 ),
               ]
-            : null,
+            : [
+                IconButton(
+                  icon: Icon(
+                    _themeMode == ThemeMode.dark
+                        ? Icons.light_mode
+                        : Icons.dark_mode,
+                  ),
+                  onPressed: toggleTheme,
+                ),
+              ],
       ),
     );
   }

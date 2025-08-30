@@ -21,6 +21,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rinf = "8.7.2"
 serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0"
+robius-directories = "5.0"
 tokio = { version = "1.45.0", features = ["rt", "sync", "time", "macros"] }
 tokio_with_wasm = { version = "0.8.5", features = [
     "rt",

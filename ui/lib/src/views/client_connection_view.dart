@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:ui/src/bindings/bindings.dart';
+import 'package:ui/src/views/status_monitoring_view.dart';
+import 'package:ui/src/views/log_view_button.dart';
 
 class ClientConnectionView extends StatefulWidget {
   const ClientConnectionView({super.key});
@@ -13,8 +15,70 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   final _localAddressController = TextEditingController(text: '127.0.0.1:9090');
   bool _isKeepAliveEnabled = true;
   String _selectedProtocol = 'TCP';
-  String _serverAddress = 'PB_MAPPER_SERVER';
+  String _serverAddress = 'localhost:7666'; // Will be updated from config
   bool _isConnected = false;
+  String? _selectedServiceKey;
+  List<String> _availableServices = [];
+  bool _serverAvailable = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Request current configuration to get server address
+    RequestConfig().sendSignalToRust();
+    
+    // Request server status to get available services
+    RequestServerStatus().sendSignalToRust();
+    
+    // Check if there's a pre-selected service key from status monitoring
+    _checkForPreSelectedService();
+    
+    // Listen for config updates
+    ConfigStatusUpdate.rustSignalStream.listen((signal) {
+      if (mounted) {
+        setState(() {
+          _serverAddress = signal.message.serverAddress;
+        });
+      }
+    });
+    
+    // Listen for server status updates
+    ServerStatusDetailUpdate.rustSignalStream.listen((signal) {
+      if (mounted) {
+        setState(() {
+          _serverAvailable = signal.message.serverAvailable;
+          _availableServices = List<String>.from(signal.message.registeredServices);
+          
+          // Clear selected service if it's no longer available
+          if (_selectedServiceKey != null && !_availableServices.contains(_selectedServiceKey)) {
+            _selectedServiceKey = null;
+          }
+        });
+      }
+    });
+  }
+
+  void _checkForPreSelectedService() {
+    // Check if there's a service key selected from status monitoring
+    final selectedKey = ServiceKeyManager.getSelectedServiceKey();
+    if (selectedKey != null) {
+      _selectedServiceKey = selectedKey;
+      ServiceKeyManager.clearSelectedServiceKey();
+      
+      // Show a helpful message
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Service key "$selectedKey" auto-selected from Status page'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -24,30 +88,29 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   }
 
   void _connectService() {
-    if (_serviceKeyController.text.isEmpty) {
+    if (_selectedServiceKey == null || _selectedServiceKey!.isEmpty) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Service key is required')));
+      ).showSnackBar(const SnackBar(content: Text('Please select a service key')));
       return;
     }
 
     ConnectServiceRequest(
-      serviceKey: _serviceKeyController.text,
+      serviceKey: _selectedServiceKey!,
       localAddress: _localAddressController.text,
       protocol: _selectedProtocol,
-      serverAddress: _serverAddress,
       enableKeepAlive: _isKeepAliveEnabled,
     ).sendSignalToRust();
 
     setState(() => _isConnected = true);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Connecting to ${_serviceKeyController.text}...')),
+      SnackBar(content: Text('Connecting to $_selectedServiceKey...')),
     );
   }
 
   void _disconnectService() {
     DisconnectServiceRequest(
-      serviceKey: _serviceKeyController.text,
+      serviceKey: _selectedServiceKey ?? '',
     ).sendSignalToRust();
 
     setState(() => _isConnected = false);
@@ -76,7 +139,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(
-                      value: _selectedProtocol,
+                      initialValue: _selectedProtocol,
                       items: ['TCP', 'UDP']
                           .map(
                             (protocol) => DropdownMenuItem(
@@ -94,12 +157,42 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                       ),
                     ),
                     const SizedBox(height: 16),
-                    TextField(
-                      controller: _serviceKeyController,
-                      decoration: const InputDecoration(
+                    DropdownButtonFormField<String>(
+                      value: _availableServices.contains(_selectedServiceKey) ? _selectedServiceKey : null,
+                      items: _availableServices.isEmpty 
+                          ? [
+                              const DropdownMenuItem(
+                                value: null,
+                                child: Text('No services available'),
+                              )
+                            ]
+                          : _availableServices.map((serviceKey) {
+                              return DropdownMenuItem(
+                                value: serviceKey,
+                                child: Text(serviceKey),
+                              );
+                            }).toList(),
+                      onChanged: _serverAvailable && _availableServices.isNotEmpty 
+                          ? (value) {
+                              setState(() => _selectedServiceKey = value);
+                            }
+                          : null,
+                      decoration: InputDecoration(
                         labelText: 'Service Key',
-                        hintText: 'service-to-connect',
-                        border: OutlineInputBorder(),
+                        hintText: _serverAvailable
+                            ? (_availableServices.isEmpty 
+                                ? 'No registered services'
+                                : 'Select a service')
+                            : 'Server unavailable',
+                        border: const OutlineInputBorder(),
+                        prefixIcon: Icon(
+                          _serverAvailable 
+                              ? Icons.cloud_done 
+                              : Icons.cloud_off,
+                          color: _serverAvailable 
+                              ? Colors.green 
+                              : Colors.red,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -120,19 +213,48 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                       },
                     ),
                     const SizedBox(height: 16),
-                    TextField(
-                      decoration: InputDecoration(
-                        labelText: 'Server Address',
-                        hintText: _serverAddress,
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          icon: const Icon(Icons.edit),
-                          onPressed: () {
-                            // TODO: Implement server address configuration
-                          },
-                        ),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey),
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                      readOnly: true,
+                      child: Row(
+                        children: [
+                          const Icon(Icons.dns, color: Colors.blue),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Server Address',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _serverAddress,
+                                  style: const TextStyle(fontSize: 16),
+                                ),
+                              ],
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              AppNavigationManager.navigateToConfigPage();
+                            },
+                            child: const Text(
+                              'Configure in Settings',
+                              style: TextStyle(
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -143,56 +265,32 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
               height: 48,
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: _isConnected ? _disconnectService : _connectService,
+                onPressed: (_serverAvailable && _selectedServiceKey != null && _availableServices.isNotEmpty)
+                    ? (_isConnected ? _disconnectService : _connectService)
+                    : null,
                 style: ElevatedButton.styleFrom(
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(24),
                   ),
+                  backgroundColor: !_serverAvailable || _availableServices.isEmpty
+                      ? Colors.grey
+                      : null,
                 ),
                 child: Text(
-                  _isConnected ? 'Disconnect' : 'Connect',
+                  _isConnected 
+                      ? 'Disconnect' 
+                      : (!_serverAvailable 
+                          ? 'Server Unavailable' 
+                          : (_availableServices.isEmpty 
+                              ? 'No Services Available'
+                              : 'Connect')),
                   style: const TextStyle(fontSize: 16),
                 ),
               ),
             ),
             const SizedBox(height: 24),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Connection Status',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 16),
-                    StreamBuilder(
-                      stream: ClientConnectionStatus.rustSignalStream,
-                      builder: (context, snapshot) {
-                        if (snapshot.hasData) {
-                          final status = snapshot.data!.message;
-                          return Text('Status: ${status.status}');
-                        }
-                        return const Text('Status: Not connected');
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Connection Logs:',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 8),
-                    const SingleChildScrollView(
-                      child: Text(
-                        'Connection logs will appear here...',
-                        textAlign: TextAlign.left,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+            // Replace the connection status card with log view button
+            const LogViewButton(),
           ],
         ),
       ),

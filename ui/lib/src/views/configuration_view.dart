@@ -15,12 +15,40 @@ class _ConfigurationViewState extends State<ConfigurationView> {
     text: 'localhost:7666',
   );
   bool _isKeepAliveEnabled = true;
+  bool _isSaving = false;
 
   @override
   void initState() {
     super.initState();
     // Request current configuration from Rust
     RequestConfig().sendSignalToRust();
+
+    // Listen for config updates and update UI fields
+    ConfigStatusUpdate.rustSignalStream.listen((signal) {
+      if (mounted) {
+        setState(() {
+          _serverAddressController.text = signal.message.serverAddress;
+          _isKeepAliveEnabled = signal.message.keepAliveEnabled;
+        });
+      }
+    });
+
+    // Listen for config save results
+    ConfigSaveResult.rustSignalStream.listen((signal) {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+
+        final result = signal.message;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result.message),
+            backgroundColor: result.success ? Colors.green : Colors.red,
+          ),
+        );
+      }
+    });
   }
 
   @override
@@ -30,14 +58,16 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   }
 
   void _saveConfiguration() {
+    if (_isSaving) return; // Prevent multiple simultaneous saves
+
+    setState(() {
+      _isSaving = true;
+    });
+
     UpdateConfigRequest(
       serverAddress: _serverAddressController.text,
       enableKeepAlive: _isKeepAliveEnabled,
     ).sendSignalToRust();
-
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Configuration updated')));
   }
 
   @override
@@ -55,7 +85,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Environment Configuration',
+                      'PB-Mapper Configuration',
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 16),
@@ -65,25 +95,20 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         labelText: 'PB_MAPPER_SERVER',
                         hintText: 'localhost:7666',
                         border: OutlineInputBorder(),
+                        helperText:
+                            'Address of the pb-mapper server to connect to',
                       ),
                     ),
                     const SizedBox(height: 16),
                     SwitchListTile(
                       title: const Text('PB_MAPPER_KEEP_ALIVE'),
+                      subtitle: const Text(
+                        'Enable TCP keep-alive for connections',
+                      ),
                       value: _isKeepAliveEnabled,
                       onChanged: (value) {
                         setState(() => _isKeepAliveEnabled = value);
                       },
-                    ),
-                    const SizedBox(height: 16),
-                    SwitchListTile(
-                      title: const Text('Enable Dark Mode'),
-                      value: Theme.of(context).brightness == Brightness.dark,
-                      onChanged: widget.onToggleTheme != null
-                          ? (value) {
-                              widget.onToggleTheme!();
-                            }
-                          : null,
                     ),
                   ],
                 ),
@@ -94,16 +119,29 @@ class _ConfigurationViewState extends State<ConfigurationView> {
               height: 48,
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: _saveConfiguration,
+                onPressed: _isSaving ? null : _saveConfiguration,
                 style: ElevatedButton.styleFrom(
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(24),
                   ),
                 ),
-                child: const Text(
-                  'Save Configuration',
-                  style: TextStyle(fontSize: 16),
-                ),
+                child: _isSaving
+                    ? const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          SizedBox(width: 12),
+                          Text('Saving...', style: TextStyle(fontSize: 16)),
+                        ],
+                      )
+                    : const Text(
+                        'Save Configuration',
+                        style: TextStyle(fontSize: 16),
+                      ),
               ),
             ),
             const SizedBox(height: 24),

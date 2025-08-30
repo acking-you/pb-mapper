@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:ui/src/bindings/bindings.dart';
+import 'package:ui/src/views/status_monitoring_view.dart';
+import 'package:ui/src/views/log_view_button.dart';
 
 class ServiceRegistrationView extends StatefulWidget {
   const ServiceRegistrationView({super.key});
@@ -15,7 +17,36 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   bool _isEncryptionEnabled = true;
   bool _isKeepAliveEnabled = true;
   String _selectedProtocol = 'TCP';
-  String _serverAddress = 'PB_MAPPER_SERVER';
+  String _serverAddress = 'localhost:7666'; // Will be updated from config
+  bool _serverAvailable = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Request current configuration to get server address
+    RequestConfig().sendSignalToRust();
+    
+    // Request server status to check availability
+    RequestServerStatus().sendSignalToRust();
+    
+    // Listen for config updates
+    ConfigStatusUpdate.rustSignalStream.listen((signal) {
+      if (mounted) {
+        setState(() {
+          _serverAddress = signal.message.serverAddress;
+        });
+      }
+    });
+    
+    // Listen for server status updates
+    ServerStatusDetailUpdate.rustSignalStream.listen((signal) {
+      if (mounted) {
+        setState(() {
+          _serverAvailable = signal.message.serverAvailable;
+        });
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -37,7 +68,6 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       localAddress: _localAddressController.text,
       protocol: _selectedProtocol,
       enableEncryption: _isEncryptionEnabled,
-      serverAddress: _serverAddress,
       enableKeepAlive: _isKeepAliveEnabled,
     ).sendSignalToRust();
 
@@ -66,7 +96,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(
-                      value: _selectedProtocol,
+                      initialValue: _selectedProtocol,
                       items: ['TCP', 'UDP']
                           .map(
                             (protocol) => DropdownMenuItem(
@@ -86,15 +116,27 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                     const SizedBox(height: 16),
                     TextField(
                       controller: _serviceKeyController,
-                      decoration: const InputDecoration(
+                      enabled: _serverAvailable,
+                      decoration: InputDecoration(
                         labelText: 'Service Key',
-                        hintText: 'unique-service-key',
-                        border: OutlineInputBorder(),
+                        hintText: _serverAvailable 
+                            ? 'unique-service-key'
+                            : 'Server unavailable',
+                        border: const OutlineInputBorder(),
+                        prefixIcon: Icon(
+                          _serverAvailable 
+                              ? Icons.cloud_done 
+                              : Icons.cloud_off,
+                          color: _serverAvailable 
+                              ? Colors.green 
+                              : Colors.red,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: _localAddressController,
+                      enabled: _serverAvailable,
                       decoration: const InputDecoration(
                         labelText: 'Local Address',
                         hintText: '127.0.0.1:8080',
@@ -105,31 +147,60 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                     SwitchListTile(
                       title: const Text('Enable Encryption'),
                       value: _isEncryptionEnabled,
-                      onChanged: (value) {
+                      onChanged: _serverAvailable ? (value) {
                         setState(() => _isEncryptionEnabled = value);
-                      },
+                      } : null,
                     ),
                     SwitchListTile(
                       title: const Text('Enable TCP Keep-Alive'),
                       value: _isKeepAliveEnabled,
-                      onChanged: (value) {
+                      onChanged: _serverAvailable ? (value) {
                         setState(() => _isKeepAliveEnabled = value);
-                      },
+                      } : null,
                     ),
                     const SizedBox(height: 16),
-                    TextField(
-                      decoration: InputDecoration(
-                        labelText: 'Server Address',
-                        hintText: _serverAddress,
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          icon: const Icon(Icons.edit),
-                          onPressed: () {
-                            // TODO: Implement server address configuration
-                          },
-                        ),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey),
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                      readOnly: true,
+                      child: Row(
+                        children: [
+                          const Icon(Icons.dns, color: Colors.blue),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Server Address',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _serverAddress,
+                                  style: const TextStyle(fontSize: 16),
+                                ),
+                              ],
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              AppNavigationManager.navigateToConfigPage();
+                            },
+                            child: const Text(
+                              'Configure in Settings',
+                              style: TextStyle(
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -140,46 +211,22 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
               height: 48,
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: _registerService,
+                onPressed: _serverAvailable ? _registerService : null,
                 style: ElevatedButton.styleFrom(
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(24),
                   ),
+                  backgroundColor: !_serverAvailable ? Colors.grey : null,
                 ),
-                child: const Text(
-                  'Register Service',
-                  style: TextStyle(fontSize: 16),
+                child: Text(
+                  _serverAvailable ? 'Register Service' : 'Server Unavailable',
+                  style: const TextStyle(fontSize: 16),
                 ),
               ),
             ),
             const SizedBox(height: 24),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Registered Services',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 16),
-                    StreamBuilder(
-                      stream: ServiceStatusUpdate.rustSignalStream,
-                      builder: (context, snapshot) {
-                        if (snapshot.hasData) {
-                          final status = snapshot.data!.message;
-                          return Text('Status: ${status.message}');
-                        }
-                        return const Text('No services registered');
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    const Text('Registered services will appear here...'),
-                  ],
-                ),
-              ),
-            ),
+            // Replace the status card with log view button
+            const LogViewButton(),
           ],
         ),
       ),

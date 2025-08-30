@@ -1,14 +1,9 @@
-use rinf::{DartSignal, RustSignal};
-use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize, DartSignal)]
-pub struct UnitTestStart;
-
-#[derive(Serialize, RustSignal)]
-pub struct UnitTestEnd;
-
-#[derive(Serialize, RustSignal)]
-pub struct ComplexSignalTestResult(pub bool);
+use rinf::DartSignal;
+use serde::Deserialize;
 
 #[derive(Deserialize, DartSignal)]
 pub struct CreateActors;
+
+// Internal signal for periodic status updates (not exposed to Dart)
+#[derive(Clone)]
+pub struct InternalStatusUpdate;
