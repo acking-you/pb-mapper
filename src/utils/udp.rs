@@ -16,6 +16,7 @@ use tokio::time::Sleep;
 
 use self::impl_inner::{UdpStreamReadContext, UdpStreamWriteContext};
 use super::addr::{each_addr, ToSocketAddrs};
+use crate::snafu_error_get_or_return;
 #[cfg(feature = "udp-timeout")]
 use crate::udp::impl_inner::get_sleep;
 
@@ -220,11 +221,11 @@ impl UdpListener {
                 }
                 tokio::select! {
                     ret = drop_rx.recv_async() => {
-                        let peer_addr = error_get_or_continue!(ret,"UDPListener clean conn");
+                        let peer_addr = snafu_error_get_or_return!(ret,"UDPListener clean conn");
                         streams.remove(&peer_addr);
                     }
                     ret = socket.recv_buf_from(&mut buf) => {
-                        let (len,peer_addr) = error_get_or_continue!(ret,"UdpListener `recv_buf_from`");
+                        let (len,peer_addr) = snafu_error_get_or_return!(ret,"UdpListener `recv_buf_from`");
                         match streams.get(&peer_addr) {
                             Some(tx) => {
                                 if let Err(err) =  tx.send_async(buf.copy_to_bytes(len)).await{

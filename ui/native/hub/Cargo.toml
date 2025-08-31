@@ -24,6 +24,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0"
 robius-directories = "5.0"
 tokio = { version = "1.45.0", features = ["rt", "sync", "time", "macros"] }
+tokio-util = "0.7"
 tokio_with_wasm = { version = "0.8.5", features = [
     "rt",
     "sync",

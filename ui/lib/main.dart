@@ -45,7 +45,7 @@ class _MyAppState extends State<MyApp> {
 
     // Initialize the global log manager
     LogManager().initialize();
-    
+
     // Set up global navigation manager
     AppNavigationManager.setNavigationFunction(_navigateToPage);
 
@@ -173,18 +173,9 @@ class _MyAppState extends State<MyApp> {
             icon: Icon(Icons.app_registration),
             label: 'Register',
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.cable),
-            label: 'Connect',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.monitor),
-            label: 'Status',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.settings),
-            label: 'Config',
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.cable), label: 'Connect'),
+          BottomNavigationBarItem(icon: Icon(Icons.monitor), label: 'Status'),
+          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Config'),
         ],
       ),
     );

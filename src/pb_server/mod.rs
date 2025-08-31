@@ -4,12 +4,11 @@ mod server;
 mod status;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use error::Result;
 use snafu::{OptionExt, ResultExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
-use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use self::client::handle_client_conn;
@@ -29,7 +28,7 @@ use crate::common::message::command::{
 use crate::common::message::{get_header_msg_reader, MessageReader};
 use crate::common::stream::set_tcp_keep_alive;
 use crate::pb_server::error::{
-    TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,
+    ServerListenSnafu, TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,
     TaskCenterSendStreamRespToClientSnafu, TaskCenterSendSubcribeRespSnafu,
     TaskCenterStreamConnIdNotExistSnafu,
 };
@@ -91,6 +90,13 @@ pub type ImutableKey = Arc<str>;
 
 pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<(RemoteConnId, bool)>>;
 
+#[derive(Debug, Clone)]
+pub struct ServerStatusInfo {
+    pub active_connections: u32,
+    pub registered_services: u32,
+    pub uptime_seconds: u64,
+}
+
 struct RemoteIdProvider {
     next_id: RemoteConnId,
 }
@@ -117,6 +123,16 @@ impl ConnIdProvider<RemoteConnId> for RemoteIdProvider {
 type ServerMananger = TaskManager<ManagerTask, ConnTask, RemoteConnId, RemoteIdProvider>;
 
 pub async fn run_server<A: ToSocketAddrs>(addr: A) {
+    run_server_with_shutdown(addr, CancellationToken::new(), None).await;
+}
+
+pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
+    addr: A,
+    shutdown_token: CancellationToken,
+    status_channel: Option<
+        tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<ServerStatusInfo>>,
+    >,
+) {
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
     // represent the mapping of the `key` to the id of the server-side conn
     let mut server_conn_map = ServerConnMap::new();
@@ -126,167 +142,214 @@ pub async fn run_server<A: ToSocketAddrs>(addr: A) {
         .expect("start listener never fails");
 
     let task_sender = manager.get_task_sender();
+    let shutdown_token_clone = shutdown_token.clone();
 
-    tokio::spawn(async move {
-        snafu_error_handle!(handle_listener(task_sender, listener).await);
+    let listener_handle = tokio::spawn(async move {
+        tokio::select! {
+            result = handle_listener(task_sender, listener) => {
+                if let Err(e) = result {
+                    tracing::error!("Listener error: {}", e);
+                }
+            }
+            _ = shutdown_token_clone.cancelled() => {
+                tracing::info!("Listener shutdown requested");
+            }
+        }
     });
 
+    let mut status_receiver = status_channel;
+    let start_time = std::time::Instant::now();
+
     loop {
-        let task = snafu_error_get_or_continue!(manager.wait_for_task().await);
-
-        match task {
-            ManagerTask::Status {
-                conn_sender,
-                status,
-                conn_id,
+        tokio::select! {
+            // Handle status query requests
+            status_request = async {
+                match &mut status_receiver {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,  // Never resolves if no channel
+                }
             } => {
-                let resp = match status {
-                    PbConnStatusReq::RemoteId => {
-                        PbConnResponse::Status(PbConnStatusResp::RemoteId {
-                            server_map: format!("{server_conn_map:?}"),
-                            active: manager.active_conn_id_msg(),
-                            idle: manager.idle_conn_id_msg(),
-                        })
+                if let Some(response_sender) = status_request {
+                    let total_connections = server_conn_map.values()
+                        .map(|conns| conns.len() as u32)
+                        .sum();
+
+                    let status_info = ServerStatusInfo {
+                        active_connections: total_connections,
+                        registered_services: server_conn_map.len() as u32,
+                        uptime_seconds: start_time.elapsed().as_secs(),
+                    };
+
+                    // Send response back (ignore if receiver dropped)
+                    let _ = response_sender.send(status_info);
+                }
+            }
+            task_result = manager.wait_for_task() => {
+                let task = match task_result {
+                    Ok(task) => task,
+                    Err(e) => {
+                        tracing::error!("Manager task error: {}", e);
+                        break;
                     }
-                    PbConnStatusReq::Keys => PbConnResponse::Status(PbConnStatusResp::Keys(
-                        server_conn_map.keys().map(|k| k.to_string()).collect(),
-                    )),
                 };
-                snafu_error_get_or_continue!(conn_sender
-                    .send_async(ConnTask::StatusResp(resp))
-                    .await
-                    .context(TaskCenterSendStatusRespSnafu { conn_id }));
-            }
-            ManagerTask::Accept(stream) => {
-                let conn_id = manager.get_conn_id(
-                    server_conn_map
-                        .iter()
-                        .flat_map(|(_, ids)| ids.iter().map(|v| v.0)),
-                );
-                let manager_task_sender = manager.get_task_sender();
-                tokio::spawn(async move {
-                    snafu_error_handle!(handle_conn(conn_id, manager_task_sender, stream).await);
-                });
-            }
-            ManagerTask::DeRegisterServerConn { key, conn_id } => {
-                if let Some(ids) = server_conn_map.get_mut(&key) {
-                    if let Some(idx) = ids.iter().position(|(id, _)| *id == conn_id) {
-                        ids.remove(idx);
-                    }
-                    if ids.is_empty() {
-                        server_conn_map.remove(&key);
-                    }
-                }
-                manager.deregister_conn(conn_id);
-                tracing::info!("DeRegister Server ok! `{key}:{conn_id}`");
-            }
-            ManagerTask::DeRegisterClientConn {
-                server_id,
-                client_id,
-            } => {
-                if let Some(server_id) = server_id {
-                    manager.deregister_conn(server_id);
-                }
-                manager.deregister_conn(client_id);
-                tracing::info!(
-                    "DeRegister Client ok! `server:{server_id:?}` <-> `client:{client_id}`"
-                );
-            }
-            ManagerTask::Register {
-                key,
-                conn_id,
-                conn_sender,
-                need_codec,
-            } => {
-                // sign up server connection
-                manager.sign_up_conn_sender(conn_id, conn_sender.clone());
-                match server_conn_map.entry(key.clone()) {
-                    hashbrown::hash_map::Entry::Occupied(mut o) => {
-                        o.get_mut().push((conn_id, need_codec));
-                    }
-                    hashbrown::hash_map::Entry::Vacant(v) => {
-                        v.insert(vec![(conn_id, need_codec)]);
-                    }
-                }
 
-                // response registered ok
-                tracing::info!("Register Server ok! `{key}:{conn_id}`");
-                snafu_error_get_or_continue!(conn_sender
-                    .send_async(ConnTask::RegisterResp)
-                    .await
-                    .context(TaskCenterSendRegisterRespSnafu { key, conn_id }));
-            }
-            ManagerTask::Stream {
-                stream,
-                server_id,
-                client_id,
-            } => {
-                let client_sender = snafu_error_get_or_continue!(manager
-                    .get_conn_sender_chan(&client_id)
-                    .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id }));
-                snafu_error_handle!(client_sender
-                    .send_async(ConnTask::StreamResp { server_id, stream })
-                    .await
-                    .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id }));
-            }
-            ManagerTask::Subcribe {
-                key,
-                conn_id,
-                conn_sender,
-            } => {
-                // sign up client connection
-                manager.sign_up_conn_sender(conn_id, conn_sender.clone());
-                let server_conn_id_list = snafu_error_get_or_continue!(server_conn_map
-                    .get(&key)
-                    .context(TaskCenterSubcribeServerConnKeyNotExistSnafu {
-                        key: key.clone(),
-                        conn_id
-                    }));
-                // Get at least one available server_conn_id from the list
-                for &(server_conn_id, need_codec) in server_conn_id_list.iter().rev() {
-                    let server_conn_sender = snafu_error_get_or_continue!(manager
-                        .get_conn_sender_chan(&server_conn_id)
-                        .context(TaskCenterSubcribeServerConnIdNotExistSnafu {
-                            conn_id: server_conn_id,
-                            key: key.clone(),
-                        }));
-                    // 1. Send a request to get server stream
-                    snafu_error_get_or_continue!(server_conn_sender
-                        .send_async(ConnTask::StreamReq(conn_id))
-                        .await
-                        .context(TaskCenterClientSendStreamSnafu {
-                            key: key.clone(),
-                            conn_id
-                        }));
-                    // 2. Response subcribe ok
-                    snafu_error_get_or_continue!(conn_sender
-                        .send_async(ConnTask::SubcribeResp { need_codec })
-                        .await
-                        .context(TaskCenterSendSubcribeRespSnafu {
-                            key: key.clone(),
-                            conn_id
-                        }));
-                    tracing::info!(
-                        "Subcribe Server ok! \
-                         key:{key},server_conn_id:{server_conn_id},client_conn_id:{conn_id}"
-                    );
-                    break;
+                match task {
+                    ManagerTask::Status {
+                        conn_sender,
+                        status,
+                        conn_id,
+                    } => {
+                        let resp = match status {
+                            PbConnStatusReq::RemoteId => {
+                                PbConnResponse::Status(PbConnStatusResp::RemoteId {
+                                    server_map: format!("{server_conn_map:?}"),
+                                    active: manager.active_conn_id_msg(),
+                                    idle: manager.idle_conn_id_msg(),
+                                })
+                            }
+                            PbConnStatusReq::Keys => PbConnResponse::Status(PbConnStatusResp::Keys(
+                                server_conn_map.keys().map(|k| k.to_string()).collect(),
+                            )),
+                        };
+                        snafu_error_get_or_continue!(conn_sender
+                            .send_async(ConnTask::StatusResp(resp))
+                            .await
+                            .context(TaskCenterSendStatusRespSnafu { conn_id }));
+                    }
+                    ManagerTask::Accept(stream) => {
+                        let conn_id = manager.get_conn_id(
+                            server_conn_map
+                                .iter()
+                                .flat_map(|(_, ids)| ids.iter().map(|v| v.0)),
+                        );
+                        let manager_task_sender = manager.get_task_sender();
+                        tokio::spawn(async move {
+                            snafu_error_handle!(handle_conn(conn_id, manager_task_sender, stream).await);
+                        });
+                    }
+                    ManagerTask::DeRegisterServerConn { key, conn_id } => {
+                        if let Some(ids) = server_conn_map.get_mut(&key) {
+                            if let Some(idx) = ids.iter().position(|(id, _)| *id == conn_id) {
+                                ids.remove(idx);
+                            }
+                            if ids.is_empty() {
+                                server_conn_map.remove(&key);
+                            }
+                        }
+                        manager.deregister_conn(conn_id);
+                        tracing::info!("DeRegister Server ok! `{key}:{conn_id}`");
+                    }
+                    ManagerTask::DeRegisterClientConn {
+                        server_id,
+                        client_id,
+                    } => {
+                        if let Some(server_id) = server_id {
+                            manager.deregister_conn(server_id);
+                        }
+                        manager.deregister_conn(client_id);
+                        tracing::info!(
+                            "DeRegister Client ok! `server:{server_id:?}` <-> `client:{client_id}`"
+                        );
+                    }
+                    ManagerTask::Register {
+                        key,
+                        conn_id,
+                        conn_sender,
+                        need_codec,
+                    } => {
+                        // sign up server connection
+                        manager.sign_up_conn_sender(conn_id, conn_sender.clone());
+                        match server_conn_map.entry(key.clone()) {
+                            hashbrown::hash_map::Entry::Occupied(mut o) => {
+                                o.get_mut().push((conn_id, need_codec));
+                            }
+                            hashbrown::hash_map::Entry::Vacant(v) => {
+                                v.insert(vec![(conn_id, need_codec)]);
+                            }
+                        }
+
+                        // response registered ok
+                        tracing::info!("Register Server ok! `{key}:{conn_id}`");
+                        snafu_error_get_or_continue!(conn_sender
+                            .send_async(ConnTask::RegisterResp)
+                            .await
+                            .context(TaskCenterSendRegisterRespSnafu { key, conn_id }));
+                    }
+                    ManagerTask::Stream {
+                        stream,
+                        server_id,
+                        client_id,
+                    } => {
+                        let client_sender = snafu_error_get_or_continue!(manager
+                            .get_conn_sender_chan(&client_id)
+                            .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id }));
+                        snafu_error_handle!(client_sender
+                            .send_async(ConnTask::StreamResp { server_id, stream })
+                            .await
+                            .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id }));
+                    }
+                    ManagerTask::Subcribe {
+                        key,
+                        conn_id,
+                        conn_sender,
+                    } => {
+                        // sign up client connection
+                        manager.sign_up_conn_sender(conn_id, conn_sender.clone());
+                        let server_conn_id_list = snafu_error_get_or_continue!(server_conn_map
+                            .get(&key)
+                            .context(TaskCenterSubcribeServerConnKeyNotExistSnafu {
+                                key: key.clone(),
+                                conn_id
+                            }));
+                        // Get at least one available server_conn_id from the list
+                        for &(server_conn_id, need_codec) in server_conn_id_list.iter().rev() {
+                            let server_conn_sender = snafu_error_get_or_continue!(manager
+                                .get_conn_sender_chan(&server_conn_id)
+                                .context(TaskCenterSubcribeServerConnIdNotExistSnafu {
+                                    conn_id: server_conn_id,
+                                    key: key.clone(),
+                                }));
+                            // 1. Send a request to get server stream
+                            snafu_error_get_or_continue!(server_conn_sender
+                                .send_async(ConnTask::StreamReq(conn_id))
+                                .await
+                                .context(TaskCenterClientSendStreamSnafu {
+                                    key: key.clone(),
+                                    conn_id
+                                }));
+                            // 2. Response subcribe ok
+                            snafu_error_get_or_continue!(conn_sender
+                                .send_async(ConnTask::SubcribeResp { need_codec })
+                                .await
+                                .context(TaskCenterSendSubcribeRespSnafu {
+                                    key: key.clone(),
+                                    conn_id
+                                }));
+                            tracing::info!(
+                                "Subcribe Server ok! \
+                                 key:{key},server_conn_id:{server_conn_id},client_conn_id:{conn_id}"
+                            );
+                            break;
+                        }
+                    }
                 }
+            }
+            _ = shutdown_token.cancelled() => {
+                tracing::info!("Server shutdown requested, stopping main loop");
+                break;
             }
         }
     }
+
+    // Gracefully shutdown the listener
+    listener_handle.abort();
+    tracing::info!("Server shutdown completed");
 }
 
 async fn handle_listener(task_sender: ManagerTaskSender, listener: TcpListener) -> Result<()> {
     loop {
-        let stream = match listener.accept().await {
-            Ok((stream, _)) => stream,
-            Err(e) => {
-                tracing::error!("server accpet error,we will slepp 3s. detail:{}", e);
-                sleep(Duration::from_secs(3)).await;
-                continue;
-            }
-        };
+        let (stream, addr) = listener.accept().await.context(ServerListenSnafu)?;
+        tracing::info!("Accept new conn: {addr}");
         // set keepalive
         snafu_error_handle!(set_tcp_keep_alive(&stream).context(TaskCenterSetKeepAliveSnafu));
         task_sender

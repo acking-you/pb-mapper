@@ -126,7 +126,7 @@ pub async fn handle_server_conn(
         tokio::select! {
             // handle stream request
             ret = rx.recv_async() =>{
-                let req = snafu_error_get_or_continue!(ret.context(ServerConnRecvConnTaskSnafu));
+                let req = snafu_error_get_or_return_ok!(ret.context(ServerConnRecvConnTaskSnafu));
                 snafu_error_get_or_continue!(
                     handle_stream_req(
                         req,

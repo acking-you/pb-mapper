@@ -5,14 +5,14 @@ import 'package:ui/src/common/responsive_layout.dart';
 // Custom notification for service connection
 class ServiceConnectionNotification extends Notification {
   final String serviceKey;
-  
+
   ServiceConnectionNotification(this.serviceKey);
 }
 
 // Global service key manager
 class ServiceKeyManager {
   static String? _selectedServiceKey;
-  
+
   static String? getSelectedServiceKey() => _selectedServiceKey;
   static void setSelectedServiceKey(String? key) => _selectedServiceKey = key;
   static void clearSelectedServiceKey() => _selectedServiceKey = null;
@@ -21,17 +21,17 @@ class ServiceKeyManager {
 // Global navigation manager
 class AppNavigationManager {
   static void Function(int)? _navigateToPage;
-  
+
   static void setNavigationFunction(void Function(int) navigationFunction) {
     _navigateToPage = navigationFunction;
   }
-  
+
   static void navigateToConnectPage() {
     if (_navigateToPage != null) {
       _navigateToPage!(3); // 3 = connect page
     }
   }
-  
+
   static void navigateToConfigPage() {
     if (_navigateToPage != null) {
       _navigateToPage!(5); // 5 = config page
@@ -57,10 +57,10 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
   void _navigateToConnection(BuildContext context, String serviceKey) {
     // Store service key for later use
     ServiceKeyManager.setSelectedServiceKey(serviceKey);
-    
+
     // Navigate to Connect page
     AppNavigationManager.navigateToConnectPage();
-    
+
     // Show a snackbar to inform user about the action
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -132,7 +132,10 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                   icon: const Icon(Icons.refresh, size: 18),
                   label: const Text('Refresh'),
                   style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
                   ),
                 ),
               ],
@@ -168,9 +171,11 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
 
   Widget _buildStatusIndicator(BuildContext context, bool isAvailable) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final availableColor = isDark ? Colors.green.shade400 : Colors.green.shade600;
+    final availableColor = isDark
+        ? Colors.green.shade400
+        : Colors.green.shade600;
     final unavailableColor = isDark ? Colors.red.shade400 : Colors.red.shade600;
-    
+
     return Row(
       children: [
         Container(
@@ -198,16 +203,16 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildDetailRow('Registered Services', status.registeredServices.length.toString()),
+        _buildDetailRow(
+          'Registered Services',
+          status.registeredServices.length.toString(),
+        ),
         const SizedBox(height: 16),
-        if (status.serverMap.isNotEmpty) 
+        if (status.serverMap.isNotEmpty)
           ExpansionTile(
             title: Text(
               'Server Map Details',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-              ),
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
             children: [
               Container(
@@ -234,14 +239,12 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
               const SizedBox(height: 8),
             ],
           ),
-        if (status.activeConnections.isNotEmpty || status.idleConnections.isNotEmpty)
+        if (status.activeConnections.isNotEmpty ||
+            status.idleConnections.isNotEmpty)
           ExpansionTile(
             title: Text(
               'Connection Details',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-              ),
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
             children: [
               Container(
@@ -388,9 +391,12 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                   }
                   return Column(
                     children: services.map<Widget>((serviceKey) {
-                      final isDark = Theme.of(context).brightness == Brightness.dark;
-                      final availableColor = isDark ? Colors.green.shade400 : Colors.green.shade600;
-                      
+                      final isDark =
+                          Theme.of(context).brightness == Brightness.dark;
+                      final availableColor = isDark
+                          ? Colors.green.shade400
+                          : Colors.green.shade600;
+
                       return Card(
                         margin: const EdgeInsets.symmetric(vertical: 6),
                         color: Theme.of(context).brightness == Brightness.dark
@@ -428,7 +434,8 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                             horizontal: 16,
                             vertical: 8,
                           ),
-                          onTap: () => _navigateToConnection(context, serviceKey),
+                          onTap: () =>
+                              _navigateToConnection(context, serviceKey),
                         ),
                       );
                     }).toList(),

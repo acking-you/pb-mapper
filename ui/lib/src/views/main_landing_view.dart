@@ -45,27 +45,17 @@ class MainLandingView extends StatelessWidget {
           padding: const EdgeInsets.all(20),
           child: Column(
             children: [
-              Icon(
-                icon,
-                size: 48,
-                color: color,
-              ),
+              Icon(icon, size: 48, color: color),
               const SizedBox(height: 12),
               Text(
                 title,
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 8),
               Text(
                 description,
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.grey[600],
-                ),
+                style: TextStyle(fontSize: 14, color: Colors.grey[600]),
                 textAlign: TextAlign.center,
               ),
             ],
@@ -124,7 +114,7 @@ class MainLandingView extends StatelessWidget {
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 20),
-                
+
                 // Simplified Project Description with GitHub Star Call-to-Action
                 Container(
                   padding: const EdgeInsets.all(20),
@@ -161,14 +151,21 @@ class MainLandingView extends StatelessWidget {
                         child: GestureDetector(
                           onTap: _launchGitHub,
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
                             decoration: BoxDecoration(
-                              color: Theme.of(context).brightness == Brightness.dark
+                              color:
+                                  Theme.of(context).brightness ==
+                                      Brightness.dark
                                   ? Colors.grey[700]
                                   : Colors.white,
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(
-                                color: Theme.of(context).brightness == Brightness.dark
+                                color:
+                                    Theme.of(context).brightness ==
+                                        Brightness.dark
                                     ? Colors.grey[600]!
                                     : Colors.grey[300]!,
                               ),
@@ -186,7 +183,9 @@ class MainLandingView extends StatelessWidget {
                                   'Like it? Give us a ⭐ on GitHub!',
                                   style: TextStyle(
                                     fontSize: 16,
-                                    color: Theme.of(context).brightness == Brightness.dark
+                                    color:
+                                        Theme.of(context).brightness ==
+                                            Brightness.dark
                                         ? Colors.grey[300]
                                         : Colors.grey[700],
                                     fontWeight: FontWeight.w600,
@@ -200,9 +199,9 @@ class MainLandingView extends StatelessWidget {
                     ],
                   ),
                 ),
-                
+
                 const SizedBox(height: 24),
-                
+
                 // Feature Cards
                 ResponsiveLayout.isMobile(context)
                     ? Column(
@@ -211,7 +210,8 @@ class MainLandingView extends StatelessWidget {
                             context: context,
                             onPressed: onServerManagement,
                             title: 'Server Management',
-                            description: 'Start and manage the central pb-mapper server',
+                            description:
+                                'Start and manage the central pb-mapper server',
                             icon: Icons.dns,
                             color: Colors.blue,
                           ),
@@ -220,7 +220,8 @@ class MainLandingView extends StatelessWidget {
                             context: context,
                             onPressed: onServiceRegistration,
                             title: 'Service Registration',
-                            description: 'Register local services to make them accessible',
+                            description:
+                                'Register local services to make them accessible',
                             icon: Icons.app_registration,
                             color: Colors.green,
                           ),
@@ -229,7 +230,8 @@ class MainLandingView extends StatelessWidget {
                             context: context,
                             onPressed: onClientConnection,
                             title: 'Client Connection',
-                            description: 'Connect to registered services remotely',
+                            description:
+                                'Connect to registered services remotely',
                             icon: Icons.cable,
                             color: Colors.orange,
                           ),
@@ -239,7 +241,8 @@ class MainLandingView extends StatelessWidget {
                               context: context,
                               onPressed: onStatusMonitoring!,
                               title: 'Status Monitoring',
-                              description: 'Monitor server status and active connections',
+                              description:
+                                  'Monitor server status and active connections',
                               icon: Icons.monitor,
                               color: Colors.purple,
                             ),
@@ -249,7 +252,8 @@ class MainLandingView extends StatelessWidget {
                               context: context,
                               onPressed: onConfiguration!,
                               title: 'Configuration',
-                              description: 'Configure server settings and preferences',
+                              description:
+                                  'Configure server settings and preferences',
                               icon: Icons.settings,
                               color: Colors.grey,
                             ),
@@ -268,7 +272,8 @@ class MainLandingView extends StatelessWidget {
                             context: context,
                             onPressed: onServerManagement,
                             title: 'Server Management',
-                            description: 'Start and manage the central pb-mapper server',
+                            description:
+                                'Start and manage the central pb-mapper server',
                             icon: Icons.dns,
                             color: Colors.blue,
                           ),
@@ -276,7 +281,8 @@ class MainLandingView extends StatelessWidget {
                             context: context,
                             onPressed: onServiceRegistration,
                             title: 'Service Registration',
-                            description: 'Register local services to make them accessible',
+                            description:
+                                'Register local services to make them accessible',
                             icon: Icons.app_registration,
                             color: Colors.green,
                           ),
@@ -284,7 +290,8 @@ class MainLandingView extends StatelessWidget {
                             context: context,
                             onPressed: onClientConnection,
                             title: 'Client Connection',
-                            description: 'Connect to registered services remotely',
+                            description:
+                                'Connect to registered services remotely',
                             icon: Icons.cable,
                             color: Colors.orange,
                           ),
@@ -293,15 +300,16 @@ class MainLandingView extends StatelessWidget {
                               context: context,
                               onPressed: onStatusMonitoring!,
                               title: 'Status Monitoring',
-                              description: 'Monitor server status and active connections',
+                              description:
+                                  'Monitor server status and active connections',
                               icon: Icons.monitor,
                               color: Colors.purple,
                             ),
                         ],
                       ),
-                
+
                 const SizedBox(height: 32),
-                
+
                 // Footer
                 Text(
                   'Click on any feature above to get started',
@@ -312,7 +320,7 @@ class MainLandingView extends StatelessWidget {
                   ),
                   textAlign: TextAlign.center,
                 ),
-                
+
                 const SizedBox(height: 20),
               ],
             ),

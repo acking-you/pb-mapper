@@ -18,11 +18,31 @@ use crate::common::stream::got_one_socket_addr;
 use crate::utils::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_return, snafu_error_handle};
 
+// Callback for notifying status changes to external systems
+pub type ClientStatusCallback = Box<dyn Fn(&str) + Send + Sync>;
+
 pub async fn run_client_side_cli<LocalListener: ListenerProvider, A: ToSocketAddrs>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
 ) {
+    run_client_side_cli_with_callback::<LocalListener, A>(local_addr, remote_addr, key, None).await
+}
+
+pub async fn run_client_side_cli_with_callback<
+    LocalListener: ListenerProvider,
+    A: ToSocketAddrs,
+>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    status_callback: Option<ClientStatusCallback>,
+) {
+    use crate::utils::timeout::TimeoutCount;
+    use std::time::Duration;
+
+    const CLIENT_RETRY_TIMES: u32 = 8;
+
     let local_addr = got_one_socket_addr(local_addr)
         .await
         .expect("at least one socket addr be parsed from `local_addr`");
@@ -30,40 +50,130 @@ pub async fn run_client_side_cli<LocalListener: ListenerProvider, A: ToSocketAdd
         .await
         .expect("at least one socket addr be parsed from `remote_addr`");
 
-    let mut stream = snafu_error_get_or_return!(
-        each_addr(remote_addr, TcpStream::connect).await,
-        "get status stream"
-    );
+    let mut timeout_count = TimeoutCount::new(CLIENT_RETRY_TIMES);
 
-    let status_resp =
-        snafu_error_get_or_return!(get_status(&mut stream, PbConnStatusReq::Keys).await);
-
-    let keys = if let PbConnStatusResp::Keys(keys) = &status_resp {
-        keys
-    } else {
-        tracing::error!("We expected status response,but got {status_resp:?}");
-        return;
-    };
-
-    if !keys.iter().any(|k| k == key.as_ref()) {
-        tracing::error!("Not valid key:{key},valid keys:{keys:?}");
-        return;
-    }
-
-    drop(status_resp);
-
-    tracing::info!("Subcribe server:{key} successful!");
-
-    let listener = snafu_error_get_or_return!(LocalListener::bind(local_addr)
-        .await
-        .context(BindLocalListenerSnafu));
     loop {
-        let (stream, _) =
-            snafu_error_get_or_return!(listener.accept().await.context(AcceptLocalStreamSnafu));
-        let key = key.clone();
-        tokio::spawn(async move {
-            snafu_error_handle!(handle_local_stream(stream, key, remote_addr).await);
-        });
+        // Notify that we're trying to connect
+        if let Some(ref callback) = status_callback {
+            if timeout_count.count() > 0 {
+                callback("retrying");
+            }
+        }
+
+        let mut stream = match each_addr(remote_addr, TcpStream::connect).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::error!("Failed to connect to remote server: {}", e);
+                if !timeout_count.validate() {
+                    if let Some(ref callback) = status_callback {
+                        callback("failed");
+                    }
+                    return;
+                }
+                let interval = timeout_count.get_interval_by_count();
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+                continue;
+            }
+        };
+
+        let status_resp = match get_status(&mut stream, PbConnStatusReq::Keys).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::error!("Failed to get status from server: {}", e);
+                if !timeout_count.validate() {
+                    if let Some(ref callback) = status_callback {
+                        callback("failed");
+                    }
+                    return;
+                }
+                let interval = timeout_count.get_interval_by_count();
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+                continue;
+            }
+        };
+
+        let keys = if let PbConnStatusResp::Keys(keys) = &status_resp {
+            keys
+        } else {
+            tracing::error!("We expected status response,but got {status_resp:?}");
+            if !timeout_count.validate() {
+                if let Some(ref callback) = status_callback {
+                    callback("failed");
+                }
+                return;
+            }
+            let interval = timeout_count.get_interval_by_count();
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+            continue;
+        };
+
+        if !keys.iter().any(|k| k == key.as_ref()) {
+            tracing::error!("Not valid key:{key},valid keys:{keys:?}");
+            if !timeout_count.validate() {
+                if let Some(ref callback) = status_callback {
+                    callback("failed");
+                }
+                return;
+            }
+            let interval = timeout_count.get_interval_by_count();
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+            continue;
+        }
+
+        drop(status_resp);
+        tracing::info!("Subscribe server:{key} successful!");
+
+        // Notify successful connection
+        if let Some(ref callback) = status_callback {
+            callback("connected");
+        }
+
+        // Reset timeout count after successful connection
+        timeout_count.reset();
+
+        let listener = match LocalListener::bind(local_addr)
+            .await
+            .context(BindLocalListenerSnafu)
+        {
+            Ok(listener) => listener,
+            Err(e) => {
+                tracing::error!("Failed to bind local listener: {}", e);
+                if !timeout_count.validate() {
+                    if let Some(ref callback) = status_callback {
+                        callback("failed");
+                    }
+                    return;
+                }
+                let interval = timeout_count.get_interval_by_count();
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+                continue;
+            }
+        };
+
+        loop {
+            let (stream, _) = match listener.accept().await.context(AcceptLocalStreamSnafu) {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Failed to accept local stream: {}", e);
+                    break; // Break inner loop to retry connection
+                }
+            };
+            let key = key.clone();
+            tokio::spawn(async move {
+                snafu_error_handle!(handle_local_stream(stream, key, remote_addr).await);
+            });
+        }
+
+        // If we reach here, the inner loop broke due to error
+        if !timeout_count.validate() {
+            if let Some(ref callback) = status_callback {
+                callback("failed");
+            }
+            return;
+        }
+
+        let interval = timeout_count.get_interval_by_count();
+        tokio::time::sleep(Duration::from_secs(interval)).await;
     }
 }
 

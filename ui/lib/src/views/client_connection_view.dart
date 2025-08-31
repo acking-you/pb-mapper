@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:ui/src/bindings/bindings.dart';
 import 'package:ui/src/views/status_monitoring_view.dart';
 import 'package:ui/src/views/log_view_button.dart';
+import 'package:ui/src/models/client_config.dart';
+import 'package:ui/src/widgets/client_card.dart';
 
 class ClientConnectionView extends StatefulWidget {
   const ClientConnectionView({super.key});
@@ -16,23 +18,28 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   bool _isKeepAliveEnabled = true;
   String _selectedProtocol = 'TCP';
   String _serverAddress = 'localhost:7666'; // Will be updated from config
-  bool _isConnected = false;
   String? _selectedServiceKey;
   List<String> _availableServices = [];
   bool _serverAvailable = false;
+  List<ClientConfig> _clientConfigs = [];
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
+
+    // Load client configurations and check status
+    _loadClientConfigs();
+
     // Request current configuration to get server address
     RequestConfig().sendSignalToRust();
-    
+
     // Request server status to get available services
     RequestServerStatus().sendSignalToRust();
-    
+
     // Check if there's a pre-selected service key from status monitoring
     _checkForPreSelectedService();
-    
+
     // Listen for config updates
     ConfigStatusUpdate.rustSignalStream.listen((signal) {
       if (mounted) {
@@ -41,21 +48,132 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         });
       }
     });
-    
+
     // Listen for server status updates
     ServerStatusDetailUpdate.rustSignalStream.listen((signal) {
       if (mounted) {
         setState(() {
           _serverAvailable = signal.message.serverAvailable;
-          _availableServices = List<String>.from(signal.message.registeredServices);
-          
+          _availableServices = List<String>.from(
+            signal.message.registeredServices,
+          );
+
           // Clear selected service if it's no longer available
-          if (_selectedServiceKey != null && !_availableServices.contains(_selectedServiceKey)) {
+          if (_selectedServiceKey != null &&
+              !_availableServices.contains(_selectedServiceKey)) {
             _selectedServiceKey = null;
           }
         });
       }
     });
+
+    // Listen for client config updates
+    ClientConfigsUpdate.rustSignalStream.listen((signal) {
+      if (mounted) {
+        _updateClientConfigsFromSignal(signal.message.clients);
+      }
+    });
+
+    // Listen for client connection status updates
+    ClientConnectionStatus.rustSignalStream.listen((signal) {
+      if (mounted) {
+        final message = signal.message.status;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(message),
+            backgroundColor:
+                message.contains('Error') || message.contains('failed')
+                ? Colors.red
+                : Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+
+        // Reload configs after connection status update
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) {
+            _loadClientConfigs();
+          }
+        });
+      }
+    });
+
+    // Listen for individual client status responses
+    ClientStatusResponse.rustSignalStream.listen((signal) {
+      if (mounted) {
+        final serviceKey = signal.message.serviceKey;
+        final status = signal.message.status;
+        final message = signal.message.message;
+
+        // Show feedback for status updates
+        if (message.isNotEmpty &&
+            (status == 'failed' || message.contains('Error'))) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('$serviceKey: $message'),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+
+        // Update local client config status
+        final configIndex = _clientConfigs.indexWhere(
+          (config) => config.serviceKey == serviceKey,
+        );
+        if (configIndex != -1) {
+          setState(() {
+            _clientConfigs[configIndex].updateStatus(
+              _parseClientStatus(status),
+              message,
+            );
+          });
+        }
+      }
+    });
+  }
+
+  void _loadClientConfigs() {
+    RequestClientConfigs().sendSignalToRust();
+  }
+
+  void _updateClientConfigsFromSignal(List<ClientConfigInfo> configs) {
+    final clientConfigs = configs.map((config) {
+      final status = _parseClientStatus(config.status);
+      return ClientConfig(
+        serviceKey: config.serviceKey,
+        localAddress: config.localAddress,
+        protocol: config.protocol,
+        enableKeepAlive: config.enableKeepAlive,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(
+          config.createdAtMs.toInt(),
+        ),
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(
+          config.updatedAtMs.toInt(),
+        ),
+        status: status,
+        statusMessage: config.statusMessage,
+      );
+    }).toList();
+
+    setState(() {
+      _clientConfigs = clientConfigs;
+      _isLoading = false;
+    });
+  }
+
+  ClientStatus _parseClientStatus(String statusString) {
+    switch (statusString.toLowerCase()) {
+      case 'running':
+        return ClientStatus.running;
+      case 'retrying':
+        return ClientStatus.retrying;
+      case 'failed':
+        return ClientStatus.failed;
+      case 'stopped':
+      default:
+        return ClientStatus.stopped;
+    }
   }
 
   void _checkForPreSelectedService() {
@@ -64,13 +182,15 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     if (selectedKey != null) {
       _selectedServiceKey = selectedKey;
       ServiceKeyManager.clearSelectedServiceKey();
-      
+
       // Show a helpful message
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Service key "$selectedKey" auto-selected from Status page'),
+              content: Text(
+                'Service key "$selectedKey" auto-selected from Status page',
+              ),
               backgroundColor: Colors.green,
               duration: const Duration(seconds: 3),
             ),
@@ -89,12 +209,35 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
 
   void _connectService() {
     if (_selectedServiceKey == null || _selectedServiceKey!.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Please select a service key')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select a service key')),
+      );
       return;
     }
 
+    // Check if client already exists
+    final existingClient = _clientConfigs.firstWhere(
+      (client) => client.serviceKey == _selectedServiceKey,
+      orElse: () => ClientConfig(
+        serviceKey: '',
+        localAddress: '',
+        protocol: '',
+        enableKeepAlive: false,
+      ),
+    );
+
+    if (existingClient.serviceKey.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Client for "$_selectedServiceKey" already exists'),
+          backgroundColor: Colors.orange,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+
+    // Save client config and connect
     ConnectServiceRequest(
       serviceKey: _selectedServiceKey!,
       localAddress: _localAddressController.text,
@@ -102,21 +245,79 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
       enableKeepAlive: _isKeepAliveEnabled,
     ).sendSignalToRust();
 
-    setState(() => _isConnected = true);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Connecting to $_selectedServiceKey...')),
     );
+
+    // Reload configs to show new client
+    _loadClientConfigs();
   }
 
-  void _disconnectService() {
-    DisconnectServiceRequest(
-      serviceKey: _selectedServiceKey ?? '',
+  void _handleClientConnect(ClientConfig config) {
+    ConnectServiceRequest(
+      serviceKey: config.serviceKey,
+      localAddress: config.localAddress,
+      protocol: config.protocol,
+      enableKeepAlive: config.enableKeepAlive,
     ).sendSignalToRust();
 
-    setState(() => _isConnected = false);
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Disconnected')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Connecting to ${config.serviceKey}...'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _handleClientDisconnect(ClientConfig config) {
+    DisconnectServiceRequest(serviceKey: config.serviceKey).sendSignalToRust();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Disconnecting ${config.serviceKey}...'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _handleClientDelete(ClientConfig config) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Client Configuration'),
+        content: Text(
+          'Are you sure you want to delete the client configuration for "${config.serviceKey}"?\n\nThis will permanently remove the configuration.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              DeleteClientConfigRequest(
+                serviceKey: config.serviceKey,
+              ).sendSignalToRust();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Client configuration "${config.serviceKey}" deleted',
+                  ),
+                ),
+              );
+              _loadClientConfigs();
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _handleClientRefresh(ClientConfig config) {
+    RequestClientStatus(serviceKey: config.serviceKey).sendSignalToRust();
   }
 
   @override
@@ -127,6 +328,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // New connection form
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
@@ -158,13 +360,16 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(
-                      value: _availableServices.contains(_selectedServiceKey) ? _selectedServiceKey : null,
-                      items: _availableServices.isEmpty 
+                      initialValue:
+                          _availableServices.contains(_selectedServiceKey)
+                          ? _selectedServiceKey
+                          : null,
+                      items: _availableServices.isEmpty
                           ? [
                               const DropdownMenuItem(
                                 value: null,
                                 child: Text('No services available'),
-                              )
+                              ),
                             ]
                           : _availableServices.map((serviceKey) {
                               return DropdownMenuItem(
@@ -172,7 +377,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                 child: Text(serviceKey),
                               );
                             }).toList(),
-                      onChanged: _serverAvailable && _availableServices.isNotEmpty 
+                      onChanged:
+                          _serverAvailable && _availableServices.isNotEmpty
                           ? (value) {
                               setState(() => _selectedServiceKey = value);
                             }
@@ -180,18 +386,14 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                       decoration: InputDecoration(
                         labelText: 'Service Key',
                         hintText: _serverAvailable
-                            ? (_availableServices.isEmpty 
-                                ? 'No registered services'
-                                : 'Select a service')
+                            ? (_availableServices.isEmpty
+                                  ? 'No registered services'
+                                  : 'Select a service')
                             : 'Server unavailable',
                         border: const OutlineInputBorder(),
                         prefixIcon: Icon(
-                          _serverAvailable 
-                              ? Icons.cloud_done 
-                              : Icons.cloud_off,
-                          color: _serverAvailable 
-                              ? Colors.green 
-                              : Colors.red,
+                          _serverAvailable ? Icons.cloud_done : Icons.cloud_off,
+                          color: _serverAvailable ? Colors.green : Colors.red,
                         ),
                       ),
                     ),
@@ -248,9 +450,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                             },
                             child: const Text(
                               'Configure in Settings',
-                              style: TextStyle(
-                                fontSize: 12,
-                              ),
+                              style: TextStyle(fontSize: 12),
                             ),
                           ),
                         ],
@@ -265,31 +465,104 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
               height: 48,
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: (_serverAvailable && _selectedServiceKey != null && _availableServices.isNotEmpty)
-                    ? (_isConnected ? _disconnectService : _connectService)
+                onPressed:
+                    (_serverAvailable &&
+                        _selectedServiceKey != null &&
+                        _availableServices.isNotEmpty)
+                    ? _connectService
                     : null,
                 style: ElevatedButton.styleFrom(
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(24),
                   ),
-                  backgroundColor: !_serverAvailable || _availableServices.isEmpty
+                  backgroundColor:
+                      !_serverAvailable || _availableServices.isEmpty
                       ? Colors.grey
                       : null,
                 ),
                 child: Text(
-                  _isConnected 
-                      ? 'Disconnect' 
-                      : (!_serverAvailable 
-                          ? 'Server Unavailable' 
-                          : (_availableServices.isEmpty 
-                              ? 'No Services Available'
-                              : 'Connect')),
+                  !_serverAvailable
+                      ? 'Server Unavailable'
+                      : (_availableServices.isEmpty
+                            ? 'No Services Available'
+                            : 'Connect'),
                   style: const TextStyle(fontSize: 16),
                 ),
               ),
             ),
+            const SizedBox(height: 16),
+
+            // Existing client configurations
+            if (_isLoading) ...[
+              const SizedBox(height: 24),
+              const Center(child: CircularProgressIndicator()),
+            ] else if (_clientConfigs.isEmpty) ...[
+              const SizedBox(height: 24),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    children: [
+                      Icon(Icons.link_off, size: 48, color: Colors.grey[400]),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No client configurations',
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(color: Colors.grey[600]),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Create a new connection above to get started',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Colors.grey[500],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ] else ...[
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Text(
+                    'Active Connections',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: _loadClientConfigs,
+                    icon: const Icon(Icons.refresh),
+                    tooltip: 'Refresh All Status',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              ..._clientConfigs.map(
+                (config) => ClientCard(
+                  key: Key(config.serviceKey),
+                  config: config,
+                  onConnectDisconnect: () =>
+                      config.status == ClientStatus.running ||
+                          config.status == ClientStatus.retrying
+                      ? _handleClientDisconnect(config)
+                      : _handleClientConnect(config),
+                  onDelete: () => _handleClientDelete(config),
+                  onRefresh: () => _handleClientRefresh(config),
+                  onStatusChanged: (updatedConfig) {
+                    final index = _clientConfigs.indexWhere(
+                      (c) => c.serviceKey == updatedConfig.serviceKey,
+                    );
+                    if (index != -1) {
+                      setState(() {
+                        _clientConfigs[index] = updatedConfig;
+                      });
+                    }
+                  },
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
-            // Replace the connection status card with log view button
             const LogViewButton(),
           ],
         ),

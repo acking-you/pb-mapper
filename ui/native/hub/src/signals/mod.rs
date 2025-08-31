@@ -1,6 +1,6 @@
 mod app_control;
-mod server_signals;
 pub mod log_collector;
+mod server_signals;
 
 pub use app_control::*;
 pub use server_signals::*;

@@ -2,7 +2,7 @@ pub mod error;
 mod stream;
 
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use snafu::ResultExt;
@@ -37,6 +37,19 @@ const GLOBAL_RETRY_TIMES: u32 = 16;
 
 const LOCAL_RETRY_TIMES: u32 = 8;
 
+// Static ping message - generated once and copied for each use to avoid encryption state corruption
+static PING_MESSAGE: OnceLock<Vec<u8>> = OnceLock::new();
+
+fn get_ping_message() -> Vec<u8> {
+    PING_MESSAGE
+        .get_or_init(|| {
+            PbServerRequest::Ping
+                .encode()
+                .expect("Ping message encoding should never fail")
+        })
+        .clone()
+}
+
 enum Status {
     Timeout,
     ReadMsg,
@@ -44,11 +57,41 @@ enum Status {
     ConnectRemote,
 }
 
+// Callback for notifying status changes to external systems
+pub type StatusCallback = Box<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Debug)]
+pub enum ServiceStatus {
+    Retrying,
+    Connected,
+    Failed,
+}
+
 pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     need_codec: bool,
+) {
+    run_server_side_cli_with_callback::<LocalStream, A>(
+        local_addr,
+        remote_addr,
+        key,
+        need_codec,
+        None,
+    )
+    .await
+}
+
+pub async fn run_server_side_cli_with_callback<
+    LocalStream: StreamProvider,
+    A: ToSocketAddrs + Debug + Copy,
+>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    need_codec: bool,
+    status_callback: Option<StatusCallback>,
 ) {
     let mut timeout_count = TimeoutCount::new(GLOBAL_RETRY_TIMES);
     let mut retry_interval = timeout_count.get_interval_by_count();
@@ -59,6 +102,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
             remote_addr,
             key.clone(),
             need_codec,
+            status_callback.as_ref(),
         )
         .await
         {
@@ -76,6 +120,12 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
                     remote_addr,
                     timeout_count.count()
                 );
+
+                // Notify external systems that we're in retry mode
+                if let Some(ref callback) = status_callback {
+                    callback("retrying");
+                }
+
                 tokio::time::sleep(Duration::from_secs(retry_interval)).await;
                 retry_interval = timeout_count.get_interval_by_count();
             }
@@ -83,13 +133,14 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
     }
 }
 
-#[instrument]
+#[instrument(skip(status_callback))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
     global_timeout_cnt: &mut TimeoutCount,
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     need_codec: bool,
+    status_callback: Option<&StatusCallback>,
 ) -> std::result::Result<(), Status> {
     let local_addr = got_one_socket_addr(local_addr)
         .await
@@ -142,13 +193,17 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
             snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail())
         };
         tracing::info!("Server Register Ok: key:{key}, conn_id:{conn_id}");
+
+        // Notify external systems that connection is established
+        if let Some(ref callback) = status_callback {
+            callback("connected");
+        }
         (key, conn_id)
     };
 
     // start listen stream request
     let mut timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
     let mut timeout_count = TimeoutCount::new(LOCAL_RETRY_TIMES);
-    let ping_msg = snafu_error_get_or_return_ok!(PbServerRequest::Ping.encode());
     // regiseter ok,and reset global timeout count
     global_timeout_cnt.reset();
     loop {
@@ -167,8 +222,8 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
             // handle ping interval
             _ = tokio::time::sleep(PING_INTERVAL) =>{
                 snafu_error_get_or_return!(
-                    handle_ping_interval(&ping_msg,&mut msg_writer,key.clone(),conn_id).await,
-                    "[read msg]",
+                    handle_ping_interval(&mut msg_writer,key.clone(),conn_id).await,
+                    "[send ping]",
                     Err(Status::SendPing)
                 );
                 tracing::info!("ping trigger:{PING_INTERVAL:?}");
@@ -188,14 +243,15 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
     }
 }
 
-#[instrument(skip(ping_msg, writer))]
+#[instrument(skip(writer))]
 async fn handle_ping_interval<T: MessageWriter>(
-    ping_msg: &[u8],
     writer: &mut T,
     key: Arc<str>,
     conn_id: u32,
 ) -> error::Result<()> {
-    writer.write_msg(ping_msg).await.context(WritePingMsgSnafu)
+    // Use static ping message with fresh copy to avoid encryption state corruption
+    let ping_msg = get_ping_message();
+    writer.write_msg(&ping_msg).await.context(WritePingMsgSnafu)
 }
 
 struct TimeoutContext<'a, 'b> {

@@ -39,6 +39,13 @@ pub struct ServiceStatusUpdate {
 }
 
 #[derive(Serialize, RustSignal)]
+pub struct ServiceRegistrationStatusUpdate {
+    pub service_key: String,
+    pub status: String, // "running", "retrying", "failed", "stopped"
+    pub message: String,
+}
+
+#[derive(Serialize, RustSignal)]
 pub struct RegisteredServicesUpdate {
     pub services: Vec<RegisteredServiceInfo>,
 }
@@ -49,6 +56,45 @@ pub struct RegisteredServiceInfo {
     pub protocol: String,
     pub local_address: String,
     pub status: String,
+}
+
+// Service Configuration Management Signals
+#[derive(Deserialize, DartSignal)]
+pub struct RequestServiceConfigs;
+
+#[derive(Serialize, RustSignal)]
+pub struct ServiceConfigsUpdate {
+    pub services: Vec<ServiceConfigInfo>,
+}
+
+#[derive(Serialize, SignalPiece)]
+pub struct ServiceConfigInfo {
+    pub service_key: String,
+    pub local_address: String,
+    pub protocol: String,
+    pub enable_encryption: bool,
+    pub enable_keep_alive: bool,
+    pub status: String,
+    pub status_message: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Deserialize, DartSignal)]
+pub struct RequestServiceStatus {
+    pub service_key: String,
+}
+
+#[derive(Serialize, RustSignal)]
+pub struct ServiceStatusResponse {
+    pub service_key: String,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Deserialize, DartSignal)]
+pub struct DeleteServiceConfigRequest {
+    pub service_key: String,
 }
 
 // Client Connection Signals
@@ -80,6 +126,44 @@ pub struct ActiveConnectionInfo {
     pub service_key: String,
     pub client_id: String,
     pub status: String,
+}
+
+// Client Configuration Management Signals
+#[derive(Deserialize, DartSignal)]
+pub struct RequestClientConfigs;
+
+#[derive(Serialize, RustSignal)]
+pub struct ClientConfigsUpdate {
+    pub clients: Vec<ClientConfigInfo>,
+}
+
+#[derive(Serialize, SignalPiece)]
+pub struct ClientConfigInfo {
+    pub service_key: String,
+    pub local_address: String,
+    pub protocol: String,
+    pub enable_keep_alive: bool,
+    pub status: String,
+    pub status_message: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Deserialize, DartSignal)]
+pub struct RequestClientStatus {
+    pub service_key: String,
+}
+
+#[derive(Serialize, RustSignal)]
+pub struct ClientStatusResponse {
+    pub service_key: String,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Deserialize, DartSignal)]
+pub struct DeleteClientConfigRequest {
+    pub service_key: String,
 }
 
 // Configuration Signals
@@ -121,6 +205,17 @@ pub struct LogMessage {
 // Status Monitoring Signals
 #[derive(Deserialize, DartSignal)]
 pub struct RequestServerStatus;
+
+#[derive(Deserialize, DartSignal)]
+pub struct RequestLocalServerStatus;
+
+#[derive(Serialize, RustSignal)]
+pub struct LocalServerStatusUpdate {
+    pub is_running: bool,
+    pub active_connections: u32,
+    pub registered_services: u32,
+    pub uptime_seconds: u64,
+}
 
 #[derive(Serialize, RustSignal)]
 pub struct ServerStatusDetailUpdate {

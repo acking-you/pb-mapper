@@ -3,7 +3,7 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use messages::prelude::{Actor, Address, Context, Notifiable};
@@ -12,6 +12,7 @@ use robius_directories::{ProjectDirs, UserDirs};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 use tokio_with_wasm::alias as tokio;
 
 use crate::signals::*;
@@ -20,13 +21,41 @@ use pb_mapper::common::listener::{TcpListenerProvider, UdpListenerProvider};
 use pb_mapper::common::message::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper::common::stream::got_one_socket_addr;
 use pb_mapper::common::stream::{TcpStreamProvider, UdpStreamProvider};
-use pb_mapper::local::client::run_client_side_cli;
 use pb_mapper::local::client::status::get_status;
-use pb_mapper::local::server::run_server_side_cli;
-use pb_mapper::pb_server::run_server;
+use pb_mapper::local::client::{ClientStatusCallback, run_client_side_cli_with_callback};
+use pb_mapper::local::server::{StatusCallback, run_server_side_cli_with_callback};
+use pb_mapper::pb_server::{ServerStatusInfo, run_server_with_shutdown};
 use pb_mapper::utils::addr::each_addr;
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct ServiceConfigData {
+    pub service_key: String,
+    pub local_address: String,
+    pub protocol: String,
+    pub enable_encryption: bool,
+    pub enable_keep_alive: bool,
+    pub created_at: SystemTime,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ServiceConfigStore {
+    pub services: HashMap<String, ServiceConfigData>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ClientConfigData {
+    pub service_key: String,
+    pub local_address: String,
+    pub protocol: String,
+    pub enable_keep_alive: bool,
+    pub created_at: SystemTime,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ClientConfigStore {
+    pub clients: HashMap<String, ClientConfigData>,
+}
+#[derive(Serialize, Deserialize)]
 struct AppConfig {
     server_address: String,
     keep_alive_enabled: bool,
@@ -50,12 +79,16 @@ struct RemoteIdData {
 
 pub struct PbMapperActor {
     server_handle: Option<JoinHandle<()>>,
+    server_shutdown_token: Option<CancellationToken>,
+    server_status_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<ServerStatusInfo>>>,
     server_start_time: Option<SystemTime>,
     registered_services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_handles: HashMap<String, JoinHandle<()>>,
     client_handles: HashMap<String, JoinHandle<()>>,
     config: AppConfig,
+    config_dir: PathBuf,
     _owned_tasks: JoinSet<()>,
 }
 
@@ -90,22 +123,286 @@ impl PbMapperActor {
         owned_tasks.spawn(Self::listen_to_request_config(self_addr.clone()));
         owned_tasks.spawn(Self::listen_to_update_config(self_addr.clone()));
         owned_tasks.spawn(Self::listen_to_request_server_status(self_addr.clone()));
+        owned_tasks.spawn(Self::listen_to_request_local_server_status(
+            self_addr.clone(),
+        ));
+        owned_tasks.spawn(Self::listen_to_request_service_configs(self_addr.clone()));
+        owned_tasks.spawn(Self::listen_to_request_service_status(self_addr.clone()));
+        owned_tasks.spawn(Self::listen_to_delete_service_config(self_addr.clone()));
+        owned_tasks.spawn(Self::listen_to_request_client_configs(self_addr.clone()));
+        owned_tasks.spawn(Self::listen_to_request_client_status(self_addr.clone()));
+        owned_tasks.spawn(Self::listen_to_delete_client_config(self_addr.clone()));
 
-        // Spawn periodic status updates
-        owned_tasks.spawn(Self::periodic_status_updates(self_addr));
+        // Note: Removed periodic_status_updates - UI will actively request status
 
         // Load or create default configuration
         let config = Self::load_config().unwrap_or_default();
 
+        // Initialize config directory
+        let config_dir = Self::get_config_dir();
+
         Self {
             server_handle: None,
+            server_shutdown_token: None,
+            server_status_sender: None,
             server_start_time: None,
             registered_services: Arc::new(RwLock::new(HashMap::new())),
             active_connections: Arc::new(RwLock::new(HashMap::new())),
             service_handles: HashMap::new(),
             client_handles: HashMap::new(),
             config,
+            config_dir,
             _owned_tasks: owned_tasks,
+        }
+    }
+
+    fn get_config_dir() -> PathBuf {
+        if let Some(proj_dirs) = ProjectDirs::from("com", "pb-mapper", "pb-mapper") {
+            proj_dirs.config_dir().to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        }
+    }
+
+    fn get_service_config_path(&self) -> PathBuf {
+        self.config_dir.join("services.json")
+    }
+
+    fn get_client_config_path(&self) -> PathBuf {
+        self.config_dir.join("clients.json")
+    }
+
+    fn load_service_configs(&self) -> ServiceConfigStore {
+        let path = self.get_service_config_path();
+        match fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| ServiceConfigStore {
+                services: HashMap::new(),
+            }),
+            Err(_) => ServiceConfigStore {
+                services: HashMap::new(),
+            },
+        }
+    }
+
+    fn save_service_configs(&self, store: &ServiceConfigStore) -> Result<(), String> {
+        let path = self.get_service_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config dir: {}", e))?;
+        }
+
+        let content = serde_json::to_string_pretty(store)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+
+        fs::write(&path, content).map_err(|e| format!("Failed to write config file: {}", e))?;
+
+        Ok(())
+    }
+
+    fn save_service_config(
+        &self,
+        service_key: &str,
+        local_address: &str,
+        protocol: &str,
+        enable_encryption: bool,
+        enable_keep_alive: bool,
+    ) -> Result<(), String> {
+        let mut store = self.load_service_configs();
+        let now = SystemTime::now();
+
+        let config = ServiceConfigData {
+            service_key: service_key.to_string(),
+            local_address: local_address.to_string(),
+            protocol: protocol.to_string(),
+            enable_encryption,
+            enable_keep_alive,
+            created_at: if store.services.contains_key(service_key) {
+                store.services[service_key].created_at
+            } else {
+                now
+            },
+        };
+
+        store.services.insert(service_key.to_string(), config);
+        self.save_service_configs(&store)
+    }
+
+    fn delete_service_config(&self, service_key: &str) -> Result<(), String> {
+        let mut store = self.load_service_configs();
+        store.services.remove(service_key);
+        self.save_service_configs(&store)
+    }
+
+    fn load_client_configs(&self) -> ClientConfigStore {
+        let path = self.get_client_config_path();
+        match fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| ClientConfigStore {
+                clients: HashMap::new(),
+            }),
+            Err(_) => ClientConfigStore {
+                clients: HashMap::new(),
+            },
+        }
+    }
+
+    fn save_client_configs(&self, store: &ClientConfigStore) -> Result<(), String> {
+        let path = self.get_client_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config dir: {}", e))?;
+        }
+
+        let content = serde_json::to_string_pretty(store)
+            .map_err(|e| format!("Failed to serialize client config: {}", e))?;
+
+        fs::write(&path, content)
+            .map_err(|e| format!("Failed to write client config file: {}", e))?;
+
+        Ok(())
+    }
+
+    fn save_client_config(
+        &self,
+        service_key: &str,
+        local_address: &str,
+        protocol: &str,
+        enable_keep_alive: bool,
+    ) -> Result<(), String> {
+        let mut store = self.load_client_configs();
+        let now = SystemTime::now();
+
+        let config = ClientConfigData {
+            service_key: service_key.to_string(),
+            local_address: local_address.to_string(),
+            protocol: protocol.to_string(),
+            enable_keep_alive,
+            created_at: if store.clients.contains_key(service_key) {
+                store.clients[service_key].created_at
+            } else {
+                now
+            },
+        };
+
+        store.clients.insert(service_key.to_string(), config);
+        self.save_client_configs(&store)
+    }
+
+    fn delete_client_config(&self, service_key: &str) -> Result<(), String> {
+        let mut store = self.load_client_configs();
+        store.clients.remove(service_key);
+        self.save_client_configs(&store)
+    }
+
+    async fn calculate_service_status(&self, service_key: &str) -> (String, String) {
+        // Check if service handle exists
+        if let Some(handle) = self.service_handles.get(service_key) {
+            if handle.is_finished() {
+                (
+                    "failed".to_string(),
+                    "Service connection terminated".to_string(),
+                )
+            } else {
+                // Service is running, now check actual status with get_status
+                let server_addr = &self.config.server_address;
+                match self
+                    .check_service_with_get_status(server_addr, service_key)
+                    .await
+                {
+                    Ok(true) => (
+                        "running".to_string(),
+                        "Service is running normally".to_string(),
+                    ),
+                    Ok(false) => (
+                        "retrying".to_string(),
+                        "Service is in retry connection loop".to_string(),
+                    ),
+                    Err(_) => (
+                        "failed".to_string(),
+                        "Cannot connect to pb-server".to_string(),
+                    ),
+                }
+            }
+        } else {
+            (
+                "stopped".to_string(),
+                "Service is not registered".to_string(),
+            )
+        }
+    }
+
+    async fn check_service_with_get_status(
+        &self,
+        server_addr: &str,
+        service_key: &str,
+    ) -> Result<bool, String> {
+        use pb_mapper::common::stream::{StreamProvider, TcpStreamProvider};
+        use pb_mapper::local::client::status::get_status;
+
+        let addr =
+            get_sockaddr(server_addr).map_err(|e| format!("Invalid server address: {}", e))?;
+
+        // Create TCP connection to server
+        match TcpStreamProvider::from_addr(addr).await {
+            Ok(mut stream) => {
+                let status_req = PbConnStatusReq::Keys; // Request keys from server
+                match get_status(&mut stream, status_req).await {
+                    Ok(status_resp) => {
+                        // Check if our service key is in the response
+                        match status_resp {
+                            PbConnStatusResp::Keys(keys) => {
+                                if keys.contains(&service_key.to_string()) {
+                                    Ok(true) // Service is registered and running
+                                } else {
+                                    Err("Service not found in server".to_string())
+                                }
+                            }
+                            _ => Ok(true), // Server responded, assume service is running
+                        }
+                    }
+                    Err(_) => {
+                        // Connection failed, service is in retry mode
+                        Ok(false)
+                    }
+                }
+            }
+            Err(_) => {
+                // Cannot connect to server
+                Err("Cannot connect to server".to_string())
+            }
+        }
+    }
+
+    async fn calculate_client_status(&self, service_key: &str) -> (String, String) {
+        // Check if client handle exists
+        if let Some(handle) = self.client_handles.get(service_key) {
+            if handle.is_finished() {
+                (
+                    "failed".to_string(),
+                    "Client connection terminated".to_string(),
+                )
+            } else {
+                // Client is running, now check actual status with get_status
+                let server_addr = &self.config.server_address;
+                match self
+                    .check_service_with_get_status(server_addr, service_key)
+                    .await
+                {
+                    Ok(true) => (
+                        "running".to_string(),
+                        "Client is connected normally".to_string(),
+                    ),
+                    Ok(false) => (
+                        "retrying".to_string(),
+                        "Client is in retry connection loop".to_string(),
+                    ),
+                    Err(_) => (
+                        "failed".to_string(),
+                        "Cannot connect to pb-server".to_string(),
+                    ),
+                }
+            }
+        } else {
+            ("stopped".to_string(), "Client is not connected".to_string())
         }
     }
 
@@ -251,14 +548,52 @@ impl PbMapperActor {
         }
     }
 
-    async fn periodic_status_updates(mut self_addr: Address<Self>) {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            // Send internal status update trigger
-            let _ = self_addr.notify(InternalStatusUpdate).await;
-            // Also request server status periodically
-            let _ = self_addr.notify(RequestServerStatus).await;
+    async fn listen_to_request_local_server_status(mut self_addr: Address<Self>) {
+        let receiver = RequestLocalServerStatus::get_dart_signal_receiver();
+        while let Some(_) = receiver.recv().await {
+            let _ = self_addr.notify(RequestLocalServerStatus).await;
+        }
+    }
+
+    async fn listen_to_request_service_configs(mut self_addr: Address<Self>) {
+        let receiver = RequestServiceConfigs::get_dart_signal_receiver();
+        while let Some(_) = receiver.recv().await {
+            let _ = self_addr.notify(RequestServiceConfigs).await;
+        }
+    }
+
+    async fn listen_to_request_service_status(mut self_addr: Address<Self>) {
+        let receiver = RequestServiceStatus::get_dart_signal_receiver();
+        while let Some(signal_pack) = receiver.recv().await {
+            let _ = self_addr.notify(signal_pack.message).await;
+        }
+    }
+
+    async fn listen_to_delete_service_config(mut self_addr: Address<Self>) {
+        let receiver = DeleteServiceConfigRequest::get_dart_signal_receiver();
+        while let Some(signal_pack) = receiver.recv().await {
+            let _ = self_addr.notify(signal_pack.message).await;
+        }
+    }
+
+    async fn listen_to_request_client_configs(mut self_addr: Address<Self>) {
+        let receiver = RequestClientConfigs::get_dart_signal_receiver();
+        while let Some(signal_pack) = receiver.recv().await {
+            let _ = self_addr.notify(signal_pack.message).await;
+        }
+    }
+
+    async fn listen_to_request_client_status(mut self_addr: Address<Self>) {
+        let receiver = RequestClientStatus::get_dart_signal_receiver();
+        while let Some(signal_pack) = receiver.recv().await {
+            let _ = self_addr.notify(signal_pack.message).await;
+        }
+    }
+
+    async fn listen_to_delete_client_config(mut self_addr: Address<Self>) {
+        let receiver = DeleteClientConfigRequest::get_dart_signal_receiver();
+        while let Some(signal_pack) = receiver.recv().await {
+            let _ = self_addr.notify(signal_pack.message).await;
         }
     }
 
@@ -287,11 +622,21 @@ impl PbMapperActor {
 
         tracing::info!("Starting pb-mapper server on {}:{}", ip_addr, port);
 
+        // Create a cancellation token for graceful shutdown
+        let shutdown_token = CancellationToken::new();
+        let shutdown_token_clone = shutdown_token.clone();
+
+        // Create status channel for real-time server status queries
+        let (status_sender, status_receiver) = tokio::sync::mpsc::unbounded_channel();
+
         let handle = tokio::spawn(async move {
-            run_server((ip_addr, port)).await;
+            run_server_with_shutdown((ip_addr, port), shutdown_token_clone, Some(status_receiver))
+                .await;
         });
 
         self.server_handle = Some(handle);
+        self.server_shutdown_token = Some(shutdown_token);
+        self.server_status_sender = Some(status_sender);
         self.server_start_time = Some(SystemTime::now());
 
         ServerStatusUpdate {
@@ -306,8 +651,27 @@ impl PbMapperActor {
     }
 
     async fn stop_server_internal(&mut self) -> Result<(), String> {
-        if let Some(handle) = self.server_handle.take() {
-            handle.abort();
+        if let (Some(handle), Some(shutdown_token)) =
+            (self.server_handle.take(), self.server_shutdown_token.take())
+        {
+            // Clear the status sender channel
+            self.server_status_sender = None;
+
+            // Signal graceful shutdown
+            shutdown_token.cancel();
+
+            // Wait a reasonable time for graceful shutdown
+            let shutdown_timeout = tokio::time::Duration::from_secs(5);
+
+            match tokio::time::timeout(shutdown_timeout, handle).await {
+                Ok(_) => {
+                    tracing::info!("Server shutdown gracefully");
+                }
+                Err(_) => {
+                    tracing::warn!("Server shutdown timed out, may not have closed gracefully");
+                }
+            }
+
             self.server_start_time = None;
 
             // Stop all service registration handles
@@ -369,31 +733,100 @@ impl PbMapperActor {
             .map_err(|e| format!("Invalid server address: {}", e))?;
 
         tracing::info!(
-            "Registering service '{}' with protocol {}",
+            "Registering service '{}' with protocol {}, local address {}, server address {}",
             service_key,
-            protocol
+            protocol,
+            local_address,
+            self.config.server_address
         );
 
+        // Save service configuration immediately
+        if let Err(e) = self.save_service_config(
+            &service_key,
+            &local_address,
+            &protocol,
+            enable_encryption,
+            enable_keep_alive,
+        ) {
+            return Err(format!("Failed to save service configuration: {}", e));
+        }
+
+        // Send initial "retrying" status to indicate registration is starting
+        ServiceRegistrationStatusUpdate {
+            service_key: service_key.clone(),
+            status: "retrying".to_string(),
+            message: "Starting service registration...".to_string(),
+        }
+        .send_signal_to_dart();
+
         let key_clone = service_key.clone();
+        let service_key_for_status = service_key.clone();
+        let service_key_for_callback = service_key.clone();
+
+        // Create status callback
+        let callback: StatusCallback = Box::new(move |status: &str| {
+            let status_signal = match status {
+                "connected" => ServiceRegistrationStatusUpdate {
+                    service_key: service_key_for_callback.clone(),
+                    status: "running".to_string(),
+                    message: "Service successfully connected to pb-server".to_string(),
+                },
+                "retrying" => ServiceRegistrationStatusUpdate {
+                    service_key: service_key_for_callback.clone(),
+                    status: "retrying".to_string(),
+                    message: "Service is retrying connection to pb-server".to_string(),
+                },
+                _ => ServiceRegistrationStatusUpdate {
+                    service_key: service_key_for_callback.clone(),
+                    status: "failed".to_string(),
+                    message: "Service connection failed".to_string(),
+                },
+            };
+            status_signal.send_signal_to_dart();
+        });
+
         let handle = if protocol.to_uppercase() == "TCP" {
             tokio::spawn(async move {
-                run_server_side_cli::<TcpStreamProvider, _>(
+                let result = run_server_side_cli_with_callback::<TcpStreamProvider, _>(
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
                     enable_encryption,
+                    Some(callback),
                 )
                 .await;
+
+                // Service finished - send appropriate status based on result
+                ServiceRegistrationStatusUpdate {
+                    service_key: service_key_for_status.clone(),
+                    status: "stopped".to_string(),
+                    message: "Service registration stopped".to_string(),
+                }
+                .send_signal_to_dart();
+
+                result
             })
         } else {
+            let service_key_for_status_udp = service_key_for_status.clone();
             tokio::spawn(async move {
-                run_server_side_cli::<UdpStreamProvider, _>(
+                let result = run_server_side_cli_with_callback::<UdpStreamProvider, _>(
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
                     enable_encryption,
+                    Some(callback),
                 )
                 .await;
+
+                // Service finished - send appropriate status based on result
+                ServiceRegistrationStatusUpdate {
+                    service_key: service_key_for_status_udp,
+                    status: "stopped".to_string(),
+                    message: "Service registration stopped".to_string(),
+                }
+                .send_signal_to_dart();
+
+                result
             })
         };
 
@@ -403,7 +836,7 @@ impl PbMapperActor {
             service_key: service_key.clone(),
             protocol,
             local_address,
-            status: "Registered".to_string(),
+            status: "Registering".to_string(),
         };
 
         self.registered_services
@@ -427,11 +860,11 @@ impl PbMapperActor {
         RegisteredServicesUpdate { services }.send_signal_to_dart();
 
         ServiceStatusUpdate {
-            message: format!("Service '{}' registered successfully", service_key),
+            message: format!("Service '{}' registration initiated", service_key),
         }
         .send_signal_to_dart();
 
-        tracing::info!("Service '{}' registered successfully", service_key);
+        tracing::info!("Service '{}' registration initiated", service_key);
         Ok(())
     }
 
@@ -440,6 +873,8 @@ impl PbMapperActor {
             handle.abort();
         }
 
+        // Keep configuration in file, only stop the service
+
         if self
             .registered_services
             .write()
@@ -447,6 +882,14 @@ impl PbMapperActor {
             .remove(&service_key)
             .is_some()
         {
+            // Send stopped status update
+            ServiceRegistrationStatusUpdate {
+                service_key: service_key.clone(),
+                status: "stopped".to_string(),
+                message: "Service stopped by user".to_string(),
+            }
+            .send_signal_to_dart();
+
             let services: Vec<RegisteredServiceInfo> = self
                 .registered_services
                 .read()
@@ -500,27 +943,44 @@ impl PbMapperActor {
             .map_err(|e| format!("Invalid server address: {}", e))?;
 
         tracing::info!(
-            "Connecting to service '{}' with protocol {}",
+            "Connecting to service '{}' with protocol {}, local address {}, server address {}",
             service_key,
-            protocol
+            protocol,
+            local_address,
+            self.config.server_address
         );
 
         let key_clone = service_key.clone();
+
+        // Create callback to update client status
+        let status_callback: ClientStatusCallback = {
+            let service_key_for_callback = service_key.clone();
+            Box::new(move |status: &str| {
+                // Send client connection status update
+                ClientConnectionStatus {
+                    status: format!("Client {}: {}", service_key_for_callback, status),
+                }
+                .send_signal_to_dart();
+            })
+        };
+
         let handle = if protocol.to_uppercase() == "TCP" {
             tokio::spawn(async move {
-                run_client_side_cli::<TcpListenerProvider, _>(
+                run_client_side_cli_with_callback::<TcpListenerProvider, _>(
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
+                    Some(status_callback),
                 )
                 .await;
             })
         } else {
             tokio::spawn(async move {
-                run_client_side_cli::<UdpListenerProvider, _>(
+                run_client_side_cli_with_callback::<UdpListenerProvider, _>(
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
+                    Some(status_callback),
                 )
                 .await;
             })
@@ -611,6 +1071,51 @@ impl PbMapperActor {
         }
     }
 
+    async fn query_local_server_status(&self) -> LocalServerStatusUpdate {
+        let is_running = self.server_handle.is_some();
+
+        if is_running && self.server_status_sender.is_some() {
+            // Try to get real-time status from server
+            if let Some(sender) = &self.server_status_sender {
+                let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+
+                if sender.send(response_sender).is_ok() {
+                    // Wait for response with timeout
+                    if let Ok(status_info) =
+                        tokio::time::timeout(tokio::time::Duration::from_secs(1), response_receiver)
+                            .await
+                    {
+                        if let Ok(info) = status_info {
+                            return LocalServerStatusUpdate {
+                                is_running: true,
+                                active_connections: info.active_connections,
+                                registered_services: info.registered_services,
+                                uptime_seconds: info.uptime_seconds,
+                            };
+                        }
+                    }
+                }
+            }
+
+            // Fallback to basic info if channel communication fails
+            LocalServerStatusUpdate {
+                is_running: true,
+                active_connections: 0,  // Unavailable
+                registered_services: 0, // Unavailable
+                uptime_seconds: self.get_uptime().await,
+            }
+        } else {
+            // Server not running
+            LocalServerStatusUpdate {
+                is_running: false,
+                active_connections: 0,
+                registered_services: 0,
+                uptime_seconds: 0,
+            }
+        }
+    }
+
+    #[allow(dead_code)]
     async fn send_status_update(&self) {
         let uptime = self.get_uptime().await;
         let active_connections = self.active_connections.read().await.len() as u32;
@@ -662,7 +1167,7 @@ impl Notifiable<RegisterServiceRequest> for PbMapperActor {
     async fn notify(&mut self, msg: RegisterServiceRequest, _: &Context<Self>) {
         if let Err(e) = self
             .register_service_internal(
-                msg.service_key,
+                msg.service_key.clone(),
                 msg.local_address,
                 msg.protocol,
                 msg.enable_encryption,
@@ -670,9 +1175,19 @@ impl Notifiable<RegisterServiceRequest> for PbMapperActor {
             )
             .await
         {
-            tracing::error!("Failed to register service: {}", e);
+            tracing::error!("Failed to register service '{}': {}", msg.service_key, e);
+
+            // Send specific error feedback to UI
+            ServiceRegistrationStatusUpdate {
+                service_key: msg.service_key.clone(),
+                status: "failed".to_string(),
+                message: format!("Registration failed: {}", e),
+            }
+            .send_signal_to_dart();
+
+            // Also send general service status update
             ServiceStatusUpdate {
-                message: format!("Error: {}", e),
+                message: format!("Error registering '{}': {}", msg.service_key, e),
             }
             .send_signal_to_dart();
         }
@@ -695,9 +1210,19 @@ impl Notifiable<UnregisterServiceRequest> for PbMapperActor {
 #[async_trait]
 impl Notifiable<ConnectServiceRequest> for PbMapperActor {
     async fn notify(&mut self, msg: ConnectServiceRequest, _: &Context<Self>) {
+        // First save client configuration
+        if let Err(e) = self.save_client_config(
+            &msg.service_key,
+            &msg.local_address,
+            &msg.protocol,
+            msg.enable_keep_alive,
+        ) {
+            tracing::error!("Failed to save client config: {}", e);
+        }
+
         if let Err(e) = self
             .connect_service_internal(
-                msg.service_key,
+                msg.service_key.clone(),
                 msg.local_address,
                 msg.protocol,
                 msg.enable_keep_alive,
@@ -706,7 +1231,12 @@ impl Notifiable<ConnectServiceRequest> for PbMapperActor {
         {
             tracing::error!("Failed to connect to service: {}", e);
             ClientConnectionStatus {
-                status: format!("Error: {}", e),
+                status: format!("Error connecting {}: {}", msg.service_key, e),
+            }
+            .send_signal_to_dart();
+        } else {
+            ClientConnectionStatus {
+                status: format!("Successfully started connection to {}", msg.service_key),
             }
             .send_signal_to_dart();
         }
@@ -716,8 +1246,20 @@ impl Notifiable<ConnectServiceRequest> for PbMapperActor {
 #[async_trait]
 impl Notifiable<DisconnectServiceRequest> for PbMapperActor {
     async fn notify(&mut self, msg: DisconnectServiceRequest, _: &Context<Self>) {
-        if let Err(e) = self.disconnect_service_internal(msg.service_key).await {
+        if let Err(e) = self
+            .disconnect_service_internal(msg.service_key.clone())
+            .await
+        {
             tracing::error!("Failed to disconnect service: {}", e);
+            ClientConnectionStatus {
+                status: format!("Error disconnecting {}: {}", msg.service_key, e),
+            }
+            .send_signal_to_dart();
+        } else {
+            ClientConnectionStatus {
+                status: format!("Successfully disconnected {}", msg.service_key),
+            }
+            .send_signal_to_dart();
         }
     }
 }
@@ -727,14 +1269,6 @@ impl Notifiable<RequestConfig> for PbMapperActor {
     async fn notify(&mut self, _msg: RequestConfig, _: &Context<Self>) {
         // Only send current configuration, don't trigger status updates
         self.send_config_status().await;
-    }
-}
-
-#[async_trait]
-impl Notifiable<InternalStatusUpdate> for PbMapperActor {
-    async fn notify(&mut self, _msg: InternalStatusUpdate, _: &Context<Self>) {
-        // Handle periodic status updates
-        self.send_status_update().await;
     }
 }
 
@@ -817,6 +1351,197 @@ impl Notifiable<RequestServerStatus> for PbMapperActor {
             "Server status sent to Flutter UI (available: {})",
             server_available
         );
+    }
+}
+
+#[async_trait]
+impl Notifiable<RequestLocalServerStatus> for PbMapperActor {
+    async fn notify(&mut self, _msg: RequestLocalServerStatus, _: &Context<Self>) {
+        tracing::info!("Received request for local server status");
+
+        let status = self.query_local_server_status().await;
+        status.send_signal_to_dart();
+
+        tracing::info!(
+            "Local server status sent to Flutter UI (running: {}, connections: {}, services: {})",
+            status.is_running,
+            status.active_connections,
+            status.registered_services
+        );
+    }
+}
+
+#[async_trait]
+impl Notifiable<RequestServiceConfigs> for PbMapperActor {
+    async fn notify(&mut self, _msg: RequestServiceConfigs, _: &Context<Self>) {
+        tracing::info!("Received request for service configurations");
+
+        let store = self.load_service_configs();
+        let mut services = Vec::new();
+
+        // Sort configurations by creation time to ensure consistent ordering
+        let mut sorted_configs: Vec<_> = store.services.values().collect();
+        sorted_configs.sort_by_key(|config| config.created_at);
+
+        for config in sorted_configs {
+            let (status, message) = self.calculate_service_status(&config.service_key).await;
+
+            services.push(ServiceConfigInfo {
+                service_key: config.service_key.clone(),
+                local_address: config.local_address.clone(),
+                protocol: config.protocol.clone(),
+                enable_encryption: config.enable_encryption,
+                enable_keep_alive: config.enable_keep_alive,
+                status,
+                status_message: message,
+                created_at_ms: config
+                    .created_at
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                updated_at_ms: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            });
+        }
+
+        ServiceConfigsUpdate { services }.send_signal_to_dart();
+        tracing::info!("Service configurations sent to Flutter UI");
+    }
+}
+
+#[async_trait]
+impl Notifiable<RequestServiceStatus> for PbMapperActor {
+    async fn notify(&mut self, msg: RequestServiceStatus, _: &Context<Self>) {
+        tracing::info!("Received request for service status: {}", msg.service_key);
+
+        let (status, message) = self.calculate_service_status(&msg.service_key).await;
+
+        ServiceStatusResponse {
+            service_key: msg.service_key,
+            status,
+            message,
+        }
+        .send_signal_to_dart();
+    }
+}
+
+#[async_trait]
+impl Notifiable<DeleteServiceConfigRequest> for PbMapperActor {
+    async fn notify(&mut self, msg: DeleteServiceConfigRequest, _: &Context<Self>) {
+        tracing::info!(
+            "Received request to delete service config: {}",
+            msg.service_key
+        );
+
+        // Stop service if it's running
+        if let Some(handle) = self.service_handles.remove(&msg.service_key) {
+            handle.abort();
+        }
+
+        // Remove from registered services
+        self.registered_services
+            .write()
+            .await
+            .remove(&msg.service_key);
+
+        // Delete configuration from file
+        if let Err(e) = self.delete_service_config(&msg.service_key) {
+            tracing::error!(
+                "Failed to delete service config for {}: {}",
+                msg.service_key,
+                e
+            );
+        } else {
+            tracing::info!(
+                "Service config for {} deleted successfully",
+                msg.service_key
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl Notifiable<RequestClientConfigs> for PbMapperActor {
+    async fn notify(&mut self, _msg: RequestClientConfigs, _: &Context<Self>) {
+        tracing::info!("Received request for client configs");
+
+        let store = self.load_client_configs();
+        let mut client_infos = Vec::new();
+
+        for (service_key, config) in store.clients.iter() {
+            let (status, status_message) = self.calculate_client_status(service_key).await;
+
+            client_infos.push(ClientConfigInfo {
+                service_key: config.service_key.clone(),
+                local_address: config.local_address.clone(),
+                protocol: config.protocol.clone(),
+                enable_keep_alive: config.enable_keep_alive,
+                status,
+                status_message,
+                created_at_ms: config
+                    .created_at
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                updated_at_ms: config
+                    .created_at
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            });
+        }
+
+        // Sort by created_at to ensure consistent ordering
+        client_infos.sort_by_key(|info| info.created_at_ms);
+
+        ClientConfigsUpdate {
+            clients: client_infos,
+        }
+        .send_signal_to_dart();
+    }
+}
+
+#[async_trait]
+impl Notifiable<RequestClientStatus> for PbMapperActor {
+    async fn notify(&mut self, msg: RequestClientStatus, _: &Context<Self>) {
+        tracing::info!("Received request for client status: {}", msg.service_key);
+
+        let (status, message) = self.calculate_client_status(&msg.service_key).await;
+
+        ClientStatusResponse {
+            service_key: msg.service_key,
+            status,
+            message,
+        }
+        .send_signal_to_dart();
+    }
+}
+
+#[async_trait]
+impl Notifiable<DeleteClientConfigRequest> for PbMapperActor {
+    async fn notify(&mut self, msg: DeleteClientConfigRequest, _: &Context<Self>) {
+        tracing::info!(
+            "Received request to delete client config: {}",
+            msg.service_key
+        );
+
+        // Stop client if it's running
+        if let Some(handle) = self.client_handles.remove(&msg.service_key) {
+            handle.abort();
+        }
+
+        // Delete configuration from file
+        if let Err(e) = self.delete_client_config(&msg.service_key) {
+            tracing::error!(
+                "Failed to delete client config for {}: {}",
+                msg.service_key,
+                e
+            );
+        } else {
+            tracing::info!("Client config for {} deleted successfully", msg.service_key);
+        }
     }
 }
 

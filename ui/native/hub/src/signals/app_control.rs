@@ -5,5 +5,6 @@ use serde::Deserialize;
 pub struct CreateActors;
 
 // Internal signal for periodic status updates (not exposed to Dart)
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct InternalStatusUpdate;

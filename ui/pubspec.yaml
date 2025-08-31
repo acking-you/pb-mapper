@@ -38,6 +38,7 @@ dependencies:
   meta: ^1.16.0
   tuple: ^2.0.2
   url_launcher: ^6.3.0
+  shared_preferences: ^2.2.2
 
 dev_dependencies:
   flutter_test:

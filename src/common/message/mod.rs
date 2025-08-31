@@ -40,6 +40,21 @@ pub trait MessageReader {
 
 pub trait MessageWriter {
     async fn write_msg(&mut self, msg: &[u8]) -> Result<()>;
+
+    /// TODO: Implement this method to fix the encryption zero-copy data corruption bug
+    ///
+    /// This method should be used for encryption scenarios where:
+    /// - Zero-copy performance is needed
+    /// - The caller can provide mutable data
+    /// - No unsafe transmutation is required
+    ///
+    /// Default implementation falls back to the immutable version for compatibility.
+    /// Encryption implementations should override this for true zero-copy operation.
+    async fn write_msg_mut(&mut self, msg: &mut [u8]) -> Result<()> {
+        // Default implementation: delegate to immutable version
+        // This maintains backward compatibility but doesn't solve the corruption issue
+        self.write_msg(msg).await
+    }
 }
 
 /// Maximum value of `datalen` to prevent Out of Memory
@@ -227,11 +242,23 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecMessageWriter<'a, T, E> {
 }
 
 impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> MessageWriter for CodecMessageWriter<'a, T, E> {
-    /// SAFETY: The use of `unsafe` here to convert external `&[u8]` into `&mut [u8]`.  Given the
-    /// logic of the [`MessageWriter`] trait, the `msg` should ideally be immutable. Otherwise,
-    /// it would affect the use of other features. However, the encryption API requires a
-    /// mutable reference `&mut`. To avoid unnecessary copying, `unsafe` is used here as a
-    /// compromise for the encryption API.
+    /// **CRITICAL BUG WARNING**: This method has a fundamental design flaw that causes data corruption!
+    ///
+    /// **PROBLEM**:
+    /// - The trait interface accepts `&[u8]` (immutable reference) but encryption needs `&mut [u8]`
+    /// - We use unsafe transmutation to bypass Rust's safety guarantees
+    /// - This causes SILENT DATA CORRUPTION when the same message is reused (like ping messages)
+    /// - First use: encryption succeeds, original data gets mutated
+    /// - Subsequent uses: corrupted data leads to decode failures on receiver side
+    ///
+    /// **REAL-WORLD IMPACT**:
+    /// - Ping messages fail after first success: "We decode ping request error!"
+    /// - Any reused message data becomes corrupted and unusable
+    ///
+    /// **WORKAROUND**: Always use fresh copies of message data, never reuse
+    ///
+    /// TODO: Add `write_msg_mut(&mut self, msg: &mut [u8])` method to MessageWriter trait
+    ///       for zero-copy encryption without unsafe transmutation
     async fn write_msg(&mut self, msg: &[u8]) -> Result<()> {
         if msg.is_empty() {
             return Ok(());

@@ -5,11 +5,9 @@ class LogViewButton extends StatelessWidget {
   const LogViewButton({super.key});
 
   void _openLogView(BuildContext context) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => const LogViewPage(),
-      ),
-    );
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (context) => const LogViewPage()));
   }
 
   @override
@@ -38,10 +36,7 @@ class LogViewButton extends StatelessWidget {
             const SizedBox(height: 12),
             Text(
               'View real-time system logs and debug information',
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey[600],
-              ),
+              style: TextStyle(fontSize: 14, color: Colors.grey[600]),
             ),
             const SizedBox(height: 16),
             SizedBox(

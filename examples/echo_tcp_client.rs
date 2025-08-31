@@ -17,5 +17,5 @@ async fn echo_client<Stream: StreamProvider>(addr: &str) -> Result<(), Box<dyn s
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    echo_client::<TcpStreamProvider>("[::1]:22222").await
+    echo_client::<TcpStreamProvider>("127.0.0.1:9090").await
 }
