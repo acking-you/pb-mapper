@@ -1,37 +1,42 @@
 mod pb_mapper_actor;
 
-use crate::signals::CreateActors;
-#[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::signals::SetAppDirectoryPath;
 use messages::prelude::Context;
 use rinf::DartSignal;
 use tokio::spawn;
+use tokio::time::{timeout, Duration};
 use tokio_with_wasm::alias as tokio;
 
 pub use pb_mapper_actor::*;
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
 async fn get_app_dir() -> Option<String> {
-    if let Some(v) = SetAppDirectoryPath::get_dart_signal_receiver().recv().await {
-        Some(v.message.path)
-    } else {
-        None
+    // Add timeout to prevent hanging if Flutter doesn't send the signal
+    match timeout(Duration::from_secs(10), SetAppDirectoryPath::get_dart_signal_receiver().recv()).await {
+        Ok(Some(signal_pack)) => {
+            let path = signal_pack.message.path;
+            if path.is_empty() {
+                tracing::info!("Received empty app directory path from Flutter, using default config directory");
+                None
+            } else {
+                tracing::info!("Received app directory path from Flutter: {}", path);
+                Some(path)
+            }
+        }
+        Ok(None) => {
+            tracing::warn!("Flutter signal stream closed, using default config directory");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("Timeout waiting for app directory path from Flutter, using default config directory");
+            None
+        }
     }
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-async fn get_app_dir() -> Option<String> {
-    None
 }
 
 /// Spawns the actors.
 pub async fn create_actors() {
-    // Wait for app directory path from Flutter first (for mobile platforms)
+    // Wait for app directory path from Flutter and start actors directly
     let app_directory_path = get_app_dir().await;
-
-    // Wait until the start signal arrives.
-    let start_receiver = CreateActors::get_dart_signal_receiver();
-    start_receiver.recv().await;
 
     // Create actor contexts.
     let pb_mapper_context = Context::new();

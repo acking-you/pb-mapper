@@ -179,16 +179,21 @@ class MainLandingView extends StatelessWidget {
                                   size: 20,
                                 ),
                                 const SizedBox(width: 8),
-                                Text(
-                                  'Like it? Give us a ⭐ on GitHub!',
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    color:
-                                        Theme.of(context).brightness ==
-                                            Brightness.dark
-                                        ? Colors.grey[300]
-                                        : Colors.grey[700],
-                                    fontWeight: FontWeight.w600,
+                                Flexible(
+                                  child: Text(
+                                    ResponsiveLayout.isMobile(context)
+                                        ? '⭐ Star on GitHub!'
+                                        : 'Like it? Give us a ⭐ on GitHub!',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      color:
+                                          Theme.of(context).brightness ==
+                                              Brightness.dark
+                                          ? Colors.grey[300]
+                                          : Colors.grey[700],
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
                                   ),
                                 ),
                               ],

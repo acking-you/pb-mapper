@@ -2,10 +2,6 @@ use rinf::DartSignal;
 use serde::Deserialize;
 
 #[derive(Deserialize, DartSignal)]
-pub struct CreateActors;
-
-#[allow(dead_code)]
-#[derive(Deserialize, DartSignal)]
 pub struct SetAppDirectoryPath {
     pub path: String,
 }

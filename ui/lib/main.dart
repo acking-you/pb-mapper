@@ -16,6 +16,7 @@ import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'src/bindings/bindings.dart';
 
 Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   await initializeRust(assignRustSignal);
   await createActors();
   runApp(MyApp());
@@ -34,11 +35,19 @@ Future<void> createActors() async {
       if (kDebugMode) {
         print('Failed to get app directory path: $e');
       }
+      // Send empty path as fallback to ensure Rust doesn't get stuck waiting
+      SetAppDirectoryPath(path: '').sendSignalToRust();
+      if (kDebugMode) {
+        print('Sent empty path to Rust as fallback');
+      }
+    }
+  } else {
+    // For desktop platforms, send empty path to indicate no mobile directory
+    SetAppDirectoryPath(path: '').sendSignalToRust();
+    if (kDebugMode) {
+      print('Desktop platform: sent empty path to Rust');
     }
   }
-  
-  // Create actors after setting directory path
-  CreateActors().sendSignalToRust();
 }
 
 class MyApp extends StatefulWidget {
