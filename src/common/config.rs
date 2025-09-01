@@ -6,7 +6,7 @@ use snafu::ResultExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, Layer};
 
-use super::error::{CfgParseSockAddrSnafu, CfgPbServerEnvNotExistSnafu, Result};
+use super::error::{CfgPbServerEnvNotExistSnafu, Result};
 
 #[derive(Debug, Subcommand)]
 pub enum LocalService {
@@ -45,9 +45,32 @@ pub enum StatusOp {
 
 #[inline]
 pub fn get_sockaddr(addr: &str) -> Result<SocketAddr> {
-    addr.parse().with_context(|_| CfgParseSockAddrSnafu {
-        string: addr.to_string(),
-    })
+    // First try direct parsing for IP addresses like "127.0.0.1:8080"
+    match addr.parse::<SocketAddr>() {
+        Ok(socket_addr) => Ok(socket_addr),
+        Err(original_parse_error) => {
+            // If direct parsing fails, use the smart address resolution for hostnames like "localhost:7666"
+            use crate::utils::addr::get_socket_addrs;
+            match get_socket_addrs(addr) {
+                Ok(socket_addrs) => {
+                    // Return the first resolved address
+                    socket_addrs.into_iter().next().ok_or_else(|| {
+                        super::error::Error::CfgParseSockAddr {
+                            string: addr.to_string(),
+                            source: original_parse_error,
+                        }
+                    })
+                }
+                Err(_) => {
+                    // If DNS resolution also fails, return the original parse error
+                    Err(super::error::Error::CfgParseSockAddr {
+                        string: addr.to_string(),
+                        source: original_parse_error,
+                    })
+                }
+            }
+        }
+    }
 }
 
 const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
