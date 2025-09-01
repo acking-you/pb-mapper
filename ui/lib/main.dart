@@ -1,6 +1,9 @@
 import 'dart:ui';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:rinf/rinf.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/views/client_connection_view.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
 import 'package:pb_mapper_ui/src/views/server_management_view.dart';
@@ -14,11 +17,27 @@ import 'src/bindings/bindings.dart';
 
 Future<void> main() async {
   await initializeRust(assignRustSignal);
-  createActors();
+  await createActors();
   runApp(MyApp());
 }
 
-void createActors() {
+Future<void> createActors() async {
+  // Send app directory path to Rust for mobile platforms
+  if (Platform.isAndroid || Platform.isIOS) {
+    try {
+      final appDocumentsDir = await getApplicationDocumentsDirectory();
+      SetAppDirectoryPath(path: appDocumentsDir.path).sendSignalToRust();
+      if (kDebugMode) {
+        print('App directory path sent to Rust: ${appDocumentsDir.path}');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('Failed to get app directory path: $e');
+      }
+    }
+  }
+  
+  // Create actors after setting directory path
   CreateActors().sendSignalToRust();
 }
 

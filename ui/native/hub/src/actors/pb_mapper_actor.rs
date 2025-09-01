@@ -100,6 +100,7 @@ pub struct PbMapperActor {
     client_handles: HashMap<String, JoinHandle<()>>,
     config: AppConfig,
     config_dir: PathBuf,
+    app_directory_path: Option<String>, // Flutter-provided app directory path
     _owned_tasks: JoinSet<()>,
 }
 
@@ -121,7 +122,7 @@ struct ConnectionInfo {
 impl Actor for PbMapperActor {}
 
 impl PbMapperActor {
-    pub fn new(self_addr: Address<Self>) -> Self {
+    pub fn new(self_addr: Address<Self>, app_directory_path: Option<String>) -> Self {
         let mut owned_tasks = JoinSet::new();
 
         // Spawn signal listeners
@@ -146,12 +147,37 @@ impl PbMapperActor {
 
         // Note: Removed periodic_status_updates - UI will actively request status
 
-        // Load or create default configuration
-        let config = Self::load_config().unwrap_or_default();
-
         // Initialize config directory
-        let config_dir = Self::get_config_dir();
+        let config_dir = Self::get_config_dir(&app_directory_path);
         tracing::info!("Using config directory: {:?}", config_dir);
+
+        // Create a temporary actor to load config (since load_config needs &self)
+        let temp_actor = Self {
+            server_handle: None,
+            server_shutdown_token: None,
+            server_status_sender: None,
+            server_start_time: None,
+            registered_services: Arc::new(RwLock::new(HashMap::new())),
+            active_connections: Arc::new(RwLock::new(HashMap::new())),
+            service_handles: HashMap::new(),
+            client_handles: HashMap::new(),
+            config: AppConfig::default(),
+            config_dir: config_dir.clone(),
+            app_directory_path: app_directory_path.clone(),
+            _owned_tasks: JoinSet::new(),
+        };
+
+        // Load configuration from file
+        let config = temp_actor.load_config().unwrap_or_else(|e| {
+            tracing::warn!("Could not load config: {}, using defaults", e);
+            AppConfig::default()
+        });
+
+        tracing::info!(
+            "Loaded configuration: server_address={}, keep_alive={}",
+            config.server_address,
+            config.keep_alive_enabled
+        );
 
         Self {
             server_handle: None,
@@ -164,28 +190,29 @@ impl PbMapperActor {
             client_handles: HashMap::new(),
             config,
             config_dir,
+            app_directory_path,
             _owned_tasks: owned_tasks,
         }
     }
 
-    fn get_config_dir() -> PathBuf {
-        // For Android, use data directory which is accessible without permissions
-        // For other platforms, use standard config directory
-        #[cfg(target_os = "android")]
+    #[allow(unused)]
+    fn get_config_dir(app_directory_path: &Option<String>) -> PathBuf {
+        // For mobile platforms, use Flutter-provided app directory path
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
-            // On Android, use the app's internal data directory
-            // This is accessible without additional permissions
-            if let Some(data_dir) = dirs::data_dir() {
-                data_dir.join("pb-mapper-ui")
+            if let Some(app_dir) = app_directory_path {
+                let path = PathBuf::from(app_dir).join("pb-mapper-ui");
+                tracing::info!("Using Flutter-provided app directory: {:?}", path);
+                return path;
             } else {
-                // Android fallback to current directory
+                // Fallback for mobile platforms when no path provided
                 tracing::warn!(
-                    "Could not determine Android data directory, using current directory"
+                    "No app directory provided for mobile platform, using relative path"
                 );
-                PathBuf::from("pb-mapper-ui-config")
+                PathBuf::from("pb-mapper-ui")
             }
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             // Use config directory for desktop platforms
             if let Some(config_dir) = dirs::config_dir() {
@@ -1583,39 +1610,9 @@ impl Notifiable<DeleteClientConfigRequest> for PbMapperActor {
 }
 
 impl PbMapperActor {
-    fn get_config_file_path() -> PathBuf {
-        // Use dirs crate for cross-platform config directory support
-        // This avoids ndk-context issues with robius-directories on Android
-        let config_dir = {
-            #[cfg(target_os = "android")]
-            {
-                // On Android, use the app's internal data directory
-                // This is accessible without additional permissions
-                if let Some(data_dir) = dirs::data_dir() {
-                    data_dir.join("pb-mapper-ui")
-                } else {
-                    // Android fallback
-                    tracing::warn!(
-                        "Could not determine Android data directory, using current directory"
-                    );
-                    PathBuf::from("pb-mapper-ui-config")
-                }
-            }
-            #[cfg(not(target_os = "android"))]
-            {
-                if let Some(config_dir) = dirs::config_dir() {
-                    // Use system config directory (Linux: ~/.config, macOS: ~/Library/Application Support, Windows: %APPDATA%)
-                    config_dir.join("pb-mapper-ui")
-                } else if let Some(home_dir) = dirs::home_dir() {
-                    // Fallback to home directory with .config subdirectory
-                    home_dir.join(".config").join("pb-mapper-ui")
-                } else {
-                    // Final fallback to current directory
-                    tracing::warn!("Could not determine config directory, using current directory");
-                    PathBuf::from("pb-mapper-ui-config")
-                }
-            }
-        };
+    fn get_config_file_path(&self) -> PathBuf {
+        // Use the same directory logic as get_config_dir
+        let config_dir = Self::get_config_dir(&self.app_directory_path);
 
         // Create directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&config_dir) {
@@ -1632,8 +1629,8 @@ impl PbMapperActor {
         config_file
     }
 
-    fn load_config() -> Result<AppConfig, String> {
-        let config_path = Self::get_config_file_path();
+    fn load_config(&self) -> Result<AppConfig, String> {
+        let config_path = self.get_config_file_path();
         if config_path.exists() {
             let contents = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
             let config: AppConfig = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
@@ -1645,7 +1642,7 @@ impl PbMapperActor {
     }
 
     fn save_config(&self) -> Result<(), String> {
-        let config_path = Self::get_config_file_path();
+        let config_path = self.get_config_file_path();
         let contents = serde_json::to_string_pretty(&self.config).map_err(|e| e.to_string())?;
         fs::write(config_path, contents).map_err(|e| e.to_string())?;
         Ok(())
@@ -1666,7 +1663,7 @@ mod tests {
 
     #[test]
     fn test_config_file_path_generation() {
-        let config_path = PbMapperActor::get_config_file_path();
+        let config_path = PbMapperActor::get_config_dir(&None);
 
         // Verify the path is not empty and ends with config.json
         assert!(!config_path.as_os_str().is_empty());
