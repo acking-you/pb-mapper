@@ -49,24 +49,51 @@ pub fn get_sockaddr(addr: &str) -> Result<SocketAddr> {
     match addr.parse::<SocketAddr>() {
         Ok(socket_addr) => Ok(socket_addr),
         Err(original_parse_error) => {
-            // If direct parsing fails, use the smart address resolution for hostnames like "localhost:7666"
-            use crate::utils::addr::get_socket_addrs;
-            match get_socket_addrs(addr) {
-                Ok(socket_addrs) => {
-                    // Return the first resolved address
-                    socket_addrs.into_iter().next().ok_or_else(|| {
-                        super::error::Error::CfgParseSockAddr {
-                            string: addr.to_string(),
-                            source: original_parse_error,
-                        }
-                    })
-                }
-                Err(_) => {
-                    // If DNS resolution also fails, return the original parse error
-                    Err(super::error::Error::CfgParseSockAddr {
+            // Check if it's localhost - use system resolver for localhost
+            if addr.starts_with("localhost:") {
+                // Use standard library for localhost resolution to avoid custom DNS resolver issues
+                match std::net::ToSocketAddrs::to_socket_addrs(addr) {
+                    Ok(mut socket_addrs) => {
+                        socket_addrs
+                            .next()
+                            .ok_or_else(|| super::error::Error::CfgParseSockAddr {
+                                string: addr.to_string(),
+                                source: original_parse_error,
+                            })
+                    }
+                    Err(_) => Err(super::error::Error::CfgParseSockAddr {
                         string: addr.to_string(),
                         source: original_parse_error,
-                    })
+                    }),
+                }
+            } else {
+                // For other hostnames, use the custom DNS resolution
+                use crate::utils::addr::get_socket_addrs;
+                match get_socket_addrs(addr) {
+                    Ok(socket_addrs) => {
+                        // Return the first resolved address
+                        socket_addrs.into_iter().next().ok_or_else(|| {
+                            super::error::Error::CfgParseSockAddr {
+                                string: addr.to_string(),
+                                source: original_parse_error,
+                            }
+                        })
+                    }
+                    Err(_) => {
+                        // If custom DNS resolution fails, fallback to system resolver
+                        match std::net::ToSocketAddrs::to_socket_addrs(addr) {
+                            Ok(mut socket_addrs) => socket_addrs.next().ok_or_else(|| {
+                                super::error::Error::CfgParseSockAddr {
+                                    string: addr.to_string(),
+                                    source: original_parse_error,
+                                }
+                            }),
+                            Err(_) => Err(super::error::Error::CfgParseSockAddr {
+                                string: addr.to_string(),
+                                source: original_parse_error,
+                            }),
+                        }
+                    }
                 }
             }
         }
