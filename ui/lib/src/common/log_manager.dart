@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'package:ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
 import 'package:rinf/rinf.dart';
 
 class LogManager {

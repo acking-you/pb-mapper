@@ -263,7 +263,7 @@ pub enum Error {
         source: flume::SendError<ManagerTask>,
     },
     #[snafu(display("Server listen error"))]
-    ServerListenError { source: std::io::Error },
+    ServerListen { source: std::io::Error },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

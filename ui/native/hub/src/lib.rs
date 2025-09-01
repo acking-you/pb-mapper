@@ -22,7 +22,9 @@ async fn main() {
     let collector = FlutterLogCollector;
     let layer = layer().event_format(collector);
     let subscriber = Registry::default().with(layer);
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
+    if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!("Failed to set tracing subscriber: {e}");
+    }
 
     // Spawn pb-mapper actors
     spawn(create_actors());

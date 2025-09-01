@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/models/client_config.dart';
-import 'package:ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/models/client_config.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
 
 class ClientCard extends StatefulWidget {
   final ClientConfig config;

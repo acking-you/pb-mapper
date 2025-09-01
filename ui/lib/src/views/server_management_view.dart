@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/bindings/bindings.dart';
-import 'package:ui/src/common/responsive_layout.dart';
-import 'package:ui/src/views/log_view_button.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
+import 'package:pb_mapper_ui/src/views/log_view_button.dart';
 
 class ServerManagementView extends StatefulWidget {
   const ServerManagementView({super.key});

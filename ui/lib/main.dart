@@ -1,15 +1,15 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:rinf/rinf.dart';
-import 'package:ui/src/views/client_connection_view.dart';
-import 'package:ui/src/views/main_landing_view.dart';
-import 'package:ui/src/views/server_management_view.dart';
-import 'package:ui/src/views/service_registration_view.dart';
-import 'package:ui/src/views/status_monitoring_view.dart';
-import 'package:ui/src/views/configuration_view.dart';
-import 'package:ui/src/common/log_manager.dart';
-import 'package:ui/src/common/desktop_layout.dart';
-import 'package:ui/src/common/responsive_layout.dart';
+import 'package:pb_mapper_ui/src/views/client_connection_view.dart';
+import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
+import 'package:pb_mapper_ui/src/views/server_management_view.dart';
+import 'package:pb_mapper_ui/src/views/service_registration_view.dart';
+import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
+import 'package:pb_mapper_ui/src/views/configuration_view.dart';
+import 'package:pb_mapper_ui/src/common/log_manager.dart';
+import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
+import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'src/bindings/bindings.dart';
 
 Future<void> main() async {

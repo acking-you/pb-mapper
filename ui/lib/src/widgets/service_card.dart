@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/models/service_config.dart';
-import 'package:ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/models/service_config.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
 
 class ServiceCard extends StatefulWidget {
   final ServiceConfig config;

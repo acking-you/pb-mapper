@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/models/service_config.dart';
+import 'package:pb_mapper_ui/src/models/service_config.dart';
 
 class EditServiceDialog extends StatefulWidget {
   final ServiceConfig config;

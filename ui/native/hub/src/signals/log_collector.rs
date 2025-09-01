@@ -53,7 +53,7 @@ where
             string: &mut message,
         });
         // write to log file for debugging
-        writeln!(writer, "[{}] {}: {}", level, timestamp, message)?;
+        writeln!(writer, "[{level}] {timestamp}: {message}")?;
 
         // Send the log message to Flutter
         LogMessage {

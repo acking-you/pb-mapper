@@ -119,7 +119,7 @@ impl<'reader, T: AsyncReadExt + Unpin> BufferReader<'reader, T> {
         }
     }
 
-    async fn read_inner<'a>(&'a mut self) -> super::error::Result<&'a [u8]> {
+    async fn read_inner(&mut self) -> super::error::Result<&[u8]> {
         if self.buffer.need_resize() {
             self.buffer.dyn_resize()
         }

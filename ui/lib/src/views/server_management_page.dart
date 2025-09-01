@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/common/theme_change_button.dart';
-import 'package:ui/src/views/server_management_view.dart';
-import 'package:ui/src/views/status_monitoring_view.dart';
+import 'package:pb_mapper_ui/src/common/theme_change_button.dart';
+import 'package:pb_mapper_ui/src/views/server_management_view.dart';
+import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 
 class ServerManagementPage extends StatefulWidget {
   final VoidCallback onBack;

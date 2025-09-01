@@ -15,7 +15,18 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tokio_with_wasm::alias as tokio;
 
-use crate::signals::*;
+use crate::signals::{
+    ActiveConnectionInfo, ActiveConnectionsUpdate, ClientConfigInfo, ClientConfigsUpdate,
+    ClientConnectionStatus, ClientStatusResponse, ConfigSaveResult, ConfigStatusUpdate,
+    ConnectServiceRequest, DeleteClientConfigRequest, DeleteServiceConfigRequest,
+    DisconnectServiceRequest, LocalServerStatusUpdate, RegisterServiceRequest,
+    RegisteredServiceInfo, RegisteredServicesUpdate, RequestClientConfigs, RequestClientStatus,
+    RequestConfig, RequestLocalServerStatus, RequestServerStatus, RequestServiceConfigs,
+    RequestServiceStatus, ServerStatusDetailUpdate, ServerStatusUpdate, ServiceConfigInfo,
+    ServiceConfigsUpdate, ServiceRegistrationStatusUpdate, ServiceStatusResponse,
+    ServiceStatusUpdate, StartServerRequest, StopServerRequest, UnregisterServiceRequest,
+    UpdateConfigRequest,
+};
 use pb_mapper::common::config::{PB_MAPPER_KEEP_ALIVE, get_pb_mapper_server, get_sockaddr};
 use pb_mapper::common::listener::{TcpListenerProvider, UdpListenerProvider};
 use pb_mapper::common::message::command::{PbConnStatusReq, PbConnStatusResp};
@@ -192,14 +203,13 @@ impl PbMapperActor {
     fn save_service_configs(&self, store: &ServiceConfigStore) -> Result<(), String> {
         let path = self.get_service_config_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create config dir: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
         }
 
         let content = serde_json::to_string_pretty(store)
-            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+            .map_err(|e| format!("Failed to serialize config: {e}"))?;
 
-        fs::write(&path, content).map_err(|e| format!("Failed to write config file: {}", e))?;
+        fs::write(&path, content).map_err(|e| format!("Failed to write config file: {e}"))?;
 
         Ok(())
     }
@@ -253,15 +263,14 @@ impl PbMapperActor {
     fn save_client_configs(&self, store: &ClientConfigStore) -> Result<(), String> {
         let path = self.get_client_config_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create config dir: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
         }
 
         let content = serde_json::to_string_pretty(store)
-            .map_err(|e| format!("Failed to serialize client config: {}", e))?;
+            .map_err(|e| format!("Failed to serialize client config: {e}"))?;
 
         fs::write(&path, content)
-            .map_err(|e| format!("Failed to write client config file: {}", e))?;
+            .map_err(|e| format!("Failed to write client config file: {e}"))?;
 
         Ok(())
     }
@@ -343,8 +352,7 @@ impl PbMapperActor {
         use pb_mapper::common::stream::{StreamProvider, TcpStreamProvider};
         use pb_mapper::local::client::status::get_status;
 
-        let addr =
-            get_sockaddr(server_addr).map_err(|e| format!("Invalid server address: {}", e))?;
+        let addr = get_sockaddr(server_addr).map_err(|e| format!("Invalid server address: {e}"))?;
 
         // Create TCP connection to server
         match TcpStreamProvider::from_addr(addr).await {
@@ -418,7 +426,7 @@ impl PbMapperActor {
         // First get keys (list of registered services)
         let services = match self.get_server_keys(&server_addr).await {
             Ok(keys) => keys,
-            Err(e) => return Err(format!("Failed to get server keys: {}", e)),
+            Err(e) => return Err(format!("Failed to get server keys: {e}")),
         };
 
         // Then get remote-id data (server map and connection info)
@@ -444,15 +452,15 @@ impl PbMapperActor {
 
         let socket_addr = got_one_socket_addr(server_addr)
             .await
-            .map_err(|e| format!("Invalid server address {}: {}", server_addr, e))?;
+            .map_err(|e| format!("Invalid server address {server_addr}: {e}"))?;
 
         let mut stream = each_addr(socket_addr, TcpStream::connect)
             .await
-            .map_err(|e| format!("Failed to connect to server: {}", e))?;
+            .map_err(|e| format!("Failed to connect to server: {e}"))?;
 
         let status_resp = get_status(&mut stream, PbConnStatusReq::Keys)
             .await
-            .map_err(|e| format!("Failed to get status: {}", e))?;
+            .map_err(|e| format!("Failed to get status: {e}"))?;
 
         match status_resp {
             PbConnStatusResp::Keys(keys) => Ok(keys),
@@ -466,15 +474,15 @@ impl PbMapperActor {
 
         let socket_addr = got_one_socket_addr(server_addr)
             .await
-            .map_err(|e| format!("Invalid server address {}: {}", server_addr, e))?;
+            .map_err(|e| format!("Invalid server address {server_addr}: {e}"))?;
 
         let mut stream = each_addr(socket_addr, TcpStream::connect)
             .await
-            .map_err(|e| format!("Failed to connect to server: {}", e))?;
+            .map_err(|e| format!("Failed to connect to server: {e}"))?;
 
         let status_resp = get_status(&mut stream, PbConnStatusReq::RemoteId)
             .await
-            .map_err(|e| format!("Failed to get status: {}", e))?;
+            .map_err(|e| format!("Failed to get status: {e}"))?;
 
         match status_resp {
             PbConnStatusResp::RemoteId {
@@ -499,6 +507,7 @@ impl PbMapperActor {
 
     async fn listen_to_stop_server(mut self_addr: Address<Self>) {
         let receiver = StopServerRequest::get_dart_signal_receiver();
+        #[allow(clippy::redundant_pattern_matching)]
         while let Some(_) = receiver.recv().await {
             let _ = self_addr.notify(StopServerRequest).await;
         }
@@ -534,6 +543,7 @@ impl PbMapperActor {
 
     async fn listen_to_request_config(mut self_addr: Address<Self>) {
         let receiver = RequestConfig::get_dart_signal_receiver();
+        #[allow(clippy::redundant_pattern_matching)]
         while let Some(_) = receiver.recv().await {
             let _ = self_addr.notify(RequestConfig).await;
         }
@@ -548,6 +558,7 @@ impl PbMapperActor {
 
     async fn listen_to_request_server_status(mut self_addr: Address<Self>) {
         let receiver = RequestServerStatus::get_dart_signal_receiver();
+        #[allow(clippy::redundant_pattern_matching)]
         while let Some(_) = receiver.recv().await {
             let _ = self_addr.notify(RequestServerStatus).await;
         }
@@ -555,6 +566,7 @@ impl PbMapperActor {
 
     async fn listen_to_request_local_server_status(mut self_addr: Address<Self>) {
         let receiver = RequestLocalServerStatus::get_dart_signal_receiver();
+        #[allow(clippy::redundant_pattern_matching)]
         while let Some(_) = receiver.recv().await {
             let _ = self_addr.notify(RequestLocalServerStatus).await;
         }
@@ -562,6 +574,7 @@ impl PbMapperActor {
 
     async fn listen_to_request_service_configs(mut self_addr: Address<Self>) {
         let receiver = RequestServiceConfigs::get_dart_signal_receiver();
+        #[allow(clippy::redundant_pattern_matching)]
         while let Some(_) = receiver.recv().await {
             let _ = self_addr.notify(RequestServiceConfigs).await;
         }
@@ -723,7 +736,7 @@ impl PbMapperActor {
         enable_keep_alive: bool,
     ) -> Result<(), String> {
         if self.service_handles.contains_key(&service_key) {
-            return Err(format!("Service '{}' is already registered", service_key));
+            return Err(format!("Service '{service_key}' is already registered"));
         }
 
         if enable_keep_alive {
@@ -733,9 +746,9 @@ impl PbMapperActor {
         }
 
         let local_sock_addr =
-            get_sockaddr(&local_address).map_err(|e| format!("Invalid local address: {}", e))?;
+            get_sockaddr(&local_address).map_err(|e| format!("Invalid local address: {e}"))?;
         let remote_sock_addr = get_pb_mapper_server(Some(&self.config.server_address))
-            .map_err(|e| format!("Invalid server address: {}", e))?;
+            .map_err(|e| format!("Invalid server address: {e}"))?;
 
         tracing::info!(
             "Registering service '{}' with protocol {}, local address {}, server address {}",
@@ -753,7 +766,7 @@ impl PbMapperActor {
             enable_encryption,
             enable_keep_alive,
         ) {
-            return Err(format!("Failed to save service configuration: {}", e));
+            return Err(format!("Failed to save service configuration: {e}"));
         }
 
         // Send initial "retrying" status to indicate registration is starting
@@ -865,7 +878,7 @@ impl PbMapperActor {
         RegisteredServicesUpdate { services }.send_signal_to_dart();
 
         ServiceStatusUpdate {
-            message: format!("Service '{}' registration initiated", service_key),
+            message: format!("Service '{service_key}' registration initiated"),
         }
         .send_signal_to_dart();
 
@@ -911,14 +924,14 @@ impl PbMapperActor {
             RegisteredServicesUpdate { services }.send_signal_to_dart();
 
             ServiceStatusUpdate {
-                message: format!("Service '{}' unregistered successfully", service_key),
+                message: format!("Service '{service_key}' unregistered successfully"),
             }
             .send_signal_to_dart();
 
             tracing::info!("Service '{}' unregistered successfully", service_key);
             Ok(())
         } else {
-            Err(format!("Service '{}' is not registered", service_key))
+            Err(format!("Service '{service_key}' is not registered"))
         }
     }
 
@@ -931,8 +944,7 @@ impl PbMapperActor {
     ) -> Result<(), String> {
         if self.client_handles.contains_key(&service_key) {
             return Err(format!(
-                "Client for service '{}' is already connected",
-                service_key
+                "Client for service '{service_key}' is already connected"
             ));
         }
 
@@ -943,9 +955,9 @@ impl PbMapperActor {
         }
 
         let local_sock_addr =
-            get_sockaddr(&local_address).map_err(|e| format!("Invalid local address: {}", e))?;
+            get_sockaddr(&local_address).map_err(|e| format!("Invalid local address: {e}"))?;
         let remote_sock_addr = get_pb_mapper_server(Some(&self.config.server_address))
-            .map_err(|e| format!("Invalid server address: {}", e))?;
+            .map_err(|e| format!("Invalid server address: {e}"))?;
 
         tracing::info!(
             "Connecting to service '{}' with protocol {}, local address {}, server address {}",
@@ -963,7 +975,7 @@ impl PbMapperActor {
             Box::new(move |status: &str| {
                 // Send client connection status update
                 ClientConnectionStatus {
-                    status: format!("Client {}: {}", service_key_for_callback, status),
+                    status: format!("Client {service_key_for_callback}: {status}"),
                 }
                 .send_signal_to_dart();
             })
@@ -995,7 +1007,7 @@ impl PbMapperActor {
 
         let connection_info = ConnectionInfo {
             service_key: service_key.clone(),
-            client_id: format!("client-{}", service_key),
+            client_id: format!("client-{service_key}"),
             status: "Connected".to_string(),
         };
 
@@ -1019,7 +1031,7 @@ impl PbMapperActor {
         ActiveConnectionsUpdate { connections }.send_signal_to_dart();
 
         ClientConnectionStatus {
-            status: format!("Connected to service '{}'", service_key),
+            status: format!("Connected to service '{service_key}'"),
         }
         .send_signal_to_dart();
 
@@ -1054,14 +1066,14 @@ impl PbMapperActor {
             ActiveConnectionsUpdate { connections }.send_signal_to_dart();
 
             ClientConnectionStatus {
-                status: format!("Disconnected from service '{}'", service_key),
+                status: format!("Disconnected from service '{service_key}'"),
             }
             .send_signal_to_dart();
 
             tracing::info!("Disconnected from service '{}'", service_key);
             Ok(())
         } else {
-            Err(format!("Service '{}' is not connected", service_key))
+            Err(format!("Service '{service_key}' is not connected"))
         }
     }
 
@@ -1086,18 +1098,16 @@ impl PbMapperActor {
 
                 if sender.send(response_sender).is_ok() {
                     // Wait for response with timeout
-                    if let Ok(status_info) =
+                    if let Ok(Ok(info)) =
                         tokio::time::timeout(tokio::time::Duration::from_secs(1), response_receiver)
                             .await
                     {
-                        if let Ok(info) = status_info {
-                            return LocalServerStatusUpdate {
-                                is_running: true,
-                                active_connections: info.active_connections,
-                                registered_services: info.registered_services,
-                                uptime_seconds: info.uptime_seconds,
-                            };
-                        }
+                        return LocalServerStatusUpdate {
+                            is_running: true,
+                            active_connections: info.active_connections,
+                            registered_services: info.registered_services,
+                            uptime_seconds: info.uptime_seconds,
+                        };
                     }
                 }
             }
@@ -1149,7 +1159,7 @@ impl Notifiable<StartServerRequest> for PbMapperActor {
         {
             tracing::error!("Failed to start server: {}", e);
             ServerStatusUpdate {
-                status: format!("Error: {}", e),
+                status: format!("Error: {e}"),
                 active_connections: 0,
                 uptime: 0,
             }
@@ -1186,13 +1196,13 @@ impl Notifiable<RegisterServiceRequest> for PbMapperActor {
             ServiceRegistrationStatusUpdate {
                 service_key: msg.service_key.clone(),
                 status: "failed".to_string(),
-                message: format!("Registration failed: {}", e),
+                message: format!("Registration failed: {e}"),
             }
             .send_signal_to_dart();
 
             // Also send general service status update
             ServiceStatusUpdate {
-                message: format!("Error registering '{}': {}", msg.service_key, e),
+                message: format!("Error registering '{}': {e}", msg.service_key),
             }
             .send_signal_to_dart();
         }
@@ -1205,7 +1215,7 @@ impl Notifiable<UnregisterServiceRequest> for PbMapperActor {
         if let Err(e) = self.unregister_service_internal(msg.service_key).await {
             tracing::error!("Failed to unregister service: {}", e);
             ServiceStatusUpdate {
-                message: format!("Error: {}", e),
+                message: format!("Error: {e}"),
             }
             .send_signal_to_dart();
         }
@@ -1236,7 +1246,7 @@ impl Notifiable<ConnectServiceRequest> for PbMapperActor {
         {
             tracing::error!("Failed to connect to service: {}", e);
             ClientConnectionStatus {
-                status: format!("Error connecting {}: {}", msg.service_key, e),
+                status: format!("Error connecting {}: {e}", msg.service_key),
             }
             .send_signal_to_dart();
         } else {
@@ -1257,7 +1267,7 @@ impl Notifiable<DisconnectServiceRequest> for PbMapperActor {
         {
             tracing::error!("Failed to disconnect service: {}", e);
             ClientConnectionStatus {
-                status: format!("Error disconnecting {}: {}", msg.service_key, e),
+                status: format!("Error disconnecting {}: {e}", msg.service_key),
             }
             .send_signal_to_dart();
         } else {
@@ -1305,7 +1315,7 @@ impl Notifiable<UpdateConfigRequest> for PbMapperActor {
                 // Send error result to Flutter
                 ConfigSaveResult {
                     success: false,
-                    message: format!("Failed to save configuration: {}", e),
+                    message: format!("Failed to save configuration: {e}"),
                 }
                 .send_signal_to_dart();
             }

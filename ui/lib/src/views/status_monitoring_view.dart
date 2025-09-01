@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/bindings/bindings.dart';
-import 'package:ui/src/common/responsive_layout.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 
 // Custom notification for service connection
 class ServiceConnectionNotification extends Notification {

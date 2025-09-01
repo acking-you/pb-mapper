@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/bindings/bindings.dart';
-import 'package:ui/src/views/status_monitoring_view.dart';
-import 'package:ui/src/views/log_view_button.dart';
-import 'package:ui/src/models/service_config.dart';
-import 'package:ui/src/widgets/service_card.dart';
-import 'package:ui/src/widgets/edit_service_dialog.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
+import 'package:pb_mapper_ui/src/views/log_view_button.dart';
+import 'package:pb_mapper_ui/src/models/service_config.dart';
+import 'package:pb_mapper_ui/src/widgets/service_card.dart';
+import 'package:pb_mapper_ui/src/widgets/edit_service_dialog.dart';
 
 class ServiceRegistrationView extends StatefulWidget {
   const ServiceRegistrationView({super.key});

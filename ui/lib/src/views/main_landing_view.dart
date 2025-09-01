@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/common/theme_change_button.dart';
-import 'package:ui/src/common/responsive_layout.dart';
+import 'package:pb_mapper_ui/src/common/theme_change_button.dart';
+import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class MainLandingView extends StatelessWidget {

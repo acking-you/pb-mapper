@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
 
 class ConfigurationView extends StatefulWidget {
   final VoidCallback? onToggleTheme;

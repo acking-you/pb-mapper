@@ -3,8 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:ui/src/bindings/bindings.dart';
-import 'package:ui/src/common/log_manager.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/common/log_manager.dart';
 
 class LogDisplayWidget extends StatefulWidget {
   const LogDisplayWidget({super.key});

@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/views/log_view_page.dart';
+import 'package:pb_mapper_ui/src/views/log_view_page.dart';
 
 class LogViewButton extends StatelessWidget {
   const LogViewButton({super.key});

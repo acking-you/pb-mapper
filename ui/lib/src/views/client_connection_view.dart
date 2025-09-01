@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:ui/src/bindings/bindings.dart';
-import 'package:ui/src/views/status_monitoring_view.dart';
-import 'package:ui/src/views/log_view_button.dart';
-import 'package:ui/src/models/client_config.dart';
-import 'package:ui/src/widgets/client_card.dart';
+import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
+import 'package:pb_mapper_ui/src/views/log_view_button.dart';
+import 'package:pb_mapper_ui/src/models/client_config.dart';
+import 'package:pb_mapper_ui/src/widgets/client_card.dart';
 
 class ClientConnectionView extends StatefulWidget {
   const ClientConnectionView({super.key});
