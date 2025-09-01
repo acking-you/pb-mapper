@@ -151,6 +151,7 @@ impl PbMapperActor {
 
         // Initialize config directory
         let config_dir = Self::get_config_dir();
+        tracing::info!("Using config directory: {:?}", config_dir);
 
         Self {
             server_handle: None,
