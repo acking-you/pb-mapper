@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use messages::prelude::{Actor, Address, Context, Notifiable};
 use rinf::{DartSignal, RustSignal};
-use robius_directories::{ProjectDirs, UserDirs};
+// Removed robius-directories import to avoid Android ndk-context panic
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::task::{JoinHandle, JoinSet};
@@ -157,10 +157,15 @@ impl PbMapperActor {
     }
 
     fn get_config_dir() -> PathBuf {
-        if let Some(proj_dirs) = ProjectDirs::from("com", "pb-mapper", "pb-mapper") {
-            proj_dirs.config_dir().to_path_buf()
+        // Use simple user directory approach to avoid ndk-context issues on Android
+        if let Some(home_dir) = dirs::home_dir() {
+            home_dir.join(".config").join("pb-mapper")
         } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            // Fallback to current directory if home directory is not available
+            tracing::warn!("Could not determine home directory, using current directory");
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("pb-mapper-config")
         }
     }
 
@@ -1547,15 +1552,14 @@ impl Notifiable<DeleteClientConfigRequest> for PbMapperActor {
 
 impl PbMapperActor {
     fn get_config_file_path() -> PathBuf {
-        // Use robius-directories for cross-platform config directory support
-        // This crate supports Linux, Windows, macOS, Android, and other platforms
-        let config_dir = if let Some(proj_dirs) = ProjectDirs::from("dev", "pb-mapper", "pb-mapper")
-        {
-            // Use project-specific config directory (recommended approach)
-            proj_dirs.config_dir().to_path_buf()
-        } else if let Some(user_dirs) = UserDirs::new() {
-            // Fallback to user home directory with .config subdirectory
-            user_dirs.home_dir().join(".config").join("pb-mapper")
+        // Use dirs crate for cross-platform config directory support
+        // This avoids ndk-context issues with robius-directories on Android
+        let config_dir = if let Some(config_dir) = dirs::config_dir() {
+            // Use system config directory (Linux: ~/.config, macOS: ~/Library/Application Support, Windows: %APPDATA%)
+            config_dir.join("pb-mapper")
+        } else if let Some(home_dir) = dirs::home_dir() {
+            // Fallback to home directory with .config subdirectory
+            home_dir.join(".config").join("pb-mapper")
         } else {
             // Final fallback to current directory
             tracing::warn!("Could not determine config directory, using current directory");
