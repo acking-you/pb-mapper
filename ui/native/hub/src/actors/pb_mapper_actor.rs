@@ -159,13 +159,13 @@ impl PbMapperActor {
     fn get_config_dir() -> PathBuf {
         // Use simple user directory approach to avoid ndk-context issues on Android
         if let Some(home_dir) = dirs::home_dir() {
-            home_dir.join(".config").join("pb-mapper")
+            home_dir.join(".config").join("pb-mapper-ui")
         } else {
             // Fallback to current directory if home directory is not available
             tracing::warn!("Could not determine home directory, using current directory");
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
-                .join("pb-mapper-config")
+                .join("pb-mapper-ui-config")
         }
     }
 
@@ -1556,14 +1556,14 @@ impl PbMapperActor {
         // This avoids ndk-context issues with robius-directories on Android
         let config_dir = if let Some(config_dir) = dirs::config_dir() {
             // Use system config directory (Linux: ~/.config, macOS: ~/Library/Application Support, Windows: %APPDATA%)
-            config_dir.join("pb-mapper")
+            config_dir.join("pb-mapper-ui")
         } else if let Some(home_dir) = dirs::home_dir() {
             // Fallback to home directory with .config subdirectory
-            home_dir.join(".config").join("pb-mapper")
+            home_dir.join(".config").join("pb-mapper-ui")
         } else {
             // Final fallback to current directory
             tracing::warn!("Could not determine config directory, using current directory");
-            PathBuf::from(".")
+            PathBuf::from("pb-mapper-ui-config")
         };
 
         // Create directory if it doesn't exist
