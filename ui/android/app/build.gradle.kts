@@ -28,6 +28,13 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        
+        // Optimize APK size by only including essential Android architectures
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            // Removed "x86_64" to reduce APK size - only include ARM architectures
+            // Most Android devices use ARM processors
+        }
     }
 
     buildTypes {

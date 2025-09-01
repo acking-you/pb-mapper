@@ -45,5 +45,25 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- Network configuration for remote server connections -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Allow arbitrary loads for HTTP connections -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<!-- Optional: More restrictive - only allow specific domains -->
+		<!--
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>your-server-domain.com</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.0</string>
+			</dict>
+		</dict>
+		-->
+	</dict>
 </dict>
 </plist>
