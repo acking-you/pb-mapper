@@ -168,15 +168,36 @@ impl PbMapperActor {
     }
 
     fn get_config_dir() -> PathBuf {
-        // Use simple user directory approach to avoid ndk-context issues on Android
-        if let Some(home_dir) = dirs::home_dir() {
-            home_dir.join(".config").join("pb-mapper-ui")
-        } else {
-            // Fallback to current directory if home directory is not available
-            tracing::warn!("Could not determine home directory, using current directory");
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("pb-mapper-ui-config")
+        // For Android, use data directory which is accessible without permissions
+        // For other platforms, use standard config directory
+        #[cfg(target_os = "android")]
+        {
+            // On Android, use the app's internal data directory
+            // This is accessible without additional permissions
+            if let Some(data_dir) = dirs::data_dir() {
+                data_dir.join("pb-mapper-ui")
+            } else {
+                // Android fallback to current directory
+                tracing::warn!(
+                    "Could not determine Android data directory, using current directory"
+                );
+                PathBuf::from("pb-mapper-ui-config")
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            // Use config directory for desktop platforms
+            if let Some(config_dir) = dirs::config_dir() {
+                config_dir.join("pb-mapper-ui")
+            } else if let Some(home_dir) = dirs::home_dir() {
+                home_dir.join(".config").join("pb-mapper-ui")
+            } else {
+                // Fallback to current directory if home directory is not available
+                tracing::warn!("Could not determine home directory, using current directory");
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("pb-mapper-ui-config")
+            }
         }
     }
 
@@ -1564,16 +1585,35 @@ impl PbMapperActor {
     fn get_config_file_path() -> PathBuf {
         // Use dirs crate for cross-platform config directory support
         // This avoids ndk-context issues with robius-directories on Android
-        let config_dir = if let Some(config_dir) = dirs::config_dir() {
-            // Use system config directory (Linux: ~/.config, macOS: ~/Library/Application Support, Windows: %APPDATA%)
-            config_dir.join("pb-mapper-ui")
-        } else if let Some(home_dir) = dirs::home_dir() {
-            // Fallback to home directory with .config subdirectory
-            home_dir.join(".config").join("pb-mapper-ui")
-        } else {
-            // Final fallback to current directory
-            tracing::warn!("Could not determine config directory, using current directory");
-            PathBuf::from("pb-mapper-ui-config")
+        let config_dir = {
+            #[cfg(target_os = "android")]
+            {
+                // On Android, use the app's internal data directory
+                // This is accessible without additional permissions
+                if let Some(data_dir) = dirs::data_dir() {
+                    data_dir.join("pb-mapper-ui")
+                } else {
+                    // Android fallback
+                    tracing::warn!(
+                        "Could not determine Android data directory, using current directory"
+                    );
+                    PathBuf::from("pb-mapper-ui-config")
+                }
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                if let Some(config_dir) = dirs::config_dir() {
+                    // Use system config directory (Linux: ~/.config, macOS: ~/Library/Application Support, Windows: %APPDATA%)
+                    config_dir.join("pb-mapper-ui")
+                } else if let Some(home_dir) = dirs::home_dir() {
+                    // Fallback to home directory with .config subdirectory
+                    home_dir.join(".config").join("pb-mapper-ui")
+                } else {
+                    // Final fallback to current directory
+                    tracing::warn!("Could not determine config directory, using current directory");
+                    PathBuf::from("pb-mapper-ui-config")
+                }
+            }
         };
 
         // Create directory if it doesn't exist
