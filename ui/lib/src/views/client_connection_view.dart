@@ -39,98 +39,6 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
 
     // Check if there's a pre-selected service key from status monitoring
     _checkForPreSelectedService();
-
-    // Listen for config updates
-    ConfigStatusUpdate.rustSignalStream.listen((signal) {
-      if (mounted) {
-        setState(() {
-          _serverAddress = signal.message.serverAddress;
-        });
-      }
-    });
-
-    // Listen for server status updates
-    ServerStatusDetailUpdate.rustSignalStream.listen((signal) {
-      if (mounted) {
-        setState(() {
-          _serverAvailable = signal.message.serverAvailable;
-          _availableServices = List<String>.from(
-            signal.message.registeredServices,
-          );
-
-          // Clear selected service if it's no longer available
-          if (_selectedServiceKey != null &&
-              !_availableServices.contains(_selectedServiceKey)) {
-            _selectedServiceKey = null;
-          }
-        });
-      }
-    });
-
-    // Listen for client config updates
-    ClientConfigsUpdate.rustSignalStream.listen((signal) {
-      if (mounted) {
-        _updateClientConfigsFromSignal(signal.message.clients);
-      }
-    });
-
-    // Listen for client connection status updates
-    ClientConnectionStatus.rustSignalStream.listen((signal) {
-      if (mounted) {
-        final message = signal.message.status;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(message),
-            backgroundColor:
-                message.contains('Error') || message.contains('failed')
-                ? Colors.red
-                : Colors.green,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-
-        // Reload configs after connection status update
-        Future.delayed(const Duration(milliseconds: 500), () {
-          if (mounted) {
-            _loadClientConfigs();
-          }
-        });
-      }
-    });
-
-    // Listen for individual client status responses
-    ClientStatusResponse.rustSignalStream.listen((signal) {
-      if (mounted) {
-        final serviceKey = signal.message.serviceKey;
-        final status = signal.message.status;
-        final message = signal.message.message;
-
-        // Show feedback for status updates
-        if (message.isNotEmpty &&
-            (status == 'failed' || message.contains('Error'))) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('$serviceKey: $message'),
-              backgroundColor: Colors.red,
-              duration: const Duration(seconds: 5),
-            ),
-          );
-        }
-
-        // Update local client config status
-        final configIndex = _clientConfigs.indexWhere(
-          (config) => config.serviceKey == serviceKey,
-        );
-        if (configIndex != -1) {
-          setState(() {
-            _clientConfigs[configIndex].updateStatus(
-              _parseClientStatus(status),
-              message,
-            );
-          });
-        }
-      }
-    });
   }
 
   void _loadClientConfigs() {
@@ -325,9 +233,127 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+        child: StreamBuilder(
+          stream: ConfigStatusUpdate.rustSignalStream,
+          builder: (context, configSnapshot) {
+            // Update server address when config data is available
+            if (configSnapshot.hasData) {
+              final config = configSnapshot.data!.message;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && _serverAddress != config.serverAddress) {
+                  setState(() {
+                    _serverAddress = config.serverAddress;
+                  });
+                }
+              });
+            }
+            
+            return StreamBuilder(
+              stream: ServerStatusDetailUpdate.rustSignalStream,
+              builder: (context, serverSnapshot) {
+                // Update server availability and available services when server status data is available
+                if (serverSnapshot.hasData) {
+                  final status = serverSnapshot.data!.message;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) {
+                      setState(() {
+                        _serverAvailable = status.serverAvailable;
+                        _availableServices = List<String>.from(status.registeredServices);
+                        
+                        // Clear selected service if it's no longer available
+                        if (_selectedServiceKey != null &&
+                            !_availableServices.contains(_selectedServiceKey)) {
+                          _selectedServiceKey = null;
+                        }
+                      });
+                    }
+                  });
+                }
+                
+                return StreamBuilder(
+                  stream: ClientConfigsUpdate.rustSignalStream,
+                  builder: (context, clientSnapshot) {
+                    // Update client configs when client data is available
+                    if (clientSnapshot.hasData) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (mounted) {
+                          _updateClientConfigsFromSignal(clientSnapshot.data!.message.clients);
+                        }
+                      });
+                    }
+                    
+                    return StreamBuilder(
+                      stream: ClientConnectionStatus.rustSignalStream,
+                      builder: (context, connectionSnapshot) {
+                        // Handle client connection status updates
+                        if (connectionSnapshot.hasData) {
+                          final message = connectionSnapshot.data!.message.status;
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(message),
+                                  backgroundColor:
+                                      message.contains('Error') || message.contains('failed')
+                                      ? Colors.red
+                                      : Colors.green,
+                                  duration: const Duration(seconds: 3),
+                                ),
+                              );
+                              
+                              // Reload configs after connection status update
+                              Future.delayed(const Duration(milliseconds: 500), () {
+                                if (mounted) {
+                                  _loadClientConfigs();
+                                }
+                              });
+                            }
+                          });
+                        }
+                        
+                        return StreamBuilder(
+                          stream: ClientStatusResponse.rustSignalStream,
+                          builder: (context, statusSnapshot) {
+                            // Handle individual client status responses
+                            if (statusSnapshot.hasData) {
+                              final signal = statusSnapshot.data!.message;
+                              final serviceKey = signal.serviceKey;
+                              final status = signal.status;
+                              final message = signal.message;
+                              
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (mounted) {
+                                  // Show feedback for status updates
+                                  if (message.isNotEmpty &&
+                                      (status == 'failed' || message.contains('Error'))) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('$serviceKey: $message'),
+                                        backgroundColor: Colors.red,
+                                        duration: const Duration(seconds: 5),
+                                      ),
+                                    );
+                                  }
+                                  
+                                  // Update local client config status
+                                  final configIndex = _clientConfigs.indexWhere(
+                                    (config) => config.serviceKey == serviceKey,
+                                  );
+                                  if (configIndex != -1) {
+                                    setState(() {
+                                      _clientConfigs[configIndex].updateStatus(
+                                        _parseClientStatus(status),
+                                        message,
+                                      );
+                                    });
+                                  }
+                                }
+                              });
+                            }
+                            
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
             // New connection form
             Card(
               child: Padding(
@@ -564,7 +590,17 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
             ],
             const SizedBox(height: 24),
             const LogViewButton(),
-          ],
+                            ],
+                          );
+                        },
+                      );
+                    },
+                  );
+                },
+              );
+            },
+          );
+        },
         ),
       ),
     );

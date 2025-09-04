@@ -785,7 +785,10 @@ impl PbMapperActor {
         enable_keep_alive: bool,
     ) -> Result<(), String> {
         if self.service_handles.contains_key(&service_key) {
-            return Err(format!("Service '{service_key}' is already registered"));
+            tracing::warn!(
+                "Service '{service_key}' is already registered,You should check service key in flutter UI"
+            );
+            self.service_handles.remove(&service_key);
         }
 
         if enable_keep_alive {
@@ -843,10 +846,10 @@ impl PbMapperActor {
                     status: "retrying".to_string(),
                     message: "Service is retrying connection to pb-server".to_string(),
                 },
-                _ => ServiceRegistrationStatusUpdate {
+                failed_msg => ServiceRegistrationStatusUpdate {
                     service_key: service_key_for_callback.clone(),
                     status: "failed".to_string(),
-                    message: "Service connection failed".to_string(),
+                    message: format!("Service connection failed with:{}", failed_msg),
                 },
             };
             status_signal.send_signal_to_dart();
@@ -992,9 +995,10 @@ impl PbMapperActor {
         enable_keep_alive: bool,
     ) -> Result<(), String> {
         if self.client_handles.contains_key(&service_key) {
-            return Err(format!(
-                "Client for service '{service_key}' is already connected"
-            ));
+            tracing::warn!(
+                "Client for service '{service_key}' is already connected.You should complete the correct detection on the Flutter side."
+            );
+            self.client_handles.remove(&service_key);
         }
 
         if enable_keep_alive {

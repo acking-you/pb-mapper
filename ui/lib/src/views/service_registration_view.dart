@@ -35,70 +35,6 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
     // Request server status to check availability
     const RequestServerStatus().sendSignalToRust();
-
-    // Listen for config updates
-    ConfigStatusUpdate.rustSignalStream.listen((signal) {
-      if (mounted) {
-        setState(() {
-          _serverAddress = signal.message.serverAddress;
-        });
-      }
-    });
-
-    // Listen for server status updates
-    ServerStatusDetailUpdate.rustSignalStream.listen((signal) {
-      if (mounted) {
-        setState(() {
-          _serverAvailable = signal.message.serverAvailable;
-        });
-      }
-    });
-
-    // Listen for service configs updates from Rust (only used when actively requested)
-    ServiceConfigsUpdate.rustSignalStream.listen((signal) {
-      if (mounted) {
-        final configs = signal.message.services
-            .map(
-              (service) => ServiceConfig(
-                serviceKey: service.serviceKey,
-                localAddress: service.localAddress,
-                protocol: service.protocol,
-                enableEncryption: service.enableEncryption,
-                enableKeepAlive: service.enableKeepAlive,
-                status: _parseStatus(service.status),
-                statusMessage: service.statusMessage,
-                createdAt: DateTime.fromMillisecondsSinceEpoch(
-                  service.createdAtMs.toInt(),
-                ),
-                updatedAt: DateTime.fromMillisecondsSinceEpoch(
-                  service.updatedAtMs.toInt(),
-                ),
-              ),
-            )
-            .toList();
-
-        // Sort configs by creation time to ensure consistent ordering
-        configs.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-
-        setState(() {
-          _serviceConfigs = configs;
-        });
-      }
-    });
-
-    // Listen for service registration status updates (including errors)
-    ServiceRegistrationStatusUpdate.rustSignalStream.listen((signal) {
-      if (mounted && signal.message.status == 'failed') {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '${signal.message.serviceKey}: ${signal.message.message}',
-            ),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    });
   }
 
   Future<void> _loadServiceConfigs() async {
@@ -480,9 +416,98 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+        child: StreamBuilder(
+          stream: ConfigStatusUpdate.rustSignalStream,
+          builder: (context, configSnapshot) {
+            // Update server address when config data is available
+            if (configSnapshot.hasData) {
+              final config = configSnapshot.data!.message;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && _serverAddress != config.serverAddress) {
+                  setState(() {
+                    _serverAddress = config.serverAddress;
+                  });
+                }
+              });
+            }
+            
+            return StreamBuilder(
+              stream: ServerStatusDetailUpdate.rustSignalStream,
+              builder: (context, serverSnapshot) {
+                // Update server availability when server status data is available
+                if (serverSnapshot.hasData) {
+                  final status = serverSnapshot.data!.message;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted && _serverAvailable != status.serverAvailable) {
+                      setState(() {
+                        _serverAvailable = status.serverAvailable;
+                      });
+                    }
+                  });
+                }
+                
+                return StreamBuilder(
+                  stream: ServiceConfigsUpdate.rustSignalStream,
+                  builder: (context, serviceSnapshot) {
+                    // Update service configs when service data is available
+                    if (serviceSnapshot.hasData) {
+                      final configs = serviceSnapshot.data!.message.services
+                          .map(
+                            (service) => ServiceConfig(
+                              serviceKey: service.serviceKey,
+                              localAddress: service.localAddress,
+                              protocol: service.protocol,
+                              enableEncryption: service.enableEncryption,
+                              enableKeepAlive: service.enableKeepAlive,
+                              status: _parseStatus(service.status),
+                              statusMessage: service.statusMessage,
+                              createdAt: DateTime.fromMillisecondsSinceEpoch(
+                                service.createdAtMs.toInt(),
+                              ),
+                              updatedAt: DateTime.fromMillisecondsSinceEpoch(
+                                service.updatedAtMs.toInt(),
+                              ),
+                            ),
+                          )
+                          .toList();
+                      
+                      // Sort configs by creation time to ensure consistent ordering
+                      configs.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+                      
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (mounted) {
+                          setState(() {
+                            _serviceConfigs = configs;
+                          });
+                        }
+                      });
+                    }
+                    
+                    return StreamBuilder(
+                      stream: ServiceRegistrationStatusUpdate.rustSignalStream,
+                      builder: (context, registrationSnapshot) {
+                        // Handle service registration status updates (including errors)
+                        if (registrationSnapshot.hasData) {
+                          final signal = registrationSnapshot.data!.message;
+                          if (signal.status == 'failed') {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      '${signal.serviceKey}: ${signal.message}',
+                                    ),
+                                    backgroundColor: Colors.red,
+                                  ),
+                                );
+                              }
+                            });
+                          }
+                        }
+                        
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
@@ -685,7 +710,15 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
             // Log view button
             const LogViewButton(),
-          ],
+                          ],
+                        );
+                      },
+                    );
+                  },
+                );
+              },
+            );
+          },
         ),
       ),
     );

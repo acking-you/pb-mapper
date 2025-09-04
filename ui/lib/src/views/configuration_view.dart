@@ -22,33 +22,6 @@ class _ConfigurationViewState extends State<ConfigurationView> {
     super.initState();
     // Request current configuration from Rust
     RequestConfig().sendSignalToRust();
-
-    // Listen for config updates and update UI fields
-    ConfigStatusUpdate.rustSignalStream.listen((signal) {
-      if (mounted) {
-        setState(() {
-          _serverAddressController.text = signal.message.serverAddress;
-          _isKeepAliveEnabled = signal.message.keepAliveEnabled;
-        });
-      }
-    });
-
-    // Listen for config save results
-    ConfigSaveResult.rustSignalStream.listen((signal) {
-      if (mounted) {
-        setState(() {
-          _isSaving = false;
-        });
-
-        final result = signal.message;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(result.message),
-            backgroundColor: result.success ? Colors.green : Colors.red,
-          ),
-        );
-      }
-    });
   }
 
   @override
@@ -75,9 +48,48 @@ class _ConfigurationViewState extends State<ConfigurationView> {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+        child: StreamBuilder(
+          stream: ConfigStatusUpdate.rustSignalStream,
+          builder: (context, configSnapshot) {
+            // Update UI fields when config data is available
+            if (configSnapshot.hasData) {
+              final config = configSnapshot.data!.message;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && _serverAddressController.text != config.serverAddress) {
+                  _serverAddressController.text = config.serverAddress;
+                }
+                if (mounted && _isKeepAliveEnabled != config.keepAliveEnabled) {
+                  setState(() {
+                    _isKeepAliveEnabled = config.keepAliveEnabled;
+                  });
+                }
+              });
+            }
+            
+            return StreamBuilder(
+              stream: ConfigSaveResult.rustSignalStream,
+              builder: (context, saveSnapshot) {
+                // Handle save results
+                if (saveSnapshot.hasData) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted && _isSaving) {
+                      setState(() {
+                        _isSaving = false;
+                      });
+                      final result = saveSnapshot.data!.message;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(result.message),
+                          backgroundColor: result.success ? Colors.green : Colors.red,
+                        ),
+                      );
+                    }
+                  });
+                }
+                
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
@@ -156,24 +168,17 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 16),
-                    StreamBuilder(
-                      stream: ConfigStatusUpdate.rustSignalStream,
-                      builder: (context, snapshot) {
-                        if (snapshot.hasData) {
-                          final config = snapshot.data!.message;
-                          return Column(
+                    configSnapshot.hasData
+                        ? Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('Server Address: ${config.serverAddress}'),
+                              Text('Server Address: ${configSnapshot.data!.message.serverAddress}'),
                               Text(
-                                'Keep-Alive Enabled: ${config.keepAliveEnabled ? 'Yes' : 'No'}',
+                                'Keep-Alive Enabled: ${configSnapshot.data!.message.keepAliveEnabled ? 'Yes' : 'No'}',
                               ),
                             ],
-                          );
-                        }
-                        return const Text('Fetching current configuration...');
-                      },
-                    ),
+                          )
+                        : const Text('Fetching current configuration...'),
                     const SizedBox(height: 16),
                     Text(
                       'Note: Changes will apply after restarting the server.',
@@ -184,7 +189,11 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                 ),
               ),
             ),
-          ],
+                  ],
+                );
+              },
+            );
+          },
         ),
       ),
     );

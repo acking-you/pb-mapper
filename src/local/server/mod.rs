@@ -50,6 +50,7 @@ fn get_ping_message() -> Vec<u8> {
         .clone()
 }
 
+#[derive(Debug)]
 enum Status {
     Timeout,
     ReadMsg,
@@ -121,13 +122,18 @@ pub async fn run_server_side_cli_with_callback<
                     timeout_count.count()
                 );
 
-                // Notify external systems that we're in retry mode
+                // Notify external systems
                 if let Some(ref callback) = status_callback {
-                    callback("retrying");
+                    let status = format!("{status:?}");
+                    callback(&status);
                 }
 
                 tokio::time::sleep(Duration::from_secs(retry_interval)).await;
                 retry_interval = timeout_count.get_interval_by_count();
+                // Notify external systems that we're in retry mode
+                if let Some(ref callback) = status_callback {
+                    callback("retrying");
+                }
             }
         }
     }
