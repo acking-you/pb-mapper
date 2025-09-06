@@ -94,7 +94,7 @@ BEGIN
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "pb-mapper" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2025 pb-mapper. All rights reserved." "\0"
-            VALUE "OriginalFilename", "pb-mapper.exe" "\0"
+            VALUE "OriginalFilename", "pb_mapper_ui.exe" "\0"
             VALUE "ProductName", "pb-mapper" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
