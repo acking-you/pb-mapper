@@ -1,0 +1,32 @@
+display_name: pb-mapper
+product_name: pb-mapper
+description: Network port mapping and tunneling tool
+company_name: pb-mapper
+copyright: Copyright © 2024 pb-mapper
+version: 1.0.0
+exe_name: pb_mapper_ui.exe
+installer_name: pb-mapper-setup.exe
+
+install_dir_name: pb-mapper
+
+# Icon configuration
+setup_icon_file: ../../runner/resources/app_icon.ico
+exe_icon_file: ../../runner/resources/app_icon.ico
+
+# Installation options
+create_desktop_icon: true
+create_start_menu_icon: true
+add_to_path: false
+
+# Languages
+languages:
+  - english
+  - chinesesimplified
+
+# License (optional)
+# license_file: LICENSE.txt
+
+# Additional files to include
+# include_files:
+#   - source: path/to/additional/file
+#     destination: destination/path
