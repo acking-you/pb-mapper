@@ -8,6 +8,6 @@ executable_name: pb_mapper_ui.exe
 output_base_file_name: pb-mapper-setup.exe
 setup_icon_file: ..\windows\runner\resources\app_icon.ico
 locales:
-  - lang: zh
-  - lang: en
+  - zh
+  - en
 privileges_required: admin
