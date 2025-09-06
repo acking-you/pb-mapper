@@ -849,7 +849,7 @@ impl PbMapperActor {
                 failed_msg => ServiceRegistrationStatusUpdate {
                     service_key: service_key_for_callback.clone(),
                     status: "failed".to_string(),
-                    message: format!("Service connection failed with:{}", failed_msg),
+                    message: format!("Service connection failed with:{failed_msg}"),
                 },
             };
             status_signal.send_signal_to_dart();
@@ -1671,10 +1671,10 @@ mod tests {
 
         // Verify the path is not empty and ends with config.json
         assert!(!config_path.as_os_str().is_empty());
-        assert!(config_path.file_name().unwrap() == "config.json");
+        assert!(config_path.file_name().expect("config path should have filename") == "config.json");
 
         // Print the path for manual verification on different platforms
-        println!("Config file path: {:?}", config_path);
+        println!("Config file path: {config_path:?}");
 
         // Test that the parent directory exists or can be created
         if let Some(parent) = config_path.parent() {
@@ -1690,11 +1690,11 @@ mod tests {
         };
 
         // Test JSON serialization
-        let json_str = serde_json::to_string_pretty(&config).unwrap();
-        println!("Config JSON: {}", json_str);
+        let json_str = serde_json::to_string_pretty(&config).expect("config should serialize to JSON");
+        println!("Config JSON: {json_str}");
 
         // Test JSON deserialization
-        let loaded_config: AppConfig = serde_json::from_str(&json_str).unwrap();
+        let loaded_config: AppConfig = serde_json::from_str(&json_str).expect("JSON should deserialize to config");
         assert_eq!(loaded_config.server_address, config.server_address);
         assert_eq!(loaded_config.keep_alive_enabled, config.keep_alive_enabled);
     }
@@ -1712,11 +1712,11 @@ mod tests {
         let temp_config_path = temp_dir.join("test_pb_mapper_config.json");
 
         // Save config
-        let json_content = serde_json::to_string_pretty(&test_config).unwrap();
-        std::fs::write(&temp_config_path, json_content).unwrap();
+        let json_content = serde_json::to_string_pretty(&test_config).expect("test config should serialize");
+        std::fs::write(&temp_config_path, json_content).expect("should write config to temp file");
 
         // Load config
-        let loaded_content = std::fs::read_to_string(&temp_config_path).unwrap();
+        let loaded_content = std::fs::read_to_string(&temp_config_path).expect("should read config from temp file");
         let loaded_config: AppConfig = serde_json::from_str(&loaded_content).unwrap();
 
         // Verify
