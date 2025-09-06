@@ -1,0 +1,30 @@
+name: pb-mapper
+description: Network port mapping and tunneling tool
+version: 1.0.0
+publish_to: none
+
+executables:
+  main:
+    name: pb-mapper
+    file: lib/main.dart
+
+packaging:
+  name: pb-mapper
+  description: Network port mapping and tunneling tool
+  executables:
+    - main
+
+distribute_options:
+  linux:
+    icon: assets/app_icon.png
+    desktop:
+      Name: pb-mapper
+      Comment: Network port mapping and tunneling tool
+      Keywords: network;tunnel;proxy;port;mapping
+      Categories: Network;Internet
+
+custom:
+  appimage:
+    icon: assets/app_icon.png
+  zip:
+    include_runtime: true
