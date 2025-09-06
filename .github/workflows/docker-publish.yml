@@ -46,31 +46,21 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Set up Rust toolchain
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: 1.88.0
           targets: ${{ matrix.target.arch }}-unknown-linux-musl
 
-      - name: Install musl tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          if [ "${{ matrix.target.arch }}" = "aarch64" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-          fi
-
       - name: Build pb-mapper-server binary
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --bin pb-mapper-server --verbose --release --target ${{ matrix.target.arch }}-unknown-linux-musl
+
+      - name: Prepare files for Docker build
         run: |
-          # Set target-specific environment variables
-          if [ "${{ matrix.target.arch }}" = "aarch64" ]; then
-            export CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
-          fi
-          
-          # Build the server binary
-          cargo build --release --bin pb-mapper-server --target ${{ matrix.target.arch }}-unknown-linux-musl
-          
           # Copy binary to expected location for Docker build
           mkdir -p target/release
           cp target/${{ matrix.target.arch }}-unknown-linux-musl/release/pb-mapper-server target/release/
