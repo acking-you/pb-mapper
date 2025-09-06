@@ -18,7 +18,7 @@ use self::impl_inner::{UdpStreamReadContext, UdpStreamWriteContext};
 use super::addr::{each_addr, ToSocketAddrs};
 use crate::snafu_error_get_or_return;
 #[cfg(feature = "udp-timeout")]
-use crate::udp::impl_inner::get_sleep;
+use crate::utils::udp::impl_inner::get_sleep;
 
 const UDP_CHANNEL_LEN: usize = 100;
 const UDP_BUFFER_SIZE: usize = 16 * 1024;

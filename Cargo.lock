@@ -1528,6 +1528,7 @@ dependencies = [
  "futures",
  "hashbrown",
  "mimalloc-rust",
+ "once_cell",
  "rand 0.9.2",
  "ring",
  "serde",
