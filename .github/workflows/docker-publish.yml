@@ -1,0 +1,151 @@
+name: Build and Push pb-mapper-server Docker Images
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+    branches:
+      - master
+  workflow_dispatch:
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ackingliu/pb-mapper
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - arch: x86_64
+            platform: linux/amd64
+            suffix: x86_64_musl
+          - arch: aarch64
+            platform: linux/arm64
+            suffix: aarch64_musl
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target.arch }}-unknown-linux-musl
+
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          if [ "${{ matrix.target.arch }}" = "aarch64" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+
+      - name: Build pb-mapper-server binary
+        run: |
+          # Set target-specific environment variables
+          if [ "${{ matrix.target.arch }}" = "aarch64" ]; then
+            export CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
+          fi
+          
+          # Build the server binary
+          cargo build --release --bin pb-mapper-server --target ${{ matrix.target.arch }}-unknown-linux-musl
+          
+          # Copy binary to expected location for Docker build
+          mkdir -p target/release
+          cp target/${{ matrix.target.arch }}-unknown-linux-musl/release/pb-mapper-server target/release/
+          cp scripts/release/entrypoint/pb-mapper-server.sh target/release/
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,suffix=-${{ matrix.target.suffix }}
+            type=ref,event=tag,suffix=-${{ matrix.target.suffix }}
+            type=semver,pattern={{version}},suffix=-${{ matrix.target.suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.target.suffix }}
+            type=semver,pattern={{major}},suffix=-${{ matrix.target.suffix }}
+            type=raw,value=latest,suffix=-${{ matrix.target.suffix }},enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/pb-mapper-server.dockerfile
+          platforms: ${{ matrix.target.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  create-manifest:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract tag version
+        id: extract_tag
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          VERSION=${TAG#v}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Create and push multi-arch manifest
+        run: |
+          TAG="${{ steps.extract_tag.outputs.tag }}"
+          VERSION="${{ steps.extract_tag.outputs.version }}"
+          
+          # Create manifest for version tag
+          docker manifest create ${{ env.IMAGE_NAME }}:${VERSION} \
+            ${{ env.IMAGE_NAME }}:${VERSION}-x86_64_musl \
+            ${{ env.IMAGE_NAME }}:${VERSION}-aarch64_musl
+          
+          docker manifest push ${{ env.IMAGE_NAME }}:${VERSION}
+          
+          # Create manifest for latest if this is the latest tag
+          docker manifest create ${{ env.IMAGE_NAME }}:latest \
+            ${{ env.IMAGE_NAME }}:${VERSION}-x86_64_musl \
+            ${{ env.IMAGE_NAME }}:${VERSION}-aarch64_musl
+          
+          docker manifest push ${{ env.IMAGE_NAME }}:latest
+
+      - name: Update Docker Hub description
+        uses: peter-evans/dockerhub-description@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: ackingliu/pb-mapper
+          short-description: "pb-mapper network tunneling server - expose local services through a public server"
+          readme-filepath: ./README.md
