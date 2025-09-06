@@ -1,0 +1,111 @@
+name: Syntax Check
+
+on:
+  push:
+    branches: [ "**" ]
+    tags-ignore: [ "**" ]  # Don't run on tag pushes
+  pull_request:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  rust-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: clippy, rustfmt
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy on workspace
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run Clippy on pb-mapper-server
+        run: cargo clippy --bin pb-mapper-server --all-features -- -D warnings
+
+      - name: Run Clippy on pb-mapper-server-cli  
+        run: cargo clippy --bin pb-mapper-server-cli --all-features -- -D warnings
+
+      - name: Run Clippy on pb-mapper-client-cli
+        run: cargo clippy --bin pb-mapper-client-cli --all-features -- -D warnings
+
+  flutter-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.35.1
+          channel: "stable"
+
+      - name: Cache Flutter dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.pub-cache
+            ui/.dart_tool
+          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.yaml') }}
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Install Rust for Rinf
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Generate Rinf bindings
+        run: |
+          cd ui
+          cargo install rinf_cli
+          rinf gen
+
+      - name: Get Flutter dependencies
+        run: |
+          cd ui
+          flutter pub get
+
+      - name: Check Dart formatting
+        run: |
+          cd ui
+          dart format --set-exit-if-changed .
+
+      - name: Run Flutter analyzer
+        run: |
+          cd ui
+          flutter analyze
+
+      - name: Check for Flutter warnings
+        run: |
+          cd ui
+          flutter analyze --no-fatal-infos --no-fatal-warnings
