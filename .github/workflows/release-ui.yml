@@ -103,8 +103,6 @@ jobs:
           WizardStyle=modern
           LanguageDetectionMethod=uilanguage
           ShowLanguageDialog=yes
-          ; Sign the installer
-          SignTool=signtool `$f ..\..\..\pb-mapper-cert.pfx `$p pb-mapper-cert-password
 
           [Languages]
           Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -142,10 +140,6 @@ jobs:
           if (Test-Path "Output\pb-mapper-windows-amd64_setup.exe") {
               echo "✓ Installer created successfully"
               ls Output
-              
-              # Verify installer signature
-              echo "=== Verifying installer signature ==="
-              & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" verify /pa /v "Output\pb-mapper-windows-amd64_setup.exe"
           } else {
               echo "✗ Installer creation failed"
               echo "=== Inno Setup Error Log ==="
@@ -158,32 +152,27 @@ jobs:
           echo "=== Creating final ZIP package ==="
           Compress-Archive -Path "Output\pb-mapper-windows-amd64_setup.exe" -DestinationPath "Output\pb-mapper-windows-amd64_setup.zip"
           
-          # Export public certificate for users
-          echo "=== Exporting public certificate for users ==="
-          Export-Certificate -Cert $cert -FilePath "Output\pb-mapper-public-cert.cer"
-          
           Remove-Item -Path "Output\pb-mapper-windows-amd64_setup.exe"
           
           # Create installation instructions
           echo @"
           # pb-mapper Windows Installation Instructions
           
-          ## Option 1: Portable Version (Recommended for most users)
+          ## Option 1: Portable Version (Recommended)
           1. Download pb-mapper-windows-amd64-portable.zip
           2. Extract to desired location
           3. Run pb_mapper_ui.exe
           4. If Windows Defender blocks it, click 'More info' then 'Run anyway'
           
-          ## Option 2: Installer Version (Advanced users)
+          ## Option 2: Installer Version
           1. Download pb-mapper-windows-amd64_setup.zip and extract
-          2. Download pb-mapper-public-cert.cer
-          3. Right-click pb-mapper-public-cert.cer → Install Certificate
-          4. Choose 'Local Machine' → 'Trusted Root Certification Authorities'
-          5. Run pb-mapper-windows-amd64_setup.exe
+          2. Run pb-mapper-windows-amd64_setup.exe
+          3. If Windows shows security warning, click 'More info' then 'Run anyway'
+          4. Follow the installer prompts
           
           ## Security Note
-          This application is signed with a self-signed certificate. For maximum security,
-          verify the SHA256 hash matches the release notes before installation.
+          This application is not code-signed with a commercial certificate, so Windows may show security warnings.
+          The application is safe to run - these warnings appear for all unsigned applications on Windows.
           "@ > Output\INSTALLATION_INSTRUCTIONS.txt
           
           ls .\Output
