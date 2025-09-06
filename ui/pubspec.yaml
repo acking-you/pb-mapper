@@ -51,6 +51,42 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
+  icons_launcher: ^3.0.0
+
+icons_launcher:
+  # Base icon used when a platform override isn't provided
+  image_path: assets/app_icon.png
+  platforms:
+    android:
+      enable: true
+      # Use adaptive icons on Android (recommended)
+      adaptive_background_color: "#7E57C2"
+      # adaptive_background_color: "#FFFFFF"   # or use an image:
+      # adaptive_background_image: assets/app_icon_bg.png
+      # adaptive_foreground_image: assets/app_icon_fg.png  # 432x432 content, no padding
+      # adaptive_round_image: assets/app_icon_round.png    # optional round variant
+      # adaptive_monochrome_image: assets/app_icon_mono.png # Android 13+ monochrome
+      # notification_image: assets/notification_icon.png    # white-only, transparent bg
+    ios:
+      enable: true
+      # image_path: assets/app_icon_ios.png     # 1024x1024 without transparency
+      # remove_alpha_ios: true                  # recommended by Apple
+      # prerendered: true
+    macos:
+      enable: true
+      # image_path: assets/app_icon_macos.png   # 1024x1024
+    windows:
+      enable: true
+      # image_path: assets/app_icon_windows.png # 256/512 PNG, generates .ico
+    linux:
+      enable: true
+      # image_path: assets/app_icon_linux.png   # 512x512 PNG
+    web:
+      enable: true
+      # image_path: assets/app_icon_web.png     # 512x512 PNG for PWA
+      # favicon_path: assets/favicon.png        # 32x32/48x48 optional custom favicon
+      background_color: "#7E57C2"
+      theme_color: "#7E57C2"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
