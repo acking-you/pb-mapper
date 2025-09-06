@@ -88,50 +88,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  create-manifest:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
-    
-    steps:
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Extract tag version
-        id: extract_tag
-        run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          VERSION=${TAG#v}
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
-      - name: Create and push multi-arch manifest
-        run: |
-          TAG="${{ steps.extract_tag.outputs.tag }}"
-          VERSION="${{ steps.extract_tag.outputs.version }}"
-          
-          # Delete existing manifests if they exist
-          docker manifest rm ${{ env.IMAGE_NAME }}:${VERSION} 2>/dev/null || true
-          docker manifest rm ${{ env.IMAGE_NAME }}:latest 2>/dev/null || true
-          
-          # Create manifest for version tag
-          docker manifest create ${{ env.IMAGE_NAME }}:${VERSION} \
-            --amend ${{ env.IMAGE_NAME }}:${VERSION}-x86_64_musl \
-            --amend ${{ env.IMAGE_NAME }}:${VERSION}-aarch64_musl
-          
-          docker manifest push ${{ env.IMAGE_NAME }}:${VERSION}
-          
-          # Create manifest for latest
-          docker manifest create ${{ env.IMAGE_NAME }}:latest \
-            --amend ${{ env.IMAGE_NAME }}:${VERSION}-x86_64_musl \
-            --amend ${{ env.IMAGE_NAME }}:${VERSION}-aarch64_musl
-          
-          docker manifest push ${{ env.IMAGE_NAME }}:latest
-
       - name: Update Docker Hub description
         uses: peter-evans/dockerhub-description@v3
         with:
