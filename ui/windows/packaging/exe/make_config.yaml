@@ -1,7 +1,15 @@
+app_id: 6L913538-42B1-4596-G479-BJ779F21A65D
+publisher: pb-mapper
+publisher_url: https://github.com/acking-you/pb-mapper
 display_name: pb-mapper
-product_name: pb-mapper
-description: Network port mapping and tunneling tool
-company_name: pb-mapper
-copyright: Copyright © 2024 pb-mapper
-exe_name: pb_mapper_ui.exe
-installer_name: pb-mapper-setup.exe
+executable_name: pb_mapper_ui.exe
+output_base_file_name: pb-mapper-setup.exe
+create_desktop_icon: true
+launch_at_startup: false
+privileges_required: lowest
+install_dir_name: "{autopf64}\\pb-mapper"
+setup_icon_file: ..\..\windows\runner\resources\app_icon.ico
+locales:
+  - en
+  - zh
+script_template: inno_setup.sas
