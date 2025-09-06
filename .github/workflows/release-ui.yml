@@ -67,7 +67,7 @@ jobs:
           #define MyAppPublisher "pb-mapper"
           #define MyAppURL "https://github.com/your-username/pb-mapper"
           #define MyAppExeName "pb_mapper_ui.exe"
-          #define MyOutputName "pb-mapper"
+          #define MyOutputName "pb-mapper-windows-amd64_setup"
 
           [Setup]
           ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
@@ -114,7 +114,7 @@ jobs:
           Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
           "@ > setup.iss
           iscc.exe setup.iss
-          mv "Output\pb-mapper.exe" "Output\pb-mapper-windows-amd64_setup.exe"
+          ls Output
           Compress-Archive -Path "Output\pb-mapper-windows-amd64_setup.exe" -DestinationPath "Output\pb-mapper-windows-amd64_setup.zip"
           Remove-Item -Path "Output\pb-mapper-windows-amd64_setup.exe"
           ls  .\Output
@@ -124,7 +124,7 @@ jobs:
           files: ui/build/windows/x64/Output/*
 
   build-linux:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     needs: [get-release]
     steps:
       - uses: actions/checkout@v4
