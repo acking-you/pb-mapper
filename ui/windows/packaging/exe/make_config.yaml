@@ -7,4 +7,3 @@ setup_icon_file: windows\runner\resources\app_icon.ico
 locales:
   - zh
   - en
-script_template: inno_setup.iss
