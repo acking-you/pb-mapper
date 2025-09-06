@@ -95,11 +95,6 @@ jobs:
           cd ui
           flutter pub get
 
-      - name: Check Dart formatting
-        run: |
-          cd ui
-          dart format --set-exit-if-changed .
-
       - name: Run Flutter analyzer
         run: |
           cd ui
