@@ -1,11 +1,11 @@
 {
-    "name": "ui",
-    "short_name": "ui",
+    "name": "pb-mapper",
+    "short_name": "pb-mapper",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#1976D2",
+    "theme_color": "#1976D2",
+    "description": "Network port mapping and tunneling tool",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

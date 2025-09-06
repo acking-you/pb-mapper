@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "ui" "\0"
+            VALUE "CompanyName", "pb-mapper" "\0"
+            VALUE "FileDescription", "Network port mapping and tunneling tool" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "ui" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2025 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "ui.exe" "\0"
-            VALUE "ProductName", "ui" "\0"
+            VALUE "InternalName", "pb-mapper" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2025 pb-mapper. All rights reserved." "\0"
+            VALUE "OriginalFilename", "pb-mapper.exe" "\0"
+            VALUE "ProductName", "pb-mapper" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
