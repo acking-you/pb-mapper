@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/models/client_config.dart';
 import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class ClientCard extends StatefulWidget {
   final ClientConfig config;
@@ -31,6 +33,17 @@ class _ClientCardState extends State<ClientCard> {
     super.initState();
     _config = widget.config;
     _setupStatusListener();
+  }
+
+  Future<void> _copyLocalAddress() async {
+    final addr = _config.localAddress.trim();
+    if (addr.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: addr));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Copied to clipboard: $addr')),
+      );
+    }
   }
 
   void _setupStatusListener() {
@@ -157,6 +170,28 @@ class _ClientCardState extends State<ClientCard> {
     });
   }
 
+  Future<void> _openLocalAddress() async {
+    final addr = _config.localAddress.trim();
+    if (addr.isEmpty) return;
+
+    // Prefix scheme if missing to help browsers resolve the URL
+    final String urlString = addr.contains('://') ? addr : 'http://$addr';
+    Uri? uri;
+    try {
+      uri = Uri.parse(urlString);
+    } catch (_) {
+      uri = null;
+    }
+
+    if (uri != null && await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } else if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Cannot open $urlString')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -192,6 +227,12 @@ class _ClientCardState extends State<ClientCard> {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // Open in browser
+                    IconButton(
+                      onPressed: _openLocalAddress,
+                      icon: const Icon(Icons.open_in_new, size: 20),
+                      tooltip: 'Open in Browser',
+                    ),
                     // Connect/Disconnect button
                     IconButton(
                       onPressed: widget.onConnectDisconnect,
@@ -243,6 +284,7 @@ class _ClientCardState extends State<ClientCard> {
                   icon: Icons.computer,
                   label: _config.localAddress,
                   color: Colors.blue,
+                  onTap: _copyLocalAddress,
                 ),
                 const SizedBox(width: 8),
                 _buildDetailChip(
@@ -330,8 +372,9 @@ class _ClientCardState extends State<ClientCard> {
     required IconData icon,
     required String label,
     required Color color,
+    VoidCallback? onTap,
   }) {
-    return Container(
+    final chip = Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.1),
@@ -352,6 +395,17 @@ class _ClientCardState extends State<ClientCard> {
             ),
           ),
         ],
+      ),
+    );
+
+    if (onTap == null) return chip;
+
+    return Tooltip(
+      message: 'Copy',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: chip,
       ),
     );
   }
