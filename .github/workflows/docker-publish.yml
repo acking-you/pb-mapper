@@ -138,4 +138,4 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
           repository: ackingliu/pb-mapper
           short-description: "pb-mapper network tunneling server - expose local services through a public server"
-          readme-filepath: ./README.md
+          readme-filepath: ./DOCKER_README.md
