@@ -40,9 +40,9 @@ class _ClientCardState extends State<ClientCard> {
     if (addr.isEmpty) return;
     await Clipboard.setData(ClipboardData(text: addr));
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Copied to clipboard: $addr')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Copied to clipboard: $addr')));
     }
   }
 
@@ -186,9 +186,9 @@ class _ClientCardState extends State<ClientCard> {
     if (uri != null && await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Cannot open $urlString')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Cannot open $urlString')));
     }
   }
 

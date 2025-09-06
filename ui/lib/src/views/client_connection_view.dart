@@ -250,7 +250,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                 }
               });
             }
-            
+
             return StreamBuilder(
               stream: ServerStatusDetailUpdate.rustSignalStream,
               builder: (context, serverSnapshot) {
@@ -261,8 +261,10 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                     if (mounted) {
                       setState(() {
                         _serverAvailable = status.serverAvailable;
-                        _availableServices = List<String>.from(status.registeredServices);
-                        
+                        _availableServices = List<String>.from(
+                          status.registeredServices,
+                        );
+
                         // Clear selected service if it's no longer available
                         if (_selectedServiceKey != null &&
                             !_availableServices.contains(_selectedServiceKey)) {
@@ -272,7 +274,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                     }
                   });
                 }
-                
+
                 return StreamBuilder(
                   stream: ClientConfigsUpdate.rustSignalStream,
                   builder: (context, clientSnapshot) {
@@ -280,17 +282,20 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                     if (clientSnapshot.hasData) {
                       WidgetsBinding.instance.addPostFrameCallback((_) {
                         if (mounted) {
-                          _updateClientConfigsFromSignal(clientSnapshot.data!.message.clients);
+                          _updateClientConfigsFromSignal(
+                            clientSnapshot.data!.message.clients,
+                          );
                         }
                       });
                     }
-                    
+
                     return StreamBuilder(
                       stream: ClientConnectionStatus.rustSignalStream,
                       builder: (context, connectionSnapshot) {
                         // Handle client connection status updates
                         if (connectionSnapshot.hasData) {
-                          final message = connectionSnapshot.data!.message.status;
+                          final message =
+                              connectionSnapshot.data!.message.status;
                           if (_lastConnectionStatusMessage != message) {
                             _lastConnectionStatusMessage = message;
                             WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -299,24 +304,28 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                   SnackBar(
                                     content: Text(message),
                                     backgroundColor:
-                                        message.contains('Error') || message.contains('failed')
+                                        message.contains('Error') ||
+                                            message.contains('failed')
                                         ? Colors.red
                                         : Colors.green,
                                     duration: const Duration(seconds: 3),
                                   ),
                                 );
-                                
+
                                 // Reload configs after connection status update
-                                Future.delayed(const Duration(milliseconds: 500), () {
-                                  if (mounted) {
-                                    _loadClientConfigs();
-                                  }
-                                });
+                                Future.delayed(
+                                  const Duration(milliseconds: 500),
+                                  () {
+                                    if (mounted) {
+                                      _loadClientConfigs();
+                                    }
+                                  },
+                                );
                               }
                             });
                           }
                         }
-                        
+
                         return StreamBuilder(
                           stream: ClientStatusResponse.rustSignalStream,
                           builder: (context, statusSnapshot) {
@@ -326,13 +335,15 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                               final serviceKey = signal.serviceKey;
                               final status = signal.status;
                               final message = signal.message;
-                              
+
                               WidgetsBinding.instance.addPostFrameCallback((_) {
                                 if (mounted) {
                                   // Show feedback for status updates (errors only), deduplicated
-                                  final errorKey = '$serviceKey|$status|$message';
+                                  final errorKey =
+                                      '$serviceKey|$status|$message';
                                   if (message.isNotEmpty &&
-                                      (status == 'failed' || message.contains('Error')) &&
+                                      (status == 'failed' ||
+                                          message.contains('Error')) &&
                                       _lastClientStatusErrorKey != errorKey) {
                                     _lastClientStatusErrorKey = errorKey;
                                     ScaffoldMessenger.of(context).showSnackBar(
@@ -343,7 +354,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                       ),
                                     );
                                   }
-                                  
+
                                   // Update local client config status
                                   final configIndex = _clientConfigs.indexWhere(
                                     (config) => config.serviceKey == serviceKey,
@@ -359,257 +370,315 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                 }
                               });
                             }
-                            
+
                             return Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-            // New connection form
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Connect to Service',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 16),
-                    DropdownButtonFormField<String>(
-                      initialValue: _selectedProtocol,
-                      items: ['TCP', 'UDP']
-                          .map(
-                            (protocol) => DropdownMenuItem(
-                              value: protocol,
-                              child: Text(protocol),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        setState(() => _selectedProtocol = value!);
-                      },
-                      decoration: const InputDecoration(
-                        labelText: 'Protocol',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    DropdownButtonFormField<String>(
-                      initialValue:
-                          _availableServices.contains(_selectedServiceKey)
-                          ? _selectedServiceKey
-                          : null,
-                      items: _availableServices.isEmpty
-                          ? [
-                              const DropdownMenuItem(
-                                value: null,
-                                child: Text('No services available'),
-                              ),
-                            ]
-                          : _availableServices.map((serviceKey) {
-                              return DropdownMenuItem(
-                                value: serviceKey,
-                                child: Text(serviceKey),
-                              );
-                            }).toList(),
-                      onChanged:
-                          _serverAvailable && _availableServices.isNotEmpty
-                          ? (value) {
-                              setState(() => _selectedServiceKey = value);
-                            }
-                          : null,
-                      decoration: InputDecoration(
-                        labelText: 'Service Key',
-                        hintText: _serverAvailable
-                            ? (_availableServices.isEmpty
-                                  ? 'No registered services'
-                                  : 'Select a service')
-                            : 'Server unavailable',
-                        border: const OutlineInputBorder(),
-                        prefixIcon: Icon(
-                          _serverAvailable ? Icons.cloud_done : Icons.cloud_off,
-                          color: _serverAvailable ? Colors.green : Colors.red,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _localAddressController,
-                      decoration: const InputDecoration(
-                        labelText: 'Local Address',
-                        hintText: '127.0.0.1:9090',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    SwitchListTile(
-                      title: const Text('Enable TCP Keep-Alive'),
-                      value: _isKeepAliveEnabled,
-                      onChanged: (value) {
-                        setState(() => _isKeepAliveEnabled = value);
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.dns, color: Colors.blue),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Server Address',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
+                                // New connection form
+                                Card(
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(16.0),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Connect to Service',
+                                          style: Theme.of(
+                                            context,
+                                          ).textTheme.titleLarge,
+                                        ),
+                                        const SizedBox(height: 16),
+                                        DropdownButtonFormField<String>(
+                                          initialValue: _selectedProtocol,
+                                          items: ['TCP', 'UDP']
+                                              .map(
+                                                (protocol) => DropdownMenuItem(
+                                                  value: protocol,
+                                                  child: Text(protocol),
+                                                ),
+                                              )
+                                              .toList(),
+                                          onChanged: (value) {
+                                            setState(
+                                              () => _selectedProtocol = value!,
+                                            );
+                                          },
+                                          decoration: const InputDecoration(
+                                            labelText: 'Protocol',
+                                            border: OutlineInputBorder(),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 16),
+                                        DropdownButtonFormField<String>(
+                                          initialValue:
+                                              _availableServices.contains(
+                                                _selectedServiceKey,
+                                              )
+                                              ? _selectedServiceKey
+                                              : null,
+                                          items: _availableServices.isEmpty
+                                              ? [
+                                                  const DropdownMenuItem(
+                                                    value: null,
+                                                    child: Text(
+                                                      'No services available',
+                                                    ),
+                                                  ),
+                                                ]
+                                              : _availableServices.map((
+                                                  serviceKey,
+                                                ) {
+                                                  return DropdownMenuItem(
+                                                    value: serviceKey,
+                                                    child: Text(serviceKey),
+                                                  );
+                                                }).toList(),
+                                          onChanged:
+                                              _serverAvailable &&
+                                                  _availableServices.isNotEmpty
+                                              ? (value) {
+                                                  setState(
+                                                    () => _selectedServiceKey =
+                                                        value,
+                                                  );
+                                                }
+                                              : null,
+                                          decoration: InputDecoration(
+                                            labelText: 'Service Key',
+                                            hintText: _serverAvailable
+                                                ? (_availableServices.isEmpty
+                                                      ? 'No registered services'
+                                                      : 'Select a service')
+                                                : 'Server unavailable',
+                                            border: const OutlineInputBorder(),
+                                            prefixIcon: Icon(
+                                              _serverAvailable
+                                                  ? Icons.cloud_done
+                                                  : Icons.cloud_off,
+                                              color: _serverAvailable
+                                                  ? Colors.green
+                                                  : Colors.red,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 16),
+                                        TextField(
+                                          controller: _localAddressController,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Local Address',
+                                            hintText: '127.0.0.1:9090',
+                                            border: OutlineInputBorder(),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 16),
+                                        SwitchListTile(
+                                          title: const Text(
+                                            'Enable TCP Keep-Alive',
+                                          ),
+                                          value: _isKeepAliveEnabled,
+                                          onChanged: (value) {
+                                            setState(
+                                              () => _isKeepAliveEnabled = value,
+                                            );
+                                          },
+                                        ),
+                                        const SizedBox(height: 16),
+                                        Container(
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: BoxDecoration(
+                                            border: Border.all(
+                                              color: Colors.grey,
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              8,
+                                            ),
+                                          ),
+                                          child: Row(
+                                            children: [
+                                              const Icon(
+                                                Icons.dns,
+                                                color: Colors.blue,
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    const Text(
+                                                      'Server Address',
+                                                      style: TextStyle(
+                                                        fontSize: 12,
+                                                        color: Colors.grey,
+                                                      ),
+                                                    ),
+                                                    const SizedBox(height: 4),
+                                                    Text(
+                                                      _serverAddress,
+                                                      style: const TextStyle(
+                                                        fontSize: 16,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                              TextButton(
+                                                onPressed: () {
+                                                  AppNavigationManager.navigateToConfigPage();
+                                                },
+                                                child: const Text(
+                                                  'Configure in Settings',
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  _serverAddress,
-                                  style: const TextStyle(fontSize: 16),
+                                const SizedBox(height: 16),
+                                SizedBox(
+                                  height: 48,
+                                  width: double.infinity,
+                                  child: ElevatedButton(
+                                    onPressed:
+                                        (_serverAvailable &&
+                                            _selectedServiceKey != null &&
+                                            _availableServices.isNotEmpty)
+                                        ? _connectService
+                                        : null,
+                                    style: ElevatedButton.styleFrom(
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(24),
+                                      ),
+                                      backgroundColor:
+                                          !_serverAvailable ||
+                                              _availableServices.isEmpty
+                                          ? Colors.grey
+                                          : null,
+                                    ),
+                                    child: Text(
+                                      !_serverAvailable
+                                          ? 'Server Unavailable'
+                                          : (_availableServices.isEmpty
+                                                ? 'No Services Available'
+                                                : 'Connect'),
+                                      style: const TextStyle(fontSize: 16),
+                                    ),
+                                  ),
                                 ),
-                              ],
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () {
-                              AppNavigationManager.navigateToConfigPage();
-                            },
-                            child: const Text(
-                              'Configure in Settings',
-                              style: TextStyle(fontSize: 12),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              height: 48,
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed:
-                    (_serverAvailable &&
-                        _selectedServiceKey != null &&
-                        _availableServices.isNotEmpty)
-                    ? _connectService
-                    : null,
-                style: ElevatedButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  backgroundColor:
-                      !_serverAvailable || _availableServices.isEmpty
-                      ? Colors.grey
-                      : null,
-                ),
-                child: Text(
-                  !_serverAvailable
-                      ? 'Server Unavailable'
-                      : (_availableServices.isEmpty
-                            ? 'No Services Available'
-                            : 'Connect'),
-                  style: const TextStyle(fontSize: 16),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
+                                const SizedBox(height: 16),
 
-            // Existing client configurations
-            if (_isLoading) ...[
-              const SizedBox(height: 24),
-              const Center(child: CircularProgressIndicator()),
-            ] else if (_clientConfigs.isEmpty) ...[
-              const SizedBox(height: 24),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    children: [
-                      Icon(Icons.link_off, size: 48, color: Colors.grey[400]),
-                      const SizedBox(height: 16),
-                      Text(
-                        'No client configurations',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(color: Colors.grey[600]),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Create a new connection above to get started',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Colors.grey[500],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ] else ...[
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Text(
-                    'Active Connections',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    onPressed: _loadClientConfigs,
-                    icon: const Icon(Icons.refresh),
-                    tooltip: 'Refresh All Status',
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              ..._clientConfigs.map(
-                (config) => ClientCard(
-                  key: Key(config.serviceKey),
-                  config: config,
-                  onConnectDisconnect: () =>
-                      config.status == ClientStatus.running ||
-                          config.status == ClientStatus.retrying
-                      ? _handleClientDisconnect(config)
-                      : _handleClientConnect(config),
-                  onDelete: () => _handleClientDelete(config),
-                  onRefresh: () => _handleClientRefresh(config),
-                  onStatusChanged: (updatedConfig) {
-                    final index = _clientConfigs.indexWhere(
-                      (c) => c.serviceKey == updatedConfig.serviceKey,
+                                // Existing client configurations
+                                if (_isLoading) ...[
+                                  const SizedBox(height: 24),
+                                  const Center(
+                                    child: CircularProgressIndicator(),
+                                  ),
+                                ] else if (_clientConfigs.isEmpty) ...[
+                                  const SizedBox(height: 24),
+                                  Card(
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(24),
+                                      child: Column(
+                                        children: [
+                                          Icon(
+                                            Icons.link_off,
+                                            size: 48,
+                                            color: Colors.grey[400],
+                                          ),
+                                          const SizedBox(height: 16),
+                                          Text(
+                                            'No client configurations',
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .titleMedium
+                                                ?.copyWith(
+                                                  color: Colors.grey[600],
+                                                ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          Text(
+                                            'Create a new connection above to get started',
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .bodySmall
+                                                ?.copyWith(
+                                                  color: Colors.grey[500],
+                                                ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ] else ...[
+                                  const SizedBox(height: 24),
+                                  Row(
+                                    children: [
+                                      Text(
+                                        'Active Connections',
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.titleMedium,
+                                      ),
+                                      const Spacer(),
+                                      IconButton(
+                                        onPressed: _loadClientConfigs,
+                                        icon: const Icon(Icons.refresh),
+                                        tooltip: 'Refresh All Status',
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  ..._clientConfigs.map(
+                                    (config) => ClientCard(
+                                      key: Key(config.serviceKey),
+                                      config: config,
+                                      onConnectDisconnect: () =>
+                                          config.status ==
+                                                  ClientStatus.running ||
+                                              config.status ==
+                                                  ClientStatus.retrying
+                                          ? _handleClientDisconnect(config)
+                                          : _handleClientConnect(config),
+                                      onDelete: () =>
+                                          _handleClientDelete(config),
+                                      onRefresh: () =>
+                                          _handleClientRefresh(config),
+                                      onStatusChanged: (updatedConfig) {
+                                        final index = _clientConfigs.indexWhere(
+                                          (c) =>
+                                              c.serviceKey ==
+                                              updatedConfig.serviceKey,
+                                        );
+                                        if (index != -1) {
+                                          setState(() {
+                                            _clientConfigs[index] =
+                                                updatedConfig;
+                                          });
+                                        }
+                                      },
+                                    ),
+                                  ),
+                                ],
+                                const SizedBox(height: 24),
+                                const LogViewButton(),
+                              ],
+                            );
+                          },
+                        );
+                      },
                     );
-                    if (index != -1) {
-                      setState(() {
-                        _clientConfigs[index] = updatedConfig;
-                      });
-                    }
                   },
-                ),
-              ),
-            ],
-            const SizedBox(height: 24),
-            const LogViewButton(),
-                            ],
-                          );
-                        },
-                      );
-                    },
-                  );
-                },
-              );
-            },
-          );
-        },
+                );
+              },
+            );
+          },
         ),
       ),
     );

@@ -432,7 +432,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                 }
               });
             }
-            
+
             return StreamBuilder(
               stream: ServerStatusDetailUpdate.rustSignalStream,
               builder: (context, serverSnapshot) {
@@ -447,7 +447,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                     }
                   });
                 }
-                
+
                 return StreamBuilder(
                   stream: ServiceConfigsUpdate.rustSignalStream,
                   builder: (context, serviceSnapshot) {
@@ -472,10 +472,12 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                             ),
                           )
                           .toList();
-                      
+
                       // Sort configs by creation time to ensure consistent ordering
-                      configs.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-                      
+                      configs.sort(
+                        (a, b) => a.createdAt.compareTo(b.createdAt),
+                      );
+
                       WidgetsBinding.instance.addPostFrameCallback((_) {
                         if (mounted) {
                           setState(() {
@@ -484,7 +486,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                         }
                       });
                     }
-                    
+
                     return StreamBuilder(
                       stream: ServiceRegistrationStatusUpdate.rustSignalStream,
                       builder: (context, registrationSnapshot) {
@@ -492,7 +494,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                         if (registrationSnapshot.hasData) {
                           final signal = registrationSnapshot.data!.message;
                           if (signal.status == 'failed') {
-                            final errorKey = '${signal.serviceKey}|${signal.message}';
+                            final errorKey =
+                                '${signal.serviceKey}|${signal.message}';
                             if (_lastRegistrationErrorKey != errorKey) {
                               _lastRegistrationErrorKey = errorKey;
                               WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -510,212 +513,251 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                             }
                           }
                         }
-                        
+
                         return Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Register Service',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 16),
-                    DropdownButtonFormField<String>(
-                      initialValue: _selectedProtocol,
-                      items: ['TCP', 'UDP']
-                          .map(
-                            (protocol) => DropdownMenuItem(
-                              value: protocol,
-                              child: Text(protocol),
+                            Card(
+                              child: Padding(
+                                padding: const EdgeInsets.all(16.0),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Register Service',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.titleLarge,
+                                    ),
+                                    const SizedBox(height: 16),
+                                    DropdownButtonFormField<String>(
+                                      initialValue: _selectedProtocol,
+                                      items: ['TCP', 'UDP']
+                                          .map(
+                                            (protocol) => DropdownMenuItem(
+                                              value: protocol,
+                                              child: Text(protocol),
+                                            ),
+                                          )
+                                          .toList(),
+                                      onChanged: (value) {
+                                        setState(
+                                          () => _selectedProtocol = value!,
+                                        );
+                                      },
+                                      decoration: const InputDecoration(
+                                        labelText: 'Protocol',
+                                        border: OutlineInputBorder(),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    TextField(
+                                      controller: _serviceKeyController,
+                                      enabled: _serverAvailable,
+                                      decoration: InputDecoration(
+                                        labelText: 'Service Key',
+                                        hintText: _serverAvailable
+                                            ? 'unique-service-key'
+                                            : 'Server unavailable',
+                                        border: const OutlineInputBorder(),
+                                        prefixIcon: Icon(
+                                          _serverAvailable
+                                              ? Icons.cloud_done
+                                              : Icons.cloud_off,
+                                          color: _serverAvailable
+                                              ? Colors.green
+                                              : Colors.red,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    TextField(
+                                      controller: _localAddressController,
+                                      enabled: _serverAvailable,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Local Address',
+                                        hintText: '127.0.0.1:8080',
+                                        border: OutlineInputBorder(),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    SwitchListTile(
+                                      title: const Text('Enable Encryption'),
+                                      value: _isEncryptionEnabled,
+                                      onChanged: _serverAvailable
+                                          ? (value) {
+                                              setState(
+                                                () => _isEncryptionEnabled =
+                                                    value,
+                                              );
+                                            }
+                                          : null,
+                                    ),
+                                    SwitchListTile(
+                                      title: const Text(
+                                        'Enable TCP Keep-Alive',
+                                      ),
+                                      value: _isKeepAliveEnabled,
+                                      onChanged: _serverAvailable
+                                          ? (value) {
+                                              setState(
+                                                () =>
+                                                    _isKeepAliveEnabled = value,
+                                              );
+                                            }
+                                          : null,
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Container(
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        border: Border.all(color: Colors.grey),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.dns,
+                                            color: Colors.blue,
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                const Text(
+                                                  'Server Address',
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: Colors.grey,
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  _serverAddress,
+                                                  style: const TextStyle(
+                                                    fontSize: 16,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          TextButton(
+                                            onPressed: () {
+                                              AppNavigationManager.navigateToConfigPage();
+                                            },
+                                            child: const Text(
+                                              'Configure in Settings',
+                                              style: TextStyle(fontSize: 12),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        setState(() => _selectedProtocol = value!);
-                      },
-                      decoration: const InputDecoration(
-                        labelText: 'Protocol',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _serviceKeyController,
-                      enabled: _serverAvailable,
-                      decoration: InputDecoration(
-                        labelText: 'Service Key',
-                        hintText: _serverAvailable
-                            ? 'unique-service-key'
-                            : 'Server unavailable',
-                        border: const OutlineInputBorder(),
-                        prefixIcon: Icon(
-                          _serverAvailable ? Icons.cloud_done : Icons.cloud_off,
-                          color: _serverAvailable ? Colors.green : Colors.red,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _localAddressController,
-                      enabled: _serverAvailable,
-                      decoration: const InputDecoration(
-                        labelText: 'Local Address',
-                        hintText: '127.0.0.1:8080',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    SwitchListTile(
-                      title: const Text('Enable Encryption'),
-                      value: _isEncryptionEnabled,
-                      onChanged: _serverAvailable
-                          ? (value) {
-                              setState(() => _isEncryptionEnabled = value);
-                            }
-                          : null,
-                    ),
-                    SwitchListTile(
-                      title: const Text('Enable TCP Keep-Alive'),
-                      value: _isKeepAliveEnabled,
-                      onChanged: _serverAvailable
-                          ? (value) {
-                              setState(() => _isKeepAliveEnabled = value);
-                            }
-                          : null,
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.dns, color: Colors.blue),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Server Address',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
+                            const SizedBox(height: 16),
+                            SizedBox(
+                              height: 48,
+                              width: double.infinity,
+                              child: ElevatedButton(
+                                onPressed: (_serverAvailable && !_isRegistering)
+                                    ? _registerService
+                                    : null,
+                                style: ElevatedButton.styleFrom(
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(24),
+                                  ),
+                                  backgroundColor: !_serverAvailable
+                                      ? Colors.grey
+                                      : null,
+                                ),
+                                child: _isRegistering
+                                    ? const Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          ),
+                                          SizedBox(width: 8),
+                                          Text(
+                                            'Registering...',
+                                            style: TextStyle(fontSize: 16),
+                                          ),
+                                        ],
+                                      )
+                                    : Text(
+                                        _serverAvailable
+                                            ? 'Register Service'
+                                            : 'Server Unavailable',
+                                        style: const TextStyle(fontSize: 16),
+                                      ),
+                              ),
+                            ),
+                            const SizedBox(height: 24),
+
+                            // Service Cards Section
+                            if (_serviceConfigs.isNotEmpty) ...[
+                              Card(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16.0),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.dns,
+                                            color: Colors.blue,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            'Registered Services (${_serviceConfigs.length})',
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .titleMedium
+                                                ?.copyWith(
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 16),
+                                      ..._serviceConfigs.map(
+                                        (config) => ServiceCard(
+                                          key: Key(
+                                            config.serviceKey,
+                                          ), // Add unique key for each card
+                                          config: config,
+                                          onEdit: () => _editService(config),
+                                          onDelete: () =>
+                                              _deleteService(config),
+                                          onStartStop: () =>
+                                              _startStopService(config),
+                                          onRefresh: () =>
+                                              _refreshServiceStatus(config),
+                                          onStatusChanged:
+                                              _onServiceStatusChanged,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  _serverAddress,
-                                  style: const TextStyle(fontSize: 16),
-                                ),
-                              ],
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () {
-                              AppNavigationManager.navigateToConfigPage();
-                            },
-                            child: const Text(
-                              'Configure in Settings',
-                              style: TextStyle(fontSize: 12),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              height: 48,
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: (_serverAvailable && !_isRegistering)
-                    ? _registerService
-                    : null,
-                style: ElevatedButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  backgroundColor: !_serverAvailable ? Colors.grey : null,
-                ),
-                child: _isRegistering
-                    ? const Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          SizedBox(width: 8),
-                          Text(
-                            'Registering...',
-                            style: TextStyle(fontSize: 16),
-                          ),
-                        ],
-                      )
-                    : Text(
-                        _serverAvailable
-                            ? 'Register Service'
-                            : 'Server Unavailable',
-                        style: const TextStyle(fontSize: 16),
-                      ),
-              ),
-            ),
-            const SizedBox(height: 24),
+                              ),
+                              const SizedBox(height: 16),
+                            ],
 
-            // Service Cards Section
-            if (_serviceConfigs.isNotEmpty) ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.dns, color: Colors.blue),
-                          const SizedBox(width: 8),
-                          Text(
-                            'Registered Services (${_serviceConfigs.length})',
-                            style: Theme.of(context).textTheme.titleMedium
-                                ?.copyWith(fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      ..._serviceConfigs.map(
-                        (config) => ServiceCard(
-                          key: Key(
-                            config.serviceKey,
-                          ), // Add unique key for each card
-                          config: config,
-                          onEdit: () => _editService(config),
-                          onDelete: () => _deleteService(config),
-                          onStartStop: () => _startStopService(config),
-                          onRefresh: () => _refreshServiceStatus(config),
-                          onStatusChanged: _onServiceStatusChanged,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-            ],
-
-            // Log view button
-            const LogViewButton(),
+                            // Log view button
+                            const LogViewButton(),
                           ],
                         );
                       },

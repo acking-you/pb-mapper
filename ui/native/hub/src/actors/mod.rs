@@ -4,18 +4,25 @@ use crate::signals::SetAppDirectoryPath;
 use messages::prelude::Context;
 use rinf::DartSignal;
 use tokio::spawn;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tokio_with_wasm::alias as tokio;
 
 pub use pb_mapper_actor::*;
 
 async fn get_app_dir() -> Option<String> {
     // Add timeout to prevent hanging if Flutter doesn't send the signal
-    match timeout(Duration::from_secs(10), SetAppDirectoryPath::get_dart_signal_receiver().recv()).await {
+    match timeout(
+        Duration::from_secs(10),
+        SetAppDirectoryPath::get_dart_signal_receiver().recv(),
+    )
+    .await
+    {
         Ok(Some(signal_pack)) => {
             let path = signal_pack.message.path;
             if path.is_empty() {
-                tracing::info!("Received empty app directory path from Flutter, using default config directory");
+                tracing::info!(
+                    "Received empty app directory path from Flutter, using default config directory"
+                );
                 None
             } else {
                 tracing::info!("Received app directory path from Flutter: {}", path);
@@ -27,7 +34,9 @@ async fn get_app_dir() -> Option<String> {
             None
         }
         Err(_) => {
-            tracing::warn!("Timeout waiting for app directory path from Flutter, using default config directory");
+            tracing::warn!(
+                "Timeout waiting for app directory path from Flutter, using default config directory"
+            );
             None
         }
     }
