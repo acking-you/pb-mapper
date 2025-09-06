@@ -24,6 +24,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   bool _serverAvailable = false;
   List<ServiceConfig> _serviceConfigs = [];
   bool _isRegistering = false;
+  // Prevent duplicate error popups when the same failed status re-builds.
+  String? _lastRegistrationErrorKey;
 
   @override
   void initState() {
@@ -490,18 +492,22 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                         if (registrationSnapshot.hasData) {
                           final signal = registrationSnapshot.data!.message;
                           if (signal.status == 'failed') {
-                            WidgetsBinding.instance.addPostFrameCallback((_) {
-                              if (mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '${signal.serviceKey}: ${signal.message}',
+                            final errorKey = '${signal.serviceKey}|${signal.message}';
+                            if (_lastRegistrationErrorKey != errorKey) {
+                              _lastRegistrationErrorKey = errorKey;
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        '${signal.serviceKey}: ${signal.message}',
+                                      ),
+                                      backgroundColor: Colors.red,
                                     ),
-                                    backgroundColor: Colors.red,
-                                  ),
-                                );
-                              }
-                            });
+                                  );
+                                }
+                              });
+                            }
                           }
                         }
                         

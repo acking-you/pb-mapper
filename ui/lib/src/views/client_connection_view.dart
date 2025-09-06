@@ -23,6 +23,9 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   bool _serverAvailable = false;
   List<ClientConfig> _clientConfigs = [];
   bool _isLoading = true;
+  // Prevent duplicate popups for repeated status/error messages.
+  String? _lastConnectionStatusMessage;
+  String? _lastClientStatusErrorKey;
 
   @override
   void initState() {
@@ -288,27 +291,30 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                         // Handle client connection status updates
                         if (connectionSnapshot.hasData) {
                           final message = connectionSnapshot.data!.message.status;
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(message),
-                                  backgroundColor:
-                                      message.contains('Error') || message.contains('failed')
-                                      ? Colors.red
-                                      : Colors.green,
-                                  duration: const Duration(seconds: 3),
-                                ),
-                              );
-                              
-                              // Reload configs after connection status update
-                              Future.delayed(const Duration(milliseconds: 500), () {
-                                if (mounted) {
-                                  _loadClientConfigs();
-                                }
-                              });
-                            }
-                          });
+                          if (_lastConnectionStatusMessage != message) {
+                            _lastConnectionStatusMessage = message;
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(message),
+                                    backgroundColor:
+                                        message.contains('Error') || message.contains('failed')
+                                        ? Colors.red
+                                        : Colors.green,
+                                    duration: const Duration(seconds: 3),
+                                  ),
+                                );
+                                
+                                // Reload configs after connection status update
+                                Future.delayed(const Duration(milliseconds: 500), () {
+                                  if (mounted) {
+                                    _loadClientConfigs();
+                                  }
+                                });
+                              }
+                            });
+                          }
                         }
                         
                         return StreamBuilder(
@@ -323,9 +329,12 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                               
                               WidgetsBinding.instance.addPostFrameCallback((_) {
                                 if (mounted) {
-                                  // Show feedback for status updates
+                                  // Show feedback for status updates (errors only), deduplicated
+                                  final errorKey = '$serviceKey|$status|$message';
                                   if (message.isNotEmpty &&
-                                      (status == 'failed' || message.contains('Error'))) {
+                                      (status == 'failed' || message.contains('Error')) &&
+                                      _lastClientStatusErrorKey != errorKey) {
+                                    _lastClientStatusErrorKey = errorKey;
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       SnackBar(
                                         content: Text('$serviceKey: $message'),
