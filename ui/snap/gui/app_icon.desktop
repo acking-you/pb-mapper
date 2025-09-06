@@ -2,7 +2,7 @@
 Name=pb-mapper
 Comment=Network port mapping and tunneling tool
 Exec=pb-mapper
-Icon=app_icon.png
+Icon=pb-mapper
 Terminal=false
 Type=Application
-Categories=Network;Internet;
+Categories=Network;
