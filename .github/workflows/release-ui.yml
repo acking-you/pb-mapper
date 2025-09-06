@@ -49,16 +49,6 @@ jobs:
           
           # Build and release using fastforge  
           fastforge release --name production
-          
-          # Move outputs to expected location
-          mkdir -p build/windows/x64/Output
-          if (Test-Path "dist") {
-              Copy-Item -Path "dist/*" -Destination "build/windows/x64/Output/" -Recurse -Force
-              ls build/windows/x64/Output/
-          } else {
-              echo "No dist folder found"
-              exit 1
-          }
       - name: Upload Windows artifacts
         uses: softprops/action-gh-release@v1
         with:
@@ -75,7 +65,7 @@ jobs:
             - **macOS**: DMG installer
             - **Android**: APK files
             - **iOS**: Unsigned IPA (for development)
-          files: ui/build/windows/x64/Output/*
+          files: ui/dist/*/*
 
   build-linux:
     runs-on: ubuntu-22.04
