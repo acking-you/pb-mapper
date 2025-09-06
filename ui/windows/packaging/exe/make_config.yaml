@@ -6,10 +6,11 @@ copyright: Copyright © 2024 pb-mapper
 version: 1.0.0
 exe_name: pb_mapper_ui.exe
 installer_name: pb-mapper-setup.exe
+app_id: "pb-mapper-ui"
 
 install_dir_name: pb-mapper
 
-# Icon configuration
+# Icon configuration  
 setup_icon_file: ../../runner/resources/app_icon.ico
 exe_icon_file: ../../runner/resources/app_icon.ico
 
@@ -17,16 +18,42 @@ exe_icon_file: ../../runner/resources/app_icon.ico
 create_desktop_icon: true
 create_start_menu_icon: true
 add_to_path: false
+admin_privileges: false
 
-# Languages
-languages:
+# Installer configuration
+installer_languages: 
   - english
   - chinesesimplified
 
-# License (optional)
+# Publisher information
+publisher_name: pb-mapper
+publisher_url: https://github.com/acking-you/pb-mapper
+support_url: https://github.com/acking-you/pb-mapper
+updates_url: https://github.com/acking-you/pb-mapper
+
+# Application information
+app_version: 1.0.0
+build_version: 1.0.0.0
+
+# License (optional - commented out if not available)
 # license_file: LICENSE.txt
 
-# Additional files to include
-# include_files:
-#   - source: path/to/additional/file
-#     destination: destination/path
+# Output settings
+output_base_filename: pb-mapper-setup
+
+# Additional installer settings
+compression: lzma
+solid_compression: true
+wizard_style: modern
+language_detection: auto
+show_language_dialog: true
+privileges_required: lowest
+disable_program_group_page: true
+
+# Directories and registry
+default_dir_name: "{autopf}\\pb-mapper"
+default_group_name: pb-mapper
+
+# Uninstall settings
+uninstallable: true
+create_uninstall_registry_key: true
