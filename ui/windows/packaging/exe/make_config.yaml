@@ -1,7 +1,7 @@
 script_template: inno_setup.iss
 app_id: 6L913538-42B1-4596-G479-BJ779F21A65D
 app_name: pb-mapper
-publisher: pb-mapper
+publisher: lb7666
 publisher_url: https://github.com/acking-you/pb-mapper
 display_name: pb-mapper
 executable_name: pb_mapper_ui.exe
