@@ -1,23 +1,3 @@
 display_name: pb-mapper
-product_name: pb-mapper
 description: Network port mapping and tunneling tool - Portable Version
-company_name: pb-mapper
-copyright: Copyright © 2024 pb-mapper
-version: 1.0.0
 archive_name: pb-mapper-portable.zip
-
-# Application information
-app_version: 1.0.0
-build_version: 1.0.0.0
-
-# Include additional files
-include_files:
-  - source: ../../runner/resources/app_icon.ico
-    destination: app_icon.ico
-
-# Optional: Include documentation if available
-# include_files:
-#   - source: ../../../README.md
-#     destination: README.md
-#   - source: ../../../LICENSE
-#     destination: LICENSE.txt
