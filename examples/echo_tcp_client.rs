@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn echo_client<Stream: StreamProvider>(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = Stream::from_addr(addr).await?;
-    println!("Ready to Connected to {}", addr);
+    println!("Ready to Connected to {addr}");
     let mut buffer = String::new();
     loop {
         std::io::stdin().read_line(&mut buffer)?;

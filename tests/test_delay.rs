@@ -51,7 +51,7 @@ async fn echo_server<P: ListenerProvider>(
     loop {
         // Accept incoming connections
         let (mut stream, addr) = listener.accept().await?;
-        println!("Connected from {}", addr);
+        println!("Connected from {addr}");
 
         // Process each connection concurrently
         tokio::spawn(async move {
@@ -61,7 +61,7 @@ async fn echo_server<P: ListenerProvider>(
                 let n = match stream.read(&mut buf).await {
                     Ok(n) => n,
                     Err(e) => {
-                        println!("Error reading: {}", e);
+                        println!("Error reading: {e}");
                         return;
                     }
                 };
@@ -73,11 +73,11 @@ async fn echo_server<P: ListenerProvider>(
 
                 // Echo data back to client
                 if let Err(e) = stream.write_all(&buf[..n]).await {
-                    println!("Error writing: {}", e);
+                    println!("Error writing: {e}");
                     return;
                 }
 
-                println!("Echoed {} bytes to {}", n, addr);
+                println!("Echoed {n} bytes to {addr}");
             }
         });
     }

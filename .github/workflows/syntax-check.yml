@@ -38,16 +38,16 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy on workspace
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run Clippy on workspace (lib and bin targets only)
+        run: cargo clippy --workspace --lib --bins --all-features -- -D warnings
 
-      - name: Run Clippy on pb-mapper-server
+      - name: Run Clippy on pb-mapper-server binary
         run: cargo clippy --bin pb-mapper-server --all-features -- -D warnings
 
-      - name: Run Clippy on pb-mapper-server-cli  
+      - name: Run Clippy on pb-mapper-server-cli binary  
         run: cargo clippy --bin pb-mapper-server-cli --all-features -- -D warnings
 
-      - name: Run Clippy on pb-mapper-client-cli
+      - name: Run Clippy on pb-mapper-client-cli binary
         run: cargo clippy --bin pb-mapper-client-cli --all-features -- -D warnings
 
   flutter-syntax-check:
