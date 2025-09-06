@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1976D2"/>
+      <stop offset="100%" stop-color="#42A5F5"/>
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect x="64" y="64" width="896" height="896" rx="196" ry="196" fill="url(#bg)"/>
+  
+  <!-- Plug + Cable symbol -->
+  <g fill="#FFFFFF">
+    <!-- Plug body -->
+    <rect x="360" y="420" width="304" height="192" rx="36" ry="36"/>
+    <!-- Prongs -->
+    <rect x="408" y="360" width="32" height="72" rx="10"/>
+    <rect x="584" y="360" width="32" height="72" rx="10"/>
+    <!-- Cable -->
+    <path d="M 664 516 Q 760 516 792 584 T 792 720 Q 792 788 724 820 T 588 820 Q 520 820 488 752 Q 456 684 388 684 Q 320 684 288 716 Q 256 748 256 816" fill="none" stroke="#FFFFFF" stroke-width="36" stroke-linecap="round"/>
+  </g>
+</svg>
