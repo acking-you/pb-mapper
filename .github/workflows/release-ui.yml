@@ -38,7 +38,7 @@ jobs:
       - name: Generate Rinf bindings
         run: |
           cd ui
-          cargo install rinf
+          cargo install rinf_cli
           rinf gen
       - name: Build Windows app
         run: |
@@ -149,7 +149,7 @@ jobs:
       - name: Generate Rinf bindings
         run: |
           cd ui
-          cargo install rinf
+          cargo install rinf_cli
           rinf gen
       - name: Build Linux app
         run: |
@@ -191,7 +191,7 @@ jobs:
       - name: Generate Rinf bindings
         run: |
           cd ui
-          cargo install rinf
+          cargo install rinf_cli
           rinf gen
       - name: Build Android APKs
         run: |
@@ -232,7 +232,7 @@ jobs:
       - name: Generate Rinf bindings
         run: |
           cd ui
-          cargo install rinf
+          cargo install rinf_cli
           rinf gen
       - name: Install appdmg
         run: |
@@ -283,7 +283,7 @@ jobs:
       - name: Generate Rinf bindings
         run: |
           cd ui
-          cargo install rinf
+          cargo install rinf_cli
           rinf gen
       - name: Build iOS app (no-codesign)
         run: |
