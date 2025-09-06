@@ -40,15 +40,15 @@ jobs:
           cd ui
           cargo install rinf_cli
           rinf gen
-      - name: Build Windows app with flutter_distributor
+      - name: Build Windows app with fastforge
         run: |
           cd ui
           
-          # Install flutter_distributor
-          dart pub global activate flutter_distributor
+          # Install fastforge
+          dart pub global activate fastforge
           
-          # Build using flutter_distributor  
-          flutter_distributor package --platform windows --targets exe,zip
+          # Build and release using fastforge  
+          fastforge release --name production
           
           # Move outputs to expected location
           mkdir -p build/windows/x64/Output

@@ -1,2 +1,12 @@
-app_name: 'pb-mapper'
-output: 'dist/'
+output: dist/
+releases:
+  - name: production
+    jobs:
+      - name: windows-exe
+        package:
+          platform: windows
+          target: exe
+      - name: windows-zip  
+        package:
+          platform: windows
+          target: zip
