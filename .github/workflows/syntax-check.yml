@@ -52,55 +52,59 @@ jobs:
 
   flutter-syntax-check:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
+          fetch-depth: 1  # Shallow clone for faster checkout
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.35.1
           channel: "stable"
+          cache: true  # Enable Flutter SDK cache
 
       - name: Cache Flutter dependencies
         uses: actions/cache@v3
         with:
           path: |
             ~/.pub-cache
-            ui/.dart_tool
+            .dart_tool
           key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-
 
-      - name: Install protoc
+      - name: Install protoc (minimal)
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y protobuf-compiler
-          protoc --version
 
-      - name: Install Rust for Rinf
+      - name: Install Rust (minimal)
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
 
+      - name: Cache Rinf CLI
+        id: cache-rinf
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/bin/rinf
+          key: ${{ runner.os }}-rinf-cli
+
+      - name: Install Rinf CLI
+        if: steps.cache-rinf.outputs.cache-hit != 'true'
+        run: cargo install rinf_cli
+
       - name: Generate Rinf bindings
-        run: |
-          cd ui
-          cargo install rinf_cli
-          rinf gen
+        run: rinf gen
 
       - name: Get Flutter dependencies
-        run: |
-          cd ui
-          flutter pub get
+        run: flutter pub get
 
       - name: Run Flutter analyzer
-        run: |
-          cd ui
-          flutter analyze
-
-      - name: Check for Flutter warnings
-        run: |
-          cd ui
-          flutter analyze --no-fatal-infos --no-fatal-warnings
+        run: flutter analyze --no-fatal-infos

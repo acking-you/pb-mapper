@@ -114,17 +114,21 @@ jobs:
           TAG="${{ steps.extract_tag.outputs.tag }}"
           VERSION="${{ steps.extract_tag.outputs.version }}"
           
+          # Delete existing manifests if they exist
+          docker manifest rm ${{ env.IMAGE_NAME }}:${VERSION} 2>/dev/null || true
+          docker manifest rm ${{ env.IMAGE_NAME }}:latest 2>/dev/null || true
+          
           # Create manifest for version tag
           docker manifest create ${{ env.IMAGE_NAME }}:${VERSION} \
-            ${{ env.IMAGE_NAME }}:${VERSION}-x86_64_musl \
-            ${{ env.IMAGE_NAME }}:${VERSION}-aarch64_musl
+            --amend ${{ env.IMAGE_NAME }}:${VERSION}-x86_64_musl \
+            --amend ${{ env.IMAGE_NAME }}:${VERSION}-aarch64_musl
           
           docker manifest push ${{ env.IMAGE_NAME }}:${VERSION}
           
-          # Create manifest for latest if this is the latest tag
+          # Create manifest for latest
           docker manifest create ${{ env.IMAGE_NAME }}:latest \
-            ${{ env.IMAGE_NAME }}:${VERSION}-x86_64_musl \
-            ${{ env.IMAGE_NAME }}:${VERSION}-aarch64_musl
+            --amend ${{ env.IMAGE_NAME }}:${VERSION}-x86_64_musl \
+            --amend ${{ env.IMAGE_NAME }}:${VERSION}-aarch64_musl
           
           docker manifest push ${{ env.IMAGE_NAME }}:latest
 
