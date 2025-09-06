@@ -154,14 +154,58 @@ jobs:
       - name: Build Linux app
         run: |
           cd ui
-          curl -L https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -o /usr/local/bin/appimagetool
-          chmod +x /usr/local/bin/appimagetool
-
-          # note that version must not change
-          dart pub global activate flutter_distributor
-          flutter_distributor package --platform=linux --targets=appimage,zip
-          mv dist/1.0.0/pb-mapper-1.0.0+1.0.0-linux.zip dist/1.0.0/pb-mapper-linux.zip
-          mv dist/1.0.0/pb-mapper-1.0.0+1.0.0-linux.AppImage dist/1.0.0/pb-mapper-linux.AppImage
+          
+          # Build Flutter Linux app
+          flutter build linux --release
+          
+          # Create directory structure for packaging
+          mkdir -p dist/1.0.0
+          
+          # Create ZIP package
+          cd build/linux/x64/release/bundle
+          zip -r ../../../../../dist/1.0.0/pb-mapper-linux.zip .
+          
+          # Create AppImage (basic)
+          cd ../../../../../
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          
+          # Copy binary and dependencies
+          cp -r build/linux/x64/release/bundle/* AppDir/usr/bin/
+          
+          # Copy icon
+          cp assets/app_icon.png AppDir/usr/share/icons/hicolor/256x256/apps/pb-mapper.png
+          cp AppDir/usr/share/icons/hicolor/256x256/apps/pb-mapper.png AppDir/pb-mapper.png
+          
+          # Create desktop file
+          cat > AppDir/usr/share/applications/pb-mapper.desktop << EOF
+          [Desktop Entry]
+          Name=pb-mapper
+          Comment=Network port mapping and tunneling tool
+          Exec=ui
+          Icon=pb-mapper
+          Terminal=false
+          Type=Application
+          Categories=Network;Internet;
+          EOF
+          
+          # Copy desktop file to root
+          cp AppDir/usr/share/applications/pb-mapper.desktop AppDir/
+          
+          # Create AppRun
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          export LD_LIBRARY_PATH="${HERE}/usr/bin/lib:${LD_LIBRARY_PATH}"
+          exec "${HERE}/usr/bin/ui" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          
+          # Build AppImage
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ./appimagetool-x86_64.AppImage AppDir dist/1.0.0/pb-mapper-linux.AppImage
       - name: Upload Linux artifacts
         uses: softprops/action-gh-release@v1
         with:
