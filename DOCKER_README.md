@@ -14,7 +14,7 @@ docker run -d \
   -p 7666:7666 \
   -e PB_MAPPER_PORT=7666 \
   -e RUST_LOG=error \
-  ackingliu/pb-mapper:latest
+  ackingliu/pb-mapper:latest-x86_64_musl
 ```
 
 ### Using Docker Compose
@@ -23,7 +23,7 @@ version: '3.8'
 services:
   pb-mapper:
     container_name: pb-mapper
-    image: ackingliu/pb-mapper:latest
+    image: ackingliu/pb-mapper:latest-x86_64_musl
     environment:
       - PB_MAPPER_PORT=7666
       - USE_IPV6=false
@@ -78,7 +78,7 @@ version: '3.8'
 services:
   pb-mapper:
     container_name: pb-mapper
-    image: ackingliu/pb-mapper:latest
+    image: ackingliu/pb-mapper:latest-x86_64_musl
     environment:
       PB_MAPPER_PORT: 7666
       USE_IPV6: false
@@ -138,20 +138,24 @@ pb-mapper creates secure tunnels between your local services and remote clients 
 
 ## 🏗️ Architecture Support
 
-This image supports multiple architectures:
-- **linux/amd64** (x86_64)
-- **linux/arm64** (aarch64)
+pb-mapper supports all architectures that Rust supports, but currently we provide pre-built Docker images for:
+- **linux/amd64** (x86_64) - `ackingliu/pb-mapper:*-x86_64_musl`
+- **linux/arm64** (aarch64) - `ackingliu/pb-mapper:*-aarch64_musl`
 
-Docker will automatically pull the correct architecture for your system.
+For other architectures, you can build the image yourself using the provided Dockerfile in the [GitHub repository](https://github.com/acking-you/pb-mapper).
 
 ## 🔍 Available Tags
 
 | Tag | Description |
 |-----|-------------|
-| `latest` | Latest stable release (multi-arch) |
-| `v1.x.x` | Specific version releases |
-| `v1.x.x-x86_64_musl` | x86_64 specific build |
-| `v1.x.x-aarch64_musl` | ARM64 specific build |
+| `latest-x86_64_musl` | Latest stable x86_64 build (recommended) |
+| `latest-aarch64_musl` | Latest stable ARM64 build |
+| `latest` | Multi-arch manifest (automatically selects architecture) |
+| `v1.x.x-x86_64_musl` | Specific version x86_64 build |
+| `v1.x.x-aarch64_musl` | Specific version ARM64 build |
+| `v1.x.x` | Specific version multi-arch manifest |
+
+**Recommendation**: Use `latest-x86_64_musl` for x86_64 systems or `latest-aarch64_musl` for ARM64 systems for best compatibility.
 
 ## 🛡️ Security Considerations
 
@@ -188,7 +192,7 @@ docker-compose logs pb-mapper
 ```yaml
 services:
   pb-mapper:
-    image: ackingliu/pb-mapper:latest
+    image: ackingliu/pb-mapper:latest-x86_64_musl
     environment:
       PB_MAPPER_PORT: 8888  # Custom port
     ports:
@@ -199,7 +203,7 @@ services:
 ```yaml
 services:
   pb-mapper:
-    image: ackingliu/pb-mapper:latest
+    image: ackingliu/pb-mapper:latest-x86_64_musl
     environment:
       USE_IPV6: true
       PB_MAPPER_PORT: 7666
@@ -211,7 +215,7 @@ services:
 ```yaml
 services:
   pb-mapper:
-    image: ackingliu/pb-mapper:latest
+    image: ackingliu/pb-mapper:latest-x86_64_musl
     environment:
       PB_MAPPER_PORT: 7666
       RUST_LOG: warn
