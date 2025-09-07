@@ -112,7 +112,41 @@ The main improvements and contributions are summarized as follows:
 
 
 ## Usage Instructions
-### Environment Setup
+
+### 🚀 Quick Start for Linux (One-click Installation)
+
+For Linux users, we provide convenient scripts for quick setup:
+
+```bash
+# One-click installation and setup (includes model download)
+./install.sh
+
+# Start WebUI after installation
+./start_webui.sh
+```
+
+The installation script will automatically:
+- Set up Python 3.11 virtual environment with uv package manager
+- Install all system dependencies (git-lfs, build-essential, clang-14)
+- Install Python dependencies and compile CUDA extensions for GPU acceleration
+- Download model files from HuggingFace (IndexTTS-1.5 by default)
+- Configure the environment for optimal performance
+
+For more startup options:
+```bash
+# Start with custom port
+./start_webui.sh --port 8080
+
+# Allow public access
+./start_webui.sh --public
+
+# Run in background
+./start_webui.sh --background
+```
+
+### Manual Environment Setup
+
+If you prefer manual installation or are using other platforms:
 1. Download this repository:
 ```bash
 git clone https://github.com/index-tts/index-tts.git

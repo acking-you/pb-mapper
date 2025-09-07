@@ -111,6 +111,27 @@ Try it on [Colab](https://colab.research.google.com/github/vibevoice-community/V
 | VibeVoice-Large| 32K | ~45 min | [HF link](https://huggingface.co/vibevoice/VibeVoice-7B) |
 
 ## Installation
+
+### 🚀 Quick Start for Linux (One-click Installation)
+
+For Linux users, we provide convenient scripts for quick setup:
+
+```bash
+# One-click installation and setup
+./install.sh
+
+# Quick start demo (after installation)
+./quick_start.sh
+```
+
+The installation script will automatically:
+- Set up Python environment with uv package manager
+- Install all required dependencies including PyTorch and Flash Attention
+- Download model weights from Hugging Face
+- Configure the environment for optimal performance
+
+### Manual Installation (All Platforms)
+
 We recommend to use NVIDIA Deep Learning Container to manage the CUDA environment. 
 
 1. Launch docker
