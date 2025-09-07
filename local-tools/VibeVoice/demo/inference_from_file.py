@@ -141,7 +141,7 @@ def parse_args():
     parser.add_argument(
         "--model_path",
         type=str,
-        default="microsoft/VibeVoice-1.5b",
+        default="vibevoice/VibeVoice-1.5B",
         help="Path to the HuggingFace model directory",
     )
     

@@ -63,7 +63,12 @@ class VibeVoiceDemo:
             attn_impl_primary = "sdpa"
         elif self.device == "cuda":
             load_dtype = torch.bfloat16
-            attn_impl_primary = "flash_attention_2"
+            # Use FlashAttention2 only if available; otherwise fall back to SDPA
+            try:
+                import flash_attn  # noqa: F401
+                attn_impl_primary = "flash_attention_2"
+            except Exception:
+                attn_impl_primary = "sdpa"
         else:
             load_dtype = torch.float32
             attn_impl_primary = "sdpa"
@@ -163,17 +168,142 @@ class VibeVoiceDemo:
         print(f"Available voices: {', '.join(self.available_voices.keys())}")
     
     def read_audio(self, audio_path: str, target_sr: int = 24000) -> np.ndarray:
-        """Read and preprocess audio file."""
+        """Read and preprocess audio file with fallback methods."""
+        import warnings
+        
+        # Suppress librosa warnings for cleaner output
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, module="librosa")
+            warnings.filterwarnings("ignore", category=UserWarning, module="librosa")
+            
+            try:
+                # First try with soundfile (fastest for WAV, FLAC)
+                wav, sr = sf.read(audio_path)
+                if len(wav.shape) > 1:
+                    wav = np.mean(wav, axis=1)
+                if sr != target_sr:
+                    wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+                return wav.astype(np.float32)
+                
+            except Exception:
+                # Fallback to librosa for other formats (MP3, OGG, etc.)
+                try:
+                    wav, sr = librosa.load(audio_path, sr=target_sr, mono=True)
+                    return wav.astype(np.float32)
+                    
+                except Exception as e:
+                    print(f"Failed to load audio {audio_path}: {e}")
+                    return np.array([])
+    
+    def upload_custom_voice(self, uploaded_file, voice_name):
+        """Handle custom voice file upload."""
+        import shutil
+        import tempfile
+        
+        if uploaded_file is None or not voice_name:
+            return gr.update(), "❌ 请选择文件并输入语音名称"
+        
+        # Validate voice name
+        voice_name = voice_name.strip()
+        if not voice_name:
+            return gr.update(), "❌ 语音名称不能为空"
+        
+        # Remove invalid characters from filename
+        import re
+        safe_name = re.sub(r'[<>:"/\\|?*]', '', voice_name)
+        if not safe_name:
+            return gr.update(), "❌ 语音名称包含无效字符"
+        
+        voices_dir = os.path.join(os.path.dirname(__file__), "voices")
+        os.makedirs(voices_dir, exist_ok=True)
+        
+        # Get file extension
+        original_extension = os.path.splitext(uploaded_file.name)[1].lower()
+        supported_formats = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac']
+        
+        if original_extension not in supported_formats:
+            return gr.update(), f"❌ 不支持的音频格式。支持的格式: {', '.join(supported_formats)}"
+        
+        # For M4A/AAC formats, we'll convert to WAV automatically
+        needs_conversion = original_extension in ['.m4a', '.aac', '.mp4']
+        final_extension = '.wav' if needs_conversion else original_extension
+        
+        # Create destination path
+        dest_filename = f"{safe_name}{final_extension}"
+        dest_path = os.path.join(voices_dir, dest_filename)
+        
+        # Check if file already exists
+        if os.path.exists(dest_path):
+            return gr.update(), f"❌ 语音 '{safe_name}' 已存在，请使用不同的名称"
+        
         try:
-            wav, sr = sf.read(audio_path)
-            if len(wav.shape) > 1:
-                wav = np.mean(wav, axis=1)
-            if sr != target_sr:
-                wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
-            return wav
+            if needs_conversion:
+                # Convert M4A/AAC to WAV using pydub
+                print(f"🔄 Converting {original_extension.upper()} to WAV format...")
+                from pydub import AudioSegment
+                
+                # Load the audio file with pydub
+                audio = AudioSegment.from_file(uploaded_file.name)
+                
+                # Convert to mono and set sample rate
+                if audio.channels > 1:
+                    audio = audio.set_channels(1)
+                audio = audio.set_frame_rate(24000)
+                
+                # Export as WAV
+                audio.export(dest_path, format="wav")
+                print(f"✅ Converted to WAV: {dest_path}")
+                
+            else:
+                # Copy the uploaded file directly
+                shutil.copy2(uploaded_file.name, dest_path)
+                print(f"📁 Copied file to: {dest_path}")
+            
+            # Test if the audio file is valid by trying to read it
+            print(f"🧪 Validating audio file...")
+            test_audio = self.read_audio(dest_path)
+            
+            if len(test_audio) == 0:
+                os.remove(dest_path)  # Remove invalid file
+                return gr.update(), "❌ 音频文件无效、损坏或转换失败。"
+            
+            # Check audio duration (should be reasonable)
+            duration = len(test_audio) / 24000  # Assuming 24kHz sample rate
+            print(f"📊 Audio validation successful: {duration:.2f} seconds")
+            
+            if duration < 0.5:
+                os.remove(dest_path)
+                return gr.update(), "❌ 音频文件太短（少于0.5秒），请使用更长的音频样本"
+                
+            if duration > 60:
+                print("⚠️ Warning: Audio file is quite long (>60s), consider using shorter clips for better performance")
+            
+            # Update voice presets
+            self.voice_presets[safe_name] = dest_path
+            self.available_voices[safe_name] = dest_path
+            
+            # Create updated choices list for dropdowns
+            updated_choices = list(self.available_voices.keys())
+            
+            # Format success message with conversion info
+            if needs_conversion:
+                success_msg = f"✅ 成功添加语音 '{safe_name}' ({duration:.1f}秒, 已从{original_extension.upper()}转换为WAV)"
+                print(f"✅ Successfully added custom voice: {safe_name} ({duration:.1f}s, converted from {original_extension.upper()} to WAV)")
+            else:
+                format_info = original_extension.upper().replace('.', '')
+                success_msg = f"✅ 成功添加语音 '{safe_name}' ({duration:.1f}秒, {format_info}格式)"
+                print(f"✅ Successfully added custom voice: {safe_name} ({duration:.1f}s, {format_info})")
+            
+            # Return updated dropdown choices and success message
+            return gr.update(choices=updated_choices), success_msg
+            
         except Exception as e:
-            print(f"Error reading audio {audio_path}: {e}")
-            return np.array([])
+            # Clean up on error
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+            error_msg = str(e)
+            print(f"❌ Upload failed: {error_msg}")
+            return gr.update(), f"❌ 上传失败: {error_msg}"
     
     def generate_podcast_streaming(self, 
                                  num_speakers: int,
@@ -771,6 +901,32 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
         color: #1f2937 !important;
     }
     
+    /* Upload section styling */
+    .upload-section {
+        background: linear-gradient(135deg, #fef3c7 0%, #f59e0b 100%);
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        border-radius: 12px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    
+    .upload-btn {
+        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        border: none;
+        border-radius: 12px;
+        padding: 0.75rem 1.5rem;
+        color: white;
+        font-weight: 600;
+        font-size: 1rem;
+        box-shadow: 0 4px 20px rgba(245, 158, 11, 0.3);
+        transition: all 0.3s ease;
+    }
+    
+    .upload-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 25px rgba(245, 158, 11, 0.4);
+    }
+    
     /* Responsive design */
     @media (max-width: 768px) {
         .main-header h1 { font-size: 2rem; }
@@ -851,6 +1007,53 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                         elem_classes="speaker-item"
                     )
                     speaker_selections.append(speaker)
+                
+                # Custom voice upload section
+                gr.Markdown("### 🎤 **Upload Custom Voice**")
+                
+                with gr.Accordion("Add Your Own Voice", open=False):
+                    gr.Markdown("""
+                    📝 **Instructions:**
+                    - Upload a clear audio file (5-30 seconds recommended)
+                    - **Supported formats:** WAV, MP3, FLAC, OGG, M4A, AAC
+                    - Give your voice a unique name
+                    - The voice will be available for selection immediately
+                    
+                    💡 **Processing:**
+                    - **WAV/MP3/FLAC/OGG:** Direct upload, fastest processing
+                    - **M4A/AAC:** Automatically converted to WAV for compatibility
+                    - All files are optimized to 24kHz mono for best results
+                    
+                    🎯 **Tips for best results:**
+                    - Use high-quality audio (no background noise)
+                    - Clear speech, single speaker only
+                    - Keep recordings between 5-30 seconds for optimal quality
+                    """)
+                    
+                    voice_upload_file = gr.File(
+                        label="Select Audio File",
+                        file_types=[".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"],
+                        file_count="single"
+                    )
+                    
+                    voice_name_input = gr.Textbox(
+                        label="Voice Name",
+                        placeholder="Enter a unique name for this voice...",
+                        max_lines=1
+                    )
+                    
+                    upload_btn = gr.Button(
+                        "🚀 Upload Voice",
+                        variant="secondary",
+                        size="lg",
+                        elem_classes="upload-btn"
+                    )
+                    
+                    upload_status = gr.Textbox(
+                        label="Upload Status",
+                        interactive=False,
+                        visible=False
+                    )
                 
                 # Advanced settings
                 gr.Markdown("### ⚙️ **Advanced Settings**")
@@ -981,6 +1184,41 @@ Or paste text directly and it will auto-assign speakers.""",
             fn=update_speaker_visibility,
             inputs=[num_speakers],
             outputs=speaker_selections
+        )
+        
+        # Voice upload functionality
+        def handle_voice_upload(uploaded_file, voice_name):
+            """Handle custom voice upload."""
+            # Call the upload method and get updates
+            dropdown_update, status_msg = demo_instance.upload_custom_voice(uploaded_file, voice_name)
+            
+            # Return updates for all speaker dropdowns and status
+            updates = []
+            for speaker_dropdown in speaker_selections:
+                updates.append(dropdown_update)  # Update all speaker dropdowns with new choices
+            
+            # Show status and clear inputs on success
+            if "✅" in status_msg:
+                updates.extend([
+                    None,  # Clear file upload
+                    "",    # Clear name input  
+                    gr.update(value=status_msg, visible=True)  # Show success status
+                ])
+            else:
+                updates.extend([
+                    gr.update(),  # Keep file upload
+                    gr.update(),  # Keep name input
+                    gr.update(value=status_msg, visible=True)  # Show error status
+                ])
+            
+            return updates
+        
+        # Connect upload button
+        upload_btn.click(
+            fn=handle_voice_upload,
+            inputs=[voice_upload_file, voice_name_input],
+            outputs=speaker_selections + [voice_upload_file, voice_name_input, upload_status],
+            queue=False
         )
         
         # Main generation function with streaming
@@ -1114,6 +1352,16 @@ Or paste text directly and it will auto-assign speakers.""",
         - **Complete Audio** tab provides the full, uninterrupted podcast after generation
         - During generation, you can click **🛑 Stop Generation** to interrupt the process
         - The streaming indicator shows real-time generation progress
+        
+        ### 🎤 **Custom Voice Upload**
+        
+        - Upload your own voice samples using the "Upload Custom Voice" section
+        - Use clear, high-quality audio files (5-30 seconds recommended)
+        - **Supported formats:** WAV, MP3, FLAC, OGG, M4A, AAC
+        - **Auto-conversion:** M4A/AAC files are automatically converted to WAV for optimal compatibility
+        - Once uploaded, custom voices appear immediately in speaker selection dropdowns
+        - Custom voices are saved permanently and persist between sessions
+        - **Performance:** WAV/FLAC process fastest; M4A/AAC take slightly longer due to conversion
         """)
         
         # Add example scripts
@@ -1169,7 +1417,7 @@ def parse_args():
     parser.add_argument(
         "--model_path",
         type=str,
-        default="/tmp/vibevoice-model",
+        default="vibevoice/VibeVoice-1.5B",
         help="Path to the VibeVoice model directory",
     )
     parser.add_argument(
@@ -1223,6 +1471,12 @@ def main():
     print(f"🔴 Streaming mode: ENABLED")
     print(f"🔒 Session isolation: ENABLED")
     
+    if not args.share:
+        print(f"🌐 Local access: http://127.0.0.1:{args.port}")
+        print(f"🌐 Network access: http://0.0.0.0:{args.port} (if firewall allows)")
+    else:
+        print(f"🌍 Public sharing: ENABLED")
+    
     # Launch the interface
     try:
         interface.queue(
@@ -1230,7 +1484,7 @@ def main():
             default_concurrency_limit=1  # Process one request at a time
         ).launch(
             share=args.share,
-            # server_port=args.port,
+            server_port=args.port,
             server_name="0.0.0.0" if args.share else "127.0.0.1",
             show_error=True,
             show_api=False  # Hide API docs for cleaner interface
