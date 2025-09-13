@@ -1,26 +1,0 @@
-2025-09-07 23:30:23,659 WETEXT INFO found existing fst: /home/ts_user/rust_pro/pb-mapper/local-tools/index-tts/indextts/utils/tagger_cache/zh_tn_tagger.fst
-2025-09-07 23:30:23,659 WETEXT INFO                     /home/ts_user/rust_pro/pb-mapper/local-tools/index-tts/indextts/utils/tagger_cache/zh_tn_verbalizer.fst
-2025-09-07 23:30:23,659 WETEXT INFO skip building fst for zh_normalizer ...
-2025-09-07 23:30:23,896 WETEXT INFO found existing fst: /home/ts_user/rust_pro/pb-mapper/local-tools/index-tts/.venv/lib/python3.11/site-packages/tn/en_tn_tagger.fst
-2025-09-07 23:30:23,896 WETEXT INFO                     /home/ts_user/rust_pro/pb-mapper/local-tools/index-tts/.venv/lib/python3.11/site-packages/tn/en_tn_verbalizer.fst
-2025-09-07 23:30:23,896 WETEXT INFO skip building fst for en_normalizer ...
->> GPT weights restored from: checkpoints/gpt.pth
->> DeepSpeed加载失败，回退到标准推理: No module named 'deepspeed'
-See more details https://www.deepspeed.ai/tutorials/advanced-install/
->> Preload custom CUDA kernel for BigVGAN <module 'indextts.BigVGAN.alias_free_activation.cuda.anti_alias_activation_cuda' from '/home/ts_user/rust_pro/pb-mapper/local-tools/index-tts/indextts/BigVGAN/alias_free_activation/cuda/anti_alias_activation_cuda.cpython-311-x86_64-linux-gnu.so'>
-Removing weight norm...
->> bigvgan weights restored from: checkpoints/bigvgan_generator.pth
->> TextNormalizer loaded
->> bpe model loaded from: checkpoints/bpe.model
-==================================================
-🎙️ IndexTTS WebUI 启动成功
-📁 参考音频输入目录: input
-💾 上传的音频文件将自动保存到: input/
-📂 发现 2 个现有参考音频文件:
-   1. man_test1.m4a
-   2. woman_test1.m4a
-==================================================
-* Running on local URL:  http://127.0.0.1:7860
-* To create a public link, set `share=True` in `launch()`.
->> start fast inference...
-bigvgan:   0%|          | 0/10 [00:00<?, ?it/s]bigvgan:  40%|████      | 4/10 [00:00<00:00, 11.27it/s]bigvgan:  60%|██████    | 6/10 [00:00<00:00,  9.60it/s]bigvgan:  80%|████████  | 8/10 [00:00<00:00,  9.26it/s]bigvgan: 100%|██████████| 10/10 [00:01<00:00,  9.56it/s]bigvgan: 100%|██████████| 10/10 [00:01<00:00,  8.37it/s]

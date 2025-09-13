@@ -1,0 +1,6 @@
+[submodule "local-tools/index-tts"]
+	path = local-tools/index-tts
+	url = https://github.com/acking-you/index-tts.git
+[submodule "local-tools/VibeVoice"]
+	path = local-tools/VibeVoice
+	url = https://github.com/acking-you/VibeVoice.git
