@@ -249,9 +249,7 @@ async fn run_echo_delay<P: StreamProvider, A: ToSocketAddrs + Send>(addr: A, tim
             assert_eq!(expected, msg);
         }
     }
-    println!(
-        "{times} rounds of 10 random data echo delay tests each took a total of {duration:?}"
-    );
+    println!("{times} rounds of 10 random data echo delay tests each took a total of {duration:?}");
 }
 
 #[derive(Debug, Clone, Copy)]

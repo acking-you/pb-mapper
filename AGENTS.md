@@ -40,6 +40,10 @@ Notes: CI builds release artifacts on tags `vX.Y.Z` (see `.github/workflows/rele
 
 ## Commit & Pull Request Guidelines
 - Commits: short, imperative (e.g., "Fix localhost resolution panic", "add network perms", "change to StreamBuilder")
+- Before committing code changes, always run:
+  - `cargo fmt --all`
+  - `cargo clippy --all-targets -- -D warnings`
+  - If `deps/uni-stream` was touched, run the same two commands inside that submodule as well.
 - PRs include: summary, rationale, test steps/coverage, and doc/config updates when behavior changes
 - Link issues; attach screenshots/logs for UI or networking changes
 
