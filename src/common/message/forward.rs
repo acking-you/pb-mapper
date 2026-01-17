@@ -496,18 +496,18 @@ macro_rules! start_datagram_forward_with_codec_key {
             Some(key) => {
                 (start_datagram_forward(
                     $udp_reader,
-                    $udp_writer,
-                    CodecDatagramReader::new(
-                        $tcp_reader,
-                        snafu_error_get_or_return_ok!(
-                            crate::common::message::get_decodec(&key),
+                        $udp_writer,
+                        CodecDatagramReader::new(
+                            $tcp_reader,
+                            snafu_error_get_or_return_ok!(
+                            $crate::common::message::get_decodec(&key),
                             "failed to create decoder when datagram forward"
                         ),
                     ),
                     CodecDatagramWriter::new(
                         $tcp_writer,
                         snafu_error_get_or_return_ok!(
-                            crate::common::message::get_encodec(&key),
+                            $crate::common::message::get_encodec(&key),
                             "failed to create encoder when datagram forward"
                         ),
                     ),

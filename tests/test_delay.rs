@@ -250,8 +250,7 @@ async fn run_echo_delay<P: StreamProvider, A: ToSocketAddrs + Send>(addr: A, tim
         }
     }
     println!(
-        "{} rounds of 10 random data echo delay tests each took a total of {:?}",
-        times, duration
+        "{times} rounds of 10 random data echo delay tests each took a total of {duration:?}"
     );
 }
 
