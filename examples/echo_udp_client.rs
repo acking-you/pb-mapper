@@ -1,8 +1,8 @@
 use std::error::Error;
 
 use pb_mapper::common::config::init_tracing;
-use uni_stream::udp::UdpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use uni_stream::udp::UdpStream;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

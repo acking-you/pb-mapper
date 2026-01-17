@@ -15,6 +15,7 @@ use self::error::{
     ReadStreamReqSnafu, RegisterRespNotMatchSnafu, SendRegisterReqSnafu, WritePingMsgSnafu,
 };
 use self::stream::handle_stream;
+use crate::common::config::IS_KEEPALIVE;
 use crate::common::message::command::{
     LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbServerRequest,
 };
@@ -22,13 +23,14 @@ use crate::common::message::forward::StreamForward;
 use crate::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
-use crate::common::config::IS_KEEPALIVE;
-use uni_stream::stream::{got_one_socket_addr, set_tcp_keep_alive, set_tcp_nodelay, StreamProvider};
-use uni_stream::addr::{each_addr, ToSocketAddrs};
 use crate::utils::timeout::TimeoutCount;
 use crate::{
     snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_get_or_return_ok,
     snafu_error_handle,
+};
+use uni_stream::addr::{each_addr, ToSocketAddrs};
+use uni_stream::stream::{
+    got_one_socket_addr, set_tcp_keep_alive, set_tcp_nodelay, StreamProvider,
 };
 
 const LOCAL_SERVER_TIMEOUT: Duration = Duration::from_secs(64);

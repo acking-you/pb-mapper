@@ -1,5 +1,5 @@
-use uni_stream::stream::{StreamProvider, TcpStreamProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use uni_stream::stream::{StreamProvider, TcpStreamProvider};
 
 async fn echo_client<Stream: StreamProvider>(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = Stream::from_addr(addr).await?;

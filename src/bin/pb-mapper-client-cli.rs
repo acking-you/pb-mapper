@@ -3,9 +3,9 @@ use mimalloc_rust::GlobalMiMalloc;
 use pb_mapper::common::config::{
     get_pb_mapper_server, get_sockaddr, init_tracing, LocalService, PB_MAPPER_KEEP_ALIVE,
 };
-use uni_stream::stream::{TcpListenerProvider, UdpListenerProvider};
 use pb_mapper::local::client::{handle_status_cli, run_client_side_cli};
 use pb_mapper::snafu_error_get_or_return;
+use uni_stream::stream::{TcpListenerProvider, UdpListenerProvider};
 
 #[global_allocator]
 static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;

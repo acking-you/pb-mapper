@@ -34,9 +34,14 @@ pub enum PbConnRequest {
         is_datagram: bool,
         key: String,
     },
-    Subcribe { key: String },
+    Subcribe {
+        key: String,
+    },
     Status(PbConnStatusReq),
-    Stream { key: String, dst_id: u32 },
+    Stream {
+        key: String,
+        dst_id: u32,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

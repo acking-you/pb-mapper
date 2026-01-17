@@ -10,16 +10,16 @@ use super::error::{
     EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu, ReadPbConnStreamRespSnafu, Result,
     WritePbConnStreamReqSnafu,
 };
+use crate::common::config::IS_KEEPALIVE;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
 use crate::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
-use crate::common::config::IS_KEEPALIVE;
-use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay, StreamProvider, StreamSplit};
 use crate::local::server::error::CreateHeaderToolSnafu;
 use crate::snafu_error_handle;
 use uni_stream::addr::{each_addr, ToSocketAddrs};
+use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay, StreamProvider, StreamSplit};
 
 /// Handle a stream connection and establish a forward network traffic forwarding.
 /// This function handles both local and remote streams, sets up message writers and readers,
@@ -56,10 +56,7 @@ where
             "remote stream set keepalive"
         );
     }
-    snafu_error_handle!(
-        set_tcp_nodelay(&remote_stream),
-        "remote stream set nodelay"
-    );
+    snafu_error_handle!(set_tcp_nodelay(&remote_stream), "remote stream set nodelay");
 
     // write stream request and read response
     let codec_key = {
