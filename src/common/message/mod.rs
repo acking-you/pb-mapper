@@ -225,11 +225,8 @@ impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageRe
     }
 }
 
-/// SAFETY: The use of `unsafe` here to convert external `&[u8]` into `&mut [u8]`.  Given the
-/// logic of the [`MessageWriter`] trait, the `msg` should ideally be immutable. Otherwise,
-/// it would affect the use of other features. However, the encryption API requires a
-/// mutable reference `&mut`. To avoid unnecessary copying, `unsafe` is used here as a
-/// compromise for the encryption API.
+/// NOTE: We copy input data before encryption to avoid mutating shared buffers.
+/// This trades some performance for correctness until a zero-copy mutable API is added.
 pub struct CodecMessageWriter<'a, T: AsyncWriteExt + Unpin, E: Encryptor> {
     writer: &'a mut T,
     encryptor: E,
@@ -242,42 +239,19 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecMessageWriter<'a, T, E> {
 }
 
 impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> MessageWriter for CodecMessageWriter<'a, T, E> {
-    /// **CRITICAL BUG WARNING**: This method has a fundamental design flaw that causes data corruption!
-    ///
-    /// **PROBLEM**:
-    /// - The trait interface accepts `&[u8]` (immutable reference) but encryption needs `&mut [u8]`
-    /// - We use unsafe transmutation to bypass Rust's safety guarantees
-    /// - This causes SILENT DATA CORRUPTION when the same message is reused (like ping messages)
-    /// - First use: encryption succeeds, original data gets mutated
-    /// - Subsequent uses: corrupted data leads to decode failures on receiver side
-    ///
-    /// **REAL-WORLD IMPACT**:
-    /// - Ping messages fail after first success: "We decode ping request error!"
-    /// - Any reused message data becomes corrupted and unusable
-    ///
-    /// **WORKAROUND**: Always use fresh copies of message data, never reuse
-    ///
-    /// TODO: Add `write_msg_mut(&mut self, msg: &mut [u8])` method to MessageWriter trait
-    ///       for zero-copy encryption without unsafe transmutation
     async fn write_msg(&mut self, msg: &[u8]) -> Result<()> {
-        if msg.is_empty() {
-            return Ok(());
-        }
-        // Pay attention here, &T -> &mut T
-        let raw_ptr = msg.as_ptr() as *mut u8;
-        let mut_msg = unsafe { std::slice::from_raw_parts_mut(raw_ptr, msg.len()) };
-
+        let mut buf = msg.to_vec();
         let tag = self
             .encryptor
-            .encrypt(mut_msg)
+            .encrypt(&mut buf)
             .map_err(|e| error::Error::MsgCodec {
                 action: "encrypt",
                 detail: format!("got {e} when we read msg"),
             })?;
-        let msg_len = (mut_msg.len() + tag.as_ref().len()) as DataLenType;
+        let msg_len = (buf.len() + tag.as_ref().len()) as DataLenType;
 
         set_msg_len(self.writer, msg_len).await?;
-        write_codec_msg(self.writer, mut_msg).await?;
+        write_codec_msg(self.writer, &buf).await?;
         write_codec_tag(self.writer, tag.as_ref()).await
     }
 }

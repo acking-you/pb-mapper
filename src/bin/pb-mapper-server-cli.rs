@@ -3,7 +3,8 @@ use mimalloc_rust::GlobalMiMalloc;
 use pb_mapper::common::config::{
     get_pb_mapper_server, get_sockaddr, init_tracing, LocalService, PB_MAPPER_KEEP_ALIVE,
 };
-use pb_mapper::common::stream::{StreamProvider, TcpStreamProvider, UdpStreamProvider};
+use pb_mapper::common::message::forward::StreamForward;
+use uni_stream::stream::{StreamProvider, TcpStreamProvider, UdpStreamProvider};
 use pb_mapper::local::client::handle_status_cli;
 use pb_mapper::local::server::run_server_side_cli;
 use pb_mapper::snafu_error_get_or_return;
@@ -37,13 +38,23 @@ struct Cli {
 
 async fn run_register<LocalStream: StreamProvider>(
     need_codec: bool,
+    is_datagram: bool,
     key: String,
     local_addr: &str,
     remote_addr: Option<&str>,
-) {
+) where
+    LocalStream::Item: StreamForward,
+{
     let local_addr = snafu_error_get_or_return!(get_sockaddr(local_addr));
     let remote_addr = snafu_error_get_or_return!(get_pb_mapper_server(remote_addr));
-    run_server_side_cli::<LocalStream, _>(local_addr, remote_addr, key.into(), need_codec).await
+    run_server_side_cli::<LocalStream, _>(
+        local_addr,
+        remote_addr,
+        key.into(),
+        need_codec,
+        is_datagram,
+    )
+    .await
 }
 
 #[tokio::main]
@@ -57,6 +68,7 @@ async fn main() {
         LocalService::UdpServer { key, addr } => {
             run_register::<UdpStreamProvider>(
                 cli.codec,
+                true,
                 key,
                 &addr,
                 cli.pb_mapper_server.as_deref(),
@@ -66,6 +78,7 @@ async fn main() {
         LocalService::TcpServer { key, addr } => {
             run_register::<TcpStreamProvider>(
                 cli.codec,
+                false,
                 key,
                 &addr,
                 cli.pb_mapper_server.as_deref(),

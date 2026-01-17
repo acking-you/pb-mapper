@@ -28,15 +28,15 @@ use crate::signals::{
     UpdateConfigRequest,
 };
 use pb_mapper::common::config::{PB_MAPPER_KEEP_ALIVE, get_pb_mapper_server, get_sockaddr};
-use pb_mapper::common::listener::{TcpListenerProvider, UdpListenerProvider};
 use pb_mapper::common::message::command::{PbConnStatusReq, PbConnStatusResp};
-use pb_mapper::common::stream::got_one_socket_addr;
-use pb_mapper::common::stream::{TcpStreamProvider, UdpStreamProvider};
 use pb_mapper::local::client::status::get_status;
 use pb_mapper::local::client::{ClientStatusCallback, run_client_side_cli_with_callback};
 use pb_mapper::local::server::{StatusCallback, run_server_side_cli_with_callback};
 use pb_mapper::pb_server::{ServerStatusInfo, run_server_with_shutdown};
 use pb_mapper::utils::addr::each_addr;
+use uni_stream::stream::got_one_socket_addr;
+use uni_stream::stream::{TcpListenerProvider, UdpListenerProvider};
+use uni_stream::stream::{TcpStreamProvider, UdpStreamProvider};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ServiceConfigData {
@@ -398,8 +398,8 @@ impl PbMapperActor {
         server_addr: &str,
         service_key: &str,
     ) -> Result<bool, String> {
-        use pb_mapper::common::stream::{StreamProvider, TcpStreamProvider};
         use pb_mapper::local::client::status::get_status;
+        use uni_stream::stream::{StreamProvider, TcpStreamProvider};
 
         let addr = get_sockaddr(server_addr).map_err(|e| format!("Invalid server address: {e}"))?;
 
@@ -862,6 +862,7 @@ impl PbMapperActor {
                     remote_sock_addr,
                     key_clone.into(),
                     enable_encryption,
+                    false,
                     Some(callback),
                 )
                 .await;
@@ -884,6 +885,7 @@ impl PbMapperActor {
                     remote_sock_addr,
                     key_clone.into(),
                     enable_encryption,
+                    true,
                     Some(callback),
                 )
                 .await;

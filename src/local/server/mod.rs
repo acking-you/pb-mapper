@@ -18,11 +18,13 @@ use self::stream::handle_stream;
 use crate::common::message::command::{
     LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbServerRequest,
 };
+use crate::common::message::forward::StreamForward;
 use crate::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
-use crate::common::stream::{got_one_socket_addr, set_tcp_keep_alive, StreamProvider};
-use crate::utils::addr::{each_addr, ToSocketAddrs};
+use crate::common::config::IS_KEEPALIVE;
+use uni_stream::stream::{got_one_socket_addr, set_tcp_keep_alive, set_tcp_nodelay, StreamProvider};
+use uni_stream::addr::{each_addr, ToSocketAddrs};
 use crate::utils::timeout::TimeoutCount;
 use crate::{
     snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_get_or_return_ok,
@@ -73,12 +75,16 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
     remote_addr: A,
     key: Arc<str>,
     need_codec: bool,
-) {
+    is_datagram: bool,
+) where
+    LocalStream::Item: StreamForward,
+{
     run_server_side_cli_with_callback::<LocalStream, A>(
         local_addr,
         remote_addr,
         key,
         need_codec,
+        is_datagram,
         None,
     )
     .await
@@ -92,8 +98,11 @@ pub async fn run_server_side_cli_with_callback<
     remote_addr: A,
     key: Arc<str>,
     need_codec: bool,
+    is_datagram: bool,
     status_callback: Option<StatusCallback>,
-) {
+) where
+    LocalStream::Item: StreamForward,
+{
     let mut timeout_count = TimeoutCount::new(GLOBAL_RETRY_TIMES);
     let mut retry_interval = timeout_count.get_interval_by_count();
     while timeout_count.validate() {
@@ -103,6 +112,7 @@ pub async fn run_server_side_cli_with_callback<
             remote_addr,
             key.clone(),
             need_codec,
+            is_datagram,
             status_callback.as_ref(),
         )
         .await
@@ -146,8 +156,12 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
     remote_addr: A,
     key: Arc<str>,
     need_codec: bool,
+    is_datagram: bool,
     status_callback: Option<&StatusCallback>,
-) -> std::result::Result<(), Status> {
+) -> std::result::Result<(), Status>
+where
+    LocalStream::Item: StreamForward,
+{
     let local_addr = got_one_socket_addr(local_addr)
         .await
         .expect("at least one socket addr be parsed from `local_addr`");
@@ -161,16 +175,23 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
         Err(Status::ConnectRemote)
     );
 
+    if *IS_KEEPALIVE {
+        snafu_error_handle!(
+            set_tcp_keep_alive(&manager_stream),
+            "manager stream set tcp keep alive"
+        );
+    }
     snafu_error_handle!(
-        set_tcp_keep_alive(&manager_stream),
-        "manager stream set tcp keep alive"
+        set_tcp_nodelay(&manager_stream),
+        "manager stream set tcp nodelay"
     );
 
     // start register server with key
     {
         let msg = snafu_error_get_or_return_ok!(PbConnRequest::Register {
             key: key.to_string(),
-            need_codec
+            need_codec,
+            is_datagram,
         }
         .encode()
         .context(EncodeRegisterReqSnafu));
@@ -276,7 +297,10 @@ async fn handle_request<
     key: Arc<str>,
     conn_id: u32,
     timeout_ctx: TimeoutContext<'_, '_>,
-) -> error::Result<()> {
+) -> error::Result<()>
+where
+    LocalStream::Item: StreamForward,
+{
     let req = LocalServer::decode(msg).context(DecodeStreamReqSnafu)?;
 
     match req {

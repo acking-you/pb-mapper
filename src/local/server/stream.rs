@@ -11,20 +11,15 @@ use super::error::{
     WritePbConnStreamReqSnafu,
 };
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
-use crate::common::message::forward::{
-    start_forward, CodecForwardReader, CodecForwardWriter, NormalForwardReader, NormalForwardWriter,
-};
+use crate::common::message::forward::StreamForward;
 use crate::common::message::{
-    get_decodec, get_encodec, get_header_msg_reader, get_header_msg_writer, MessageReader,
-    MessageWriter,
+    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
-use crate::common::stream::{set_tcp_keep_alive, StreamProvider, StreamSplit};
+use crate::common::config::IS_KEEPALIVE;
+use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay, StreamProvider, StreamSplit};
 use crate::local::server::error::CreateHeaderToolSnafu;
-use crate::utils::addr::{each_addr, ToSocketAddrs};
-use crate::{
-    create_component, snafu_error_get_or_return_ok, snafu_error_handle,
-    start_forward_with_codec_key,
-};
+use crate::snafu_error_handle;
+use uni_stream::addr::{each_addr, ToSocketAddrs};
 
 /// Handle a stream connection and establish a forward network traffic forwarding.
 /// This function handles both local and remote streams, sets up message writers and readers,
@@ -37,7 +32,10 @@ pub async fn handle_stream<
     remote_addr: A,
     key: Arc<str>,
     client_id: u32,
-) -> Result<()> {
+) -> Result<()>
+where
+    LocalStream::Item: StreamForward,
+{
     let key_ref = key.as_ref();
     let client_id_span = info_span!("client_id", key_ref, client_id);
     let _enter = client_id_span.enter();
@@ -52,9 +50,15 @@ pub async fn handle_stream<
     let mut remote_stream = each_addr(remote_addr, TcpStream::connect)
         .await
         .context(ConnectRemoteStreamSnafu)?;
+    if *IS_KEEPALIVE {
+        snafu_error_handle!(
+            set_tcp_keep_alive(&remote_stream),
+            "remote stream set keepalive"
+        );
+    }
     snafu_error_handle!(
-        set_tcp_keep_alive(&remote_stream),
-        "remote stream set keepalive"
+        set_tcp_nodelay(&remote_stream),
+        "remote stream set nodelay"
     );
 
     // write stream request and read response
@@ -86,19 +90,18 @@ pub async fn handle_stream<
         .await
         .context(ConnectLocalStreamSnafu)?;
 
-    let (mut client_reader, mut client_writer) = remote_stream.split();
-    let (mut server_reader, mut server_writer) = local_stream.split();
+    let (client_reader, client_writer) = remote_stream.split();
+    let (server_reader, server_writer) = local_stream.split();
 
-    start_forward_with_codec_key!(
-        codec_key,
-        &mut client_reader,
-        &mut client_writer,
-        &mut server_reader,
-        &mut server_writer,
-        true,
-        true,
-        false,
-        false
+    snafu_error_handle!(
+        <LocalStream::Item as StreamForward>::forward_local_to_remote(
+            codec_key,
+            server_reader,
+            server_writer,
+            client_reader,
+            client_writer,
+        )
+        .await
     );
 
     Ok(())

@@ -4,3 +4,6 @@
 [submodule "local-tools/VibeVoice"]
 	path = local-tools/VibeVoice
 	url = https://github.com/acking-you/VibeVoice.git
+[submodule "deps/uni-stream"]
+	path = deps/uni-stream
+	url = https://github.com/acking-you/uni-stream.git

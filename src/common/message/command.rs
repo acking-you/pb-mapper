@@ -29,7 +29,11 @@ pub enum PbConnStatusResp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub enum PbConnRequest {
-    Register { need_codec: bool, key: String },
+    Register {
+        need_codec: bool,
+        is_datagram: bool,
+        key: String,
+    },
     Subcribe { key: String },
     Status(PbConnStatusReq),
     Stream { key: String, dst_id: u32 },

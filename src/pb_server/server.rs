@@ -59,6 +59,7 @@ const SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 pub async fn handle_server_conn(
     key: ImutableKey,
     need_codec: bool,
+    is_datagram: bool,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
     mut conn: TcpStream,
@@ -71,6 +72,7 @@ pub async fn handle_server_conn(
             key: key.clone(),
             conn_id,
             need_codec,
+            is_datagram,
             conn_sender: tx,
         })
         .await

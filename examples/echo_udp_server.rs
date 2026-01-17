@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use pb_mapper::common::config::init_tracing;
-use pb_mapper::utils::udp::UdpListener;
+use uni_stream::udp::UdpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const UDP_BUFFER_SIZE: usize = 16 * 1024; // 16kb

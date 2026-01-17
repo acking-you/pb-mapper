@@ -12,10 +12,11 @@ use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
 use self::status::get_status;
 use self::stream::handle_local_stream;
 use crate::common::config::StatusOp;
-use crate::common::listener::{ListenerProvider, StreamAccept};
+use uni_stream::stream::{ListenerProvider, StreamAccept};
 use crate::common::message::command::{PbConnStatusReq, PbConnStatusResp};
-use crate::common::stream::got_one_socket_addr;
-use crate::utils::addr::{each_addr, ToSocketAddrs};
+use crate::common::message::forward::StreamForward;
+use uni_stream::stream::got_one_socket_addr;
+use uni_stream::addr::{each_addr, ToSocketAddrs};
 use crate::{snafu_error_get_or_return, snafu_error_handle};
 
 // Callback for notifying status changes to external systems
@@ -25,19 +26,20 @@ pub async fn run_client_side_cli<LocalListener: ListenerProvider, A: ToSocketAdd
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
-) {
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
     run_client_side_cli_with_callback::<LocalListener, A>(local_addr, remote_addr, key, None).await
 }
 
-pub async fn run_client_side_cli_with_callback<
-    LocalListener: ListenerProvider,
-    A: ToSocketAddrs,
->(
+pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, A: ToSocketAddrs>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     status_callback: Option<ClientStatusCallback>,
-) {
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
     use crate::utils::timeout::TimeoutCount;
     use std::time::Duration;
 

@@ -1,4 +1,4 @@
-use pb_mapper::common::listener::{ListenerProvider, StreamAccept, TcpListenerProvider};
+use uni_stream::stream::{ListenerProvider, StreamAccept, TcpListenerProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn echo_server<P: ListenerProvider>(

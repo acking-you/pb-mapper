@@ -14,7 +14,9 @@ use crate::common::checksum::{gen_random_key, AesKeyType};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{MessageSerializer, PbConnResponse};
 use crate::common::message::forward::{
-    start_forward, CodecForwardReader, CodecForwardWriter, NormalForwardReader, NormalForwardWriter,
+    start_datagram_forward, start_forward, CodecDatagramReader, CodecDatagramWriter,
+    CodecForwardReader, CodecForwardWriter, NormalDatagramReader, NormalDatagramWriter,
+    NormalForwardReader, NormalForwardWriter,
 };
 use crate::common::message::{get_decodec, get_encodec, get_header_msg_writer, MessageWriter};
 use crate::pb_server::error::{
@@ -63,7 +65,7 @@ pub async fn handle_client_conn(
     mut conn: TcpStream,
 ) -> Result<()> {
     let prev_time = Instant::now();
-    let (mut server_stream, server_id, codec_key) = {
+    let (mut server_stream, server_id, codec_key, is_datagram) = {
         match get_server_stream(&mut conn, key.clone(), conn_id, task_sender.clone()).await {
             Ok(res) => res,
             Err(e) => {
@@ -114,17 +116,52 @@ pub async fn handle_client_conn(
             })?;
     }
 
-    start_forward_with_codec_key!(
-        codec_key,
-        &mut client_reader,
-        &mut client_writer,
-        &mut server_reader,
-        &mut server_writer,
-        true,
-        true,
-        true,
-        true
-    );
+    if is_datagram {
+        match codec_key {
+            Some(key) => {
+                start_datagram_forward(
+                    CodecDatagramReader::new(
+                        &mut client_reader,
+                        snafu_error_get_or_return_ok!(get_decodec(&key)),
+                    ),
+                    CodecDatagramWriter::new(
+                        &mut client_writer,
+                        snafu_error_get_or_return_ok!(get_encodec(&key)),
+                    ),
+                    CodecDatagramReader::new(
+                        &mut server_reader,
+                        snafu_error_get_or_return_ok!(get_decodec(&key)),
+                    ),
+                    CodecDatagramWriter::new(
+                        &mut server_writer,
+                        snafu_error_get_or_return_ok!(get_encodec(&key)),
+                    ),
+                )
+                .await;
+            }
+            None => {
+                start_datagram_forward(
+                    NormalDatagramReader::new(&mut client_reader),
+                    NormalDatagramWriter::new(&mut client_writer),
+                    NormalDatagramReader::new(&mut server_reader),
+                    NormalDatagramWriter::new(&mut server_writer),
+                )
+                .await;
+            }
+        }
+    } else {
+        start_forward_with_codec_key!(
+            codec_key,
+            &mut client_reader,
+            &mut client_writer,
+            &mut server_reader,
+            &mut server_writer,
+            true,
+            true,
+            true,
+            true
+        );
+    }
 
     Ok(())
 }
@@ -134,7 +171,7 @@ async fn get_server_stream(
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
-) -> Result<(TcpStream, RemoteConnId, Option<AesKeyType>)> {
+) -> Result<(TcpStream, RemoteConnId, Option<AesKeyType>, bool)> {
     let (tx, rx) = flume::bounded(DEFAULT_CLIENT_CHAN_CAP);
     task_sender
         .send_async(ManagerTask::Subcribe {
@@ -158,13 +195,17 @@ async fn get_server_stream(
 
     // Note: A key will be generated for encrypting messages that are forwarded, and this key will
     // apply to all endpoints.
-    let codec_key = match resp {
-        ConnTask::SubcribeResp { need_codec } => {
-            if need_codec {
+    let (codec_key, is_datagram) = match resp {
+        ConnTask::SubcribeResp {
+            need_codec,
+            is_datagram,
+        } => {
+            let codec_key = if need_codec {
                 Some(gen_random_key())
             } else {
                 None
-            }
+            };
+            (codec_key, is_datagram)
         }
         _ => ClientConnSubcribeRespNotMatchSnafu {
             key: key.clone(),
@@ -199,7 +240,7 @@ async fn get_server_stream(
                 key: key.clone(),
                 conn_id,
             })?;
-        Ok((stream, server_id, codec_key))
+        Ok((stream, server_id, codec_key, is_datagram))
     } else {
         ClientConnStreamRespNotMatchSnafu {
             key: key.clone(),

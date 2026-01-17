@@ -36,6 +36,7 @@ async-trait = "0.1.87"
 messages = "0.3.1"
 anyhow = "1.0.89"
 sample_crate = { path = "../sample_crate" }
+uni-stream.workspace = true
 
 
 pb-mapper = { path = "../../../" }

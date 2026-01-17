@@ -22,7 +22,7 @@ pub enum Error {
     #[snafu(display("encode pb connect stream request error"))]
     EncodePbConnStreamReq { source: common::error::Error },
     #[snafu(display("connect local stream error"))]
-    ConnectLocalStream { source: common::error::Error },
+    ConnectLocalStream { source: std::io::Error },
     #[snafu(display("connect remote stream error"))]
     ConnectRemoteStream { source: std::io::Error },
     #[snafu(display("write pb conn stream request error"))]

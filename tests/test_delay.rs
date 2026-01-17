@@ -3,20 +3,20 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use pb_mapper::common::config::init_tracing;
-use pb_mapper::common::listener::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
+use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 use pb_mapper::common::message::{
     MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };
-use pb_mapper::common::stream::{
-    StreamProvider, StreamSplit, TcpStreamProvider, UdpStreamProvider,
-};
+use uni_stream::stream::{StreamProvider, StreamSplit, TcpStreamProvider, UdpStreamProvider};
 use pb_mapper::local::client::run_client_side_cli;
 use pb_mapper::local::server::run_server_side_cli;
 use pb_mapper::pb_server::run_server;
-use pb_mapper::utils::addr::ToSocketAddrs;
+use uni_stream::addr::ToSocketAddrs;
+use uni_stream::udp::tune_udp_socket;
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::Instant;
+use tokio::net::UdpSocket;
+use tokio::time::{timeout, Instant};
 
 struct TimerTickGurad<'a> {
     ins: Instant,
@@ -41,7 +41,9 @@ impl<'a> Drop for TimerTickGurad<'a> {
     }
 }
 
-use pb_mapper::common::listener::StreamAccept;
+use uni_stream::stream::StreamAccept;
+
+const UDP_TEST_PAYLOAD_MAX: usize = 1200;
 
 async fn echo_server<P: ListenerProvider>(
     server_addr: &str,
@@ -88,8 +90,21 @@ async fn run_echo_server(
     addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match server_type {
-        ServerType::Udp => echo_server::<UdpListenerProvider>(addr).await,
+        ServerType::Udp => run_udp_echo_server(addr).await,
         ServerType::Tcp => echo_server::<TcpListenerProvider>(addr).await,
+    }
+}
+
+async fn run_udp_echo_server(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = UdpSocket::bind(addr).await?;
+    tune_udp_socket(&socket);
+    let mut buf = vec![0u8; 65_507];
+    println!("run udp echo server:{addr}");
+    loop {
+        let (len, peer) = socket.recv_from(&mut buf).await?;
+        if let Err(err) = socket.send_to(&buf[..len], peer).await {
+            println!("udp echo send error: {err}");
+        }
     }
 }
 
@@ -111,6 +126,7 @@ async fn run_pb_mapper_server_cli(
                 remote_addr,
                 key.into(),
                 need_codec,
+                true,
             )
             .await
         }
@@ -120,6 +136,7 @@ async fn run_pb_mapper_server_cli(
                 remote_addr,
                 key.into(),
                 need_codec,
+                false,
             )
             .await
         }
@@ -153,13 +170,65 @@ async fn run_pb_mapper_client_cli(
 }
 
 /// get random message
-fn gen_random_msg() -> Vec<u8> {
-    let len = rand::rng().random_range(0_usize..2000);
+fn gen_random_msg(max_len: usize) -> Vec<u8> {
+    let len = rand::rng().random_range(0_usize..max_len);
     let mut vec = Vec::new();
     for _ in 0..len {
         vec.push(rand::rng().random_range(0..212));
     }
     vec
+}
+
+async fn run_udp_datagram_echo(addr: &str, rounds: usize, burst: usize) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    tune_udp_socket(&socket);
+    socket.connect(addr).await.unwrap();
+    let mut buf = vec![0u8; 65_507];
+
+    // Warm up UDP path to ensure listener and forwarding pipeline are ready.
+    let probe = b"pb-mapper-probe";
+    let mut ready = false;
+    for _ in 0..10 {
+        socket.send(probe).await.unwrap();
+        if let Ok(Ok(len)) = timeout(Duration::from_millis(300), socket.recv(&mut buf)).await {
+            if &buf[..len] == probe {
+                ready = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ready, "udp echo path not ready");
+
+    for round in 0..rounds {
+        for seq in 0..burst {
+            let mut msg = (seq as u32).to_be_bytes().to_vec();
+            if round == 0 && seq == 0 {
+                msg.extend(vec![0u8; UDP_TEST_PAYLOAD_MAX]);
+            } else {
+                msg.extend(gen_random_msg(UDP_TEST_PAYLOAD_MAX));
+            }
+            socket.send(&msg).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                let len = match timeout(wait, socket.recv(&mut buf)).await {
+                    Ok(Ok(len)) => len,
+                    Ok(Err(err)) => panic!("udp recv error: {err}"),
+                    Err(_) => panic!("udp echo timeout; missing seq: {seq}"),
+                };
+                if len < 4 {
+                    continue;
+                }
+                let recv_seq = u32::from_be_bytes(buf[..4].try_into().unwrap());
+                if recv_seq != seq as u32 {
+                    continue;
+                }
+                assert_eq!(msg, &buf[..len]);
+                break;
+            }
+        }
+    }
 }
 
 async fn run_echo_delay<P: StreamProvider, A: ToSocketAddrs + Send>(addr: A, times: usize) {
@@ -169,7 +238,7 @@ async fn run_echo_delay<P: StreamProvider, A: ToSocketAddrs + Send>(addr: A, tim
     let mut writer = NormalMessageWriter::new(&mut writer);
     let mut duration = Duration::default();
     for _ in 0..times {
-        let expected = gen_random_msg();
+        let expected = gen_random_msg(2000);
         for _ in 0..10 {
             let msg = {
                 let _guard = TimerTickGurad::new(&mut duration);
@@ -257,8 +326,7 @@ async fn test_pb_mapper_server_no_codec() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     // run echo test
     match server_type {
-        ServerType::Udp => run_echo_delay::<UdpStreamProvider, _>(local_server.as_str(), 10).await,
-
+        ServerType::Udp => run_udp_datagram_echo(local_server.as_str(), 10, 8).await,
         ServerType::Tcp => run_echo_delay::<TcpStreamProvider, _>(local_server.as_str(), 10).await,
     }
 
@@ -310,8 +378,7 @@ async fn test_pb_mapper_server_codec() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     // run echo test
     match server_type {
-        ServerType::Udp => run_echo_delay::<UdpStreamProvider, _>(local_server.as_str(), 10).await,
-
+        ServerType::Udp => run_udp_datagram_echo(local_server.as_str(), 10, 8).await,
         ServerType::Tcp => run_echo_delay::<TcpStreamProvider, _>(local_server.as_str(), 10).await,
     }
 

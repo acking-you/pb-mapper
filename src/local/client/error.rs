@@ -6,9 +6,9 @@ use crate::common;
 #[snafu(visibility(pub(super)))]
 pub enum Error {
     #[snafu(display("bind local listener error"))]
-    BindLocalListener { source: common::error::Error },
+    BindLocalListener { source: std::io::Error },
     #[snafu(display("accept local listener error"))]
-    AcceptLocalStream { source: common::error::Error },
+    AcceptLocalStream { source: std::io::Error },
     #[snafu(display("connect remote stream error"))]
     ConnectRemoteStream { source: std::io::Error },
     #[snafu(display("encode subcribe request error"))]

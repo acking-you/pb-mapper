@@ -1,4 +1,4 @@
-use pb_mapper::common::stream::{StreamProvider, TcpStreamProvider};
+use uni_stream::stream::{StreamProvider, TcpStreamProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn echo_client<Stream: StreamProvider>(addr: &str) -> Result<(), Box<dyn std::error::Error>> {

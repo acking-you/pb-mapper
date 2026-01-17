@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use pb_mapper::common::config::init_tracing;
-use pb_mapper::utils::udp::UdpStream;
+use uni_stream::udp::UdpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
