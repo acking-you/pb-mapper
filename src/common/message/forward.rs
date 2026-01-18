@@ -135,13 +135,7 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> ForwardReader
     for CodecForwardReader<'a, T, D>
 {
     async fn read(&mut self) -> Result<&'_ [u8]> {
-        self.0
-            .read_msg()
-            .await
-            .map_err(|e| super::error::Error::MsgForward {
-                action: "read",
-                detail: format!("{}", snafu::Report::from_error(e)),
-            })
+        self.0.read_msg().await
     }
 }
 
@@ -159,14 +153,7 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> DatagramReader
     for CodecDatagramReader<'a, T, D>
 {
     async fn recv(&mut self) -> Result<Bytes> {
-        let msg = self
-            .0
-            .read_msg()
-            .await
-            .map_err(|e| super::error::Error::MsgForward {
-                action: "read",
-                detail: format!("{}", snafu::Report::from_error(e)),
-            })?;
+        let msg = self.0.read_msg().await?;
         Ok(Bytes::copy_from_slice(msg))
     }
 }
@@ -307,7 +294,7 @@ impl DatagramReader for UdpStreamReadHalf {
             .await
             .map_err(|e| super::error::Error::MsgForward {
                 action: "read",
-                detail: format!("{e}"),
+                source: e,
             })
     }
 }
@@ -318,7 +305,7 @@ impl DatagramWriter for UdpStreamWriteHalf<'_> {
             .await
             .map_err(|e| super::error::Error::MsgForward {
                 action: "write",
-                detail: format!("{e}"),
+                source: e,
             })
     }
 }

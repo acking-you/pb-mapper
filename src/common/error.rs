@@ -59,11 +59,11 @@ pub enum Error {
         // specific error explanation
         detail: String,
     },
-    #[snafu(display("`{action}` forward message failed with detail:`{detail}`"))]
+    #[snafu(display("`{action}` forward message failed: {source}"))]
     MsgForward {
         // must be "read" or "write"
         action: &'static str,
-        detail: String,
+        source: std::io::Error,
     },
     /// Error for manager
     #[snafu(display("`TaskManager` fails while waiting for a task"))]
@@ -133,17 +133,8 @@ impl Error {
             | Error::MsgNetworkWriteBody { source }
             | Error::MsgNetworkWriteCodecMsg { source }
             | Error::MsgNetworkWriteCodecTag { source }
-            | Error::FwdNetworkWriteWithNormal { source } => is_expected(source.kind()),
-            Error::MsgForward { detail, .. } => {
-                let detail_lower = detail.to_ascii_lowercase();
-                detail_lower.contains("unexpected end of file")
-                    || detail_lower.contains("connection reset")
-                    || detail_lower.contains("connection aborted")
-                    || detail_lower.contains("broken pipe")
-                    || detail_lower.contains("not connected")
-                    || detail_lower.contains("forcibly closed")
-                    || detail.contains("远程主机强迫关闭了一个现有的连接")
-            }
+            | Error::FwdNetworkWriteWithNormal { source }
+            | Error::MsgForward { source, .. } => is_expected(source.kind()),
             _ => false,
         }
     }
