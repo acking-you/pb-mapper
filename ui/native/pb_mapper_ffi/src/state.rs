@@ -921,12 +921,12 @@ impl PbMapperState {
         if protocol_upper == "TCP" {
             let listener = TcpListenerProvider::bind(local_sock_addr)
                 .await
-                .map_err(|e| format!("Failed to bind local address {}: {e}", local_address))?;
+                .map_err(|e| format!("Failed to bind local address {local_address}: {e}"))?;
             drop(listener);
         } else {
             let listener = UdpListenerProvider::bind(local_sock_addr)
                 .await
-                .map_err(|e| format!("Failed to bind local address {}: {e}", local_address))?;
+                .map_err(|e| format!("Failed to bind local address {local_address}: {e}"))?;
             drop(listener);
         }
 
