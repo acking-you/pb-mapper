@@ -26,6 +26,9 @@ pub trait ForwardReader {
 
 pub trait ForwardWriter {
     async fn write(&mut self, src: &[u8]) -> Result<()>;
+
+    // Gracefully close the write side to support half-closed TCP streams.
+    async fn shutdown(&mut self);
 }
 
 pub trait DatagramReader {
@@ -94,6 +97,10 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> ForwardWriter for NormalForwardWriter<
     async fn write(&mut self, src: &[u8]) -> Result<()> {
         self.write_inner(src).await
     }
+
+    async fn shutdown(&mut self) {
+        let _ = self.writer.shutdown().await;
+    }
 }
 
 pub struct NormalDatagramWriter<'a, T: AsyncWriteExt + Unpin> {
@@ -128,13 +135,7 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> ForwardReader
     for CodecForwardReader<'a, T, D>
 {
     async fn read(&mut self) -> Result<&'_ [u8]> {
-        self.0
-            .read_msg()
-            .await
-            .map_err(|e| super::error::Error::MsgForward {
-                action: "read",
-                detail: format!("{}", snafu::Report::from_error(e)),
-            })
+        self.0.read_msg().await
     }
 }
 
@@ -152,14 +153,7 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> DatagramReader
     for CodecDatagramReader<'a, T, D>
 {
     async fn recv(&mut self) -> Result<Bytes> {
-        let msg = self
-            .0
-            .read_msg()
-            .await
-            .map_err(|e| super::error::Error::MsgForward {
-                action: "read",
-                detail: format!("{}", snafu::Report::from_error(e)),
-            })?;
+        let msg = self.0.read_msg().await?;
         Ok(Bytes::copy_from_slice(msg))
     }
 }
@@ -180,6 +174,10 @@ impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> ForwardWriter
     /// SAFETY: Same as [`CodecMessageWriter`]
     async fn write(&mut self, src: &[u8]) -> Result<()> {
         self.0.write_msg(src).await
+    }
+
+    async fn shutdown(&mut self) {
+        let _ = self.0.shutdown().await;
     }
 }
 
@@ -211,11 +209,13 @@ pub async fn copy<R: ForwardReader, W: ForwardWriter>(
         let src = reader.read().await?;
         let n = src.len();
         if n == 0 {
-            return Ok(length);
+            break;
         }
         writer.write(src).await?;
         length += n;
     }
+    writer.shutdown().await;
+    Ok(length)
 }
 
 pub async fn transfer_datagrams<R: DatagramReader, W: DatagramWriter>(
@@ -246,14 +246,9 @@ pub async fn start_forward<
 ) {
     let client_to_server = copy(client_reader, server_writer);
     let server_to_client = copy(server_reader, client_writer);
-    tokio::select! {
-        result = client_to_server =>{
-            handle_forward_result( result,"client->server");
-        },
-        result = server_to_client =>{
-            handle_forward_result( result,"server->client");
-        }
-    }
+    let (client_result, server_result) = tokio::join!(client_to_server, server_to_client);
+    handle_forward_result(client_result, "client->server");
+    handle_forward_result(server_result, "server->client");
 }
 
 pub async fn start_datagram_forward<
@@ -282,7 +277,14 @@ pub async fn start_datagram_forward<
 fn handle_forward_result(result: Result<usize>, detail: &'static str) {
     match result {
         Ok(len) => tracing::info!("forward finish! we send {len} bytes,detail:{detail}"),
-        Err(e) => tracing::error!("got forward error:{e},detail:{detail}"),
+        Err(e) => {
+            // Treat peer-initiated shutdowns as expected to avoid noisy error logs.
+            if e.is_expected_disconnect() {
+                tracing::debug!("forward closed by peer:{e},detail:{detail}");
+            } else {
+                tracing::error!("got forward error:{e},detail:{detail}");
+            }
+        }
     }
 }
 
@@ -292,7 +294,7 @@ impl DatagramReader for UdpStreamReadHalf {
             .await
             .map_err(|e| super::error::Error::MsgForward {
                 action: "read",
-                detail: format!("{e}"),
+                source: e,
             })
     }
 }
@@ -303,7 +305,7 @@ impl DatagramWriter for UdpStreamWriteHalf<'_> {
             .await
             .map_err(|e| super::error::Error::MsgForward {
                 action: "write",
-                detail: format!("{e}"),
+                source: e,
             })
     }
 }

@@ -34,7 +34,7 @@ dotenvy = "0.15.7"
 udp-timeout = ["uni-stream/udp-timeout"]
 
 [workspace]
-members = ["ui/native/*"]
+members = ["ui/native/pb_mapper_ffi"]
 exclude = ["deps/uni-stream", "deps/kanal"]
 
 [workspace.package]

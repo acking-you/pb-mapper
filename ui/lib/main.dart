@@ -2,7 +2,6 @@ import 'dart:ui';
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:rinf/rinf.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/views/client_connection_view.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
@@ -13,11 +12,11 @@ import 'package:pb_mapper_ui/src/views/configuration_view.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
-import 'src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await initializeRust(assignRustSignal);
+  PbMapperService().initLogging();
   await createActors();
   runApp(MyApp());
 }
@@ -27,7 +26,7 @@ Future<void> createActors() async {
   if (Platform.isAndroid || Platform.isIOS) {
     try {
       final appDocumentsDir = await getApplicationDocumentsDirectory();
-      SetAppDirectoryPath(path: appDocumentsDir.path).sendSignalToRust();
+      await PbMapperService().setAppDirectoryPath(appDocumentsDir.path);
       if (kDebugMode) {
         print('App directory path sent to Rust: ${appDocumentsDir.path}');
       }
@@ -36,14 +35,14 @@ Future<void> createActors() async {
         print('Failed to get app directory path: $e');
       }
       // Send empty path as fallback to ensure Rust doesn't get stuck waiting
-      SetAppDirectoryPath(path: '').sendSignalToRust();
+      await PbMapperService().setAppDirectoryPath('');
       if (kDebugMode) {
         print('Sent empty path to Rust as fallback');
       }
     }
   } else {
     // For desktop platforms, send empty path to indicate no mobile directory
-    SetAppDirectoryPath(path: '').sendSignalToRust();
+    await PbMapperService().setAppDirectoryPath('');
     if (kDebugMode) {
       print('Desktop platform: sent empty path to Rust');
     }
@@ -80,7 +79,7 @@ class _MyAppState extends State<MyApp> {
     _listener = AppLifecycleListener(
       onExitRequested: () async {
         LogManager().dispose(); // Clean up log manager
-        finalizeRust(); // This line shuts down the async Rust runtime.
+        PbMapperService().dispose();
         return AppExitResponse.exit;
       },
     );

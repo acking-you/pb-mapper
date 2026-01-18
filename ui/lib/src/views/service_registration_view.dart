@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/views/log_view_button.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
@@ -15,6 +15,7 @@ class ServiceRegistrationView extends StatefulWidget {
 }
 
 class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
+  final PbMapperApi _api = PbMapperApi();
   final _serviceKeyController = TextEditingController();
   final _localAddressController = TextEditingController(text: '127.0.0.1:8080');
   bool _isEncryptionEnabled = true;
@@ -22,26 +23,86 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   String _selectedProtocol = 'TCP';
   String _serverAddress = 'localhost:7666'; // Will be updated from config
   bool _serverAvailable = false;
+  bool _serverStatusRetryPending = false;
   List<ServiceConfig> _serviceConfigs = [];
   bool _isRegistering = false;
-  // Prevent duplicate error popups when the same failed status re-builds.
-  String? _lastRegistrationErrorKey;
 
   @override
   void initState() {
     super.initState();
+    _loadConfig();
+    _loadServerStatus();
     _loadServiceConfigs();
+  }
 
-    // Request current configuration to get server address
-    const RequestConfig().sendSignalToRust();
+  Future<void> _loadConfig() async {
+    final config = await _api.fetchConfig();
+    if (!mounted) return;
+    setState(() {
+      _serverAddress = config.serverAddress;
+      _isKeepAliveEnabled = config.keepAliveEnabled;
+    });
+  }
 
-    // Request server status to check availability
-    const RequestServerStatus().sendSignalToRust();
+  Future<void> _loadServerStatus() async {
+    final status = await _api.getServerStatusDetail();
+    if (!mounted) return;
+    setState(() {
+      _serverAvailable = status.serverAvailable;
+    });
+    _scheduleServerStatusRetryIfNeeded();
+  }
+
+  void _scheduleServerStatusRetryIfNeeded() {
+    if (_serverAvailable) {
+      _serverStatusRetryPending = false;
+      return;
+    }
+    if (_serverStatusRetryPending) {
+      return;
+    }
+    _serverStatusRetryPending = true;
+    Future.delayed(const Duration(seconds: 1), () {
+      if (!mounted) return;
+      _serverStatusRetryPending = false;
+      if (!_serverAvailable) {
+        _loadServerStatus();
+      }
+    });
+  }
+
+  Future<List<ServiceConfig>> _fetchServiceConfigs() async {
+    final services = await _api.getServiceConfigs();
+    final configs = services
+        .map(
+          (service) => ServiceConfig(
+            serviceKey: service.serviceKey,
+            localAddress: service.localAddress,
+            protocol: service.protocol,
+            enableEncryption: service.enableEncryption,
+            enableKeepAlive: service.enableKeepAlive,
+            status: _parseStatus(service.status),
+            statusMessage: service.statusMessage,
+            createdAt: DateTime.fromMillisecondsSinceEpoch(
+              service.createdAtMs,
+            ),
+            updatedAt: DateTime.fromMillisecondsSinceEpoch(
+              service.updatedAtMs,
+            ),
+          ),
+        )
+        .toList();
+
+    configs.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return configs;
   }
 
   Future<void> _loadServiceConfigs() async {
-    // Request service configs from Rust backend
-    RequestServiceConfigs().sendSignalToRust();
+    final configs = await _fetchServiceConfigs();
+    if (!mounted) return;
+    setState(() {
+      _serviceConfigs = configs;
+    });
   }
 
   ServiceStatus _parseStatus(String statusString) {
@@ -63,6 +124,54 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     _serviceKeyController.dispose();
     _localAddressController.dispose();
     super.dispose();
+  }
+
+  Widget _buildServerUnavailableBanner() {
+    return Card(
+      color: Colors.amber.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.warning_amber, color: Colors.orange),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'No pb-mapper server is reachable.',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Please configure a reachable server in the Config page '
+                    'before registering services.',
+                    style: TextStyle(color: Colors.grey.shade700),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            ElevatedButton(
+              onPressed: AppNavigationManager.navigateToConfigPage,
+              child: const Text('Go to Config'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _wrapIfUnavailable(bool unavailable, Widget child) {
+    if (!unavailable) {
+      return child;
+    }
+    return IgnorePointer(
+      ignoring: true,
+      child: Opacity(opacity: 0.5, child: child),
+    );
   }
 
   void _registerService() {
@@ -101,20 +210,34 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     // Send registration request to Rust backend
     final serviceKey = _serviceKeyController.text;
 
-    RegisterServiceRequest(
-      serviceKey: serviceKey,
-      localAddress: _localAddressController.text,
-      protocol: _selectedProtocol,
-      enableEncryption: _isEncryptionEnabled,
-      enableKeepAlive: _isKeepAliveEnabled,
-    ).sendSignalToRust();
+    _api
+        .registerService(
+          serviceKey: serviceKey,
+          localAddress: _localAddressController.text,
+          protocol: _selectedProtocol,
+          enableEncryption: _isEncryptionEnabled,
+          enableKeepAlive: _isKeepAliveEnabled,
+        )
+        .then((result) {
+          if (!mounted) return;
+          if (!result.success) {
+            setState(() => _isRegistering = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(result.message),
+                backgroundColor: Colors.red,
+              ),
+            );
+            return;
+          }
 
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('Registering $serviceKey...')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Registering $serviceKey...')),
+          );
 
-    // Poll for registration status
-    _pollRegistrationStatus(serviceKey);
+          // Poll for registration status
+          _pollRegistrationStatus(serviceKey);
+        });
   }
 
   void _pollRegistrationStatus(String serviceKey) async {
@@ -125,12 +248,13 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       if (!mounted) return;
 
       // Check if service was successfully registered by loading configs
-      _loadServiceConfigs();
+      final configs = await _fetchServiceConfigs();
+      if (!mounted) return;
+      setState(() {
+        _serviceConfigs = configs;
+      });
 
-      // Wait a bit for the response
-      await Future.delayed(Duration(milliseconds: 500));
-
-      final config = _serviceConfigs.firstWhere(
+      final config = configs.firstWhere(
         (c) => c.serviceKey == serviceKey,
         orElse: () => ServiceConfig(
           serviceKey: '',
@@ -152,6 +276,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
             ),
           );
         }
+        await _pollServiceStatusUntilStable(serviceKey);
         return;
       }
     }
@@ -165,6 +290,40 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
           backgroundColor: Colors.red,
         ),
       );
+    }
+  }
+
+  // Poll the native status cache for a short time so the UI reflects state changes quickly.
+  Future<void> _pollServiceStatusUntilStable(String serviceKey) async {
+    for (int i = 0; i < 10; i++) {
+      await Future.delayed(const Duration(seconds: 1));
+      if (!mounted) return;
+
+      final configs = await _fetchServiceConfigs();
+      if (!mounted) return;
+
+      setState(() {
+        _serviceConfigs = configs;
+      });
+
+      final config = configs.firstWhere(
+        (c) => c.serviceKey == serviceKey,
+        orElse: () => ServiceConfig(
+          serviceKey: '',
+          localAddress: '',
+          protocol: '',
+          enableEncryption: false,
+          enableKeepAlive: false,
+        ),
+      );
+
+      if (config.serviceKey.isEmpty) {
+        continue;
+      }
+
+      if (config.status != ServiceStatus.retrying) {
+        return;
+      }
     }
   }
 
@@ -222,22 +381,43 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       // Handle same-key edits: if service key hasn't changed, stop existing service first
       if (updatedConfig.serviceKey == config.serviceKey) {
         // Same key - need to unregister first, then register with new config
-        UnregisterServiceRequest(
-          serviceKey: config.serviceKey,
-        ).sendSignalToRust();
+        final stopResult = await _api.unregisterService(config.serviceKey);
+        if (!stopResult.success) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(stopResult.message),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
 
         // Wait a moment for unregister to complete
         await Future.delayed(Duration(milliseconds: 500));
       }
 
       // Register with new configuration
-      RegisterServiceRequest(
+      final registerResult = await _api.registerService(
         serviceKey: updatedConfig.serviceKey,
         localAddress: updatedConfig.localAddress,
         protocol: updatedConfig.protocol,
         enableEncryption: updatedConfig.enableEncryption,
         enableKeepAlive: updatedConfig.enableKeepAlive,
-      ).sendSignalToRust();
+      );
+
+      if (!registerResult.success) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(registerResult.message),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
 
       // Poll for test registration result
       _testAndUpdateService(config, updatedConfig);
@@ -255,10 +435,13 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       if (!mounted) return;
 
       // Check if new service was successfully registered
-      _loadServiceConfigs();
-      await Future.delayed(Duration(milliseconds: 500));
+      final configs = await _fetchServiceConfigs();
+      if (!mounted) return;
+      setState(() {
+        _serviceConfigs = configs;
+      });
 
-      final testConfig = _serviceConfigs.firstWhere(
+      final testConfig = configs.firstWhere(
         (c) => c.serviceKey == newConfig.serviceKey,
         orElse: () => ServiceConfig(
           serviceKey: '',
@@ -275,12 +458,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         // New configuration works! Now clean up old service if it's different
         if (oldConfig.serviceKey != newConfig.serviceKey) {
           // Different service key, stop and delete old service
-          UnregisterServiceRequest(
-            serviceKey: oldConfig.serviceKey,
-          ).sendSignalToRust();
-          DeleteServiceConfigRequest(
-            serviceKey: oldConfig.serviceKey,
-          ).sendSignalToRust();
+          await _api.unregisterService(oldConfig.serviceKey);
+          await _api.deleteServiceConfig(oldConfig.serviceKey);
         }
 
         if (mounted) {
@@ -298,12 +477,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     }
 
     // Test failed - stop the test service and show error
-    UnregisterServiceRequest(
-      serviceKey: newConfig.serviceKey,
-    ).sendSignalToRust();
-    DeleteServiceConfigRequest(
-      serviceKey: newConfig.serviceKey,
-    ).sendSignalToRust();
+    await _api.unregisterService(newConfig.serviceKey);
+    await _api.deleteServiceConfig(newConfig.serviceKey);
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -341,11 +516,9 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
     if (confirmed == true) {
       // Delete the configuration completely (this will also stop the service)
-      DeleteServiceConfigRequest(
-        serviceKey: config.serviceKey,
-      ).sendSignalToRust();
+      await _api.deleteServiceConfig(config.serviceKey);
 
-      _loadServiceConfigs();
+      await _loadServiceConfigs();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -369,28 +542,38 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     if (config.status == ServiceStatus.running ||
         config.status == ServiceStatus.retrying) {
       // Stop the service
-      UnregisterServiceRequest(
-        serviceKey: config.serviceKey,
-      ).sendSignalToRust();
+      final result = await _api.unregisterService(config.serviceKey);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Stopping service "${config.serviceKey}"...')),
+          SnackBar(
+            content: Text(result.message),
+            backgroundColor: result.success ? Colors.green : Colors.red,
+          ),
         );
       }
     } else {
       // Start the service
-      RegisterServiceRequest(
+      final result = await _api.registerService(
         serviceKey: config.serviceKey,
         localAddress: config.localAddress,
         protocol: config.protocol,
         enableEncryption: config.enableEncryption,
         enableKeepAlive: config.enableKeepAlive,
-      ).sendSignalToRust();
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Starting service "${config.serviceKey}"...')),
+          SnackBar(
+            content: Text(result.message),
+            backgroundColor: result.success ? Colors.green : Colors.red,
+          ),
         );
       }
+
+      if (!result.success) {
+        return;
+      }
+
+      await _pollServiceStatusUntilStable(config.serviceKey);
     }
 
     // Refresh status after a delay
@@ -400,11 +583,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   }
 
   void _refreshServiceStatus(ServiceConfig config) {
-    // Request individual service status
-    RequestServiceStatus(serviceKey: config.serviceKey).sendSignalToRust();
-
-    // Also refresh the whole list
-    _loadServiceConfigs();
+    // Refresh service status directly and reload list
+    _api.getServiceStatus(config.serviceKey).then((_) => _loadServiceConfigs());
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -415,358 +595,239 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
   @override
   Widget build(BuildContext context) {
+    final bool disableUi = !_serverAvailable;
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: SingleChildScrollView(
-        child: StreamBuilder(
-          stream: ConfigStatusUpdate.rustSignalStream,
-          builder: (context, configSnapshot) {
-            // Update server address when config data is available
-            if (configSnapshot.hasData) {
-              final config = configSnapshot.data!.message;
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted && _serverAddress != config.serverAddress) {
-                  setState(() {
-                    _serverAddress = config.serverAddress;
-                  });
-                }
-              });
-            }
-
-            return StreamBuilder(
-              stream: ServerStatusDetailUpdate.rustSignalStream,
-              builder: (context, serverSnapshot) {
-                // Update server availability when server status data is available
-                if (serverSnapshot.hasData) {
-                  final status = serverSnapshot.data!.message;
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (mounted && _serverAvailable != status.serverAvailable) {
-                      setState(() {
-                        _serverAvailable = status.serverAvailable;
-                      });
-                    }
-                  });
-                }
-
-                return StreamBuilder(
-                  stream: ServiceConfigsUpdate.rustSignalStream,
-                  builder: (context, serviceSnapshot) {
-                    // Update service configs when service data is available
-                    if (serviceSnapshot.hasData) {
-                      final configs = serviceSnapshot.data!.message.services
-                          .map(
-                            (service) => ServiceConfig(
-                              serviceKey: service.serviceKey,
-                              localAddress: service.localAddress,
-                              protocol: service.protocol,
-                              enableEncryption: service.enableEncryption,
-                              enableKeepAlive: service.enableKeepAlive,
-                              status: _parseStatus(service.status),
-                              statusMessage: service.statusMessage,
-                              createdAt: DateTime.fromMillisecondsSinceEpoch(
-                                service.createdAtMs.toInt(),
-                              ),
-                              updatedAt: DateTime.fromMillisecondsSinceEpoch(
-                                service.updatedAtMs.toInt(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (disableUi) ...[
+              _buildServerUnavailableBanner(),
+              const SizedBox(height: 12),
+            ],
+            _wrapIfUnavailable(
+              disableUi,
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Register Service',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                          const SizedBox(height: 16),
+                          DropdownButtonFormField<String>(
+                            initialValue: _selectedProtocol,
+                            items: ['TCP', 'UDP']
+                                .map(
+                                  (protocol) => DropdownMenuItem(
+                                    value: protocol,
+                                    child: Text(protocol),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (value) {
+                              setState(() => _selectedProtocol = value!);
+                            },
+                            decoration: const InputDecoration(
+                              labelText: 'Protocol',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          TextField(
+                            controller: _serviceKeyController,
+                            enabled: _serverAvailable,
+                            decoration: InputDecoration(
+                              labelText: 'Service Key',
+                              hintText: _serverAvailable
+                                  ? 'unique-service-key'
+                                  : 'Server unavailable',
+                              border: const OutlineInputBorder(),
+                              prefixIcon: Icon(
+                                _serverAvailable
+                                    ? Icons.cloud_done
+                                    : Icons.cloud_off,
+                                color:
+                                    _serverAvailable ? Colors.green : Colors.red,
                               ),
                             ),
-                          )
-                          .toList();
-
-                      // Sort configs by creation time to ensure consistent ordering
-                      configs.sort(
-                        (a, b) => a.createdAt.compareTo(b.createdAt),
-                      );
-
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (mounted) {
-                          setState(() {
-                            _serviceConfigs = configs;
-                          });
-                        }
-                      });
-                    }
-
-                    return StreamBuilder(
-                      stream: ServiceRegistrationStatusUpdate.rustSignalStream,
-                      builder: (context, registrationSnapshot) {
-                        // Handle service registration status updates (including errors)
-                        if (registrationSnapshot.hasData) {
-                          final signal = registrationSnapshot.data!.message;
-                          if (signal.status == 'failed') {
-                            final errorKey =
-                                '${signal.serviceKey}|${signal.message}';
-                            if (_lastRegistrationErrorKey != errorKey) {
-                              _lastRegistrationErrorKey = errorKey;
-                              WidgetsBinding.instance.addPostFrameCallback((_) {
-                                if (mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                        '${signal.serviceKey}: ${signal.message}',
-                                      ),
-                                      backgroundColor: Colors.red,
-                                    ),
-                                  );
-                                }
-                              });
-                            }
-                          }
-                        }
-
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Card(
-                              child: Padding(
-                                padding: const EdgeInsets.all(16.0),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Register Service',
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.titleLarge,
-                                    ),
-                                    const SizedBox(height: 16),
-                                    DropdownButtonFormField<String>(
-                                      initialValue: _selectedProtocol,
-                                      items: ['TCP', 'UDP']
-                                          .map(
-                                            (protocol) => DropdownMenuItem(
-                                              value: protocol,
-                                              child: Text(protocol),
-                                            ),
-                                          )
-                                          .toList(),
-                                      onChanged: (value) {
-                                        setState(
-                                          () => _selectedProtocol = value!,
-                                        );
-                                      },
-                                      decoration: const InputDecoration(
-                                        labelText: 'Protocol',
-                                        border: OutlineInputBorder(),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 16),
-                                    TextField(
-                                      controller: _serviceKeyController,
-                                      enabled: _serverAvailable,
-                                      decoration: InputDecoration(
-                                        labelText: 'Service Key',
-                                        hintText: _serverAvailable
-                                            ? 'unique-service-key'
-                                            : 'Server unavailable',
-                                        border: const OutlineInputBorder(),
-                                        prefixIcon: Icon(
-                                          _serverAvailable
-                                              ? Icons.cloud_done
-                                              : Icons.cloud_off,
-                                          color: _serverAvailable
-                                              ? Colors.green
-                                              : Colors.red,
+                          ),
+                          const SizedBox(height: 16),
+                          TextField(
+                            controller: _localAddressController,
+                            enabled: _serverAvailable,
+                            decoration: const InputDecoration(
+                              labelText: 'Local Address',
+                              hintText: '127.0.0.1:8080',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          SwitchListTile(
+                            title: const Text('Enable Encryption'),
+                            value: _isEncryptionEnabled,
+                            onChanged: _serverAvailable
+                                ? (value) {
+                                    setState(() => _isEncryptionEnabled = value);
+                                  }
+                                : null,
+                          ),
+                          SwitchListTile(
+                            title: const Text('Enable TCP Keep-Alive'),
+                            value: _isKeepAliveEnabled,
+                            onChanged: _serverAvailable
+                                ? (value) {
+                                    setState(() => _isKeepAliveEnabled = value);
+                                  }
+                                : null,
+                          ),
+                          const SizedBox(height: 16),
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              border: Border.all(color: Colors.grey),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.dns,
+                                  color: Colors.blue,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      const Text(
+                                        'Server Address',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.grey,
                                         ),
                                       ),
-                                    ),
-                                    const SizedBox(height: 16),
-                                    TextField(
-                                      controller: _localAddressController,
-                                      enabled: _serverAvailable,
-                                      decoration: const InputDecoration(
-                                        labelText: 'Local Address',
-                                        hintText: '127.0.0.1:8080',
-                                        border: OutlineInputBorder(),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 16),
-                                    SwitchListTile(
-                                      title: const Text('Enable Encryption'),
-                                      value: _isEncryptionEnabled,
-                                      onChanged: _serverAvailable
-                                          ? (value) {
-                                              setState(
-                                                () => _isEncryptionEnabled =
-                                                    value,
-                                              );
-                                            }
-                                          : null,
-                                    ),
-                                    SwitchListTile(
-                                      title: const Text(
-                                        'Enable TCP Keep-Alive',
-                                      ),
-                                      value: _isKeepAliveEnabled,
-                                      onChanged: _serverAvailable
-                                          ? (value) {
-                                              setState(
-                                                () =>
-                                                    _isKeepAliveEnabled = value,
-                                              );
-                                            }
-                                          : null,
-                                    ),
-                                    const SizedBox(height: 16),
-                                    Container(
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        border: Border.all(color: Colors.grey),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          const Icon(
-                                            Icons.dns,
-                                            color: Colors.blue,
-                                          ),
-                                          const SizedBox(width: 12),
-                                          Expanded(
-                                            child: Column(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.start,
-                                              children: [
-                                                const Text(
-                                                  'Server Address',
-                                                  style: TextStyle(
-                                                    fontSize: 12,
-                                                    color: Colors.grey,
-                                                  ),
-                                                ),
-                                                const SizedBox(height: 4),
-                                                Text(
-                                                  _serverAddress,
-                                                  style: const TextStyle(
-                                                    fontSize: 16,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                          TextButton(
-                                            onPressed: () {
-                                              AppNavigationManager.navigateToConfigPage();
-                                            },
-                                            child: const Text(
-                                              'Configure in Settings',
-                                              style: TextStyle(fontSize: 12),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            SizedBox(
-                              height: 48,
-                              width: double.infinity,
-                              child: ElevatedButton(
-                                onPressed: (_serverAvailable && !_isRegistering)
-                                    ? _registerService
-                                    : null,
-                                style: ElevatedButton.styleFrom(
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(24),
-                                  ),
-                                  backgroundColor: !_serverAvailable
-                                      ? Colors.grey
-                                      : null,
-                                ),
-                                child: _isRegistering
-                                    ? const Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        children: [
-                                          SizedBox(
-                                            width: 16,
-                                            height: 16,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                            ),
-                                          ),
-                                          SizedBox(width: 8),
-                                          Text(
-                                            'Registering...',
-                                            style: TextStyle(fontSize: 16),
-                                          ),
-                                        ],
-                                      )
-                                    : Text(
-                                        _serverAvailable
-                                            ? 'Register Service'
-                                            : 'Server Unavailable',
-                                        style: const TextStyle(fontSize: 16),
-                                      ),
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-
-                            // Service Cards Section
-                            if (_serviceConfigs.isNotEmpty) ...[
-                              Card(
-                                child: Padding(
-                                  padding: const EdgeInsets.all(16.0),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          const Icon(
-                                            Icons.dns,
-                                            color: Colors.blue,
-                                          ),
-                                          const SizedBox(width: 8),
-                                          Text(
-                                            'Registered Services (${_serviceConfigs.length})',
-                                            style: Theme.of(context)
-                                                .textTheme
-                                                .titleMedium
-                                                ?.copyWith(
-                                                  fontWeight: FontWeight.bold,
-                                                ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 16),
-                                      ..._serviceConfigs.map(
-                                        (config) => ServiceCard(
-                                          key: Key(
-                                            config.serviceKey,
-                                          ), // Add unique key for each card
-                                          config: config,
-                                          onEdit: () => _editService(config),
-                                          onDelete: () =>
-                                              _deleteService(config),
-                                          onStartStop: () =>
-                                              _startStopService(config),
-                                          onRefresh: () =>
-                                              _refreshServiceStatus(config),
-                                          onStatusChanged:
-                                              _onServiceStatusChanged,
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        _serverAddress,
+                                        style: const TextStyle(
+                                          fontSize: 16,
                                         ),
                                       ),
                                     ],
                                   ),
                                 ),
+                                TextButton(
+                                  onPressed: () {
+                                    AppNavigationManager.navigateToConfigPage();
+                                  },
+                                  child: const Text(
+                                    'Configure in Settings',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    height: 48,
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: (_serverAvailable && !_isRegistering)
+                          ? _registerService
+                          : null,
+                      style: ElevatedButton.styleFrom(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        backgroundColor: !_serverAvailable ? Colors.grey : null,
+                      ),
+                      child: _isRegistering
+                          ? const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Registering...',
+                                  style: TextStyle(fontSize: 16),
+                                ),
+                              ],
+                            )
+                          : Text(
+                              _serverAvailable
+                                  ? 'Register Service'
+                                  : 'Server Unavailable',
+                              style: const TextStyle(fontSize: 16),
+                            ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  if (_serviceConfigs.isNotEmpty) ...[
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(
+                                  Icons.dns,
+                                  color: Colors.blue,
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Registered Services (${_serviceConfigs.length})',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleMedium
+                                      ?.copyWith(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 16),
+                            ..._serviceConfigs.map(
+                              (config) => ServiceCard(
+                                key: Key(config.serviceKey),
+                                config: config,
+                                onEdit: () => _editService(config),
+                                onDelete: () => _deleteService(config),
+                                onStartStop: () => _startStopService(config),
+                                onRefresh: () => _refreshServiceStatus(config),
+                                onStatusChanged: _onServiceStatusChanged,
                               ),
-                              const SizedBox(height: 16),
-                            ],
-
-                            // Log view button
-                            const LogViewButton(),
+                            ),
                           ],
-                        );
-                      },
-                    );
-                  },
-                );
-              },
-            );
-          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                  const LogViewButton(),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

@@ -1,11 +1,12 @@
 use std::future::{self, Future};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::task::{ready, Context, Poll};
 
 use tokio::task::JoinHandle;
 use trust_dns_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
-use trust_dns_resolver::Resolver;
+use trust_dns_resolver::{Resolver, TokioAsyncResolver};
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
 type ReadyFuture<T> = future::Ready<Result<T>>;
@@ -245,15 +246,25 @@ const DEFAULT_DNS_SERVER_GROUP: &[IpAddr] = &[
 const DNS_QUERY_PORT: u16 = 53;
 
 #[inline]
+fn custom_resolver_config() -> ResolverConfig {
+    ResolverConfig::from_parts(
+        None,
+        vec![],
+        NameServerConfigGroup::from_ips_clear(DEFAULT_DNS_SERVER_GROUP, DNS_QUERY_PORT, true),
+    )
+}
+
+#[inline]
 pub fn get_custom_resolver() -> Option<Resolver> {
-    match Resolver::new(
-        ResolverConfig::from_parts(
-            None,
-            vec![],
-            NameServerConfigGroup::from_ips_clear(DEFAULT_DNS_SERVER_GROUP, DNS_QUERY_PORT, true),
-        ),
-        ResolverOpts::default(),
-    ) {
+    // The sync resolver uses `block_on` internally and will panic if called from a Tokio runtime
+    // thread. Keep a guard here so callers can fall back to system DNS, and use the async helpers
+    // below when running inside async code.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tracing::debug!("Skipping sync custom DNS resolver inside Tokio runtime thread");
+        return None;
+    }
+
+    match Resolver::new(custom_resolver_config(), ResolverOpts::default()) {
         Ok(r) => Some(r),
         Err(e) => {
             tracing::error!(
@@ -262,6 +273,14 @@ pub fn get_custom_resolver() -> Option<Resolver> {
             None
         }
     }
+}
+
+#[inline]
+fn get_custom_async_resolver() -> TokioAsyncResolver {
+    static RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+        TokioAsyncResolver::tokio(custom_resolver_config(), ResolverOpts::default())
+    });
+    RESOLVER.clone()
 }
 
 macro_rules! invalid_input {
@@ -289,7 +308,7 @@ fn get_ip_addrs(s: &str) -> Result<Vec<IpAddr>> {
         .map_err(|e| invalid_input!(e))
 }
 
-/// must run as async runtime
+/// Blocking DNS lookup. Avoid calling this from inside a Tokio runtime thread.
 #[inline]
 pub fn get_socket_addrs_from_host_port(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
     match get_ip_addrs(host) {
@@ -299,12 +318,46 @@ pub fn get_socket_addrs_from_host_port(host: &str, port: u16) -> Result<Vec<Sock
     }
 }
 
-/// must run as async runtime
+/// Blocking DNS lookup. Avoid calling this from inside a Tokio runtime thread.
 #[inline]
 pub fn get_socket_addrs(s: &str) -> Result<Vec<SocketAddr>> {
     let (host, port_str) = try_opt!(s.rsplit_once(':'), "invalid socket address");
     let port: u16 = try_opt!(port_str.parse().ok(), "invalid port value");
     get_socket_addrs_from_host_port(host, port)
+}
+
+/// Async DNS lookup using the custom resolver, safe to call inside Tokio runtimes.
+pub async fn get_ip_addrs_async(s: &str) -> Result<Vec<IpAddr>> {
+    let resolver = get_custom_async_resolver();
+    resolver
+        .lookup_ip(s)
+        .await
+        .map(|v| v.iter().collect())
+        .map_err(|e| invalid_input!(e))
+}
+
+/// Async DNS lookup for host + port, falls back to system resolver on failure.
+#[inline]
+pub async fn get_socket_addrs_from_host_port_async(
+    host: &str,
+    port: u16,
+) -> Result<Vec<SocketAddr>> {
+    match get_ip_addrs_async(host).await {
+        Ok(r) => Ok(r.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()),
+        // Resolve dns properly with the system resolver
+        Err(_) => tokio::net::lookup_host((host, port))
+            .await
+            .map(|v| v.collect())
+            .map_err(|e| invalid_input!(e)),
+    }
+}
+
+/// Async DNS lookup for `domain:port` forms, such as `bilibili.com:1080`.
+#[inline]
+pub async fn get_socket_addrs_async(s: &str) -> Result<Vec<SocketAddr>> {
+    let (host, port_str) = try_opt!(s.rsplit_once(':'), "invalid socket address");
+    let port: u16 = try_opt!(port_str.parse().ok(), "invalid port value");
+    get_socket_addrs_from_host_port_async(host, port).await
 }
 
 pub async fn each_addr<A: ToSocketAddrs, F, T, R>(addr: A, f: F) -> Result<T>

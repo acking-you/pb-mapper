@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/models/client_config.dart';
-import 'package:pb_mapper_ui/src/bindings/bindings.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class ClientCard extends StatefulWidget {
@@ -32,7 +31,17 @@ class _ClientCardState extends State<ClientCard> {
   void initState() {
     super.initState();
     _config = widget.config;
-    _setupStatusListener();
+  }
+
+  @override
+  void didUpdateWidget(covariant ClientCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.config != widget.config) {
+      setState(() {
+        _config = widget.config;
+        _isOperating = false;
+      });
+    }
   }
 
   Future<void> _copyLocalAddress() async {
@@ -43,50 +52,6 @@ class _ClientCardState extends State<ClientCard> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Copied to clipboard: $addr')));
-    }
-  }
-
-  void _setupStatusListener() {
-    // Listen for client connection status updates
-    ClientConnectionStatus.rustSignalStream.listen((signal) {
-      if (mounted) {
-        final message = signal.message.status;
-        // Check if this update is for our client
-        if (message.contains(_config.serviceKey)) {
-          setState(() => _isOperating = false);
-          widget.onStatusChanged?.call(_config);
-        }
-      }
-    });
-
-    // Listen for individual client status responses
-    ClientStatusResponse.rustSignalStream.listen((signal) {
-      if (signal.message.serviceKey == _config.serviceKey && mounted) {
-        final status = _parseStatus(signal.message.status);
-        setState(() {
-          _config = _config.copyWith(
-            status: status,
-            statusMessage: signal.message.message,
-          );
-          _isOperating = false;
-        });
-        widget.onStatusChanged?.call(_config);
-      }
-    });
-  }
-
-  ClientStatus _parseStatus(String statusString) {
-    switch (statusString.toLowerCase()) {
-      case 'running':
-      case 'connected':
-        return ClientStatus.running;
-      case 'retrying':
-        return ClientStatus.retrying;
-      case 'failed':
-        return ClientStatus.failed;
-      case 'stopped':
-      default:
-        return ClientStatus.stopped;
     }
   }
 
@@ -136,10 +101,8 @@ class _ClientCardState extends State<ClientCard> {
 
     if (_config.status == ClientStatus.running ||
         _config.status == ClientStatus.retrying) {
-      // Disconnect the client
-      DisconnectServiceRequest(
-        serviceKey: _config.serviceKey,
-      ).sendSignalToRust();
+      // Disconnect via parent callback
+      widget.onConnectDisconnect?.call();
       setState(() {
         _config = _config.copyWith(
           status: ClientStatus.stopped,
@@ -147,13 +110,8 @@ class _ClientCardState extends State<ClientCard> {
         );
       });
     } else {
-      // Connect the client
-      ConnectServiceRequest(
-        serviceKey: _config.serviceKey,
-        localAddress: _config.localAddress,
-        protocol: _config.protocol,
-        enableKeepAlive: _config.enableKeepAlive,
-      ).sendSignalToRust();
+      // Connect via parent callback
+      widget.onConnectDisconnect?.call();
       setState(() {
         _config = _config.copyWith(
           status: ClientStatus.retrying,

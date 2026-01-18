@@ -1,7 +1,8 @@
 use clap::Parser;
 use mimalloc_rust::GlobalMiMalloc;
 use pb_mapper::common::config::{
-    get_pb_mapper_server, get_sockaddr, init_tracing, LocalService, PB_MAPPER_KEEP_ALIVE,
+    get_pb_mapper_server_async, get_sockaddr_async, init_tracing, LocalService,
+    PB_MAPPER_KEEP_ALIVE,
 };
 use pb_mapper::local::client::{handle_status_cli, run_client_side_cli};
 use pb_mapper::snafu_error_get_or_return;
@@ -42,16 +43,20 @@ async fn main() {
     match cli.local_server {
         LocalService::UdpServer { key, addr } => {
             run_client_side_cli::<UdpListenerProvider, _>(
-                snafu_error_get_or_return!(get_sockaddr(&addr)),
-                snafu_error_get_or_return!(get_pb_mapper_server(cli.pb_mapper_server.as_deref())),
+                snafu_error_get_or_return!(get_sockaddr_async(&addr).await),
+                snafu_error_get_or_return!(
+                    get_pb_mapper_server_async(cli.pb_mapper_server.as_deref()).await
+                ),
                 key.into(),
             )
             .await
         }
         LocalService::TcpServer { key, addr } => {
             run_client_side_cli::<TcpListenerProvider, _>(
-                snafu_error_get_or_return!(get_sockaddr(&addr)),
-                snafu_error_get_or_return!(get_pb_mapper_server(cli.pb_mapper_server.as_deref())),
+                snafu_error_get_or_return!(get_sockaddr_async(&addr).await),
+                snafu_error_get_or_return!(
+                    get_pb_mapper_server_async(cli.pb_mapper_server.as_deref()).await
+                ),
                 key.into(),
             )
             .await;
@@ -59,7 +64,9 @@ async fn main() {
         LocalService::Status { op } => {
             handle_status_cli(
                 op,
-                snafu_error_get_or_return!(get_pb_mapper_server(cli.pb_mapper_server.as_deref())),
+                snafu_error_get_or_return!(
+                    get_pb_mapper_server_async(cli.pb_mapper_server.as_deref()).await
+                ),
             )
             .await
         }

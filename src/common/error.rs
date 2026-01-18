@@ -59,11 +59,11 @@ pub enum Error {
         // specific error explanation
         detail: String,
     },
-    #[snafu(display("`{action}` forward message failed with detail:`{detail}`"))]
+    #[snafu(display("`{action}` forward message failed: {source}"))]
     MsgForward {
         // must be "read" or "write"
         action: &'static str,
-        detail: String,
+        source: std::io::Error,
     },
     /// Error for manager
     #[snafu(display("`TaskManager` fails while waiting for a task"))]
@@ -106,6 +106,39 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+impl Error {
+    pub fn is_expected_disconnect(&self) -> bool {
+        use std::io::ErrorKind;
+
+        let is_expected = |kind: ErrorKind| {
+            matches!(
+                kind,
+                ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::NotConnected
+                    | ErrorKind::TimedOut
+            )
+        };
+
+        match self {
+            Error::MsgNetworkReadCheckSum { source }
+            | Error::MsgNetworkReadDatalen { source }
+            | Error::MsgNetworkReadBufferdRawData { source }
+            | Error::MsgNetworkReadBody { source }
+            | Error::MsgNetworkWriteCheckSum { source }
+            | Error::MsgNetworkWriteDatalen { source }
+            | Error::MsgNetworkWriteBody { source }
+            | Error::MsgNetworkWriteCodecMsg { source }
+            | Error::MsgNetworkWriteCodecTag { source }
+            | Error::FwdNetworkWriteWithNormal { source }
+            | Error::MsgForward { source, .. } => is_expected(source.kind()),
+            _ => false,
+        }
+    }
+}
 
 #[macro_export]
 macro_rules! snafu_error_handle {

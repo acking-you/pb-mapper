@@ -57,8 +57,13 @@ pub trait MessageWriter {
     }
 }
 
-/// Maximum value of `datalen` to prevent Out of Memory
-const MAX_MSG_LEN: DataLenType = 8 * 1024 * 1024;
+/// Maximum plaintext payload size read from local services.
+const MAX_PLAINTEXT_LEN: DataLenType = 8 * 1024 * 1024;
+/// AES-GCM tag length (bytes). Keep in sync with ring's tag length.
+const CODEC_TAG_LEN: DataLenType = 16;
+/// Maximum value of `datalen` to prevent Out of Memory.
+/// For encrypted frames, the tag is appended to the payload.
+const MAX_MSG_LEN: DataLenType = MAX_PLAINTEXT_LEN + CODEC_TAG_LEN;
 
 pub type DataLenType = u32;
 
@@ -235,6 +240,10 @@ pub struct CodecMessageWriter<'a, T: AsyncWriteExt + Unpin, E: Encryptor> {
 impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecMessageWriter<'a, T, E> {
     pub fn new(writer: &'a mut T, encryptor: E) -> Self {
         Self { writer, encryptor }
+    }
+
+    pub async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.writer.shutdown().await
     }
 }
 

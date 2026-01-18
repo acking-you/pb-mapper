@@ -60,21 +60,21 @@ jobs:
       - name: Build pb-mapper-server
         uses: actions-rs/cargo@v1
         with:
-          use-cross: true
+          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
           command: build
           args: --bin pb-mapper-server --verbose --release --target ${{ matrix.target }}
 
       - name: Build pb-mapper-server-cli
         uses: actions-rs/cargo@v1
         with:
-          use-cross: true
+          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
           command: build
           args: --bin pb-mapper-server-cli --verbose --release --target ${{ matrix.target }}
 
       - name: Build pb-mapper-client-cli
         uses: actions-rs/cargo@v1
         with:
-          use-cross: true
+          use-cross: ${{ matrix.os == 'ubuntu-latest' }}
           command: build
           args: --bin pb-mapper-client-cli --verbose --release --target ${{ matrix.target }}
 
@@ -94,10 +94,10 @@ jobs:
 
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             7z a "$dirname.zip" "$dirname"
-            echo "CLI_ASSET=$dirname.zip" >> $GITHUB_ENV
+            echo "SERVER_ASSET=$dirname.zip" >> $GITHUB_ENV
           else
             tar -czf "$dirname.tar.gz" "$dirname"
-            echo "CLI_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
+            echo "SERVER_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
           fi
 
       - name: Archive pb-mapper-server-cli
@@ -116,10 +116,10 @@ jobs:
 
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             7z a "$dirname.zip" "$dirname"
-            echo "CLIENT_ASSET=$dirname.zip" >> $GITHUB_ENV
+            echo "SERVER_CLI_ASSET=$dirname.zip" >> $GITHUB_ENV
           else
             tar -czf "$dirname.tar.gz" "$dirname"
-            echo "CLIENT_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
+            echo "SERVER_CLI_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
           fi
 
       - name: Archive pb-mapper-client-cli
@@ -138,10 +138,10 @@ jobs:
 
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             7z a "$dirname.zip" "$dirname"
-            echo "SERVER_ASSET=$dirname.zip" >> $GITHUB_ENV
+            echo "CLIENT_CLI_ASSET=$dirname.zip" >> $GITHUB_ENV
           else
             tar -czf "$dirname.tar.gz" "$dirname"
-            echo "SERVER_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
+            echo "CLIENT_CLI_ASSET=$dirname.tar.gz" >> $GITHUB_ENV
           fi
 
       - name: Release binary
@@ -149,5 +149,5 @@ jobs:
         with:
           files: |
             ${{ env.SERVER_ASSET }}
-            ${{ env.CLIENT_ASSET }}
-            ${{ env.CLI_ASSET }}
+            ${{ env.SERVER_CLI_ASSET }}
+            ${{ env.CLIENT_CLI_ASSET }}

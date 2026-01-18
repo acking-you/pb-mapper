@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 
 // Custom notification for service connection
@@ -47,11 +47,43 @@ class StatusMonitoringView extends StatefulWidget {
 }
 
 class _StatusMonitoringViewState extends State<StatusMonitoringView> {
+  final PbMapperApi _api = PbMapperApi();
+  ServerStatusDetail? _status;
+  bool _serverStatusRetryPending = false;
+
   @override
   void initState() {
     super.initState();
     // Request detailed status when view loads
-    RequestServerStatus().sendSignalToRust();
+    _loadStatus();
+  }
+
+  Future<void> _loadStatus() async {
+    final status = await _api.getServerStatusDetail();
+    if (!mounted) return;
+    setState(() {
+      _status = status;
+    });
+    _scheduleServerStatusRetryIfNeeded();
+  }
+
+  void _scheduleServerStatusRetryIfNeeded() {
+    final serverAvailable = _status?.serverAvailable ?? false;
+    if (serverAvailable) {
+      _serverStatusRetryPending = false;
+      return;
+    }
+    if (_serverStatusRetryPending) {
+      return;
+    }
+    _serverStatusRetryPending = true;
+    Future.delayed(const Duration(seconds: 1), () {
+      if (!mounted) return;
+      _serverStatusRetryPending = false;
+      if (!(_status?.serverAvailable ?? false)) {
+        _loadStatus();
+      }
+    });
   }
 
   void _navigateToConnection(BuildContext context, String serviceKey) {
@@ -71,14 +103,75 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
     );
   }
 
+  Widget _buildServerUnavailableBanner() {
+    return Card(
+      color: Colors.amber.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.warning_amber, color: Colors.orange),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'No pb-mapper server is reachable.',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Please configure a reachable server in the Config page '
+                    'before using status monitoring.',
+                    style: TextStyle(color: Colors.grey.shade700),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            ElevatedButton(
+              onPressed: AppNavigationManager.navigateToConfigPage,
+              child: const Text('Go to Config'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _wrapIfUnavailable(bool unavailable, Widget child) {
+    if (!unavailable) {
+      return child;
+    }
+    return IgnorePointer(
+      ignoring: true,
+      child: Opacity(opacity: 0.5, child: child),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final bool disableUi = _status != null && !_status!.serverAvailable;
     return Padding(
       padding: ResponsiveLayout.getScreenPadding(context),
       child: SingleChildScrollView(
-        child: ResponsiveLayout.isMobile(context)
-            ? _buildMobileLayout(context)
-            : _buildDesktopLayout(context),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (disableUi) ...[
+              _buildServerUnavailableBanner(),
+              SizedBox(height: ResponsiveLayout.getVerticalSpacing(context)),
+            ],
+            _wrapIfUnavailable(
+              disableUi,
+              ResponsiveLayout.isMobile(context)
+                  ? _buildMobileLayout(context)
+                  : _buildDesktopLayout(context),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -128,7 +221,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                 ),
                 const Spacer(),
                 ElevatedButton.icon(
-                  onPressed: () => RequestServerStatus().sendSignalToRust(),
+                  onPressed: _loadStatus,
                   icon: const Icon(Icons.refresh, size: 18),
                   label: const Text('Refresh'),
                   style: ElevatedButton.styleFrom(
@@ -141,28 +234,21 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
               ],
             ),
             const SizedBox(height: 20),
-            StreamBuilder(
-              stream: ServerStatusDetailUpdate.rustSignalStream,
-              builder: (context, snapshot) {
-                if (snapshot.hasData) {
-                  final status = snapshot.data!.message;
-                  return Column(
+            _status != null
+                ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _buildStatusIndicator(context, status.serverAvailable),
+                      _buildStatusIndicator(context, _status!.serverAvailable),
                       const SizedBox(height: 16),
-                      _buildServerDetails(context, status),
+                      _buildServerDetails(context, _status!),
                     ],
-                  );
-                }
-                return const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(20),
-                    child: CircularProgressIndicator(),
+                  )
+                : const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(20),
+                      child: CircularProgressIndicator(),
+                    ),
                   ),
-                );
-              },
-            ),
           ],
         ),
       ),
@@ -360,95 +446,87 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
               ),
             ),
             const SizedBox(height: 16),
-            StreamBuilder(
-              stream: ServerStatusDetailUpdate.rustSignalStream,
-              builder: (context, snapshot) {
-                if (snapshot.hasData && snapshot.data != null) {
-                  final services = snapshot.data!.message.registeredServices;
-                  if (services.isEmpty) {
-                    return Container(
-                      padding: const EdgeInsets.all(24),
-                      child: Center(
-                        child: Column(
-                          children: [
-                            Icon(
-                              Icons.info_outline,
-                              size: 48,
-                              color: Colors.grey.shade400,
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              'No services registered',
-                              style: TextStyle(
-                                fontSize: 16,
-                                color: Colors.grey.shade600,
-                              ),
-                            ),
-                          ],
+            if (_status == null)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(20),
+                  child: CircularProgressIndicator(),
+                ),
+              )
+            else if (_status!.registeredServices.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(24),
+                child: Center(
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.info_outline,
+                        size: 48,
+                        color: Colors.grey.shade400,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'No services registered',
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: Colors.grey.shade600,
                         ),
                       ),
-                    );
-                  }
-                  return Column(
-                    children: services.map<Widget>((serviceKey) {
-                      final isDark =
-                          Theme.of(context).brightness == Brightness.dark;
-                      final availableColor = isDark
-                          ? Colors.green.shade400
-                          : Colors.green.shade600;
-
-                      return Card(
-                        margin: const EdgeInsets.symmetric(vertical: 6),
-                        color: Theme.of(context).brightness == Brightness.dark
-                            ? Colors.grey.shade800.withValues(alpha: 0.7)
-                            : Colors.green.shade50,
-                        child: ListTile(
-                          leading: Container(
-                            width: 12,
-                            height: 12,
-                            decoration: BoxDecoration(
-                              color: availableColor,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          title: Text(
-                            serviceKey,
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          subtitle: Text(
-                            'Tap to connect to this service',
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: availableColor,
-                            ),
-                          ),
-                          trailing: Icon(
-                            Icons.arrow_forward_ios,
-                            size: 16,
-                            color: availableColor,
-                          ),
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
-                          ),
-                          onTap: () =>
-                              _navigateToConnection(context, serviceKey),
-                        ),
-                      );
-                    }).toList(),
-                  );
-                }
-                return const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(20),
-                    child: CircularProgressIndicator(),
+                    ],
                   ),
-                );
-              },
-            ),
+                ),
+              )
+            else
+              Column(
+                children: _status!.registeredServices.map<Widget>((serviceKey) {
+                  final isDark =
+                      Theme.of(context).brightness == Brightness.dark;
+                  final availableColor = isDark
+                      ? Colors.green.shade400
+                      : Colors.green.shade600;
+
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    color: Theme.of(context).brightness == Brightness.dark
+                        ? Colors.grey.shade800.withValues(alpha: 0.7)
+                        : Colors.green.shade50,
+                    child: ListTile(
+                      leading: Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: availableColor,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      title: Text(
+                        serviceKey,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Tap to connect to this service',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: availableColor,
+                        ),
+                      ),
+                      trailing: Icon(
+                        Icons.arrow_forward_ios,
+                        size: 16,
+                        color: availableColor,
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      onTap: () => _navigateToConnection(context, serviceKey),
+                    ),
+                  );
+                }).toList(),
+              ),
           ],
         ),
       ),

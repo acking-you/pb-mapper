@@ -5,6 +5,9 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
 
+env:
+  UI_VERSION: ${{ github.ref_name }}
+
 permissions:
   contents: write
 
@@ -27,32 +30,24 @@ jobs:
           submodules: true          
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0            
+      - name: Install make
+        run: choco install make
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.35.1
           channel: "stable"
-      - name: Install protoc on Windows
-        run: |
-          choco install protoc
-          protoc --version       
-      - name: Generate Rinf bindings
-        run: |
-          cd ui
-          cargo install rinf_cli
-          rinf gen
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
       - name: Build Windows app with fastforge
         run: |
-          cd ui
-          
-          # Install fastforge
-          dart pub global activate fastforge
-          
-          # Build and release using fastforge  
-          fastforge release --name production
+          make release-ui-windows
       - name: Upload Windows artifacts
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}-ui
+          target_commitish: ${{ github.sha }}
           name: "pb-mapper UI ${{ github.ref_name }}"
           body: |
             # pb-mapper UI Release ${{ github.ref_name }}
@@ -81,47 +76,40 @@ jobs:
         with:
           flutter-version: 3.35.1
           channel: "stable"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
       - name: Install dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y locate ninja-build libgtk-3-dev libayatana-appindicator3-dev libnotify-dev \
           binutils coreutils desktop-file-utils fakeroot fuse libgdk-pixbuf2.0-dev patchelf python3-pip python3-setuptools squashfs-tools strace util-linux zsync
-      - name: Install protoc on Ubuntu
-        run: |
-          sudo apt-get install -y protobuf-compiler
-          protoc --version
-      - name: Generate Rinf bindings
-        run: |
-          cd ui
-          cargo install rinf_cli
-          rinf gen
       - name: Build Linux app
         run: |
+          make build-ui-linux-release
           cd ui
-          
-          # Build Flutter Linux app
-          flutter build linux --release
-          
+
           # Create directory structure for packaging
-          mkdir -p dist/1.0.0
-          
+          mkdir -p dist/${UI_VERSION}
+
           # Create ZIP package
           cd build/linux/x64/release/bundle
-          zip -r ../../../../../dist/1.0.0/pb-mapper-linux.zip .
-          
+          zip -r ../../../../../dist/${UI_VERSION}/pb-mapper-linux.zip .
+
           # Create AppImage (basic)
           cd ../../../../../
           mkdir -p AppDir/usr/bin
           mkdir -p AppDir/usr/share/applications
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
-          
+
           # Copy binary and dependencies
           cp -r build/linux/x64/release/bundle/* AppDir/usr/bin/
-          
+
           # Copy icon
           cp assets/app_icon.png AppDir/usr/share/icons/hicolor/256x256/apps/pb-mapper.png
           cp AppDir/usr/share/icons/hicolor/256x256/apps/pb-mapper.png AppDir/pb-mapper.png
-          
+
           # Create desktop file
           cat > AppDir/usr/share/applications/pb-mapper.desktop << EOF
           [Desktop Entry]
@@ -133,10 +121,10 @@ jobs:
           Type=Application
           Categories=Network;
           EOF
-          
+
           # Copy desktop file to root
           cp AppDir/usr/share/applications/pb-mapper.desktop AppDir/
-          
+
           # Create AppRun
           cat > AppDir/AppRun << 'EOF'
           #!/bin/bash
@@ -145,16 +133,17 @@ jobs:
           exec "${HERE}/usr/bin/ui" "$@"
           EOF
           chmod +x AppDir/AppRun
-          
+
           # Build AppImage
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
-          ./appimagetool-x86_64.AppImage AppDir dist/1.0.0/pb-mapper-linux.AppImage
+          ./appimagetool-x86_64.AppImage AppDir dist/${UI_VERSION}/pb-mapper-linux.AppImage
       - name: Upload Linux artifacts
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}-ui
-          files: ui/dist/1.0.0/*
+          target_commitish: ${{ github.sha }}
+          files: ui/dist/${{ env.UI_VERSION }}/*
 
   build-android:
     runs-on: ubuntu-latest
@@ -173,20 +162,14 @@ jobs:
         with:
           flutter-version: 3.35.1
           channel: "stable"
-      - name: Install protoc on Ubuntu
-        run: |
-          sudo apt-get install -y protobuf-compiler
-          protoc --version
-      - name: Generate Rinf bindings
-        run: |
-          cd ui
-          cargo install rinf_cli
-          rinf gen
+      - name: Set up Android NDK
+        uses: android-actions/setup-ndk@v1
+        with:
+          ndk-version: r26d
       - name: Build Android APKs
         run: |
-          cd ui
-          flutter build apk --split-per-abi --release
-          cd build/app/outputs/flutter-apk
+          make build-ui-android-release
+          cd ui/build/app/outputs/flutter-apk
           mv app-arm64-v8a-release.apk pb-mapper-arm64-v8a.apk
           mv app-armeabi-v7a-release.apk pb-mapper-armeabi-v7a.apk
           mv app-x86_64-release.apk pb-mapper-x86_64.apk
@@ -194,6 +177,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}-ui
+          target_commitish: ${{ github.sha }}
           files: |
             ui/build/app/outputs/flutter-apk/pb-mapper-arm64-v8a.apk
             ui/build/app/outputs/flutter-apk/pb-mapper-armeabi-v7a.apk
@@ -215,24 +199,14 @@ jobs:
         with:
           flutter-version: 3.35.1
           channel: "stable"
-      - name: Install protoc on macOS
-        run: |
-          brew install protobuf
-          protoc --version      
-      - name: Generate Rinf bindings
-        run: |
-          cd ui
-          cargo install rinf_cli
-          rinf gen
       - name: Install appdmg
         run: |
           npm install -g appdmg
       - name: Build macOS app
         run: |
+          make build-ui-macos-release
           cd ui
           PROJECT_DIR=$(pwd)
-
-          flutter build macos --release
           cd build/macos/Build/Products/Release
           cat>appdmg.json<<EOF
           {
@@ -251,6 +225,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}-ui
+          target_commitish: ${{ github.sha }}
           files: |
             ${{env.DMG_ASSET}}
 
@@ -267,19 +242,10 @@ jobs:
         with:
           flutter-version: 3.35.1
           channel: "stable"
-      - name: Install protoc on macOS
-        run: |
-          brew install protobuf
-          protoc --version      
-      - name: Generate Rinf bindings
-        run: |
-          cd ui
-          cargo install rinf_cli
-          rinf gen
       - name: Build iOS app (no-codesign)
         run: |
+          make build-ui-ios-release
           cd ui
-          flutter build ios --release --no-codesign
           cd build/ios/iphoneos
           mkdir Payload
           mv Runner.app Payload/
@@ -288,5 +254,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}-ui
+          target_commitish: ${{ github.sha }}
           files: |
             ui/build/ios/iphoneos/pb-mapper-ios-unsigned.ipa

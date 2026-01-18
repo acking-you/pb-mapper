@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:pb_mapper_ui/src/bindings/bindings.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/views/log_view_button.dart';
 
@@ -11,6 +11,7 @@ class ServerManagementView extends StatefulWidget {
 }
 
 class _ServerManagementViewState extends State<ServerManagementView> {
+  final PbMapperApi _api = PbMapperApi();
   final _portController = TextEditingController(text: '7666');
   bool _isKeepAliveEnabled = true;
   bool _isServerRunning = false;
@@ -24,30 +25,23 @@ class _ServerManagementViewState extends State<ServerManagementView> {
   @override
   void initState() {
     super.initState();
-    _setupServerStatusListener();
-    _requestServerStatus(); // Actively request status on page load
+    _refreshStatus();
   }
 
-  void _setupServerStatusListener() {
-    LocalServerStatusUpdate.rustSignalStream.listen((signal) {
-      if (mounted) {
-        setState(() {
-          _isServerRunning = signal.message.isRunning;
-          _activeConnections = signal.message.activeConnections;
-          _registeredServices = signal.message.registeredServices;
-          _uptime = signal.message.uptimeSeconds.toInt();
-          _serverStatus = signal.message.isRunning ? 'Running' : 'Stopped';
+  Future<void> _refreshStatus() async {
+    final status = await _api.getLocalServerStatus();
+    if (!mounted) return;
+    setState(() {
+      _isServerRunning = status.isRunning;
+      _activeConnections = status.activeConnections;
+      _registeredServices = status.registeredServices;
+      _uptime = status.uptimeSeconds;
+      _serverStatus = status.isRunning ? 'Running' : 'Stopped';
 
-          // Clear loading states when we get a status update
-          _isStarting = false;
-          _isStopping = false;
-        });
-      }
+      // Clear loading states when we get a status update
+      _isStarting = false;
+      _isStopping = false;
     });
-  }
-
-  void _requestServerStatus() {
-    const RequestLocalServerStatus().sendSignalToRust();
   }
 
   @override
@@ -56,31 +50,49 @@ class _ServerManagementViewState extends State<ServerManagementView> {
     super.dispose();
   }
 
-  void _startServer() {
+  Future<void> _startServer() async {
     final port = int.tryParse(_portController.text) ?? 7666;
     setState(() => _isStarting = true);
 
-    StartServerRequest(
+    final result = await _api.startServer(
       port: port,
-      enableKeepAlive: _isKeepAliveEnabled,
-    ).sendSignalToRust();
+      keepAlive: _isKeepAliveEnabled,
+    );
 
-    // Request status update after a brief delay to allow server to start
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.message),
+          backgroundColor: result.success ? Colors.green : Colors.red,
+        ),
+      );
+    }
+
+    // Request status update after a brief delay to allow server to start.
     Future.delayed(const Duration(milliseconds: 500), () {
       if (mounted) {
-        _requestServerStatus();
+        _refreshStatus();
       }
     });
   }
 
-  void _stopServer() {
+  Future<void> _stopServer() async {
     setState(() => _isStopping = true);
-    StopServerRequest().sendSignalToRust();
+    final result = await _api.stopServer();
 
-    // Request status update after a brief delay to allow server to stop
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.message),
+          backgroundColor: result.success ? Colors.green : Colors.red,
+        ),
+      );
+    }
+
+    // Request status update after a brief delay to allow server to stop.
     Future.delayed(const Duration(milliseconds: 500), () {
       if (mounted) {
-        _requestServerStatus();
+        _refreshStatus();
       }
     });
   }
