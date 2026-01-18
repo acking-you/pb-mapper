@@ -3,3 +3,9 @@ target
 .idea
 .vscode
 .cargo
+ui/native/**/libpb_mapper_ffi.*
+ui/native/**/libpb_mapper_ffi.so
+ui/native/**/libpb_mapper_ffi.dylib
+ui/native/**/libpb_mapper_ffi.dll
+ui/native/**/libpb_mapper_ffi.a
+ui/native/**/libpb_mapper_ffi.lib
