@@ -126,3 +126,16 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
   install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endif()
+
+# Copy native pb-mapper FFI library
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+  set(PB_MAPPER_FFI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../native/linux/x64")
+else()
+  set(PB_MAPPER_FFI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../native/linux/arm64")
+endif()
+
+if(EXISTS "${PB_MAPPER_FFI_DIR}/libpb_mapper_ffi.so")
+  install(FILES "${PB_MAPPER_FFI_DIR}/libpb_mapper_ffi.so"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()

@@ -1,1 +1,2 @@
 #include "Generated.xcconfig"
+OTHER_LDFLAGS=$(inherited) -L$(PROJECT_DIR)/../native/ios -lpb_mapper_ffi

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
-import 'package:pb_mapper_ui/src/bindings/bindings.dart';
 
 class ServiceCard extends StatefulWidget {
   final ServiceConfig config;
@@ -32,37 +31,16 @@ class _ServiceCardState extends State<ServiceCard> {
   void initState() {
     super.initState();
     _config = widget.config;
-    _setupStatusListener();
   }
 
-  void _setupStatusListener() {
-    // Listen for service registration status updates
-    ServiceRegistrationStatusUpdate.rustSignalStream.listen((signal) {
-      if (signal.message.serviceKey == _config.serviceKey && mounted) {
-        final status = _parseStatus(signal.message.status);
-        setState(() {
-          _config = _config.copyWith(
-            status: status,
-            statusMessage: signal.message.message,
-          );
-          _isOperating = false;
-        });
-        widget.onStatusChanged?.call(_config);
-      }
-    });
-  }
-
-  ServiceStatus _parseStatus(String statusString) {
-    switch (statusString.toLowerCase()) {
-      case 'running':
-        return ServiceStatus.running;
-      case 'retrying':
-        return ServiceStatus.retrying;
-      case 'failed':
-        return ServiceStatus.failed;
-      case 'stopped':
-      default:
-        return ServiceStatus.stopped;
+  @override
+  void didUpdateWidget(covariant ServiceCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.config != widget.config) {
+      setState(() {
+        _config = widget.config;
+        _isOperating = false;
+      });
     }
   }
 
@@ -112,10 +90,8 @@ class _ServiceCardState extends State<ServiceCard> {
 
     if (_config.status == ServiceStatus.running ||
         _config.status == ServiceStatus.retrying) {
-      // Stop the service
-      UnregisterServiceRequest(
-        serviceKey: _config.serviceKey,
-      ).sendSignalToRust();
+      // Stop the service via parent callback
+      widget.onStartStop?.call();
       setState(() {
         _config = _config.copyWith(
           status: ServiceStatus.stopped,
@@ -123,14 +99,8 @@ class _ServiceCardState extends State<ServiceCard> {
         );
       });
     } else {
-      // Start/restart the service
-      RegisterServiceRequest(
-        serviceKey: _config.serviceKey,
-        localAddress: _config.localAddress,
-        protocol: _config.protocol,
-        enableEncryption: _config.enableEncryption,
-        enableKeepAlive: _config.enableKeepAlive,
-      ).sendSignalToRust();
+      // Start/restart the service via parent callback
+      widget.onStartStop?.call();
       setState(() {
         _config = _config.copyWith(
           status: ServiceStatus.retrying,

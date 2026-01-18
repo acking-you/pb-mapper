@@ -109,7 +109,9 @@ async fn run_udp_echo_server(addr: &str) -> Result<(), Box<dyn std::error::Error
 }
 
 async fn run_pb_mapper_server(addr: &str) {
-    run_server(addr).await;
+    if let Err(e) = run_server(addr).await {
+        eprintln!("pb-mapper server failed to start: {e}");
+    }
 }
 
 async fn run_pb_mapper_server_cli(

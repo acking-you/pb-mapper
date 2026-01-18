@@ -1,6 +1,5 @@
 import 'dart:async';
-import 'package:pb_mapper_ui/src/bindings/bindings.dart';
-import 'package:rinf/rinf.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 
 class LogManager {
   static final LogManager _instance = LogManager._internal();
@@ -18,10 +17,10 @@ class LogManager {
   int get logCount => _logMessages.length;
   int get maxLogLines => _maxLogLines;
 
-  late StreamSubscription<RustSignalPack<LogMessage>> _logSubscription;
+  late StreamSubscription<LogMessage> _logSubscription;
 
   void initialize() {
-    _logSubscription = LogMessage.rustSignalStream.listen(_handleLogMessage);
+    _logSubscription = PbMapperService.logStream.listen(_handleLogMessage);
   }
 
   void dispose() {
@@ -29,8 +28,8 @@ class LogManager {
     _logStreamController.close();
   }
 
-  void _handleLogMessage(RustSignalPack<LogMessage> signalPack) {
-    _logMessages.add(signalPack.message);
+  void _handleLogMessage(LogMessage message) {
+    _logMessages.add(message);
 
     // Limit log lines to prevent memory issues
     if (_logMessages.length > _maxLogLines) {

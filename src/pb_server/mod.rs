@@ -136,8 +136,8 @@ impl ConnIdProvider<RemoteConnId> for RemoteIdProvider {
 }
 type ServerMananger = TaskManager<ManagerTask, ConnTask, RemoteConnId, RemoteIdProvider>;
 
-pub async fn run_server<A: ToSocketAddrs>(addr: A) {
-    run_server_with_shutdown(addr, CancellationToken::new(), None).await;
+pub async fn run_server<A: ToSocketAddrs>(addr: A) -> std::io::Result<()> {
+    run_server_with_shutdown(addr, CancellationToken::new(), None).await
 }
 
 pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
@@ -146,14 +146,12 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
     status_channel: Option<
         tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<ServerStatusInfo>>,
     >,
-) {
+) -> std::io::Result<()> {
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
     // represent the mapping of the `key` to the id of the server-side conn
     let mut server_conn_map = ServerConnMap::new();
 
-    let listener = TcpListener::bind(addr)
-        .await
-        .expect("start listener never fails");
+    let listener = TcpListener::bind(addr).await?;
 
     let task_sender = manager.get_task_sender();
     let shutdown_token_clone = shutdown_token.clone();
@@ -395,6 +393,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
         handle.abort();
     }
     tracing::info!("Server shutdown completed");
+    Ok(())
 }
 
 async fn handle_listener(task_sender: ManagerTaskSender, listener: TcpListener) -> Result<()> {

@@ -107,6 +107,48 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+impl Error {
+    pub fn is_expected_disconnect(&self) -> bool {
+        use std::io::ErrorKind;
+
+        let is_expected = |kind: ErrorKind| {
+            matches!(
+                kind,
+                ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::NotConnected
+                    | ErrorKind::TimedOut
+            )
+        };
+
+        match self {
+            Error::MsgNetworkReadCheckSum { source }
+            | Error::MsgNetworkReadDatalen { source }
+            | Error::MsgNetworkReadBufferdRawData { source }
+            | Error::MsgNetworkReadBody { source }
+            | Error::MsgNetworkWriteCheckSum { source }
+            | Error::MsgNetworkWriteDatalen { source }
+            | Error::MsgNetworkWriteBody { source }
+            | Error::MsgNetworkWriteCodecMsg { source }
+            | Error::MsgNetworkWriteCodecTag { source }
+            | Error::FwdNetworkWriteWithNormal { source } => is_expected(source.kind()),
+            Error::MsgForward { detail, .. } => {
+                let detail_lower = detail.to_ascii_lowercase();
+                detail_lower.contains("unexpected end of file")
+                    || detail_lower.contains("connection reset")
+                    || detail_lower.contains("connection aborted")
+                    || detail_lower.contains("broken pipe")
+                    || detail_lower.contains("not connected")
+                    || detail_lower.contains("forcibly closed")
+                    || detail.contains("远程主机强迫关闭了一个现有的连接")
+            }
+            _ => false,
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! snafu_error_handle {
     ($func_call:expr) => {

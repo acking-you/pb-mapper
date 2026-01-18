@@ -79,30 +79,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-flutter-
 
-      - name: Install protoc (minimal)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Install Rust (minimal)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88.0
-
-      - name: Cache Rinf CLI
-        id: cache-rinf
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/bin/rinf
-          key: ${{ runner.os }}-rinf-cli
-
-      - name: Install Rinf CLI
-        if: steps.cache-rinf.outputs.cache-hit != 'true'
-        run: cargo install rinf_cli
-
-      - name: Generate Rinf bindings
-        run: rinf gen
-
       - name: Get Flutter dependencies
         run: flutter pub get
 

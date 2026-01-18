@@ -35,9 +35,11 @@ async fn main() {
         std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
     }
     let ip_addr = if cli.use_ipv6 {
-        IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
-    } else {
         IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0))
+    } else {
+        IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
     };
-    run_server((ip_addr, cli.pb_mapper_port)).await;
+    if let Err(e) = run_server((ip_addr, cli.pb_mapper_port)).await {
+        tracing::error!("Failed to start pb-mapper server: {e}");
+    }
 }

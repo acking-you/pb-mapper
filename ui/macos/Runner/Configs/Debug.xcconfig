@@ -1,2 +1,3 @@
 #include "../../Flutter/Flutter-Debug.xcconfig"
 #include "Warnings.xcconfig"
+OTHER_LDFLAGS=$(inherited) -L$(PROJECT_DIR)/../native/macos -lpb_mapper_ffi -Wl,-rpath,@executable_path/../Frameworks
