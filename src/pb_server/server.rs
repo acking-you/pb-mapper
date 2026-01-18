@@ -6,9 +6,9 @@ use tracing::instrument;
 
 use super::error::{
     ServerConnCreateHeaderToolSnafu, ServerConnDecodeStreamRequestSnafu,
-    ServerConnEncodeRegisterRespSnafu, ServerConnRecvConnTaskSnafu,
-    ServerConnRecvServerRegisteredRespSnafu, ServerConnRegisteredRespNotMatchSnafu,
-    ServerConnSendRegisterSnafu, ServerConnWritePongRespSnafu, ServerConnWriteRegisteredOkSnafu,
+    ServerConnEncodeRegisterRespSnafu, ServerConnRecvServerRegisteredRespSnafu,
+    ServerConnRegisteredRespNotMatchSnafu, ServerConnSendRegisterSnafu,
+    ServerConnWritePongRespSnafu, ServerConnWriteRegisteredOkSnafu,
     ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
@@ -34,9 +34,13 @@ impl<'a> Drop for ServerConnGuard<'a> {
     fn drop(&mut self) {
         snafu_error_handle!(self
             .sender
-            .send(ManagerTask::DeRegisterServerConn {
+            .try_send(ManagerTask::DeRegisterServerConn {
                 key: self.key.clone(),
                 conn_id: self.conn_id,
+            })
+            .map_err(|err| match err {
+                kanal::SendTimeoutError::Closed(_) => kanal::SendTimeoutError::Closed(()),
+                kanal::SendTimeoutError::Timeout(_) => kanal::SendTimeoutError::Timeout(()),
             })
             .context(ServerConnSendDeregisterServerSnafu {
                 key: self.key.clone(),
@@ -51,7 +55,7 @@ impl<'a> Drop for ServerConnGuard<'a> {
 }
 
 const DEFAULT_SERVER_CHAN_CAP: usize = 32 * 4;
-const SERVER_TIMEOUT: Duration = Duration::from_secs(60);
+const SERVER_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
 
 /// Maintaining a connection to the server.
 /// This connection is used to send channel request
@@ -64,11 +68,11 @@ pub async fn handle_server_conn(
     task_sender: ManagerTaskSender,
     mut conn: TcpStream,
 ) -> Result<()> {
-    let (tx, rx) = flume::bounded(DEFAULT_SERVER_CHAN_CAP);
+    let (tx, rx) = kanal::bounded_async(DEFAULT_SERVER_CHAN_CAP);
 
     // register metadate
     task_sender
-        .send_async(ManagerTask::Register {
+        .send(ManagerTask::Register {
             key: key.clone(),
             conn_id,
             need_codec,
@@ -76,13 +80,14 @@ pub async fn handle_server_conn(
             conn_sender: tx,
         })
         .await
+        .map_err(|_| kanal::SendError(()))
         .context(ServerConnSendRegisterSnafu {
             key: key.clone(),
             conn_id,
         })?;
 
     let response = rx
-        .recv_async()
+        .recv()
         .await
         .context(ServerConnRecvServerRegisteredRespSnafu {
             key: key.clone(),
@@ -124,11 +129,22 @@ pub async fn handle_server_conn(
                 conn_id,
             })?;
     }
-    loop {
+    let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let forward_handle = tokio::spawn(async move {
+        while let Ok(task) = rx.recv().await {
+            if task_tx.send(task).is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = loop {
         tokio::select! {
             // handle stream request
-            ret = rx.recv_async() =>{
-                let req = snafu_error_get_or_return_ok!(ret.context(ServerConnRecvConnTaskSnafu));
+            req = task_rx.recv() => {
+                let Some(req) = req else {
+                    break Ok(());
+                };
                 snafu_error_get_or_continue!(
                     handle_stream_req(
                         req,
@@ -149,10 +165,12 @@ pub async fn handle_server_conn(
             // handle timeout
             _ = tokio::time::sleep(SERVER_TIMEOUT) =>{
                 tracing::error!("Timeout trigger:{SERVER_TIMEOUT:?}");
-                return Ok(());
+                break Ok(());
             }
         }
-    }
+    };
+    forward_handle.abort();
+    result
 }
 
 #[instrument(skip(msg, writer))]

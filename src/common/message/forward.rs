@@ -286,7 +286,7 @@ fn handle_forward_result(result: Result<usize>, detail: &'static str) {
     }
 }
 
-impl DatagramReader for UdpStreamReadHalf<'_> {
+impl DatagramReader for UdpStreamReadHalf {
     async fn recv(&mut self) -> Result<Bytes> {
         self.recv_datagram()
             .await

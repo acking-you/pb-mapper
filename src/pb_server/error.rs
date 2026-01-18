@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use snafu::Snafu;
 
-use super::{ConnTask, ManagerTask};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::{self};
 
@@ -20,42 +19,53 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: common::error::Error,
     },
-    #[snafu(display("send listener task error"))]
-    TaskCenterSendListener {
-        source: flume::SendError<ManagerTask>,
-    },
+    #[snafu(display("send listener task error, type:{source:?} detail:{source}"))]
+    TaskCenterSendListener { source: kanal::SendError<()> },
 
     #[snafu(display(
-        "client send server stream request error with `key:{key}` `client_id:{conn_id}`"
+        "client send server stream request error with `key:{key}` `client_id:{conn_id}`, \
+         type:{source:?} detail:{source}"
     ))]
     TaskCenterClientSendStream {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::SendError<ConnTask>,
+        source: kanal::SendError<()>,
     },
-    #[snafu(display("send server stream response to task manager error, `dst_id:{conn_id}`"))]
+    #[snafu(display(
+        "send server stream response to task manager error, `dst_id:{conn_id}`, \
+         type:{source:?} detail:{source}"
+    ))]
     TaskCenterSendStreamRespToManager {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::SendError<ManagerTask>,
+        source: kanal::SendError<()>,
     },
-    #[snafu(display("send server stream response to client error, `client_id:{conn_id}`"))]
+    #[snafu(display(
+        "send server stream response to client error, `client_id:{conn_id}`, \
+         type:{source:?} detail:{source}"
+    ))]
     TaskCenterSendStreamRespToClient {
         conn_id: RemoteConnId,
-        source: flume::SendError<ConnTask>,
+        source: kanal::SendError<()>,
     },
     #[snafu(display("The target `dst_id:{conn_id}` that stream needs to send does not exist"))]
     TaskCenterStreamTaskConnIdNotExist { conn_id: RemoteConnId },
-    #[snafu(display("send server status response error with `conn_id:{conn_id}`"))]
+    #[snafu(display(
+        "send server status response error with `conn_id:{conn_id}`, type:{source:?} \
+         detail:{source}"
+    ))]
     TaskCenterSendStatusResp {
         conn_id: RemoteConnId,
-        source: flume::SendError<ConnTask>,
+        source: kanal::SendError<()>,
     },
-    #[snafu(display("send server register response error with `key:{key}` `conn_id:{conn_id}`"))]
+    #[snafu(display(
+        "send server register response error with `key:{key}` `conn_id:{conn_id}`, \
+         type:{source:?} detail:{source}"
+    ))]
     TaskCenterSendRegisterResp {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::SendError<ConnTask>,
+        source: kanal::SendError<()>,
     },
     #[snafu(display("failed to process stream task, `dst_id:{conn_id}` does not exist"))]
     TaskCenterStreamConnIdNotExist { conn_id: RemoteConnId },
@@ -69,11 +79,14 @@ pub enum Error {
         key: Arc<str>,
         conn_id: RemoteConnId,
     },
-    #[snafu(display("send client subcriber response error with `key:{key}` `conn_id:{conn_id}`"))]
+    #[snafu(display(
+        "send client subcriber response error with `key:{key}` `conn_id:{conn_id}`, \
+         type:{source:?} detail:{source}"
+    ))]
     TaskCenterSendSubcribeResp {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::SendError<ConnTask>,
+        source: kanal::SendError<()>,
     },
     #[snafu(display("remote stream to set keepalive error,when handle_listener"))]
     TaskCenterSetKeepAlive { source: std::io::Error },
@@ -90,7 +103,7 @@ pub enum Error {
     ServerConnRecvServerRegisteredResp {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::RecvError,
+        source: kanal::ReceiveError,
     },
     #[snafu(display(
         "the first message received after server registration must be the \
@@ -117,7 +130,7 @@ pub enum Error {
         source: common::error::Error,
     },
     #[snafu(display("server conn receive conn task error"))]
-    ServerConnRecvConnTask { source: flume::RecvError },
+    ServerConnRecvConnTask { source: kanal::ReceiveError },
     #[snafu(display(
         "server conn write stream request to network error with `key:{key}` `server_id:{conn_id}`"
     ))]
@@ -143,17 +156,23 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: common::error::Error,
     },
-    #[snafu(display("send deregister server task error with `key:{key}` `conn_id:{conn_id}`"))]
+    #[snafu(display(
+        "send deregister server task error with `key:{key}` `conn_id:{conn_id}`, \
+         type:{source:?} detail:{source}"
+    ))]
     ServerConnSendDeregisterServer {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::SendError<ManagerTask>,
+        source: kanal::SendTimeoutError<()>,
     },
-    #[snafu(display("send register task error with `key:{key}` `conn_id:{conn_id}`"))]
+    #[snafu(display(
+        "send register task error with `key:{key}` `conn_id:{conn_id}`, \
+         type:{source:?} detail:{source}"
+    ))]
     ServerConnSendRegister {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::SendError<ManagerTask>,
+        source: kanal::SendError<()>,
     },
     /// client handler error
     #[snafu(display("Client connection create header tool:`{tool}` fails!"))]
@@ -164,31 +183,34 @@ pub enum Error {
     },
     #[snafu(display(
         "send deregister client task error with `key:{key}` `server:{server_id:?}` <-> \
-         `client:{client_id}`"
+         `client:{client_id}`, type:{source:?} detail:{source}"
     ))]
     ClientConnSendDeregisterClient {
         key: Arc<str>,
         server_id: Option<RemoteConnId>,
         client_id: RemoteConnId,
-        source: flume::SendError<ManagerTask>,
+        source: kanal::SendTimeoutError<()>,
     },
-    #[snafu(display("send subcribe task error with `key:{key}` `conn_id:{conn_id}`"))]
+    #[snafu(display(
+        "send subcribe task error with `key:{key}` `conn_id:{conn_id}`, type:{source:?} \
+         detail:{source}"
+    ))]
     ClientConnSendSubcribe {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::SendError<ManagerTask>,
+        source: kanal::SendError<()>,
     },
     #[snafu(display("receive subcribe response error with `key:{key}` `client_id:{conn_id}`"))]
     ClientConnRecvSubcribeResp {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::RecvError,
+        source: kanal::ReceiveError,
     },
     #[snafu(display("receive server stream error with `key:{key}` `client_id:{conn_id}`"))]
     ClientConnRecvStream {
         key: Arc<str>,
         conn_id: RemoteConnId,
-        source: flume::RecvError,
+        source: kanal::ReceiveError,
     },
     #[snafu(display(
         "received conn task not match! we expected subcribe response.  `key:{key}` \
@@ -245,22 +267,23 @@ pub enum Error {
         tool: &'static str,
         source: common::error::Error,
     },
-    #[snafu(display("send status manager task error"))]
-    StatusSendManagerTask {
-        source: flume::SendError<ManagerTask>,
-    },
+    #[snafu(display("send status manager task error, type:{source:?} detail:{source}"))]
+    StatusSendManagerTask { source: kanal::SendError<()> },
     #[snafu(display("receive `ConnTask::StatusResp` error"))]
-    StatusRecvConnTask { source: flume::RecvError },
+    StatusRecvConnTask { source: kanal::ReceiveError },
     #[snafu(display("we expected `ConnTask::StatusResp`"))]
     StatusConnTaskNotMatch,
     #[snafu(display("encode status response error"))]
     StatusEncodeResp { source: common::error::Error },
     #[snafu(display("write status response error"))]
     StatusWriteResp { source: common::error::Error },
-    #[snafu(display("send deregister request error with `conn_id:{conn_id}`"))]
+    #[snafu(display(
+        "send deregister request error with `conn_id:{conn_id}`, type:{source:?} \
+         detail:{source}"
+    ))]
     StatusSendDeregister {
         conn_id: RemoteConnId,
-        source: flume::SendError<ManagerTask>,
+        source: kanal::SendTimeoutError<()>,
     },
     #[snafu(display("Server listen error"))]
     ServerListen { source: std::io::Error },

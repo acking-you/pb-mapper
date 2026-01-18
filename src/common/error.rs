@@ -67,7 +67,7 @@ pub enum Error {
     },
     /// Error for manager
     #[snafu(display("`TaskManager` fails while waiting for a task"))]
-    MngWaitForTask { source: flume::RecvError },
+    MngWaitForTask { source: kanal::ReceiveError },
     /// Error for forward
     #[snafu(display("failed to forward message to write in normal text"))]
     FwdNetworkWriteWithNormal { source: std::io::Error },

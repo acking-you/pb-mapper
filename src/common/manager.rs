@@ -15,8 +15,8 @@ pub struct ForwardMessage {
     pub msg: Vec<u8>,
 }
 
-pub type SenderChan<T> = flume::Sender<T>;
-pub type ReceiverChan<T> = flume::Receiver<T>;
+pub type SenderChan<T> = kanal::AsyncSender<T>;
+pub type ReceiverChan<T> = kanal::AsyncReceiver<T>;
 
 /// hashmap for index(`ConnId`) to `SenderChan`
 pub type ConnMap<K, V> = hashbrown::HashMap<K, SenderChan<V>>;
@@ -40,7 +40,7 @@ impl<
     pub fn new(
         conn_id_provider: ConnIdProviderType,
     ) -> TaskManager<MangerChanType, ConnChanType, ConnIdType, ConnIdProviderType> {
-        let manager_chan = flume::bounded(DEFAULT_CHAN_CAP);
+        let manager_chan = kanal::bounded_async(DEFAULT_CHAN_CAP);
         Self {
             conn_id_provider,
             manager_chan,
@@ -53,7 +53,7 @@ impl<
     pub async fn wait_for_task(&self) -> Result<MangerChanType> {
         self.manager_chan
             .1
-            .recv_async()
+            .recv()
             .await
             .context(MngWaitForTaskSnafu)
     }

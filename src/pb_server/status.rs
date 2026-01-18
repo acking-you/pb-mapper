@@ -22,9 +22,13 @@ impl Drop for StatusConnGuard<'_> {
     fn drop(&mut self) {
         snafu_error_handle!(self
             .sender
-            .send(ManagerTask::DeRegisterClientConn {
+            .try_send(ManagerTask::DeRegisterClientConn {
                 server_id: None,
                 client_id: self.conn_id
+            })
+            .map_err(|err| match err {
+                kanal::SendTimeoutError::Closed(_) => kanal::SendTimeoutError::Closed(()),
+                kanal::SendTimeoutError::Timeout(_) => kanal::SendTimeoutError::Timeout(()),
             })
             .context(StatusSendDeregisterSnafu {
                 conn_id: self.conn_id
@@ -44,18 +48,19 @@ pub async fn handle_show_status(
         sender: &manager_sender,
     };
     let _enter = info_span.enter();
-    let (tx, rx) = flume::bounded(5);
+    let (tx, rx) = kanal::bounded_async(5);
     let req = ManagerTask::Status {
         conn_sender: tx,
         status,
         conn_id,
     };
     manager_sender
-        .send_async(req)
+        .send(req)
         .await
+        .map_err(|_| kanal::SendError(()))
         .context(StatusSendManagerTaskSnafu)?;
 
-    let resp = rx.recv_async().await.context(StatusRecvConnTaskSnafu)?;
+    let resp = rx.recv().await.context(StatusRecvConnTaskSnafu)?;
     if let ConnTask::StatusResp(resp) = resp {
         let msg = resp.encode().context(StatusEncodeRespSnafu)?;
         let mut msg_writer = get_header_msg_writer(&mut conn)

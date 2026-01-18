@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use snafu::ResultExt;
 use tokio::net::TcpStream;
+use uni_stream::udp::set_custom_timeout;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
 use self::status::get_status;
@@ -44,6 +45,8 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
     use std::time::Duration;
 
     const CLIENT_RETRY_TIMES: u32 = 8;
+
+    set_custom_timeout(Duration::from_secs(120));
 
     let local_addr = got_one_socket_addr(local_addr)
         .await

@@ -7,3 +7,7 @@
 [submodule "deps/uni-stream"]
 	path = deps/uni-stream
 	url = https://github.com/acking-you/uni-stream.git
+[submodule "deps/kanal"]
+	path = deps/kanal
+	url = https://github.com/acking-you/kanal.git
+	branch = dev/pb-mapper

@@ -35,7 +35,7 @@ use uni_stream::stream::{
 
 const LOCAL_SERVER_TIMEOUT: Duration = Duration::from_secs(64);
 
-const PING_INTERVAL: Duration = Duration::from_secs(16);
+const PING_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 minutes
 
 const GLOBAL_RETRY_TIMES: u32 = 16;
 

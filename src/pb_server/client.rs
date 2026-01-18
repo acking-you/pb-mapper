@@ -41,9 +41,13 @@ impl<'a> Drop for ClientConnGuard<'a> {
     fn drop(&mut self) {
         snafu_error_handle!(self
             .sender
-            .send(ManagerTask::DeRegisterClientConn {
+            .try_send(ManagerTask::DeRegisterClientConn {
                 server_id: self.server_id,
                 client_id: self.client_id
+            })
+            .map_err(|err| match err {
+                kanal::SendTimeoutError::Closed(_) => kanal::SendTimeoutError::Closed(()),
+                kanal::SendTimeoutError::Timeout(_) => kanal::SendTimeoutError::Timeout(()),
             })
             .context(ClientConnSendDeregisterClientSnafu {
                 key: self.key.clone(),
@@ -172,26 +176,24 @@ async fn get_server_stream(
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
 ) -> Result<(TcpStream, RemoteConnId, Option<AesKeyType>, bool)> {
-    let (tx, rx) = flume::bounded(DEFAULT_CLIENT_CHAN_CAP);
+    let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
     task_sender
-        .send_async(ManagerTask::Subcribe {
+        .send(ManagerTask::Subcribe {
             key: key.clone(),
             conn_id,
             conn_sender: tx,
         })
         .await
+        .map_err(|_| kanal::SendError(()))
         .context(ClientConnSendSubcribeSnafu {
             key: key.clone(),
             conn_id,
         })?;
 
-    let resp = rx
-        .recv_async()
-        .await
-        .context(ClientConnRecvSubcribeRespSnafu {
-            key: key.clone(),
-            conn_id,
-        })?;
+    let resp = rx.recv().await.context(ClientConnRecvSubcribeRespSnafu {
+        key: key.clone(),
+        conn_id,
+    })?;
 
     // Note: A key will be generated for encrypting messages that are forwarded, and this key will
     // apply to all endpoints.
@@ -214,7 +216,7 @@ async fn get_server_stream(
         .fail()?,
     };
 
-    let resp = rx.recv_async().await.context(ClientConnRecvStreamSnafu {
+    let resp = rx.recv().await.context(ClientConnRecvStreamSnafu {
         key: key.clone(),
         conn_id,
     })?;
