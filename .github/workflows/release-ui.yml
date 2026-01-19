@@ -50,6 +50,7 @@ jobs:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
           name: "pb-mapper UI ${{ github.ref_name }}"
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
           body: |
             # pb-mapper UI Release ${{ github.ref_name }}
             
@@ -144,6 +145,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: ui/dist/${{ env.UI_VERSION }}/*
 
   build-android:
@@ -179,6 +181,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: |
             ui/build/app/outputs/flutter-apk/pb-mapper-arm64-v8a.apk
             ui/build/app/outputs/flutter-apk/pb-mapper-armeabi-v7a.apk
@@ -227,6 +230,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: |
             ${{env.DMG_ASSET}}
 
@@ -256,5 +260,6 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: |
             ui/build/ios/iphoneos/pb-mapper-ios-unsigned.ipa
