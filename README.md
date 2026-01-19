@@ -11,6 +11,14 @@ pb-mapper is a Rust-based service mapping system that exposes multiple local TCP
 - **Encryption support**: optional message encryption for forwarded traffic using AES-256-GCM (via `ring`), enabled with the `--codec` flag when registering services.
 - **Performance**: in real use (e.g., running a Palworld UDP server), latency is comparable to using frp with a directly exposed remote port.
 
+## Quick Start (server install)
+
+One command installs `pb-mapper-server` as a systemd service on Linux (x86_64, musl build). Defaults: port `7666`, `MSG_HEADER_KEY=abcdefghijklmnopqlsn123456789j01`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
+```
+
 ## Docs
 
 - User Guide (build/run/use): [`docs/user-guide.md`](docs/user-guide.md)

@@ -11,6 +11,14 @@ pb-mapper 是一个基于 Rust 的服务映射系统，通过**一个**公网端
 - **加密支持**：可选转发消息加密，使用 AES-256-GCM（`ring` 实现），在注册服务时通过 `--codec` 开启。
 - **性能**：实际使用中（例如用 frp 直连方式对比开一个“幻兽帕鲁”UDP 服务器），延迟表现接近。
 
+## 快速开始（服务端一键部署）
+
+一条命令安装并注册 `pb-mapper-server` 的 systemd 服务（Linux x86_64，musl 构建）。默认端口 `7666`，默认密钥 `MSG_HEADER_KEY=abcdefghijklmnopqlsn123456789j01`。
+
+```bash
+curl -fsSL https://gitee.com/acking-you/pb-mapper/raw/master/scripts/install-server-gitee.sh | bash
+```
+
 ## 文档
 
 - 使用手册（编译/运行/使用）：[`docs/user-guide.zh-CN.md`](docs/user-guide.zh-CN.md)
