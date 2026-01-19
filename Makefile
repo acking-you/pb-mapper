@@ -62,7 +62,7 @@ build-ui-ios-release: build-pb-mapper-ffi-ios
 release-ui-windows: build-pb-mapper-ffi-windows
 	cd ui && dart pub global activate fastforge
 	cd ui && flutter pub get
-	cd ui && dart pub global run fastforge:fastforge release --name production
+	cd ui && dart pub global run fastforge:main release --name production
 
 release-pb-mapper-server-docker-image: build-pb-mapper-server
 	bash ./scripts/release/pb-mapper-server-docker-image.sh
