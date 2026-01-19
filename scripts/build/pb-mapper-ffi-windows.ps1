@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$root = Resolve-Path (Join-Path $PSScriptRoot "../..")
+$root = (Resolve-Path (Join-Path $PSScriptRoot "../..") | Select-Object -First 1 -ExpandProperty Path)
 $ffiLib = "pb_mapper_ffi.dll"
 
 Push-Location $root
