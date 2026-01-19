@@ -16,9 +16,9 @@ try {
   Copy-Item (Join-Path $root "target/release/$ffiLib") (Join-Path $nativeDir $ffiLib) -Force
 
   $candidateDirs = @(
-    Join-Path $root "ui/build/windows/x64/runner/Release",
-    Join-Path $root "ui/build/windows/x64/runner/Debug",
-    Join-Path $root "ui/build/windows/x64/runner/Profile"
+    (Join-Path -Path $root -ChildPath "ui/build/windows/x64/runner/Release");
+    (Join-Path -Path $root -ChildPath "ui/build/windows/x64/runner/Debug");
+    (Join-Path -Path $root -ChildPath "ui/build/windows/x64/runner/Profile")
   )
 
   foreach ($dir in $candidateDirs) {
