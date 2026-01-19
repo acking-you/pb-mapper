@@ -166,9 +166,10 @@ jobs:
           flutter-version: 3.35.1
           channel: "stable"
       - name: Set up Android NDK
-        uses: android-actions/setup-ndk@v1
+        uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
+          link-to-sdk: true
       - name: Build Android APKs
         run: |
           make build-ui-android-release
