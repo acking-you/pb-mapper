@@ -73,6 +73,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
   int _currentPage =
       0; // 0 = landing, 1 = server, 2 = register, 3 = connect, 4 = status, 5 = config
   final PbMapperApi _api = PbMapperApi();
+  bool _allowExit = false;
 
   @override
   void initState() {
@@ -86,6 +87,10 @@ class _MyAppState extends State<MyApp> with WindowListener {
 
     _listener = AppLifecycleListener(
       onExitRequested: () async {
+        if (_isDesktop() && !_allowExit) {
+          await TrayService.instance.hideToTray();
+          return AppExitResponse.cancel;
+        }
         LogManager().dispose(); // Clean up log manager
         PbMapperService().dispose();
         return AppExitResponse.exit;
@@ -112,9 +117,8 @@ class _MyAppState extends State<MyApp> with WindowListener {
 
   @override
   void onWindowClose() async {
-    if (!kIsWeb &&
-        (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
-      await windowManager.hide();
+    if (_isDesktop()) {
+      await TrayService.instance.hideToTray();
     }
   }
 
@@ -133,13 +137,29 @@ class _MyAppState extends State<MyApp> with WindowListener {
   Future<TrayStatus> _fetchTrayStatus() async {
     final serverStatus = await _api.getServerStatusDetail();
     final localStatus = await _api.getLocalServerStatus();
+    final serviceConfigs = await _api.getServiceConfigs();
+    final clientConfigs = await _api.getClientConfigs();
+
+    final runningServices = serviceConfigs.where((config) {
+      final status = config.status.toLowerCase();
+      return status == 'running' || status == 'retrying';
+    }).length;
+
+    final runningClients = clientConfigs.where((config) {
+      final status = config.status.toLowerCase();
+      return status == 'running' || status == 'retrying';
+    }).length;
+
     final isAvailable = serverStatus.serverAvailable || localStatus.isRunning;
+    final registeredServices = serverStatus.serverAvailable
+        ? serverStatus.registeredServices.length
+        : runningServices;
+
     return TrayStatus(
       serverAvailable: isAvailable,
       activeConnections: localStatus.activeConnections,
-      registeredServices: serverStatus.serverAvailable
-          ? serverStatus.registeredServices.length
-          : localStatus.registeredServices,
+      registeredServices: registeredServices,
+      connectedClients: runningClients,
     );
   }
 
@@ -148,10 +168,16 @@ class _MyAppState extends State<MyApp> with WindowListener {
   }
 
   void _quitFromTray() {
+    _allowExit = true;
     TrayService.instance.dispose();
     PbMapperService().dispose();
     LogManager().dispose();
     exit(0);
+  }
+
+  bool _isDesktop() {
+    return !kIsWeb &&
+        (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
   }
 
   void _navigateToPage(int page) {

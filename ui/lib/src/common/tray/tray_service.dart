@@ -9,22 +9,29 @@ class TrayStatus {
   final bool serverAvailable;
   final int activeConnections;
   final int registeredServices;
+  final int connectedClients;
 
   const TrayStatus({
     required this.serverAvailable,
     required this.activeConnections,
     required this.registeredServices,
+    required this.connectedClients,
   });
+
+  bool get hasConnections =>
+      activeConnections > 0 || registeredServices > 0 || connectedClients > 0;
+
+  int get connectionCount => activeConnections + connectedClients;
 
   String get displayText {
     if (!serverAvailable) {
       return 'Offline · pb-mapper';
     }
-    if (activeConnections > 0) {
-      return 'Active · $activeConnections connections';
+    if (activeConnections > 0 || connectedClients > 0) {
+      return 'Connected · $connectionCount connections';
     }
     if (registeredServices > 0) {
-      return 'Idle · $registeredServices services';
+      return 'Connected · $registeredServices services';
     }
     return 'Online · No services';
   }
@@ -42,6 +49,7 @@ class TrayService with TrayListener {
     serverAvailable: false,
     activeConnections: 0,
     registeredServices: 0,
+    connectedClients: 0,
   );
   Timer? _statusTimer;
   Future<TrayStatus> Function()? _statusProvider;
@@ -96,11 +104,14 @@ class TrayService with TrayListener {
       final next = await _statusProvider!();
       await _applyStatus(next);
     } catch (_) {
-      await _applyStatus(const TrayStatus(
-        serverAvailable: false,
-        activeConnections: 0,
-        registeredServices: 0,
-      ));
+      await _applyStatus(
+        const TrayStatus(
+          serverAvailable: false,
+          activeConnections: 0,
+          registeredServices: 0,
+          connectedClients: 0,
+        ),
+      );
     }
   }
 
@@ -112,25 +123,12 @@ class TrayService with TrayListener {
     await _trayManager.setContextMenu(
       Menu(
         items: [
-          MenuItem(
-            key: 'status',
-            label: next.displayText,
-            disabled: true,
-          ),
+          MenuItem(key: 'status', label: next.displayText, disabled: true),
           MenuItem.separator(),
-          MenuItem(
-            key: 'open',
-            label: 'Open pb-mapper',
-          ),
-          MenuItem(
-            key: 'refresh',
-            label: 'Refresh status',
-          ),
+          MenuItem(key: 'open', label: 'Open pb-mapper'),
+          MenuItem(key: 'refresh', label: 'Refresh status'),
           MenuItem.separator(),
-          MenuItem(
-            key: 'quit',
-            label: 'Quit',
-          ),
+          MenuItem(key: 'quit', label: 'Quit'),
         ],
       ),
     );
@@ -140,7 +138,7 @@ class TrayService with TrayListener {
     if (!status.serverAvailable) {
       return _assetPath('assets/tray/tray_offline');
     }
-    if (status.activeConnections > 0) {
+    if (status.hasConnections) {
       return _assetPath('assets/tray/tray_active');
     }
     return _assetPath('assets/tray/tray_idle');
