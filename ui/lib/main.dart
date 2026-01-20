@@ -1,5 +1,6 @@
 import 'dart:ui';
-import 'dart:io' show Platform;
+import 'dart:async' show unawaited;
+import 'dart:io' show Platform, exit;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -13,9 +14,15 @@ import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/common/tray/tray_service.dart';
+import 'package:window_manager/window_manager.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+    await windowManager.ensureInitialized();
+  }
   PbMapperService().initLogging();
   await createActors();
   runApp(MyApp());
@@ -55,7 +62,7 @@ class MyApp extends StatefulWidget {
   State<MyApp> createState() => _MyAppState();
 }
 
-class _MyAppState extends State<MyApp> {
+class _MyAppState extends State<MyApp> with WindowListener {
   /// This `AppLifecycleListener` is responsible for the
   /// graceful shutdown of the async runtime in Rust.
   /// If you don't care about
@@ -65,6 +72,7 @@ class _MyAppState extends State<MyApp> {
   ThemeMode _themeMode = ThemeMode.system;
   int _currentPage =
       0; // 0 = landing, 1 = server, 2 = register, 3 = connect, 4 = status, 5 = config
+  final PbMapperApi _api = PbMapperApi();
 
   @override
   void initState() {
@@ -83,12 +91,67 @@ class _MyAppState extends State<MyApp> {
         return AppExitResponse.exit;
       },
     );
+
+    unawaited(_initTray());
+    if (!kIsWeb &&
+        (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+      windowManager.addListener(this);
+    }
   }
 
   @override
   void dispose() {
+    TrayService.instance.dispose();
+    if (!kIsWeb &&
+        (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+      windowManager.removeListener(this);
+    }
     _listener.dispose();
     super.dispose();
+  }
+
+  @override
+  void onWindowClose() async {
+    if (!kIsWeb &&
+        (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+      await windowManager.hide();
+    }
+  }
+
+  Future<void> _initTray() async {
+    if (!kIsWeb &&
+        (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+      await windowManager.setPreventClose(true);
+    }
+    await TrayService.instance.initialize(
+      statusProvider: _fetchTrayStatus,
+      showApp: _showFromTray,
+      quitApp: _quitFromTray,
+    );
+  }
+
+  Future<TrayStatus> _fetchTrayStatus() async {
+    final serverStatus = await _api.getServerStatusDetail();
+    final localStatus = await _api.getLocalServerStatus();
+    final isAvailable = serverStatus.serverAvailable || localStatus.isRunning;
+    return TrayStatus(
+      serverAvailable: isAvailable,
+      activeConnections: localStatus.activeConnections,
+      registeredServices: serverStatus.serverAvailable
+          ? serverStatus.registeredServices.length
+          : localStatus.registeredServices,
+    );
+  }
+
+  void _showFromTray() {
+    TrayService.instance.showFromTray();
+  }
+
+  void _quitFromTray() {
+    TrayService.instance.dispose();
+    PbMapperService().dispose();
+    LogManager().dispose();
+    exit(0);
   }
 
   void _navigateToPage(int page) {
