@@ -11,3 +11,9 @@
 	path = deps/kanal
 	url = https://github.com/acking-you/kanal.git
 	branch = dev/pb-mapper
+[submodule "local-tools/Qwen3-TTS"]
+	path = local-tools/Qwen3-TTS
+	url = https://github.com/acking-you/Qwen3-TTS.git
+[submodule "local-tools/index-tts-vllm"]
+	path = local-tools/index-tts-vllm
+	url = https://github.com/acking-you/index-tts-vllm.git
