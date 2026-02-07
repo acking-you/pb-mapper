@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
-import 'package:pb_mapper_ui/src/views/log_view_button.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
 import 'package:pb_mapper_ui/src/widgets/service_card.dart';
 import 'package:pb_mapper_ui/src/widgets/edit_service_dialog.dart';
@@ -30,26 +29,43 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   @override
   void initState() {
     super.initState();
-    _loadConfig();
-    _loadServerStatus();
+    _refreshPrerequisites();
     _loadServiceConfigs();
   }
 
+  Future<void> _refreshPrerequisites() async {
+    await Future.wait([_loadConfig(), _loadServerStatus()]);
+  }
+
   Future<void> _loadConfig() async {
-    final config = await _api.fetchConfig();
-    if (!mounted) return;
-    setState(() {
-      _serverAddress = config.serverAddress;
-      _isKeepAliveEnabled = config.keepAliveEnabled;
-    });
+    try {
+      final config = await _api.fetchConfig();
+      if (!mounted) return;
+      setState(() {
+        _serverAddress = config.serverAddress;
+        _isKeepAliveEnabled = config.keepAliveEnabled;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _serverAddress = 'localhost:7666';
+      });
+    }
   }
 
   Future<void> _loadServerStatus() async {
-    final status = await _api.getServerStatusDetail();
-    if (!mounted) return;
-    setState(() {
-      _serverAvailable = status.serverAvailable;
-    });
+    try {
+      final status = await _api.getServerStatusDetail();
+      if (!mounted) return;
+      setState(() {
+        _serverAvailable = status.serverAvailable;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _serverAvailable = false;
+      });
+    }
     _scheduleServerStatusRetryIfNeeded();
   }
 
@@ -72,29 +88,33 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   }
 
   Future<List<ServiceConfig>> _fetchServiceConfigs() async {
-    final services = await _api.getServiceConfigs();
-    final configs = services
-        .map(
-          (service) => ServiceConfig(
-            serviceKey: service.serviceKey,
-            localAddress: service.localAddress,
-            protocol: service.protocol,
-            enableEncryption: service.enableEncryption,
-            enableKeepAlive: service.enableKeepAlive,
-            status: _parseStatus(service.status),
-            statusMessage: service.statusMessage,
-            createdAt: DateTime.fromMillisecondsSinceEpoch(
-              service.createdAtMs,
+    try {
+      final services = await _api.getServiceConfigs();
+      final configs = services
+          .map(
+            (service) => ServiceConfig(
+              serviceKey: service.serviceKey,
+              localAddress: service.localAddress,
+              protocol: service.protocol,
+              enableEncryption: service.enableEncryption,
+              enableKeepAlive: service.enableKeepAlive,
+              status: _parseStatus(service.status),
+              statusMessage: service.statusMessage,
+              createdAt: DateTime.fromMillisecondsSinceEpoch(
+                service.createdAtMs,
+              ),
+              updatedAt: DateTime.fromMillisecondsSinceEpoch(
+                service.updatedAtMs,
+              ),
             ),
-            updatedAt: DateTime.fromMillisecondsSinceEpoch(
-              service.updatedAtMs,
-            ),
-          ),
-        )
-        .toList();
+          )
+          .toList();
 
-    configs.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    return configs;
+      configs.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      return configs;
+    } catch (_) {
+      return [];
+    }
   }
 
   Future<void> _loadServiceConfigs() async {
@@ -157,6 +177,68 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
             ElevatedButton(
               onPressed: AppNavigationManager.navigateToConfigPage,
               child: const Text('Go to Config'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSetupStepCard() {
+    final statusColor = _serverAvailable ? Colors.green : Colors.red;
+    final statusText = _serverAvailable ? 'Reachable' : 'Unreachable';
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.looks_one, color: Colors.blueGrey),
+                const SizedBox(width: 8),
+                Text(
+                  'Step 1: Configure PB_MAPPER_SERVER',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const Spacer(),
+                Icon(Icons.circle, color: statusColor, size: 12),
+                const SizedBox(width: 6),
+                Text(
+                  statusText,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            SelectableText(
+              _serverAddress,
+              style: Theme.of(
+                context,
+              ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: AppNavigationManager.navigateToConfigPage,
+                  icon: const Icon(Icons.settings),
+                  label: const Text('Open Config'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _refreshPrerequisites,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Re-check Server'),
+                ),
+              ],
             ),
           ],
         ),
@@ -231,9 +313,9 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
             return;
           }
 
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Registering $serviceKey...')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Registering $serviceKey...')));
 
           // Poll for registration status
           _pollRegistrationStatus(serviceKey);
@@ -602,6 +684,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            _buildSetupStepCard(),
+            const SizedBox(height: 12),
             if (disableUi) ...[
               _buildServerUnavailableBanner(),
               const SizedBox(height: 12),
@@ -618,7 +702,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Register Service',
+                            'Step 2: Register Service',
                             style: Theme.of(context).textTheme.titleLarge,
                           ),
                           const SizedBox(height: 16),
@@ -654,8 +738,9 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                                 _serverAvailable
                                     ? Icons.cloud_done
                                     : Icons.cloud_off,
-                                color:
-                                    _serverAvailable ? Colors.green : Colors.red,
+                                color: _serverAvailable
+                                    ? Colors.green
+                                    : Colors.red,
                               ),
                             ),
                           ),
@@ -675,7 +760,9 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                             value: _isEncryptionEnabled,
                             onChanged: _serverAvailable
                                 ? (value) {
-                                    setState(() => _isEncryptionEnabled = value);
+                                    setState(
+                                      () => _isEncryptionEnabled = value,
+                                    );
                                   }
                                 : null,
                           ),
@@ -697,14 +784,12 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                             ),
                             child: Row(
                               children: [
-                                const Icon(
-                                  Icons.dns,
-                                  color: Colors.blue,
-                                ),
+                                const Icon(Icons.dns, color: Colors.blue),
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       const Text(
                                         'Server Address',
@@ -716,9 +801,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                                       const SizedBox(height: 4),
                                       Text(
                                         _serverAddress,
-                                        style: const TextStyle(
-                                          fontSize: 16,
-                                        ),
+                                        style: const TextStyle(fontSize: 16),
                                       ),
                                     ],
                                   ),
@@ -773,7 +856,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                             )
                           : Text(
                               _serverAvailable
-                                  ? 'Register Service'
+                                  ? 'Register & Start'
                                   : 'Server Unavailable',
                               style: const TextStyle(fontSize: 16),
                             ),
@@ -789,19 +872,23 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                           children: [
                             Row(
                               children: [
-                                const Icon(
-                                  Icons.dns,
-                                  color: Colors.blue,
-                                ),
+                                const Icon(Icons.dns, color: Colors.blue),
                                 const SizedBox(width: 8),
-                                Text(
-                                  'Registered Services (${_serviceConfigs.length})',
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .titleMedium
-                                      ?.copyWith(
-                                        fontWeight: FontWeight.bold,
-                                      ),
+                                Expanded(
+                                  child: Text(
+                                    'Registered Services (${_serviceConfigs.length})',
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium
+                                        ?.copyWith(fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                                TextButton.icon(
+                                  onPressed: AppNavigationManager
+                                      .navigateToConnectPage,
+                                  icon: const Icon(Icons.cable),
+                                  label: const Text('Open Connect'),
                                 ),
                               ],
                             ),
@@ -823,7 +910,6 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                     ),
                     const SizedBox(height: 16),
                   ],
-                  const LogViewButton(),
                 ],
               ),
             ),

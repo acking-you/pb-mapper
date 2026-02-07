@@ -6,10 +6,10 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/views/client_connection_view.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
-import 'package:pb_mapper_ui/src/views/server_management_view.dart';
 import 'package:pb_mapper_ui/src/views/service_registration_view.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/views/configuration_view.dart';
+import 'package:pb_mapper_ui/src/views/log_view_page.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
@@ -71,7 +71,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
   late final AppLifecycleListener _listener;
   ThemeMode _themeMode = ThemeMode.system;
   int _currentPage =
-      0; // 0 = landing, 1 = server, 2 = register, 3 = connect, 4 = status, 5 = config
+      0; // 0 = landing, 1 = register, 2 = connect, 3 = status, 4 = config, 5 = logs
   final PbMapperApi _api = PbMapperApi();
   bool _allowExit = false;
 
@@ -127,40 +127,51 @@ class _MyAppState extends State<MyApp> with WindowListener {
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
       await windowManager.setPreventClose(true);
     }
-    await TrayService.instance.initialize(
-      statusProvider: _fetchTrayStatus,
-      showApp: _showFromTray,
-      quitApp: _quitFromTray,
-    );
+    try {
+      await TrayService.instance.initialize(
+        statusProvider: _fetchTrayStatus,
+        showApp: _showFromTray,
+        quitApp: _quitFromTray,
+      );
+    } catch (e) {
+      debugPrint('Tray initialization failed: $e');
+    }
   }
 
   Future<TrayStatus> _fetchTrayStatus() async {
-    final serverStatus = await _api.getServerStatusDetail();
-    final localStatus = await _api.getLocalServerStatus();
-    final serviceConfigs = await _api.getServiceConfigs();
-    final clientConfigs = await _api.getClientConfigs();
+    try {
+      final serverStatus = await _api.getServerStatusDetail();
+      final serviceConfigs = await _api.getServiceConfigs();
+      final clientConfigs = await _api.getClientConfigs();
 
-    final runningServices = serviceConfigs.where((config) {
-      final status = config.status.toLowerCase();
-      return status == 'running' || status == 'retrying';
-    }).length;
+      final runningServices = serviceConfigs.where((config) {
+        final status = config.status.toLowerCase();
+        return status == 'running' || status == 'retrying';
+      }).length;
 
-    final runningClients = clientConfigs.where((config) {
-      final status = config.status.toLowerCase();
-      return status == 'running' || status == 'retrying';
-    }).length;
+      final runningClients = clientConfigs.where((config) {
+        final status = config.status.toLowerCase();
+        return status == 'running' || status == 'retrying';
+      }).length;
 
-    final isAvailable = serverStatus.serverAvailable || localStatus.isRunning;
-    final registeredServices = serverStatus.serverAvailable
-        ? serverStatus.registeredServices.length
-        : runningServices;
+      final registeredServices = serverStatus.serverAvailable
+          ? serverStatus.registeredServices.length
+          : runningServices;
 
-    return TrayStatus(
-      serverAvailable: isAvailable,
-      activeConnections: localStatus.activeConnections,
-      registeredServices: registeredServices,
-      connectedClients: runningClients,
-    );
+      return TrayStatus(
+        serverAvailable: serverStatus.serverAvailable,
+        activeConnections: 0,
+        registeredServices: registeredServices,
+        connectedClients: runningClients,
+      );
+    } catch (_) {
+      return const TrayStatus(
+        serverAvailable: false,
+        activeConnections: 0,
+        registeredServices: 0,
+        connectedClients: 0,
+      );
+    }
   }
 
   void _showFromTray() {
@@ -204,22 +215,22 @@ class _MyAppState extends State<MyApp> with WindowListener {
   Widget _getCurrentPageContent() {
     switch (_currentPage) {
       case 1:
-        return const ServerManagementView();
-      case 2:
         return const ServiceRegistrationView();
-      case 3:
+      case 2:
         return const ClientConnectionView();
-      case 4:
+      case 3:
         return const StatusMonitoringView();
-      case 5:
+      case 4:
         return const ConfigurationView();
+      case 5:
+        return const LogViewPage(showScaffold: false);
       default:
         return MainLandingView(
-          onServerManagement: () => _navigateToPage(1),
-          onServiceRegistration: () => _navigateToPage(2),
-          onClientConnection: () => _navigateToPage(3),
-          onStatusMonitoring: () => _navigateToPage(4),
-          onConfiguration: () => _navigateToPage(5),
+          onConfiguration: () => _navigateToPage(4),
+          onServiceRegistration: () => _navigateToPage(1),
+          onClientConnection: () => _navigateToPage(2),
+          onStatusMonitoring: () => _navigateToPage(3),
+          onLogs: () => _navigateToPage(5),
           onToggleTheme: toggleTheme,
         );
     }
@@ -284,7 +295,6 @@ class _MyAppState extends State<MyApp> with WindowListener {
         currentIndex: _currentPage - 1,
         onTap: (index) => _navigateToPage(index + 1),
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.dns), label: 'Server'),
           BottomNavigationBarItem(
             icon: Icon(Icons.app_registration),
             label: 'Register',
@@ -292,6 +302,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
           BottomNavigationBarItem(icon: Icon(Icons.cable), label: 'Connect'),
           BottomNavigationBarItem(icon: Icon(Icons.monitor), label: 'Status'),
           BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Config'),
+          BottomNavigationBarItem(icon: Icon(Icons.terminal), label: 'Logs'),
         ],
       ),
     );
@@ -334,15 +345,15 @@ class _MyAppState extends State<MyApp> with WindowListener {
       case 0:
         return null;
       case 1:
-        return 'Server Management';
-      case 2:
         return 'Service Registration';
-      case 3:
+      case 2:
         return 'Client Connection';
-      case 4:
+      case 3:
         return 'Status Monitoring';
-      case 5:
+      case 4:
         return 'Configuration';
+      case 5:
+        return 'Runtime Logs';
       default:
         return null;
     }

@@ -16,11 +16,17 @@ class ConfigStatus {
   final String serverAddress;
   final bool keepAliveEnabled;
 
-  const ConfigStatus({required this.serverAddress, required this.keepAliveEnabled});
+  const ConfigStatus({
+    required this.serverAddress,
+    required this.keepAliveEnabled,
+  });
 
   factory ConfigStatus.fromMap(Map<String, dynamic> map) {
     return ConfigStatus(
-      serverAddress: _asString(map['serverAddress'], fallback: 'localhost:7666'),
+      serverAddress: _asString(
+        map['serverAddress'],
+        fallback: 'localhost:7666',
+      ),
       keepAliveEnabled: _asBool(map['keepAliveEnabled'], fallback: true),
     );
   }
@@ -205,7 +211,10 @@ class PbMapperApi {
     if (result['success'] == true) {
       return ConfigStatus.fromMap(_asMap(result['data']));
     }
-    return const ConfigStatus(serverAddress: 'localhost:7666', keepAliveEnabled: true);
+    return const ConfigStatus(
+      serverAddress: 'localhost:7666',
+      keepAliveEnabled: true,
+    );
   }
 
   Future<OperationResult> updateConfig({
@@ -219,7 +228,10 @@ class PbMapperApi {
     return _resultFrom(result);
   }
 
-  Future<OperationResult> startServer({required int port, required bool keepAlive}) async {
+  Future<OperationResult> startServer({
+    required int port,
+    required bool keepAlive,
+  }) async {
     final result = await _service.startServer(port: port, keepAlive: keepAlive);
     return _resultFrom(result);
   }
@@ -263,9 +275,13 @@ class PbMapperApi {
       final servicesRaw = data['services'];
       if (servicesRaw is List) {
         return servicesRaw
-            .map((item) => item is Map<String, dynamic>
-                ? ServiceConfigInfo.fromMap(item)
-                : ServiceConfigInfo.fromMap(Map<String, dynamic>.from(item as Map)))
+            .map(
+              (item) => item is Map<String, dynamic>
+                  ? ServiceConfigInfo.fromMap(item)
+                  : ServiceConfigInfo.fromMap(
+                      Map<String, dynamic>.from(item as Map),
+                    ),
+            )
             .toList();
       }
     }
@@ -318,9 +334,13 @@ class PbMapperApi {
       final clientsRaw = data['clients'];
       if (clientsRaw is List) {
         return clientsRaw
-            .map((item) => item is Map<String, dynamic>
-                ? ClientConfigInfo.fromMap(item)
-                : ClientConfigInfo.fromMap(Map<String, dynamic>.from(item as Map)))
+            .map(
+              (item) => item is Map<String, dynamic>
+                  ? ClientConfigInfo.fromMap(item)
+                  : ClientConfigInfo.fromMap(
+                      Map<String, dynamic>.from(item as Map),
+                    ),
+            )
             .toList();
       }
     }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 
 class ConfigurationView extends StatefulWidget {
   final VoidCallback? onToggleTheme;
@@ -17,6 +18,9 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   );
   bool _isKeepAliveEnabled = true;
   bool _isSaving = false;
+  bool _isCheckingServer = false;
+  bool? _serverReachable;
+  String _serverCheckMessage = '';
   ConfigStatus? _currentConfig;
 
   @override
@@ -32,13 +36,21 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   }
 
   Future<void> _loadConfig() async {
-    final config = await _api.fetchConfig();
-    if (!mounted) return;
-    setState(() {
-      _currentConfig = config;
-      _serverAddressController.text = config.serverAddress;
-      _isKeepAliveEnabled = config.keepAliveEnabled;
-    });
+    try {
+      final config = await _api.fetchConfig();
+      if (!mounted) return;
+      setState(() {
+        _currentConfig = config;
+        _serverAddressController.text = config.serverAddress;
+        _isKeepAliveEnabled = config.keepAliveEnabled;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _currentConfig = null;
+        _serverAddressController.text = 'localhost:7666';
+      });
+    }
   }
 
   Future<void> _saveConfiguration() async {
@@ -48,23 +60,78 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       _isSaving = true;
     });
 
-    final result = await _api.updateConfig(
-      serverAddress: _serverAddressController.text,
-      keepAlive: _isKeepAliveEnabled,
-    );
+    try {
+      final result = await _api.updateConfig(
+        serverAddress: _serverAddressController.text,
+        keepAlive: _isKeepAliveEnabled,
+      );
 
-    if (!mounted) return;
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.message),
+          backgroundColor: result.success ? Colors.green : Colors.red,
+        ),
+      );
+
+      await _loadConfig();
+      await _checkServerConnection();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to save configuration'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _checkServerConnection() async {
+    if (_isCheckingServer) return;
     setState(() {
-      _isSaving = false;
+      _isCheckingServer = true;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(result.message),
-        backgroundColor: result.success ? Colors.green : Colors.red,
-      ),
-    );
 
-    await _loadConfig();
+    try {
+      final status = await _api.getServerStatusDetail();
+      if (!mounted) return;
+      setState(() {
+        _isCheckingServer = false;
+        _serverReachable = status.serverAvailable;
+        _serverCheckMessage = status.serverAvailable
+            ? 'Server is reachable'
+            : 'Server is not reachable yet';
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_serverCheckMessage),
+          backgroundColor: status.serverAvailable
+              ? Colors.green
+              : Colors.orange,
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isCheckingServer = false;
+        _serverReachable = false;
+        _serverCheckMessage = 'Server check failed';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Server check failed'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 
   @override
@@ -129,15 +196,10 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                           SizedBox(
                             width: 20,
                             height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                            ),
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           ),
                           SizedBox(width: 12),
-                          Text(
-                            'Saving...',
-                            style: TextStyle(fontSize: 16),
-                          ),
+                          Text('Saving...', style: TextStyle(fontSize: 16)),
                         ],
                       )
                     : const Text(
@@ -145,6 +207,49 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         style: TextStyle(fontSize: 16),
                       ),
               ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 44,
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _isCheckingServer ? null : _checkServerConnection,
+                icon: _isCheckingServer
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        (_serverReachable ?? false)
+                            ? Icons.cloud_done
+                            : Icons.cloud_outlined,
+                      ),
+                label: Text(
+                  _isCheckingServer
+                      ? 'Checking Server...'
+                      : (_serverReachable == null
+                            ? 'Check Server Connectivity'
+                            : _serverCheckMessage),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: AppNavigationManager.navigateToConnectPage,
+                  icon: const Icon(Icons.cable),
+                  label: const Text('Open Connect'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: AppNavigationManager.navigateToRegisterPage,
+                  icon: const Icon(Icons.app_registration),
+                  label: const Text('Open Register'),
+                ),
+              ],
             ),
             const SizedBox(height: 24),
             Card(
@@ -173,7 +278,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         : const Text('Fetching current configuration...'),
                     const SizedBox(height: 16),
                     Text(
-                      'Note: Changes will apply after restarting the server.',
+                      'Note: Changes apply to subsequent register/connect operations.',
                       style: Theme.of(context).textTheme.bodySmall,
                       textAlign: TextAlign.center,
                     ),

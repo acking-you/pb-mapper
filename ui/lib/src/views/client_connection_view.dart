@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
-import 'package:pb_mapper_ui/src/views/log_view_button.dart';
 import 'package:pb_mapper_ui/src/models/client_config.dart';
 import 'package:pb_mapper_ui/src/widgets/client_card.dart';
 
@@ -31,32 +30,54 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
 
     // Load client configurations and check status
     _loadClientConfigs();
-    _loadConfig();
-    _loadServerStatus();
+    _refreshPrerequisites();
 
     // Check if there's a pre-selected service key from status monitoring
     _checkForPreSelectedService();
   }
 
+  Future<void> _refreshPrerequisites() async {
+    await Future.wait([_loadConfig(), _loadServerStatus()]);
+  }
+
   Future<void> _loadConfig() async {
-    final config = await _api.fetchConfig();
-    if (!mounted) return;
-    setState(() {
-      _serverAddress = config.serverAddress;
-    });
+    try {
+      final config = await _api.fetchConfig();
+      if (!mounted) return;
+      setState(() {
+        _serverAddress = config.serverAddress;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _serverAddress = 'localhost:7666';
+      });
+    }
   }
 
   Future<void> _loadServerStatus() async {
-    final status = await _api.getServerStatusDetail();
-    if (!mounted) return;
-    setState(() {
-      _serverAvailable = status.serverAvailable;
-      _availableServices = status.registeredServices;
-      if (_selectedServiceKey != null &&
-          !_availableServices.contains(_selectedServiceKey)) {
+    try {
+      final status = await _api.getServerStatusDetail();
+      if (!mounted) return;
+      setState(() {
+        _serverAvailable = status.serverAvailable;
+        _availableServices = status.registeredServices;
+        if (_selectedServiceKey != null &&
+            !_availableServices.contains(_selectedServiceKey)) {
+          _selectedServiceKey = null;
+        }
+        if (_selectedServiceKey == null && _availableServices.isNotEmpty) {
+          _selectedServiceKey = _availableServices.first;
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _serverAvailable = false;
+        _availableServices = [];
         _selectedServiceKey = null;
-      }
-    });
+      });
+    }
     _scheduleServerStatusRetryIfNeeded();
   }
 
@@ -79,9 +100,17 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   }
 
   Future<void> _loadClientConfigs() async {
-    final configs = await _api.getClientConfigs();
-    if (!mounted) return;
-    _updateClientConfigsFromSignal(configs);
+    try {
+      final configs = await _api.getClientConfigs();
+      if (!mounted) return;
+      _updateClientConfigsFromSignal(configs);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _clientConfigs = [];
+        _isLoading = false;
+      });
+    }
   }
 
   void _updateClientConfigsFromSignal(List<ClientConfigInfo> configs) {
@@ -184,6 +213,68 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
             ElevatedButton(
               onPressed: AppNavigationManager.navigateToConfigPage,
               child: const Text('Go to Config'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSetupStepCard() {
+    final statusColor = _serverAvailable ? Colors.green : Colors.red;
+    final statusText = _serverAvailable ? 'Reachable' : 'Unreachable';
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.looks_one, color: Colors.blueGrey),
+                const SizedBox(width: 8),
+                Text(
+                  'Step 1: Configure PB_MAPPER_SERVER',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const Spacer(),
+                Icon(Icons.circle, color: statusColor, size: 12),
+                const SizedBox(width: 6),
+                Text(
+                  statusText,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            SelectableText(
+              _serverAddress,
+              style: Theme.of(
+                context,
+              ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: AppNavigationManager.navigateToConfigPage,
+                  icon: const Icon(Icons.settings),
+                  label: const Text('Open Config'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _refreshPrerequisites,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Re-check Server'),
+                ),
+              ],
             ),
           ],
         ),
@@ -342,8 +433,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                 messenger.showSnackBar(
                   SnackBar(
                     content: Text(result.message),
-                    backgroundColor:
-                        result.success ? Colors.green : Colors.red,
+                    backgroundColor: result.success ? Colors.green : Colors.red,
                   ),
                 );
                 _loadClientConfigs();
@@ -360,8 +450,9 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   void _handleClientRefresh(ClientConfig config) {
     _api.getClientStatus(config.serviceKey).then((status) {
       if (!mounted) return;
-      final configIndex =
-          _clientConfigs.indexWhere((c) => c.serviceKey == status.serviceKey);
+      final configIndex = _clientConfigs.indexWhere(
+        (c) => c.serviceKey == status.serviceKey,
+      );
       if (configIndex != -1) {
         setState(() {
           _clientConfigs[configIndex].updateStatus(
@@ -382,6 +473,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            _buildSetupStepCard(),
+            const SizedBox(height: 12),
             if (disableUi) ...[
               _buildServerUnavailableBanner(),
               const SizedBox(height: 12),
@@ -398,7 +491,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Connect to Service',
+                            'Step 2: Connect to Service',
                             style: Theme.of(context).textTheme.titleLarge,
                           ),
                           const SizedBox(height: 16),
@@ -424,8 +517,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                           DropdownButtonFormField<String>(
                             initialValue:
                                 _availableServices.contains(_selectedServiceKey)
-                                    ? _selectedServiceKey
-                                    : null,
+                                ? _selectedServiceKey
+                                : null,
                             items: _availableServices.isEmpty
                                 ? [
                                     const DropdownMenuItem(
@@ -439,7 +532,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                       child: Text(serviceKey),
                                     );
                                   }).toList(),
-                            onChanged: _serverAvailable &&
+                            onChanged:
+                                _serverAvailable &&
                                     _availableServices.isNotEmpty
                                 ? (value) {
                                     setState(() => _selectedServiceKey = value);
@@ -449,16 +543,17 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                               labelText: 'Service Key',
                               hintText: _serverAvailable
                                   ? (_availableServices.isEmpty
-                                      ? 'No registered services'
-                                      : 'Select a service')
+                                        ? 'No registered services'
+                                        : 'Select a service')
                                   : 'Server unavailable',
                               border: const OutlineInputBorder(),
                               prefixIcon: Icon(
                                 _serverAvailable
                                     ? Icons.cloud_done
                                     : Icons.cloud_off,
-                                color:
-                                    _serverAvailable ? Colors.green : Colors.red,
+                                color: _serverAvailable
+                                    ? Colors.green
+                                    : Colors.red,
                               ),
                             ),
                           ),
@@ -488,14 +583,12 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                             ),
                             child: Row(
                               children: [
-                                const Icon(
-                                  Icons.dns,
-                                  color: Colors.blue,
-                                ),
+                                const Icon(Icons.dns, color: Colors.blue),
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       const Text(
                                         'Server Address',
@@ -533,7 +626,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                     height: 48,
                     width: double.infinity,
                     child: ElevatedButton(
-                      onPressed: (_serverAvailable &&
+                      onPressed:
+                          (_serverAvailable &&
                               _selectedServiceKey != null &&
                               _availableServices.isNotEmpty)
                           ? _connectService
@@ -544,15 +638,15 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                         ),
                         backgroundColor:
                             !_serverAvailable || _availableServices.isEmpty
-                                ? Colors.grey
-                                : null,
+                            ? Colors.grey
+                            : null,
                       ),
                       child: Text(
                         !_serverAvailable
                             ? 'Server Unavailable'
                             : (_availableServices.isEmpty
-                                ? 'No Services Available'
-                                : 'Connect'),
+                                  ? 'No Services Available'
+                                  : 'Connect in One Click'),
                         style: const TextStyle(fontSize: 16),
                       ),
                     ),
@@ -560,9 +654,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                   const SizedBox(height: 16),
                   if (_isLoading) ...[
                     const SizedBox(height: 24),
-                    const Center(
-                      child: CircularProgressIndicator(),
-                    ),
+                    const Center(child: CircularProgressIndicator()),
                   ] else if (_clientConfigs.isEmpty) ...[
                     const SizedBox(height: 24),
                     Card(
@@ -578,22 +670,14 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                             const SizedBox(height: 16),
                             Text(
                               'No client configurations',
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleMedium
-                                  ?.copyWith(
-                                    color: Colors.grey[600],
-                                  ),
+                              style: Theme.of(context).textTheme.titleMedium
+                                  ?.copyWith(color: Colors.grey[600]),
                             ),
                             const SizedBox(height: 8),
                             Text(
                               'Create a new connection above to get started',
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .bodySmall
-                                  ?.copyWith(
-                                    color: Colors.grey[500],
-                                  ),
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: Colors.grey[500]),
                             ),
                           ],
                         ),
@@ -622,9 +706,9 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                         config: config,
                         onConnectDisconnect: () =>
                             config.status == ClientStatus.running ||
-                                    config.status == ClientStatus.retrying
-                                ? _handleClientDisconnect(config)
-                                : _handleClientConnect(config),
+                                config.status == ClientStatus.retrying
+                            ? _handleClientDisconnect(config)
+                            : _handleClientConnect(config),
                         onDelete: () => _handleClientDelete(config),
                         onRefresh: () => _handleClientRefresh(config),
                         onStatusChanged: (updatedConfig) {
@@ -640,8 +724,6 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                       ),
                     ),
                   ],
-                  const SizedBox(height: 24),
-                  const LogViewButton(),
                 ],
               ),
             ),

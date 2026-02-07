@@ -13,7 +13,11 @@ class LogMessage {
   final String message;
   final int timestamp;
 
-  LogMessage({required this.level, required this.message, required this.timestamp});
+  LogMessage({
+    required this.level,
+    required this.message,
+    required this.timestamp,
+  });
 }
 
 class PbMapperService {

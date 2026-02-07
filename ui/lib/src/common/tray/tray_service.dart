@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -55,6 +56,9 @@ class TrayService with TrayListener {
   Future<TrayStatus> Function()? _statusProvider;
   VoidCallback? _showApp;
   VoidCallback? _quitApp;
+  bool _iconSupported = true;
+  bool _toolTipSupported = true;
+  bool _contextMenuSupported = true;
 
   Future<void> initialize({
     required Future<TrayStatus> Function() statusProvider,
@@ -118,20 +122,66 @@ class TrayService with TrayListener {
   Future<void> _applyStatus(TrayStatus next) async {
     _status = next;
     final iconPath = _iconFor(next);
-    await _trayManager.setIcon(iconPath);
-    await _trayManager.setToolTip(next.displayText);
-    await _trayManager.setContextMenu(
-      Menu(
-        items: [
-          MenuItem(key: 'status', label: next.displayText, disabled: true),
-          MenuItem.separator(),
-          MenuItem(key: 'open', label: 'Open pb-mapper'),
-          MenuItem(key: 'refresh', label: 'Refresh status'),
-          MenuItem.separator(),
-          MenuItem(key: 'quit', label: 'Quit'),
-        ],
-      ),
-    );
+    if (_iconSupported) {
+      await _invokeTrayMethod(
+        action: () => _trayManager.setIcon(iconPath),
+        onUnsupported: () => _iconSupported = false,
+        methodName: 'setIcon',
+      );
+    }
+    if (_toolTipSupported) {
+      await _invokeTrayMethod(
+        action: () => _trayManager.setToolTip(next.displayText),
+        onUnsupported: () => _toolTipSupported = false,
+        methodName: 'setToolTip',
+      );
+    }
+    if (_contextMenuSupported) {
+      await _invokeTrayMethod(
+        action: () => _trayManager.setContextMenu(
+          Menu(
+            items: [
+              MenuItem(key: 'status', label: next.displayText, disabled: true),
+              MenuItem.separator(),
+              MenuItem(key: 'open', label: 'Open pb-mapper'),
+              MenuItem(key: 'refresh', label: 'Refresh status'),
+              MenuItem.separator(),
+              MenuItem(key: 'quit', label: 'Quit'),
+            ],
+          ),
+        ),
+        onUnsupported: () => _contextMenuSupported = false,
+        methodName: 'setContextMenu',
+      );
+    }
+  }
+
+  Future<void> _invokeTrayMethod({
+    required Future<void> Function() action,
+    required VoidCallback onUnsupported,
+    required String methodName,
+  }) async {
+    try {
+      await action();
+    } on MissingPluginException {
+      onUnsupported();
+      debugPrint('Tray method "$methodName" is unavailable on this platform.');
+    } on UnimplementedError {
+      onUnsupported();
+      debugPrint(
+        'Tray method "$methodName" is unimplemented on this platform.',
+      );
+    } on PlatformException catch (e) {
+      final code = e.code.toLowerCase();
+      if (code.contains('unimplemented') || code.contains('missing')) {
+        onUnsupported();
+        debugPrint(
+          'Tray method "$methodName" is unsupported: ${e.code} ${e.message ?? ''}',
+        );
+        return;
+      }
+      rethrow;
+    }
   }
 
   String _iconFor(TrayStatus status) {

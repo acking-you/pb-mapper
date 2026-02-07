@@ -1,30 +1,31 @@
 import 'package:flutter/material.dart';
-import 'package:pb_mapper_ui/src/common/theme_change_button.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
+import 'package:pb_mapper_ui/src/common/theme_change_button.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class MainLandingView extends StatelessWidget {
-  final VoidCallback onServerManagement;
+  final VoidCallback onConfiguration;
   final VoidCallback onServiceRegistration;
   final VoidCallback onClientConnection;
-  final VoidCallback? onStatusMonitoring;
-  final VoidCallback? onConfiguration;
+  final VoidCallback onStatusMonitoring;
+  final VoidCallback onLogs;
   final VoidCallback onToggleTheme;
 
   const MainLandingView({
     super.key,
-    required this.onServerManagement,
+    required this.onConfiguration,
     required this.onServiceRegistration,
     required this.onClientConnection,
-    this.onStatusMonitoring,
-    this.onConfiguration,
+    required this.onStatusMonitoring,
+    required this.onLogs,
     required this.onToggleTheme,
   });
 
   Future<void> _launchGitHub() async {
     const url = 'https://github.com/ACking-you/pb-mapper';
-    if (await canLaunchUrl(Uri.parse(url))) {
-      await launchUrl(Uri.parse(url));
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
     }
   }
 
@@ -45,11 +46,14 @@ class MainLandingView extends StatelessWidget {
           padding: const EdgeInsets.all(20),
           child: Column(
             children: [
-              Icon(icon, size: 48, color: color),
+              Icon(icon, size: 44, color: color),
               const SizedBox(height: 12),
               Text(
                 title,
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 8),
@@ -65,9 +69,112 @@ class MainLandingView extends StatelessWidget {
     );
   }
 
+  Widget _buildQuickStartCard(BuildContext context) {
+    return Card(
+      color: Theme.of(context).brightness == Brightness.dark
+          ? Colors.blueGrey.shade900
+          : Colors.blue.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.route_outlined,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  'Quick Start',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Text('1) Set `PB_MAPPER_SERVER` in Configuration'),
+            const SizedBox(height: 4),
+            const Text('2) Register local services'),
+            const SizedBox(height: 4),
+            const Text('3) Connect clients to registered services'),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: onConfiguration,
+                  icon: const Icon(Icons.settings),
+                  label: const Text('Go to Config'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: onServiceRegistration,
+                  icon: const Icon(Icons.app_registration),
+                  label: const Text('Go to Register'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: onClientConnection,
+                  icon: const Icon(Icons.cable),
+                  label: const Text('Go to Connect'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final bool showAppBar = ResponsiveLayout.isMobile(context);
+    final showAppBar = ResponsiveLayout.isMobile(context);
+    final isMobile = ResponsiveLayout.isMobile(context);
+
+    final cards = <Widget>[
+      _buildFeatureCard(
+        context: context,
+        onPressed: onConfiguration,
+        title: 'Configuration',
+        description: 'Step 1: Configure `PB_MAPPER_SERVER` and runtime options',
+        icon: Icons.settings,
+        color: Colors.blueGrey,
+      ),
+      _buildFeatureCard(
+        context: context,
+        onPressed: onServiceRegistration,
+        title: 'Register',
+        description: 'Publish local services to your pb-mapper server',
+        icon: Icons.app_registration,
+        color: Colors.green,
+      ),
+      _buildFeatureCard(
+        context: context,
+        onPressed: onClientConnection,
+        title: 'Connect',
+        description: 'Create local client tunnels to registered services',
+        icon: Icons.cable,
+        color: Colors.orange,
+      ),
+      _buildFeatureCard(
+        context: context,
+        onPressed: onStatusMonitoring,
+        title: 'Status',
+        description: 'Inspect currently registered services and connections',
+        icon: Icons.monitor,
+        color: Colors.teal,
+      ),
+      _buildFeatureCard(
+        context: context,
+        onPressed: onLogs,
+        title: 'Logs',
+        description: 'Open the dedicated runtime log viewer',
+        icon: Icons.terminal,
+        color: Colors.indigo,
+      ),
+    ];
 
     return Scaffold(
       appBar: showAppBar
@@ -83,29 +190,24 @@ class MainLandingView extends StatelessWidget {
           padding: ResponsiveLayout.getScreenPadding(context),
           child: SingleChildScrollView(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const SizedBox(height: 20),
-                // Large Project Title
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: _launchGitHub,
-                    child: Text(
-                      'pb-mapper',
-                      style: TextStyle(
-                        fontSize: ResponsiveLayout.isMobile(context) ? 56 : 72,
-                        fontWeight: FontWeight.bold,
-                        color: Theme.of(context).brightness == Brightness.dark
-                            ? Colors.white
-                            : Theme.of(context).primaryColor,
-                      ),
+                GestureDetector(
+                  onTap: _launchGitHub,
+                  child: Text(
+                    'pb-mapper',
+                    style: TextStyle(
+                      fontSize: isMobile ? 56 : 72,
+                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).brightness == Brightness.dark
+                          ? Colors.white
+                          : Theme.of(context).primaryColor,
                     ),
                   ),
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'Network Tunneling & Proxy Solution',
+                  'Network Tunneling & Proxy Client',
                   style: TextStyle(
                     fontSize: ResponsiveLayout.getFontSize(context, 22),
                     color: Colors.grey[600],
@@ -114,156 +216,17 @@ class MainLandingView extends StatelessWidget {
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 20),
-
-                // Simplified Project Description with GitHub Star Call-to-Action
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  margin: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).brightness == Brightness.dark
-                        ? Colors.grey[800]
-                        : Colors.blue[50],
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: Theme.of(context).brightness == Brightness.dark
-                          ? Colors.grey[700]!
-                          : Colors.blue[200]!,
-                      width: 1,
-                    ),
-                  ),
-                  child: Column(
-                    children: [
-                      Text(
-                        'Access your local services from anywhere through secure tunneling.',
-                        style: TextStyle(
-                          fontSize: 18,
-                          color: Theme.of(context).brightness == Brightness.dark
-                              ? Colors.grey[300]
-                              : Colors.blue[800],
-                          fontWeight: FontWeight.w500,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 16),
-                      // GitHub Star Call-to-Action
-                      MouseRegion(
-                        cursor: SystemMouseCursors.click,
-                        child: GestureDetector(
-                          onTap: _launchGitHub,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 12,
-                            ),
-                            decoration: BoxDecoration(
-                              color:
-                                  Theme.of(context).brightness ==
-                                      Brightness.dark
-                                  ? Colors.grey[700]
-                                  : Colors.white,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(
-                                color:
-                                    Theme.of(context).brightness ==
-                                        Brightness.dark
-                                    ? Colors.grey[600]!
-                                    : Colors.grey[300]!,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  Icons.star,
-                                  color: Colors.orange,
-                                  size: 20,
-                                ),
-                                const SizedBox(width: 8),
-                                Flexible(
-                                  child: Text(
-                                    ResponsiveLayout.isMobile(context)
-                                        ? '⭐ Star on GitHub!'
-                                        : 'Like it? Give us a ⭐ on GitHub!',
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      color:
-                                          Theme.of(context).brightness ==
-                                              Brightness.dark
-                                          ? Colors.grey[300]
-                                          : Colors.grey[700],
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(height: 24),
-
-                // Feature Cards
-                ResponsiveLayout.isMobile(context)
+                _buildQuickStartCard(context),
+                const SizedBox(height: 20),
+                isMobile
                     ? Column(
-                        children: [
-                          _buildFeatureCard(
-                            context: context,
-                            onPressed: onServerManagement,
-                            title: 'Server Management',
-                            description:
-                                'Start and manage the central pb-mapper server',
-                            icon: Icons.dns,
-                            color: Colors.blue,
-                          ),
-                          const SizedBox(height: 16),
-                          _buildFeatureCard(
-                            context: context,
-                            onPressed: onServiceRegistration,
-                            title: 'Service Registration',
-                            description:
-                                'Register local services to make them accessible',
-                            icon: Icons.app_registration,
-                            color: Colors.green,
-                          ),
-                          const SizedBox(height: 16),
-                          _buildFeatureCard(
-                            context: context,
-                            onPressed: onClientConnection,
-                            title: 'Client Connection',
-                            description:
-                                'Connect to registered services remotely',
-                            icon: Icons.cable,
-                            color: Colors.orange,
-                          ),
-                          const SizedBox(height: 16),
-                          if (onStatusMonitoring != null)
-                            _buildFeatureCard(
-                              context: context,
-                              onPressed: onStatusMonitoring!,
-                              title: 'Status Monitoring',
-                              description:
-                                  'Monitor server status and active connections',
-                              icon: Icons.monitor,
-                              color: Colors.purple,
-                            ),
-                          if (onConfiguration != null) ...[
-                            const SizedBox(height: 16),
-                            _buildFeatureCard(
-                              context: context,
-                              onPressed: onConfiguration!,
-                              title: 'Configuration',
-                              description:
-                                  'Configure server settings and preferences',
-                              icon: Icons.settings,
-                              color: Colors.grey,
-                            ),
-                          ],
-                        ],
+                        children:
+                            cards
+                                .expand(
+                                  (card) => [card, const SizedBox(height: 16)],
+                                )
+                                .toList()
+                              ..removeLast(),
                       )
                     : GridView.count(
                         shrinkWrap: true,
@@ -271,53 +234,12 @@ class MainLandingView extends StatelessWidget {
                         crossAxisCount: 2,
                         crossAxisSpacing: 16,
                         mainAxisSpacing: 16,
-                        childAspectRatio: 1.2,
-                        children: [
-                          _buildFeatureCard(
-                            context: context,
-                            onPressed: onServerManagement,
-                            title: 'Server Management',
-                            description:
-                                'Start and manage the central pb-mapper server',
-                            icon: Icons.dns,
-                            color: Colors.blue,
-                          ),
-                          _buildFeatureCard(
-                            context: context,
-                            onPressed: onServiceRegistration,
-                            title: 'Service Registration',
-                            description:
-                                'Register local services to make them accessible',
-                            icon: Icons.app_registration,
-                            color: Colors.green,
-                          ),
-                          _buildFeatureCard(
-                            context: context,
-                            onPressed: onClientConnection,
-                            title: 'Client Connection',
-                            description:
-                                'Connect to registered services remotely',
-                            icon: Icons.cable,
-                            color: Colors.orange,
-                          ),
-                          if (onStatusMonitoring != null)
-                            _buildFeatureCard(
-                              context: context,
-                              onPressed: onStatusMonitoring!,
-                              title: 'Status Monitoring',
-                              description:
-                                  'Monitor server status and active connections',
-                              icon: Icons.monitor,
-                              color: Colors.purple,
-                            ),
-                        ],
+                        childAspectRatio: 1.25,
+                        children: cards,
                       ),
-
-                const SizedBox(height: 32),
-
-                // Footer
+                const SizedBox(height: 28),
                 Text(
-                  'Click on any feature above to get started',
+                  'Start with Configuration, then Register or Connect.',
                   style: TextStyle(
                     fontSize: 16,
                     color: Colors.grey[600],
@@ -325,7 +247,6 @@ class MainLandingView extends StatelessWidget {
                   ),
                   textAlign: TextAlign.center,
                 ),
-
                 const SizedBox(height: 20),
               ],
             ),

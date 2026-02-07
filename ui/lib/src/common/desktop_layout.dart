@@ -65,11 +65,6 @@ class _DesktopLayoutState extends State<DesktopLayout> {
                   extended: ResponsiveLayout.isDesktop(context),
                   destinations: const [
                     NavigationRailDestination(
-                      icon: Icon(Icons.dns_outlined),
-                      selectedIcon: Icon(Icons.dns),
-                      label: Text('Server'),
-                    ),
-                    NavigationRailDestination(
                       icon: Icon(Icons.app_registration_outlined),
                       selectedIcon: Icon(Icons.app_registration),
                       label: Text('Register'),
@@ -88,6 +83,11 @@ class _DesktopLayoutState extends State<DesktopLayout> {
                       icon: Icon(Icons.settings_outlined),
                       selectedIcon: Icon(Icons.settings),
                       label: Text('Config'),
+                    ),
+                    NavigationRailDestination(
+                      icon: Icon(Icons.terminal_outlined),
+                      selectedIcon: Icon(Icons.terminal),
+                      label: Text('Logs'),
                     ),
                   ],
                 ),

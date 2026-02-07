@@ -28,13 +28,19 @@ class AppNavigationManager {
 
   static void navigateToConnectPage() {
     if (_navigateToPage != null) {
-      _navigateToPage!(3); // 3 = connect page
+      _navigateToPage!(2); // 2 = connect page
+    }
+  }
+
+  static void navigateToRegisterPage() {
+    if (_navigateToPage != null) {
+      _navigateToPage!(1); // 1 = register page
     }
   }
 
   static void navigateToConfigPage() {
     if (_navigateToPage != null) {
-      _navigateToPage!(5); // 5 = config page
+      _navigateToPage!(4); // 4 = config page
     }
   }
 }
@@ -59,11 +65,24 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
   }
 
   Future<void> _loadStatus() async {
-    final status = await _api.getServerStatusDetail();
-    if (!mounted) return;
-    setState(() {
-      _status = status;
-    });
+    try {
+      final status = await _api.getServerStatusDetail();
+      if (!mounted) return;
+      setState(() {
+        _status = status;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _status = const ServerStatusDetail(
+          serverAvailable: false,
+          registeredServices: [],
+          serverMap: '',
+          activeConnections: '',
+          idleConnections: '',
+        );
+      });
+    }
     _scheduleServerStatusRetryIfNeeded();
   }
 
@@ -508,10 +527,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                       ),
                       subtitle: Text(
                         'Tap to connect to this service',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: availableColor,
-                        ),
+                        style: TextStyle(fontSize: 14, color: availableColor),
                       ),
                       trailing: Icon(
                         Icons.arrow_forward_ios,
