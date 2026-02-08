@@ -9,12 +9,19 @@ class LogManager {
 
   static const int _maxLogLines = 1000;
   static const List<String> logLevels = [
-    'ERROR',
-    'WARN',
-    'INFO',
-    'DEBUG',
     'TRACE',
+    'DEBUG',
+    'INFO',
+    'WARN',
+    'ERROR',
   ];
+  static const Map<String, int> _levelPriority = {
+    'TRACE': 0,
+    'DEBUG': 1,
+    'INFO': 2,
+    'WARN': 3,
+    'ERROR': 4,
+  };
 
   final List<LogMessage> _logMessages = [];
   final StreamController<List<LogMessage>> _logStreamController =
@@ -62,13 +69,48 @@ class LogManager {
     _emitSnapshot();
   }
 
+  static String normalizeLevel(String level) {
+    final normalized = level.trim().toUpperCase();
+    if (_levelPriority.containsKey(normalized)) {
+      return normalized;
+    }
+    return 'UNKNOWN';
+  }
+
+  static bool includesThreshold({
+    required String thresholdLevel,
+    required String entryLevel,
+  }) {
+    final threshold = _levelPriority[normalizeLevel(thresholdLevel)];
+    final entry = _levelPriority[normalizeLevel(entryLevel)];
+    if (threshold == null || entry == null) {
+      return normalizeLevel(entryLevel) == normalizeLevel(thresholdLevel);
+    }
+    return entry >= threshold;
+  }
+
+  static String getThresholdLabel(String level) {
+    final normalized = normalizeLevel(level);
+    if (normalized == 'ERROR' || normalized == 'UNKNOWN') {
+      return normalized;
+    }
+    return '$normalized+';
+  }
+
   List<LogMessage> filterLogs({String? levelFilter, String keyword = ''}) {
+    final normalizedLevelFilter =
+        (levelFilter == null || levelFilter.trim().isEmpty)
+        ? null
+        : normalizeLevel(levelFilter);
     final normalizedKeyword = keyword.trim().toLowerCase();
     return _logMessages
         .where((log) {
-          if (levelFilter != null &&
-              levelFilter.isNotEmpty &&
-              log.level != levelFilter) {
+          if (normalizedLevelFilter != null &&
+              normalizedLevelFilter.isNotEmpty &&
+              !includesThreshold(
+                thresholdLevel: normalizedLevelFilter,
+                entryLevel: log.level,
+              )) {
             return false;
           }
           if (normalizedKeyword.isEmpty) {

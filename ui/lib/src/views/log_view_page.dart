@@ -166,7 +166,7 @@ class _LogViewPageState extends State<LogViewPage> {
                     ...LogManager.logLevels.map(
                       (level) => DropdownMenuItem<String?>(
                         value: level,
-                        child: Text(level),
+                        child: Text(LogManager.getThresholdLabel(level)),
                       ),
                     ),
                   ],
@@ -317,7 +317,7 @@ class _LogViewPageState extends State<LogViewPage> {
   Widget _buildBottomBar(BuildContext context) {
     final filterParts = <String>[];
     if (_levelFilter != null) {
-      filterParts.add('level=$_levelFilter');
+      filterParts.add('level=${LogManager.getThresholdLabel(_levelFilter!)}');
     }
     if (_keywordFilter.isNotEmpty) {
       filterParts.add('keyword="$_keywordFilter"');
