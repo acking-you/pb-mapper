@@ -38,6 +38,8 @@ pub enum Error {
     },
     #[snafu(display("Failed to write ping message"))]
     WritePingMsg { source: common::error::Error },
+    #[snafu(display("Failed to encode ping message"))]
+    EncodePingMsg { source: common::error::Error },
     #[snafu(display("header msg tool:`{action}` create failed!"))]
     CreateHeaderTool {
         // Must be `reader/writer`

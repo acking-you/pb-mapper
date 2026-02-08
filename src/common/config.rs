@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Once};
 
 use clap::{Subcommand, ValueEnum};
 use snafu::ResultExt;
@@ -196,15 +196,21 @@ pub async fn get_pb_mapper_server_async(addr: Option<&str>) -> Result<SocketAddr
 }
 
 pub fn init_tracing() {
-    let subcriber = tracing_subscriber::registry().with(
-        fmt::layer()
-            .pretty()
-            .with_writer(std::io::stdout)
-            .with_filter(
-                tracing_subscriber::EnvFilter::builder()
-                    .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                    .from_env_lossy(),
-            ),
-    );
-    tracing::subscriber::set_global_default(subcriber).expect("setting tracing default failed");
+    static INIT_TRACING: Once = Once::new();
+    INIT_TRACING.call_once(|| {
+        let subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .pretty()
+                .with_writer(std::io::stdout)
+                .with_filter(
+                    tracing_subscriber::EnvFilter::builder()
+                        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                        .from_env_lossy(),
+                ),
+        );
+
+        if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
+            eprintln!("failed to initialize tracing subscriber: {e}");
+        }
+    });
 }

@@ -2,7 +2,7 @@ pub mod error;
 mod stream;
 
 use std::fmt::Debug;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use snafu::ResultExt;
@@ -11,8 +11,9 @@ use tokio::time::Instant;
 use tracing::instrument;
 
 use self::error::{
-    DecodeRegisterRespSnafu, DecodeStreamReqSnafu, EncodeRegisterReqSnafu, ReadRegisterRespSnafu,
-    ReadStreamReqSnafu, RegisterRespNotMatchSnafu, SendRegisterReqSnafu, WritePingMsgSnafu,
+    DecodeRegisterRespSnafu, DecodeStreamReqSnafu, EncodePingMsgSnafu, EncodeRegisterReqSnafu,
+    ReadRegisterRespSnafu, ReadStreamReqSnafu, RegisterRespNotMatchSnafu, SendRegisterReqSnafu,
+    WritePingMsgSnafu,
 };
 use self::stream::handle_stream;
 use crate::common::config::IS_KEEPALIVE;
@@ -41,17 +42,8 @@ const GLOBAL_RETRY_TIMES: u32 = 16;
 
 const LOCAL_RETRY_TIMES: u32 = 8;
 
-// Static ping message - generated once and copied for each use to avoid encryption state corruption
-static PING_MESSAGE: OnceLock<Vec<u8>> = OnceLock::new();
-
-fn get_ping_message() -> Vec<u8> {
-    PING_MESSAGE
-        .get_or_init(|| {
-            PbServerRequest::Ping
-                .encode()
-                .expect("Ping message encoding should never fail")
-        })
-        .clone()
+fn get_ping_message() -> error::Result<Vec<u8>> {
+    PbServerRequest::Ping.encode().context(EncodePingMsgSnafu)
 }
 
 #[derive(Debug)]
@@ -164,12 +156,20 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs
 where
     LocalStream::Item: StreamForward,
 {
-    let local_addr = got_one_socket_addr(local_addr)
-        .await
-        .expect("at least one socket addr be parsed from `local_addr`");
-    let remote_addr = got_one_socket_addr(remote_addr)
-        .await
-        .expect("at least one socket addr be parsed from `remote_addr`");
+    let local_addr = match got_one_socket_addr(local_addr).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("parse local addr failed: {e}");
+            return Err(Status::ConnectRemote);
+        }
+    };
+    let remote_addr = match got_one_socket_addr(remote_addr).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("parse remote addr failed: {e}");
+            return Err(Status::ConnectRemote);
+        }
+    };
 
     let mut manager_stream = snafu_error_get_or_return!(
         each_addr(remote_addr, TcpStream::connect).await,
@@ -197,18 +197,33 @@ where
         }
         .encode()
         .context(EncodeRegisterReqSnafu));
-        let mut msg_writer = get_header_msg_writer(&mut manager_stream)
-            .expect("remote stream create header msg writer nerver fails!");
+        let mut msg_writer = match get_header_msg_writer(&mut manager_stream) {
+            Ok(writer) => writer,
+            Err(e) => {
+                tracing::error!("create manager header writer failed: {e}");
+                return Err(Status::ConnectRemote);
+            }
+        };
         snafu_error_get_or_return_ok!(msg_writer
             .write_msg(&msg)
             .await
             .context(SendRegisterReqSnafu));
     }
     let (mut reader, mut writer) = manager_stream.split();
-    let mut msg_reader =
-        get_header_msg_reader(&mut reader).expect("generate remote header reader nerver fails");
-    let mut msg_writer =
-        get_header_msg_writer(&mut writer).expect("generate remote header writer nerver fails");
+    let mut msg_reader = match get_header_msg_reader(&mut reader) {
+        Ok(reader) => reader,
+        Err(e) => {
+            tracing::error!("create manager header reader failed: {e}");
+            return Err(Status::ReadMsg);
+        }
+    };
+    let mut msg_writer = match get_header_msg_writer(&mut writer) {
+        Ok(writer) => writer,
+        Err(e) => {
+            tracing::error!("create manager header writer failed: {e}");
+            return Err(Status::SendPing);
+        }
+    };
     // read register resp to indicate that register has finished
     let (key, conn_id) = {
         let msg = snafu_error_get_or_return_ok!(msg_reader
@@ -278,8 +293,7 @@ async fn handle_ping_interval<T: MessageWriter>(
     key: Arc<str>,
     conn_id: u32,
 ) -> error::Result<()> {
-    // Use static ping message with fresh copy to avoid encryption state corruption
-    let ping_msg = get_ping_message();
+    let ping_msg = get_ping_message()?;
     writer.write_msg(&ping_msg).await.context(WritePingMsgSnafu)
 }
 

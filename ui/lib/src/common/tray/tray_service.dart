@@ -1,4 +1,4 @@
-import 'dart:async';
+import 'dart:async' show Timer, unawaited;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -208,7 +208,16 @@ class TrayService with TrayListener {
 
   @override
   void onTrayIconRightMouseDown() {
-    _trayManager.popUpContextMenu();
+    if (!_contextMenuSupported) {
+      return;
+    }
+    unawaited(
+      _invokeTrayMethod(
+        action: () => _trayManager.popUpContextMenu(),
+        onUnsupported: () => _contextMenuSupported = false,
+        methodName: 'popUpContextMenu',
+      ),
+    );
   }
 
   @override

@@ -48,12 +48,26 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
 
     set_custom_timeout(Duration::from_secs(120));
 
-    let local_addr = got_one_socket_addr(local_addr)
-        .await
-        .expect("at least one socket addr be parsed from `local_addr`");
-    let remote_addr = got_one_socket_addr(remote_addr)
-        .await
-        .expect("at least one socket addr be parsed from `remote_addr`");
+    let local_addr = match got_one_socket_addr(local_addr).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("parse local addr failed: {e}");
+            if let Some(ref callback) = status_callback {
+                callback("failed");
+            }
+            return;
+        }
+    };
+    let remote_addr = match got_one_socket_addr(remote_addr).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("parse remote addr failed: {e}");
+            if let Some(ref callback) = status_callback {
+                callback("failed");
+            }
+            return;
+        }
+    };
 
     let mut timeout_count = TimeoutCount::new(CLIENT_RETRY_TIMES);
 

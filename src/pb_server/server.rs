@@ -19,8 +19,7 @@ use crate::common::message::command::{
 use crate::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
-use crate::pb_server::error::ServerConnSendDeregisterServerSnafu;
-use crate::{snafu_error_get_or_continue, snafu_error_get_or_return_ok, snafu_error_handle};
+use crate::{snafu_error_get_or_continue, snafu_error_get_or_return_ok};
 
 /// Ensure that server-side connections are properly deregistered before a normal connection is
 /// disconnected or an exception occurs
@@ -32,25 +31,33 @@ struct ServerConnGuard<'a> {
 
 impl<'a> Drop for ServerConnGuard<'a> {
     fn drop(&mut self) {
-        snafu_error_handle!(self
-            .sender
-            .try_send(ManagerTask::DeRegisterServerConn {
-                key: self.key.clone(),
-                conn_id: self.conn_id,
-            })
-            .map_err(|err| match err {
-                kanal::SendTimeoutError::Closed(_) => kanal::SendTimeoutError::Closed(()),
-                kanal::SendTimeoutError::Timeout(_) => kanal::SendTimeoutError::Timeout(()),
-            })
-            .context(ServerConnSendDeregisterServerSnafu {
-                key: self.key.clone(),
-                conn_id: self.conn_id
-            }));
-        tracing::error!(
-            "Server conn drop! key:{} conn_id:{}",
-            self.key,
-            self.conn_id
-        );
+        let task = ManagerTask::DeRegisterServerConn {
+            key: self.key.clone(),
+            conn_id: self.conn_id,
+        };
+        match self.sender.try_send(task) {
+            Ok(()) => {
+                tracing::info!(
+                    "Server conn drop! key:{} conn_id:{}",
+                    self.key,
+                    self.conn_id
+                );
+            }
+            Err(kanal::SendTimeoutError::Closed(_)) => {
+                tracing::debug!(
+                    "skip deregister on drop because manager channel is closed: key:{} conn_id:{}",
+                    self.key,
+                    self.conn_id
+                );
+            }
+            Err(kanal::SendTimeoutError::Timeout(_)) => {
+                tracing::warn!(
+                    "deregister on drop timed out: key:{} conn_id:{}",
+                    self.key,
+                    self.conn_id
+                );
+            }
+        }
     }
 }
 
