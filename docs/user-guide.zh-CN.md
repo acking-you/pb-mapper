@@ -72,6 +72,29 @@ pb-mapper-server --pb-mapper-port 7666
 
 - `--use-ipv6`：开启 IPv6 监听
 - `--keep-alive`：开启 TCP keep-alive
+- `--use-machine-msg-header-key`：基于当前机器 hostname + MAC 派生 `MSG_HEADER_KEY`，
+  并写入 `/var/lib/pb-mapper-server/msg_header_key`
+
+### 基于机器信息派生 `MSG_HEADER_KEY`（可选）
+
+如果你希望每台部署机器都使用各自唯一的 key（而不是内置默认 key），可以这样启动服务端：
+
+```bash
+pb-mapper-server --pb-mapper-port 7666 --use-machine-msg-header-key
+```
+
+该参数会完成：
+
+- 基于 hostname + MAC 地址派生稳定的 32 字节 key
+- 自动设置当前服务端进程的 `MSG_HEADER_KEY`
+- 将 key 持久化到 `/var/lib/pb-mapper-server/msg_header_key`
+
+随后在 `pb-mapper-server-cli` / `pb-mapper-client-cli` 中使用同一 key：
+
+```bash
+export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
+pb-mapper-server-cli --pb-mapper-server "your-server:7666" tcp-server --key "my-service" --addr "127.0.0.1:8080"
+```
 
 ### 2）注册本地服务
 

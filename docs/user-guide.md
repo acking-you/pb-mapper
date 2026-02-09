@@ -72,6 +72,30 @@ Optional flags:
 
 - `--use-ipv6`: enable IPv6 listening
 - `--keep-alive`: enable TCP keep-alive
+- `--use-machine-msg-header-key`: derive `MSG_HEADER_KEY` from current machine hostname + MAC,
+  and write it to `/var/lib/pb-mapper-server/msg_header_key`
+
+### Machine-derived `MSG_HEADER_KEY` (optional)
+
+When you want each deployed server to use a host-specific key (instead of the built-in default),
+start server with:
+
+```bash
+pb-mapper-server --pb-mapper-port 7666 --use-machine-msg-header-key
+```
+
+This will:
+
+- derive a stable 32-byte key from hostname + MAC addresses
+- set server process `MSG_HEADER_KEY` automatically
+- persist the key to `/var/lib/pb-mapper-server/msg_header_key`
+
+Then use the same key for `pb-mapper-server-cli` or `pb-mapper-client-cli`:
+
+```bash
+export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
+pb-mapper-server-cli --pb-mapper-server "your-server:7666" tcp-server --key "my-service" --addr "127.0.0.1:8080"
+```
 
 ### 2) Register a local service
 

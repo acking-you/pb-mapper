@@ -38,7 +38,7 @@ members = ["ui/native/pb_mapper_ffi"]
 exclude = ["deps/uni-stream", "deps/kanal"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.1"
 authors = ["L_B__"]
 edition = "2021"
 
