@@ -32,15 +32,55 @@ curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts
 - **pb-mapper-client-cli**: connect to a registered service and expose a local port
 - **Flutter UI** (`ui/`): GUI for server and client management
 
-## Architecture (developer view)
+## Architecture
 
-### Rust core
+![pb-mapper architecture](docs/assets/architecture.svg)
+
+The diagram above shows the three-zone architecture:
+
+- **Local Service Side** (green): `pb-mapper-server-cli` (or Flutter UI) registers a local TCP/UDP service with the public server.
+- **Public Network** (blue): `pb-mapper-server` maintains a service registry, manages connections, and forwards data bidirectionally.
+- **Remote Client Side** (orange): `pb-mapper-client-cli` (or Flutter UI) subscribes to a service key and exposes it as a local port.
+
+### Concrete example: access a home web server remotely
+
+Suppose you run a web server on `localhost:8080` at home, and want to access it from a coffee shop.
+
+```
+                  Home LAN                    Public Server                Coffee Shop
+          ┌─────────────────────┐       ┌──────────────────┐       ┌──────────────────┐
+          │  Web Server :8080   │       │  pb-mapper-server│       │  Browser :3000   │
+          │        ↑            │       │     :7666        │       │       ↑          │
+          │  server-cli ────────┼──────►│  key='web' ──────┼◄──────┼── client-cli     │
+          └─────────────────────┘       └──────────────────┘       └──────────────────┘
+```
+
+**Step 1** – On the public server, start the central router:
+```bash
+pb-mapper-server --port 7666
+```
+
+**Step 2** – At home, register your web server:
+```bash
+pb-mapper-server-cli --server <public-ip>:7666 --key web --local 127.0.0.1:8080
+```
+
+**Step 3** – At the coffee shop, subscribe and expose locally:
+```bash
+pb-mapper-client-cli --server <public-ip>:7666 --key web --local 127.0.0.1:3000
+```
+
+Now open `http://localhost:3000` in the coffee-shop browser — traffic flows through the public server back to your home web server.
+
+### Developer view
+
+#### Rust core
 - **Binaries** live in `src/bin/` and share protocol + networking helpers in
   `src/common` and `src/utils`.
 - **Server/Client internals** are split across `src/pb_server`,
   `src/local/server`, and `src/local/client`.
 
-### Flutter UI
+#### Flutter UI
 - **Layering**:
   - UI screens/widgets: `ui/lib/src/views`, `ui/lib/src/widgets`.
   - Typed UI API: `ui/lib/src/ffi/pb_mapper_api.dart`.
@@ -51,12 +91,6 @@ curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts
   blocking Flutter's UI thread.
 - **Native responses**: Rust returns JSON strings (`{success, message, data}`)
   to avoid generated bindings and keep the ABI stable during iteration.
-
-## How it works (high level)
-
-1. Run `pb-mapper-server` on a public host (single public port).
-2. Run `pb-mapper-server-cli` next to each local service to register it with a unique service key.
-3. Run `pb-mapper-client-cli` on a remote machine to connect using a service key and expose a local port.
 
 ## Repository layout
 
