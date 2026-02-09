@@ -22,6 +22,9 @@ class LogManager {
     'WARN': 3,
     'ERROR': 4,
   };
+  static final RegExp _knownLevelPattern = RegExp(
+    r'TRACE|DEBUG|INFO|WARN|WARNING|ERROR',
+  );
 
   final List<LogMessage> _logMessages = [];
   final StreamController<List<LogMessage>> _logStreamController =
@@ -74,6 +77,13 @@ class LogManager {
     if (_levelPriority.containsKey(normalized)) {
       return normalized;
     }
+    final matched = _knownLevelPattern.firstMatch(normalized)?.group(0);
+    if (matched == 'WARNING') {
+      return 'WARN';
+    }
+    if (matched != null && _levelPriority.containsKey(matched)) {
+      return matched;
+    }
     return 'UNKNOWN';
   }
 
@@ -83,8 +93,11 @@ class LogManager {
   }) {
     final threshold = _levelPriority[normalizeLevel(thresholdLevel)];
     final entry = _levelPriority[normalizeLevel(entryLevel)];
-    if (threshold == null || entry == null) {
-      return normalizeLevel(entryLevel) == normalizeLevel(thresholdLevel);
+    if (threshold == null) {
+      return true;
+    }
+    if (entry == null) {
+      return false;
     }
     return entry >= threshold;
   }

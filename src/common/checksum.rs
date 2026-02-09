@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use rand::Rng;
+use rand::RngExt;
 
 use super::message::DataLenType;
 

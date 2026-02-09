@@ -1,12 +1,11 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
+use better_mimalloc_rs::MiMalloc;
 use clap::Parser;
-use mimalloc_rust::GlobalMiMalloc;
 use pb_mapper::common::config::{init_tracing, PB_MAPPER_KEEP_ALIVE};
 use pb_mapper::pb_server::run_server;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[global_allocator]
-static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
+static GLOBAL_MIMALLOC: MiMalloc = MiMalloc;
 
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
@@ -29,6 +28,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    MiMalloc::init();
     let cli = Cli::parse();
     init_tracing();
     if cli.keep_alive {

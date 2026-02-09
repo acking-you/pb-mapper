@@ -1,5 +1,5 @@
+use better_mimalloc_rs::MiMalloc;
 use clap::Parser;
-use mimalloc_rust::GlobalMiMalloc;
 use pb_mapper::common::config::{
     get_pb_mapper_server_async, get_sockaddr_async, init_tracing, LocalService,
     PB_MAPPER_KEEP_ALIVE,
@@ -9,7 +9,7 @@ use pb_mapper::snafu_error_get_or_return;
 use uni_stream::stream::{TcpListenerProvider, UdpListenerProvider};
 
 #[global_allocator]
-static GLOBAL_MIMALLOC: GlobalMiMalloc = GlobalMiMalloc;
+static GLOBAL_MIMALLOC: MiMalloc = MiMalloc;
 
 #[derive(Parser)]
 #[command(author = "L_B__", version, about, long_about = None)]
@@ -35,6 +35,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    MiMalloc::init();
     let cli = Cli::parse();
     init_tracing();
     if cli.keep_alive {

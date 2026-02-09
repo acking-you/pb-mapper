@@ -15,7 +15,8 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0"
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio = { version = "1", features = ["full"] }
+tokio.workspace = true
+better_mimalloc_rs.workspace = true
 tokio-util = "0.7"
 dirs = "5.0"
 

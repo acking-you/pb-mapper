@@ -11,6 +11,7 @@ mod service;
 mod state;
 
 // Re-export public FFI functions and handle type.
+use better_mimalloc_rs::MiMalloc;
 pub use client::{
     pb_mapper_connect_service, pb_mapper_delete_client_config, pb_mapper_disconnect_service,
     pb_mapper_get_client_configs_json, pb_mapper_get_client_status_json,
@@ -26,3 +27,6 @@ pub use service::{
     pb_mapper_delete_service_config, pb_mapper_get_service_configs_json,
     pb_mapper_get_service_status_json, pb_mapper_register_service, pb_mapper_unregister_service,
 };
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;

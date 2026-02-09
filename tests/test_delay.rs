@@ -9,7 +9,7 @@ use pb_mapper::common::message::{
 use pb_mapper::local::client::run_client_side_cli;
 use pb_mapper::local::server::run_server_side_cli;
 use pb_mapper::pb_server::run_server;
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::time::{timeout, Instant};
