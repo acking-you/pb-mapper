@@ -13,10 +13,16 @@ pb-mapper 是一个基于 Rust 的服务映射系统，通过**一个**公网端
 
 ## 快速开始（服务端一键部署）
 
-一条命令安装并注册 `pb-mapper-server` 的 systemd 服务（Linux x86_64，musl 构建）。默认端口 `7666`，默认密钥 `MSG_HEADER_KEY=abcdefghijklmnopqlsn123456789j01`。
+一条命令安装并注册 `pb-mapper-server` 的 systemd 服务（Linux x86_64，musl 构建）。默认端口 `7666`，默认启用 `--use-machine-msg-header-key`，并将 key 落盘到 `/var/lib/pb-mapper-server/msg_header_key`。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
+```
+
+安装后，可在 `pb-mapper-server-cli` / `pb-mapper-client-cli` 使用同一 key：
+
+```bash
+export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
 ```
 
 ## 文档

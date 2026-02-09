@@ -4,6 +4,8 @@ services:
     container_name: pb-mapper
     image: ackingliu/pb-mapper:x86_64_musl
     environment:
+      PB_MAPPER_PORT: 7666
+      USE_MACHINE_MSG_HEADER_KEY: true
       RUST_LOG: error
     ports:
       - "7666:7666"

@@ -13,6 +13,7 @@ docker run -d \
   --name pb-mapper \
   -p 7666:7666 \
   -e PB_MAPPER_PORT=7666 \
+  -e USE_MACHINE_MSG_HEADER_KEY=true \
   -e RUST_LOG=error \
   ackingliu/pb-mapper:latest-x86_64_musl
 ```
@@ -27,6 +28,7 @@ services:
     environment:
       - PB_MAPPER_PORT=7666
       - USE_IPV6=false
+      - USE_MACHINE_MSG_HEADER_KEY=true
       - RUST_LOG=error
     ports:
       - "7666:7666"
@@ -44,6 +46,7 @@ docker-compose up -d
 |----------|---------|-------------|
 | `PB_MAPPER_PORT` | `7666` | **Required** - Port for the pb-mapper server to listen on |
 | `USE_IPV6` | `false` | Enable IPv6 support (`true`/`false`) |
+| `USE_MACHINE_MSG_HEADER_KEY` | `true` | Derive `MSG_HEADER_KEY` from hostname + MAC and persist to `/var/lib/pb-mapper-server/msg_header_key` |
 | `RUST_LOG` | `error` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) |
 
 ⚠️ **Important**: `PB_MAPPER_PORT` must be set or the container will exit with an error.
@@ -82,6 +85,7 @@ services:
     environment:
       PB_MAPPER_PORT: 7666
       USE_IPV6: false
+      USE_MACHINE_MSG_HEADER_KEY: true
       RUST_LOG: error
     ports:
       - "7666:7666"

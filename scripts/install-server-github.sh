@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Configuration
-VERSION="0.1.5"
+VERSION="0.2.1"
 ARCH="x86_64-unknown-linux-musl"
 TARBALL="pb-mapper-server-v${VERSION}-${ARCH}.tar.gz"
 DOWNLOAD_URL="https://github.com/acking-you/pb-mapper/releases/download/v${VERSION}/${TARBALL}"
@@ -10,7 +10,6 @@ INSTALL_DIR="/opt/pb-mapper-server"
 SERVICE_NAME="pb-mapper-server"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 PORT="7666"
-DEFAULT_KEY="abcdefghijklmnopqlsn123456789j01"
 
 # Re-run with sudo if needed
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -88,9 +87,8 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/pb-mapper-server --pb-mapper-port ${PORT}
+ExecStart=${INSTALL_DIR}/pb-mapper-server --pb-mapper-port ${PORT} --use-machine-msg-header-key
 Environment=RUST_LOG=info
-Environment=MSG_HEADER_KEY=${DEFAULT_KEY}
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65535
@@ -105,3 +103,4 @@ systemctl enable --now "${SERVICE_NAME}.service"
 
 echo "pb-mapper-server is installed and running."
 echo "Service name: ${SERVICE_NAME}.service"
+echo "Machine-derived key file: /var/lib/pb-mapper-server/msg_header_key"

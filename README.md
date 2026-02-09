@@ -13,10 +13,16 @@ pb-mapper is a Rust-based service mapping system that exposes multiple local TCP
 
 ## Quick Start (server install)
 
-One command installs `pb-mapper-server` as a systemd service on Linux (x86_64, musl build). Defaults: port `7666`, `MSG_HEADER_KEY=abcdefghijklmnopqlsn123456789j01`.
+One command installs `pb-mapper-server` as a systemd service on Linux (x86_64, musl build). Defaults: port `7666`, enables `--use-machine-msg-header-key`, and persists key to `/var/lib/pb-mapper-server/msg_header_key`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
+```
+
+After install, load the same key for `pb-mapper-server-cli` / `pb-mapper-client-cli`:
+
+```bash
+export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
 ```
 
 ## Docs
