@@ -1,0 +1,69 @@
+name: Feature Request
+description: Suggest a new capability or improvement.
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Great ideas are welcome 🚀
+
+        Please explain the problem first, then propose the solution.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before You Start
+      options:
+        - label: I searched existing issues and did not find a duplicate request.
+          required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Core networking (server/client routing)
+        - CLI UX
+        - Security / encryption
+        - Flutter UI
+        - Build / release / deployment
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What user pain does this solve?
+      placeholder: |
+        As a ..., I want ..., so that ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Describe your ideal API/CLI behavior or workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What alternatives/workarounds did you evaluate?
+    validations:
+      required: false
+  - type: textarea
+    id: impact
+    attributes:
+      label: Expected Impact
+      description: Any compatibility, migration, security, or performance impact?
+    validations:
+      required: false
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Links, diagrams, related issues/PRs, or similar tools.
+    validations:
+      required: false

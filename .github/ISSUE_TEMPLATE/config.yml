@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: pb-mapper User Guide
+    url: https://github.com/acking-you/pb-mapper/blob/master/docs/user-guide.md
+    about: Check setup and usage instructions before opening an issue.
+  - name: pb-mapper Chinese User Guide
+    url: https://github.com/acking-you/pb-mapper/blob/master/docs/user-guide.zh-CN.md
+    about: 中文使用说明请见这里。

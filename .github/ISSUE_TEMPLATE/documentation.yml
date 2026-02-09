@@ -1,0 +1,48 @@
+name: Documentation Improvement
+description: Report unclear docs or propose documentation updates.
+title: "[Docs]: "
+labels: ["documentation", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Documentation feedback helps new users and contributors get productive faster 📚
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before You Start
+      options:
+        - label: I checked existing docs/issues and did not find the same request.
+          required: true
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options:
+        - English
+        - Chinese
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Doc Location
+      description: File path or URL
+      placeholder: README.md / docs/user-guide.zh-CN.md / ...
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What's Missing or Unclear?
+      description: Describe the current problem.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested Improvement
+      description: Share proposed wording, examples, screenshots, or structure changes.
+    validations:
+      required: true
