@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pb Mapper Release Pipeline"
+  short_description: "Release pb-mapper binaries and UI with changelog-aware workflow"
+  default_prompt: "Use this skill to run pb-mapper release flow: validate, update changelog, tag, push, trigger and monitor GitHub workflows."
