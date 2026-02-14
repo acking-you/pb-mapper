@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.4] - 2026-02-15
+- Fixed runtime `MSG_HEADER_KEY` propagation so UI-configured key changes take effect immediately without process restart.
+- Replaced one-time static header-key snapshot with mutable runtime key state used by checksum and default codec creation.
+- Wired UI FFI config application to the shared key setter to keep Linux/Windows behavior consistent.
+- Resolved cross-platform mismatch where Windows UI failed against keyed server while Linux appeared to ignore UI key changes.
+
 ## [0.2.3] - 2026-02-15
 - Fixed `clippy::needless_as_bytes` in `ui/native/pb_mapper_ffi/src/state.rs` to restore strict CI lint pass (`-D warnings`).
 - No runtime behavior change; release is a CI/lint hotfix on top of `0.2.2`.

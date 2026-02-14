@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use pb_mapper::common::checksum::ENV_MSG_HEADER_KEY;
+use pb_mapper::common::checksum::set_process_msg_header_key;
 use pb_mapper::common::config::{
     get_pb_mapper_server_async, get_sockaddr_async, PB_MAPPER_KEEP_ALIVE,
 };
@@ -434,7 +434,9 @@ impl PbMapperState {
             service_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
             client_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
         };
-        state.apply_msg_header_key_env();
+        if let Err(e) = state.apply_msg_header_key_env() {
+            tracing::error!("Failed to apply MSG_HEADER_KEY during init: {}", e);
+        }
         state
     }
 
@@ -449,16 +451,16 @@ impl PbMapperState {
                 tracing::warn!("Failed to reload config after setting app dir: {}", e);
             }
         }
-        self.apply_msg_header_key_env();
+        self.apply_msg_header_key_env()?;
 
         Ok(())
     }
 
-    fn apply_msg_header_key_env(&self) {
+    fn apply_msg_header_key_env(&self) -> Result<(), String> {
         if self.config.msg_header_key.is_empty() {
-            std::env::remove_var(ENV_MSG_HEADER_KEY);
+            set_process_msg_header_key(None)
         } else {
-            std::env::set_var(ENV_MSG_HEADER_KEY, &self.config.msg_header_key);
+            set_process_msg_header_key(Some(&self.config.msg_header_key))
         }
     }
 
@@ -1074,7 +1076,7 @@ impl PbMapperState {
         self.config.server_address = server_address;
         self.config.keep_alive_enabled = keep_alive;
         self.config.msg_header_key = msg_header_key;
-        self.apply_msg_header_key_env();
+        self.apply_msg_header_key_env()?;
         self.save_config()?;
         self.reset_status_caches().await;
         Ok(())

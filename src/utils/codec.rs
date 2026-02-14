@@ -5,7 +5,7 @@ use ring::aead::{
     NONCE_LEN,
 };
 
-use crate::common::checksum::MSG_HEADER_KEY;
+use crate::common::checksum::get_msg_header_key;
 
 #[derive(Clone, Copy, Default)]
 struct Counter(u32);
@@ -56,7 +56,8 @@ impl Aes256GcmCodec {
     }
 
     pub fn try_new_with_default_key() -> RingResult<Self> {
-        Aes256GcmCodec::try_new(MSG_HEADER_KEY.0.as_ref())
+        let key = get_msg_header_key();
+        Aes256GcmCodec::try_new(key.as_ref())
     }
 
     pub fn encrypt(&mut self, data: &mut [u8]) -> RingResult<Tag> {

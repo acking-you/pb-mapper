@@ -6,7 +6,7 @@ use snafu::{ensure, ResultExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
-use super::checksum::{get_checksum, valid_checksum, MSG_HEADER_KEY};
+use super::checksum::{get_checksum, get_msg_header_key, valid_checksum};
 use super::error::{
     self, MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,
     MsgNetworkReadDatalenSnafu, MsgNetworkWriteBodySnafu, MsgNetworkWriteCheckSumSnafu,
@@ -281,7 +281,8 @@ pub fn get_header_msg_writer<T: AsyncWriteExt + Unpin>(
 
 #[inline]
 pub fn get_default_encodec() -> Result<Aes256GcmEnCodec> {
-    Aes256GcmEnCodec::try_new(&MSG_HEADER_KEY.0).map_err(|e| error::Error::MsgCodec {
+    let key = get_msg_header_key();
+    Aes256GcmEnCodec::try_new(&key).map_err(|e| error::Error::MsgCodec {
         action: "create default encodec",
         detail: format!("{e}"),
     })
@@ -289,7 +290,8 @@ pub fn get_default_encodec() -> Result<Aes256GcmEnCodec> {
 
 #[inline]
 pub fn get_default_decodec() -> Result<Aes256GcmDeCodec> {
-    Aes256GcmDeCodec::try_new(&MSG_HEADER_KEY.0).map_err(|e| error::Error::MsgCodec {
+    let key = get_msg_header_key();
+    Aes256GcmDeCodec::try_new(&key).map_err(|e| error::Error::MsgCodec {
         action: "create default decodec",
         detail: format!("{e}"),
     })
