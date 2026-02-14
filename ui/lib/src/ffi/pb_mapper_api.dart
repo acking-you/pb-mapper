@@ -15,10 +15,12 @@ class OperationResult {
 class ConfigStatus {
   final String serverAddress;
   final bool keepAliveEnabled;
+  final String msgHeaderKey;
 
   const ConfigStatus({
     required this.serverAddress,
     required this.keepAliveEnabled,
+    required this.msgHeaderKey,
   });
 
   factory ConfigStatus.fromMap(Map<String, dynamic> map) {
@@ -28,6 +30,7 @@ class ConfigStatus {
         fallback: 'localhost:7666',
       ),
       keepAliveEnabled: _asBool(map['keepAliveEnabled'], fallback: true),
+      msgHeaderKey: _asString(map['msgHeaderKey']),
     );
   }
 }
@@ -214,16 +217,19 @@ class PbMapperApi {
     return const ConfigStatus(
       serverAddress: 'localhost:7666',
       keepAliveEnabled: true,
+      msgHeaderKey: '',
     );
   }
 
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,
+    required String msgHeaderKey,
   }) async {
     final result = await _service.updateConfig(
       serverAddress: serverAddress,
       keepAlive: keepAlive,
+      msgHeaderKey: msgHeaderKey,
     );
     return _resultFrom(result);
   }

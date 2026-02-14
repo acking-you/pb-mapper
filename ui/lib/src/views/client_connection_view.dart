@@ -202,8 +202,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Please configure a reachable server in the Config page '
-                    'before connecting clients.',
+                    'Please configure a reachable server and matching '
+                    'MSG_HEADER_KEY in the Config page before connecting clients.',
                     style: TextStyle(color: Colors.grey.shade700),
                   ),
                 ],
@@ -235,7 +235,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                 const Icon(Icons.looks_one, color: Colors.blueGrey),
                 const SizedBox(width: 8),
                 Text(
-                  'Step 1: Configure PB_MAPPER_SERVER',
+                  'Step 1: Configure Server / MSG_HEADER_KEY',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.bold,
                   ),

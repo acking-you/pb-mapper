@@ -21,6 +21,43 @@ jobs:
           submodules: true          
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0            
+      - name: Generate UI release notes from changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="${VERSION}" '
+            $0 ~ "^## \\[" ver "\\]" {capture=1}
+            capture {
+              if ($0 ~ "^## \\[" && $0 !~ "^## \\[" ver "\\]") exit
+              print
+            }
+          ' CHANGELOG.md > changelog_section.md
+
+          {
+            echo "# pb-mapper UI Release ${GITHUB_REF_NAME}"
+            echo
+            echo "Cross-platform graphical interface for pb-mapper network tunneling tool."
+            echo
+            echo "## Downloads"
+            echo "- **Windows**: Download the .exe installer or .zip portable version"
+            echo "- **Linux**: AppImage, DEB, or other Linux packages"
+            echo "- **macOS**: DMG installer"
+            echo "- **Android**: APK files"
+            echo "- **iOS**: Unsigned IPA (for development)"
+            echo
+            echo "## Latest Changelog"
+            echo
+            if [ -s changelog_section.md ]; then
+              cat changelog_section.md
+            else
+              echo "_No changelog section found for version ${VERSION} in CHANGELOG.md._"
+            fi
+          } > ui_release_notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-release-notes
+          path: ui_release_notes.md
 
   build-windows:
     runs-on: windows-latest
@@ -31,6 +68,9 @@ jobs:
           submodules: true          
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0            
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-release-notes
       - name: Install make
         run: choco install make
       - uses: subosito/flutter-action@v2
@@ -41,9 +81,23 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
-      - name: Build Windows app with fastforge
+      - name: Build latest Windows FFI
         run: |
-          make release-ui-windows
+          make build-pb-mapper-ffi-windows
+      - name: Build Windows app with latest FFI
+        run: |
+          make release-ui-windows-no-ffi
+      - name: Verify Windows bundle uses latest FFI
+        run: |
+          $src = "ui/native/windows/x64/pb_mapper_ffi.dll"
+          $dst = "ui/build/windows/x64/runner/Release/pb_mapper_ffi.dll"
+          if (!(Test-Path $src)) { throw "FFI source dll not found: $src" }
+          if (!(Test-Path $dst)) { throw "FFI dll not found in built UI bundle: $dst" }
+          $srcHash = (Get-FileHash -Algorithm SHA256 $src).Hash
+          $dstHash = (Get-FileHash -Algorithm SHA256 $dst).Hash
+          if ($srcHash -ne $dstHash) {
+            throw "FFI hash mismatch. source=$srcHash bundle=$dstHash"
+          }
       - name: Upload Windows artifacts
         uses: softprops/action-gh-release@v1
         with:
@@ -51,17 +105,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: "pb-mapper UI ${{ github.ref_name }}"
           draft: ${{ github.event_name == 'workflow_dispatch' }}
-          body: |
-            # pb-mapper UI Release ${{ github.ref_name }}
-            
-            Cross-platform graphical interface for pb-mapper network tunneling tool.
-            
-            ## Downloads
-            - **Windows**: Download the .exe installer or .zip portable version
-            - **Linux**: AppImage, DEB, or other Linux packages  
-            - **macOS**: DMG installer
-            - **Android**: APK files
-            - **iOS**: Unsigned IPA (for development)
+          body_path: ui_release_notes.md
           files: ui/dist/*/*
 
   build-linux:
@@ -73,6 +117,9 @@ jobs:
           submodules: true          
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0            
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-release-notes
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -87,9 +134,26 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y locate ninja-build libgtk-3-dev libayatana-appindicator3-dev libnotify-dev \
           binutils coreutils desktop-file-utils fakeroot fuse libgdk-pixbuf2.0-dev patchelf python3-pip python3-setuptools squashfs-tools strace util-linux zsync
-      - name: Build Linux app
+      - name: Build latest Linux FFI
         run: |
-          make build-ui-linux-release
+          make build-pb-mapper-ffi-linux
+      - name: Build Linux app with latest FFI
+        run: |
+          make build-ui-linux-release-no-ffi
+      - name: Verify Linux bundle uses latest FFI
+        run: |
+          SRC_FFI="ui/native/linux/x64/libpb_mapper_ffi.so"
+          DST_FFI="ui/build/linux/x64/release/bundle/lib/libpb_mapper_ffi.so"
+          test -f "${SRC_FFI}"
+          test -f "${DST_FFI}"
+          SRC_HASH="$(sha256sum "${SRC_FFI}" | awk '{print $1}')"
+          DST_HASH="$(sha256sum "${DST_FFI}" | awk '{print $1}')"
+          if [ "${SRC_HASH}" != "${DST_HASH}" ]; then
+            echo "FFI hash mismatch: src=${SRC_HASH} dst=${DST_HASH}"
+            exit 1
+          fi
+      - name: Package Linux artifacts
+        run: |
           cd ui
 
           # Create directory structure for packaging
@@ -146,6 +210,7 @@ jobs:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
+          body_path: ui_release_notes.md
           files: ui/dist/${{ env.UI_VERSION }}/*
 
   build-android:
@@ -157,6 +222,9 @@ jobs:
           submodules: true          
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0            
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-release-notes
       - uses: actions/setup-java@v3
         with:
           distribution: "liberica"
@@ -165,14 +233,43 @@ jobs:
         with:
           flutter-version: 3.35.1
           channel: "stable"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
       - name: Set up Android NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
           link-to-sdk: true
-      - name: Build Android APKs
+      - name: Build latest Android FFI
         run: |
-          make build-ui-android-release
+          make build-pb-mapper-ffi-android
+      - name: Build Android APKs with latest FFI
+        run: |
+          make build-ui-android-release-no-ffi
+      - name: Verify Android APKs use latest FFI
+        run: |
+          set -euo pipefail
+          declare -A APK_BY_ABI=(
+            ["arm64-v8a"]="app-arm64-v8a-release.apk"
+            ["armeabi-v7a"]="app-armeabi-v7a-release.apk"
+            ["x86_64"]="app-x86_64-release.apk"
+          )
+          for abi in "${!APK_BY_ABI[@]}"; do
+            src="ui/native/android/${abi}/libpb_mapper_ffi.so"
+            apk="ui/build/app/outputs/flutter-apk/${APK_BY_ABI[$abi]}"
+            test -f "${src}"
+            test -f "${apk}"
+            src_hash="$(sha256sum "${src}" | awk '{print $1}')"
+            apk_hash="$(unzip -p "${apk}" "lib/${abi}/libpb_mapper_ffi.so" | sha256sum | awk '{print $1}')"
+            if [ "${src_hash}" != "${apk_hash}" ]; then
+              echo "FFI hash mismatch for ${abi}: src=${src_hash} apk=${apk_hash}"
+              exit 1
+            fi
+          done
+      - name: Rename Android APKs
+        run: |
           cd ui/build/app/outputs/flutter-apk
           mv app-arm64-v8a-release.apk pb-mapper-arm64-v8a.apk
           mv app-armeabi-v7a-release.apk pb-mapper-armeabi-v7a.apk
@@ -183,6 +280,7 @@ jobs:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
+          body_path: ui_release_notes.md
           files: |
             ui/build/app/outputs/flutter-apk/pb-mapper-arm64-v8a.apk
             ui/build/app/outputs/flutter-apk/pb-mapper-armeabi-v7a.apk
@@ -197,6 +295,9 @@ jobs:
           submodules: true          
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0            
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-release-notes
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -204,12 +305,34 @@ jobs:
         with:
           flutter-version: 3.35.1
           channel: "stable"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
       - name: Install appdmg
         run: |
           npm install -g appdmg
-      - name: Build macOS app
+      - name: Build latest macOS FFI
         run: |
-          make build-ui-macos-release
+          make build-pb-mapper-ffi-macos
+      - name: Build macOS app with latest FFI
+        run: |
+          make build-ui-macos-release-no-ffi
+      - name: Verify macOS app bundle uses latest FFI
+        run: |
+          SRC_FFI="ui/native/macos/libpb_mapper_ffi.dylib"
+          DST_FFI="$(find ui/build/macos/Build/Products/Release -type f -name libpb_mapper_ffi.dylib | head -n1)"
+          test -f "${SRC_FFI}"
+          test -n "${DST_FFI}"
+          test -f "${DST_FFI}"
+          SRC_HASH="$(shasum -a 256 "${SRC_FFI}" | awk '{print $1}')"
+          DST_HASH="$(shasum -a 256 "${DST_FFI}" | awk '{print $1}')"
+          if [ "${SRC_HASH}" != "${DST_HASH}" ]; then
+            echo "FFI hash mismatch: src=${SRC_HASH} dst=${DST_HASH}"
+            exit 1
+          fi
+      - name: Package macOS artifacts
+        run: |
           cd ui
           PROJECT_DIR=$(pwd)
           cd build/macos/Build/Products/Release
@@ -232,6 +355,7 @@ jobs:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
+          body_path: ui_release_notes.md
           files: |
             ${{env.DMG_ASSET}}
 
@@ -244,13 +368,23 @@ jobs:
           submodules: true          
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0            
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-release-notes
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.35.1
           channel: "stable"
-      - name: Build iOS app (no-codesign)
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - name: Build latest iOS FFI
         run: |
-          make build-ui-ios-release
+          make build-pb-mapper-ffi-ios
+      - name: Build iOS app with latest FFI (no-codesign)
+        run: |
+          make build-ui-ios-release-no-ffi
           cd ui
           cd build/ios/iphoneos
           mkdir Payload
@@ -262,5 +396,6 @@ jobs:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
+          body_path: ui_release_notes.md
           files: |
             ui/build/ios/iphoneos/pb-mapper-ios-unsigned.ipa

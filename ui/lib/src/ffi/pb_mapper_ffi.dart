@@ -96,12 +96,14 @@ typedef _PbMapperUpdateConfigNative =
       Pointer<Void> handle,
       Pointer<Utf8> serverAddress,
       Int32 enableKeepAlive,
+      Pointer<Utf8> msgHeaderKey,
     );
 typedef _PbMapperUpdateConfigDart =
     Pointer<Utf8> Function(
       Pointer<Void> handle,
       Pointer<Utf8> serverAddress,
       int enableKeepAlive,
+      Pointer<Utf8> msgHeaderKey,
     );
 
 typedef _PbMapperGetServiceConfigsNative =

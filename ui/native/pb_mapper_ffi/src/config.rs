@@ -25,7 +25,8 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
 
     ok_data(json!({
         "serverAddress": config.server_address,
-        "keepAliveEnabled": config.keep_alive_enabled
+        "keepAliveEnabled": config.keep_alive_enabled,
+        "msgHeaderKey": config.msg_header_key
     }))
 }
 
@@ -35,6 +36,7 @@ pub unsafe extern "C" fn pb_mapper_update_config(
     handle: *mut PbMapperHandle,
     server_address: *const c_char,
     enable_keep_alive: c_int,
+    msg_header_key: *const c_char,
 ) -> *mut c_char {
     if handle.is_null() {
         return err_message("handle is null");
@@ -44,13 +46,17 @@ pub unsafe extern "C" fn pb_mapper_update_config(
         Ok(v) => v,
         Err(e) => return err_message(&e),
     };
+    let msg_header_key = match parse_c_string(msg_header_key, "msg_header_key") {
+        Ok(v) => v,
+        Err(e) => return err_message(&e),
+    };
 
     let handle = unsafe { &mut *handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
         state
-            .update_config(server_address, enable_keep_alive != 0)
+            .update_config(server_address, enable_keep_alive != 0, msg_header_key)
             .await
     });
 

@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use pb_mapper::common::checksum::ENV_MSG_HEADER_KEY;
 use pb_mapper::common::config::{
     get_pb_mapper_server_async, get_sockaddr_async, PB_MAPPER_KEEP_ALIVE,
 };
@@ -147,6 +148,17 @@ fn cache_is_stale(last_update: Option<Instant>, ttl: Duration) -> bool {
     }
 }
 
+fn normalize_msg_header_key(msg_header_key: String) -> Result<String, String> {
+    let normalized = msg_header_key.trim().to_string();
+    if normalized.is_empty() {
+        return Ok(normalized);
+    }
+    if normalized.as_bytes().len() != 32 {
+        return Err("MSG_HEADER_KEY must be exactly 32 bytes (256-bit) when provided".to_string());
+    }
+    Ok(normalized)
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ServiceConfigData {
     pub service_key: String,
@@ -177,9 +189,11 @@ pub struct ClientConfigStore {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct AppConfig {
     pub server_address: String,
     pub keep_alive_enabled: bool,
+    pub msg_header_key: String,
 }
 
 impl Default for AppConfig {
@@ -187,6 +201,7 @@ impl Default for AppConfig {
         Self {
             server_address: "localhost:7666".to_string(),
             keep_alive_enabled: true,
+            msg_header_key: String::new(),
         }
     }
 }
@@ -390,12 +405,13 @@ impl PbMapperState {
         });
 
         tracing::info!(
-            "Loaded configuration: server_address={}, keep_alive={}",
+            "Loaded configuration: server_address={}, keep_alive={}, msg_header_key_set={}",
             config.server_address,
-            config.keep_alive_enabled
+            config.keep_alive_enabled,
+            !config.msg_header_key.is_empty()
         );
 
-        Self {
+        let state = Self {
             server_handle: None,
             server_shutdown_token: None,
             server_status_sender: None,
@@ -417,7 +433,9 @@ impl PbMapperState {
             client_status_cache: Arc::new(RwLock::new(HashMap::new())),
             service_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
             client_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
-        }
+        };
+        state.apply_msg_header_key_env();
+        state
     }
 
     pub fn set_app_directory_path(&mut self, path: Option<String>) -> Result<(), String> {
@@ -431,8 +449,17 @@ impl PbMapperState {
                 tracing::warn!("Failed to reload config after setting app dir: {}", e);
             }
         }
+        self.apply_msg_header_key_env();
 
         Ok(())
+    }
+
+    fn apply_msg_header_key_env(&self) {
+        if self.config.msg_header_key.is_empty() {
+            std::env::remove_var(ENV_MSG_HEADER_KEY);
+        } else {
+            std::env::set_var(ENV_MSG_HEADER_KEY, &self.config.msg_header_key);
+        }
     }
 
     #[allow(unused_variables)]
@@ -486,7 +513,9 @@ impl PbMapperState {
         let config_path = self.get_config_file_path();
         if config_path.exists() {
             let contents = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-            let config: AppConfig = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+            let mut config: AppConfig =
+                serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+            config.msg_header_key = normalize_msg_header_key(config.msg_header_key)?;
             Ok(config)
         } else {
             Ok(AppConfig::default())
@@ -1039,9 +1068,13 @@ impl PbMapperState {
         &mut self,
         server_address: String,
         keep_alive: bool,
+        msg_header_key: String,
     ) -> Result<(), String> {
+        let msg_header_key = normalize_msg_header_key(msg_header_key)?;
         self.config.server_address = server_address;
         self.config.keep_alive_enabled = keep_alive;
+        self.config.msg_header_key = msg_header_key;
+        self.apply_msg_header_key_env();
         self.save_config()?;
         self.reset_status_caches().await;
         Ok(())

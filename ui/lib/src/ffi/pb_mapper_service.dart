@@ -184,10 +184,12 @@ class PbMapperService {
   Future<Map<String, dynamic>> updateConfig({
     required String serverAddress,
     required bool keepAlive,
+    required String msgHeaderKey,
   }) {
     return _runJsonOnWorker('updateConfig', {
       'serverAddress': serverAddress,
       'keepAlive': keepAlive,
+      'msgHeaderKey': msgHeaderKey,
     });
   }
 
@@ -316,10 +318,12 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
         break;
       case 'updateConfig':
         arg1 = (params['serverAddress'] as String).toNativeUtf8();
+        arg2 = (params['msgHeaderKey'] as String).toNativeUtf8();
         result = ffi.pbMapperUpdateConfig(
           handle,
           arg1,
           (params['keepAlive'] as bool) ? 1 : 0,
+          arg2,
         );
         break;
       case 'getServiceConfigs':

@@ -166,8 +166,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Please configure a reachable server in the Config page '
-                    'before registering services.',
+                    'Please configure a reachable server and matching '
+                    'MSG_HEADER_KEY in the Config page before registering services.',
                     style: TextStyle(color: Colors.grey.shade700),
                   ),
                 ],
@@ -199,7 +199,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                 const Icon(Icons.looks_one, color: Colors.blueGrey),
                 const SizedBox(width: 8),
                 Text(
-                  'Step 1: Configure PB_MAPPER_SERVER',
+                  'Step 1: Configure Server / MSG_HEADER_KEY',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.bold,
                   ),

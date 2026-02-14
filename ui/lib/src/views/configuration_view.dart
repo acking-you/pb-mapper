@@ -16,6 +16,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   final _serverAddressController = TextEditingController(
     text: 'localhost:7666',
   );
+  final _msgHeaderKeyController = TextEditingController();
   bool _isKeepAliveEnabled = true;
   bool _isSaving = false;
   bool _isCheckingServer = false;
@@ -32,6 +33,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   @override
   void dispose() {
     _serverAddressController.dispose();
+    _msgHeaderKeyController.dispose();
     super.dispose();
   }
 
@@ -43,18 +45,30 @@ class _ConfigurationViewState extends State<ConfigurationView> {
         _currentConfig = config;
         _serverAddressController.text = config.serverAddress;
         _isKeepAliveEnabled = config.keepAliveEnabled;
+        _msgHeaderKeyController.text = config.msgHeaderKey;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _currentConfig = null;
         _serverAddressController.text = 'localhost:7666';
+        _msgHeaderKeyController.clear();
       });
     }
   }
 
   Future<void> _saveConfiguration() async {
     if (_isSaving) return; // Prevent multiple simultaneous saves
+    final msgHeaderKey = _msgHeaderKeyController.text.trim();
+    if (msgHeaderKey.isNotEmpty && msgHeaderKey.length != 32) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('MSG_HEADER_KEY must be exactly 32 characters'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
 
     setState(() {
       _isSaving = true;
@@ -64,6 +78,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       final result = await _api.updateConfig(
         serverAddress: _serverAddressController.text,
         keepAlive: _isKeepAliveEnabled,
+        msgHeaderKey: msgHeaderKey,
       );
 
       if (!mounted) return;
@@ -161,6 +176,17 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         border: OutlineInputBorder(),
                         helperText:
                             'Address of the pb-mapper server to connect to',
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _msgHeaderKeyController,
+                      decoration: const InputDecoration(
+                        labelText: 'MSG_HEADER_KEY',
+                        hintText: '32-byte key, leave empty for default',
+                        border: OutlineInputBorder(),
+                        helperText:
+                            'Used for message checksum/encryption handshake. Must be 32 chars when set.',
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -272,6 +298,9 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                               ),
                               Text(
                                 'Keep-Alive Enabled: ${_currentConfig!.keepAliveEnabled ? 'Yes' : 'No'}',
+                              ),
+                              Text(
+                                'MSG_HEADER_KEY Configured: ${_currentConfig!.msgHeaderKey.isNotEmpty ? 'Yes' : 'No'}',
                               ),
                             ],
                           )
