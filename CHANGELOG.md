@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.5] - 2026-02-15
+- Fixed Android UI release workflow false failures when APK-packaged `libpb_mapper_ffi.so` differs at raw byte level from staged FFI output.
+- Kept strict FFI provenance checks by adding ELF Build ID and debug-stripped hash fallback verification before upload.
+- Rerolled `0.2.4` runtime `MSG_HEADER_KEY` synchronization fixes as a new patch release after CI pipeline stabilization.
+
 ## [0.2.4] - 2026-02-15
 - Fixed runtime `MSG_HEADER_KEY` propagation so UI-configured key changes take effect immediately without process restart.
 - Replaced one-time static header-key snapshot with mutable runtime key state used by checksum and default codec creation.

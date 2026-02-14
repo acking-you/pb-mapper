@@ -251,6 +251,8 @@ jobs:
       - name: Verify Android APKs use latest FFI
         run: |
           set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "${tmp_dir}"' EXIT
           declare -A APK_BY_ABI=(
             ["arm64-v8a"]="app-arm64-v8a-release.apk"
             ["armeabi-v7a"]="app-armeabi-v7a-release.apk"
@@ -259,14 +261,48 @@ jobs:
           for abi in "${!APK_BY_ABI[@]}"; do
             src="ui/native/android/${abi}/libpb_mapper_ffi.so"
             apk="ui/build/app/outputs/flutter-apk/${APK_BY_ABI[$abi]}"
+            extracted="${tmp_dir}/${abi}.apk.so"
             test -f "${src}"
             test -f "${apk}"
+            unzip -p "${apk}" "lib/${abi}/libpb_mapper_ffi.so" > "${extracted}"
+            test -s "${extracted}"
             src_hash="$(sha256sum "${src}" | awk '{print $1}')"
-            apk_hash="$(unzip -p "${apk}" "lib/${abi}/libpb_mapper_ffi.so" | sha256sum | awk '{print $1}')"
-            if [ "${src_hash}" != "${apk_hash}" ]; then
-              echo "FFI hash mismatch for ${abi}: src=${src_hash} apk=${apk_hash}"
-              exit 1
+            apk_hash="$(sha256sum "${extracted}" | awk '{print $1}')"
+            if [ "${src_hash}" = "${apk_hash}" ]; then
+              continue
             fi
+
+            src_build_id=""
+            apk_build_id=""
+            if command -v readelf >/dev/null 2>&1; then
+              src_build_id="$(readelf -n "${src}" 2>/dev/null | awk '/Build ID:/ {print $3; exit}')"
+              apk_build_id="$(readelf -n "${extracted}" 2>/dev/null | awk '/Build ID:/ {print $3; exit}')"
+            fi
+            if [ -n "${src_build_id}" ] && [ "${src_build_id}" = "${apk_build_id}" ]; then
+              echo "FFI raw hash mismatch for ${abi}, but ELF Build ID matches (${src_build_id}); accepting packaged artifact."
+              continue
+            fi
+
+            src_norm="${tmp_dir}/${abi}.src.norm.so"
+            apk_norm="${tmp_dir}/${abi}.apk.norm.so"
+            cp "${src}" "${src_norm}"
+            cp "${extracted}" "${apk_norm}"
+            if command -v llvm-strip >/dev/null 2>&1; then
+              llvm-strip --strip-debug "${src_norm}" || true
+              llvm-strip --strip-debug "${apk_norm}" || true
+            elif command -v objcopy >/dev/null 2>&1; then
+              objcopy --strip-debug "${src_norm}" || true
+              objcopy --strip-debug "${apk_norm}" || true
+            fi
+            src_norm_hash="$(sha256sum "${src_norm}" | awk '{print $1}')"
+            apk_norm_hash="$(sha256sum "${apk_norm}" | awk '{print $1}')"
+            if [ "${src_norm_hash}" = "${apk_norm_hash}" ]; then
+              echo "FFI raw hash mismatch for ${abi}, but debug-stripped hashes match; accepting packaged artifact."
+              continue
+            fi
+
+            echo "FFI mismatch for ${abi}: src_hash=${src_hash} apk_hash=${apk_hash} src_build_id=${src_build_id:-none} apk_build_id=${apk_build_id:-none} src_norm_hash=${src_norm_hash} apk_norm_hash=${apk_norm_hash}"
+            exit 1
           done
       - name: Rename Android APKs
         run: |
