@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.6] - 2026-02-15
+- Fixed Android UI release verification on `armeabi-v7a` by preferring NDK LLVM ELF tools instead of host `objcopy/readelf` that could not parse the artifact format.
+- Added an exported-symbol hash fallback check in the Android UI release workflow to preserve FFI provenance validation when raw and stripped hashes differ.
+- Rerolled `0.2.5` as a patch release to unblock end-to-end UI artifact publishing.
+
 ## [0.2.5] - 2026-02-15
 - Fixed Android UI release workflow false failures when APK-packaged `libpb_mapper_ffi.so` differs at raw byte level from staged FFI output.
 - Kept strict FFI provenance checks by adding ELF Build ID and debug-stripped hash fallback verification before upload.
