@@ -153,7 +153,7 @@ fn normalize_msg_header_key(msg_header_key: String) -> Result<String, String> {
     if normalized.is_empty() {
         return Ok(normalized);
     }
-    if normalized.as_bytes().len() != 32 {
+    if normalized.len() != 32 {
         return Err("MSG_HEADER_KEY must be exactly 32 bytes (256-bit) when provided".to_string());
     }
     Ok(normalized)

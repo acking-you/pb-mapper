@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3] - 2026-02-15
+- Fixed `clippy::needless_as_bytes` in `ui/native/pb_mapper_ffi/src/state.rs` to restore strict CI lint pass (`-D warnings`).
+- No runtime behavior change; release is a CI/lint hotfix on top of `0.2.2`.
+
 ## [0.2.2] - 2026-02-15
 - Added full Flutter UI + FFI support for `MSG_HEADER_KEY` configuration, including config persistence, validation, and runtime propagation.
 - Made `MSG_HEADER_KEY` optional in UI config: empty value now falls back to the default header key behavior.
