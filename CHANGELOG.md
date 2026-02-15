@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.7] - 2026-02-15
+- Added one-click configuration export in UI Config page with JSON payload encoded as Base64.
+- Added one-click configuration import in UI Config page from Base64-encoded JSON, including validation and immediate apply/save flow.
+- Included clipboard-friendly export dialog and import dialog to simplify cross-device/shareable configuration transfer.
+
 ## [0.2.6] - 2026-02-15
 - Fixed Android UI release verification on `armeabi-v7a` by preferring NDK LLVM ELF tools instead of host `objcopy/readelf` that could not parse the artifact format.
 - Added an exported-symbol hash fallback check in the Android UI release workflow to preserve FFI provenance validation when raw and stripped hashes differ.

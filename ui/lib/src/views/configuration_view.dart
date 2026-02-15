@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 
@@ -149,6 +152,185 @@ class _ConfigurationViewState extends State<ConfigurationView> {
     }
   }
 
+  Map<String, dynamic> _buildConfigExportPayload() {
+    return <String, dynamic>{
+      'version': 1,
+      'serverAddress': _serverAddressController.text.trim(),
+      'keepAliveEnabled': _isKeepAliveEnabled,
+      'msgHeaderKey': _msgHeaderKeyController.text.trim(),
+      'exportedAt': DateTime.now().toIso8601String(),
+    };
+  }
+
+  Future<void> _exportConfiguration() async {
+    final payload = _buildConfigExportPayload();
+    final encoded = base64Encode(utf8.encode(jsonEncode(payload)));
+    if (!mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Export Configuration'),
+          content: SizedBox(
+            width: 560,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Copy the Base64 string below. It contains JSON configuration data.',
+                ),
+                const SizedBox(height: 12),
+                SelectableText(encoded),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+              },
+              child: const Text('Close'),
+            ),
+            FilledButton.icon(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: encoded));
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Configuration export copied to clipboard'),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              },
+              icon: const Icon(Icons.copy),
+              label: const Text('Copy'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<String?> _showImportDialog() async {
+    final controller = TextEditingController();
+    final imported = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Import Configuration'),
+          content: SizedBox(
+            width: 560,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Paste Base64-encoded JSON configuration here.'),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: controller,
+                  maxLines: 6,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    hintText: 'Base64 string',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+              },
+              child: const Text('Cancel'),
+            ),
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.of(dialogContext).pop(controller.text.trim());
+              },
+              icon: const Icon(Icons.download),
+              label: const Text('Import'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    return imported;
+  }
+
+  bool _parseKeepAliveFlag(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      if (normalized == 'true' || normalized == '1') return true;
+      if (normalized == 'false' || normalized == '0') return false;
+    }
+    throw const FormatException('Invalid keepAliveEnabled value');
+  }
+
+  Map<String, dynamic> _decodeImportedPayload(String rawBase64) {
+    final normalized = rawBase64.replaceAll(RegExp(r'\s+'), '');
+    if (normalized.isEmpty) {
+      throw const FormatException('Import content is empty');
+    }
+
+    List<int> bytes;
+    try {
+      bytes = base64Decode(normalized);
+    } catch (_) {
+      bytes = base64Url.decode(base64Url.normalize(normalized));
+    }
+
+    final decodedJson = jsonDecode(utf8.decode(bytes));
+    if (decodedJson is! Map) {
+      throw const FormatException('Import payload must be a JSON object');
+    }
+    return Map<String, dynamic>.from(decodedJson);
+  }
+
+  Future<void> _importConfiguration() async {
+    if (_isSaving) return;
+    final importedRaw = await _showImportDialog();
+    if (importedRaw == null) return;
+
+    try {
+      final payload = _decodeImportedPayload(importedRaw);
+
+      final serverAddress = (payload['serverAddress'] ?? '').toString().trim();
+      final msgHeaderKey = (payload['msgHeaderKey'] ?? '').toString().trim();
+      final keepAliveEnabled = _parseKeepAliveFlag(payload['keepAliveEnabled']);
+
+      if (serverAddress.isEmpty) {
+        throw const FormatException('serverAddress is required');
+      }
+      if (msgHeaderKey.isNotEmpty && msgHeaderKey.length != 32) {
+        throw const FormatException(
+          'MSG_HEADER_KEY must be exactly 32 characters',
+        );
+      }
+
+      setState(() {
+        _serverAddressController.text = serverAddress;
+        _msgHeaderKeyController.text = msgHeaderKey;
+        _isKeepAliveEnabled = keepAliveEnabled;
+      });
+
+      await _saveConfiguration();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Import failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -233,6 +415,32 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         style: TextStyle(fontSize: 16),
                       ),
               ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 44,
+                    child: OutlinedButton.icon(
+                      onPressed: _isSaving ? null : _exportConfiguration,
+                      icon: const Icon(Icons.upload_file),
+                      label: const Text('Export (Base64)'),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: SizedBox(
+                    height: 44,
+                    child: OutlinedButton.icon(
+                      onPressed: _isSaving ? null : _importConfiguration,
+                      icon: const Icon(Icons.download_for_offline),
+                      label: const Text('Import (Base64)'),
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             SizedBox(
