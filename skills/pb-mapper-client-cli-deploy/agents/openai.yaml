@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pb Mapper Client CLI Deploy"
+  short_description: "Deploy pb-mapper client-cli as a Linux systemd tunnel service"
+  default_prompt: "Use this skill to deploy or upgrade pb-mapper-client-cli on a remote Linux host via SSH, manage it with systemd, and verify API tunnel health."
