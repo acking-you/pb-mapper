@@ -1,0 +1,253 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d0d1f"/>
+      <stop offset="40%" style="stop-color:#12102a"/>
+      <stop offset="100%" style="stop-color:#0a0e1a"/>
+    </linearGradient>
+    <linearGradient id="titleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#7c3aed"/>
+      <stop offset="50%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="purpleBlue" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#7c3aed"/>
+      <stop offset="100%" style="stop-color:#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="blueCyan" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="cardFill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1640;stop-opacity:0.9"/>
+      <stop offset="100%" style="stop-color:#0f0d20;stop-opacity:0.9"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glowStrong">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1920" height="1080" fill="url(#bgGrad)"/>
+
+  <!-- Top accent bar -->
+  <rect x="0" y="0" width="1920" height="6" fill="url(#titleGrad)"/>
+
+  <!-- Subtle grid -->
+  <g opacity="0.04" stroke="#7c3aed" stroke-width="0.5">
+    <line x1="240" y1="0" x2="240" y2="1080"/><line x1="480" y1="0" x2="480" y2="1080"/>
+    <line x1="720" y1="0" x2="720" y2="1080"/><line x1="960" y1="0" x2="960" y2="1080"/>
+    <line x1="1200" y1="0" x2="1200" y2="1080"/><line x1="1440" y1="0" x2="1440" y2="1080"/>
+    <line x1="1680" y1="0" x2="1680" y2="1080"/>
+    <line x1="0" y1="180" x2="1920" y2="180"/><line x1="0" y1="360" x2="1920" y2="360"/>
+    <line x1="0" y1="540" x2="1920" y2="540"/><line x1="0" y1="720" x2="1920" y2="720"/>
+    <line x1="0" y1="900" x2="1920" y2="900"/>
+  </g>
+
+  <!-- Decorative orbs -->
+  <circle cx="160" cy="160" r="200" fill="#7c3aed" opacity="0.03"/>
+  <circle cx="1760" cy="920" r="180" fill="#06b6d4" opacity="0.03"/>
+  <circle cx="960" cy="440" r="320" fill="#3b82f6" opacity="0.015"/>
+
+  <!-- ===== MAIN TITLE AREA (top 1/3) ===== -->
+  <text x="960" y="200" text-anchor="middle" fill="url(#titleGrad)"
+        font-family="Arial, sans-serif" font-size="116" font-weight="bold"
+        filter="url(#glowStrong)">Vibe Coding Everywhere</text>
+
+  <text x="960" y="280" text-anchor="middle" fill="#e2e8f0"
+        font-family="Arial, sans-serif" font-size="42">
+    开源组合 HAPI + pb-mapper，解放双手让 AI 随时随地帮你写代码
+  </text>
+
+  <!-- ===== FLOW DIAGRAM (center) ===== -->
+
+  <!-- Node 1: Phone -->
+  <g transform="translate(180, 370)">
+    <rect x="0" y="0" width="260" height="340" rx="28" fill="url(#cardFill)"
+          stroke="#7c3aed" stroke-width="2.5"/>
+    <!-- Notch -->
+    <rect x="90" y="12" width="80" height="8" rx="4" fill="#2d2060"/>
+    <!-- Screen area -->
+    <rect x="18" y="36" width="224" height="240" rx="8" fill="#0d0b1a"
+          stroke="#2d2060" stroke-width="1"/>
+    <!-- HAPI Web UI mockup on screen -->
+    <rect x="30" y="50" width="200" height="28" rx="4" fill="#1e1b3a"/>
+    <text x="130" y="70" text-anchor="middle" fill="#7c3aed" font-family="monospace" font-size="13" font-weight="bold">HAPI Web</text>
+    <!-- Chat messages -->
+    <rect x="30" y="90" width="140" height="24" rx="6" fill="#7c3aed" opacity="0.25"/>
+    <text x="100" y="107" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="11">Add error handling...</text>
+    <rect x="80" y="124" width="150" height="24" rx="6" fill="#1e3a5f" opacity="0.6"/>
+    <text x="155" y="141" text-anchor="middle" fill="#93c5fd" font-family="Arial, sans-serif" font-size="11">Working on it...</text>
+    <!-- Approve button -->
+    <rect x="60" y="164" width="140" height="36" rx="8" fill="#7c3aed" opacity="0.4"
+          stroke="#7c3aed" stroke-width="1.5"/>
+    <text x="130" y="188" text-anchor="middle" fill="#e9d5ff" font-family="Arial, sans-serif" font-size="15" font-weight="bold">Approve</text>
+    <!-- Status dots -->
+    <circle cx="80" cy="220" r="5" fill="#22c55e" opacity="0.8"/>
+    <text x="92" y="224" fill="#6b7280" font-family="Arial, sans-serif" font-size="10">Connected</text>
+    <!-- Home bar -->
+    <rect x="90" y="310" width="80" height="6" rx="3" fill="#3b3070"/>
+    <!-- Label -->
+    <text x="130" y="370" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="20" font-weight="bold">Phone</text>
+    <text x="130" y="394" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="14">HAPI Web UI</text>
+  </g>
+
+  <!-- Arrow 1: Phone to pb-mapper -->
+  <g filter="url(#glow)">
+    <line x1="470" y1="540" x2="590" y2="540" stroke="url(#purpleBlue)" stroke-width="3" stroke-dasharray="10,7"/>
+    <polygon points="590,532 612,540 590,548" fill="#3b82f6"/>
+    <text x="530" y="525" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="13">tunnel</text>
+  </g>
+
+  <!-- Node 2: pb-mapper (Cloud) -->
+  <g transform="translate(620, 420)">
+    <rect x="0" y="0" width="260" height="240" rx="16" fill="url(#cardFill)"
+          stroke="#06b6d4" stroke-width="2.5"/>
+    <!-- Cloud icon -->
+    <g transform="translate(130, 50)" fill="none" stroke="#06b6d4" stroke-width="2.5">
+      <path d="M-40,10 C-40,-15 -15,-30 10,-25 C20,-45 55,-40 60,-20 C80,-15 80,15 60,20 L-30,20 C-50,20 -55,0 -40,10Z"/>
+    </g>
+    <!-- Text -->
+    <text x="130" y="110" text-anchor="middle" fill="#06b6d4" font-family="Consolas, monospace" font-size="24" font-weight="bold">pb-mapper</text>
+    <text x="130" y="140" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="14">Network Tunnel</text>
+    <!-- Features -->
+    <text x="130" y="175" text-anchor="middle" fill="#4ade80" font-family="monospace" font-size="12">Rust | Encrypted | Low Latency</text>
+    <!-- Port mapping visual -->
+    <rect x="40" y="195" width="180" height="24" rx="4" fill="#0d2818" opacity="0.5"
+          stroke="#22c55e" stroke-width="1"/>
+    <text x="130" y="212" text-anchor="middle" fill="#4ade80" font-family="monospace" font-size="11">:7666 → hapi-hub</text>
+    <!-- Label -->
+    <text x="130" y="275" text-anchor="middle" fill="#67e8f9" font-family="Arial, sans-serif" font-size="20" font-weight="bold">Public Server</text>
+    <text x="130" y="299" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="14">NAT Traversal</text>
+  </g>
+
+  <!-- Arrow 2: pb-mapper to HAPI Hub -->
+  <g filter="url(#glow)">
+    <line x1="910" y1="540" x2="1030" y2="540" stroke="url(#blueCyan)" stroke-width="3" stroke-dasharray="10,7"/>
+    <polygon points="1030,532 1052,540 1030,548" fill="#06b6d4"/>
+    <text x="970" y="525" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="13">forward</text>
+  </g>
+
+  <!-- Node 3: HAPI Hub -->
+  <g transform="translate(1060, 420)">
+    <rect x="0" y="0" width="260" height="240" rx="16" fill="url(#cardFill)"
+          stroke="#7c3aed" stroke-width="2.5"/>
+    <!-- Hub icon: three connected dots -->
+    <g transform="translate(130, 55)">
+      <circle cx="0" cy="-20" r="10" fill="#7c3aed" opacity="0.6"/>
+      <circle cx="-22" cy="12" r="10" fill="#3b82f6" opacity="0.6"/>
+      <circle cx="22" cy="12" r="10" fill="#06b6d4" opacity="0.6"/>
+      <line x1="0" y1="-10" x2="-18" y2="5" stroke="#7c3aed" stroke-width="2" opacity="0.5"/>
+      <line x1="0" y1="-10" x2="18" y2="5" stroke="#3b82f6" stroke-width="2" opacity="0.5"/>
+      <line x1="-14" y1="12" x2="14" y2="12" stroke="#06b6d4" stroke-width="2" opacity="0.5"/>
+    </g>
+    <!-- Text -->
+    <text x="130" y="110" text-anchor="middle" fill="#c4b5fd" font-family="Consolas, monospace" font-size="24" font-weight="bold">HAPI Hub</text>
+    <text x="130" y="140" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="14">Remote Control</text>
+    <!-- Modes -->
+    <g transform="translate(30, 160)">
+      <rect x="0" y="0" width="90" height="26" rx="6" fill="#7c3aed" opacity="0.2"
+            stroke="#7c3aed" stroke-width="1"/>
+      <text x="45" y="18" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="12" font-weight="bold">Local</text>
+      <rect x="110" y="0" width="90" height="26" rx="6" fill="#3b82f6" opacity="0.2"
+            stroke="#3b82f6" stroke-width="1"/>
+      <text x="155" y="18" text-anchor="middle" fill="#93c5fd" font-family="Arial, sans-serif" font-size="12" font-weight="bold">Remote</text>
+    </g>
+    <!-- Supported agents -->
+    <text x="130" y="218" text-anchor="middle" fill="#6b7280" font-family="monospace" font-size="11">CC | Codex | Gemini | OpenCode</text>
+    <!-- Label -->
+    <text x="130" y="275" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="20" font-weight="bold">Your PC</text>
+    <text x="130" y="299" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="14">localhost:3006</text>
+  </g>
+
+  <!-- Arrow 3: HAPI Hub to AI Agent -->
+  <g filter="url(#glow)">
+    <line x1="1350" y1="540" x2="1470" y2="540" stroke="url(#purpleBlue)" stroke-width="3" stroke-dasharray="10,7"/>
+    <polygon points="1470,532 1492,540 1470,548" fill="#7c3aed"/>
+    <text x="1410" y="525" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="13">control</text>
+  </g>
+
+  <!-- Node 4: AI Agent / Code -->
+  <g transform="translate(1500, 370)">
+    <rect x="0" y="0" width="260" height="340" rx="16" fill="url(#cardFill)"
+          stroke="#3b82f6" stroke-width="2.5"/>
+    <!-- Terminal header -->
+    <rect x="14" y="14" width="232" height="28" rx="6" fill="#1a1640"/>
+    <circle cx="30" cy="28" r="5" fill="#ef4444" opacity="0.7"/>
+    <circle cx="46" cy="28" r="5" fill="#eab308" opacity="0.7"/>
+    <circle cx="62" cy="28" r="5" fill="#22c55e" opacity="0.7"/>
+    <text x="130" y="33" text-anchor="middle" fill="#6b7280" font-family="monospace" font-size="10">claude-code</text>
+    <!-- Code content -->
+    <rect x="14" y="44" width="232" height="230" rx="0 0 6 6" fill="#0d0b1a"/>
+    <text x="24" y="68" fill="#06b6d4" font-family="Consolas, monospace" font-size="13" opacity="0.9">$ claude</text>
+    <text x="24" y="90" fill="#9ca3af" font-family="Consolas, monospace" font-size="12" opacity="0.7">Thinking...</text>
+    <text x="24" y="115" fill="#7c3aed" font-family="Consolas, monospace" font-size="12">fn retry&lt;F, T, E&gt;(</text>
+    <text x="24" y="135" fill="#3b82f6" font-family="Consolas, monospace" font-size="12">  f: F,</text>
+    <text x="24" y="155" fill="#3b82f6" font-family="Consolas, monospace" font-size="12">  max: u32,</text>
+    <text x="24" y="175" fill="#7c3aed" font-family="Consolas, monospace" font-size="12">) -&gt; Result&lt;T, E&gt;</text>
+    <text x="24" y="195" fill="#7c3aed" font-family="Consolas, monospace" font-size="12">{</text>
+    <text x="24" y="215" fill="#06b6d4" font-family="Consolas, monospace" font-size="12">  for i in 0..max {</text>
+    <text x="24" y="235" fill="#4ade80" font-family="Consolas, monospace" font-size="12">    // exponential backoff</text>
+    <text x="24" y="255" fill="#06b6d4" font-family="Consolas, monospace" font-size="12">  }</text>
+    <!-- Cursor blink -->
+    <rect x="24" y="260" width="8" height="14" fill="#7c3aed" opacity="0.8"/>
+    <!-- Status bar -->
+    <rect x="14" y="278" width="232" height="22" fill="#1a1640"/>
+    <circle cx="28" cy="289" r="4" fill="#22c55e"/>
+    <text x="38" y="293" fill="#4ade80" font-family="monospace" font-size="10">cargo check passed</text>
+    <!-- Label -->
+    <text x="130" y="330" text-anchor="middle" fill="#93c5fd" font-family="Arial, sans-serif" font-size="20" font-weight="bold">AI Agent</text>
+    <text x="130" y="354" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="14">Auto Coding</text>
+  </g>
+
+  <!-- ===== BOTTOM AREA ===== -->
+
+  <!-- Bottom dark bar -->
+  <rect x="0" y="980" width="1920" height="100" fill="#08081a" opacity="0.9"/>
+
+  <!-- Tag pills -->
+  <g transform="translate(960, 1020)">
+    <!-- HAPI tag -->
+    <rect x="-420" y="-18" width="120" height="36" rx="18" fill="transparent"
+          stroke="#7c3aed" stroke-width="2"/>
+    <text x="-360" y="6" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="15" font-weight="bold">HAPI</text>
+    <!-- pb-mapper tag -->
+    <rect x="-270" y="-18" width="150" height="36" rx="18" fill="transparent"
+          stroke="#06b6d4" stroke-width="2"/>
+    <text x="-195" y="6" text-anchor="middle" fill="#67e8f9" font-family="Arial, sans-serif" font-size="15" font-weight="bold">pb-mapper</text>
+    <!-- Open Source tag -->
+    <rect x="-90" y="-18" width="140" height="36" rx="18" fill="transparent"
+          stroke="#22c55e" stroke-width="2"/>
+    <text x="-20" y="6" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="15" font-weight="bold">Open Source</text>
+    <!-- Rust tag -->
+    <rect x="80" y="-18" width="100" height="36" rx="18" fill="transparent"
+          stroke="#f97316" stroke-width="2"/>
+    <text x="130" y="6" text-anchor="middle" fill="#fdba74" font-family="Arial, sans-serif" font-size="15" font-weight="bold">Rust</text>
+    <!-- Flutter tag -->
+    <rect x="210" y="-18" width="110" height="36" rx="18" fill="transparent"
+          stroke="#3b82f6" stroke-width="2"/>
+    <text x="265" y="6" text-anchor="middle" fill="#93c5fd" font-family="Arial, sans-serif" font-size="15" font-weight="bold">Flutter</text>
+    <!-- AI Coding tag -->
+    <rect x="350" y="-18" width="130" height="36" rx="18" fill="transparent"
+          stroke="#a855f7" stroke-width="2"/>
+    <text x="415" y="6" text-anchor="middle" fill="#d8b4fe" font-family="Arial, sans-serif" font-size="15" font-weight="bold">AI Coding</text>
+  </g>
+
+  <!-- GitHub links -->
+  <text x="960" y="1065" text-anchor="middle" fill="#4b5563" font-family="Consolas, monospace" font-size="14">
+    github.com/humanapi-corp/hapi  |  github.com/pysrc/pb-mapper
+  </text>
+
+  <!-- Corner accents -->
+  <g opacity="0.4">
+    <line x1="40" y1="30" x2="100" y2="30" stroke="url(#purpleBlue)" stroke-width="2"/>
+    <line x1="40" y1="30" x2="40" y2="90" stroke="url(#purpleBlue)" stroke-width="2"/>
+    <line x1="1820" y1="30" x2="1880" y2="30" stroke="url(#blueCyan)" stroke-width="2"/>
+    <line x1="1880" y1="30" x2="1880" y2="90" stroke="url(#blueCyan)" stroke-width="2"/>
+  </g>
+</svg>
