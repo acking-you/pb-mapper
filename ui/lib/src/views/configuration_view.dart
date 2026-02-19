@@ -118,7 +118,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
     });
 
     try {
-      final status = await _api.getServerStatusDetail();
+      final status = await _api.forceRefreshServerStatus();
       if (!mounted) return;
       setState(() {
         _isCheckingServer = false;

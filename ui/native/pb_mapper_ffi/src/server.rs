@@ -92,3 +92,25 @@ pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
         Err(e) => err_message(&e),
     }
 }
+
+/// Force-refresh server status (blocks until network result is available).
+#[no_mangle]
+pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
+    handle: *mut PbMapperHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return err_message("handle is null");
+    }
+
+    let handle = unsafe { &mut *handle };
+    let state = handle.state.clone();
+    let result = handle.runtime.block_on(async move {
+        let state = state.lock().await;
+        state.force_refresh_server_status().await
+    });
+
+    match result {
+        Ok(detail) => ok_data(serde_json::to_value(detail).unwrap_or_else(|_| json!({}))),
+        Err(e) => err_message(&e),
+    }
+}

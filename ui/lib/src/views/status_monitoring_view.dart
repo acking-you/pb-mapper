@@ -66,7 +66,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
 
   Future<void> _loadStatus() async {
     try {
-      final status = await _api.getServerStatusDetail();
+      final status = await _api.forceRefreshServerStatus();
       if (!mounted) return;
       setState(() {
         _status = status;

@@ -30,7 +30,8 @@ use uni_stream::stream::{
 
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 const SERVER_STATUS_TTL: Duration = Duration::from_secs(2);
-const STATUS_REFRESH_TIMEOUT: Duration = Duration::from_millis(800);
+const STATUS_REFRESH_TIMEOUT: Duration = Duration::from_millis(3000);
+const FORCE_REFRESH_TIMEOUT: Duration = Duration::from_millis(5000);
 
 #[derive(Clone)]
 struct StatusCacheEntry {
@@ -71,22 +72,20 @@ async fn check_service_with_get_status(
 async fn fetch_real_status_with_addr(
     server_addr: &str,
 ) -> Result<(Vec<String>, RemoteIdData), String> {
-    let services = match get_server_keys_with_addr(server_addr).await {
-        Ok(keys) => keys,
-        Err(e) => return Err(format!("Failed to get server keys: {e}")),
-    };
+    let (keys_result, remote_id_result) = tokio::join!(
+        get_server_keys_with_addr(server_addr),
+        get_remote_id_data_with_addr(server_addr),
+    );
 
-    let remote_id_data = match get_remote_id_data_with_addr(server_addr).await {
-        Ok(data) => data,
-        Err(e) => {
-            tracing::warn!("Failed to get remote-id data: {}, using empty data", e);
-            RemoteIdData {
-                server_map: String::new(),
-                active: String::new(),
-                idle: String::new(),
-            }
+    let services = keys_result.map_err(|e| format!("Failed to get server keys: {e}"))?;
+    let remote_id_data = remote_id_result.unwrap_or_else(|e| {
+        tracing::warn!("Failed to get remote-id data: {}, using empty data", e);
+        RemoteIdData {
+            server_map: String::new(),
+            active: String::new(),
+            idle: String::new(),
         }
-    };
+    });
 
     Ok((services, remote_id_data))
 }
@@ -1315,6 +1314,59 @@ impl PbMapperState {
             }
             refreshing.store(false, Ordering::Release);
         });
+    }
+
+    /// Perform a blocking status refresh — waits for the actual network result
+    /// instead of returning stale cache.
+    pub async fn force_refresh_server_status(&self) -> Result<ServerStatusDetail, String> {
+        let server_addr = self.config.server_address.clone();
+
+        let detail = match tokio::time::timeout(
+            FORCE_REFRESH_TIMEOUT,
+            fetch_real_status_with_addr(&server_addr),
+        )
+        .await
+        {
+            Ok(Ok((services, remote_id_data))) => ServerStatusDetail {
+                server_available: true,
+                registered_services: services,
+                server_map: remote_id_data.server_map,
+                active_connections: remote_id_data.active,
+                idle_connections: remote_id_data.idle,
+            },
+            Ok(Err(e)) => {
+                tracing::warn!("Force refresh failed: {}", e);
+                ServerStatusDetail {
+                    server_available: false,
+                    registered_services: Vec::new(),
+                    server_map: String::new(),
+                    active_connections: String::new(),
+                    idle_connections: String::new(),
+                }
+            }
+            Err(_) => {
+                tracing::warn!("Force refresh timed out after {:?}", FORCE_REFRESH_TIMEOUT);
+                ServerStatusDetail {
+                    server_available: false,
+                    registered_services: Vec::new(),
+                    server_map: String::new(),
+                    active_connections: String::new(),
+                    idle_connections: String::new(),
+                }
+            }
+        };
+
+        // Update cache so subsequent non-blocking reads benefit too.
+        {
+            let mut cache = self.server_status_cache.write().await;
+            *cache = detail.clone();
+        }
+        {
+            let mut last_update = self.server_status_last_update.write().await;
+            *last_update = Some(Instant::now());
+        }
+
+        Ok(detail)
     }
 
     // Cache service status to avoid blocking UI with network checks on every paint.

@@ -274,6 +274,20 @@ class PbMapperApi {
     );
   }
 
+  Future<ServerStatusDetail> forceRefreshServerStatus() async {
+    final result = await _service.forceRefreshServerStatus();
+    if (result['success'] == true) {
+      return ServerStatusDetail.fromMap(_asMap(result['data']));
+    }
+    return const ServerStatusDetail(
+      serverAvailable: false,
+      registeredServices: [],
+      serverMap: '',
+      activeConnections: '',
+      idleConnections: '',
+    );
+  }
+
   Future<List<ServiceConfigInfo>> getServiceConfigs() async {
     final result = await _service.getServiceConfigs();
     if (result['success'] == true) {

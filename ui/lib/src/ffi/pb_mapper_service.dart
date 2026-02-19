@@ -216,6 +216,10 @@ class PbMapperService {
   Future<Map<String, dynamic>> getServerStatusDetail() {
     return _runJsonOnWorker('getServerStatusDetail', {});
   }
+
+  Future<Map<String, dynamic>> forceRefreshServerStatus() {
+    return _runJsonOnWorker('forceRefreshServerStatus', {});
+  }
 }
 
 Map<String, dynamic> _decodeJsonStatic(PbMapperFFI ffi, Pointer<Utf8> ptr) {
@@ -345,6 +349,9 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
         break;
       case 'getServerStatusDetail':
         result = ffi.pbMapperGetServerStatusDetail(handle);
+        break;
+      case 'forceRefreshServerStatus':
+        result = ffi.pbMapperForceRefreshServerStatus(handle);
         break;
       default:
         return {'success': false, 'message': 'Unknown op: $op'};

@@ -34,7 +34,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   }
 
   Future<void> _refreshPrerequisites() async {
-    await Future.wait([_loadConfig(), _loadServerStatus()]);
+    await _loadConfig();
+    await _loadServerStatus();
   }
 
   Future<void> _loadConfig() async {
@@ -55,7 +56,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
   Future<void> _loadServerStatus() async {
     try {
-      final status = await _api.getServerStatusDetail();
+      final status = await _api.forceRefreshServerStatus();
       if (!mounted) return;
       setState(() {
         _serverAvailable = status.serverAvailable;

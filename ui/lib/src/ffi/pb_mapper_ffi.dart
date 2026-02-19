@@ -136,6 +136,11 @@ typedef _PbMapperGetServerStatusDetailNative =
 typedef _PbMapperGetServerStatusDetailDart =
     Pointer<Utf8> Function(Pointer<Void> handle);
 
+typedef _PbMapperForceRefreshServerStatusNative =
+    Pointer<Utf8> Function(Pointer<Void> handle);
+typedef _PbMapperForceRefreshServerStatusDart =
+    Pointer<Utf8> Function(Pointer<Void> handle);
+
 typedef _PbMapperSetLogCallbackNative =
     Void Function(Pointer<NativeFunction<LogCallbackNative>> callback);
 typedef _PbMapperSetLogCallbackDart =
@@ -294,6 +299,12 @@ class PbMapperFFI {
         _PbMapperGetServerStatusDetailNative,
         _PbMapperGetServerStatusDetailDart
       >('pb_mapper_get_server_status_detail_json');
+
+  late final pbMapperForceRefreshServerStatus = lib
+      .lookupFunction<
+        _PbMapperForceRefreshServerStatusNative,
+        _PbMapperForceRefreshServerStatusDart
+      >('pb_mapper_force_refresh_server_status_json');
 
   late final pbMapperSetLogCallback = lib
       .lookupFunction<

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.8] - 2026-02-19
+- Fixed mobile UI status check instability where server showed as unreachable intermittently despite correct configuration.
+- Added synchronous `forceRefreshServerStatus` FFI endpoint that waits for actual network result instead of returning stale cache.
+- Parallelized dual TCP status queries (Keys + RemoteId) with `tokio::join!` to halve round-trip time.
+- Increased background status refresh timeout from 800ms to 3000ms to accommodate mobile network latency.
+- Fixed Flutter parallel loading race in client connection and service registration views by sequencing config load before status check.
+- Upgraded `MSG_HEADER_KEY` atomic hash operations from `Ordering::Relaxed` to `Release`/`Acquire` for cross-thread visibility.
+
 ## [0.2.7] - 2026-02-15
 - Added one-click configuration export in UI Config page with JSON payload encoded as Base64.
 - Added one-click configuration import in UI Config page from Base64-encoded JSON, including validation and immediate apply/save flow.
