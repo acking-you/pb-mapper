@@ -10,18 +10,56 @@ description: Deploy or upgrade `pb-mapper-client-cli` on a remote Linux host thr
 Use this workflow to perform reproducible remote deployment of `pb-mapper-client-cli` with minimal manual edits.
 Execute from the operator machine that has SSH access to the target host.
 
-## Required Inputs
+## Pre-flight: SSH Access
 
-Collect these values first:
+Before starting, verify SSH connectivity to the target host:
 
-- `SSH_TARGET` (example: `ubuntu@sfapi.duckdns.org`)
-- `VERSION` without `v` prefix (example: `0.2.7`)
-- `TARGET_TRIPLE` (example: `x86_64-unknown-linux-musl`)
-- `PB_SERVER` (example: `sfapi.duckdns.org:7666`)
-- `SERVICE_KEY` (example: `sf-backend`)
-- `LOCAL_ADDR` to expose on remote host (example: `127.0.0.1:39080`)
-- `PUBLIC_CHECK_URL` for external validation (example: `https://sfapi.duckdns.org/api/semantic-search?q=test`)
-- optional `MSG_HEADER_KEY` (exactly 32 chars). Leave empty to use default key behavior.
+1. Confirm passwordless SSH login is configured. Test with:
+   ```bash
+   ssh <user>@<host> "echo ok"
+   ```
+   If this fails or prompts for a password, configure key-based auth first:
+   ```bash
+   ssh-copy-id <user>@<host>
+   ```
+
+2. Ask the user: **Is the SSH port the default 22?** If not, collect the custom port number.
+   All subsequent `ssh`/`scp` commands use `${SSH_PORT_OPT}` / `${SCP_PORT_OPT}` which expand to `-p <port>` / `-P <port>` when non-default.
+
+## Required Inputs (Interactive Collection)
+
+Prompt the user for each value below. Do NOT assume or hardcode any value.
+
+| Variable | Prompt | Default | Notes |
+|---|---|---|---|
+| `SSH_USER` | Remote host username | — | Required |
+| `SSH_HOST` | Remote host IP or domain | — | Required |
+| `SSH_PORT` | SSH port | `22` | Only ask if non-default |
+| `SERVICE_KEY` | pb-mapper service name to subscribe | — | Required |
+| `LISTEN_IP` | Listen on localhost only (`127.0.0.1`) or all interfaces (`0.0.0.0`)? | `127.0.0.1` | Required |
+| `LISTEN_PORT` | Local listening port on remote host | — | Required |
+| `MSG_HEADER_KEY` | Encryption key (exactly 32 chars) | *(empty)* | Optional, **confidential** — never log or echo |
+| `PUBLIC_CHECK_URL` | URL for external validation | *(empty)* | Optional |
+| `VERSION` | Release version (without `v` prefix) | Latest release | Auto-detect or user-specified |
+| `TARGET_TRIPLE` | Build target | `x86_64-unknown-linux-musl` | User can override |
+| `PB_SERVER` | pb-mapper server address | `${SSH_HOST}:7666` | Derived by default, user can override |
+
+### Derived Variables
+
+After collection, compute:
+
+```bash
+export SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+export SSH_PORT_OPT=""
+export SCP_PORT_OPT=""
+if [ "${SSH_PORT}" != "22" ]; then
+  export SSH_PORT_OPT="-p ${SSH_PORT}"
+  export SCP_PORT_OPT="-P ${SSH_PORT}"
+fi
+export LOCAL_ADDR="${LISTEN_IP}:${LISTEN_PORT}"
+export PB_SERVER="${PB_SERVER:-${SSH_HOST}:7666}"
+export INSTANCE_NAME="${SERVICE_KEY}"
+```
 
 ## Deployment Workflow
 
@@ -30,16 +68,6 @@ Collect these values first:
 Use deterministic file names:
 
 ```bash
-export SSH_TARGET="ubuntu@sfapi.duckdns.org"
-export VERSION="0.2.7"
-export TARGET_TRIPLE="x86_64-unknown-linux-musl"
-export PB_SERVER="sfapi.duckdns.org:7666"
-export SERVICE_KEY="sf-backend"
-export LOCAL_ADDR="127.0.0.1:39080"
-export PUBLIC_CHECK_URL="https://sfapi.duckdns.org/api/semantic-search?q=test"
-# Optional. Keep empty to use default header key behavior.
-export MSG_HEADER_KEY="OMbmiQpCTVKqEMzVUzm8YQgmbQR1bbn0"
-
 export ASSET_FILE="pb-mapper-client-cli-v${VERSION}-${TARGET_TRIPLE}.tar.gz"
 export ASSET_URL="https://github.com/acking-you/pb-mapper/releases/download/v${VERSION}/${ASSET_FILE}"
 
@@ -47,12 +75,20 @@ curl -fL "${ASSET_URL}" -o "/tmp/${ASSET_FILE}"
 test -s "/tmp/${ASSET_FILE}"
 ```
 
+**Proxy fallback:** If the download fails due to network issues (timeout, connection refused), ask the user for their local proxy port and retry:
+
+```bash
+export PROXY_PORT="<user-provided>"
+curl -fL -x "http://127.0.0.1:${PROXY_PORT}" "${ASSET_URL}" -o "/tmp/${ASSET_FILE}"
+test -s "/tmp/${ASSET_FILE}"
+```
+
 ### 2. Upload and install binary on remote host
 
 ```bash
-scp "/tmp/${ASSET_FILE}" "${SSH_TARGET}:/tmp/${ASSET_FILE}"
+scp ${SCP_PORT_OPT} "/tmp/${ASSET_FILE}" "${SSH_TARGET}:/tmp/${ASSET_FILE}"
 
-ssh "${SSH_TARGET}" "ASSET_FILE='${ASSET_FILE}' sudo bash -s" <<'REMOTE_INSTALL'
+ssh ${SSH_PORT_OPT} "${SSH_TARGET}" "ASSET_FILE='${ASSET_FILE}' sudo bash -s" <<'REMOTE_INSTALL'
 set -euo pipefail
 TMP_DIR="/tmp/pb-mapper-client-cli-install"
 INSTALL_DIR="/opt/pb-mapper-client-cli/current"
@@ -78,7 +114,7 @@ REMOTE_INSTALL
 Use a templated service so multiple tunnel instances can coexist:
 
 ```bash
-ssh "${SSH_TARGET}" "sudo bash -s" <<'REMOTE_SYSTEMD'
+ssh ${SSH_PORT_OPT} "${SSH_TARGET}" "sudo bash -s" <<'REMOTE_SYSTEMD'
 set -euo pipefail
 SERVICE_TEMPLATE="/etc/systemd/system/pb-mapper-client-cli@.service"
 sudo tee "${SERVICE_TEMPLATE}" >/dev/null <<'UNIT'
@@ -111,9 +147,7 @@ REMOTE_SYSTEMD
 `MSG_HEADER_KEY` must be omitted when empty; never write an empty value to env file.
 
 ```bash
-export INSTANCE_NAME="${SERVICE_KEY}"
-
-ssh "${SSH_TARGET}" \
+ssh ${SSH_PORT_OPT} "${SSH_TARGET}" \
   "INSTANCE_NAME='${INSTANCE_NAME}' PB_SERVER='${PB_SERVER}' SERVICE_KEY='${SERVICE_KEY}' LOCAL_ADDR='${LOCAL_ADDR}' MSG_HEADER_KEY='${MSG_HEADER_KEY}' sudo bash -s" <<'REMOTE_ENV'
 set -euo pipefail
 
@@ -145,19 +179,21 @@ REMOTE_ENV
 Run all checks:
 
 ```bash
-ssh "${SSH_TARGET}" "sudo systemctl --no-pager --full status pb-mapper-client-cli@${INSTANCE_NAME}.service"
-ssh "${SSH_TARGET}" "curl -fsS 'http://${LOCAL_ADDR}/api/semantic-search?q=test' | jq -e 'type==\"object\" or type==\"array\"' >/dev/null"
-curl -fsS "${PUBLIC_CHECK_URL}" | jq -e 'type==\"object\" or type==\"array\"' >/dev/null
+ssh ${SSH_PORT_OPT} "${SSH_TARGET}" "sudo systemctl --no-pager --full status pb-mapper-client-cli@${INSTANCE_NAME}.service"
+ssh ${SSH_PORT_OPT} "${SSH_TARGET}" "curl -fsS 'http://${LOCAL_ADDR}/' | head -c 512"
+if [ -n "${PUBLIC_CHECK_URL}" ]; then
+  curl -fsS "${PUBLIC_CHECK_URL}" | head -c 512
+fi
 ```
 
-If `jq` is unavailable, print raw body and verify it is valid JSON manually.
+If `jq` is available, pipe through `jq .` for formatted JSON output.
 
 ## Troubleshooting Checklist
 
 Use this quick triage when startup or forwarding fails:
 
 - `datalen not valid`: likely `MSG_HEADER_KEY` mismatch or hidden newline; verify both sides use the same 32-byte key.
-- Service restarts immediately: inspect logs with `journalctl -u pb-mapper-client-cli@<instance> -n 200 --no-pager`.
+- Service restarts immediately: inspect logs with `journalctl -u pb-mapper-client-cli@${INSTANCE_NAME} -n 200 --no-pager`.
 - Remote port not listening: confirm `LOCAL_ADDR` host/port and no port conflict.
 - Public URL fails but localhost works: investigate reverse proxy (for example, Caddy route/TLS config).
 
@@ -167,5 +203,5 @@ Upgrade in place without changing the unit:
 
 1. Download/upload new `vX.Y.Z` artifact.
 2. Re-run install step to overwrite `/opt/pb-mapper-client-cli/current/pb-mapper-client-cli`.
-3. Restart instance: `sudo systemctl restart pb-mapper-client-cli@<instance>.service`.
+3. Restart instance: `sudo systemctl restart pb-mapper-client-cli@${INSTANCE_NAME}.service`.
 4. Re-run validation checks.
