@@ -13,7 +13,18 @@ pb-mapper is a Rust-based service mapping system that exposes multiple local TCP
 
 ## Quick Start (server install)
 
-One command installs `pb-mapper-server` as a systemd service on Linux (x86_64, musl build). Defaults: port `7666`, enables `--use-machine-msg-header-key`, and persists key to `/var/lib/pb-mapper-server/msg_header_key`.
+### Recommended: AI coding agent + deployment skill
+
+If you use an AI coding agent (e.g., Claude Code, Cursor, Kiro), invoke the built-in deployment skill for a fully interactive, one-click deploy — no need for GitHub access on the remote host:
+
+- **Server deploy**: `/pb-mapper-server-deploy` — downloads the binary locally, uploads via SCP, and sets up a systemd service on the remote host.
+- **Client tunnel deploy**: `/pb-mapper-client-cli-deploy` — same local-download-then-upload flow for `pb-mapper-client-cli`, with systemd service and end-to-end validation.
+
+The skills interactively collect all parameters (SSH credentials, ports, encryption keys) and handle proxy fallback if GitHub downloads fail on your local network.
+
+### Alternative: one-liner install script
+
+If the remote host has direct GitHub access, one command installs `pb-mapper-server` as a systemd service on Linux (x86_64, musl build). Defaults: port `7666`, enables `--use-machine-msg-header-key`, and persists key to `/var/lib/pb-mapper-server/msg_header_key`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
@@ -104,6 +115,7 @@ Now open `http://localhost:3000` in the coffee-shop browser — traffic flows th
 - `ui/`: Flutter UI + native bridge
 - `docs/`: documentation
 - `docker/`, `services/`, `scripts/`, `tests/`: deployment and tooling
+- `skills/`: AI coding agent deployment skills (server deploy, client-cli deploy)
 
 ## Development
 

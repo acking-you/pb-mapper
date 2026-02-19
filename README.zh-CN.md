@@ -13,7 +13,18 @@ pb-mapper 是一个基于 Rust 的服务映射系统，通过**一个**公网端
 
 ## 快速开始（服务端一键部署）
 
-一条命令安装并注册 `pb-mapper-server` 的 systemd 服务（Linux x86_64，musl 构建）。默认端口 `7666`，默认启用 `--use-machine-msg-header-key`，并将 key 落盘到 `/var/lib/pb-mapper-server/msg_header_key`。
+### 推荐方式：AI 编程助手 + 部署 Skill
+
+如果你使用 AI 编程助手（如 Claude Code、Cursor、Kiro），可以直接调用内置的部署 skill，实现全交互式一键部署——远程主机无需能访问 GitHub：
+
+- **服务端部署**：`/pb-mapper-server-deploy` — 在本地下载 binary，通过 SCP 上传到远程主机，自动配置 systemd 服务。
+- **客户端隧道部署**：`/pb-mapper-client-cli-deploy` — 同样的"本地下载→上传"流程部署 `pb-mapper-client-cli`，含 systemd 服务配置和端到端验证。
+
+Skill 会交互式收集所有参数（SSH 凭据、端口、加密密钥等），并在本地网络无法直连 GitHub 时自动提示切换代理下载。
+
+### 备选方式：一键安装脚本
+
+如果远程主机可以直接访问 GitHub，一条命令安装并注册 `pb-mapper-server` 的 systemd 服务（Linux x86_64，musl 构建）。默认端口 `7666`，默认启用 `--use-machine-msg-header-key`，并将 key 落盘到 `/var/lib/pb-mapper-server/msg_header_key`。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
@@ -106,6 +117,7 @@ pb-mapper-client-cli --server <public-ip>:7666 --key web --local 127.0.0.1:3000
 - `ui/`：Flutter UI + 原生桥接
 - `docs/`：文档
 - `docker/`、`services/`、`scripts/`、`tests/`：部署与工具
+- `skills/`：AI 编程助手部署 skill（服务端部署、客户端隧道部署）
 
 ## 开发
 
