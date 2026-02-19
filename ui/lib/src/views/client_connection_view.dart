@@ -14,31 +14,22 @@ class ClientConnectionView extends StatefulWidget {
 class _ClientConnectionViewState extends State<ClientConnectionView> {
   final PbMapperApi _api = PbMapperApi();
   final _localAddressController = TextEditingController(text: '127.0.0.1:9090');
+  final _serviceKeyInputController = TextEditingController();
   bool _isKeepAliveEnabled = true;
   String _selectedProtocol = 'TCP';
   String _serverAddress = 'localhost:7666'; // Will be updated from config
   String? _selectedServiceKey;
   List<String> _availableServices = [];
-  bool _serverAvailable = false;
-  bool _serverStatusRetryPending = false;
   List<ClientConfig> _clientConfigs = [];
   bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-
-    // Load client configurations and check status
     _loadClientConfigs();
-    _refreshPrerequisites();
-
-    // Check if there's a pre-selected service key from status monitoring
+    _loadConfig();
+    _loadAvailableServices();
     _checkForPreSelectedService();
-  }
-
-  Future<void> _refreshPrerequisites() async {
-    await _loadConfig();
-    await _loadServerStatus();
   }
 
   Future<void> _loadConfig() async {
@@ -56,12 +47,11 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     }
   }
 
-  Future<void> _loadServerStatus() async {
+  Future<void> _loadAvailableServices() async {
     try {
       final status = await _api.forceRefreshServerStatus();
       if (!mounted) return;
       setState(() {
-        _serverAvailable = status.serverAvailable;
         _availableServices = status.registeredServices;
         if (_selectedServiceKey != null &&
             !_availableServices.contains(_selectedServiceKey)) {
@@ -71,33 +61,10 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
           _selectedServiceKey = _availableServices.first;
         }
       });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _serverAvailable = false;
-        _availableServices = [];
-        _selectedServiceKey = null;
-      });
+    } catch (e) {
+      // Silently fail — user can still type service key manually
+      debugPrint('Failed to load available services: $e');
     }
-    _scheduleServerStatusRetryIfNeeded();
-  }
-
-  void _scheduleServerStatusRetryIfNeeded() {
-    if (_serverAvailable) {
-      _serverStatusRetryPending = false;
-      return;
-    }
-    if (_serverStatusRetryPending) {
-      return;
-    }
-    _serverStatusRetryPending = true;
-    Future.delayed(const Duration(seconds: 1), () {
-      if (!mounted) return;
-      _serverStatusRetryPending = false;
-      if (!_serverAvailable) {
-        _loadServerStatus();
-      }
-    });
   }
 
   Future<void> _loadClientConfigs() async {
@@ -158,6 +125,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     final selectedKey = ServiceKeyManager.getSelectedServiceKey();
     if (selectedKey != null) {
       _selectedServiceKey = selectedKey;
+      _serviceKeyInputController.text = selectedKey;
       ServiceKeyManager.clearSelectedServiceKey();
 
       // Show a helpful message
@@ -180,130 +148,29 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   @override
   void dispose() {
     _localAddressController.dispose();
+    _serviceKeyInputController.dispose();
     super.dispose();
   }
 
-  Widget _buildServerUnavailableBanner() {
-    return Card(
-      color: Colors.amber.shade50,
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Icon(Icons.warning_amber, color: Colors.orange),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'No pb-mapper server is reachable.',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Please configure a reachable server and matching '
-                    'MSG_HEADER_KEY in the Config page before connecting clients.',
-                    style: TextStyle(color: Colors.grey.shade700),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            ElevatedButton(
-              onPressed: AppNavigationManager.navigateToConfigPage,
-              child: const Text('Go to Config'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSetupStepCard() {
-    final statusColor = _serverAvailable ? Colors.green : Colors.red;
-    final statusText = _serverAvailable ? 'Reachable' : 'Unreachable';
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.looks_one, color: Colors.blueGrey),
-                const SizedBox(width: 8),
-                Text(
-                  'Step 1: Configure Server / MSG_HEADER_KEY',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const Spacer(),
-                Icon(Icons.circle, color: statusColor, size: 12),
-                const SizedBox(width: 6),
-                Text(
-                  statusText,
-                  style: TextStyle(
-                    color: statusColor,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            SelectableText(
-              _serverAddress,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: AppNavigationManager.navigateToConfigPage,
-                  icon: const Icon(Icons.settings),
-                  label: const Text('Open Config'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _refreshPrerequisites,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Re-check Server'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _wrapIfUnavailable(bool unavailable, Widget child) {
-    if (!unavailable) {
-      return child;
+  String get _effectiveServiceKey {
+    if (_selectedServiceKey != null && _selectedServiceKey!.isNotEmpty) {
+      return _selectedServiceKey!;
     }
-    return IgnorePointer(
-      ignoring: true,
-      child: Opacity(opacity: 0.5, child: child),
-    );
+    return _serviceKeyInputController.text.trim();
   }
 
   void _connectService() {
-    if (_selectedServiceKey == null || _selectedServiceKey!.isEmpty) {
+    final serviceKey = _effectiveServiceKey;
+    if (serviceKey.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select a service key')),
+        const SnackBar(content: Text('Please select or enter a service key')),
       );
       return;
     }
 
     // Check if client already exists
     final existingClient = _clientConfigs.firstWhere(
-      (client) => client.serviceKey == _selectedServiceKey,
+      (client) => client.serviceKey == serviceKey,
       orElse: () => ClientConfig(
         serviceKey: '',
         localAddress: '',
@@ -315,7 +182,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     if (existingClient.serviceKey.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Client for "$_selectedServiceKey" already exists'),
+          content: Text('Client for "$serviceKey" already exists'),
           backgroundColor: Colors.orange,
           duration: const Duration(seconds: 3),
         ),
@@ -325,7 +192,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
 
     _api
         .connectService(
-          serviceKey: _selectedServiceKey!,
+          serviceKey: serviceKey,
           localAddress: _localAddressController.text,
           protocol: _selectedProtocol,
           enableKeepAlive: _isKeepAliveEnabled,
@@ -341,7 +208,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
           );
           _loadClientConfigs();
           if (result.success) {
-            _pollClientStatusUntilStable(_selectedServiceKey!);
+            _pollClientStatusUntilStable(serviceKey);
           }
         });
   }
@@ -467,267 +334,248 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
 
   @override
   Widget build(BuildContext context) {
-    final bool disableUi = !_serverAvailable;
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _buildSetupStepCard(),
-            const SizedBox(height: 12),
-            if (disableUi) ...[
-              _buildServerUnavailableBanner(),
-              const SizedBox(height: 12),
-            ],
-            _wrapIfUnavailable(
-              disableUi,
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Step 2: Connect to Service',
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
-                          const SizedBox(height: 16),
-                          DropdownButtonFormField<String>(
-                            initialValue: _selectedProtocol,
-                            items: ['TCP', 'UDP']
-                                .map(
-                                  (protocol) => DropdownMenuItem(
-                                    value: protocol,
-                                    child: Text(protocol),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (value) {
-                              setState(() => _selectedProtocol = value!);
-                            },
-                            decoration: const InputDecoration(
-                              labelText: 'Protocol',
-                              border: OutlineInputBorder(),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Connect to Service',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      initialValue: _selectedProtocol,
+                      items: ['TCP', 'UDP']
+                          .map(
+                            (protocol) => DropdownMenuItem(
+                              value: protocol,
+                              child: Text(protocol),
                             ),
-                          ),
-                          const SizedBox(height: 16),
-                          DropdownButtonFormField<String>(
-                            initialValue:
-                                _availableServices.contains(_selectedServiceKey)
-                                ? _selectedServiceKey
-                                : null,
-                            items: _availableServices.isEmpty
-                                ? [
-                                    const DropdownMenuItem(
-                                      value: null,
-                                      child: Text('No services available'),
-                                    ),
-                                  ]
-                                : _availableServices.map((serviceKey) {
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        setState(() => _selectedProtocol = value!);
+                      },
+                      decoration: const InputDecoration(
+                        labelText: 'Protocol',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: _availableServices.isNotEmpty
+                              ? DropdownButtonFormField<String>(
+                                  initialValue:
+                                      _availableServices.contains(_selectedServiceKey)
+                                      ? _selectedServiceKey
+                                      : null,
+                                  items: _availableServices.map((serviceKey) {
                                     return DropdownMenuItem(
                                       value: serviceKey,
                                       child: Text(serviceKey),
                                     );
                                   }).toList(),
-                            onChanged:
-                                _serverAvailable &&
-                                    _availableServices.isNotEmpty
-                                ? (value) {
-                                    setState(() => _selectedServiceKey = value);
-                                  }
-                                : null,
-                            decoration: InputDecoration(
-                              labelText: 'Service Key',
-                              hintText: _serverAvailable
-                                  ? (_availableServices.isEmpty
-                                        ? 'No registered services'
-                                        : 'Select a service')
-                                  : 'Server unavailable',
-                              border: const OutlineInputBorder(),
-                              prefixIcon: Icon(
-                                _serverAvailable
-                                    ? Icons.cloud_done
-                                    : Icons.cloud_off,
-                                color: _serverAvailable
-                                    ? Colors.green
-                                    : Colors.red,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          TextField(
-                            controller: _localAddressController,
-                            decoration: const InputDecoration(
-                              labelText: 'Local Address',
-                              hintText: '127.0.0.1:9090',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          SwitchListTile(
-                            title: const Text('Enable TCP Keep-Alive'),
-                            value: _isKeepAliveEnabled,
-                            onChanged: (value) {
-                              setState(() => _isKeepAliveEnabled = value);
-                            },
-                          ),
-                          const SizedBox(height: 16),
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              border: Border.all(color: Colors.grey),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.dns, color: Colors.blue),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      const Text(
-                                        'Server Address',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: Colors.grey,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        _serverAddress,
-                                        style: const TextStyle(fontSize: 16),
-                                      ),
-                                    ],
+                                  onChanged: (value) {
+                                    setState(() {
+                                      _selectedServiceKey = value;
+                                      _serviceKeyInputController.text = value ?? '';
+                                    });
+                                  },
+                                  decoration: const InputDecoration(
+                                    labelText: 'Service Key',
+                                    hintText: 'Select a service',
+                                    border: OutlineInputBorder(),
+                                    prefixIcon: Icon(Icons.vpn_key),
+                                  ),
+                                )
+                              : TextField(
+                                  controller: _serviceKeyInputController,
+                                  onChanged: (value) {
+                                    setState(() => _selectedServiceKey = value.trim().isEmpty ? null : value.trim());
+                                  },
+                                  decoration: const InputDecoration(
+                                    labelText: 'Service Key',
+                                    hintText: 'Enter service key',
+                                    border: OutlineInputBorder(),
+                                    prefixIcon: Icon(Icons.vpn_key),
                                   ),
                                 ),
-                                TextButton(
-                                  onPressed: () {
-                                    AppNavigationManager.navigateToConfigPage();
-                                  },
-                                  child: const Text(
-                                    'Configure in Settings',
-                                    style: TextStyle(fontSize: 12),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          onPressed: _loadAvailableServices,
+                          icon: const Icon(Icons.refresh),
+                          tooltip: 'Refresh service list',
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _localAddressController,
+                      decoration: const InputDecoration(
+                        labelText: 'Local Address',
+                        hintText: '127.0.0.1:9090',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SwitchListTile(
+                      title: const Text('Enable TCP Keep-Alive'),
+                      value: _isKeepAliveEnabled,
+                      onChanged: (value) {
+                        setState(() => _isKeepAliveEnabled = value);
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.dns, color: Colors.blue),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Server Address',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey,
                                   ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _serverAddress,
+                                  style: const TextStyle(fontSize: 16),
                                 ),
                               ],
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              AppNavigationManager.navigateToConfigPage();
+                            },
+                            child: const Text(
+                              'Configure in Settings',
+                              style: TextStyle(fontSize: 12),
                             ),
                           ),
                         ],
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    height: 48,
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed:
-                          (_serverAvailable &&
-                              _selectedServiceKey != null &&
-                              _availableServices.isNotEmpty)
-                          ? _connectService
-                          : null,
-                      style: ElevatedButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(24),
-                        ),
-                        backgroundColor:
-                            !_serverAvailable || _availableServices.isEmpty
-                            ? Colors.grey
-                            : null,
-                      ),
-                      child: Text(
-                        !_serverAvailable
-                            ? 'Server Unavailable'
-                            : (_availableServices.isEmpty
-                                  ? 'No Services Available'
-                                  : 'Connect in One Click'),
-                        style: const TextStyle(fontSize: 16),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (_isLoading) ...[
-                    const SizedBox(height: 24),
-                    const Center(child: CircularProgressIndicator()),
-                  ] else if (_clientConfigs.isEmpty) ...[
-                    const SizedBox(height: 24),
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Column(
-                          children: [
-                            Icon(
-                              Icons.link_off,
-                              size: 48,
-                              color: Colors.grey[400],
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'No client configurations',
-                              style: Theme.of(context).textTheme.titleMedium
-                                  ?.copyWith(color: Colors.grey[600]),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Create a new connection above to get started',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: Colors.grey[500]),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ] else ...[
-                    const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Text(
-                          'Active Connections',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const Spacer(),
-                        IconButton(
-                          onPressed: _loadClientConfigs,
-                          icon: const Icon(Icons.refresh),
-                          tooltip: 'Refresh All Status',
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    ..._clientConfigs.map(
-                      (config) => ClientCard(
-                        key: Key(config.serviceKey),
-                        config: config,
-                        onConnectDisconnect: () =>
-                            config.status == ClientStatus.running ||
-                                config.status == ClientStatus.retrying
-                            ? _handleClientDisconnect(config)
-                            : _handleClientConnect(config),
-                        onDelete: () => _handleClientDelete(config),
-                        onRefresh: () => _handleClientRefresh(config),
-                        onStatusChanged: (updatedConfig) {
-                          final index = _clientConfigs.indexWhere(
-                            (c) => c.serviceKey == updatedConfig.serviceKey,
-                          );
-                          if (index != -1) {
-                            setState(() {
-                              _clientConfigs[index] = updatedConfig;
-                            });
-                          }
-                        },
-                      ),
-                    ),
                   ],
-                ],
+                ),
               ),
             ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 48,
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _effectiveServiceKey.isNotEmpty
+                    ? _connectService
+                    : null,
+                style: ElevatedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                ),
+                child: const Text(
+                  'Connect',
+                  style: TextStyle(fontSize: 16),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (_isLoading) ...[
+              const SizedBox(height: 24),
+              const Center(child: CircularProgressIndicator()),
+            ] else if (_clientConfigs.isEmpty) ...[
+              const SizedBox(height: 24),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.link_off,
+                        size: 48,
+                        color: Colors.grey[400],
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No client configurations',
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(color: Colors.grey[600]),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Create a new connection above to get started',
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(color: Colors.grey[500]),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ] else ...[
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Text(
+                    'Active Connections',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: _loadClientConfigs,
+                    icon: const Icon(Icons.refresh),
+                    tooltip: 'Refresh All Status',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              ..._clientConfigs.map(
+                (config) => ClientCard(
+                  key: Key(config.serviceKey),
+                  config: config,
+                  onConnectDisconnect: () =>
+                      config.status == ClientStatus.running ||
+                              config.status == ClientStatus.retrying
+                      ? _handleClientDisconnect(config)
+                      : _handleClientConnect(config),
+                  onDelete: () => _handleClientDelete(config),
+                  onRefresh: () => _handleClientRefresh(config),
+                  onStatusChanged: (updatedConfig) {
+                    final index = _clientConfigs.indexWhere(
+                      (c) => c.serviceKey == updatedConfig.serviceKey,
+                    );
+                    if (index != -1) {
+                      setState(() {
+                        _clientConfigs[index] = updatedConfig;
+                      });
+                    }
+                  },
+                ),
+              ),
+            ],
           ],
         ),
       ),

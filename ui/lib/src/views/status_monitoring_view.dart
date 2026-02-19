@@ -55,12 +55,10 @@ class StatusMonitoringView extends StatefulWidget {
 class _StatusMonitoringViewState extends State<StatusMonitoringView> {
   final PbMapperApi _api = PbMapperApi();
   ServerStatusDetail? _status;
-  bool _serverStatusRetryPending = false;
 
   @override
   void initState() {
     super.initState();
-    // Request detailed status when view loads
     _loadStatus();
   }
 
@@ -83,26 +81,6 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
         );
       });
     }
-    _scheduleServerStatusRetryIfNeeded();
-  }
-
-  void _scheduleServerStatusRetryIfNeeded() {
-    final serverAvailable = _status?.serverAvailable ?? false;
-    if (serverAvailable) {
-      _serverStatusRetryPending = false;
-      return;
-    }
-    if (_serverStatusRetryPending) {
-      return;
-    }
-    _serverStatusRetryPending = true;
-    Future.delayed(const Duration(seconds: 1), () {
-      if (!mounted) return;
-      _serverStatusRetryPending = false;
-      if (!(_status?.serverAvailable ?? false)) {
-        _loadStatus();
-      }
-    });
   }
 
   void _navigateToConnection(BuildContext context, String serviceKey) {
@@ -122,75 +100,14 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
     );
   }
 
-  Widget _buildServerUnavailableBanner() {
-    return Card(
-      color: Colors.amber.shade50,
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Icon(Icons.warning_amber, color: Colors.orange),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'No pb-mapper server is reachable.',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Please configure a reachable server in the Config page '
-                    'before using status monitoring.',
-                    style: TextStyle(color: Colors.grey.shade700),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            ElevatedButton(
-              onPressed: AppNavigationManager.navigateToConfigPage,
-              child: const Text('Go to Config'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _wrapIfUnavailable(bool unavailable, Widget child) {
-    if (!unavailable) {
-      return child;
-    }
-    return IgnorePointer(
-      ignoring: true,
-      child: Opacity(opacity: 0.5, child: child),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final bool disableUi = _status != null && !_status!.serverAvailable;
     return Padding(
       padding: ResponsiveLayout.getScreenPadding(context),
       child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (disableUi) ...[
-              _buildServerUnavailableBanner(),
-              SizedBox(height: ResponsiveLayout.getVerticalSpacing(context)),
-            ],
-            _wrapIfUnavailable(
-              disableUi,
-              ResponsiveLayout.isMobile(context)
-                  ? _buildMobileLayout(context)
-                  : _buildDesktopLayout(context),
-            ),
-          ],
-        ),
+        child: ResponsiveLayout.isMobile(context)
+            ? _buildMobileLayout(context)
+            : _buildDesktopLayout(context),
       ),
     );
   }

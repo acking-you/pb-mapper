@@ -29,7 +29,6 @@ use uni_stream::stream::{
 };
 
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
-const SERVER_STATUS_TTL: Duration = Duration::from_secs(2);
 const STATUS_REFRESH_TIMEOUT: Duration = Duration::from_millis(3000);
 const FORCE_REFRESH_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -304,9 +303,6 @@ pub struct PbMapperState {
     config: AppConfig,
     config_dir: PathBuf,
     app_directory_path: Option<String>,
-    server_status_cache: Arc<RwLock<ServerStatusDetail>>,
-    server_status_last_update: Arc<RwLock<Option<Instant>>>,
-    server_status_refreshing: Arc<AtomicBool>,
     local_server_status_cache: Arc<RwLock<LocalServerStatus>>,
     local_server_status_last_update: Arc<RwLock<Option<Instant>>>,
     local_server_status_refreshing: Arc<AtomicBool>,
@@ -318,23 +314,6 @@ pub struct PbMapperState {
 
 impl PbMapperState {
     async fn reset_status_caches(&self) {
-        {
-            let mut cache = self.server_status_cache.write().await;
-            *cache = ServerStatusDetail {
-                server_available: false,
-                registered_services: Vec::new(),
-                server_map: String::new(),
-                active_connections: String::new(),
-                idle_connections: String::new(),
-            };
-        }
-        {
-            let mut last_update = self.server_status_last_update.write().await;
-            *last_update = None;
-        }
-        self.server_status_refreshing
-            .store(false, Ordering::Release);
-
         {
             let mut cache = self.local_server_status_cache.write().await;
             *cache = LocalServerStatus {
@@ -360,13 +339,6 @@ impl PbMapperState {
         let config_dir = Self::get_config_dir(&app_directory_path);
         tracing::info!("Using config directory: {:?}", config_dir);
 
-        let server_status_cache = Arc::new(RwLock::new(ServerStatusDetail {
-            server_available: false,
-            registered_services: Vec::new(),
-            server_map: String::new(),
-            active_connections: String::new(),
-            idle_connections: String::new(),
-        }));
         let local_server_status_cache = Arc::new(RwLock::new(LocalServerStatus {
             is_running: false,
             active_connections: 0,
@@ -386,9 +358,6 @@ impl PbMapperState {
             config: AppConfig::default(),
             config_dir: config_dir.clone(),
             app_directory_path: app_directory_path.clone(),
-            server_status_cache: server_status_cache.clone(),
-            server_status_last_update: Arc::new(RwLock::new(None)),
-            server_status_refreshing: Arc::new(AtomicBool::new(false)),
             local_server_status_cache: local_server_status_cache.clone(),
             local_server_status_last_update: Arc::new(RwLock::new(None)),
             local_server_status_refreshing: Arc::new(AtomicBool::new(false)),
@@ -422,9 +391,6 @@ impl PbMapperState {
             config,
             config_dir,
             app_directory_path,
-            server_status_cache,
-            server_status_last_update: Arc::new(RwLock::new(None)),
-            server_status_refreshing: Arc::new(AtomicBool::new(false)),
             local_server_status_cache,
             local_server_status_last_update: Arc::new(RwLock::new(None)),
             local_server_status_refreshing: Arc::new(AtomicBool::new(false)),
@@ -1246,74 +1212,8 @@ impl PbMapperState {
         });
     }
 
-    // Return cached status immediately so UI threads stay responsive; refresh happens in background.
     pub async fn get_server_status_detail(&self) -> Result<ServerStatusDetail, String> {
-        let should_refresh = {
-            let last_update = self.server_status_last_update.read().await;
-            cache_is_stale(*last_update, SERVER_STATUS_TTL)
-        };
-
-        if should_refresh {
-            self.schedule_server_status_refresh();
-        }
-
-        let cache = self.server_status_cache.read().await;
-        Ok(cache.clone())
-    }
-
-    fn schedule_server_status_refresh(&self) {
-        if self.server_status_refreshing.swap(true, Ordering::AcqRel) {
-            return;
-        }
-
-        let server_addr = self.config.server_address.clone();
-        let cache = self.server_status_cache.clone();
-        let last_update = self.server_status_last_update.clone();
-        let refreshing = self.server_status_refreshing.clone();
-
-        tokio::spawn(async move {
-            let detail = match tokio::time::timeout(
-                STATUS_REFRESH_TIMEOUT,
-                fetch_real_status_with_addr(&server_addr),
-            )
-            .await
-            {
-                Ok(Ok((services, remote_id_data))) => ServerStatusDetail {
-                    server_available: true,
-                    registered_services: services,
-                    server_map: remote_id_data.server_map,
-                    active_connections: remote_id_data.active,
-                    idle_connections: remote_id_data.idle,
-                },
-                Ok(Err(e)) => {
-                    tracing::warn!("Failed to fetch server status: {}", e);
-                    ServerStatusDetail {
-                        server_available: false,
-                        registered_services: Vec::new(),
-                        server_map: String::new(),
-                        active_connections: String::new(),
-                        idle_connections: String::new(),
-                    }
-                }
-                Err(_) => ServerStatusDetail {
-                    server_available: false,
-                    registered_services: Vec::new(),
-                    server_map: String::new(),
-                    active_connections: String::new(),
-                    idle_connections: String::new(),
-                },
-            };
-
-            {
-                let mut cache = cache.write().await;
-                *cache = detail;
-            }
-            {
-                let mut last_update = last_update.write().await;
-                *last_update = Some(Instant::now());
-            }
-            refreshing.store(false, Ordering::Release);
-        });
+        self.force_refresh_server_status().await
     }
 
     /// Perform a blocking status refresh — waits for the actual network result
@@ -1355,16 +1255,6 @@ impl PbMapperState {
                 }
             }
         };
-
-        // Update cache so subsequent non-blocking reads benefit too.
-        {
-            let mut cache = self.server_status_cache.write().await;
-            *cache = detail.clone();
-        }
-        {
-            let mut last_update = self.server_status_last_update.write().await;
-            *last_update = Some(Instant::now());
-        }
 
         Ok(detail)
     }

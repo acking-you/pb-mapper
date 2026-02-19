@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.9] - 2026-02-19
+- Removed redundant server-status caching layer from FFI state, eliminating stale-cache UI inconsistencies.
+- Removed blocking "server unavailable" banners from service registration, client connection, and status monitoring views so pages remain fully operable regardless of server reachability.
+- Simplified client connection view to allow manual service key input alongside dropdown selection.
+- Cleaned up automatic server-status retry loops that caused unnecessary background network traffic on mobile.
+
 ## [0.2.8] - 2026-02-19
 - Fixed mobile UI status check instability where server showed as unreachable intermittently despite correct configuration.
 - Added synchronous `forceRefreshServerStatus` FFI endpoint that waits for actual network result instead of returning stale cache.
