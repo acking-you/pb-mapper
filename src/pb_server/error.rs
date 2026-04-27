@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use snafu::Snafu;
 
@@ -206,11 +206,29 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: kanal::ReceiveError,
     },
+    #[snafu(display(
+        "timed out waiting for subcribe response with `key:{key}` `client_id:{conn_id}` after \
+         {timeout:?}"
+    ))]
+    ClientConnRecvSubcribeRespTimeout {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+        timeout: Duration,
+    },
     #[snafu(display("receive server stream error with `key:{key}` `client_id:{conn_id}`"))]
     ClientConnRecvStream {
         key: Arc<str>,
         conn_id: RemoteConnId,
         source: kanal::ReceiveError,
+    },
+    #[snafu(display(
+        "timed out waiting for server stream with `key:{key}` `client_id:{conn_id}` after \
+         {timeout:?}"
+    ))]
+    ClientConnRecvStreamTimeout {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+        timeout: Duration,
     },
     #[snafu(display(
         "received conn task not match! we expected subcribe response.  `key:{key}` \

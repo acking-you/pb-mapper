@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use snafu::ResultExt;
 use tokio::net::TcpStream;
-use tokio::time::Instant;
+use tokio::time::{timeout, Instant};
 use tracing::instrument;
 
 use super::error::{
-    ClientConnEncodeSubcribeRespSnafu, ClientConnRecvStreamSnafu, ClientConnRecvSubcribeRespSnafu,
+    ClientConnEncodeSubcribeRespSnafu, ClientConnRecvStreamSnafu, ClientConnRecvStreamTimeoutSnafu,
+    ClientConnRecvSubcribeRespSnafu, ClientConnRecvSubcribeRespTimeoutSnafu,
     ClientConnSendDeregisterClientSnafu, ClientConnSendSubcribeSnafu,
     ClientConnStreamRespNotMatchSnafu, ClientConnSubcribeRespNotMatchSnafu,
     ClientConnWriteSubcribeRespSnafu,
@@ -58,6 +61,7 @@ impl<'a> Drop for ClientConnGuard<'a> {
 }
 
 const DEFAULT_CLIENT_CHAN_CAP: usize = 32;
+const CLIENT_CONN_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 1. Request server stream
 /// 2. Forward the traffic between client stream and server stream
@@ -190,10 +194,18 @@ async fn get_server_stream(
             conn_id,
         })?;
 
-    let resp = rx.recv().await.context(ClientConnRecvSubcribeRespSnafu {
-        key: key.clone(),
-        conn_id,
-    })?;
+    let resp = match timeout(CLIENT_CONN_CONTROL_TIMEOUT, rx.recv()).await {
+        Ok(resp) => resp.context(ClientConnRecvSubcribeRespSnafu {
+            key: key.clone(),
+            conn_id,
+        })?,
+        Err(_) => ClientConnRecvSubcribeRespTimeoutSnafu {
+            key: key.clone(),
+            conn_id,
+            timeout: CLIENT_CONN_CONTROL_TIMEOUT,
+        }
+        .fail()?,
+    };
 
     // Note: A key will be generated for encrypting messages that are forwarded, and this key will
     // apply to all endpoints.
@@ -216,10 +228,18 @@ async fn get_server_stream(
         .fail()?,
     };
 
-    let resp = rx.recv().await.context(ClientConnRecvStreamSnafu {
-        key: key.clone(),
-        conn_id,
-    })?;
+    let resp = match timeout(CLIENT_CONN_CONTROL_TIMEOUT, rx.recv()).await {
+        Ok(resp) => resp.context(ClientConnRecvStreamSnafu {
+            key: key.clone(),
+            conn_id,
+        })?,
+        Err(_) => ClientConnRecvStreamTimeoutSnafu {
+            key: key.clone(),
+            conn_id,
+            timeout: CLIENT_CONN_CONTROL_TIMEOUT,
+        }
+        .fail()?,
+    };
 
     if let ConnTask::StreamResp { server_id, stream } = resp {
         // response message to client to indicate that subcribe handling has finished
