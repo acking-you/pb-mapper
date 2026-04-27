@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.10] - 2026-04-28
+- Fixed server-side connection ID recycling so stale or duplicate deregistration cannot return active IDs to the idle pool.
+- Prevented active client/control connection IDs from being reused while still registered in the task manager.
+- Added control-plane timeouts for subscribe and stream-establishment handshakes so failed tunnel setup cannot leave downstream requests waiting indefinitely.
+- Added regression coverage for duplicate connection deregistration and active-ID reuse prevention.
+
 ## [0.2.9] - 2026-02-19
 - Removed redundant server-status caching layer from FFI state, eliminating stale-cache UI inconsistencies.
 - Removed blocking "server unavailable" banners from service registration, client connection, and status monitoring views so pages remain fully operable regardless of server reachability.
