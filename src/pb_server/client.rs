@@ -149,6 +149,13 @@ pub async fn handle_client_conn(
         match get_server_stream(&mut conn, key.clone(), conn_id, task_sender.clone()).await {
             Ok(res) => res,
             Err(e) => {
+                tracing::warn!(
+                    event = "client_stream_setup_failed",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    error = %e,
+                    "failed to prepare server stream for client connection"
+                );
                 guard.deregister().await;
                 return Err(e);
             }
@@ -159,8 +166,14 @@ pub async fn handle_client_conn(
         let duration = Instant::now() - prev_time;
 
         tracing::info!(
-            "[time cost:{duration:?}] get server stream ok! we will start forward traffic. \
-             key:{key}   server:{server_id}<->client:{conn_id}"
+            event = "client_stream_setup_finished",
+            key = %key,
+            client_conn_id = %conn_id,
+            server_conn_id = %server_id,
+            setup_elapsed_ms = duration.as_millis(),
+            is_datagram,
+            codec_enabled = codec_key.is_some(),
+            "server stream is ready; start forwarding client traffic"
         );
 
         let (mut client_reader, mut client_writer) = conn.split();
@@ -235,6 +248,23 @@ pub async fn handle_client_conn(
         Ok(())
     }
     .await;
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "client_forward_finished",
+            key = %key,
+            client_conn_id = %conn_id,
+            server_conn_id = %server_id,
+            "client forward finished"
+        ),
+        Err(e) => tracing::warn!(
+            event = "client_forward_failed",
+            key = %key,
+            client_conn_id = %conn_id,
+            server_conn_id = %server_id,
+            error = %e,
+            "client forward finished with error"
+        ),
+    }
     guard.deregister().await;
     result
 }
@@ -249,7 +279,11 @@ async fn send_server_deregister(
         .await
         .is_err()
     {
-        tracing::debug!("skip server deregister because manager channel is closed");
+        tracing::debug!(
+            event = "server_deregister_skipped",
+            conn_id = %conn_id,
+            "skip server deregister because manager channel is closed"
+        );
     }
 }
 
@@ -272,6 +306,12 @@ async fn get_server_stream(
             key: key.clone(),
             conn_id,
         })?;
+    tracing::debug!(
+        event = "subscribe_task_sent",
+        key = %key,
+        client_conn_id = %conn_id,
+        "subscribe task sent to manager"
+    );
 
     let resp = match timeout(CLIENT_CONN_CONTROL_TIMEOUT, rx.recv()).await {
         Ok(resp) => resp.context(ClientConnRecvSubcribeRespSnafu {
@@ -299,14 +339,33 @@ async fn get_server_stream(
             } else {
                 None
             };
+            tracing::debug!(
+                event = "subscribe_response_received",
+                key = %key,
+                client_conn_id = %conn_id,
+                server_conn_id = %server_conn_id,
+                need_codec,
+                is_datagram,
+                codec_enabled = codec_key.is_some(),
+                "subscribe response received from manager"
+            );
             (codec_key, is_datagram, server_conn_id)
         }
-        ConnTask::SubcribeFailed { reason } => ClientConnSubcribeFailedSnafu {
-            key: key.clone(),
-            conn_id,
-            reason,
+        ConnTask::SubcribeFailed { reason } => {
+            tracing::warn!(
+                event = "subscribe_failed",
+                key = %key,
+                client_conn_id = %conn_id,
+                reason = %reason,
+                "subscribe failed before stream forwarding"
+            );
+            ClientConnSubcribeFailedSnafu {
+                key: key.clone(),
+                conn_id,
+                reason,
+            }
+            .fail()?
         }
-        .fail()?,
         _ => ClientConnSubcribeRespNotMatchSnafu {
             key: key.clone(),
             conn_id,
@@ -320,6 +379,14 @@ async fn get_server_stream(
             conn_id,
         })?,
         Err(_) => {
+            tracing::warn!(
+                event = "server_stream_wait_timeout",
+                key = %key,
+                client_conn_id = %conn_id,
+                server_conn_id = %server_conn_id,
+                timeout = ?CLIENT_CONN_CONTROL_TIMEOUT,
+                "timed out waiting for server stream"
+            );
             send_server_deregister(&task_sender, key.clone(), server_conn_id).await;
             ClientConnRecvStreamTimeoutSnafu {
                 key: key.clone(),
@@ -351,6 +418,15 @@ async fn get_server_stream(
                 key: key.clone(),
                 conn_id,
             })?;
+        tracing::info!(
+            event = "subscribe_response_written",
+            key = %key,
+            client_conn_id = %conn_id,
+            server_conn_id = %server_id,
+            is_datagram,
+            codec_enabled = codec_key.is_some(),
+            "subscribe response written to client"
+        );
         Ok((stream, server_id, codec_key, is_datagram))
     } else {
         ClientConnStreamRespNotMatchSnafu {

@@ -68,6 +68,16 @@ impl<
     }
 
     #[inline]
+    pub fn active_conn_count(&self) -> usize {
+        self.active_conn_map.len()
+    }
+
+    #[inline]
+    pub fn idle_conn_count(&self) -> usize {
+        self.idle_conn_id_list.len()
+    }
+
+    #[inline]
     pub fn deregister_conn(&mut self, conn_id: ConnIdType) -> bool {
         if self.active_conn_map.remove(&conn_id).is_none() {
             return false;
@@ -217,5 +227,19 @@ mod tests {
 
         assert_eq!(manager.get_conn_id(std::iter::empty()), TestConnId(1));
         assert!(manager.get_conn_sender_chan(&TestConnId(0)).is_some());
+    }
+
+    #[test]
+    fn exposes_active_and_idle_connection_counts() {
+        let mut manager = manager();
+        manager.sign_up_conn_sender(TestConnId(0), sender());
+
+        assert_eq!(manager.active_conn_count(), 1);
+        assert_eq!(manager.idle_conn_count(), 0);
+
+        assert!(manager.deregister_conn(TestConnId(0)));
+
+        assert_eq!(manager.active_conn_count(), 0);
+        assert_eq!(manager.idle_conn_count(), 1);
     }
 }

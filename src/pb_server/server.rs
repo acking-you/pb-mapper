@@ -156,6 +156,14 @@ pub async fn handle_server_conn(
             key: key.clone(),
             conn_id,
         })?;
+    tracing::debug!(
+        event = "server_register_task_sent",
+        key = %key,
+        conn_id = %conn_id,
+        need_codec,
+        is_datagram,
+        "server register task sent to manager"
+    );
 
     let mut guard = ServerConnGuard::new(key.clone(), conn_id, task_sender.clone());
     let result = async {
@@ -174,6 +182,12 @@ pub async fn handle_server_conn(
             }
             .fail()?
         }
+        tracing::debug!(
+            event = "server_register_ack_received",
+            key = %key,
+            conn_id = %conn_id,
+            "server register ack received from manager"
+        );
 
         let (mut reader, mut writer) = conn.split();
         let mut msg_writer = get_header_msg_writer(&mut writer)
@@ -195,6 +209,14 @@ pub async fn handle_server_conn(
                     key: key.clone(),
                     conn_id,
                 })?;
+            tracing::info!(
+                event = "server_register_response_written",
+                key = %key,
+                conn_id = %conn_id,
+                need_codec,
+                is_datagram,
+                "server register response written to local server"
+            );
         }
         let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
         let forward_handle = tokio::spawn(async move {
@@ -231,7 +253,13 @@ pub async fn handle_server_conn(
                 }
                 // handle timeout
                 _ = tokio::time::sleep(SERVER_TIMEOUT) =>{
-                    tracing::error!("Timeout trigger:{SERVER_TIMEOUT:?}");
+                    tracing::error!(
+                        event = "server_conn_idle_timeout",
+                        key = %key,
+                        conn_id = %conn_id,
+                        timeout = ?SERVER_TIMEOUT,
+                        "server connection idle timeout triggered"
+                    );
                     break Ok(());
                 }
             }
@@ -240,6 +268,21 @@ pub async fn handle_server_conn(
         result
     }
     .await;
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "server_conn_finished",
+            key = %key,
+            conn_id = %conn_id,
+            "server connection handler finished"
+        ),
+        Err(e) => tracing::warn!(
+            event = "server_conn_failed",
+            key = %key,
+            conn_id = %conn_id,
+            error = %e,
+            "server connection handler finished with error"
+        ),
+    }
     guard.deregister().await;
     result
 }
@@ -255,13 +298,25 @@ async fn handle_ping_pong_check<T: MessageWriter>(
     let req = match PbServerRequest::decode(msg) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("We decode ping request error! detail:{e}");
+            tracing::error!(
+                event = "ping_decode_failed",
+                key = %key,
+                conn_id = %conn_id,
+                error = %e,
+                "failed to decode ping request"
+            );
             return Ok(());
         }
     };
 
     if !matches!(req, PbServerRequest::Ping) {
-        tracing::error!("We expected `Ping`,but got `{req:?}`");
+        tracing::error!(
+            event = "ping_unexpected_message",
+            key = %key,
+            conn_id = %conn_id,
+            request = ?req,
+            "expected ping request"
+        );
         return Ok(());
     }
 
@@ -269,11 +324,23 @@ async fn handle_ping_pong_check<T: MessageWriter>(
     let resp = match LocalServer::Pong.encode() {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("We encode pong response error! detail:{e}");
+            tracing::error!(
+                event = "pong_encode_failed",
+                key = %key,
+                conn_id = %conn_id,
+                error = %e,
+                "failed to encode pong response"
+            );
             return Ok(());
         }
     };
 
+    tracing::debug!(
+        event = "ping_received",
+        key = %key,
+        conn_id = %conn_id,
+        "received ping from local server"
+    );
     writer
         .write_msg(&resp)
         .await
@@ -289,15 +356,22 @@ async fn handle_stream_req<T: MessageWriter>(
 ) -> Result<()> {
     // TODO: handle stop task
     // FIXME: Maybe it can be parallelized here?
-    if let ConnTask::StreamReq(conn_id) = req {
+    if let ConnTask::StreamReq(client_conn_id) = req {
         let msg = LocalServer::Stream {
-            client_id: conn_id.into(),
+            client_id: client_conn_id.into(),
         }
         .encode()
         .context(ServerConnDecodeStreamRequestSnafu {
             key: key.clone(),
             conn_id,
         })?;
+        tracing::debug!(
+            event = "stream_request_written_to_local_server",
+            key = %key,
+            server_conn_id = %conn_id,
+            client_conn_id = %client_conn_id,
+            "writing stream request to local server"
+        );
         writer
             .write_msg(&msg)
             .await
@@ -306,7 +380,13 @@ async fn handle_stream_req<T: MessageWriter>(
                 conn_id,
             })?
     } else {
-        tracing::error!("We expected ConnTask::StreamReq,but got `{req:?}`");
+        tracing::error!(
+            event = "unexpected_server_conn_task",
+            key = %key,
+            server_conn_id = %conn_id,
+            task = ?req,
+            "expected stream request task"
+        );
     }
     Ok(())
 }

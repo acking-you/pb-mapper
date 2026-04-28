@@ -176,6 +176,15 @@ where
         "[connect remote stream]",
         Err(Status::ConnectRemote)
     );
+    tracing::info!(
+        event = "local_server_connected_remote",
+        key = %key,
+        local_addr = %local_addr,
+        remote_addr = %remote_addr,
+        need_codec,
+        is_datagram,
+        "local server connected to pb server"
+    );
 
     if *IS_KEEPALIVE {
         snafu_error_handle!(
@@ -246,7 +255,14 @@ where
         let PbConnResponse::Register(conn_id) = resp else {
             snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail())
         };
-        tracing::info!("Server Register Ok: key:{key}, conn_id:{conn_id}");
+        tracing::info!(
+            event = "local_server_registered",
+            key = %key,
+            conn_id = %conn_id,
+            local_addr = %local_addr,
+            remote_addr = %remote_addr,
+            "local server registered with pb server"
+        );
 
         // Notify external systems that connection is established
         if let Some(ref callback) = status_callback {
@@ -280,15 +296,33 @@ where
                     "[send ping]",
                     Err(Status::SendPing)
                 );
-                tracing::info!("ping trigger:{PING_INTERVAL:?}");
+                tracing::debug!(
+                    event = "local_server_ping_sent",
+                    key = %key,
+                    conn_id = %conn_id,
+                    interval = ?PING_INTERVAL,
+                    "local server ping sent"
+                );
             }
             // handle timeout
             _ = tokio::time::sleep_until(timeout) =>{
                 if timeout_count.validate(){
-                    tracing::info!("[timeout retry] local retry count:{}",timeout_count.count());
+                    tracing::info!(
+                        event = "local_server_timeout_retry",
+                        key = %key,
+                        conn_id = %conn_id,
+                        retry_count = timeout_count.count(),
+                        "local server heartbeat timeout retry"
+                    );
                     timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
                 }else{
-                    tracing::warn!("Timeout traggier! `{timeout:?}`");
+                    tracing::warn!(
+                        event = "local_server_timeout_exhausted",
+                        key = %key,
+                        conn_id = %conn_id,
+                        deadline = ?timeout,
+                        "local server heartbeat timeout exhausted"
+                    );
                     return Err(Status::Timeout);
                 }
 
@@ -339,6 +373,13 @@ where
 
     match req {
         LocalServer::Stream { client_id } => {
+            tracing::debug!(
+                event = "local_server_stream_request_received",
+                key = %key,
+                server_conn_id = %conn_id,
+                client_conn_id = client_id,
+                "local server received stream request"
+            );
             let key = key.clone();
             tokio::spawn(async move {
                 snafu_error_handle!(
@@ -348,7 +389,12 @@ where
         }
         // got pong response
         LocalServer::Pong => {
-            tracing::info!("got pong message! we will reset timeout");
+            tracing::debug!(
+                event = "local_server_pong_received",
+                key = %key,
+                server_conn_id = %conn_id,
+                "local server received pong"
+            );
         }
     }
     timeout_ctx.timeout_count.reset();

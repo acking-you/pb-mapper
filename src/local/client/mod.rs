@@ -72,6 +72,14 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
     let mut timeout_count = TimeoutCount::new(CLIENT_RETRY_TIMES);
 
     loop {
+        tracing::debug!(
+            event = "client_probe_start",
+            key = %key,
+            local_addr = %local_addr,
+            remote_addr = %remote_addr,
+            retry_count = timeout_count.count(),
+            "client probing remote server"
+        );
         // Notify that we're trying to connect
         if let Some(ref callback) = status_callback {
             if timeout_count.count() > 0 {
@@ -82,7 +90,13 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         let mut stream = match each_addr(remote_addr, TcpStream::connect).await {
             Ok(stream) => stream,
             Err(e) => {
-                tracing::error!("Failed to connect to remote server: {}", e);
+                tracing::error!(
+                    event = "client_remote_connect_failed",
+                    key = %key,
+                    remote_addr = %remote_addr,
+                    error = %e,
+                    "failed to connect to remote server"
+                );
                 if !timeout_count.validate() {
                     if let Some(ref callback) = status_callback {
                         callback("failed");
@@ -98,7 +112,13 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         let status_resp = match get_status(&mut stream, PbConnStatusReq::Keys).await {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::error!("Failed to get status from server: {}", e);
+                tracing::error!(
+                    event = "client_status_probe_failed",
+                    key = %key,
+                    remote_addr = %remote_addr,
+                    error = %e,
+                    "failed to get status from server"
+                );
                 if !timeout_count.validate() {
                     if let Some(ref callback) = status_callback {
                         callback("failed");
@@ -114,7 +134,13 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         let keys = if let PbConnStatusResp::Keys(keys) = &status_resp {
             keys
         } else {
-            tracing::error!("We expected status response,but got {status_resp:?}");
+            tracing::error!(
+                event = "client_status_unexpected_response",
+                key = %key,
+                remote_addr = %remote_addr,
+                response = ?status_resp,
+                "expected keys status response"
+            );
             if !timeout_count.validate() {
                 if let Some(ref callback) = status_callback {
                     callback("failed");
@@ -127,7 +153,13 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         };
 
         if !keys.iter().any(|k| k == key.as_ref()) {
-            tracing::error!("Not valid key:{key},valid keys:{keys:?}");
+            tracing::error!(
+                event = "client_key_not_registered",
+                key = %key,
+                remote_addr = %remote_addr,
+                valid_keys = ?keys,
+                "client key is not registered on remote server"
+            );
             if !timeout_count.validate() {
                 if let Some(ref callback) = status_callback {
                     callback("failed");
@@ -143,7 +175,13 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         // The status probe is one-shot. Close it before the long-lived listener starts,
         // otherwise the server closes its side while this process keeps a stale fd open.
         drop(stream);
-        tracing::info!("Remote server key:{key} is available; local listener will start");
+        tracing::info!(
+            event = "client_key_available",
+            key = %key,
+            local_addr = %local_addr,
+            remote_addr = %remote_addr,
+            "remote server key is available; local listener will start"
+        );
 
         // Notify successful connection
         if let Some(ref callback) = status_callback {
@@ -159,7 +197,13 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         {
             Ok(listener) => listener,
             Err(e) => {
-                tracing::error!("Failed to bind local listener: {}", e);
+                tracing::error!(
+                    event = "client_local_bind_failed",
+                    key = %key,
+                    local_addr = %local_addr,
+                    error = %e,
+                    "failed to bind local listener"
+                );
                 if !timeout_count.validate() {
                     if let Some(ref callback) = status_callback {
                         callback("failed");
@@ -173,13 +217,27 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         };
 
         loop {
-            let (stream, _) = match listener.accept().await.context(AcceptLocalStreamSnafu) {
+            let (stream, peer_addr) = match listener.accept().await.context(AcceptLocalStreamSnafu)
+            {
                 Ok(result) => result,
                 Err(e) => {
-                    tracing::error!("Failed to accept local stream: {}", e);
+                    tracing::error!(
+                        event = "client_local_accept_failed",
+                        key = %key,
+                        local_addr = %local_addr,
+                        error = %e,
+                        "failed to accept local stream"
+                    );
                     break; // Break inner loop to retry connection
                 }
             };
+            tracing::debug!(
+                event = "client_local_stream_accepted",
+                key = %key,
+                local_addr = %local_addr,
+                peer_addr = ?peer_addr,
+                "accepted local client stream"
+            );
             let key = key.clone();
             tokio::spawn(async move {
                 snafu_error_handle!(handle_local_stream(stream, key, remote_addr).await);

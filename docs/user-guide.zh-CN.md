@@ -149,6 +149,7 @@ flutter run
 
 - `PB_MAPPER_SERVER`：CLI 默认服务器地址
 - `PB_MAPPER_KEEP_ALIVE`：启用 TCP keep-alive（设置为 `ON`）
+- `PB_MAPPER_LOG_FORMAT`：tracing 输出格式，可选 `pretty`（默认）、`compact` 或 `json`
 - `PB_MAPPER_CONTROL_IO_TIMEOUT`：控制面握手卡住后的关闭时间，默认 `30s`
 - `PB_MAPPER_TUNNEL_IDLE_TIMEOUT`：TCP 隧道双向完全空闲后的关闭时间，默认 `1h`
 - `PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT`：TCP 隧道半关闭后另一方向无数据时的关闭时间，默认 `60s`

@@ -5,7 +5,7 @@ use std::time::Duration;
 use clap::{Subcommand, ValueEnum};
 use snafu::ResultExt;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{fmt, Layer};
+use tracing_subscriber::{fmt, EnvFilter, Layer};
 
 use super::error::{CfgPbServerEnvNotExistSnafu, Result};
 
@@ -160,7 +160,36 @@ const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
 /// Env to control whether the keep-alive option of TCP is enabled
 pub const PB_MAPPER_KEEP_ALIVE: &str = "PB_MAPPER_KEEP_ALIVE";
 pub const PB_MAPPER_CONTROL_IO_TIMEOUT: &str = "PB_MAPPER_CONTROL_IO_TIMEOUT";
+pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
 const DEFAULT_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    Pretty,
+    Compact,
+    Json,
+}
+
+pub fn parse_log_format(value: &str) -> LogFormat {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "compact" => LogFormat::Compact,
+        "json" => LogFormat::Json,
+        _ => LogFormat::Pretty,
+    }
+}
+
+fn log_format_from_env() -> LogFormat {
+    std::env::var(PB_MAPPER_LOG_FORMAT)
+        .ok()
+        .map(|value| parse_log_format(&value))
+        .unwrap_or(LogFormat::Pretty)
+}
+
+fn default_env_filter() -> EnvFilter {
+    EnvFilter::builder()
+        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+        .from_env_lossy()
+}
 
 pub fn parse_duration(value: &str) -> Option<Duration> {
     let value = value.trim();
@@ -242,19 +271,53 @@ pub async fn get_pb_mapper_server_async(addr: Option<&str>) -> Result<SocketAddr
 pub fn init_tracing() {
     static INIT_TRACING: Once = Once::new();
     INIT_TRACING.call_once(|| {
-        let subscriber = tracing_subscriber::registry().with(
-            fmt::layer()
-                .pretty()
-                .with_writer(std::io::stdout)
-                .with_filter(
-                    tracing_subscriber::EnvFilter::builder()
-                        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
-                        .from_env_lossy(),
-                ),
-        );
+        let result = match log_format_from_env() {
+            LogFormat::Pretty => {
+                let subscriber = tracing_subscriber::registry().with(
+                    fmt::layer()
+                        .pretty()
+                        .with_writer(std::io::stdout)
+                        .with_filter(default_env_filter()),
+                );
+                tracing::subscriber::set_global_default(subscriber)
+            }
+            LogFormat::Compact => {
+                let subscriber = tracing_subscriber::registry().with(
+                    fmt::layer()
+                        .compact()
+                        .with_writer(std::io::stdout)
+                        .with_filter(default_env_filter()),
+                );
+                tracing::subscriber::set_global_default(subscriber)
+            }
+            LogFormat::Json => {
+                let subscriber = tracing_subscriber::registry().with(
+                    fmt::layer()
+                        .json()
+                        .flatten_event(true)
+                        .with_writer(std::io::stdout)
+                        .with_filter(default_env_filter()),
+                );
+                tracing::subscriber::set_global_default(subscriber)
+            }
+        };
 
-        if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
+        if let Err(e) = result {
             eprintln!("failed to initialize tracing subscriber: {e}");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_log_format_accepts_supported_values() {
+        assert_eq!(parse_log_format("pretty"), LogFormat::Pretty);
+        assert_eq!(parse_log_format("compact"), LogFormat::Compact);
+        assert_eq!(parse_log_format("json"), LogFormat::Json);
+        assert_eq!(parse_log_format(" JSON "), LogFormat::Json);
+        assert_eq!(parse_log_format("unknown"), LogFormat::Pretty);
+    }
 }

@@ -3,6 +3,7 @@ mod error;
 mod server;
 mod status;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use error::Result;
@@ -35,7 +36,10 @@ use crate::{snafu_error_get_or_continue, snafu_error_handle};
 use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay};
 
 pub enum ManagerTask {
-    Accept(TcpStream),
+    Accept {
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+    },
     Register {
         key: ImutableKey,
         conn_id: RemoteConnId,
@@ -118,15 +122,25 @@ fn remove_server_conn(
     server_conn_map: &mut ServerConnMap,
     key: &ImutableKey,
     conn_id: RemoteConnId,
-) {
+) -> bool {
     if let Some(ids) = server_conn_map.get_mut(key) {
         if let Some(idx) = ids.iter().position(|info| info.conn_id == conn_id) {
             ids.remove(idx);
-        }
-        if ids.is_empty() {
-            server_conn_map.remove(key);
+            if ids.is_empty() {
+                server_conn_map.remove(key);
+            }
+            return true;
         }
     }
+    false
+}
+
+fn registered_server_conn_count(server_conn_map: &ServerConnMap) -> usize {
+    server_conn_map.values().map(Vec::len).sum()
+}
+
+fn service_conn_count(server_conn_map: &ServerConnMap, key: &ImutableKey) -> usize {
+    server_conn_map.get(key).map(Vec::len).unwrap_or_default()
 }
 
 async fn send_subcribe_failed(
@@ -143,7 +157,13 @@ async fn send_subcribe_failed(
         .await
         .is_err()
     {
-        tracing::debug!("subcribe failure receiver dropped, key:{key}, conn_id:{conn_id}");
+        tracing::debug!(
+            event = "subscribe_failure_receiver_dropped",
+            key = %key,
+            client_conn_id = %conn_id,
+            reason = %reason,
+            "subscribe failure receiver dropped"
+        );
     }
 }
 
@@ -188,6 +208,13 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
     let mut server_conn_map = ServerConnMap::new();
 
     let listener = TcpListener::bind(addr).await?;
+    let listen_addr = listener.local_addr()?;
+    tracing::info!(
+        event = "pb_server_listening",
+        listen_addr = %listen_addr,
+        control_timeout = ?control_io_timeout(),
+        "pb-mapper server is listening"
+    );
 
     let task_sender = manager.get_task_sender();
     let shutdown_token_clone = shutdown_token.clone();
@@ -254,6 +281,14 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
 
                 // Send response back (ignore if receiver dropped)
                 let _ = response_sender.send(status_info);
+                tracing::debug!(
+                    event = "status_query_served",
+                    registered_services = server_conn_map.len(),
+                    server_connections = total_connections,
+                    active_connections = manager.active_conn_count(),
+                    idle_connections = manager.idle_conn_count(),
+                    "server status query served"
+                );
             }
             ManagerTask::Status {
                 conn_sender,
@@ -278,33 +313,81 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     .map_err(|_| kanal::SendError(()))
                     .context(TaskCenterSendStatusRespSnafu { conn_id }));
             }
-            ManagerTask::Accept(stream) => {
+            ManagerTask::Accept { stream, peer_addr } => {
                 let conn_id = manager.get_conn_id(
                     server_conn_map
                         .iter()
                         .flat_map(|(_, ids)| ids.iter().map(|v| v.conn_id)),
                 );
+                tracing::info!(
+                    event = "conn_accepted",
+                    conn_id = %conn_id,
+                    peer_addr = %peer_addr,
+                    registered_services = server_conn_map.len(),
+                    server_connections = registered_server_conn_count(&server_conn_map),
+                    active_connections = manager.active_conn_count(),
+                    idle_connections = manager.idle_conn_count(),
+                    "accepted pb connection"
+                );
                 let manager_task_sender = manager.get_task_sender();
                 tokio::spawn(async move {
-                    snafu_error_handle!(handle_conn(conn_id, manager_task_sender, stream).await);
+                    snafu_error_handle!(
+                        handle_conn(conn_id, peer_addr, manager_task_sender, stream).await
+                    );
                 });
             }
             ManagerTask::DeRegisterServerConn { key, conn_id } => {
-                remove_server_conn(&mut server_conn_map, &key, conn_id);
-                manager.deregister_conn(conn_id);
-                tracing::info!("DeRegister Server ok! `{key}:{conn_id}`");
+                let removed_from_service_map =
+                    remove_server_conn(&mut server_conn_map, &key, conn_id);
+                let removed_from_active_map = manager.deregister_conn(conn_id);
+                tracing::info!(
+                    event = "server_conn_deregistered",
+                    key = %key,
+                    conn_id = %conn_id,
+                    removed_from_service_map,
+                    removed_from_active_map,
+                    registered_services = server_conn_map.len(),
+                    server_connections = registered_server_conn_count(&server_conn_map),
+                    active_connections = manager.active_conn_count(),
+                    idle_connections = manager.idle_conn_count(),
+                    "server connection deregistered"
+                );
             }
             ManagerTask::DeRegisterClientConn {
                 server_id,
                 client_id,
             } => {
-                if let Some(server_id) = server_id {
-                    manager.deregister_conn(server_id);
+                let removed_server_conn = if let Some(server_id) = server_id {
+                    manager.deregister_conn(server_id)
+                } else {
+                    false
+                };
+                let removed_client_conn = manager.deregister_conn(client_id);
+                if removed_server_conn || removed_client_conn {
+                    tracing::info!(
+                        event = "client_conn_deregistered",
+                        server_conn_id = ?server_id,
+                        client_conn_id = %client_id,
+                        removed_server_conn,
+                        removed_client_conn,
+                        registered_services = server_conn_map.len(),
+                        server_connections = registered_server_conn_count(&server_conn_map),
+                        active_connections = manager.active_conn_count(),
+                        idle_connections = manager.idle_conn_count(),
+                        "client connection deregistered"
+                    );
+                } else {
+                    tracing::debug!(
+                        event = "client_conn_deregister_skipped",
+                        server_conn_id = ?server_id,
+                        client_conn_id = %client_id,
+                        registered_services = server_conn_map.len(),
+                        server_connections = registered_server_conn_count(&server_conn_map),
+                        active_connections = manager.active_conn_count(),
+                        idle_connections = manager.idle_conn_count(),
+                        "client connection was already inactive"
+                    );
                 }
-                manager.deregister_conn(client_id);
-                tracing::info!(
-                    "DeRegister Client ok! `server:{server_id:?}` <-> `client:{client_id}`"
-                );
             }
             ManagerTask::Register {
                 key,
@@ -333,7 +416,19 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 }
 
                 // response registered ok
-                tracing::info!("Register Server ok! `{key}:{conn_id}`");
+                tracing::info!(
+                    event = "server_conn_registered",
+                    key = %key,
+                    conn_id = %conn_id,
+                    need_codec,
+                    is_datagram,
+                    service_connections = service_conn_count(&server_conn_map, &key),
+                    registered_services = server_conn_map.len(),
+                    server_connections = registered_server_conn_count(&server_conn_map),
+                    active_connections = manager.active_conn_count(),
+                    idle_connections = manager.idle_conn_count(),
+                    "server connection registered"
+                );
                 snafu_error_get_or_continue!(conn_sender
                     .send(ConnTask::RegisterResp)
                     .await
@@ -345,6 +440,13 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 server_id,
                 client_id,
             } => {
+                tracing::debug!(
+                    event = "stream_ready_for_client",
+                    server_conn_id = %server_id,
+                    client_conn_id = %client_id,
+                    active_connections = manager.active_conn_count(),
+                    "server stream ready for client"
+                );
                 let client_sender = snafu_error_get_or_continue!(manager
                     .get_conn_sender_chan(&client_id)
                     .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id }));
@@ -361,7 +463,12 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
             } => {
                 let Some(server_conn_id_list) = server_conn_map.get(&key).cloned() else {
                     tracing::warn!(
-                        "subcribe server conn key not exist, key:{key}, conn_id:{conn_id}"
+                        event = "subscribe_key_missing",
+                        key = %key,
+                        client_conn_id = %conn_id,
+                        registered_services = server_conn_map.len(),
+                        server_connections = registered_server_conn_count(&server_conn_map),
+                        "subscribe key is not registered"
                     );
                     send_subcribe_failed(
                         &conn_sender,
@@ -383,10 +490,15 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     let Some(server_conn_sender) = manager.get_conn_sender_chan(&server_conn_id)
                     else {
                         tracing::warn!(
-                            "subcribe server conn id not exist, key:{key}, server_id:{server_conn_id}"
+                            event = "subscribe_stale_server_conn",
+                            key = %key,
+                            client_conn_id = %conn_id,
+                            server_conn_id = %server_conn_id,
+                            reason = "sender_not_found",
+                            "subscribe skipped stale server connection"
                         );
                         remove_server_conn(&mut server_conn_map, &key, server_conn_id);
-                        manager.deregister_conn(server_conn_id);
+                        let _ = manager.deregister_conn(server_conn_id);
                         continue;
                     };
                     // 1. Send a request to get server stream
@@ -399,9 +511,17 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                             conn_id,
                         })
                     {
-                        tracing::error!("{}", snafu::Report::from_error(e));
+                        let report = snafu::Report::from_error(e);
+                        tracing::error!(
+                            event = "subscribe_stream_request_failed",
+                            key = %key,
+                            client_conn_id = %conn_id,
+                            server_conn_id = %server_conn_id,
+                            error = %report,
+                            "failed to send stream request to registered server"
+                        );
                         remove_server_conn(&mut server_conn_map, &key, server_conn_id);
-                        manager.deregister_conn(server_conn_id);
+                        let _ = manager.deregister_conn(server_conn_id);
                         continue;
                     }
                     // sign up client connection after a server accepted the stream request
@@ -420,19 +540,42 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                             conn_id,
                         })
                     {
-                        tracing::error!("{}", snafu::Report::from_error(e));
+                        let report = snafu::Report::from_error(e);
+                        tracing::error!(
+                            event = "subscribe_response_failed",
+                            key = %key,
+                            client_conn_id = %conn_id,
+                            server_conn_id = %server_conn_id,
+                            error = %report,
+                            "failed to send subscribe response to client"
+                        );
                         manager.deregister_conn(conn_id);
                         selected = true;
                         break;
                     }
                     tracing::info!(
-                                "Subcribe Server ok! \
-                                 key:{key},server_conn_id:{server_conn_id},client_conn_id:{conn_id}"
-                            );
+                        event = "subscribe_server_selected",
+                        key = %key,
+                        client_conn_id = %conn_id,
+                        server_conn_id = %server_conn_id,
+                        need_codec,
+                        is_datagram,
+                        service_connections = service_conn_count(&server_conn_map, &key),
+                        active_connections = manager.active_conn_count(),
+                        "selected server connection for client subscribe"
+                    );
                     selected = true;
                     break;
                 }
                 if !selected {
+                    tracing::warn!(
+                        event = "subscribe_no_usable_server_conn",
+                        key = %key,
+                        client_conn_id = %conn_id,
+                        registered_services = server_conn_map.len(),
+                        server_connections = registered_server_conn_count(&server_conn_map),
+                        "no usable server connection for subscribe"
+                    );
                     send_subcribe_failed(
                         &conn_sender,
                         &key,
@@ -462,23 +605,31 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
 async fn handle_listener(task_sender: ManagerTaskSender, listener: TcpListener) -> Result<()> {
     loop {
         let (stream, addr) = listener.accept().await.context(ServerListenSnafu)?;
-        tracing::info!("Accept new conn: {addr}");
+        tracing::debug!(
+            event = "tcp_conn_accepted",
+            peer_addr = %addr,
+            "accepted tcp connection"
+        );
         // set keepalive (optional) and nodelay
         if *IS_KEEPALIVE {
             snafu_error_handle!(set_tcp_keep_alive(&stream).context(TaskCenterSetKeepAliveSnafu));
         }
         snafu_error_handle!(set_tcp_nodelay(&stream), "remote stream set nodelay");
         task_sender
-            .send(ManagerTask::Accept(stream))
+            .send(ManagerTask::Accept {
+                stream,
+                peer_addr: addr,
+            })
             .await
             .map_err(|_| kanal::SendError(()))
             .context(TaskCenterSendListenerSnafu)?
     }
 }
 
-#[instrument(skip(manager_task_sender, conn))]
+#[instrument(skip(manager_task_sender, conn), fields(conn_id = %conn_id, peer_addr = %peer_addr))]
 async fn handle_conn(
     conn_id: RemoteConnId,
+    peer_addr: SocketAddr,
     manager_task_sender: ManagerTaskSender,
     mut conn: TcpStream,
 ) -> Result<()> {
@@ -490,6 +641,16 @@ async fn handle_conn(
             need_codec,
             is_datagram,
         } => {
+            tracing::info!(
+                event = "init_request",
+                request = "register",
+                conn_id = %conn_id,
+                peer_addr = %peer_addr,
+                key = %key,
+                need_codec,
+                is_datagram,
+                "received pb init request"
+            );
             handle_server_conn(
                 key.into(),
                 need_codec,
@@ -501,9 +662,26 @@ async fn handle_conn(
             .await?;
         }
         PbConnRequest::Subcribe { key } => {
+            tracing::info!(
+                event = "init_request",
+                request = "subscribe",
+                conn_id = %conn_id,
+                peer_addr = %peer_addr,
+                key = %key,
+                "received pb init request"
+            );
             handle_client_conn(key.into(), conn_id, manager_task_sender, conn).await?;
         }
         PbConnRequest::Stream { key, dst_id } => {
+            tracing::debug!(
+                event = "init_request",
+                request = "stream",
+                conn_id = %conn_id,
+                peer_addr = %peer_addr,
+                key = %key,
+                client_conn_id = dst_id,
+                "received pb init request"
+            );
             let key = ImutableKey::from(key);
             manager_task_sender
                 .send(ManagerTask::Stream {
@@ -516,6 +694,14 @@ async fn handle_conn(
                 .context(TaskCenterSendStreamRespToManagerSnafu { key, conn_id })?;
         }
         PbConnRequest::Status(status) => {
+            tracing::debug!(
+                event = "init_request",
+                request = "status",
+                conn_id = %conn_id,
+                peer_addr = %peer_addr,
+                status = ?status,
+                "received pb init request"
+            );
             handle_show_status(status, manager_task_sender, conn_id, conn).await?;
         }
     }

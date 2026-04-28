@@ -150,6 +150,7 @@ flutter run
 
 - `PB_MAPPER_SERVER`: default server address for the CLI
 - `PB_MAPPER_KEEP_ALIVE`: enable TCP keep-alive (set to `ON`)
+- `PB_MAPPER_LOG_FORMAT`: tracing output format, one of `pretty` (default), `compact`, or `json`
 - `PB_MAPPER_CONTROL_IO_TIMEOUT`: close stalled control-plane handshakes after this duration, default `30s`
 - `PB_MAPPER_TUNNEL_IDLE_TIMEOUT`: close a fully idle TCP tunnel after this duration, default `1h`
 - `PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT`: close a half-closed TCP tunnel after this idle duration, default `60s`
