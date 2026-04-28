@@ -140,7 +140,10 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         }
 
         drop(status_resp);
-        tracing::info!("Subscribe server:{key} successful!");
+        // The status probe is one-shot. Close it before the long-lived listener starts,
+        // otherwise the server closes its side while this process keeps a stale fd open.
+        drop(stream);
+        tracing::info!("Remote server key:{key} is available; local listener will start");
 
         // Notify successful connection
         if let Some(ref callback) = status_callback {

@@ -62,7 +62,9 @@ impl<'a> Drop for ServerConnGuard<'a> {
 }
 
 const DEFAULT_SERVER_CHAN_CAP: usize = 32 * 4;
-const SERVER_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
+// Must be greater than the local server ping interval (5 minutes). Equal values race
+// under scheduler/network jitter and can drop a healthy registration.
+const SERVER_TIMEOUT: Duration = Duration::from_secs(60 * 11);
 
 /// Maintaining a connection to the server.
 /// This connection is used to send channel request
@@ -252,6 +254,13 @@ mod tests {
     use std::time::Duration;
 
     use tokio::time::Instant;
+
+    use super::SERVER_TIMEOUT;
+
+    #[test]
+    fn server_timeout_has_slack_over_local_server_ping_interval() {
+        assert!(SERVER_TIMEOUT > Duration::from_secs(5 * 60));
+    }
 
     #[tokio::test]
     async fn test_sleep() {
