@@ -6,13 +6,14 @@ use tokio::time::{timeout, Instant};
 use tracing::instrument;
 
 use super::error::{
-    ClientConnEncodeSubcribeRespSnafu, ClientConnRecvStreamSnafu, ClientConnRecvStreamTimeoutSnafu,
-    ClientConnRecvSubcribeRespSnafu, ClientConnRecvSubcribeRespTimeoutSnafu,
-    ClientConnSendSubcribeSnafu, ClientConnStreamRespNotMatchSnafu, ClientConnSubcribeFailedSnafu,
+    ClientConnEncodeSubcribeRespSnafu, ClientConnRecvStreamSnafu, ClientConnRecvSubcribeRespSnafu,
+    ClientConnRecvSubcribeRespTimeoutSnafu, ClientConnSendSubcribeSnafu,
+    ClientConnStreamRespNotMatchSnafu, ClientConnSubcribeFailedSnafu,
     ClientConnSubcribeRespNotMatchSnafu, ClientConnWriteSubcribeRespSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use crate::common::checksum::{gen_random_key, AesKeyType};
+use crate::common::config::{stream_ack_timeout, stream_ready_timeout};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{MessageSerializer, PbConnResponse};
 use crate::common::message::forward::{
@@ -269,22 +270,61 @@ pub async fn handle_client_conn(
     result
 }
 
-async fn send_server_deregister(
+async fn mark_server_suspect(
     task_sender: &ManagerTaskSender,
     key: ImutableKey,
     conn_id: RemoteConnId,
 ) {
     if task_sender
-        .send(ManagerTask::DeRegisterServerConn { key, conn_id })
+        .send(ManagerTask::MarkServerConnSuspect { key, conn_id })
         .await
         .is_err()
     {
         tracing::debug!(
-            event = "server_deregister_skipped",
+            event = "server_suspect_mark_skipped",
             conn_id = %conn_id,
-            "skip server deregister because manager channel is closed"
+            "skip server suspect mark because manager channel is closed"
         );
     }
+}
+
+async fn write_subscribe_response(
+    conn: &mut TcpStream,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+    server_id: RemoteConnId,
+    codec_key: Option<AesKeyType>,
+    is_datagram: bool,
+) -> Result<()> {
+    let mut msg_writer =
+        get_header_msg_writer(conn).context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
+    let msg = PbConnResponse::Subcribe {
+        codec_key,
+        client_id: conn_id.into(),
+        server_id: server_id.into(),
+    }
+    .encode()
+    .context(ClientConnEncodeSubcribeRespSnafu {
+        key: key.clone(),
+        conn_id,
+    })?;
+    msg_writer
+        .write_msg(&msg)
+        .await
+        .context(ClientConnWriteSubcribeRespSnafu {
+            key: key.clone(),
+            conn_id,
+        })?;
+    tracing::info!(
+        event = "subscribe_response_written",
+        key = %key,
+        client_conn_id = %conn_id,
+        server_conn_id = %server_id,
+        is_datagram,
+        codec_enabled = codec_key.is_some(),
+        "subscribe response written to client"
+    );
+    Ok(())
 }
 
 async fn get_server_stream(
@@ -294,145 +334,200 @@ async fn get_server_stream(
     task_sender: ManagerTaskSender,
 ) -> Result<(TcpStream, RemoteConnId, Option<AesKeyType>, bool)> {
     let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
-    task_sender
-        .send(ManagerTask::Subcribe {
-            key: key.clone(),
-            conn_id,
-            conn_sender: tx,
-        })
-        .await
-        .map_err(|_| kanal::SendError(()))
-        .context(ClientConnSendSubcribeSnafu {
-            key: key.clone(),
-            conn_id,
-        })?;
-    tracing::debug!(
-        event = "subscribe_task_sent",
-        key = %key,
-        client_conn_id = %conn_id,
-        "subscribe task sent to manager"
-    );
+    let ack_timeout = stream_ack_timeout();
+    let ready_timeout = stream_ready_timeout();
+    let mut excluded_server_conn_ids = Vec::new();
 
-    let resp = match timeout(CLIENT_CONN_CONTROL_TIMEOUT, rx.recv()).await {
-        Ok(resp) => resp.context(ClientConnRecvSubcribeRespSnafu {
-            key: key.clone(),
-            conn_id,
-        })?,
-        Err(_) => ClientConnRecvSubcribeRespTimeoutSnafu {
-            key: key.clone(),
-            conn_id,
-            timeout: CLIENT_CONN_CONTROL_TIMEOUT,
-        }
-        .fail()?,
-    };
-
-    // Note: A key will be generated for encrypting messages that are forwarded, and this key will
-    // apply to all endpoints.
-    let (codec_key, is_datagram, server_conn_id) = match resp {
-        ConnTask::SubcribeResp {
-            need_codec,
-            is_datagram,
-            server_conn_id,
-        } => {
-            let codec_key = if need_codec {
-                Some(gen_random_key())
-            } else {
-                None
-            };
-            tracing::debug!(
-                event = "subscribe_response_received",
-                key = %key,
-                client_conn_id = %conn_id,
-                server_conn_id = %server_conn_id,
-                need_codec,
-                is_datagram,
-                codec_enabled = codec_key.is_some(),
-                "subscribe response received from manager"
-            );
-            (codec_key, is_datagram, server_conn_id)
-        }
-        ConnTask::SubcribeFailed { reason } => {
-            tracing::warn!(
-                event = "subscribe_failed",
-                key = %key,
-                client_conn_id = %conn_id,
-                reason = %reason,
-                "subscribe failed before stream forwarding"
-            );
-            ClientConnSubcribeFailedSnafu {
+    'attempt: loop {
+        task_sender
+            .send(ManagerTask::Subcribe {
                 key: key.clone(),
                 conn_id,
-                reason,
-            }
-            .fail()?
-        }
-        _ => ClientConnSubcribeRespNotMatchSnafu {
-            key: key.clone(),
-            conn_id,
-        }
-        .fail()?,
-    };
+                conn_sender: tx.clone(),
+                excluded_server_conn_ids: excluded_server_conn_ids.clone(),
+            })
+            .await
+            .map_err(|_| kanal::SendError(()))
+            .context(ClientConnSendSubcribeSnafu {
+                key: key.clone(),
+                conn_id,
+            })?;
+        tracing::debug!(
+            event = "subscribe_task_sent",
+            key = %key,
+            client_conn_id = %conn_id,
+            excluded_server_conn_ids = ?excluded_server_conn_ids,
+            "subscribe task sent to manager"
+        );
 
-    let resp = match timeout(CLIENT_CONN_CONTROL_TIMEOUT, rx.recv()).await {
-        Ok(resp) => resp.context(ClientConnRecvStreamSnafu {
-            key: key.clone(),
-            conn_id,
-        })?,
-        Err(_) => {
-            tracing::warn!(
-                event = "server_stream_wait_timeout",
-                key = %key,
-                client_conn_id = %conn_id,
-                server_conn_id = %server_conn_id,
-                timeout = ?CLIENT_CONN_CONTROL_TIMEOUT,
-                "timed out waiting for server stream"
-            );
-            send_server_deregister(&task_sender, key.clone(), server_conn_id).await;
-            ClientConnRecvStreamTimeoutSnafu {
+        let resp = match timeout(CLIENT_CONN_CONTROL_TIMEOUT, rx.recv()).await {
+            Ok(resp) => resp.context(ClientConnRecvSubcribeRespSnafu {
+                key: key.clone(),
+                conn_id,
+            })?,
+            Err(_) => ClientConnRecvSubcribeRespTimeoutSnafu {
                 key: key.clone(),
                 conn_id,
                 timeout: CLIENT_CONN_CONTROL_TIMEOUT,
             }
-            .fail()?
-        }
-    };
+            .fail()?,
+        };
 
-    if let ConnTask::StreamResp { server_id, stream } = resp {
-        // response message to client to indicate that subcribe handling has finished
-        let mut msg_writer = get_header_msg_writer(conn)
-            .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
-        let msg = PbConnResponse::Subcribe {
-            codec_key,
-            client_id: conn_id.into(),
-            server_id: server_id.into(),
-        }
-        .encode()
-        .context(ClientConnEncodeSubcribeRespSnafu {
-            key: key.clone(),
-            conn_id,
-        })?;
-        msg_writer
-            .write_msg(&msg)
-            .await
-            .context(ClientConnWriteSubcribeRespSnafu {
+        let (codec_key, is_datagram, server_conn_id, server_generation) = match resp {
+            ConnTask::SubcribeResp {
+                need_codec,
+                is_datagram,
+                server_conn_id,
+                server_generation,
+            } => {
+                let codec_key = if need_codec {
+                    Some(gen_random_key())
+                } else {
+                    None
+                };
+                tracing::debug!(
+                    event = "subscribe_response_received",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    server_conn_id = %server_conn_id,
+                    server_generation,
+                    need_codec,
+                    is_datagram,
+                    codec_enabled = codec_key.is_some(),
+                    "subscribe response received from manager"
+                );
+                (codec_key, is_datagram, server_conn_id, server_generation)
+            }
+            ConnTask::SubcribeFailed { reason } => {
+                tracing::warn!(
+                    event = "subscribe_failed",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    reason = %reason,
+                    "subscribe failed before stream forwarding"
+                );
+                ClientConnSubcribeFailedSnafu {
+                    key: key.clone(),
+                    conn_id,
+                    reason,
+                }
+                .fail()?
+            }
+            _ => ClientConnSubcribeRespNotMatchSnafu {
                 key: key.clone(),
                 conn_id,
-            })?;
-        tracing::info!(
-            event = "subscribe_response_written",
-            key = %key,
-            client_conn_id = %conn_id,
-            server_conn_id = %server_id,
-            is_datagram,
-            codec_enabled = codec_key.is_some(),
-            "subscribe response written to client"
-        );
-        Ok((stream, server_id, codec_key, is_datagram))
-    } else {
+            }
+            .fail()?,
+        };
+
+        let resp = match timeout(ack_timeout, rx.recv()).await {
+            Ok(resp) => resp.context(ClientConnRecvStreamSnafu {
+                key: key.clone(),
+                conn_id,
+            })?,
+            Err(_) => {
+                tracing::warn!(
+                    event = "server_stream_ack_timeout",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    server_conn_id = %server_conn_id,
+                    server_generation,
+                    timeout = ?ack_timeout,
+                    "timed out waiting for server stream ack"
+                );
+                mark_server_suspect(&task_sender, key.clone(), server_conn_id).await;
+                excluded_server_conn_ids.push(server_conn_id);
+                continue 'attempt;
+            }
+        };
+
+        match resp {
+            ConnTask::StreamResp {
+                server_id,
+                server_generation: response_generation,
+                stream,
+            } if response_generation == server_generation => {
+                write_subscribe_response(conn, &key, conn_id, server_id, codec_key, is_datagram)
+                    .await?;
+                return Ok((stream, server_id, codec_key, is_datagram));
+            }
+            ConnTask::StreamAck {
+                server_id,
+                server_generation: response_generation,
+            } if server_id == server_conn_id && response_generation == server_generation => {
+                tracing::debug!(
+                    event = "server_stream_ack_received",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    server_conn_id = %server_id,
+                    server_generation,
+                    "server stream ack received"
+                );
+            }
+            _ => {
+                tracing::warn!(
+                    event = "server_stream_ack_unexpected_task",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    server_conn_id = %server_conn_id,
+                    server_generation,
+                    "unexpected task while waiting for server stream ack"
+                );
+                excluded_server_conn_ids.push(server_conn_id);
+                continue 'attempt;
+            }
+        }
+
+        let resp = match timeout(ready_timeout, rx.recv()).await {
+            Ok(resp) => resp.context(ClientConnRecvStreamSnafu {
+                key: key.clone(),
+                conn_id,
+            })?,
+            Err(_) => {
+                tracing::warn!(
+                    event = "server_stream_wait_timeout",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    server_conn_id = %server_conn_id,
+                    server_generation,
+                    timeout = ?ready_timeout,
+                    "timed out waiting for server stream after ack"
+                );
+                mark_server_suspect(&task_sender, key.clone(), server_conn_id).await;
+                excluded_server_conn_ids.push(server_conn_id);
+                continue 'attempt;
+            }
+        };
+
+        if let ConnTask::StreamResp {
+            server_id,
+            server_generation: response_generation,
+            stream,
+        } = resp
+        {
+            if response_generation == server_generation {
+                write_subscribe_response(conn, &key, conn_id, server_id, codec_key, is_datagram)
+                    .await?;
+                return Ok((stream, server_id, codec_key, is_datagram));
+            }
+            tracing::warn!(
+                event = "server_stream_generation_mismatch",
+                key = %key,
+                client_conn_id = %conn_id,
+                expected_server_conn_id = %server_conn_id,
+                expected_generation = server_generation,
+                server_conn_id = %server_id,
+                response_generation,
+                "ignoring stale server stream response"
+            );
+            excluded_server_conn_ids.push(server_conn_id);
+            continue 'attempt;
+        }
+
         ClientConnStreamRespNotMatchSnafu {
             key: key.clone(),
             conn_id,
         }
-        .fail()
+        .fail()?
     }
 }

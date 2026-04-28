@@ -160,8 +160,14 @@ const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
 /// Env to control whether the keep-alive option of TCP is enabled
 pub const PB_MAPPER_KEEP_ALIVE: &str = "PB_MAPPER_KEEP_ALIVE";
 pub const PB_MAPPER_CONTROL_IO_TIMEOUT: &str = "PB_MAPPER_CONTROL_IO_TIMEOUT";
+pub const PB_MAPPER_STREAM_ACK_TIMEOUT: &str = "PB_MAPPER_STREAM_ACK_TIMEOUT";
+pub const PB_MAPPER_STREAM_READY_TIMEOUT: &str = "PB_MAPPER_STREAM_READY_TIMEOUT";
+pub const PB_MAPPER_CONTROL_CONN_POOL_SIZE: &str = "PB_MAPPER_CONTROL_CONN_POOL_SIZE";
 pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
 const DEFAULT_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_millis(300);
+const DEFAULT_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_CONTROL_CONN_POOL_SIZE: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -230,6 +236,23 @@ pub fn duration_from_env(name: &str, default: Duration) -> Duration {
 
 pub fn control_io_timeout() -> Duration {
     duration_from_env(PB_MAPPER_CONTROL_IO_TIMEOUT, DEFAULT_CONTROL_IO_TIMEOUT)
+}
+
+pub fn stream_ack_timeout() -> Duration {
+    duration_from_env(PB_MAPPER_STREAM_ACK_TIMEOUT, DEFAULT_STREAM_ACK_TIMEOUT)
+}
+
+pub fn stream_ready_timeout() -> Duration {
+    duration_from_env(PB_MAPPER_STREAM_READY_TIMEOUT, DEFAULT_STREAM_READY_TIMEOUT)
+}
+
+pub fn control_conn_pool_size() -> usize {
+    std::env::var(PB_MAPPER_CONTROL_CONN_POOL_SIZE)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|size| *size > 0)
+        .map(|size| size.min(16))
+        .unwrap_or(DEFAULT_CONTROL_CONN_POOL_SIZE)
 }
 
 /// Controls whether the keepalive option for TCP is enabled, depending on the value of the

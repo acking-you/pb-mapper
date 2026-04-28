@@ -36,7 +36,7 @@ struct Cli {
     codec: bool,
 }
 
-async fn run_register<LocalStream: StreamProvider>(
+async fn run_register<LocalStream: StreamProvider + Send + 'static>(
     need_codec: bool,
     is_datagram: bool,
     key: String,

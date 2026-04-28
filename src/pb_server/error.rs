@@ -156,6 +156,14 @@ pub enum Error {
         source: common::error::Error,
     },
     #[snafu(display(
+        "server conn send stream ack to manager error with `key:{key}` `server_id:{conn_id}`"
+    ))]
+    ServerConnSendStreamAck {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+        source: kanal::SendError<()>,
+    },
+    #[snafu(display(
         "server conn decode stream request error with `key:{key}` `server_id:{conn_id}`"
     ))]
     ServerConnDecodeStreamRequest {

@@ -8,7 +8,7 @@ use super::error::{
     ServerConnCreateHeaderToolSnafu, ServerConnDecodeStreamRequestSnafu,
     ServerConnEncodeRegisterRespSnafu, ServerConnRecvServerRegisteredRespSnafu,
     ServerConnRegisteredRespNotMatchSnafu, ServerConnSendRegisterSnafu,
-    ServerConnWritePongRespSnafu, ServerConnWriteRegisteredOkSnafu,
+    ServerConnSendStreamAckSnafu, ServerConnWritePongRespSnafu, ServerConnWriteRegisteredOkSnafu,
     ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
@@ -246,8 +246,12 @@ pub async fn handle_server_conn(
                 // handle ping pong check
                 ret = msg_reader.read_msg() =>{
                     snafu_error_get_or_return_ok!(
-                        handle_ping_pong_check(
-                            snafu_error_get_or_return_ok!(ret), &mut msg_writer, key.clone(), conn_id
+                        handle_control_message(
+                            snafu_error_get_or_return_ok!(ret),
+                            &mut msg_writer,
+                            task_sender.clone(),
+                            key.clone(),
+                            conn_id
                         ).await
                     );
                 }
@@ -288,13 +292,13 @@ pub async fn handle_server_conn(
 }
 
 #[instrument(skip(msg, writer))]
-async fn handle_ping_pong_check<T: MessageWriter>(
+async fn handle_control_message<T: MessageWriter>(
     msg: &[u8],
     writer: &mut T,
+    task_sender: ManagerTaskSender,
     key: ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
-    // receive ping req
     let req = match PbServerRequest::decode(msg) {
         Ok(v) => v,
         Err(e) => {
@@ -309,42 +313,56 @@ async fn handle_ping_pong_check<T: MessageWriter>(
         }
     };
 
-    if !matches!(req, PbServerRequest::Ping) {
-        tracing::error!(
-            event = "ping_unexpected_message",
-            key = %key,
-            conn_id = %conn_id,
-            request = ?req,
-            "expected ping request"
-        );
-        return Ok(());
-    }
+    match req {
+        PbServerRequest::Ping => {
+            let resp = match LocalServer::Pong.encode() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        event = "pong_encode_failed",
+                        key = %key,
+                        conn_id = %conn_id,
+                        error = %e,
+                        "failed to encode pong response"
+                    );
+                    return Ok(());
+                }
+            };
 
-    // response pong
-    let resp = match LocalServer::Pong.encode() {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(
-                event = "pong_encode_failed",
+            tracing::debug!(
+                event = "ping_received",
                 key = %key,
                 conn_id = %conn_id,
-                error = %e,
-                "failed to encode pong response"
+                "received ping from local server"
             );
-            return Ok(());
+            writer
+                .write_msg(&resp)
+                .await
+                .context(ServerConnWritePongRespSnafu { key, conn_id })
         }
-    };
-
-    tracing::debug!(
-        event = "ping_received",
-        key = %key,
-        conn_id = %conn_id,
-        "received ping from local server"
-    );
-    writer
-        .write_msg(&resp)
-        .await
-        .context(ServerConnWritePongRespSnafu { key, conn_id })
+        PbServerRequest::StreamAck {
+            client_id,
+            server_generation,
+        } => {
+            tracing::debug!(
+                event = "stream_ack_received",
+                key = %key,
+                server_conn_id = %conn_id,
+                client_conn_id = client_id,
+                server_generation,
+                "received stream ack from local server"
+            );
+            task_sender
+                .send(ManagerTask::StreamAck {
+                    server_id: conn_id,
+                    client_id: client_id.into(),
+                    server_generation,
+                })
+                .await
+                .map_err(|_| kanal::SendError(()))
+                .context(ServerConnSendStreamAckSnafu { key, conn_id })
+        }
+    }
 }
 
 #[instrument(skip(req, writer))]
@@ -356,9 +374,14 @@ async fn handle_stream_req<T: MessageWriter>(
 ) -> Result<()> {
     // TODO: handle stop task
     // FIXME: Maybe it can be parallelized here?
-    if let ConnTask::StreamReq(client_conn_id) = req {
+    if let ConnTask::StreamReq {
+        client_id: client_conn_id,
+        server_generation,
+    } = req
+    {
         let msg = LocalServer::Stream {
             client_id: client_conn_id.into(),
+            server_generation,
         }
         .encode()
         .context(ServerConnDecodeStreamRequestSnafu {
@@ -370,6 +393,7 @@ async fn handle_stream_req<T: MessageWriter>(
             key = %key,
             server_conn_id = %conn_id,
             client_conn_id = %client_conn_id,
+            server_generation,
             "writing stream request to local server"
         );
         writer

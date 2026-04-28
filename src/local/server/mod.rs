@@ -7,16 +7,15 @@ use std::time::Duration;
 
 use snafu::ResultExt;
 use tokio::net::TcpStream;
-use tokio::time::Instant;
 use tracing::instrument;
 
 use self::error::{
     ControlIoTimeoutSnafu, DecodeRegisterRespSnafu, DecodeStreamReqSnafu, EncodePingMsgSnafu,
-    EncodeRegisterReqSnafu, ReadRegisterRespSnafu, ReadStreamReqSnafu, RegisterRespNotMatchSnafu,
-    SendRegisterReqSnafu, WritePingMsgSnafu,
+    EncodeRegisterReqSnafu, EncodeStreamAckMsgSnafu, ReadRegisterRespSnafu, ReadStreamReqSnafu,
+    RegisterRespNotMatchSnafu, SendRegisterReqSnafu, WritePingMsgSnafu, WriteStreamAckMsgSnafu,
 };
 use self::stream::handle_stream;
-use crate::common::config::{control_io_timeout, IS_KEEPALIVE};
+use crate::common::config::{control_conn_pool_size, control_io_timeout, IS_KEEPALIVE};
 use crate::common::message::command::{
     LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbServerRequest,
 };
@@ -34,13 +33,9 @@ use uni_stream::stream::{
     got_one_socket_addr, set_tcp_keep_alive, set_tcp_nodelay, StreamProvider,
 };
 
-const LOCAL_SERVER_TIMEOUT: Duration = Duration::from_secs(64);
-
 const PING_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 minutes
 
 const GLOBAL_RETRY_TIMES: u32 = 16;
-
-const LOCAL_RETRY_TIMES: u32 = 8;
 
 fn get_ping_message() -> error::Result<Vec<u8>> {
     PbServerRequest::Ping.encode().context(EncodePingMsgSnafu)
@@ -48,7 +43,6 @@ fn get_ping_message() -> error::Result<Vec<u8>> {
 
 #[derive(Debug)]
 enum Status {
-    Timeout,
     ReadMsg,
     SendPing,
     ConnectRemote,
@@ -64,14 +58,26 @@ pub enum ServiceStatus {
     Failed,
 }
 
-pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
+#[derive(Clone, Debug)]
+struct ServerCliRunConfig<A> {
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    need_codec: bool,
+    is_datagram: bool,
+    worker_index: usize,
+}
+
+pub async fn run_server_side_cli<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     need_codec: bool,
     is_datagram: bool,
 ) where
+    LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
+    A: ToSocketAddrs + Debug + Copy,
 {
     run_server_side_cli_with_callback::<LocalStream, A>(
         local_addr,
@@ -84,10 +90,7 @@ pub async fn run_server_side_cli<LocalStream: StreamProvider, A: ToSocketAddrs +
     .await
 }
 
-pub async fn run_server_side_cli_with_callback<
-    LocalStream: StreamProvider,
-    A: ToSocketAddrs + Debug + Copy,
->(
+pub async fn run_server_side_cli_with_callback<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
@@ -95,18 +98,97 @@ pub async fn run_server_side_cli_with_callback<
     is_datagram: bool,
     status_callback: Option<StatusCallback>,
 ) where
+    LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
+    A: ToSocketAddrs + Debug + Copy,
 {
+    let local_addr = match got_one_socket_addr(local_addr).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("parse local addr failed: {e}");
+            return;
+        }
+    };
+    let remote_addr = match got_one_socket_addr(remote_addr).await {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("parse remote addr failed: {e}");
+            return;
+        }
+    };
+    let pool_size = control_conn_pool_size();
+    tracing::info!(
+        event = "local_server_control_pool_starting",
+        key = %key,
+        pool_size,
+        "starting local server control connection pool"
+    );
+    let mut worker_handles = Vec::new();
+    if pool_size > 1 {
+        for worker_index in 1..pool_size {
+            let worker_key = key.clone();
+            worker_handles.push(tokio::spawn(async move {
+                run_server_side_cli_worker::<LocalStream, _>(
+                    local_addr,
+                    remote_addr,
+                    worker_key,
+                    need_codec,
+                    is_datagram,
+                    None,
+                    worker_index,
+                )
+                .await;
+            }));
+        }
+    }
+    run_server_side_cli_worker::<LocalStream, _>(
+        local_addr,
+        remote_addr,
+        key,
+        need_codec,
+        is_datagram,
+        status_callback,
+        0,
+    )
+    .await;
+    for handle in worker_handles {
+        if let Err(e) = handle.await {
+            tracing::warn!(
+                event = "local_server_control_worker_join_failed",
+                error = %e,
+                "local server control worker join failed"
+            );
+        }
+    }
+}
+
+async fn run_server_side_cli_worker<LocalStream, A>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    need_codec: bool,
+    is_datagram: bool,
+    status_callback: Option<StatusCallback>,
+    worker_index: usize,
+) where
+    LocalStream: StreamProvider + Send + 'static,
+    LocalStream::Item: StreamForward,
+    A: ToSocketAddrs + Debug + Copy + Send + 'static,
+{
+    let run_config = ServerCliRunConfig {
+        local_addr,
+        remote_addr,
+        key: key.clone(),
+        need_codec,
+        is_datagram,
+        worker_index,
+    };
     let mut timeout_count = TimeoutCount::new(GLOBAL_RETRY_TIMES);
     let mut retry_interval = timeout_count.get_interval_by_count();
     while timeout_count.validate() {
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
             &mut timeout_count,
-            local_addr,
-            remote_addr,
-            key.clone(),
-            need_codec,
-            is_datagram,
+            run_config.clone(),
             status_callback.as_ref(),
         )
         .await
@@ -116,14 +198,14 @@ pub async fn run_server_side_cli_with_callback<
             return;
         };
         match status {
-            Status::Timeout | Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
+            Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
                 tracing::info!(
                     "We will try to re-connect the pb-server:`{:?} <-`{}`-> {:?}` after \
                      {retry_interval}s, global-retry-count:{}",
                     local_addr,
                     key,
                     remote_addr,
-                    timeout_count.count()
+                    timeout_count.count(),
                 );
 
                 // Notify external systems
@@ -146,16 +228,20 @@ pub async fn run_server_side_cli_with_callback<
 #[instrument(skip(status_callback))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
     global_timeout_cnt: &mut TimeoutCount,
-    local_addr: A,
-    remote_addr: A,
-    key: Arc<str>,
-    need_codec: bool,
-    is_datagram: bool,
+    config: ServerCliRunConfig<A>,
     status_callback: Option<&StatusCallback>,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,
 {
+    let ServerCliRunConfig {
+        local_addr,
+        remote_addr,
+        key,
+        need_codec,
+        is_datagram,
+        worker_index,
+    } = config;
     let local_addr = match got_one_socket_addr(local_addr).await {
         Ok(addr) => addr,
         Err(e) => {
@@ -179,6 +265,7 @@ where
     tracing::info!(
         event = "local_server_connected_remote",
         key = %key,
+        worker_index,
         local_addr = %local_addr,
         remote_addr = %remote_addr,
         need_codec,
@@ -259,6 +346,7 @@ where
             event = "local_server_registered",
             key = %key,
             conn_id = %conn_id,
+            worker_index,
             local_addr = %local_addr,
             remote_addr = %remote_addr,
             "local server registered with pb server"
@@ -271,22 +359,15 @@ where
         (key, conn_id)
     };
 
-    // start listen stream request
-    let mut timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
-    let mut timeout_count = TimeoutCount::new(LOCAL_RETRY_TIMES);
-    // regiseter ok,and reset global timeout count
+    // register ok, and reset global timeout count
     global_timeout_cnt.reset();
     loop {
         tokio::select! {
             ret = msg_reader.read_msg() =>{
                 let msg = snafu_error_get_or_return!(ret.context(ReadStreamReqSnafu),"[read msg]",Err(Status::ReadMsg));
-                // timeout will reset by this function
                 snafu_error_get_or_continue!(
-                    handle_request::<LocalStream,_>(msg,local_addr,remote_addr,key.clone(),conn_id,
-                    TimeoutContext {
-                        timeout_count: &mut timeout_count,
-                         timeout: &mut timeout
-                    }).await
+                    handle_request::<LocalStream, _, _>(msg,local_addr,remote_addr,key.clone(),conn_id,
+                    &mut msg_writer).await
                 );
             }
             // handle ping interval
@@ -303,29 +384,6 @@ where
                     interval = ?PING_INTERVAL,
                     "local server ping sent"
                 );
-            }
-            // handle timeout
-            _ = tokio::time::sleep_until(timeout) =>{
-                if timeout_count.validate(){
-                    tracing::info!(
-                        event = "local_server_timeout_retry",
-                        key = %key,
-                        conn_id = %conn_id,
-                        retry_count = timeout_count.count(),
-                        "local server heartbeat timeout retry"
-                    );
-                    timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
-                }else{
-                    tracing::warn!(
-                        event = "local_server_timeout_exhausted",
-                        key = %key,
-                        conn_id = %conn_id,
-                        deadline = ?timeout,
-                        "local server heartbeat timeout exhausted"
-                    );
-                    return Err(Status::Timeout);
-                }
-
             }
         }
     }
@@ -349,22 +407,18 @@ async fn handle_ping_interval<T: MessageWriter>(
     }
 }
 
-struct TimeoutContext<'a, 'b> {
-    timeout_count: &'a mut TimeoutCount,
-    timeout: &'b mut Instant,
-}
-
-#[instrument(skip(msg, timeout_ctx))]
+#[instrument(skip(msg, writer))]
 async fn handle_request<
     LocalStream: StreamProvider,
     A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
+    W: MessageWriter,
 >(
     msg: &[u8],
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     conn_id: u32,
-    timeout_ctx: TimeoutContext<'_, '_>,
+    writer: &mut W,
 ) -> error::Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -372,18 +426,30 @@ where
     let req = LocalServer::decode(msg).context(DecodeStreamReqSnafu)?;
 
     match req {
-        LocalServer::Stream { client_id } => {
+        LocalServer::Stream {
+            client_id,
+            server_generation,
+        } => {
             tracing::debug!(
                 event = "local_server_stream_request_received",
                 key = %key,
                 server_conn_id = %conn_id,
                 client_conn_id = client_id,
+                server_generation,
                 "local server received stream request"
             );
+            write_stream_ack(writer, client_id, server_generation).await?;
             let key = key.clone();
             tokio::spawn(async move {
                 snafu_error_handle!(
-                    handle_stream::<LocalStream, _>(local_addr, remote_addr, key, client_id).await
+                    handle_stream::<LocalStream, _>(
+                        local_addr,
+                        remote_addr,
+                        key,
+                        client_id,
+                        server_generation
+                    )
+                    .await
                 )
             });
         }
@@ -397,7 +463,27 @@ where
             );
         }
     }
-    timeout_ctx.timeout_count.reset();
-    *timeout_ctx.timeout = Instant::now() + LOCAL_SERVER_TIMEOUT;
     Ok(())
+}
+
+async fn write_stream_ack<T: MessageWriter>(
+    writer: &mut T,
+    client_id: u32,
+    server_generation: u64,
+) -> error::Result<()> {
+    let ack = PbServerRequest::StreamAck {
+        client_id,
+        server_generation,
+    }
+    .encode()
+    .context(EncodeStreamAckMsgSnafu)?;
+    let timeout = control_io_timeout();
+    match tokio::time::timeout(timeout, writer.write_msg(&ack)).await {
+        Ok(result) => result.context(WriteStreamAckMsgSnafu),
+        Err(_) => ControlIoTimeoutSnafu {
+            action: "write stream ack message",
+            timeout,
+        }
+        .fail(),
+    }
 }

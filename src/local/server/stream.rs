@@ -32,6 +32,7 @@ pub async fn handle_stream<
     remote_addr: A,
     key: Arc<str>,
     client_id: u32,
+    server_generation: u64,
 ) -> Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -43,6 +44,7 @@ where
     let msg = PbConnRequest::Stream {
         key: key.to_string(),
         dst_id: client_id,
+        server_generation,
     }
     .encode()
     .context(EncodePbConnStreamReqSnafu)?;

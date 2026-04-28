@@ -51,11 +51,18 @@ pub enum ManagerTask {
         key: ImutableKey,
         conn_id: RemoteConnId,
         conn_sender: ConnTaskSender,
+        excluded_server_conn_ids: Vec<RemoteConnId>,
     },
     Stream {
         stream: TcpStream,
         server_id: RemoteConnId,
         client_id: RemoteConnId,
+        server_generation: u64,
+    },
+    StreamAck {
+        server_id: RemoteConnId,
+        client_id: RemoteConnId,
+        server_generation: u64,
     },
     Status {
         conn_sender: ConnTaskSender,
@@ -66,6 +73,10 @@ pub enum ManagerTask {
         response_sender: tokio::sync::oneshot::Sender<ServerStatusInfo>,
     },
     DeRegisterServerConn {
+        key: ImutableKey,
+        conn_id: RemoteConnId,
+    },
+    MarkServerConnSuspect {
         key: ImutableKey,
         conn_id: RemoteConnId,
     },
@@ -83,15 +94,24 @@ pub enum ConnTask {
     RegisterResp,
     SubcribeResp {
         server_conn_id: RemoteConnId,
+        server_generation: u64,
         need_codec: bool,
         is_datagram: bool,
     },
     SubcribeFailed {
         reason: String,
     },
-    StreamReq(RemoteConnId),
+    StreamReq {
+        client_id: RemoteConnId,
+        server_generation: u64,
+    },
+    StreamAck {
+        server_id: RemoteConnId,
+        server_generation: u64,
+    },
     StreamResp {
         server_id: RemoteConnId,
+        server_generation: u64,
         stream: TcpStream,
     },
     StatusResp(PbConnResponse),
@@ -102,9 +122,17 @@ pub(crate) type ConnTaskSender = SenderChan<ConnTask>;
 
 pub type ImutableKey = Arc<str>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerConnHealth {
+    Healthy,
+    Suspect,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ServerConnInfo {
     pub conn_id: RemoteConnId,
+    pub generation: u64,
+    pub health: ServerConnHealth,
     pub need_codec: bool,
     pub is_datagram: bool,
 }
@@ -141,6 +169,22 @@ fn registered_server_conn_count(server_conn_map: &ServerConnMap) -> usize {
 
 fn service_conn_count(server_conn_map: &ServerConnMap, key: &ImutableKey) -> usize {
     server_conn_map.get(key).map(Vec::len).unwrap_or_default()
+}
+
+fn mark_server_conn_health(
+    server_conn_map: &mut ServerConnMap,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+    health: ServerConnHealth,
+) -> bool {
+    let Some(conns) = server_conn_map.get_mut(key) else {
+        return false;
+    };
+    let Some(info) = conns.iter_mut().find(|info| info.conn_id == conn_id) else {
+        return false;
+    };
+    info.health = health;
+    true
 }
 
 async fn send_subcribe_failed(
@@ -206,6 +250,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
     // represent the mapping of the `key` to the id of the server-side conn
     let mut server_conn_map = ServerConnMap::new();
+    let mut pending_streams = hashbrown::HashMap::<RemoteConnId, (RemoteConnId, u64)>::new();
+    let mut next_server_generation = 1_u64;
 
     let listener = TcpListener::bind(addr).await?;
     let listen_addr = listener.local_addr()?;
@@ -340,6 +386,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 let removed_from_service_map =
                     remove_server_conn(&mut server_conn_map, &key, conn_id);
                 let removed_from_active_map = manager.deregister_conn(conn_id);
+                pending_streams.retain(|_, (server_id, _)| *server_id != conn_id);
                 tracing::info!(
                     event = "server_conn_deregistered",
                     key = %key,
@@ -353,10 +400,28 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     "server connection deregistered"
                 );
             }
+            ManagerTask::MarkServerConnSuspect { key, conn_id } => {
+                let updated = mark_server_conn_health(
+                    &mut server_conn_map,
+                    &key,
+                    conn_id,
+                    ServerConnHealth::Suspect,
+                );
+                tracing::warn!(
+                    event = "server_conn_marked_suspect",
+                    key = %key,
+                    conn_id = %conn_id,
+                    updated,
+                    registered_services = server_conn_map.len(),
+                    server_connections = registered_server_conn_count(&server_conn_map),
+                    "server connection marked suspect"
+                );
+            }
             ManagerTask::DeRegisterClientConn {
                 server_id,
                 client_id,
             } => {
+                pending_streams.remove(&client_id);
                 let removed_server_conn = if let Some(server_id) = server_id {
                     manager.deregister_conn(server_id)
                 } else {
@@ -396,12 +461,16 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 need_codec,
                 is_datagram,
             } => {
+                let generation = next_server_generation;
+                next_server_generation = next_server_generation.saturating_add(1).max(1);
                 // sign up server connection
                 manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                 match server_conn_map.entry(key.clone()) {
                     hashbrown::hash_map::Entry::Occupied(mut o) => {
                         o.get_mut().push(ServerConnInfo {
                             conn_id,
+                            generation,
+                            health: ServerConnHealth::Healthy,
                             need_codec,
                             is_datagram,
                         });
@@ -409,6 +478,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     hashbrown::hash_map::Entry::Vacant(v) => {
                         v.insert(vec![ServerConnInfo {
                             conn_id,
+                            generation,
+                            health: ServerConnHealth::Healthy,
                             need_codec,
                             is_datagram,
                         }]);
@@ -420,6 +491,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     event = "server_conn_registered",
                     key = %key,
                     conn_id = %conn_id,
+                    generation,
                     need_codec,
                     is_datagram,
                     service_connections = service_conn_count(&server_conn_map, &key),
@@ -439,11 +511,48 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 stream,
                 server_id,
                 client_id,
+                server_generation,
             } => {
+                let Some((expected_control_conn_id, expected_generation)) =
+                    pending_streams.get(&client_id).copied()
+                else {
+                    tracing::warn!(
+                        event = "stale_stream_without_pending_client",
+                        server_conn_id = %server_id,
+                        client_conn_id = %client_id,
+                        server_generation,
+                        "dropping stream for client without pending subscribe"
+                    );
+                    continue;
+                };
+                if server_generation != 0 && expected_generation != server_generation {
+                    tracing::warn!(
+                        event = "stale_stream_generation_mismatch",
+                        stream_conn_id = %server_id,
+                        client_conn_id = %client_id,
+                        expected_control_conn_id = %expected_control_conn_id,
+                        expected_generation,
+                        server_generation,
+                        "dropping stale stream for a previous subscribe attempt"
+                    );
+                    continue;
+                }
+                if let Some(info) = server_conn_map
+                    .values_mut()
+                    .flat_map(|infos| infos.iter_mut())
+                    .find(|info| {
+                        info.conn_id == expected_control_conn_id
+                            && info.generation == expected_generation
+                    })
+                {
+                    info.health = ServerConnHealth::Healthy;
+                }
                 tracing::debug!(
                     event = "stream_ready_for_client",
-                    server_conn_id = %server_id,
+                    stream_conn_id = %server_id,
+                    control_conn_id = %expected_control_conn_id,
                     client_conn_id = %client_id,
+                    server_generation = expected_generation,
                     active_connections = manager.active_conn_count(),
                     "server stream ready for client"
                 );
@@ -451,7 +560,59 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     .get_conn_sender_chan(&client_id)
                     .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id }));
                 snafu_error_handle!(client_sender
-                    .send(ConnTask::StreamResp { server_id, stream })
+                    .send(ConnTask::StreamResp {
+                        server_id,
+                        server_generation: expected_generation,
+                        stream
+                    })
+                    .await
+                    .map_err(|_| kanal::SendError(()))
+                    .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id }));
+            }
+            ManagerTask::StreamAck {
+                server_id,
+                client_id,
+                server_generation,
+            } => {
+                let Some((expected_server_id, expected_generation)) =
+                    pending_streams.get(&client_id).copied()
+                else {
+                    tracing::warn!(
+                        event = "stale_stream_ack_without_pending_client",
+                        server_conn_id = %server_id,
+                        client_conn_id = %client_id,
+                        server_generation,
+                        "dropping stream ack for client without pending subscribe"
+                    );
+                    continue;
+                };
+                if expected_server_id != server_id || expected_generation != server_generation {
+                    tracing::warn!(
+                        event = "stale_stream_ack_generation_mismatch",
+                        server_conn_id = %server_id,
+                        client_conn_id = %client_id,
+                        expected_server_conn_id = %expected_server_id,
+                        expected_generation,
+                        server_generation,
+                        "dropping stale stream ack for a previous subscribe attempt"
+                    );
+                    continue;
+                }
+                if let Some(info) = server_conn_map
+                    .values_mut()
+                    .flat_map(|infos| infos.iter_mut())
+                    .find(|info| info.conn_id == server_id && info.generation == server_generation)
+                {
+                    info.health = ServerConnHealth::Healthy;
+                }
+                let client_sender = snafu_error_get_or_continue!(manager
+                    .get_conn_sender_chan(&client_id)
+                    .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id }));
+                snafu_error_handle!(client_sender
+                    .send(ConnTask::StreamAck {
+                        server_id,
+                        server_generation,
+                    })
                     .await
                     .map_err(|_| kanal::SendError(()))
                     .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id }));
@@ -460,6 +621,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 key,
                 conn_id,
                 conn_sender,
+                excluded_server_conn_ids,
             } => {
                 let Some(server_conn_id_list) = server_conn_map.get(&key).cloned() else {
                     tracing::warn!(
@@ -479,14 +641,22 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     .await;
                     continue;
                 };
-                // Get at least one available server_conn_id from the list
                 let mut selected = false;
-                for server_info in server_conn_id_list.iter().rev() {
+                let mut candidates = Vec::new();
+                for preferred_health in [ServerConnHealth::Healthy, ServerConnHealth::Suspect] {
+                    candidates.extend(server_conn_id_list.iter().rev().copied().filter(|info| {
+                        info.health == preferred_health
+                            && !excluded_server_conn_ids.contains(&info.conn_id)
+                    }));
+                }
+                for server_info in candidates {
                     let ServerConnInfo {
                         conn_id: server_conn_id,
+                        generation: server_generation,
+                        health,
                         need_codec,
                         is_datagram,
-                    } = *server_info;
+                    } = server_info;
                     let Some(server_conn_sender) = manager.get_conn_sender_chan(&server_conn_id)
                     else {
                         tracing::warn!(
@@ -503,7 +673,10 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     };
                     // 1. Send a request to get server stream
                     if let Err(e) = server_conn_sender
-                        .send(ConnTask::StreamReq(conn_id))
+                        .send(ConnTask::StreamReq {
+                            client_id: conn_id,
+                            server_generation,
+                        })
                         .await
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterClientSendStreamSnafu {
@@ -525,11 +698,15 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                         continue;
                     }
                     // sign up client connection after a server accepted the stream request
-                    manager.sign_up_conn_sender(conn_id, conn_sender.clone());
+                    if manager.get_conn_sender_chan(&conn_id).is_none() {
+                        manager.sign_up_conn_sender(conn_id, conn_sender.clone());
+                    }
+                    pending_streams.insert(conn_id, (server_conn_id, server_generation));
                     // 2. Response subcribe ok
                     if let Err(e) = conn_sender
                         .send(ConnTask::SubcribeResp {
                             server_conn_id,
+                            server_generation,
                             need_codec,
                             is_datagram,
                         })
@@ -558,6 +735,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                         key = %key,
                         client_conn_id = %conn_id,
                         server_conn_id = %server_conn_id,
+                        server_generation,
+                        health = ?health,
                         need_codec,
                         is_datagram,
                         service_connections = service_conn_count(&server_conn_map, &key),
@@ -672,7 +851,11 @@ async fn handle_conn(
             );
             handle_client_conn(key.into(), conn_id, manager_task_sender, conn).await?;
         }
-        PbConnRequest::Stream { key, dst_id } => {
+        PbConnRequest::Stream {
+            key,
+            dst_id,
+            server_generation,
+        } => {
             tracing::debug!(
                 event = "init_request",
                 request = "stream",
@@ -680,6 +863,7 @@ async fn handle_conn(
                 peer_addr = %peer_addr,
                 key = %key,
                 client_conn_id = dst_id,
+                server_generation,
                 "received pb init request"
             );
             let key = ImutableKey::from(key);
@@ -688,6 +872,7 @@ async fn handle_conn(
                     stream: conn,
                     server_id: conn_id,
                     client_id: dst_id.into(),
+                    server_generation,
                 })
                 .await
                 .map_err(|_| kanal::SendError(()))

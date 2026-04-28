@@ -41,6 +41,8 @@ pub enum PbConnRequest {
     Stream {
         key: String,
         dst_id: u32,
+        #[serde(default)]
+        server_generation: u64,
     },
 }
 
@@ -61,12 +63,21 @@ pub enum PbConnResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbServerRequest {
     Ping,
+    StreamAck {
+        client_id: u32,
+        #[serde(default)]
+        server_generation: u64,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum LocalServer {
     /// pb server makes a stream request to local server
-    Stream { client_id: u32 },
+    Stream {
+        client_id: u32,
+        #[serde(default)]
+        server_generation: u64,
+    },
     /// pb server response a pong msg when it receive a ping request
     Pong,
 }

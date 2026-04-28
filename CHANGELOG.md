@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.12] - 2026-04-29
+- Added parallel server-side control connections for registered services so transient stale control connections can be bypassed quickly.
+- Added stream-request acknowledgements and generation checks to reject stale ack/stream responses from previous subscribe attempts.
+- Removed missing-pong based local control-connection recycling; real control-plane read/write failures still reconnect immediately.
+- Added configurable stream ack, stream ready, and control connection pool settings.
+- Added regression coverage for unacked and acked-but-stalled control connection failover.
+
 ## [0.2.10] - 2026-04-28
 - Fixed server-side connection ID recycling so stale or duplicate deregistration cannot return active IDs to the idle pool.
 - Prevented active client/control connection IDs from being reused while still registered in the task manager.
