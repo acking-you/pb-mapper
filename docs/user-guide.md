@@ -150,7 +150,11 @@ flutter run
 
 - `PB_MAPPER_SERVER`: default server address for the CLI
 - `PB_MAPPER_KEEP_ALIVE`: enable TCP keep-alive (set to `ON`)
+- `PB_MAPPER_TUNNEL_IDLE_TIMEOUT`: close a fully idle TCP tunnel after this duration, default `1h`
+- `PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT`: close a half-closed TCP tunnel after this idle duration, default `60s`
 - `RUST_LOG`: logging level, for example `info` or `debug`
+
+Timeout values accept plain seconds or `ms`/`s`/`m`/`h` suffixes, for example `500ms`, `60s`, `10m`, or `1h`.
 
 ## Docker deployment
 

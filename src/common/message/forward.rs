@@ -2,7 +2,9 @@ use bytes::Bytes;
 use snafu::ResultExt;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::Instant;
 
 use super::super::buffer::{BufferReader, BufferedReader};
 use super::error::{FwdNetworkWriteWithNormalSnafu, Result};
@@ -37,6 +39,69 @@ pub trait DatagramReader {
 
 pub trait DatagramWriter {
     async fn send(&mut self, src: &[u8]) -> Result<()>;
+}
+
+const DEFAULT_TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_HALF_CLOSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const PB_MAPPER_TUNNEL_IDLE_TIMEOUT: &str = "PB_MAPPER_TUNNEL_IDLE_TIMEOUT";
+const PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT: &str = "PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT";
+
+#[derive(Debug, Clone, Copy)]
+struct ForwardTimeoutConfig {
+    tunnel_idle_timeout: Duration,
+    half_close_idle_timeout: Duration,
+}
+
+impl ForwardTimeoutConfig {
+    fn from_env() -> Self {
+        Self {
+            tunnel_idle_timeout: duration_from_env(
+                PB_MAPPER_TUNNEL_IDLE_TIMEOUT,
+                DEFAULT_TUNNEL_IDLE_TIMEOUT,
+            ),
+            half_close_idle_timeout: duration_from_env(
+                PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT,
+                DEFAULT_HALF_CLOSE_IDLE_TIMEOUT,
+            ),
+        }
+    }
+}
+
+fn duration_from_env(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| parse_duration(&value))
+        .unwrap_or(default)
+}
+
+fn parse_duration(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(raw) = value.strip_suffix("ms") {
+        return raw.trim().parse::<u64>().ok().map(Duration::from_millis);
+    }
+    if let Some(raw) = value.strip_suffix('s') {
+        return raw.trim().parse::<u64>().ok().map(Duration::from_secs);
+    }
+    if let Some(raw) = value.strip_suffix('m') {
+        return raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|minutes| minutes.checked_mul(60))
+            .map(Duration::from_secs);
+    }
+    if let Some(raw) = value.strip_suffix('h') {
+        return raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|hours| hours.checked_mul(60 * 60))
+            .map(Duration::from_secs);
+    }
+    value.parse::<u64>().ok().map(Duration::from_secs)
 }
 
 pub struct NormalForwardReader<'a, T> {
@@ -244,11 +309,186 @@ pub async fn start_forward<
     server_reader: ServerReader,
     server_writer: ServerWriter,
 ) {
-    let client_to_server = copy(client_reader, server_writer);
-    let server_to_client = copy(server_reader, client_writer);
-    let (client_result, server_result) = tokio::join!(client_to_server, server_to_client);
-    handle_forward_result(client_result, "client->server");
-    handle_forward_result(server_result, "server->client");
+    start_forward_with_config(
+        client_reader,
+        client_writer,
+        server_reader,
+        server_writer,
+        ForwardTimeoutConfig::from_env(),
+    )
+    .await
+}
+
+#[derive(Default)]
+struct ForwardDirectionState {
+    len: usize,
+    result: Option<Result<usize>>,
+}
+
+impl ForwardDirectionState {
+    fn is_done(&self) -> bool {
+        self.result.is_some()
+    }
+}
+
+async fn start_forward_with_config<
+    ClientReader: ForwardReader,
+    ClientWriter: ForwardWriter,
+    ServerReader: ForwardReader,
+    ServerWriter: ForwardWriter,
+>(
+    mut client_reader: ClientReader,
+    mut client_writer: ClientWriter,
+    mut server_reader: ServerReader,
+    mut server_writer: ServerWriter,
+    timeout_config: ForwardTimeoutConfig,
+) {
+    let tunnel_idle_enabled = !timeout_config.tunnel_idle_timeout.is_zero();
+    let half_close_idle_enabled = !timeout_config.half_close_idle_timeout.is_zero();
+    let tunnel_idle_sleep = tokio::time::sleep(timeout_config.tunnel_idle_timeout);
+    let half_close_idle_sleep = tokio::time::sleep(timeout_config.half_close_idle_timeout);
+    tokio::pin!(tunnel_idle_sleep);
+    tokio::pin!(half_close_idle_sleep);
+
+    let mut client_state = ForwardDirectionState::default();
+    let mut server_state = ForwardDirectionState::default();
+    let mut client_writer_shutdown = false;
+    let mut server_writer_shutdown = false;
+
+    loop {
+        let client_done = client_state.is_done();
+        let server_done = server_state.is_done();
+        let half_closed = client_done ^ server_done;
+        if client_done && server_done {
+            break;
+        }
+
+        tokio::select! {
+            result = forward_once(&mut client_reader, &mut server_writer), if !client_done => {
+                let (should_continue, reached_eof) = handle_forward_step(
+                    result,
+                    &mut client_state,
+                    &mut tunnel_idle_sleep,
+                    timeout_config.tunnel_idle_timeout,
+                    &mut half_close_idle_sleep,
+                    timeout_config.half_close_idle_timeout,
+                    server_done,
+                );
+                if reached_eof {
+                    server_writer_shutdown = true;
+                }
+                if !should_continue {
+                    break;
+                }
+            }
+            result = forward_once(&mut server_reader, &mut client_writer), if !server_done => {
+                let (should_continue, reached_eof) = handle_forward_step(
+                    result,
+                    &mut server_state,
+                    &mut tunnel_idle_sleep,
+                    timeout_config.tunnel_idle_timeout,
+                    &mut half_close_idle_sleep,
+                    timeout_config.half_close_idle_timeout,
+                    client_done,
+                );
+                if reached_eof {
+                    client_writer_shutdown = true;
+                }
+                if !should_continue {
+                    break;
+                }
+            }
+            _ = &mut tunnel_idle_sleep, if tunnel_idle_enabled && !half_closed => {
+                tracing::debug!(
+                    "forward tunnel idle timeout after {:?}",
+                    timeout_config.tunnel_idle_timeout
+                );
+                break;
+            }
+            _ = &mut half_close_idle_sleep, if half_close_idle_enabled && half_closed => {
+                tracing::debug!(
+                    "forward half-close idle timeout after {:?}",
+                    timeout_config.half_close_idle_timeout
+                );
+                break;
+            }
+        }
+    }
+
+    if !client_writer_shutdown {
+        client_writer.shutdown().await;
+    }
+    if !server_writer_shutdown {
+        server_writer.shutdown().await;
+    }
+    let client_len = client_state.len;
+    let server_len = server_state.len;
+    handle_forward_final_result(client_state.result, client_len, "client->server");
+    handle_forward_final_result(server_state.result, server_len, "server->client");
+}
+
+enum ForwardStep {
+    Bytes(usize),
+    Eof,
+}
+
+async fn forward_once<R: ForwardReader, W: ForwardWriter>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<ForwardStep> {
+    let src = reader.read().await?;
+    let n = src.len();
+    if n == 0 {
+        writer.shutdown().await;
+        Ok(ForwardStep::Eof)
+    } else {
+        writer.write(src).await?;
+        Ok(ForwardStep::Bytes(n))
+    }
+}
+
+fn handle_forward_step(
+    result: Result<ForwardStep>,
+    state: &mut ForwardDirectionState,
+    tunnel_idle_sleep: &mut Pin<&mut tokio::time::Sleep>,
+    tunnel_idle_timeout: Duration,
+    half_close_idle_sleep: &mut Pin<&mut tokio::time::Sleep>,
+    half_close_idle_timeout: Duration,
+    peer_done: bool,
+) -> (bool, bool) {
+    match result {
+        Ok(ForwardStep::Bytes(n)) => {
+            state.len += n;
+            reset_sleep(tunnel_idle_sleep, tunnel_idle_timeout);
+            if peer_done {
+                reset_sleep(half_close_idle_sleep, half_close_idle_timeout);
+            }
+            (true, false)
+        }
+        Ok(ForwardStep::Eof) => {
+            state.result = Some(Ok(state.len));
+            reset_sleep(half_close_idle_sleep, half_close_idle_timeout);
+            (true, true)
+        }
+        Err(e) => {
+            state.result = Some(Err(e));
+            (false, false)
+        }
+    }
+}
+
+fn reset_sleep(sleep: &mut Pin<&mut tokio::time::Sleep>, timeout: Duration) {
+    if !timeout.is_zero() {
+        sleep.as_mut().reset(Instant::now() + timeout);
+    }
+}
+
+fn handle_forward_final_result(result: Option<Result<usize>>, len: usize, detail: &'static str) {
+    if let Some(result) = result {
+        handle_forward_result(result, detail);
+    } else {
+        tracing::debug!("forward stopped before peer closed; we send {len} bytes,detail:{detail}");
+    }
 }
 
 pub async fn start_datagram_forward<
@@ -527,4 +767,205 @@ macro_rules! start_datagram_forward_with_codec_key {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::common::error::Error;
+
+    enum ReadAction {
+        Data(Vec<u8>),
+        Eof,
+        Pending,
+        Error(io::ErrorKind),
+    }
+
+    struct ScriptedReader {
+        actions: VecDeque<ReadAction>,
+        current: Vec<u8>,
+    }
+
+    impl ScriptedReader {
+        fn new(actions: impl IntoIterator<Item = ReadAction>) -> Self {
+            Self {
+                actions: actions.into_iter().collect(),
+                current: Vec::new(),
+            }
+        }
+    }
+
+    impl ForwardReader for ScriptedReader {
+        async fn read(&mut self) -> Result<&'_ [u8]> {
+            match self.actions.pop_front().unwrap_or(ReadAction::Pending) {
+                ReadAction::Data(data) => {
+                    self.current = data;
+                    Ok(&self.current)
+                }
+                ReadAction::Eof => {
+                    self.current.clear();
+                    Ok(&self.current)
+                }
+                ReadAction::Pending => std::future::pending().await,
+                ReadAction::Error(kind) => Err(Error::MsgForward {
+                    action: "read",
+                    source: io::Error::new(kind, "scripted read error"),
+                }),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct WriterState {
+        chunks: Vec<Vec<u8>>,
+        shutdowns: usize,
+    }
+
+    #[derive(Clone, Default)]
+    struct ScriptedWriter {
+        state: Arc<Mutex<WriterState>>,
+    }
+
+    impl ScriptedWriter {
+        fn chunks(&self) -> Vec<Vec<u8>> {
+            self.state.lock().unwrap().chunks.clone()
+        }
+
+        fn shutdowns(&self) -> usize {
+            self.state.lock().unwrap().shutdowns
+        }
+    }
+
+    impl ForwardWriter for ScriptedWriter {
+        async fn write(&mut self, src: &[u8]) -> Result<()> {
+            self.state.lock().unwrap().chunks.push(src.to_vec());
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) {
+            self.state.lock().unwrap().shutdowns += 1;
+        }
+    }
+
+    #[test]
+    fn parse_duration_accepts_suffixes_and_plain_seconds() {
+        assert_eq!(parse_duration("42"), Some(Duration::from_secs(42)));
+        assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration("2s"), Some(Duration::from_secs(2)));
+        assert_eq!(parse_duration("3m"), Some(Duration::from_secs(180)));
+        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("bad"), None);
+        assert_eq!(parse_duration("18446744073709551615h"), None);
+    }
+
+    #[tokio::test]
+    async fn half_close_idle_timeout_closes_stalled_peer() {
+        let client_reader = ScriptedReader::new([ReadAction::Eof]);
+        let client_writer = ScriptedWriter::default();
+        let server_reader = ScriptedReader::new([ReadAction::Pending]);
+        let server_writer = ScriptedWriter::default();
+        let server_writer_state = server_writer.clone();
+
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            start_forward_with_config(
+                client_reader,
+                client_writer,
+                server_reader,
+                server_writer,
+                ForwardTimeoutConfig {
+                    tunnel_idle_timeout: Duration::from_secs(60 * 60),
+                    half_close_idle_timeout: Duration::from_millis(20),
+                },
+            ),
+        )
+        .await
+        .expect("half-closed tunnel did not stop after half-close idle timeout");
+
+        assert_eq!(server_writer_state.shutdowns(), 1);
+    }
+
+    #[tokio::test]
+    async fn expected_disconnect_stops_waiting_for_pending_peer() {
+        let client_reader =
+            ScriptedReader::new([ReadAction::Error(io::ErrorKind::ConnectionReset)]);
+        let client_writer = ScriptedWriter::default();
+        let server_reader = ScriptedReader::new([ReadAction::Pending]);
+        let server_writer = ScriptedWriter::default();
+
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            start_forward_with_config(
+                client_reader,
+                client_writer,
+                server_reader,
+                server_writer,
+                ForwardTimeoutConfig {
+                    tunnel_idle_timeout: Duration::from_secs(60 * 60),
+                    half_close_idle_timeout: Duration::from_secs(60),
+                },
+            ),
+        )
+        .await
+        .expect("expected disconnect did not stop the tunnel");
+    }
+
+    #[tokio::test]
+    async fn half_closed_tunnel_drains_peer_before_timeout() {
+        let client_reader = ScriptedReader::new([ReadAction::Eof]);
+        let client_writer = ScriptedWriter::default();
+        let client_writer_state = client_writer.clone();
+        let server_reader =
+            ScriptedReader::new([ReadAction::Data(b"response".to_vec()), ReadAction::Eof]);
+        let server_writer = ScriptedWriter::default();
+
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            start_forward_with_config(
+                client_reader,
+                client_writer,
+                server_reader,
+                server_writer,
+                ForwardTimeoutConfig {
+                    tunnel_idle_timeout: Duration::from_secs(60 * 60),
+                    half_close_idle_timeout: Duration::from_millis(200),
+                },
+            ),
+        )
+        .await
+        .expect("half-closed tunnel failed to drain the peer");
+
+        assert_eq!(client_writer_state.chunks(), vec![b"response".to_vec()]);
+        assert_eq!(client_writer_state.shutdowns(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_idle_timeout_closes_inactive_tunnel() {
+        let client_reader = ScriptedReader::new([ReadAction::Pending]);
+        let client_writer = ScriptedWriter::default();
+        let server_reader = ScriptedReader::new([ReadAction::Pending]);
+        let server_writer = ScriptedWriter::default();
+
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            start_forward_with_config(
+                client_reader,
+                client_writer,
+                server_reader,
+                server_writer,
+                ForwardTimeoutConfig {
+                    tunnel_idle_timeout: Duration::from_millis(20),
+                    half_close_idle_timeout: Duration::from_secs(60),
+                },
+            ),
+        )
+        .await
+        .expect("inactive open tunnel did not stop after tunnel idle timeout");
+    }
 }

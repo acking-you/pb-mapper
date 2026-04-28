@@ -149,7 +149,11 @@ flutter run
 
 - `PB_MAPPER_SERVER`：CLI 默认服务器地址
 - `PB_MAPPER_KEEP_ALIVE`：启用 TCP keep-alive（设置为 `ON`）
+- `PB_MAPPER_TUNNEL_IDLE_TIMEOUT`：TCP 隧道双向完全空闲后的关闭时间，默认 `1h`
+- `PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT`：TCP 隧道半关闭后另一方向无数据时的关闭时间，默认 `60s`
 - `RUST_LOG`：日志级别，例如 `info` 或 `debug`
+
+超时值支持纯秒数，也支持 `ms`/`s`/`m`/`h` 后缀，例如 `500ms`、`60s`、`10m`、`1h`。
 
 ## Docker 部署
 
