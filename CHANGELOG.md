@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.13] - 2026-04-29
+- Retired stale server control connections instead of keeping them selectable after stream ack or stream-ready timeouts.
+- Kept subscribe requests open briefly while replacement control connections register, reducing transient failures during network churn.
+- Added continuous client-side key health checks while local listeners are active so missing remote registrations are detected quickly.
+- Replaced finite retry loops with capped fast backoff so local server/client processes keep recovering under default settings.
+- Added regression coverage for stale control retirement, replacement-control recovery, active client health checks, and non-exhausting retry backoff.
+
 ## [0.2.12] - 2026-04-29
 - Added parallel server-side control connections for registered services so transient stale control connections can be bypassed quickly.
 - Added stream-request acknowledgements and generation checks to reject stale ack/stream responses from previous subscribe attempts.
