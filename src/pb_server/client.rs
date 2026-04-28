@@ -13,7 +13,7 @@ use super::error::{
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use crate::common::checksum::{gen_random_key, AesKeyType};
-use crate::common::config::{stream_ack_timeout, stream_ready_timeout};
+use crate::common::config::{stream_ack_timeout, stream_ready_timeout, stream_recovery_timeout};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{MessageSerializer, PbConnResponse};
 use crate::common::message::forward::{
@@ -270,20 +270,27 @@ pub async fn handle_client_conn(
     result
 }
 
-async fn mark_server_suspect(
+async fn retire_server_conn(
     task_sender: &ManagerTaskSender,
     key: ImutableKey,
     conn_id: RemoteConnId,
+    reason: impl Into<String>,
 ) {
+    let reason = reason.into();
     if task_sender
-        .send(ManagerTask::MarkServerConnSuspect { key, conn_id })
+        .send(ManagerTask::RetireServerConn {
+            key,
+            conn_id,
+            reason: reason.clone(),
+        })
         .await
         .is_err()
     {
         tracing::debug!(
-            event = "server_suspect_mark_skipped",
+            event = "server_retire_skipped",
             conn_id = %conn_id,
-            "skip server suspect mark because manager channel is closed"
+            reason = %reason,
+            "skip server retire because manager channel is closed"
         );
     }
 }
@@ -336,7 +343,9 @@ async fn get_server_stream(
     let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
     let ack_timeout = stream_ack_timeout();
     let ready_timeout = stream_ready_timeout();
-    let mut excluded_server_conn_ids = Vec::new();
+    let recovery_timeout = stream_recovery_timeout();
+    let recovery_deadline = Instant::now() + recovery_timeout;
+    let mut excluded_server_conns = Vec::new();
 
     'attempt: loop {
         task_sender
@@ -344,7 +353,7 @@ async fn get_server_stream(
                 key: key.clone(),
                 conn_id,
                 conn_sender: tx.clone(),
-                excluded_server_conn_ids: excluded_server_conn_ids.clone(),
+                excluded_server_conns: excluded_server_conns.clone(),
             })
             .await
             .map_err(|_| kanal::SendError(()))
@@ -356,7 +365,7 @@ async fn get_server_stream(
             event = "subscribe_task_sent",
             key = %key,
             client_conn_id = %conn_id,
-            excluded_server_conn_ids = ?excluded_server_conn_ids,
+            excluded_server_conns = ?excluded_server_conns,
             "subscribe task sent to manager"
         );
 
@@ -413,6 +422,35 @@ async fn get_server_stream(
                 }
                 .fail()?
             }
+            ConnTask::SubcribeRetry { reason } => {
+                if Instant::now() >= recovery_deadline {
+                    tracing::warn!(
+                        event = "subscribe_recovery_timeout",
+                        key = %key,
+                        client_conn_id = %conn_id,
+                        reason = %reason,
+                        recovery_timeout = ?recovery_timeout,
+                        "subscribe recovery timed out"
+                    );
+                    ClientConnSubcribeFailedSnafu {
+                        key: key.clone(),
+                        conn_id,
+                        reason: reason.clone(),
+                    }
+                    .fail()?
+                }
+                tracing::info!(
+                    event = "subscribe_waiting_for_replacement",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    reason = %reason,
+                    excluded_server_conns = ?excluded_server_conns,
+                    recovery_timeout = ?recovery_timeout,
+                    "waiting for replacement server control connection"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue 'attempt;
+            }
             _ => ClientConnSubcribeRespNotMatchSnafu {
                 key: key.clone(),
                 conn_id,
@@ -435,8 +473,16 @@ async fn get_server_stream(
                     timeout = ?ack_timeout,
                     "timed out waiting for server stream ack"
                 );
-                mark_server_suspect(&task_sender, key.clone(), server_conn_id).await;
-                excluded_server_conn_ids.push(server_conn_id);
+                retire_server_conn(
+                    &task_sender,
+                    key.clone(),
+                    server_conn_id,
+                    format!(
+                        "timed out waiting for stream ack for client {conn_id} after {ack_timeout:?}"
+                    ),
+                )
+                .await;
+                excluded_server_conns.push((server_conn_id, server_generation));
                 continue 'attempt;
             }
         };
@@ -473,7 +519,7 @@ async fn get_server_stream(
                     server_generation,
                     "unexpected task while waiting for server stream ack"
                 );
-                excluded_server_conn_ids.push(server_conn_id);
+                excluded_server_conns.push((server_conn_id, server_generation));
                 continue 'attempt;
             }
         }
@@ -493,8 +539,16 @@ async fn get_server_stream(
                     timeout = ?ready_timeout,
                     "timed out waiting for server stream after ack"
                 );
-                mark_server_suspect(&task_sender, key.clone(), server_conn_id).await;
-                excluded_server_conn_ids.push(server_conn_id);
+                retire_server_conn(
+                    &task_sender,
+                    key.clone(),
+                    server_conn_id,
+                    format!(
+                        "timed out waiting for stream connection for client {conn_id} after {ready_timeout:?}"
+                    ),
+                )
+                .await;
+                excluded_server_conns.push((server_conn_id, server_generation));
                 continue 'attempt;
             }
         };
@@ -520,7 +574,7 @@ async fn get_server_stream(
                 response_generation,
                 "ignoring stale server stream response"
             );
-            excluded_server_conn_ids.push(server_conn_id);
+            excluded_server_conns.push((server_conn_id, server_generation));
             continue 'attempt;
         }
 

@@ -226,12 +226,26 @@ pub async fn handle_server_conn(
                 tokio::select! {
                     req = rx.recv() => {
                         let req = req.context(ServerConnRecvConnTaskSnafu)?;
-                        handle_stream_req(
-                            req,
-                            &mut msg_writer,
-                            writer_key.clone(),
-                            conn_id
-                        ).await?;
+                        match req {
+                            ConnTask::Retire { reason } => {
+                                tracing::warn!(
+                                    event = "server_conn_retire_requested",
+                                    key = %writer_key,
+                                    conn_id = %conn_id,
+                                    reason = %reason,
+                                    "server control connection writer is closing"
+                                );
+                                break Ok(());
+                            }
+                            req => {
+                                handle_stream_req(
+                                    req,
+                                    &mut msg_writer,
+                                    writer_key.clone(),
+                                    conn_id
+                                ).await?;
+                            }
+                        }
                     }
                     cmd = write_rx.recv() => {
                         let Some(cmd) = cmd else {
@@ -404,8 +418,6 @@ async fn handle_stream_req<T: MessageWriter>(
     key: ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
-    // TODO: handle stop task
-    // FIXME: Maybe it can be parallelized here?
     if let ConnTask::StreamReq {
         client_id: client_conn_id,
         server_generation,

@@ -162,12 +162,18 @@ pub const PB_MAPPER_KEEP_ALIVE: &str = "PB_MAPPER_KEEP_ALIVE";
 pub const PB_MAPPER_CONTROL_IO_TIMEOUT: &str = "PB_MAPPER_CONTROL_IO_TIMEOUT";
 pub const PB_MAPPER_STREAM_ACK_TIMEOUT: &str = "PB_MAPPER_STREAM_ACK_TIMEOUT";
 pub const PB_MAPPER_STREAM_READY_TIMEOUT: &str = "PB_MAPPER_STREAM_READY_TIMEOUT";
+pub const PB_MAPPER_STREAM_RECOVERY_TIMEOUT: &str = "PB_MAPPER_STREAM_RECOVERY_TIMEOUT";
 pub const PB_MAPPER_CONTROL_CONN_POOL_SIZE: &str = "PB_MAPPER_CONTROL_CONN_POOL_SIZE";
+pub const PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL: &str = "PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL";
+pub const PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT: &str = "PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT";
 pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
 const DEFAULT_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_millis(300);
 const DEFAULT_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_STREAM_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_CONTROL_CONN_POOL_SIZE: usize = 2;
+const DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -246,6 +252,13 @@ pub fn stream_ready_timeout() -> Duration {
     duration_from_env(PB_MAPPER_STREAM_READY_TIMEOUT, DEFAULT_STREAM_READY_TIMEOUT)
 }
 
+pub fn stream_recovery_timeout() -> Duration {
+    duration_from_env(
+        PB_MAPPER_STREAM_RECOVERY_TIMEOUT,
+        DEFAULT_STREAM_RECOVERY_TIMEOUT,
+    )
+}
+
 pub fn control_conn_pool_size() -> usize {
     std::env::var(PB_MAPPER_CONTROL_CONN_POOL_SIZE)
         .ok()
@@ -253,6 +266,20 @@ pub fn control_conn_pool_size() -> usize {
         .filter(|size| *size > 0)
         .map(|size| size.min(16))
         .unwrap_or(DEFAULT_CONTROL_CONN_POOL_SIZE)
+}
+
+pub fn client_health_check_interval() -> Duration {
+    duration_from_env(
+        PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL,
+        DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL,
+    )
+}
+
+pub fn client_health_check_timeout() -> Duration {
+    duration_from_env(
+        PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT,
+        DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT,
+    )
 }
 
 /// Controls whether the keepalive option for TCP is enabled, depending on the value of the

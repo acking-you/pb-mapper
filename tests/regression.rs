@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,29 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uni_stream::stream::TcpListenerProvider;
+
+struct EnvVarGuard {
+    key: &'static str,
+    old_value: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &'static str) -> Self {
+        let old_value = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, old_value }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.old_value.take() {
+            std::env::set_var(self.key, value);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
 
 async fn wait_for_server(server_addr: SocketAddr) -> TcpStream {
     timeout(Duration::from_secs(2), async {
@@ -52,6 +76,29 @@ async fn register_control_conn_parts(
         panic!("unexpected register response");
     };
     conn_id
+}
+
+async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
+    let mut stream = wait_for_server(server_addr).await;
+    let request = PbConnRequest::Status(PbConnStatusReq::Keys)
+        .encode()
+        .unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut stream).unwrap();
+        writer.write_msg(&request).await.unwrap();
+    }
+
+    let mut reader = get_header_msg_reader(&mut stream).unwrap();
+    let response = timeout(Duration::from_secs(1), reader.read_msg())
+        .await
+        .expect("status keys response timed out")
+        .unwrap();
+    let PbConnResponse::Status(PbConnStatusResp::Keys(keys)) =
+        PbConnResponse::decode(response).unwrap()
+    else {
+        panic!("unexpected status keys response");
+    };
+    keys
 }
 
 #[tokio::test]
@@ -93,6 +140,282 @@ async fn client_closes_initial_status_probe_after_key_check() {
 
     assert_eq!(fake_server.await.unwrap(), 0);
     client.abort();
+}
+
+#[tokio::test]
+async fn client_rechecks_remote_key_while_listener_is_active() {
+    let _health_interval = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL", "20ms");
+    let _health_timeout = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT", "200ms");
+
+    let local_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = local_probe.local_addr().unwrap();
+    drop(local_probe);
+
+    let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = remote_listener.local_addr().unwrap();
+    let key_available = Arc::new(AtomicBool::new(true));
+    let status_count = Arc::new(AtomicUsize::new(0));
+
+    let fake_key_available = key_available.clone();
+    let fake_status_count = status_count.clone();
+    let fake_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = remote_listener.accept().await.unwrap();
+            let key_available = fake_key_available.clone();
+            let status_count = fake_status_count.clone();
+            tokio::spawn(async move {
+                let Ok(request) = get_init_request(&mut stream, 0.into()).await else {
+                    return;
+                };
+                match request {
+                    PbConnRequest::Status(PbConnStatusReq::Keys) => {
+                        status_count.fetch_add(1, Ordering::SeqCst);
+                        let keys = if key_available.load(Ordering::SeqCst) {
+                            vec!["sf-backend".to_string()]
+                        } else {
+                            Vec::new()
+                        };
+                        let response = PbConnResponse::Status(PbConnStatusResp::Keys(keys))
+                            .encode()
+                            .unwrap();
+                        let mut writer = get_header_msg_writer(&mut stream).unwrap();
+                        writer.write_msg(&response).await.unwrap();
+                    }
+                    PbConnRequest::Subcribe { .. } => {}
+                    _ => {}
+                }
+            });
+        }
+    });
+
+    let client = tokio::spawn(run_client_side_cli_with_callback::<TcpListenerProvider, _>(
+        local_addr,
+        remote_addr,
+        Arc::from("sf-backend"),
+        None,
+    ));
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if status_count.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("client did not run initial key probe");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if TcpStream::connect(local_addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("client listener did not bind after key probe");
+
+    let baseline = status_count.load(Ordering::SeqCst);
+    key_available.store(false, Ordering::SeqCst);
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if status_count.load(Ordering::SeqCst) > baseline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("client did not recheck remote key while listener was active");
+
+    client.abort();
+    fake_server.abort();
+}
+
+#[tokio::test]
+async fn subscribe_retires_unacked_control_connection() {
+    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = probe_listener.local_addr().unwrap();
+    drop(probe_listener);
+
+    let shutdown_token = CancellationToken::new();
+    let server_shutdown = shutdown_token.clone();
+    let server = tokio::spawn(async move {
+        run_server_with_shutdown(server_addr, server_shutdown, None)
+            .await
+            .unwrap();
+    });
+
+    let key = "sf-backend";
+    let (stale_ready_tx, stale_ready_rx) = tokio::sync::oneshot::channel();
+    let stale_key = key.to_string();
+    let stale_task = tokio::spawn(async move {
+        let stale_control = wait_for_server(server_addr).await;
+        let (mut reader_stream, mut writer_stream) = stale_control.into_split();
+        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, &stale_key).await;
+        stale_ready_tx.send(()).unwrap();
+        let request = timeout(Duration::from_secs(2), reader.read_msg())
+            .await
+            .expect("stale control did not receive stream request")
+            .unwrap();
+        assert!(matches!(
+            LocalServer::decode(request).unwrap(),
+            LocalServer::Stream { .. }
+        ));
+        std::future::pending::<()>().await;
+    });
+    stale_ready_rx.await.unwrap();
+
+    let mut client = wait_for_server(server_addr).await;
+    let request = PbConnRequest::Subcribe {
+        key: key.to_string(),
+    }
+    .encode()
+    .unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut client).unwrap();
+        writer.write_msg(&request).await.unwrap();
+    }
+
+    let mut reader = get_header_msg_reader(&mut client).unwrap();
+    let result = timeout(Duration::from_secs(4), reader.read_msg())
+        .await
+        .expect("subscribe did not finish after stale control timed out");
+    assert!(result.is_err());
+
+    let keys = read_status_keys(server_addr).await;
+    assert!(
+        !keys.iter().any(|candidate| candidate == key),
+        "unacked stale control connection kept key registered: {keys:?}"
+    );
+
+    stale_task.abort();
+    shutdown_token.cancel();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection() {
+    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = probe_listener.local_addr().unwrap();
+    drop(probe_listener);
+
+    let shutdown_token = CancellationToken::new();
+    let server_shutdown = shutdown_token.clone();
+    let server = tokio::spawn(async move {
+        run_server_with_shutdown(server_addr, server_shutdown, None)
+            .await
+            .unwrap();
+    });
+
+    let key = "sf-backend";
+    let (stale_ready_tx, stale_ready_rx) = tokio::sync::oneshot::channel();
+    let (retired_tx, retired_rx) = tokio::sync::oneshot::channel();
+    let stale_key = key.to_string();
+    let stale_task = tokio::spawn(async move {
+        let stale_control = wait_for_server(server_addr).await;
+        let (mut reader_stream, mut writer_stream) = stale_control.into_split();
+        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        register_control_conn_parts(&mut reader, &mut writer, &stale_key).await;
+        stale_ready_tx.send(()).unwrap();
+        let request = timeout(Duration::from_secs(2), reader.read_msg())
+            .await
+            .expect("stale control did not receive stream request")
+            .unwrap();
+        assert!(matches!(
+            LocalServer::decode(request).unwrap(),
+            LocalServer::Stream { .. }
+        ));
+
+        let retired = timeout(Duration::from_secs(2), reader.read_msg())
+            .await
+            .expect("stale control was not retired by the server");
+        if let Ok(bytes) = retired {
+            assert!(bytes.is_empty());
+        }
+        retired_tx.send(()).unwrap();
+    });
+    stale_ready_rx.await.unwrap();
+
+    let (replacement_stream_tx, replacement_stream_rx) = tokio::sync::oneshot::channel();
+    let replacement_key = key.to_string();
+    let replacement_task = tokio::spawn(async move {
+        retired_rx.await.unwrap();
+        let replacement_control = wait_for_server(server_addr).await;
+        let (mut reader_stream, mut writer_stream) = replacement_control.into_split();
+        let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+        {
+            let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+            register_control_conn_parts(&mut reader, &mut writer, &replacement_key).await;
+        }
+        let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+        let request = timeout(Duration::from_secs(2), reader.read_msg())
+            .await
+            .expect("replacement control did not receive stream request")
+            .unwrap();
+        let LocalServer::Stream {
+            client_id,
+            server_generation,
+        } = LocalServer::decode(request).unwrap()
+        else {
+            panic!("unexpected local server control message");
+        };
+
+        let ack = PbServerRequest::StreamAck {
+            client_id,
+            server_generation,
+        }
+        .encode()
+        .unwrap();
+        writer.write_msg(&ack).await.unwrap();
+
+        let mut stream = TcpStream::connect(server_addr).await.unwrap();
+        let request = PbConnRequest::Stream {
+            key: replacement_key,
+            dst_id: client_id,
+            server_generation,
+        }
+        .encode()
+        .unwrap();
+        let mut stream_writer = get_header_msg_writer(&mut stream).unwrap();
+        stream_writer.write_msg(&request).await.unwrap();
+        replacement_stream_tx.send(stream).unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    let mut client = wait_for_server(server_addr).await;
+    let request = PbConnRequest::Subcribe {
+        key: key.to_string(),
+    }
+    .encode()
+    .unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut client).unwrap();
+        writer.write_msg(&request).await.unwrap();
+    }
+
+    let mut reader = get_header_msg_reader(&mut client).unwrap();
+    let response = timeout(Duration::from_secs(3), reader.read_msg())
+        .await
+        .expect("subscribe did not wait for replacement control connection")
+        .unwrap();
+    assert!(matches!(
+        PbConnResponse::decode(response).unwrap(),
+        PbConnResponse::Subcribe { .. }
+    ));
+
+    let stream = replacement_stream_rx.await.unwrap();
+    drop(stream);
+    stale_task.abort();
+    replacement_task.abort();
+    shutdown_token.cancel();
+    server.await.unwrap();
 }
 
 #[tokio::test]

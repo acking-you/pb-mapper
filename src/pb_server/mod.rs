@@ -51,7 +51,7 @@ pub enum ManagerTask {
         key: ImutableKey,
         conn_id: RemoteConnId,
         conn_sender: ConnTaskSender,
-        excluded_server_conn_ids: Vec<RemoteConnId>,
+        excluded_server_conns: Vec<(RemoteConnId, u64)>,
     },
     Stream {
         stream: TcpStream,
@@ -76,9 +76,10 @@ pub enum ManagerTask {
         key: ImutableKey,
         conn_id: RemoteConnId,
     },
-    MarkServerConnSuspect {
+    RetireServerConn {
         key: ImutableKey,
         conn_id: RemoteConnId,
+        reason: String,
     },
     DeRegisterClientConn {
         server_id: Option<RemoteConnId>,
@@ -87,7 +88,6 @@ pub enum ManagerTask {
     Shutdown,
 }
 
-/// TODO: Add a task that notifies the writer to release
 #[derive(Debug)]
 pub enum ConnTask {
     Forward(ForwardMessage),
@@ -101,9 +101,15 @@ pub enum ConnTask {
     SubcribeFailed {
         reason: String,
     },
+    SubcribeRetry {
+        reason: String,
+    },
     StreamReq {
         client_id: RemoteConnId,
         server_generation: u64,
+    },
+    Retire {
+        reason: String,
     },
     StreamAck {
         server_id: RemoteConnId,
@@ -171,22 +177,6 @@ fn service_conn_count(server_conn_map: &ServerConnMap, key: &ImutableKey) -> usi
     server_conn_map.get(key).map(Vec::len).unwrap_or_default()
 }
 
-fn mark_server_conn_health(
-    server_conn_map: &mut ServerConnMap,
-    key: &ImutableKey,
-    conn_id: RemoteConnId,
-    health: ServerConnHealth,
-) -> bool {
-    let Some(conns) = server_conn_map.get_mut(key) else {
-        return false;
-    };
-    let Some(info) = conns.iter_mut().find(|info| info.conn_id == conn_id) else {
-        return false;
-    };
-    info.health = health;
-    true
-}
-
 async fn send_subcribe_failed(
     conn_sender: &ConnTaskSender,
     key: &ImutableKey,
@@ -207,6 +197,30 @@ async fn send_subcribe_failed(
             client_conn_id = %conn_id,
             reason = %reason,
             "subscribe failure receiver dropped"
+        );
+    }
+}
+
+async fn send_subcribe_retry(
+    conn_sender: &ConnTaskSender,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+    reason: impl Into<String>,
+) {
+    let reason = reason.into();
+    if conn_sender
+        .send(ConnTask::SubcribeRetry {
+            reason: reason.clone(),
+        })
+        .await
+        .is_err()
+    {
+        tracing::debug!(
+            event = "subscribe_retry_receiver_dropped",
+            key = %key,
+            client_conn_id = %conn_id,
+            reason = %reason,
+            "subscribe retry receiver dropped"
         );
     }
 }
@@ -400,21 +414,47 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     "server connection deregistered"
                 );
             }
-            ManagerTask::MarkServerConnSuspect { key, conn_id } => {
-                let updated = mark_server_conn_health(
-                    &mut server_conn_map,
-                    &key,
-                    conn_id,
-                    ServerConnHealth::Suspect,
-                );
+            ManagerTask::RetireServerConn {
+                key,
+                conn_id,
+                reason,
+            } => {
+                let conn_sender = manager.get_conn_sender_chan(&conn_id);
+                let removed_from_service_map =
+                    remove_server_conn(&mut server_conn_map, &key, conn_id);
+                let removed_from_active_map = manager.deregister_conn(conn_id);
+                let mut removed_pending_streams = 0usize;
+                pending_streams.retain(|_, (server_id, _)| {
+                    let keep = *server_id != conn_id;
+                    if !keep {
+                        removed_pending_streams += 1;
+                    }
+                    keep
+                });
+                let retire_notified = conn_sender
+                    .as_ref()
+                    .and_then(|sender| {
+                        sender
+                            .try_send(ConnTask::Retire {
+                                reason: reason.clone(),
+                            })
+                            .ok()
+                    })
+                    .is_some();
                 tracing::warn!(
-                    event = "server_conn_marked_suspect",
+                    event = "server_conn_retired",
                     key = %key,
                     conn_id = %conn_id,
-                    updated,
+                    reason = %reason,
+                    removed_from_service_map,
+                    removed_from_active_map,
+                    removed_pending_streams,
+                    retire_notified,
                     registered_services = server_conn_map.len(),
                     server_connections = registered_server_conn_count(&server_conn_map),
-                    "server connection marked suspect"
+                    active_connections = manager.active_conn_count(),
+                    idle_connections = manager.idle_conn_count(),
+                    "server connection retired"
                 );
             }
             ManagerTask::DeRegisterClientConn {
@@ -621,34 +661,32 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 key,
                 conn_id,
                 conn_sender,
-                excluded_server_conn_ids,
+                excluded_server_conns,
             } => {
                 let Some(server_conn_id_list) = server_conn_map.get(&key).cloned() else {
+                    let reason = format!("server key `{key}` is not registered");
                     tracing::warn!(
                         event = "subscribe_key_missing",
                         key = %key,
                         client_conn_id = %conn_id,
+                        excluded_server_conns = ?excluded_server_conns,
                         registered_services = server_conn_map.len(),
                         server_connections = registered_server_conn_count(&server_conn_map),
                         "subscribe key is not registered"
                     );
-                    send_subcribe_failed(
-                        &conn_sender,
-                        &key,
-                        conn_id,
-                        format!("server key `{key}` is not registered"),
-                    )
-                    .await;
+                    if excluded_server_conns.is_empty() {
+                        send_subcribe_failed(&conn_sender, &key, conn_id, reason).await;
+                    } else {
+                        send_subcribe_retry(&conn_sender, &key, conn_id, reason).await;
+                    }
                     continue;
                 };
                 let mut selected = false;
                 let mut candidates = Vec::new();
-                for preferred_health in [ServerConnHealth::Healthy, ServerConnHealth::Suspect] {
-                    candidates.extend(server_conn_id_list.iter().rev().copied().filter(|info| {
-                        info.health == preferred_health
-                            && !excluded_server_conn_ids.contains(&info.conn_id)
-                    }));
-                }
+                candidates.extend(server_conn_id_list.iter().rev().copied().filter(|info| {
+                    info.health == ServerConnHealth::Healthy
+                        && !excluded_server_conns.contains(&(info.conn_id, info.generation))
+                }));
                 for server_info in candidates {
                     let ServerConnInfo {
                         conn_id: server_conn_id,
@@ -747,21 +785,21 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     break;
                 }
                 if !selected {
+                    let reason = format!("no usable server connection for key `{key}`");
                     tracing::warn!(
                         event = "subscribe_no_usable_server_conn",
                         key = %key,
                         client_conn_id = %conn_id,
+                        excluded_server_conns = ?excluded_server_conns,
                         registered_services = server_conn_map.len(),
                         server_connections = registered_server_conn_count(&server_conn_map),
                         "no usable server connection for subscribe"
                     );
-                    send_subcribe_failed(
-                        &conn_sender,
-                        &key,
-                        conn_id,
-                        format!("no usable server connection for key `{key}`"),
-                    )
-                    .await;
+                    if excluded_server_conns.is_empty() {
+                        send_subcribe_failed(&conn_sender, &key, conn_id, reason).await;
+                    } else {
+                        send_subcribe_retry(&conn_sender, &key, conn_id, reason).await;
+                    }
                 }
             }
             ManagerTask::Shutdown => {

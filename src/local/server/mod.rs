@@ -23,7 +23,7 @@ use crate::common::message::forward::StreamForward;
 use crate::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
-use crate::utils::timeout::TimeoutCount;
+use crate::utils::timeout::RetryBackoff;
 use crate::{
     snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_get_or_return_ok,
     snafu_error_handle,
@@ -34,8 +34,6 @@ use uni_stream::stream::{
 };
 
 const PING_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 minutes
-
-const GLOBAL_RETRY_TIMES: u32 = 16;
 
 fn get_ping_message() -> error::Result<Vec<u8>> {
     PbServerRequest::Ping.encode().context(EncodePingMsgSnafu)
@@ -191,11 +189,10 @@ async fn run_server_side_cli_worker<LocalStream, A>(
         is_datagram,
         worker_index,
     };
-    let mut timeout_count = TimeoutCount::new(GLOBAL_RETRY_TIMES);
-    let mut retry_interval = timeout_count.get_interval_by_count();
-    while timeout_count.validate() {
+    let mut retry_backoff = RetryBackoff::default();
+    loop {
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
-            &mut timeout_count,
+            &mut retry_backoff,
             run_config.clone(),
             status_callback.as_ref(),
         )
@@ -203,28 +200,35 @@ async fn run_server_side_cli_worker<LocalStream, A>(
         {
             status
         } else {
-            return;
+            tracing::warn!(
+                event = "local_server_control_worker_finished",
+                key = %key,
+                worker_index,
+                "local server control worker finished without an error; reconnecting"
+            );
+            Status::ReadMsg
         };
         match status {
             Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
+                let retry_interval = retry_backoff.next_delay();
                 tracing::info!(
-                    "We will try to re-connect the pb-server:`{:?} <-`{}`-> {:?}` after \
-                     {retry_interval}s, global-retry-count:{}",
-                    local_addr,
-                    key,
-                    remote_addr,
-                    timeout_count.count(),
+                    event = "local_server_control_reconnect_scheduled",
+                    key = %key,
+                    worker_index,
+                    local_addr = ?local_addr,
+                    remote_addr = ?remote_addr,
+                    status = ?status,
+                    retry_delay = ?retry_interval,
+                    retry_count = retry_backoff.failures(),
+                    "local server control connection will reconnect"
                 );
 
-                // Notify external systems
                 if let Some(ref callback) = status_callback {
                     let status = format!("{status:?}");
                     callback(&status);
                 }
 
-                tokio::time::sleep(Duration::from_secs(retry_interval)).await;
-                retry_interval = timeout_count.get_interval_by_count();
-                // Notify external systems that we're in retry mode
+                tokio::time::sleep(retry_interval).await;
                 if let Some(ref callback) = status_callback {
                     callback("retrying");
                 }
@@ -235,7 +239,7 @@ async fn run_server_side_cli_worker<LocalStream, A>(
 
 #[instrument(skip(status_callback))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
-    global_timeout_cnt: &mut TimeoutCount,
+    retry_backoff: &mut RetryBackoff,
     config: ServerCliRunConfig<A>,
     status_callback: Option<&StatusCallback>,
 ) -> std::result::Result<(), Status>
@@ -360,8 +364,7 @@ where
         (key, conn_id)
     };
 
-    // register ok, and reset global timeout count
-    global_timeout_cnt.reset();
+    retry_backoff.reset();
     let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<LocalControlWrite>();
     let writer_key = key.clone();
     let mut writer_handle = tokio::spawn(async move {
