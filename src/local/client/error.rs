@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use snafu::Snafu;
 
 use crate::common;
@@ -48,6 +50,11 @@ pub enum Error {
         // Must be `reader/writer`
         action: &'static str,
         source: common::error::Error,
+    },
+    #[snafu(display("control io `{action}` timed out after {timeout:?}"))]
+    ControlIoTimeout {
+        action: &'static str,
+        timeout: Duration,
     },
 }
 

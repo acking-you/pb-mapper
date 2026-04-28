@@ -8,9 +8,8 @@ use tracing::instrument;
 use super::error::{
     ClientConnEncodeSubcribeRespSnafu, ClientConnRecvStreamSnafu, ClientConnRecvStreamTimeoutSnafu,
     ClientConnRecvSubcribeRespSnafu, ClientConnRecvSubcribeRespTimeoutSnafu,
-    ClientConnSendDeregisterClientSnafu, ClientConnSendSubcribeSnafu,
-    ClientConnStreamRespNotMatchSnafu, ClientConnSubcribeRespNotMatchSnafu,
-    ClientConnWriteSubcribeRespSnafu,
+    ClientConnSendSubcribeSnafu, ClientConnStreamRespNotMatchSnafu, ClientConnSubcribeFailedSnafu,
+    ClientConnSubcribeRespNotMatchSnafu, ClientConnWriteSubcribeRespSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use crate::common::checksum::{gen_random_key, AesKeyType};
@@ -26,37 +25,109 @@ use crate::pb_server::error::{
     ClientConnCreateHeaderToolSnafu, ClientConnEncodeStreamRespSnafu,
     ClientConnWriteStreamRespSnafu,
 };
-use crate::{
-    create_component, snafu_error_get_or_return_ok, snafu_error_handle,
-    start_forward_with_codec_key,
-};
+use crate::{create_component, snafu_error_get_or_return_ok, start_forward_with_codec_key};
 
 /// Ensure that client-side connections are properly deregistered before a normal connection is
 /// disconnected or an exception occurs
-struct ClientConnGuard<'a> {
+struct ClientConnGuard {
     client_id: RemoteConnId,
     server_id: Option<RemoteConnId>,
-    sender: &'a ManagerTaskSender,
-    key: &'a ImutableKey,
+    sender: ManagerTaskSender,
+    key: ImutableKey,
+    active: bool,
 }
 
-impl<'a> Drop for ClientConnGuard<'a> {
+impl ClientConnGuard {
+    fn new(
+        client_id: RemoteConnId,
+        server_id: Option<RemoteConnId>,
+        sender: ManagerTaskSender,
+        key: ImutableKey,
+    ) -> Self {
+        Self {
+            client_id,
+            server_id,
+            sender,
+            key,
+            active: true,
+        }
+    }
+
+    fn set_server_id(&mut self, server_id: RemoteConnId) {
+        self.server_id = Some(server_id);
+    }
+
+    fn deregister_task(&self) -> ManagerTask {
+        ManagerTask::DeRegisterClientConn {
+            server_id: self.server_id,
+            client_id: self.client_id,
+        }
+    }
+
+    async fn deregister(&mut self) {
+        if !self.active {
+            return;
+        }
+        let task = self.deregister_task();
+        match self.sender.send(task).await {
+            Ok(()) => {
+                self.active = false;
+            }
+            Err(_) => {
+                self.active = false;
+                tracing::debug!(
+                    "skip async client deregister because manager channel is closed: key:{} client:{}",
+                    self.key,
+                    self.client_id
+                );
+            }
+        }
+    }
+
+    fn spawn_deregister(sender: ManagerTaskSender, task: ManagerTask) {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    if sender.send(task).await.is_err() {
+                        tracing::debug!(
+                            "skip deferred client deregister because manager channel is closed"
+                        );
+                    }
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "cannot defer client deregister because no Tokio runtime is available"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for ClientConnGuard {
     fn drop(&mut self) {
-        snafu_error_handle!(self
-            .sender
-            .try_send(ManagerTask::DeRegisterClientConn {
-                server_id: self.server_id,
-                client_id: self.client_id
-            })
-            .map_err(|err| match err {
-                kanal::SendTimeoutError::Closed(_) => kanal::SendTimeoutError::Closed(()),
-                kanal::SendTimeoutError::Timeout(_) => kanal::SendTimeoutError::Timeout(()),
-            })
-            .context(ClientConnSendDeregisterClientSnafu {
-                key: self.key.clone(),
-                server_id: self.server_id,
-                client_id: self.client_id,
-            }));
+        if !self.active {
+            return;
+        }
+        let task = self.deregister_task();
+        match self.sender.try_send(task) {
+            Ok(()) => {}
+            Err(kanal::SendTimeoutError::Closed(_)) => {
+                tracing::debug!(
+                    "skip client deregister on drop because manager channel is closed: key:{} client:{}",
+                    self.key,
+                    self.client_id
+                );
+            }
+            Err(kanal::SendTimeoutError::Timeout(task)) => {
+                tracing::warn!(
+                    "manager queue is full; defer client deregister: key:{} client:{}",
+                    self.key,
+                    self.client_id
+                );
+                Self::spawn_deregister(self.sender.clone(), task);
+            }
+        }
     }
 }
 
@@ -73,105 +144,113 @@ pub async fn handle_client_conn(
     mut conn: TcpStream,
 ) -> Result<()> {
     let prev_time = Instant::now();
-    let (mut server_stream, server_id, codec_key, is_datagram) = {
+    let mut guard = ClientConnGuard::new(conn_id, None, task_sender.clone(), key.clone());
+    let (mut server_stream, server_id, codec_key, is_datagram) =
         match get_server_stream(&mut conn, key.clone(), conn_id, task_sender.clone()).await {
             Ok(res) => res,
             Err(e) => {
-                let _guard = ClientConnGuard {
-                    client_id: conn_id,
-                    server_id: None,
-                    sender: &task_sender,
-                    key: &key,
-                };
+                guard.deregister().await;
                 return Err(e);
             }
-        }
-    };
+        };
+    guard.set_server_id(server_id);
 
-    let duration = Instant::now() - prev_time;
+    let result = async {
+        let duration = Instant::now() - prev_time;
 
-    tracing::info!(
-        "[time cost:{duration:?}] get server stream ok! we will start forward traffic. \
-         key:{key}   server:{server_id}<->client:{conn_id}"
-    );
-
-    let _guard = ClientConnGuard {
-        client_id: conn_id,
-        server_id: Some(server_id),
-        sender: &task_sender,
-        key: &key,
-    };
-
-    let (mut client_reader, mut client_writer) = conn.split();
-    let (mut server_reader, mut server_writer) = server_stream.split();
-
-    // response message to server to indicate that stream handling has finished
-    {
-        let mut msg_writer = get_header_msg_writer(&mut server_writer)
-            .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
-        let msg = PbConnResponse::Stream { codec_key }.encode().context(
-            ClientConnEncodeStreamRespSnafu {
-                key: key.clone(),
-                conn_id,
-            },
-        )?;
-        msg_writer
-            .write_msg(&msg)
-            .await
-            .context(ClientConnWriteStreamRespSnafu {
-                key: key.clone(),
-                conn_id,
-            })?;
-    }
-
-    if is_datagram {
-        match codec_key {
-            Some(key) => {
-                start_datagram_forward(
-                    CodecDatagramReader::new(
-                        &mut client_reader,
-                        snafu_error_get_or_return_ok!(get_decodec(&key)),
-                    ),
-                    CodecDatagramWriter::new(
-                        &mut client_writer,
-                        snafu_error_get_or_return_ok!(get_encodec(&key)),
-                    ),
-                    CodecDatagramReader::new(
-                        &mut server_reader,
-                        snafu_error_get_or_return_ok!(get_decodec(&key)),
-                    ),
-                    CodecDatagramWriter::new(
-                        &mut server_writer,
-                        snafu_error_get_or_return_ok!(get_encodec(&key)),
-                    ),
-                )
-                .await;
-            }
-            None => {
-                start_datagram_forward(
-                    NormalDatagramReader::new(&mut client_reader),
-                    NormalDatagramWriter::new(&mut client_writer),
-                    NormalDatagramReader::new(&mut server_reader),
-                    NormalDatagramWriter::new(&mut server_writer),
-                )
-                .await;
-            }
-        }
-    } else {
-        start_forward_with_codec_key!(
-            codec_key,
-            &mut client_reader,
-            &mut client_writer,
-            &mut server_reader,
-            &mut server_writer,
-            true,
-            true,
-            true,
-            true
+        tracing::info!(
+            "[time cost:{duration:?}] get server stream ok! we will start forward traffic. \
+             key:{key}   server:{server_id}<->client:{conn_id}"
         );
-    }
 
-    Ok(())
+        let (mut client_reader, mut client_writer) = conn.split();
+        let (mut server_reader, mut server_writer) = server_stream.split();
+
+        // response message to server to indicate that stream handling has finished
+        {
+            let mut msg_writer = get_header_msg_writer(&mut server_writer)
+                .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
+            let msg = PbConnResponse::Stream { codec_key }.encode().context(
+                ClientConnEncodeStreamRespSnafu {
+                    key: key.clone(),
+                    conn_id,
+                },
+            )?;
+            msg_writer
+                .write_msg(&msg)
+                .await
+                .context(ClientConnWriteStreamRespSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
+        }
+
+        if is_datagram {
+            match codec_key {
+                Some(key) => {
+                    start_datagram_forward(
+                        CodecDatagramReader::new(
+                            &mut client_reader,
+                            snafu_error_get_or_return_ok!(get_decodec(&key)),
+                        ),
+                        CodecDatagramWriter::new(
+                            &mut client_writer,
+                            snafu_error_get_or_return_ok!(get_encodec(&key)),
+                        ),
+                        CodecDatagramReader::new(
+                            &mut server_reader,
+                            snafu_error_get_or_return_ok!(get_decodec(&key)),
+                        ),
+                        CodecDatagramWriter::new(
+                            &mut server_writer,
+                            snafu_error_get_or_return_ok!(get_encodec(&key)),
+                        ),
+                    )
+                    .await;
+                }
+                None => {
+                    start_datagram_forward(
+                        NormalDatagramReader::new(&mut client_reader),
+                        NormalDatagramWriter::new(&mut client_writer),
+                        NormalDatagramReader::new(&mut server_reader),
+                        NormalDatagramWriter::new(&mut server_writer),
+                    )
+                    .await;
+                }
+            }
+        } else {
+            start_forward_with_codec_key!(
+                codec_key,
+                &mut client_reader,
+                &mut client_writer,
+                &mut server_reader,
+                &mut server_writer,
+                true,
+                true,
+                true,
+                true
+            );
+        }
+
+        Ok(())
+    }
+    .await;
+    guard.deregister().await;
+    result
+}
+
+async fn send_server_deregister(
+    task_sender: &ManagerTaskSender,
+    key: ImutableKey,
+    conn_id: RemoteConnId,
+) {
+    if task_sender
+        .send(ManagerTask::DeRegisterServerConn { key, conn_id })
+        .await
+        .is_err()
+    {
+        tracing::debug!("skip server deregister because manager channel is closed");
+    }
 }
 
 async fn get_server_stream(
@@ -209,18 +288,25 @@ async fn get_server_stream(
 
     // Note: A key will be generated for encrypting messages that are forwarded, and this key will
     // apply to all endpoints.
-    let (codec_key, is_datagram) = match resp {
+    let (codec_key, is_datagram, server_conn_id) = match resp {
         ConnTask::SubcribeResp {
             need_codec,
             is_datagram,
+            server_conn_id,
         } => {
             let codec_key = if need_codec {
                 Some(gen_random_key())
             } else {
                 None
             };
-            (codec_key, is_datagram)
+            (codec_key, is_datagram, server_conn_id)
         }
+        ConnTask::SubcribeFailed { reason } => ClientConnSubcribeFailedSnafu {
+            key: key.clone(),
+            conn_id,
+            reason,
+        }
+        .fail()?,
         _ => ClientConnSubcribeRespNotMatchSnafu {
             key: key.clone(),
             conn_id,
@@ -233,12 +319,15 @@ async fn get_server_stream(
             key: key.clone(),
             conn_id,
         })?,
-        Err(_) => ClientConnRecvStreamTimeoutSnafu {
-            key: key.clone(),
-            conn_id,
-            timeout: CLIENT_CONN_CONTROL_TIMEOUT,
+        Err(_) => {
+            send_server_deregister(&task_sender, key.clone(), server_conn_id).await;
+            ClientConnRecvStreamTimeoutSnafu {
+                key: key.clone(),
+                conn_id,
+                timeout: CLIENT_CONN_CONTROL_TIMEOUT,
+            }
+            .fail()?
         }
-        .fail()?,
     };
 
     if let ConnTask::StreamResp { server_id, stream } = resp {

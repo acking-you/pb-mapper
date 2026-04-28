@@ -13,14 +13,13 @@ use tracing::instrument;
 
 use self::client::handle_client_conn;
 use self::error::{
-    TaskCenterDecodeInitRequestSnafu, TaskCenterReadInitRequestSnafu, TaskCenterSendListenerSnafu,
-    TaskCenterSendStatusRespSnafu, TaskCenterSendStreamRespToManagerSnafu,
-    TaskCenterSetKeepAliveSnafu, TaskCenterSubcribeServerConnIdNotExistSnafu,
-    TaskCenterSubcribeServerConnKeyNotExistSnafu,
+    TaskCenterDecodeInitRequestSnafu, TaskCenterInitRequestTimeoutSnafu,
+    TaskCenterReadInitRequestSnafu, TaskCenterSendListenerSnafu, TaskCenterSendStatusRespSnafu,
+    TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
 };
 use self::server::handle_server_conn;
 use self::status::handle_show_status;
-use crate::common::config::IS_KEEPALIVE;
+use crate::common::config::{control_io_timeout, IS_KEEPALIVE};
 use crate::common::conn_id::{ConnIdProvider, RemoteConnId};
 use crate::common::manager::{ForwardMessage, SenderChan, TaskManager};
 use crate::common::message::command::{
@@ -79,8 +78,12 @@ pub enum ConnTask {
     Forward(ForwardMessage),
     RegisterResp,
     SubcribeResp {
+        server_conn_id: RemoteConnId,
         need_codec: bool,
         is_datagram: bool,
+    },
+    SubcribeFailed {
+        reason: String,
     },
     StreamReq(RemoteConnId),
     StreamResp {
@@ -109,6 +112,39 @@ pub struct ServerStatusInfo {
     pub active_connections: u32,
     pub registered_services: u32,
     pub uptime_seconds: u64,
+}
+
+fn remove_server_conn(
+    server_conn_map: &mut ServerConnMap,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) {
+    if let Some(ids) = server_conn_map.get_mut(key) {
+        if let Some(idx) = ids.iter().position(|info| info.conn_id == conn_id) {
+            ids.remove(idx);
+        }
+        if ids.is_empty() {
+            server_conn_map.remove(key);
+        }
+    }
+}
+
+async fn send_subcribe_failed(
+    conn_sender: &ConnTaskSender,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+    reason: impl Into<String>,
+) {
+    let reason = reason.into();
+    if conn_sender
+        .send(ConnTask::SubcribeFailed {
+            reason: reason.clone(),
+        })
+        .await
+        .is_err()
+    {
+        tracing::debug!("subcribe failure receiver dropped, key:{key}, conn_id:{conn_id}");
+    }
 }
 
 struct RemoteIdProvider {
@@ -254,14 +290,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 });
             }
             ManagerTask::DeRegisterServerConn { key, conn_id } => {
-                if let Some(ids) = server_conn_map.get_mut(&key) {
-                    if let Some(idx) = ids.iter().position(|info| info.conn_id == conn_id) {
-                        ids.remove(idx);
-                    }
-                    if ids.is_empty() {
-                        server_conn_map.remove(&key);
-                    }
-                }
+                remove_server_conn(&mut server_conn_map, &key, conn_id);
                 manager.deregister_conn(conn_id);
                 tracing::info!("DeRegister Server ok! `{key}:{conn_id}`");
             }
@@ -330,39 +359,57 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 conn_id,
                 conn_sender,
             } => {
-                // sign up client connection
-                manager.sign_up_conn_sender(conn_id, conn_sender.clone());
-                let server_conn_id_list = snafu_error_get_or_continue!(server_conn_map
-                    .get(&key)
-                    .context(TaskCenterSubcribeServerConnKeyNotExistSnafu {
-                        key: key.clone(),
-                        conn_id
-                    }));
+                let Some(server_conn_id_list) = server_conn_map.get(&key).cloned() else {
+                    tracing::warn!(
+                        "subcribe server conn key not exist, key:{key}, conn_id:{conn_id}"
+                    );
+                    send_subcribe_failed(
+                        &conn_sender,
+                        &key,
+                        conn_id,
+                        format!("server key `{key}` is not registered"),
+                    )
+                    .await;
+                    continue;
+                };
                 // Get at least one available server_conn_id from the list
+                let mut selected = false;
                 for server_info in server_conn_id_list.iter().rev() {
                     let ServerConnInfo {
                         conn_id: server_conn_id,
                         need_codec,
                         is_datagram,
                     } = *server_info;
-                    let server_conn_sender = snafu_error_get_or_continue!(manager
-                        .get_conn_sender_chan(&server_conn_id)
-                        .context(TaskCenterSubcribeServerConnIdNotExistSnafu {
-                            conn_id: server_conn_id,
-                            key: key.clone(),
-                        }));
+                    let Some(server_conn_sender) = manager.get_conn_sender_chan(&server_conn_id)
+                    else {
+                        tracing::warn!(
+                            "subcribe server conn id not exist, key:{key}, server_id:{server_conn_id}"
+                        );
+                        remove_server_conn(&mut server_conn_map, &key, server_conn_id);
+                        manager.deregister_conn(server_conn_id);
+                        continue;
+                    };
                     // 1. Send a request to get server stream
-                    snafu_error_get_or_continue!(server_conn_sender
+                    if let Err(e) = server_conn_sender
                         .send(ConnTask::StreamReq(conn_id))
                         .await
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterClientSendStreamSnafu {
                             key: key.clone(),
-                            conn_id
-                        }));
+                            conn_id,
+                        })
+                    {
+                        tracing::error!("{}", snafu::Report::from_error(e));
+                        remove_server_conn(&mut server_conn_map, &key, server_conn_id);
+                        manager.deregister_conn(server_conn_id);
+                        continue;
+                    }
+                    // sign up client connection after a server accepted the stream request
+                    manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                     // 2. Response subcribe ok
-                    snafu_error_get_or_continue!(conn_sender
+                    if let Err(e) = conn_sender
                         .send(ConnTask::SubcribeResp {
+                            server_conn_id,
                             need_codec,
                             is_datagram,
                         })
@@ -370,13 +417,29 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendSubcribeRespSnafu {
                             key: key.clone(),
-                            conn_id
-                        }));
+                            conn_id,
+                        })
+                    {
+                        tracing::error!("{}", snafu::Report::from_error(e));
+                        manager.deregister_conn(conn_id);
+                        selected = true;
+                        break;
+                    }
                     tracing::info!(
                                 "Subcribe Server ok! \
                                  key:{key},server_conn_id:{server_conn_id},client_conn_id:{conn_id}"
                             );
+                    selected = true;
                     break;
+                }
+                if !selected {
+                    send_subcribe_failed(
+                        &conn_sender,
+                        &key,
+                        conn_id,
+                        format!("no usable server connection for key `{key}`"),
+                    )
+                    .await;
                 }
             }
             ManagerTask::Shutdown => {
@@ -465,9 +528,10 @@ pub async fn get_init_request(
 ) -> Result<PbConnRequest> {
     let mut reader =
         get_header_msg_reader(conn).context(TaskCenterReadInitRequestSnafu { conn_id })?;
-    let msg = reader
-        .read_msg()
-        .await
-        .context(TaskCenterReadInitRequestSnafu { conn_id })?;
+    let timeout = control_io_timeout();
+    let msg = match tokio::time::timeout(timeout, reader.read_msg()).await {
+        Ok(result) => result.context(TaskCenterReadInitRequestSnafu { conn_id })?,
+        Err(_) => TaskCenterInitRequestTimeoutSnafu { conn_id, timeout }.fail()?,
+    };
     PbConnRequest::decode(msg).context(TaskCenterDecodeInitRequestSnafu { conn_id })
 }

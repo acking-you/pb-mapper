@@ -6,10 +6,11 @@ use tokio::net::TcpStream;
 use tracing::{info_span, instrument};
 
 use super::error::{
-    ConnectRemoteStreamSnafu, DecodeSubcribeRespSnafu, EncodeSubcribeReqSnafu,
-    ReadSubcribeRespSnafu, Result, SubcribeRespNotMatchSnafu, WriteSubcribeReqSnafu,
+    ConnectRemoteStreamSnafu, ControlIoTimeoutSnafu, DecodeSubcribeRespSnafu,
+    EncodeSubcribeReqSnafu, ReadSubcribeRespSnafu, Result, SubcribeRespNotMatchSnafu,
+    WriteSubcribeReqSnafu,
 };
-use crate::common::config::IS_KEEPALIVE;
+use crate::common::config::{control_io_timeout, IS_KEEPALIVE};
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
 use crate::common::message::{
@@ -43,6 +44,7 @@ pub async fn handle_local_stream<
 
     // start subcribe
     let (codec_key, client_id, server_id) = {
+        let timeout = control_io_timeout();
         // handle request
         let msg = PbConnRequest::Subcribe {
             key: key.to_string(),
@@ -51,14 +53,25 @@ pub async fn handle_local_stream<
         .context(EncodeSubcribeReqSnafu)?;
         let mut msg_writer = get_header_msg_writer(&mut remote_stream)
             .context(CreateHeaderToolSnafu { action: "writer" })?;
-        msg_writer
-            .write_msg(&msg)
-            .await
-            .context(WriteSubcribeReqSnafu)?;
+        match tokio::time::timeout(timeout, msg_writer.write_msg(&msg)).await {
+            Ok(result) => result.context(WriteSubcribeReqSnafu)?,
+            Err(_) => ControlIoTimeoutSnafu {
+                action: "write subcribe request",
+                timeout,
+            }
+            .fail()?,
+        }
         // handle response
         let mut msg_reader = get_header_msg_reader(&mut remote_stream)
             .context(CreateHeaderToolSnafu { action: "reader" })?;
-        let msg = msg_reader.read_msg().await.context(ReadSubcribeRespSnafu)?;
+        let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
+            Ok(result) => result.context(ReadSubcribeRespSnafu)?,
+            Err(_) => ControlIoTimeoutSnafu {
+                action: "read subcribe response",
+                timeout,
+            }
+            .fail()?,
+        };
         let resp = PbConnResponse::decode(msg).context(DecodeSubcribeRespSnafu)?;
         match resp {
             PbConnResponse::Subcribe {

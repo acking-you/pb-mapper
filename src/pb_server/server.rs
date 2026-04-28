@@ -23,18 +23,79 @@ use crate::{snafu_error_get_or_continue, snafu_error_get_or_return_ok};
 
 /// Ensure that server-side connections are properly deregistered before a normal connection is
 /// disconnected or an exception occurs
-struct ServerConnGuard<'a> {
-    key: &'a ImutableKey,
+struct ServerConnGuard {
+    key: ImutableKey,
     conn_id: RemoteConnId,
-    sender: &'a ManagerTaskSender,
+    sender: ManagerTaskSender,
+    active: bool,
 }
 
-impl<'a> Drop for ServerConnGuard<'a> {
-    fn drop(&mut self) {
-        let task = ManagerTask::DeRegisterServerConn {
+impl ServerConnGuard {
+    fn new(key: ImutableKey, conn_id: RemoteConnId, sender: ManagerTaskSender) -> Self {
+        Self {
+            key,
+            conn_id,
+            sender,
+            active: true,
+        }
+    }
+
+    fn deregister_task(&self) -> ManagerTask {
+        ManagerTask::DeRegisterServerConn {
             key: self.key.clone(),
             conn_id: self.conn_id,
-        };
+        }
+    }
+
+    async fn deregister(&mut self) {
+        if !self.active {
+            return;
+        }
+        let task = self.deregister_task();
+        match self.sender.send(task).await {
+            Ok(()) => {
+                self.active = false;
+                tracing::info!(
+                    "Server conn deregistered! key:{} conn_id:{}",
+                    self.key,
+                    self.conn_id
+                );
+            }
+            Err(_) => {
+                self.active = false;
+                tracing::debug!(
+                    "skip async deregister because manager channel is closed: key:{} conn_id:{}",
+                    self.key,
+                    self.conn_id
+                );
+            }
+        }
+    }
+
+    fn spawn_deregister(sender: ManagerTaskSender, task: ManagerTask) {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    if sender.send(task).await.is_err() {
+                        tracing::debug!(
+                            "skip deferred deregister because manager channel is closed"
+                        );
+                    }
+                });
+            }
+            Err(_) => {
+                tracing::warn!("cannot defer deregister because no Tokio runtime is available");
+            }
+        }
+    }
+}
+
+impl Drop for ServerConnGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let task = self.deregister_task();
         match self.sender.try_send(task) {
             Ok(()) => {
                 tracing::info!(
@@ -50,12 +111,13 @@ impl<'a> Drop for ServerConnGuard<'a> {
                     self.conn_id
                 );
             }
-            Err(kanal::SendTimeoutError::Timeout(_)) => {
+            Err(kanal::SendTimeoutError::Timeout(task)) => {
                 tracing::warn!(
-                    "deregister on drop timed out: key:{} conn_id:{}",
+                    "manager queue is full; defer server deregister: key:{} conn_id:{}",
                     self.key,
                     self.conn_id
                 );
+                Self::spawn_deregister(self.sender.clone(), task);
             }
         }
     }
@@ -95,90 +157,90 @@ pub async fn handle_server_conn(
             conn_id,
         })?;
 
-    let response = rx
-        .recv()
-        .await
-        .context(ServerConnRecvServerRegisteredRespSnafu {
-            key: key.clone(),
-            conn_id,
-        })?;
-
-    if !matches!(response, ConnTask::RegisterResp) {
-        ServerConnRegisteredRespNotMatchSnafu {
-            key: key.clone(),
-            conn_id,
-        }
-        .fail()?
-    }
-
-    // metadata register has finished,next we will handle `ConnTask`
-    let _guard = ServerConnGuard {
-        key: &key,
-        conn_id,
-        sender: &task_sender,
-    };
-    let (mut reader, mut writer) = conn.split();
-    let mut msg_writer = get_header_msg_writer(&mut writer)
-        .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
-    let mut msg_reader = get_header_msg_reader(&mut reader)
-        .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
-    // response msg to local server to indicate that register handling has finished
-    {
-        let msg = PbConnResponse::Register(conn_id.into()).encode().context(
-            ServerConnEncodeRegisterRespSnafu {
-                key: key.clone(),
-                conn_id,
-            },
-        )?;
-        msg_writer
-            .write_msg(&msg)
+    let mut guard = ServerConnGuard::new(key.clone(), conn_id, task_sender.clone());
+    let result = async {
+        let response = rx
+            .recv()
             .await
-            .context(ServerConnWriteRegisteredOkSnafu {
+            .context(ServerConnRecvServerRegisteredRespSnafu {
                 key: key.clone(),
                 conn_id,
             })?;
-    }
-    let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
-    let forward_handle = tokio::spawn(async move {
-        while let Ok(task) = rx.recv().await {
-            if task_tx.send(task).is_err() {
-                break;
-            }
-        }
-    });
 
-    let result = loop {
-        tokio::select! {
-            // handle stream request
-            req = task_rx.recv() => {
-                let Some(req) = req else {
-                    break Ok(());
-                };
-                snafu_error_get_or_continue!(
-                    handle_stream_req(
-                        req,
-                        &mut msg_writer,
-                        key.clone(),
-                        conn_id
-                    ).await
-                );
+        if !matches!(response, ConnTask::RegisterResp) {
+            ServerConnRegisteredRespNotMatchSnafu {
+                key: key.clone(),
+                conn_id,
             }
-            // handle ping pong check
-            ret = msg_reader.read_msg() =>{
-                snafu_error_get_or_return_ok!(
-                    handle_ping_pong_check(
-                        snafu_error_get_or_return_ok!(ret), &mut msg_writer, key.clone(), conn_id
-                    ).await
-                );
-            }
-            // handle timeout
-            _ = tokio::time::sleep(SERVER_TIMEOUT) =>{
-                tracing::error!("Timeout trigger:{SERVER_TIMEOUT:?}");
-                break Ok(());
-            }
+            .fail()?
         }
-    };
-    forward_handle.abort();
+
+        let (mut reader, mut writer) = conn.split();
+        let mut msg_writer = get_header_msg_writer(&mut writer)
+            .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+        let mut msg_reader = get_header_msg_reader(&mut reader)
+            .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
+        // response msg to local server to indicate that register handling has finished
+        {
+            let msg = PbConnResponse::Register(conn_id.into()).encode().context(
+                ServerConnEncodeRegisterRespSnafu {
+                    key: key.clone(),
+                    conn_id,
+                },
+            )?;
+            msg_writer
+                .write_msg(&msg)
+                .await
+                .context(ServerConnWriteRegisteredOkSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
+        }
+        let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
+        let forward_handle = tokio::spawn(async move {
+            while let Ok(task) = rx.recv().await {
+                if task_tx.send(task).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let result = loop {
+            tokio::select! {
+                // handle stream request
+                req = task_rx.recv() => {
+                    let Some(req) = req else {
+                        break Ok(());
+                    };
+                    snafu_error_get_or_continue!(
+                        handle_stream_req(
+                            req,
+                            &mut msg_writer,
+                            key.clone(),
+                            conn_id
+                        ).await
+                    );
+                }
+                // handle ping pong check
+                ret = msg_reader.read_msg() =>{
+                    snafu_error_get_or_return_ok!(
+                        handle_ping_pong_check(
+                            snafu_error_get_or_return_ok!(ret), &mut msg_writer, key.clone(), conn_id
+                        ).await
+                    );
+                }
+                // handle timeout
+                _ = tokio::time::sleep(SERVER_TIMEOUT) =>{
+                    tracing::error!("Timeout trigger:{SERVER_TIMEOUT:?}");
+                    break Ok(());
+                }
+            }
+        };
+        forward_handle.abort();
+        result
+    }
+    .await;
+    guard.deregister().await;
     result
 }
 
@@ -251,11 +313,15 @@ async fn handle_stream_req<T: MessageWriter>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use tokio::time::Instant;
 
-    use super::SERVER_TIMEOUT;
+    use crate::common::conn_id::RemoteConnId;
+    use crate::pb_server::ManagerTask;
+
+    use super::{ServerConnGuard, SERVER_TIMEOUT};
 
     #[test]
     fn server_timeout_has_slack_over_local_server_ping_interval() {
@@ -282,5 +348,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn server_conn_guard_does_not_drop_deregister_when_manager_queue_is_full() {
+        let (sender, receiver) = kanal::bounded_async(1);
+        sender.send(ManagerTask::Shutdown).await.unwrap();
+        let key: Arc<str> = Arc::from("sf-backend");
+
+        drop(ServerConnGuard::new(
+            key,
+            RemoteConnId::from(7),
+            sender.clone(),
+        ));
+
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ManagerTask::Shutdown
+        ));
+        let task = tokio::time::timeout(Duration::from_millis(200), receiver.recv())
+            .await
+            .expect("deregister task was lost when manager queue was full")
+            .unwrap();
+        assert!(matches!(
+            task,
+            ManagerTask::DeRegisterServerConn { conn_id, .. } if conn_id == RemoteConnId::from(7)
+        ));
     }
 }

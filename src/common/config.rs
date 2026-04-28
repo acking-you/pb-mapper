@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::{LazyLock, Once};
+use std::time::Duration;
 
 use clap::{Subcommand, ValueEnum};
 use snafu::ResultExt;
@@ -158,6 +159,49 @@ const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
 
 /// Env to control whether the keep-alive option of TCP is enabled
 pub const PB_MAPPER_KEEP_ALIVE: &str = "PB_MAPPER_KEEP_ALIVE";
+pub const PB_MAPPER_CONTROL_IO_TIMEOUT: &str = "PB_MAPPER_CONTROL_IO_TIMEOUT";
+const DEFAULT_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub fn parse_duration(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(raw) = value.strip_suffix("ms") {
+        return raw.trim().parse::<u64>().ok().map(Duration::from_millis);
+    }
+    if let Some(raw) = value.strip_suffix('s') {
+        return raw.trim().parse::<u64>().ok().map(Duration::from_secs);
+    }
+    if let Some(raw) = value.strip_suffix('m') {
+        return raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|minutes| minutes.checked_mul(60))
+            .map(Duration::from_secs);
+    }
+    if let Some(raw) = value.strip_suffix('h') {
+        return raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|hours| hours.checked_mul(60 * 60))
+            .map(Duration::from_secs);
+    }
+    value.parse::<u64>().ok().map(Duration::from_secs)
+}
+
+pub fn duration_from_env(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| parse_duration(&value))
+        .unwrap_or(default)
+}
+
+pub fn control_io_timeout() -> Duration {
+    duration_from_env(PB_MAPPER_CONTROL_IO_TIMEOUT, DEFAULT_CONTROL_IO_TIMEOUT)
+}
 
 /// Controls whether the keepalive option for TCP is enabled, depending on the value of the
 /// environment variable `PB_MAPPER_KEEP_ALIVE`

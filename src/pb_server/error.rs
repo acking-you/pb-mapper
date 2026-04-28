@@ -14,6 +14,13 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: common::error::Error,
     },
+    #[snafu(display(
+        "timed out reading pb conn init request with `conn_id:{conn_id}` after {timeout:?}"
+    ))]
+    TaskCenterInitRequestTimeout {
+        conn_id: RemoteConnId,
+        timeout: Duration,
+    },
     #[snafu(display("decode pb conn init request with `conn_id:{conn_id}`"))]
     TaskCenterDecodeInitRequest {
         conn_id: RemoteConnId,
@@ -237,6 +244,12 @@ pub enum Error {
     ClientConnSubcribeRespNotMatch {
         key: Arc<str>,
         conn_id: RemoteConnId,
+    },
+    #[snafu(display("subcribe failed with `key:{key}` `client_id:{conn_id}`, reason:{reason}"))]
+    ClientConnSubcribeFailed {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+        reason: String,
     },
     #[snafu(display(
         "received conn task not match! we expected stream response.  `key:{key}` \

@@ -5,12 +5,15 @@ use std::time::Duration;
 use pb_mapper::common::message::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
 };
-use pb_mapper::common::message::{get_header_msg_writer, MessageWriter};
+use pb_mapper::common::message::{
+    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
+};
 use pb_mapper::local::client::run_client_side_cli_with_callback;
-use pb_mapper::pb_server::get_init_request;
+use pb_mapper::pb_server::{get_init_request, run_server_with_shutdown};
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use uni_stream::stream::TcpListenerProvider;
 
 #[tokio::test]
@@ -52,4 +55,49 @@ async fn client_closes_initial_status_probe_after_key_check() {
 
     assert_eq!(fake_server.await.unwrap(), 0);
     client.abort();
+}
+
+#[tokio::test]
+async fn subscribe_missing_key_closes_without_hanging() {
+    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = probe_listener.local_addr().unwrap();
+    drop(probe_listener);
+
+    let shutdown_token = CancellationToken::new();
+    let server_shutdown = shutdown_token.clone();
+    let server = tokio::spawn(async move {
+        run_server_with_shutdown(server_addr, server_shutdown, None)
+            .await
+            .unwrap();
+    });
+
+    let mut stream = timeout(Duration::from_secs(2), async {
+        loop {
+            match TcpStream::connect(server_addr).await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("server did not start");
+
+    let request = PbConnRequest::Subcribe {
+        key: "missing-key".to_string(),
+    }
+    .encode()
+    .unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut stream).unwrap();
+        writer.write_msg(&request).await.unwrap();
+    }
+
+    let mut reader = get_header_msg_reader(&mut stream).unwrap();
+    let result = timeout(Duration::from_millis(200), reader.read_msg())
+        .await
+        .expect("missing-key subscribe hung instead of closing");
+    assert!(result.is_err());
+
+    shutdown_token.cancel();
+    server.await.unwrap();
 }

@@ -13,6 +13,7 @@ use super::{
     NormalMessageWriter,
 };
 use crate::common::checksum::AesKeyType;
+use crate::common::config::duration_from_env;
 use crate::common::message::{get_decodec, get_encodec};
 use crate::utils::codec::{Decryptor, Encryptor};
 use crate::{
@@ -65,43 +66,6 @@ impl ForwardTimeoutConfig {
             ),
         }
     }
-}
-
-fn duration_from_env(name: &str, default: Duration) -> Duration {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| parse_duration(&value))
-        .unwrap_or(default)
-}
-
-fn parse_duration(value: &str) -> Option<Duration> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if let Some(raw) = value.strip_suffix("ms") {
-        return raw.trim().parse::<u64>().ok().map(Duration::from_millis);
-    }
-    if let Some(raw) = value.strip_suffix('s') {
-        return raw.trim().parse::<u64>().ok().map(Duration::from_secs);
-    }
-    if let Some(raw) = value.strip_suffix('m') {
-        return raw
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .and_then(|minutes| minutes.checked_mul(60))
-            .map(Duration::from_secs);
-    }
-    if let Some(raw) = value.strip_suffix('h') {
-        return raw
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .and_then(|hours| hours.checked_mul(60 * 60))
-            .map(Duration::from_secs);
-    }
-    value.parse::<u64>().ok().map(Duration::from_secs)
 }
 
 pub struct NormalForwardReader<'a, T> {
@@ -777,6 +741,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::common::config::parse_duration;
     use crate::common::error::Error;
 
     enum ReadAction {

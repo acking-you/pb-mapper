@@ -6,11 +6,11 @@ use tokio::net::TcpStream;
 use tracing::info_span;
 
 use super::error::{
-    ConnectLocalStreamSnafu, ConnectRemoteStreamSnafu, DecodePbConnStreamRespSnafu,
-    EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu, ReadPbConnStreamRespSnafu, Result,
-    WritePbConnStreamReqSnafu,
+    ConnectLocalStreamSnafu, ConnectRemoteStreamSnafu, ControlIoTimeoutSnafu,
+    DecodePbConnStreamRespSnafu, EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu,
+    ReadPbConnStreamRespSnafu, Result, WritePbConnStreamReqSnafu,
 };
-use crate::common::config::IS_KEEPALIVE;
+use crate::common::config::{control_io_timeout, IS_KEEPALIVE};
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
 use crate::common::message::{
@@ -47,9 +47,16 @@ where
     .encode()
     .context(EncodePbConnStreamReqSnafu)?;
 
-    let mut remote_stream = each_addr(remote_addr, TcpStream::connect)
-        .await
-        .context(ConnectRemoteStreamSnafu)?;
+    let timeout = control_io_timeout();
+    let mut remote_stream =
+        match tokio::time::timeout(timeout, each_addr(remote_addr, TcpStream::connect)).await {
+            Ok(result) => result.context(ConnectRemoteStreamSnafu)?,
+            Err(_) => ControlIoTimeoutSnafu {
+                action: "connect remote stream",
+                timeout,
+            }
+            .fail()?,
+        };
     if *IS_KEEPALIVE {
         snafu_error_handle!(
             set_tcp_keep_alive(&remote_stream),
@@ -62,16 +69,24 @@ where
     let codec_key = {
         let mut msg_writer = get_header_msg_writer(&mut remote_stream)
             .context(CreateHeaderToolSnafu { action: "writer" })?;
-        msg_writer
-            .write_msg(&msg)
-            .await
-            .context(WritePbConnStreamReqSnafu)?;
+        match tokio::time::timeout(timeout, msg_writer.write_msg(&msg)).await {
+            Ok(result) => result.context(WritePbConnStreamReqSnafu)?,
+            Err(_) => ControlIoTimeoutSnafu {
+                action: "write pb conn stream request",
+                timeout,
+            }
+            .fail()?,
+        }
         let mut msg_reader = get_header_msg_reader(&mut remote_stream)
             .context(CreateHeaderToolSnafu { action: "reader" })?;
-        let msg = msg_reader
-            .read_msg()
-            .await
-            .context(ReadPbConnStreamRespSnafu)?;
+        let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
+            Ok(result) => result.context(ReadPbConnStreamRespSnafu)?,
+            Err(_) => ControlIoTimeoutSnafu {
+                action: "read pb conn stream response",
+                timeout,
+            }
+            .fail()?,
+        };
         let resp = PbConnResponse::decode(msg).context(DecodePbConnStreamRespSnafu)?;
         match resp {
             PbConnResponse::Stream { codec_key } => codec_key,

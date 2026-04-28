@@ -11,12 +11,12 @@ use tokio::time::Instant;
 use tracing::instrument;
 
 use self::error::{
-    DecodeRegisterRespSnafu, DecodeStreamReqSnafu, EncodePingMsgSnafu, EncodeRegisterReqSnafu,
-    ReadRegisterRespSnafu, ReadStreamReqSnafu, RegisterRespNotMatchSnafu, SendRegisterReqSnafu,
-    WritePingMsgSnafu,
+    ControlIoTimeoutSnafu, DecodeRegisterRespSnafu, DecodeStreamReqSnafu, EncodePingMsgSnafu,
+    EncodeRegisterReqSnafu, ReadRegisterRespSnafu, ReadStreamReqSnafu, RegisterRespNotMatchSnafu,
+    SendRegisterReqSnafu, WritePingMsgSnafu,
 };
 use self::stream::handle_stream;
-use crate::common::config::IS_KEEPALIVE;
+use crate::common::config::{control_io_timeout, IS_KEEPALIVE};
 use crate::common::message::command::{
     LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbServerRequest,
 };
@@ -190,6 +190,7 @@ where
 
     // start register server with key
     {
+        let timeout = control_io_timeout();
         let msg = snafu_error_get_or_return_ok!(PbConnRequest::Register {
             key: key.to_string(),
             need_codec,
@@ -204,10 +205,14 @@ where
                 return Err(Status::ConnectRemote);
             }
         };
-        snafu_error_get_or_return_ok!(msg_writer
-            .write_msg(&msg)
-            .await
-            .context(SendRegisterReqSnafu));
+        match tokio::time::timeout(timeout, msg_writer.write_msg(&msg)).await {
+            Ok(result) => snafu_error_get_or_return_ok!(result.context(SendRegisterReqSnafu)),
+            Err(_) => snafu_error_get_or_return_ok!(ControlIoTimeoutSnafu {
+                action: "send register request",
+                timeout,
+            }
+            .fail()),
+        }
     }
     let (mut reader, mut writer) = manager_stream.split();
     let mut msg_reader = match get_header_msg_reader(&mut reader) {
@@ -226,10 +231,15 @@ where
     };
     // read register resp to indicate that register has finished
     let (key, conn_id) = {
-        let msg = snafu_error_get_or_return_ok!(msg_reader
-            .read_msg()
-            .await
-            .context(ReadRegisterRespSnafu));
+        let timeout = control_io_timeout();
+        let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
+            Ok(result) => snafu_error_get_or_return_ok!(result.context(ReadRegisterRespSnafu)),
+            Err(_) => snafu_error_get_or_return_ok!(ControlIoTimeoutSnafu {
+                action: "read register response",
+                timeout,
+            }
+            .fail()),
+        };
         let resp = snafu_error_get_or_return_ok!(
             PbConnResponse::decode(msg).context(DecodeRegisterRespSnafu)
         );
@@ -294,7 +304,15 @@ async fn handle_ping_interval<T: MessageWriter>(
     conn_id: u32,
 ) -> error::Result<()> {
     let ping_msg = get_ping_message()?;
-    writer.write_msg(&ping_msg).await.context(WritePingMsgSnafu)
+    let timeout = control_io_timeout();
+    match tokio::time::timeout(timeout, writer.write_msg(&ping_msg)).await {
+        Ok(result) => result.context(WritePingMsgSnafu),
+        Err(_) => ControlIoTimeoutSnafu {
+            action: "write ping message",
+            timeout,
+        }
+        .fail(),
+    }
 }
 
 struct TimeoutContext<'a, 'b> {
