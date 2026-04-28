@@ -155,6 +155,11 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: common::error::Error,
     },
+    #[snafu(display("server conn control writer closed with `key:{key}` `server_id:{conn_id}`"))]
+    ServerConnControlWriterClosed {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+    },
     #[snafu(display(
         "server conn send stream ack to manager error with `key:{key}` `server_id:{conn_id}`"
     ))]

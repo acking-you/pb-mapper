@@ -48,6 +48,14 @@ enum Status {
     ConnectRemote,
 }
 
+enum LocalControlWrite {
+    Ping,
+    StreamAck {
+        client_id: u32,
+        server_generation: u64,
+    },
+}
+
 // Callback for notifying status changes to external systems
 pub type StatusCallback = Box<dyn Fn(&str) + Send + Sync>;
 
@@ -310,19 +318,12 @@ where
             .fail()),
         }
     }
-    let (mut reader, mut writer) = manager_stream.split();
+    let (mut reader, mut writer) = manager_stream.into_split();
     let mut msg_reader = match get_header_msg_reader(&mut reader) {
         Ok(reader) => reader,
         Err(e) => {
             tracing::error!("create manager header reader failed: {e}");
             return Err(Status::ReadMsg);
-        }
-    };
-    let mut msg_writer = match get_header_msg_writer(&mut writer) {
-        Ok(writer) => writer,
-        Err(e) => {
-            tracing::error!("create manager header writer failed: {e}");
-            return Err(Status::SendPing);
         }
     };
     // read register resp to indicate that register has finished
@@ -361,32 +362,100 @@ where
 
     // register ok, and reset global timeout count
     global_timeout_cnt.reset();
-    loop {
-        tokio::select! {
-            ret = msg_reader.read_msg() =>{
-                let msg = snafu_error_get_or_return!(ret.context(ReadStreamReqSnafu),"[read msg]",Err(Status::ReadMsg));
-                snafu_error_get_or_continue!(
-                    handle_request::<LocalStream, _, _>(msg,local_addr,remote_addr,key.clone(),conn_id,
-                    &mut msg_writer).await
-                );
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<LocalControlWrite>();
+    let writer_key = key.clone();
+    let mut writer_handle = tokio::spawn(async move {
+        let mut msg_writer = match get_header_msg_writer(&mut writer) {
+            Ok(writer) => writer,
+            Err(e) => {
+                tracing::error!("create manager header writer failed: {e}");
+                return Err(Status::SendPing);
             }
-            // handle ping interval
-            _ = tokio::time::sleep(PING_INTERVAL) =>{
-                snafu_error_get_or_return!(
-                    handle_ping_interval(&mut msg_writer,key.clone(),conn_id).await,
-                    "[send ping]",
-                    Err(Status::SendPing)
-                );
-                tracing::debug!(
-                    event = "local_server_ping_sent",
-                    key = %key,
-                    conn_id = %conn_id,
-                    interval = ?PING_INTERVAL,
-                    "local server ping sent"
-                );
+        };
+        loop {
+            let Some(cmd) = write_rx.recv().await else {
+                return Ok(());
+            };
+            match cmd {
+                LocalControlWrite::Ping => {
+                    snafu_error_get_or_return!(
+                        handle_ping_interval(&mut msg_writer, writer_key.clone(), conn_id).await,
+                        "[send ping]",
+                        Err(Status::SendPing)
+                    );
+                    tracing::debug!(
+                        event = "local_server_ping_sent",
+                        key = %writer_key,
+                        conn_id = %conn_id,
+                        interval = ?PING_INTERVAL,
+                        "local server ping sent"
+                    );
+                }
+                LocalControlWrite::StreamAck {
+                    client_id,
+                    server_generation,
+                } => {
+                    snafu_error_get_or_return!(
+                        write_stream_ack(&mut msg_writer, client_id, server_generation).await,
+                        "[send stream ack]",
+                        Err(Status::SendPing)
+                    );
+                }
             }
         }
+    });
+    let ping_tx = write_tx.clone();
+    let ping_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(PING_INTERVAL).await;
+            if ping_tx.send(LocalControlWrite::Ping).is_err() {
+                break;
+            }
+        }
+    });
+
+    let reader_result = async {
+        loop {
+            let msg = snafu_error_get_or_return!(
+                msg_reader.read_msg().await.context(ReadStreamReqSnafu),
+                "[read msg]",
+                Err(Status::ReadMsg)
+            );
+            snafu_error_get_or_continue!(
+                handle_request::<LocalStream, _>(
+                    msg,
+                    local_addr,
+                    remote_addr,
+                    key.clone(),
+                    conn_id,
+                    &write_tx
+                )
+                .await
+            );
+        }
+    };
+
+    let result = tokio::select! {
+        result = reader_result => result,
+        result = &mut writer_handle => match result {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(
+                    event = "local_server_control_writer_join_failed",
+                    key = %key,
+                    conn_id = %conn_id,
+                    error = %e,
+                    "local server control writer task failed"
+                );
+                Err(Status::SendPing)
+            }
+        },
+    };
+    ping_handle.abort();
+    if !writer_handle.is_finished() {
+        writer_handle.abort();
     }
+    result
 }
 
 #[instrument(skip(writer))]
@@ -407,18 +476,17 @@ async fn handle_ping_interval<T: MessageWriter>(
     }
 }
 
-#[instrument(skip(msg, writer))]
+#[instrument(skip(msg, write_tx))]
 async fn handle_request<
     LocalStream: StreamProvider,
     A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
-    W: MessageWriter,
 >(
     msg: &[u8],
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     conn_id: u32,
-    writer: &mut W,
+    write_tx: &tokio::sync::mpsc::UnboundedSender<LocalControlWrite>,
 ) -> error::Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -438,7 +506,14 @@ where
                 server_generation,
                 "local server received stream request"
             );
-            write_stream_ack(writer, client_id, server_generation).await?;
+            write_tx
+                .send(LocalControlWrite::StreamAck {
+                    client_id,
+                    server_generation,
+                })
+                .map_err(|_| error::Error::ControlWriterClosed {
+                    action: "stream ack message",
+                })?;
             let key = key.clone();
             tokio::spawn(async move {
                 snafu_error_handle!(

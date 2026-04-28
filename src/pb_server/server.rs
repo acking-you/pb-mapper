@@ -6,10 +6,10 @@ use tracing::instrument;
 
 use super::error::{
     ServerConnCreateHeaderToolSnafu, ServerConnDecodeStreamRequestSnafu,
-    ServerConnEncodeRegisterRespSnafu, ServerConnRecvServerRegisteredRespSnafu,
-    ServerConnRegisteredRespNotMatchSnafu, ServerConnSendRegisterSnafu,
-    ServerConnSendStreamAckSnafu, ServerConnWritePongRespSnafu, ServerConnWriteRegisteredOkSnafu,
-    ServerConnWriteStreamRequestSnafu,
+    ServerConnEncodeRegisterRespSnafu, ServerConnRecvConnTaskSnafu,
+    ServerConnRecvServerRegisteredRespSnafu, ServerConnRegisteredRespNotMatchSnafu,
+    ServerConnSendRegisterSnafu, ServerConnSendStreamAckSnafu, ServerConnWritePongRespSnafu,
+    ServerConnWriteRegisteredOkSnafu, ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use crate::common::conn_id::RemoteConnId;
@@ -19,7 +19,6 @@ use crate::common::message::command::{
 use crate::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
-use crate::{snafu_error_get_or_continue, snafu_error_get_or_return_ok};
 
 /// Ensure that server-side connections are properly deregistered before a normal connection is
 /// disconnected or an exception occurs
@@ -128,6 +127,10 @@ const DEFAULT_SERVER_CHAN_CAP: usize = 32 * 4;
 // under scheduler/network jitter and can drop a healthy registration.
 const SERVER_TIMEOUT: Duration = Duration::from_secs(60 * 11);
 
+enum ServerControlWrite {
+    Pong(Vec<u8>),
+}
+
 /// Maintaining a connection to the server.
 /// This connection is used to send channel request
 #[instrument(skip(task_sender))]
@@ -137,7 +140,7 @@ pub async fn handle_server_conn(
     is_datagram: bool,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
-    mut conn: TcpStream,
+    conn: TcpStream,
 ) -> Result<()> {
     let (tx, rx) = kanal::bounded_async(DEFAULT_SERVER_CHAN_CAP);
 
@@ -189,86 +192,116 @@ pub async fn handle_server_conn(
             "server register ack received from manager"
         );
 
-        let (mut reader, mut writer) = conn.split();
-        let mut msg_writer = get_header_msg_writer(&mut writer)
-            .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+        let (mut reader, mut writer) = conn.into_split();
         let mut msg_reader = get_header_msg_reader(&mut reader)
             .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
-        // response msg to local server to indicate that register handling has finished
-        {
-            let msg = PbConnResponse::Register(conn_id.into()).encode().context(
-                ServerConnEncodeRegisterRespSnafu {
-                    key: key.clone(),
+        // Keep one header writer for the register response and all later control frames. The
+        // encrypted header codec is stateful; recreating it between frames breaks peer decoding.
+        let register_response = PbConnResponse::Register(conn_id.into()).encode().context(
+            ServerConnEncodeRegisterRespSnafu {
+                key: key.clone(),
+                conn_id,
+            },
+        )?;
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<ServerControlWrite>();
+        let writer_key = key.clone();
+        let mut writer_handle = tokio::spawn(async move {
+            let mut msg_writer = get_header_msg_writer(&mut writer)
+                .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+            msg_writer.write_msg(&register_response).await.context(
+                ServerConnWriteRegisteredOkSnafu {
+                    key: writer_key.clone(),
                     conn_id,
                 },
             )?;
-            msg_writer
-                .write_msg(&msg)
-                .await
-                .context(ServerConnWriteRegisteredOkSnafu {
-                    key: key.clone(),
-                    conn_id,
-                })?;
             tracing::info!(
                 event = "server_register_response_written",
-                key = %key,
+                key = %writer_key,
                 conn_id = %conn_id,
                 need_codec,
                 is_datagram,
                 "server register response written to local server"
             );
-        }
-        let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
-        let forward_handle = tokio::spawn(async move {
-            while let Ok(task) = rx.recv().await {
-                if task_tx.send(task).is_err() {
-                    break;
+            loop {
+                tokio::select! {
+                    req = rx.recv() => {
+                        let req = req.context(ServerConnRecvConnTaskSnafu)?;
+                        handle_stream_req(
+                            req,
+                            &mut msg_writer,
+                            writer_key.clone(),
+                            conn_id
+                        ).await?;
+                    }
+                    cmd = write_rx.recv() => {
+                        let Some(cmd) = cmd else {
+                            break Ok(());
+                        };
+                        match cmd {
+                            ServerControlWrite::Pong(resp) => {
+                                msg_writer
+                                    .write_msg(&resp)
+                                    .await
+                                    .context(ServerConnWritePongRespSnafu {
+                                        key: writer_key.clone(),
+                                        conn_id,
+                                    })?;
+                            }
+                        }
+                    }
                 }
             }
         });
 
-        let result = loop {
-            tokio::select! {
-                // handle stream request
-                req = task_rx.recv() => {
-                    let Some(req) = req else {
+        let reader_result = async {
+            loop {
+                let msg = match tokio::time::timeout(SERVER_TIMEOUT, msg_reader.read_msg()).await {
+                    Ok(Ok(msg)) => msg,
+                    Ok(Err(e)) => {
+                        tracing::error!(
+                            event = "server_conn_control_read_failed",
+                            key = %key,
+                            conn_id = %conn_id,
+                            error = %snafu::Report::from_error(e),
+                            "server connection control read failed"
+                        );
                         break Ok(());
-                    };
-                    snafu_error_get_or_continue!(
-                        handle_stream_req(
-                            req,
-                            &mut msg_writer,
-                            key.clone(),
-                            conn_id
-                        ).await
-                    );
-                }
-                // handle ping pong check
-                ret = msg_reader.read_msg() =>{
-                    snafu_error_get_or_return_ok!(
-                        handle_control_message(
-                            snafu_error_get_or_return_ok!(ret),
-                            &mut msg_writer,
-                            task_sender.clone(),
-                            key.clone(),
-                            conn_id
-                        ).await
-                    );
-                }
-                // handle timeout
-                _ = tokio::time::sleep(SERVER_TIMEOUT) =>{
-                    tracing::error!(
-                        event = "server_conn_idle_timeout",
-                        key = %key,
-                        conn_id = %conn_id,
-                        timeout = ?SERVER_TIMEOUT,
-                        "server connection idle timeout triggered"
-                    );
-                    break Ok(());
-                }
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            event = "server_conn_idle_timeout",
+                            key = %key,
+                            conn_id = %conn_id,
+                            timeout = ?SERVER_TIMEOUT,
+                            "server connection idle timeout triggered"
+                        );
+                        break Ok(());
+                    }
+                };
+                handle_control_message(msg, &write_tx, task_sender.clone(), key.clone(), conn_id)
+                    .await?;
             }
         };
-        forward_handle.abort();
+
+        let result = tokio::select! {
+            result = reader_result => result,
+            result = &mut writer_handle => match result {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!(
+                        event = "server_conn_writer_join_failed",
+                        key = %key,
+                        conn_id = %conn_id,
+                        error = %e,
+                        "server connection writer task failed"
+                    );
+                    Ok(())
+                }
+            },
+        };
+        if !writer_handle.is_finished() {
+            writer_handle.abort();
+        }
         result
     }
     .await;
@@ -291,10 +324,10 @@ pub async fn handle_server_conn(
     result
 }
 
-#[instrument(skip(msg, writer))]
-async fn handle_control_message<T: MessageWriter>(
+#[instrument(skip(msg, write_tx))]
+async fn handle_control_message(
     msg: &[u8],
-    writer: &mut T,
+    write_tx: &tokio::sync::mpsc::UnboundedSender<ServerControlWrite>,
     task_sender: ManagerTaskSender,
     key: ImutableKey,
     conn_id: RemoteConnId,
@@ -335,10 +368,9 @@ async fn handle_control_message<T: MessageWriter>(
                 conn_id = %conn_id,
                 "received ping from local server"
             );
-            writer
-                .write_msg(&resp)
-                .await
-                .context(ServerConnWritePongRespSnafu { key, conn_id })
+            write_tx
+                .send(ServerControlWrite::Pong(resp))
+                .map_err(|_| super::error::Error::ServerConnControlWriterClosed { key, conn_id })
         }
         PbServerRequest::StreamAck {
             client_id,

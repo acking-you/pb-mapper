@@ -46,6 +46,8 @@ pub enum Error {
     WriteStreamAckMsg { source: common::error::Error },
     #[snafu(display("Failed to encode stream ack message"))]
     EncodeStreamAckMsg { source: common::error::Error },
+    #[snafu(display("control writer closed while scheduling `{action}`"))]
+    ControlWriterClosed { action: &'static str },
     #[snafu(display("header msg tool:`{action}` create failed!"))]
     CreateHeaderTool {
         // Must be `reader/writer`
