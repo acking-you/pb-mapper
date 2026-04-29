@@ -4,6 +4,8 @@ use snafu::ResultExt;
 use super::super::error::{MsgSerializeSnafu, Result};
 use crate::common::checksum::AesKeyType;
 
+pub const CONTROL_PROTOCOL_V2: u16 = 2;
+
 pub trait MessageSerializer {
     fn encode(&self) -> Result<Vec<u8>>;
     fn decode(msg: &[u8]) -> Result<Self>
@@ -15,6 +17,7 @@ pub trait MessageSerializer {
 pub enum PbConnStatusReq {
     RemoteId,
     Keys,
+    Service { key: String },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -25,6 +28,19 @@ pub enum PbConnStatusResp {
         idle: String,
     },
     Keys(Vec<String>),
+    Service {
+        key: String,
+        connections: Vec<PbServiceConnStatus>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PbServiceConnStatus {
+    pub conn_id: u32,
+    pub generation: u64,
+    pub protocol_version: u16,
+    pub healthy: bool,
+    pub last_rx_age_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -33,6 +49,14 @@ pub enum PbConnRequest {
         need_codec: bool,
         is_datagram: bool,
         key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_version: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_instance_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat_interval_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat_tolerance_ms: Option<u64>,
     },
     Subcribe {
         key: String,
@@ -49,6 +73,11 @@ pub enum PbConnRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnResponse {
     Register(u32),
+    RegisterV2 {
+        conn_id: u32,
+        generation: u64,
+        lease_ttl_ms: u64,
+    },
     Subcribe {
         codec_key: Option<AesKeyType>,
         client_id: u32,
@@ -63,6 +92,9 @@ pub enum PbConnResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbServerRequest {
     Ping,
+    PingV2 {
+        seq: u64,
+    },
     StreamAck {
         client_id: u32,
         #[serde(default)]
@@ -80,6 +112,15 @@ pub enum LocalServer {
     },
     /// pb server response a pong msg when it receive a ping request
     Pong,
+    PongV2 {
+        seq: u64,
+    },
+    Retire {
+        reason: String,
+        conn_id: u32,
+        #[serde(default)]
+        server_generation: u64,
+    },
 }
 
 const CONTENT_SHOW_LIMIT_SIZE: usize = 1024;

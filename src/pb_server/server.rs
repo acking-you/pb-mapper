@@ -12,9 +12,10 @@ use super::error::{
     ServerConnWriteRegisteredOkSnafu, ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
+use crate::common::config::server_lease_timeout;
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{
-    LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
+    LocalServer, MessageSerializer, PbConnResponse, PbServerRequest, CONTROL_PROTOCOL_V2,
 };
 use crate::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
@@ -138,6 +139,7 @@ pub async fn handle_server_conn(
     key: ImutableKey,
     need_codec: bool,
     is_datagram: bool,
+    protocol_version: u16,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
     conn: TcpStream,
@@ -151,6 +153,7 @@ pub async fn handle_server_conn(
             conn_id,
             need_codec,
             is_datagram,
+            protocol_version,
             conn_sender: tx,
         })
         .await
@@ -178,17 +181,24 @@ pub async fn handle_server_conn(
                 conn_id,
             })?;
 
-        if !matches!(response, ConnTask::RegisterResp) {
+        let ConnTask::RegisterResp {
+            generation,
+            protocol_version,
+            lease_ttl_ms,
+        } = response
+        else {
             ServerConnRegisteredRespNotMatchSnafu {
                 key: key.clone(),
                 conn_id,
             }
             .fail()?
-        }
+        };
         tracing::debug!(
             event = "server_register_ack_received",
             key = %key,
             conn_id = %conn_id,
+            generation,
+            protocol_version,
             "server register ack received from manager"
         );
 
@@ -197,12 +207,20 @@ pub async fn handle_server_conn(
             .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
         // Keep one header writer for the register response and all later control frames. The
         // encrypted header codec is stateful; recreating it between frames breaks peer decoding.
-        let register_response = PbConnResponse::Register(conn_id.into()).encode().context(
-            ServerConnEncodeRegisterRespSnafu {
-                key: key.clone(),
-                conn_id,
-            },
-        )?;
+        let register_response = if protocol_version >= CONTROL_PROTOCOL_V2 {
+            PbConnResponse::RegisterV2 {
+                conn_id: conn_id.into(),
+                generation,
+                lease_ttl_ms,
+            }
+        } else {
+            PbConnResponse::Register(conn_id.into())
+        }
+        .encode()
+        .context(ServerConnEncodeRegisterRespSnafu {
+            key: key.clone(),
+            conn_id,
+        })?;
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<ServerControlWrite>();
         let writer_key = key.clone();
         let mut writer_handle = tokio::spawn(async move {
@@ -220,6 +238,9 @@ pub async fn handle_server_conn(
                 conn_id = %conn_id,
                 need_codec,
                 is_datagram,
+                generation,
+                protocol_version,
+                lease_ttl_ms,
                 "server register response written to local server"
             );
             loop {
@@ -269,7 +290,12 @@ pub async fn handle_server_conn(
 
         let reader_result = async {
             loop {
-                let msg = match tokio::time::timeout(SERVER_TIMEOUT, msg_reader.read_msg()).await {
+                let idle_timeout = if protocol_version >= CONTROL_PROTOCOL_V2 {
+                    server_lease_timeout()
+                } else {
+                    SERVER_TIMEOUT
+                };
+                let msg = match tokio::time::timeout(idle_timeout, msg_reader.read_msg()).await {
                     Ok(Ok(msg)) => msg,
                     Ok(Err(e)) => {
                         tracing::error!(
@@ -286,7 +312,8 @@ pub async fn handle_server_conn(
                             event = "server_conn_idle_timeout",
                             key = %key,
                             conn_id = %conn_id,
-                            timeout = ?SERVER_TIMEOUT,
+                            timeout = ?idle_timeout,
+                            protocol_version,
                             "server connection idle timeout triggered"
                         );
                         break Ok(());
@@ -362,6 +389,17 @@ async fn handle_control_message(
 
     match req {
         PbServerRequest::Ping => {
+            task_sender
+                .send(ManagerTask::ServerConnActivity {
+                    key: key.clone(),
+                    conn_id,
+                })
+                .await
+                .map_err(|_| kanal::SendError(()))
+                .context(ServerConnSendStreamAckSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
             let resp = match LocalServer::Pong.encode() {
                 Ok(v) => v,
                 Err(e) => {
@@ -381,6 +419,44 @@ async fn handle_control_message(
                 key = %key,
                 conn_id = %conn_id,
                 "received ping from local server"
+            );
+            write_tx
+                .send(ServerControlWrite::Pong(resp))
+                .map_err(|_| super::error::Error::ServerConnControlWriterClosed { key, conn_id })
+        }
+        PbServerRequest::PingV2 { seq } => {
+            task_sender
+                .send(ManagerTask::ServerConnActivity {
+                    key: key.clone(),
+                    conn_id,
+                })
+                .await
+                .map_err(|_| kanal::SendError(()))
+                .context(ServerConnSendStreamAckSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
+            let resp = match (LocalServer::PongV2 { seq }).encode() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        event = "pong_v2_encode_failed",
+                        key = %key,
+                        conn_id = %conn_id,
+                        seq,
+                        error = %e,
+                        "failed to encode pong v2 response"
+                    );
+                    return Ok(());
+                }
+            };
+
+            tracing::debug!(
+                event = "ping_v2_received",
+                key = %key,
+                conn_id = %conn_id,
+                seq,
+                "received ping v2 from local server"
             );
             write_tx
                 .send(ServerControlWrite::Pong(resp))

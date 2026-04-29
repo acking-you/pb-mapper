@@ -13,6 +13,10 @@ mod tests {
             key: "test".into(),
             need_codec: false,
             is_datagram: false,
+            protocol_version: None,
+            client_instance_id: None,
+            heartbeat_interval_ms: None,
+            heartbeat_tolerance_ms: None,
         };
         let json_value = serde_json::to_string(&mapper).unwrap();
         let raw_json_str =

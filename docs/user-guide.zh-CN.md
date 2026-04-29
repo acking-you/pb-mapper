@@ -155,6 +155,11 @@ flutter run
 - `PB_MAPPER_STREAM_READY_TIMEOUT`：收到 stream ack 后等待服务端数据流到达的时间，超时后尝试其它控制连接，默认 `1s`
 - `PB_MAPPER_STREAM_RECOVERY_TIMEOUT`：退休旧控制连接并等待替代控制连接注册时，单个 subscribe 最多保持打开的时间，默认 `2s`
 - `PB_MAPPER_CONTROL_CONN_POOL_SIZE`：每个注册服务并行保持的服务端控制连接数量，默认 `2`，最大 `16`
+- `PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL`：server-cli 控制连接心跳间隔，默认 `2s`
+- `PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE`：已注册控制连接多久没有收到入站控制消息后进入 suspect 并触发远端注册探测，默认 `6s`
+- `PB_MAPPER_CONTROL_SUSPECT_GRACE`：远端注册探测失败后的额外宽限时间，超过后主动重连，默认 `2s`
+- `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`：server-cli 每次远端注册状态探测的超时时间，默认 `1s`
+- `PB_MAPPER_SERVER_LEASE_TIMEOUT`：server 侧 V2 已注册控制连接的空闲租约超时，默认 `15s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`：client 侧本地 listener 重新确认远端 service key 仍已注册的间隔，默认 `1s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`：client 侧每次远端 key 健康检查的超时时间，默认 `1s`
 - `PB_MAPPER_TUNNEL_IDLE_TIMEOUT`：TCP 隧道双向完全空闲后的关闭时间，默认 `1h`

@@ -5,18 +5,19 @@ use std::time::Duration;
 
 use pb_mapper::common::message::command::{
     LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq,
-    PbConnStatusResp, PbServerRequest,
+    PbConnStatusResp, PbServerRequest, PbServiceConnStatus,
 };
 use pb_mapper::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
 use pb_mapper::local::client::run_client_side_cli_with_callback;
+use pb_mapper::local::server::run_server_side_cli_with_callback;
 use pb_mapper::pb_server::{get_init_request, run_server_with_shutdown};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use uni_stream::stream::TcpListenerProvider;
+use uni_stream::stream::{TcpListenerProvider, TcpStreamProvider};
 
 struct EnvVarGuard {
     key: &'static str,
@@ -63,6 +64,10 @@ async fn register_control_conn_parts(
         need_codec: false,
         is_datagram: false,
         key: key.to_string(),
+        protocol_version: None,
+        client_instance_id: None,
+        heartbeat_interval_ms: None,
+        heartbeat_tolerance_ms: None,
     }
     .encode()
     .unwrap();
@@ -76,6 +81,39 @@ async fn register_control_conn_parts(
         panic!("unexpected register response");
     };
     conn_id
+}
+
+async fn register_v2_control_conn_parts(
+    reader: &mut impl MessageReader,
+    writer: &mut impl MessageWriter,
+    key: &str,
+) -> (u32, u64) {
+    let request = PbConnRequest::Register {
+        need_codec: false,
+        is_datagram: false,
+        key: key.to_string(),
+        protocol_version: Some(2),
+        client_instance_id: Some("regression-test-client".to_string()),
+        heartbeat_interval_ms: Some(50),
+        heartbeat_tolerance_ms: Some(150),
+    }
+    .encode()
+    .unwrap();
+    writer.write_msg(&request).await.unwrap();
+
+    let response = timeout(Duration::from_secs(1), reader.read_msg())
+        .await
+        .expect("register v2 response timed out")
+        .unwrap();
+    let PbConnResponse::RegisterV2 {
+        conn_id,
+        generation,
+        ..
+    } = PbConnResponse::decode(response).unwrap()
+    else {
+        panic!("unexpected register v2 response");
+    };
+    (conn_id, generation)
 }
 
 async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
@@ -102,6 +140,148 @@ async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn status_service_reports_registered_v2_control_connection() {
+    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = probe_listener.local_addr().unwrap();
+    drop(probe_listener);
+
+    let shutdown_token = CancellationToken::new();
+    let server_shutdown = shutdown_token.clone();
+    let server = tokio::spawn(async move {
+        run_server_with_shutdown(server_addr, server_shutdown, None)
+            .await
+            .unwrap();
+    });
+
+    let key = "sf-backend";
+    let control = wait_for_server(server_addr).await;
+    let (mut reader_stream, mut writer_stream) = control.into_split();
+    let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
+    let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
+    let (conn_id, generation) = register_v2_control_conn_parts(&mut reader, &mut writer, key).await;
+
+    let mut status = wait_for_server(server_addr).await;
+    let request = PbConnRequest::Status(PbConnStatusReq::Service {
+        key: key.to_string(),
+    })
+    .encode()
+    .unwrap();
+    {
+        let mut writer = get_header_msg_writer(&mut status).unwrap();
+        writer.write_msg(&request).await.unwrap();
+    }
+
+    let mut reader = get_header_msg_reader(&mut status).unwrap();
+    let response = timeout(Duration::from_secs(1), reader.read_msg())
+        .await
+        .expect("service status response timed out")
+        .unwrap();
+    let PbConnResponse::Status(PbConnStatusResp::Service {
+        key: status_key,
+        connections,
+    }) = PbConnResponse::decode(response).unwrap()
+    else {
+        panic!("unexpected service status response");
+    };
+
+    assert_eq!(status_key, key);
+    assert_eq!(connections.len(), 1);
+    assert_eq!(connections[0].conn_id, conn_id);
+    assert_eq!(connections[0].generation, generation);
+    assert!(connections[0].healthy);
+
+    shutdown_token.cancel();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_status() {
+    let _pool_size = EnvVarGuard::set("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1");
+    let _heartbeat = EnvVarGuard::set("PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL", "20ms");
+    let _tolerance = EnvVarGuard::set("PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE", "50ms");
+    let _grace = EnvVarGuard::set("PB_MAPPER_CONTROL_SUSPECT_GRACE", "20ms");
+    let _probe_timeout = EnvVarGuard::set("PB_MAPPER_REGISTRATION_PROBE_TIMEOUT", "50ms");
+
+    let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = remote_listener.local_addr().unwrap();
+    let register_count = Arc::new(AtomicUsize::new(0));
+    let (second_register_tx, second_register_rx) = tokio::sync::oneshot::channel();
+    let second_register_tx = Arc::new(tokio::sync::Mutex::new(Some(second_register_tx)));
+
+    let fake_register_count = register_count.clone();
+    let fake_second_register_tx = second_register_tx.clone();
+    let fake_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = remote_listener.accept().await.unwrap();
+            let register_count = fake_register_count.clone();
+            let second_register_tx = fake_second_register_tx.clone();
+            tokio::spawn(async move {
+                let Ok(request) = get_init_request(&mut stream, 0.into()).await else {
+                    return;
+                };
+                match request {
+                    PbConnRequest::Register { key, .. } => {
+                        let count = register_count.fetch_add(1, Ordering::SeqCst) + 1;
+                        let response = PbConnResponse::RegisterV2 {
+                            conn_id: count as u32,
+                            generation: count as u64,
+                            lease_ttl_ms: 150,
+                        }
+                        .encode()
+                        .unwrap();
+                        let mut writer = get_header_msg_writer(&mut stream).unwrap();
+                        writer.write_msg(&response).await.unwrap();
+                        if count == 2 {
+                            if let Some(tx) = second_register_tx.lock().await.take() {
+                                tx.send(()).unwrap();
+                            }
+                        }
+                        tracing::debug!(key, count, "fake server accepted register");
+                        std::future::pending::<()>().await;
+                    }
+                    PbConnRequest::Status(PbConnStatusReq::Service { key }) => {
+                        let response = PbConnResponse::Status(PbConnStatusResp::Service {
+                            key,
+                            connections: Vec::new(),
+                        })
+                        .encode()
+                        .unwrap();
+                        let mut writer = get_header_msg_writer(&mut stream).unwrap();
+                        writer.write_msg(&response).await.unwrap();
+                    }
+                    PbConnRequest::Status(PbConnStatusReq::Keys) => {
+                        let response = PbConnResponse::Status(PbConnStatusResp::Keys(Vec::new()))
+                            .encode()
+                            .unwrap();
+                        let mut writer = get_header_msg_writer(&mut stream).unwrap();
+                        writer.write_msg(&response).await.unwrap();
+                    }
+                    _ => {}
+                }
+            });
+        }
+    });
+
+    let local_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let local_server = tokio::spawn(run_server_side_cli_with_callback::<TcpStreamProvider, _>(
+        local_addr,
+        remote_addr,
+        Arc::from("sf-backend"),
+        false,
+        false,
+        None,
+    ));
+
+    timeout(Duration::from_secs(2), second_register_rx)
+        .await
+        .expect("local server did not reconnect after remote status lost its registration")
+        .unwrap();
+
+    local_server.abort();
+    fake_server.abort();
+}
+
+#[tokio::test]
 async fn client_closes_initial_status_probe_after_key_check() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();
@@ -109,15 +289,22 @@ async fn client_closes_initial_status_probe_after_key_check() {
     let fake_server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let request = get_init_request(&mut stream, 0.into()).await.unwrap();
-        assert!(matches!(
-            request,
-            PbConnRequest::Status(PbConnStatusReq::Keys)
-        ));
+        let PbConnRequest::Status(PbConnStatusReq::Service { key }) = request else {
+            panic!("client did not use service status for initial key check");
+        };
 
-        let response =
-            PbConnResponse::Status(PbConnStatusResp::Keys(vec!["sf-backend".to_string()]))
-                .encode()
-                .unwrap();
+        let response = PbConnResponse::Status(PbConnStatusResp::Service {
+            key,
+            connections: vec![PbServiceConnStatus {
+                conn_id: 1,
+                generation: 1,
+                protocol_version: 2,
+                healthy: true,
+                last_rx_age_ms: 0,
+            }],
+        })
+        .encode()
+        .unwrap();
         {
             let mut writer = get_header_msg_writer(&mut stream).unwrap();
             writer.write_msg(&response).await.unwrap();
@@ -168,6 +355,26 @@ async fn client_rechecks_remote_key_while_listener_is_active() {
                     return;
                 };
                 match request {
+                    PbConnRequest::Status(PbConnStatusReq::Service { key }) => {
+                        status_count.fetch_add(1, Ordering::SeqCst);
+                        let connections = if key_available.load(Ordering::SeqCst) {
+                            vec![PbServiceConnStatus {
+                                conn_id: 1,
+                                generation: 1,
+                                protocol_version: 2,
+                                healthy: true,
+                                last_rx_age_ms: 0,
+                            }]
+                        } else {
+                            Vec::new()
+                        };
+                        let response =
+                            PbConnResponse::Status(PbConnStatusResp::Service { key, connections })
+                                .encode()
+                                .unwrap();
+                        let mut writer = get_header_msg_writer(&mut stream).unwrap();
+                        writer.write_msg(&response).await.unwrap();
+                    }
                     PbConnRequest::Status(PbConnStatusReq::Keys) => {
                         status_count.fetch_add(1, Ordering::SeqCst);
                         let keys = if key_available.load(Ordering::SeqCst) {

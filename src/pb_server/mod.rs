@@ -5,6 +5,7 @@ mod status;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use error::Result;
 use snafu::{OptionExt, ResultExt};
@@ -20,11 +21,12 @@ use self::error::{
 };
 use self::server::handle_server_conn;
 use self::status::handle_show_status;
-use crate::common::config::{control_io_timeout, IS_KEEPALIVE};
+use crate::common::config::{control_io_timeout, server_lease_timeout, IS_KEEPALIVE};
 use crate::common::conn_id::{ConnIdProvider, RemoteConnId};
 use crate::common::manager::{ForwardMessage, SenderChan, TaskManager};
 use crate::common::message::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
+    PbServiceConnStatus,
 };
 use crate::common::message::{get_header_msg_reader, MessageReader};
 use crate::pb_server::error::{
@@ -45,7 +47,12 @@ pub enum ManagerTask {
         conn_id: RemoteConnId,
         need_codec: bool,
         is_datagram: bool,
+        protocol_version: u16,
         conn_sender: ConnTaskSender,
+    },
+    ServerConnActivity {
+        key: ImutableKey,
+        conn_id: RemoteConnId,
     },
     Subcribe {
         key: ImutableKey,
@@ -91,7 +98,11 @@ pub enum ManagerTask {
 #[derive(Debug)]
 pub enum ConnTask {
     Forward(ForwardMessage),
-    RegisterResp,
+    RegisterResp {
+        generation: u64,
+        protocol_version: u16,
+        lease_ttl_ms: u64,
+    },
     SubcribeResp {
         server_conn_id: RemoteConnId,
         server_generation: u64,
@@ -141,6 +152,8 @@ pub struct ServerConnInfo {
     pub health: ServerConnHealth,
     pub need_codec: bool,
     pub is_datagram: bool,
+    pub protocol_version: u16,
+    pub last_rx_at: Instant,
 }
 
 pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<ServerConnInfo>>;
@@ -175,6 +188,60 @@ fn registered_server_conn_count(server_conn_map: &ServerConnMap) -> usize {
 
 fn service_conn_count(server_conn_map: &ServerConnMap, key: &ImutableKey) -> usize {
     server_conn_map.get(key).map(Vec::len).unwrap_or_default()
+}
+
+fn service_status_connections(
+    server_conn_map: &ServerConnMap,
+    key: &ImutableKey,
+) -> Vec<PbServiceConnStatus> {
+    let now = Instant::now();
+    server_conn_map
+        .get(key)
+        .map(|infos| {
+            infos
+                .iter()
+                .map(|info| PbServiceConnStatus {
+                    conn_id: info.conn_id.into(),
+                    generation: info.generation,
+                    protocol_version: info.protocol_version,
+                    healthy: info.health == ServerConnHealth::Healthy,
+                    last_rx_age_ms: now.duration_since(info.last_rx_at).as_millis() as u64,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn record_server_conn_activity(
+    server_conn_map: &mut ServerConnMap,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> bool {
+    let Some(infos) = server_conn_map.get_mut(key) else {
+        return false;
+    };
+    let Some(info) = infos.iter_mut().find(|info| info.conn_id == conn_id) else {
+        return false;
+    };
+    info.last_rx_at = Instant::now();
+    info.health = ServerConnHealth::Healthy;
+    true
+}
+
+fn record_server_conn_activity_by_conn_id(
+    server_conn_map: &mut ServerConnMap,
+    conn_id: RemoteConnId,
+) -> bool {
+    let Some(info) = server_conn_map
+        .values_mut()
+        .flat_map(|infos| infos.iter_mut())
+        .find(|info| info.conn_id == conn_id)
+    else {
+        return false;
+    };
+    info.last_rx_at = Instant::now();
+    info.health = ServerConnHealth::Healthy;
+    true
 }
 
 async fn send_subcribe_failed(
@@ -366,6 +433,13 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     PbConnStatusReq::Keys => PbConnResponse::Status(PbConnStatusResp::Keys(
                         server_conn_map.keys().map(|k| k.to_string()).collect(),
                     )),
+                    PbConnStatusReq::Service { key } => {
+                        let key: ImutableKey = key.into();
+                        PbConnResponse::Status(PbConnStatusResp::Service {
+                            key: key.to_string(),
+                            connections: service_status_connections(&server_conn_map, &key),
+                        })
+                    }
                 };
                 snafu_error_get_or_continue!(conn_sender
                     .send(ConnTask::StatusResp(resp))
@@ -412,6 +486,16 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     active_connections = manager.active_conn_count(),
                     idle_connections = manager.idle_conn_count(),
                     "server connection deregistered"
+                );
+            }
+            ManagerTask::ServerConnActivity { key, conn_id } => {
+                let recorded = record_server_conn_activity(&mut server_conn_map, &key, conn_id);
+                tracing::debug!(
+                    event = "server_conn_lease_renewed",
+                    key = %key,
+                    conn_id = %conn_id,
+                    recorded,
+                    "server control connection activity recorded"
                 );
             }
             ManagerTask::RetireServerConn {
@@ -500,9 +584,11 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 conn_sender,
                 need_codec,
                 is_datagram,
+                protocol_version,
             } => {
                 let generation = next_server_generation;
                 next_server_generation = next_server_generation.saturating_add(1).max(1);
+                let now = Instant::now();
                 // sign up server connection
                 manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                 match server_conn_map.entry(key.clone()) {
@@ -513,6 +599,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                             health: ServerConnHealth::Healthy,
                             need_codec,
                             is_datagram,
+                            protocol_version,
+                            last_rx_at: now,
                         });
                     }
                     hashbrown::hash_map::Entry::Vacant(v) => {
@@ -522,6 +610,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                             health: ServerConnHealth::Healthy,
                             need_codec,
                             is_datagram,
+                            protocol_version,
+                            last_rx_at: now,
                         }]);
                     }
                 }
@@ -532,6 +622,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     key = %key,
                     conn_id = %conn_id,
                     generation,
+                    protocol_version,
                     need_codec,
                     is_datagram,
                     service_connections = service_conn_count(&server_conn_map, &key),
@@ -542,7 +633,11 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     "server connection registered"
                 );
                 snafu_error_get_or_continue!(conn_sender
-                    .send(ConnTask::RegisterResp)
+                    .send(ConnTask::RegisterResp {
+                        generation,
+                        protocol_version,
+                        lease_ttl_ms: server_lease_timeout().as_millis() as u64,
+                    })
                     .await
                     .map_err(|_| kanal::SendError(()))
                     .context(TaskCenterSendRegisterRespSnafu { key, conn_id }));
@@ -614,6 +709,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 client_id,
                 server_generation,
             } => {
+                let recorded_activity =
+                    record_server_conn_activity_by_conn_id(&mut server_conn_map, server_id);
                 let Some((expected_server_id, expected_generation)) =
                     pending_streams.get(&client_id).copied()
                 else {
@@ -622,6 +719,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                         server_conn_id = %server_id,
                         client_conn_id = %client_id,
                         server_generation,
+                        recorded_activity,
                         "dropping stream ack for client without pending subscribe"
                     );
                     continue;
@@ -634,6 +732,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                         expected_server_conn_id = %expected_server_id,
                         expected_generation,
                         server_generation,
+                        recorded_activity,
                         "dropping stale stream ack for a previous subscribe attempt"
                     );
                     continue;
@@ -694,6 +793,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                         health,
                         need_codec,
                         is_datagram,
+                        protocol_version: _,
+                        last_rx_at: _,
                     } = server_info;
                     let Some(server_conn_sender) = manager.get_conn_sender_chan(&server_conn_id)
                     else {
@@ -857,13 +958,22 @@ async fn handle_conn(
             key,
             need_codec,
             is_datagram,
+            protocol_version,
+            client_instance_id,
+            heartbeat_interval_ms,
+            heartbeat_tolerance_ms,
         } => {
+            let protocol_version = protocol_version.unwrap_or(1);
             tracing::info!(
                 event = "init_request",
                 request = "register",
                 conn_id = %conn_id,
                 peer_addr = %peer_addr,
                 key = %key,
+                protocol_version,
+                client_instance_id = ?client_instance_id,
+                heartbeat_interval_ms = ?heartbeat_interval_ms,
+                heartbeat_tolerance_ms = ?heartbeat_tolerance_ms,
                 need_codec,
                 is_datagram,
                 "received pb init request"
@@ -872,6 +982,7 @@ async fn handle_conn(
                 key.into(),
                 need_codec,
                 is_datagram,
+                protocol_version,
                 conn_id,
                 manager_task_sender,
                 conn,

@@ -164,6 +164,11 @@ pub const PB_MAPPER_STREAM_ACK_TIMEOUT: &str = "PB_MAPPER_STREAM_ACK_TIMEOUT";
 pub const PB_MAPPER_STREAM_READY_TIMEOUT: &str = "PB_MAPPER_STREAM_READY_TIMEOUT";
 pub const PB_MAPPER_STREAM_RECOVERY_TIMEOUT: &str = "PB_MAPPER_STREAM_RECOVERY_TIMEOUT";
 pub const PB_MAPPER_CONTROL_CONN_POOL_SIZE: &str = "PB_MAPPER_CONTROL_CONN_POOL_SIZE";
+pub const PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL: &str = "PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL";
+pub const PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE: &str = "PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE";
+pub const PB_MAPPER_CONTROL_SUSPECT_GRACE: &str = "PB_MAPPER_CONTROL_SUSPECT_GRACE";
+pub const PB_MAPPER_REGISTRATION_PROBE_TIMEOUT: &str = "PB_MAPPER_REGISTRATION_PROBE_TIMEOUT";
+pub const PB_MAPPER_SERVER_LEASE_TIMEOUT: &str = "PB_MAPPER_SERVER_LEASE_TIMEOUT";
 pub const PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL: &str = "PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL";
 pub const PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT: &str = "PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT";
 pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
@@ -172,6 +177,11 @@ const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_millis(300);
 const DEFAULT_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_STREAM_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_CONTROL_CONN_POOL_SIZE: usize = 2;
+const DEFAULT_CONTROL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const DEFAULT_CONTROL_HEARTBEAT_TOLERANCE: Duration = Duration::from_secs(6);
+const DEFAULT_CONTROL_SUSPECT_GRACE: Duration = Duration::from_secs(2);
+const DEFAULT_REGISTRATION_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_SERVER_LEASE_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -266,6 +276,38 @@ pub fn control_conn_pool_size() -> usize {
         .filter(|size| *size > 0)
         .map(|size| size.min(16))
         .unwrap_or(DEFAULT_CONTROL_CONN_POOL_SIZE)
+}
+
+pub fn control_heartbeat_interval() -> Duration {
+    duration_from_env(
+        PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL,
+        DEFAULT_CONTROL_HEARTBEAT_INTERVAL,
+    )
+}
+
+pub fn control_heartbeat_tolerance() -> Duration {
+    duration_from_env(
+        PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE,
+        DEFAULT_CONTROL_HEARTBEAT_TOLERANCE,
+    )
+}
+
+pub fn control_suspect_grace() -> Duration {
+    duration_from_env(
+        PB_MAPPER_CONTROL_SUSPECT_GRACE,
+        DEFAULT_CONTROL_SUSPECT_GRACE,
+    )
+}
+
+pub fn registration_probe_timeout() -> Duration {
+    duration_from_env(
+        PB_MAPPER_REGISTRATION_PROBE_TIMEOUT,
+        DEFAULT_REGISTRATION_PROBE_TIMEOUT,
+    )
+}
+
+pub fn server_lease_timeout() -> Duration {
+    duration_from_env(PB_MAPPER_SERVER_LEASE_TIMEOUT, DEFAULT_SERVER_LEASE_TIMEOUT)
 }
 
 pub fn client_health_check_interval() -> Duration {

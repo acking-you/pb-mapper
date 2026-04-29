@@ -245,12 +245,39 @@ async fn probe_remote_key_once(
     remote_addr: SocketAddr,
     key: &str,
 ) -> std::result::Result<(), String> {
-    let mut stream = each_addr(remote_addr, TcpStream::connect)
-        .await
-        .map_err(|e| format!("connect remote stream failed: {e}"))?;
-    let status_resp = get_status(&mut stream, PbConnStatusReq::Keys)
-        .await
-        .map_err(|e| format!("get status failed: {}", snafu::Report::from_error(e)))?;
+    match fetch_remote_status(
+        remote_addr,
+        PbConnStatusReq::Service {
+            key: key.to_string(),
+        },
+    )
+    .await
+    {
+        Ok(PbConnStatusResp::Service { connections, .. }) => {
+            if connections.iter().any(|conn| conn.healthy) {
+                return Ok(());
+            }
+            return Err(format!(
+                "client key `{key}` has no healthy remote server connections"
+            ));
+        }
+        Ok(status_resp) => {
+            return Err(format!(
+                "expected service status response, got {status_resp:?}"
+            ));
+        }
+        Err(service_reason) => {
+            tracing::debug!(
+                event = "client_remote_service_probe_failed",
+                key = %key,
+                remote_addr = %remote_addr,
+                reason = %service_reason,
+                "service status probe failed; falling back to key status"
+            );
+        }
+    }
+
+    let status_resp = fetch_remote_status(remote_addr, PbConnStatusReq::Keys).await?;
     let PbConnStatusResp::Keys(keys) = status_resp else {
         return Err(format!(
             "expected keys status response, got {status_resp:?}"
@@ -263,6 +290,18 @@ async fn probe_remote_key_once(
             "client key `{key}` is not registered on remote server; valid keys: {keys:?}"
         ))
     }
+}
+
+async fn fetch_remote_status(
+    remote_addr: SocketAddr,
+    req: PbConnStatusReq,
+) -> std::result::Result<PbConnStatusResp, String> {
+    let mut stream = each_addr(remote_addr, TcpStream::connect)
+        .await
+        .map_err(|e| format!("connect remote stream failed: {e}"))?;
+    get_status(&mut stream, req)
+        .await
+        .map_err(|e| format!("get status failed: {}", snafu::Report::from_error(e)))
 }
 
 pub async fn show_status<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
