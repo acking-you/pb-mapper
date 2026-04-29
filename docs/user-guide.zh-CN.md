@@ -6,6 +6,52 @@
 
 pb-mapper 通过“服务 key”将本地 TCP/UDP 服务暴露到公网服务器，提供三款 CLI 二进制与可选的 Flutter GUI。
 
+## 运转机制
+
+```mermaid
+flowchart LR
+    A["本地 TCP 或 UDP 服务"] --> B["pb-mapper-server-cli"]
+    B --> C["V2 控制连接池"]
+    C --> D["pb-mapper-server"]
+    E["pb-mapper-client-cli"] --> F["本地监听端口"]
+    G["远程用户应用"] --> F
+    F --> E
+    E --> D
+    D --> C
+    C --> B
+    B --> A
+```
+
+`pb-mapper-server` 是公网会合点。`pb-mapper-server-cli` 为一个服务 key 注册本地服务，并向 server 保持一组长期存在的控制连接。`pb-mapper-client-cli` 在对外暴露本地监听端口前，会先确认目标服务 key 下面存在 healthy 的控制连接。
+
+当用户连接 client 侧的本地监听端口时，client 会向 server 订阅目标服务 key。server 选择一个健康的已注册控制连接，让对应的 server-cli 打开数据流，等待 ack 后再把 client 数据流和本地服务之间的字节双向转发起来。
+
+```mermaid
+sequenceDiagram
+    participant S as server cli
+    participant R as pb mapper server
+    participant C as client cli
+    participant U as user app
+
+    S->>R: Register V2 with service key
+    R-->>S: conn id and generation
+    loop Control lease
+        S->>R: PingV2
+        R-->>S: PongV2
+    end
+    C->>R: Status Service key
+    R-->>C: healthy control connections
+    U->>C: connect local listener
+    C->>R: Subscribe service key
+    R->>S: Stream request
+    S->>R: Stream ack
+    S->>R: Data stream
+    R-->>C: subscribe ready
+    C-->>U: forward service bytes
+```
+
+控制连接使用租约机制，而不是因为一次没收到 heartbeat 就直接误判断开。如果 server-cli 在容忍窗口内没有收到控制面入站消息，它会打开一条独立 status 探测连接，确认 server 注册表里是否还存在精确的 `conn_id` 和 `generation`。如果注册已经丢失，或探测失败超过 suspect 宽限窗口，server-cli 会主动重连并重新注册。server 侧也会回收空闲的 V2 控制连接，subscribe 选择连接时会跳过 unhealthy 或 stale 的注册。
+
 ## 环境准备
 
 - 可选：Flutter SDK（用于 `ui/` 图形界面）

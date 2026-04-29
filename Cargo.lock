@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "better_mimalloc_rs",
  "bytes",

@@ -6,6 +6,52 @@
 
 pb-mapper exposes local TCP/UDP services through a public server using a service key. It includes three CLI binaries and an optional Flutter GUI.
 
+## How it works
+
+```mermaid
+flowchart LR
+    A["Local TCP or UDP service"] --> B["pb-mapper-server-cli"]
+    B --> C["V2 control connection pool"]
+    C --> D["pb-mapper-server"]
+    E["pb-mapper-client-cli"] --> F["Local listener"]
+    G["Remote user app"] --> F
+    F --> E
+    E --> D
+    D --> C
+    C --> B
+    B --> A
+```
+
+The server is the public rendezvous point. A `pb-mapper-server-cli` process registers one service key and keeps a small pool of long-lived control connections to the server. A `pb-mapper-client-cli` process first checks that the requested service key has a healthy registered control connection, then opens a local listener for downstream users.
+
+When a user connects to the client-side local listener, the client subscribes to the service key on the server. The server selects a healthy registered control connection, asks the matching server-cli to open a data stream, waits for an acknowledgement, and then forwards bytes between the client stream and the local service.
+
+```mermaid
+sequenceDiagram
+    participant S as server cli
+    participant R as pb mapper server
+    participant C as client cli
+    participant U as user app
+
+    S->>R: Register V2 with service key
+    R-->>S: conn id and generation
+    loop Control lease
+        S->>R: PingV2
+        R-->>S: PongV2
+    end
+    C->>R: Status Service key
+    R-->>C: healthy control connections
+    U->>C: connect local listener
+    C->>R: Subscribe service key
+    R->>S: Stream request
+    S->>R: Stream ack
+    S->>R: Data stream
+    R-->>C: subscribe ready
+    C-->>U: forward service bytes
+```
+
+Control connections are leased rather than guessed from a single missing heartbeat. If a registered server-cli stops receiving control-plane activity for longer than the tolerance window, it opens a separate status probe and verifies that the exact `conn_id` and `generation` are still present on the server. If that registration is missing, or if the probe keeps failing past the suspect grace window, the server-cli reconnects and registers a fresh control connection. The server side also expires idle V2 control connections, and subscribe requests skip unhealthy or stale registrations.
+
 ## Prerequisites
 
 - Optional: Flutter SDK for the GUI (`ui/`)

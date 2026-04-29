@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.14] - 2026-04-29
+- Added V2 control-connection registration metadata, lease responses, and per-service status reporting for exact `conn_id` and `generation` health checks.
+- Added server-cli suspect-state probing so missing remote registrations are detected and re-registered without relying on missing heartbeat guesses.
+- Added server-side V2 idle lease expiration and client-side healthy-control-connection checks before exposing local listeners.
+- Documented the current pb-mapper runtime mechanism with visual topology and request-flow diagrams in both English and Chinese user guides.
+
 ## [0.2.13] - 2026-04-29
 - Retired stale server control connections instead of keeping them selectable after stream ack or stream-ready timeouts.
 - Kept subscribe requests open briefly while replacement control connections register, reducing transient failures during network churn.
