@@ -1,0 +1,40 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">pb-mapper Logo</title>
+  <desc id="desc">A blue rounded-square app icon with a white plug-shaped robot and cable mark.</desc>
+  <defs>
+    <linearGradient id="bg" x1="146" y1="105" x2="878" y2="936" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0876D9"/>
+      <stop offset="0.48" stop-color="#168FE9"/>
+      <stop offset="1" stop-color="#30B2FF"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(703 392) rotate(127) scale(628 673)">
+      <stop offset="0" stop-color="#62C7FF" stop-opacity="0.45"/>
+      <stop offset="0.62" stop-color="#2EAAFF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#0069D6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="eye" x1="407" y1="535" x2="620" y2="535" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#168BE5"/>
+      <stop offset="1" stop-color="#2AA4F5"/>
+    </linearGradient>
+    <filter id="softShadow" x="180" y="270" width="700" height="620" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0057A9" flood-opacity="0.16"/>
+    </filter>
+    <filter id="innerDepth" x="70" y="70" width="884" height="884" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="-2" stdDeviation="2" flood-color="#FFFFFF" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect x="70" y="70" width="884" height="884" rx="170" fill="url(#bg)" filter="url(#innerDepth)"/>
+  <rect x="70" y="70" width="884" height="884" rx="170" fill="url(#shine)"/>
+
+  <g filter="url(#softShadow)">
+    <path d="M687 514C779 511 855 574 855 677C855 791 744 843 639 811C581 793 543 755 498 716C414 644 316 655 250 748" stroke="white" stroke-width="43" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="382" y="326" width="44" height="119" rx="19" fill="white"/>
+    <rect x="581" y="326" width="44" height="119" rx="19" fill="white"/>
+    <rect x="328" y="400" width="368" height="228" rx="59" fill="white"/>
+  </g>
+
+  <path d="M414 501L456 535L414 565" stroke="url(#eye)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M596 501L554 535L596 565" stroke="url(#eye)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
