@@ -86,18 +86,18 @@ dependencies = [
 
 [[package]]
 name = "better_mimalloc_rs"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54be7bee89c922bed8d101e27e4b7ae9bf72e172b3acfe66a4b9fe3fce7372cb"
+checksum = "1736ed1052cbbfb06806ca9d19d8f39d8a1005a65a3de579cb1f50e74ee8c6fc"
 dependencies = [
  "better_mimalloc_sys",
 ]
 
 [[package]]
 name = "better_mimalloc_sys"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a386f1c09cf2b4cf160f89ebfc34f9f2803b6669ab366a0687d014230f567619"
+checksum = "e32d316dee410eb0ec38619a5c010b1e1270ade6f14f4629b97b51fde12b42f5"
 dependencies = [
  "cc",
  "cty",
