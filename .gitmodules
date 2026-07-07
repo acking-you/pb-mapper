@@ -1,19 +1,7 @@
-[submodule "local-tools/index-tts"]
-	path = local-tools/index-tts
-	url = https://github.com/acking-you/index-tts.git
-[submodule "local-tools/VibeVoice"]
-	path = local-tools/VibeVoice
-	url = https://github.com/acking-you/VibeVoice.git
 [submodule "deps/uni-stream"]
 	path = deps/uni-stream
-	url = https://github.com/acking-you/uni-stream.git
+	url = https://github.com/RespawnLabs1/uni-stream.git
 [submodule "deps/kanal"]
 	path = deps/kanal
-	url = https://github.com/acking-you/kanal.git
+	url = https://github.com/RespawnLabs1/kanal.git
 	branch = dev/pb-mapper
-[submodule "local-tools/Qwen3-TTS"]
-	path = local-tools/Qwen3-TTS
-	url = https://github.com/acking-you/Qwen3-TTS.git
-[submodule "local-tools/index-tts-vllm"]
-	path = local-tools/index-tts-vllm
-	url = https://github.com/acking-you/index-tts-vllm.git
