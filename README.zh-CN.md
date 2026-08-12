@@ -22,29 +22,26 @@
 
 ---
 
-**pb-mapper** 是一个基于 Rust 的服务映射系统，通过**单个**公网端口暴露多项本地 TCP/UDP 服务。与 frp 那种"按服务占用多个公网端口"的方案不同，它通过服务 key 注册表让多项本地服务共享同一个公网入口，并被持有 key 的任意客户端访问。
+**pb-mapper** 通过**单个**公网端口暴露任意多项本地 TCP/UDP 服务。不同于 frp"一服务一端口"的映射方式，服务以 key 注册，持有 key 的客户端即可访问。
 
 ## 亮点
 
-- **单端口即用**：一个公网端口加一张服务 key 注册表，无需为每个服务规划端口；CLI 与 GUI 共享同一套工作流。
-- **可拓展架构**：`pb-mapper-server`、`pb-mapper-server-cli`、`pb-mapper-client-cli` 清晰拆分，公共协议与工具集中在 `src/common`、`src/utils`，便于扩展新的传输方式与能力。
-- **可选加密**：转发流量可启用 AES-256-GCM（基于 `ring`），在注册服务时通过 `--codec` 开启。
-- **生产级性能**：在真实负载下（例如 Palworld UDP 服务器），延迟与 frp 直暴端口相当。
+- **单端口即用**：服务 key 注册表取代逐个服务规划端口；CLI 与 GUI 共享同一套工作流。
+- **可选加密**：转发流量可启用 AES-256-GCM（基于 `ring`），注册服务时用 `--codec` 开启。
+- **生产可用**：真实负载下（例如 Palworld UDP 服务器），延迟与 frp 直暴端口相当。
 
 ## 快速开始
 
-### 推荐方式：AI 助手 + 部署 Skill
+### 推荐方式：AI 助手部署 Skill
 
-如果你使用 AI 编程助手（Claude Code、Cursor、Kiro），可以直接调用内置部署 skill 完成全交互式一键部署。远程主机无需访问 GitHub，binary 在本地下载后通过 SCP 上传：
+使用 AI 编程助手（Claude Code、Cursor、Kiro）时，内置 skill 会交互式完成部署。binary 在本地下载后通过 SCP 上传，远程主机无需访问 GitHub。
 
-- **服务端**：`/pb-mapper-server-deploy` — 本地下载 binary，通过 SCP 上传到远程，并配置 systemd 服务。
-- **客户端隧道**：`/pb-mapper-client-cli-deploy` — 同样的"本地下载→上传"流程部署 `pb-mapper-client-cli`，含 systemd 服务与端到端验证。
-
-Skill 会交互式收集 SSH 凭据、端口、加密密钥等参数，本地无法直连 GitHub 时会自动提示切换代理下载。
+- `/pb-mapper-server-deploy` — 将 `pb-mapper-server` 部署为 systemd 服务。
+- `/pb-mapper-client-cli-deploy` — 同样的流程部署 `pb-mapper-client-cli`，并附端到端验证。
 
 ### 备选方式：一键安装脚本
 
-如果远程主机能够直接访问 GitHub，一条命令即可在 Linux（x86_64，musl 构建）上安装并注册 `pb-mapper-server` 的 systemd 服务。默认端口 `7666`，默认启用 `--use-machine-msg-header-key`，并将 key 落盘到 `/var/lib/pb-mapper-server/msg_header_key`。
+远程主机能直连 GitHub 时，一条命令即可在 Linux（x86_64，musl）上安装 `pb-mapper-server` 的 systemd 服务：端口 `7666`，启用 `--use-machine-msg-header-key`，key 落盘在 `/var/lib/pb-mapper-server/msg_header_key`。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
@@ -60,15 +57,15 @@ export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
 
 ![pb-mapper architecture](docs/assets/architecture.svg)
 
-三段式架构：
+- **本地服务侧**（绿色）：`pb-mapper-server-cli` 注册本地 TCP/UDP 服务。
+- **公网侧**（蓝色）：`pb-mapper-server` 维护注册表并执行双向数据转发。
+- **远程客户端侧**（橙色）：`pb-mapper-client-cli` 订阅服务 key，在本地暴露端口。
 
-- **本地服务侧**（绿色）：`pb-mapper-server-cli`（或 Flutter UI）将本地 TCP/UDP 服务注册到公网服务器。
-- **公网侧**（蓝色）：`pb-mapper-server` 维护服务注册表、管理连接，并执行双向数据转发。
-- **远程客户端侧**（橙色）：`pb-mapper-client-cli`（或 Flutter UI）订阅服务 key，并在本地暴露端口。
+两个 CLI 都可以用 Flutter UI 替代。
 
-### 具体示例：远程访问家里的 Web 服务
+### 示例：从咖啡店访问家里的 Web 服务
 
-假设你在家中运行了一个 `localhost:8080` 的 Web 服务，希望从咖啡店访问它。
+家中 Web 服务运行在 `localhost:8080`。
 
 ```
                   Home LAN                    Public Server                Coffee Shop
@@ -79,25 +76,18 @@ export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
           └─────────────────────┘       └──────────────────┘       └──────────────────┘
 ```
 
-**1.** 在公网服务器启动中心路由：
-
 ```bash
+# 1. 公网服务器：启动中心路由
 pb-mapper-server --port 7666
-```
 
-**2.** 在家中机器注册 Web 服务：
-
-```bash
+# 2. 家中机器：以 key 'web' 注册服务
 pb-mapper-server-cli --server <public-ip>:7666 --key web --local 127.0.0.1:8080
-```
 
-**3.** 在咖啡店机器订阅并本地暴露：
-
-```bash
+# 3. 咖啡店机器：订阅并在本地暴露
 pb-mapper-client-cli --server <public-ip>:7666 --key web --local 127.0.0.1:3000
 ```
 
-随后在咖啡店浏览器打开 `http://localhost:3000`，流量会经公网服务器回到家里的 Web 服务。
+在咖啡店浏览器打开 `http://localhost:3000`，流量会经公网服务器回到家里的 Web 服务。
 
 ## 组件
 
@@ -110,21 +100,8 @@ pb-mapper-client-cli --server <public-ip>:7666 --key web --local 127.0.0.1:3000
 
 ## 开发者视角
 
-### Rust 核心
-
-- 二进制入口在 `src/bin/`，协议与网络通用逻辑集中在 `src/common`、`src/utils`。
-- 服务端/客户端实现拆分在 `src/pb_server`、`src/local/server`、`src/local/client`。
-
-### Flutter UI
-
-- **分层结构**
-  - 界面与组件：`ui/lib/src/views`、`ui/lib/src/widgets`
-  - UI 层 API：`ui/lib/src/ffi/pb_mapper_api.dart`
-  - FFI 调度 + isolate：`ui/lib/src/ffi/pb_mapper_service.dart`
-  - 低层 FFI 绑定：`ui/lib/src/ffi/pb_mapper_ffi.dart`
-  - Rust FFI crate：`ui/native/pb_mapper_ffi`（C ABI + JSON 返回封装）
-- **线程模型** — 所有 FFI 调用都在后台 isolate 上执行，避免阻塞 Flutter 的 UI 线程。
-- **响应格式** — Rust 统一返回 JSON 字符串（`{success, message, data}`），跳过 bindings 代码生成并在迭代过程中保持 ABI 稳定。
+- **Rust 核心**：二进制入口在 `src/bin/`；协议与网络通用逻辑在 `src/common`、`src/utils`；服务端/客户端实现在 `src/pb_server`、`src/local/server`、`src/local/client`。
+- **Flutter UI**：界面在 `ui/lib/src/views`，FFI 各层在 `ui/lib/src/ffi`，Rust 桥接在 `ui/native/pb_mapper_ffi`。FFI 调用跑在后台 isolate，Rust 统一返回 JSON（`{success, message, data}`）以保持 C ABI 稳定。
 
 ## 文档
 
