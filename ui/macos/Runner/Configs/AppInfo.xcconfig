@@ -8,7 +8,7 @@
 PRODUCT_NAME = pb-mapper
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.pb_mapper.ui
+PRODUCT_BUNDLE_IDENTIFIER = com.pb-mapper.ui
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2025 pb-mapper. All rights reserved.

@@ -11,7 +11,7 @@ build-pb-mapper-server-x86_64_musl:
 build-pb-mapper-ffi-linux:
 	bash ./scripts/build/pb-mapper-ffi-linux.sh
 
-# Build the macOS FFI library and stage it for Flutter.
+# Build the macOS FFI library and stage it for Flutter (host arch only).
 build-pb-mapper-ffi-macos:
 	bash ./scripts/build/pb-mapper-ffi-macos.sh
 
@@ -37,10 +37,15 @@ build-ui-linux-release-no-ffi:
 build-ui-linux-release: build-pb-mapper-ffi-linux build-ui-linux-release-no-ffi
 
 # Build the Flutter macOS release app with the FFI library staged.
+# Restricted to the host arch so the .app matches the host-only FFI dylib;
+# without this Flutter emits a universal binary whose x86_64 slice has no dylib.
+MACOS_HOST_ARCH := $(shell uname -m)
 build-ui-macos-release-no-ffi:
 	cd ui && flutter clean
 	cd ui && flutter pub get
-	cd ui && flutter build macos --release
+	cd ui && FLUTTER_XCODE_ARCHS=$(MACOS_HOST_ARCH) \
+		FLUTTER_XCODE_ONLY_ACTIVE_ARCH=YES \
+		flutter build macos --release
 	# Ensure the .app bundle has the FFI library even if it already existed.
 	bash ./scripts/build/pb-mapper-ffi-macos.sh
 build-ui-macos-release: build-pb-mapper-ffi-macos build-ui-macos-release-no-ffi

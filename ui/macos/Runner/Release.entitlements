@@ -4,5 +4,11 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- Outbound connections to pb-mapper-server, and DNS resolution. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- Local listening ports opened when subscribing to a service. -->
+	<key>com.apple.security.network.server</key>
+	<true/>
 </dict>
 </plist>

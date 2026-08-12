@@ -368,8 +368,18 @@ jobs:
             ui/build/app/outputs/flutter-apk/pb-mapper-x86_64.apk
 
   build-macos:
-    runs-on: macos-latest
+    # One native runner per architecture: each .app carries a single-arch FFI
+    # dylib, so the artifacts are roughly half the size of a universal build.
+    runs-on: ${{ matrix.runner }}
     needs: [get-release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -399,6 +409,16 @@ jobs:
       - name: Build macOS app with latest FFI
         run: |
           make build-ui-macos-release-no-ffi
+      - name: Verify macOS build matches runner arch
+        run: |
+          APP="$(find ui/build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)"
+          for bin in "${APP}/Contents/MacOS/pb-mapper" \
+                     "${APP}/Contents/Frameworks/libpb_mapper_ffi.dylib"; do
+            got="$(lipo -archs "${bin}")"
+            echo "${bin}: ${got}"
+            [ "${got}" = "${{ matrix.arch }}" ] \
+              || { echo "expected ${{ matrix.arch }}, got ${got}"; exit 1; }
+          done
       - name: Verify macOS app bundle uses latest FFI
         run: |
           SRC_FFI="ui/native/macos/libpb_mapper_ffi.dylib"
@@ -428,8 +448,9 @@ jobs:
           }
           EOF
           mkdir dist
-          echo "DMG_ASSET=ui/build/macos/Build/Products/Release/dist/pb-mapper-macos.dmg" >> $GITHUB_ENV
-          appdmg appdmg.json dist/pb-mapper-macos.dmg
+          DMG="pb-mapper-macos-${{ matrix.arch }}.dmg"
+          echo "DMG_ASSET=ui/build/macos/Build/Products/Release/dist/${DMG}" >> $GITHUB_ENV
+          appdmg appdmg.json "dist/${DMG}"
       - name: Upload macOS artifacts
         uses: softprops/action-gh-release@v1
         with:

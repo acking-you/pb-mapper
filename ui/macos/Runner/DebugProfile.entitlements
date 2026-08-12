@@ -6,6 +6,9 @@
 	<true/>
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
+	<!-- Outbound connections to pb-mapper-server, and DNS resolution. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
 </dict>
