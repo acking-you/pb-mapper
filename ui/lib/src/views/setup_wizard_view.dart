@@ -850,22 +850,8 @@ class SetupServiceKeyField extends StatelessWidget {
             .toList()
           ..sort();
 
-    if (options.isEmpty) {
-      return TextField(
-        key: const Key('setup-service-key-input'),
-        controller: controller,
-        focusNode: focusNode,
-        decoration: InputDecoration(
-          labelText: labelText,
-          helperText: helperText,
-          helperMaxLines: 2,
-          border: const OutlineInputBorder(),
-        ),
-      );
-    }
-
     return DropdownMenu<String>(
-      key: const Key('setup-service-key-dropdown'),
+      key: const Key('setup-service-key-input'),
       controller: controller,
       focusNode: focusNode,
       requestFocusOnTap: true,

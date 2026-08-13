@@ -320,7 +320,7 @@ void main() {
       ),
     );
 
-    expect(find.byKey(const Key('setup-service-key-dropdown')), findsOneWidget);
+    expect(find.byKey(const Key('setup-service-key-input')), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.arrow_drop_down));
     await tester.pumpAndSettle();
@@ -335,7 +335,7 @@ void main() {
     expect(controller.text, 'custom-key');
   });
 
-  testWidgets('service key field stays a text input without suggestions', (
+  testWidgets('service key field stays editable without suggestions', (
     tester,
   ) async {
     final controller = TextEditingController();
@@ -355,7 +355,10 @@ void main() {
     );
 
     expect(find.byKey(const Key('setup-service-key-input')), findsOneWidget);
-    expect(find.byType(DropdownMenu<String>), findsNothing);
+    expect(find.byType(DropdownMenu<String>), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'manual-key');
+    expect(controller.text, 'manual-key');
   });
 
   testWidgets('a wizard that set nothing up finishes at home', (tester) async {
