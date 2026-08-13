@@ -179,7 +179,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Copy the Base64 string below. It contains JSON configuration data.',
+                  'Copy the string below.',
                 ),
                 const SizedBox(height: 12),
                 SelectableText(encoded),
@@ -226,7 +226,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Paste Base64-encoded JSON configuration here.'),
+                const Text('Paste the exported Base64 string.'),
                 const SizedBox(height: 12),
                 TextField(
                   controller: controller,
@@ -365,7 +365,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                       controller: _msgHeaderKeyController,
                       decoration: const InputDecoration(
                         labelText: 'MSG_HEADER_KEY',
-                        hintText: '32-byte key, leave empty for default',
+                        hintText: '32 characters, or empty',
                         border: OutlineInputBorder(),
                         helperText:
                             'Used for message checksum/encryption handshake. Must be 32 chars when set.',
@@ -495,7 +495,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                               ),
                             ],
                           )
-                        : const Text('Fetching current configuration...'),
+                        : const Text('Loading…'),
                     const SizedBox(height: 16),
                     Text(
                       'Note: Changes apply to subsequent register/connect operations.',

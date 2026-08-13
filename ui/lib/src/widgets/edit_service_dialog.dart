@@ -42,7 +42,7 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Edit Service Configuration'),
+      title: const Text('Edit service'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,

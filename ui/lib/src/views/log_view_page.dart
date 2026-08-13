@@ -184,7 +184,7 @@ class _LogViewPageState extends State<LogViewPage> {
                     onChanged: _onKeywordChanged,
                     decoration: InputDecoration(
                       labelText: context.l10n.logKeyword,
-                      hintText: 'error, timeout, service-key...',
+                      hintText: 'error, timeout…',
                       prefixIcon: const Icon(Icons.search),
                       suffixIcon: _keywordFilter.isEmpty
                           ? null
@@ -210,7 +210,7 @@ class _LogViewPageState extends State<LogViewPage> {
               onChanged: _onKeywordChanged,
               decoration: InputDecoration(
                 labelText: context.l10n.logKeyword,
-                hintText: 'error, timeout, service-key...',
+                hintText: 'error, timeout…',
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: _keywordFilter.isEmpty
                     ? null

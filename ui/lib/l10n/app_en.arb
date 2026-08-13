@@ -1,6 +1,5 @@
 {
   "@@locale": "en",
-
   "appTitle": "pb-mapper",
   "navRegister": "Register",
   "navConnect": "Connect",
@@ -8,147 +7,148 @@
   "navConfig": "Config",
   "navLogs": "Logs",
   "navOps": "Operations",
-  "pageOps": "Operations",
-  "opsSummary": "Server settings, live status and logs",
-  "pageRegister": "Service Registration",
-  "pageConnect": "Client Connection",
-  "pageStatus": "Status Monitoring",
-  "pageConfig": "Configuration",
-  "pageLogs": "Runtime Logs",
-
+  "opsSummary": "Server, status and logs",
+  "pageRegister": "Register",
+  "pageConnect": "Connect",
+  "pageStatus": "Status",
+  "pageConfig": "Config",
+  "pageLogs": "Logs",
   "toggleTheme": "Toggle theme",
   "toggleLanguage": "Switch language",
   "home": "Home",
-
   "quickStart": "Quick Start",
-  "quickStartStep1": "Point pb-mapper at your server",
+  "quickStartStep1": "Set your server address",
   "quickStartStep1Action": "Configure",
-  "quickStartStep2": "Pick the role that matches this machine",
-  "roleRegisterSummary": "This machine has a service to share",
-  "roleRegisterDetail": "Publish a local TCP or UDP port under a key, so others can reach it through the server.",
-  "roleConnectSummary": "This machine wants to reach a shared service",
-  "roleConnectDetail": "Subscribe to a key and expose it as a local port, as if the remote service were running here.",
-  "setupWelcomeTitle": "Let's get you set up",
-  "setupWelcomeBody": "Three short steps. You can change any of it later.",
+  "quickStartStep2": "Pick this machine's role",
+  "roleRegisterSummary": "Share a service on this machine",
+  "roleRegisterDetail": "Publish a local port under a key.",
+  "roleConnectSummary": "Reach a service shared elsewhere",
+  "roleConnectDetail": "Expose a remote key as a local port.",
   "setupStepOf": "Step {current} of {total}",
   "@setupStepOf": {
     "placeholders": {
-      "current": { "type": "int" },
-      "total": { "type": "int" }
+      "current": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
     }
   },
-  "setupServerTitle": "Where is your pb-mapper server?",
-  "setupServerBody": "The public host and port your server listens on. Everything else goes through it.",
+  "setupServerTitle": "Where is your server?",
+  "setupServerBody": "Host and port. All traffic goes through it.",
   "setupServerHint": "example.com:7666",
-  "setupServerInvalid": "Enter an address as host:port",
-  "setupKeyLabel": "Message header key (optional)",
-  "setupKeyBody": "Only needed if your server was started with a key. Leave empty otherwise.",
-  "setupKeyInvalid": "The key must be exactly 32 characters",
-  "setupCheckingServer": "Checking the server…",
-  "setupServerOk": "Reached the server",
-  "setupServerFailed": "Could not reach it. You can continue and fix this later.",
-  "setupRoleTitle": "What is this machine doing?",
-  "setupDetailsTitleRegister": "Which local service do you want to share?",
+  "setupServerInvalid": "Use host:port",
+  "setupKeyLabel": "Header key (optional)",
+  "setupKeyBody": "Only if your server was started with one.",
+  "setupKeyInvalid": "Must be exactly 32 characters",
+  "setupCheckingServer": "Checking…",
+  "setupServerOk": "Server reached",
+  "setupServerFailed": "Not reachable. You can continue anyway.",
+  "setupRoleTitle": "What does this machine do?",
+  "setupDetailsTitleRegister": "Which service do you want to share?",
   "setupDetailsTitleConnect": "Which service do you want to reach?",
-  "setupServiceKeyBody": "A name you choose. The other side uses the same one.",
-  "setupLocalAddressBodyRegister": "The address your service already listens on.",
-  "setupLocalAddressBodyConnect": "A free local port. The remote service will appear here.",
+  "setupServiceKeyBody": "Your own name for it. Both sides use the same one.",
+  "setupLocalAddressBodyRegister": "Where your service already listens.",
+  "setupLocalAddressBodyConnect": "A free local port.",
   "setupDoneTitle": "Ready",
-  "setupDoneBodyRegister": "Your service is registered. It will keep retrying if the server is not up yet.",
-  "setupDoneBodyConnect": "Your tunnel is connected.",
-  "setupDoneBodyServer": "Server settings saved.",
-  "setupVerifyTitle": "Bringing it up",
-  "setupVerifyWaiting": "Waiting for the tunnel to come up…",
+  "setupDoneBodyServer": "Server saved.",
+  "setupVerifyTitle": "Starting",
+  "setupVerifyWaiting": "Starting…",
   "setupVerifyRunning": "{key} is running",
-  "@setupVerifyRunning": {"placeholders": {"key": {"type": "String"}}},
-  "setupVerifyRetrying": "{key} is retrying. This is normal if the server is not up yet.",
-  "@setupVerifyRetrying": {"placeholders": {"key": {"type": "String"}}},
+  "@setupVerifyRunning": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "setupVerifyRetrying": "{key} retrying. Normal if the server is down.",
+  "@setupVerifyRetrying": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
   "setupVerifyFailed": "{key} could not start: {message}",
-  "@setupVerifyFailed": {"placeholders": {"key": {"type": "String"}, "message": {"type": "String"}}},
+  "@setupVerifyFailed": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      },
+      "message": {
+        "type": "String"
+      }
+    }
+  },
   "setupVerifyStopped": "{key} is not running yet",
-  "@setupVerifyStopped": {"placeholders": {"key": {"type": "String"}}},
-  "setupAddAnother": "Add another",
+  "@setupVerifyStopped": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
   "setupAddRegister": "Register a service",
   "setupAddConnect": "Connect to a service",
-  "setupWorking": "Working so far",
+  "setupWorking": "Ready",
   "setupNothingYet": "Nothing set up yet",
   "setupDoneAll": "Done",
   "setupRetry": "Try again",
   "setupBack": "Back",
   "setupNext": "Next",
   "setupFinish": "Finish",
-  "setupSkip": "Skip setup",
+  "setupSkip": "Skip",
   "setupFailed": "Setup failed: {message}",
   "@setupFailed": {
-    "placeholders": { "message": { "type": "String" } }
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
   },
-
   "starOnGitHub": "Star on GitHub",
-  "starPitch": "pb-mapper is open source. A star helps others find it.",
-  "viewRepository": "Repository",
-
-  "save": "Save",
+  "starPitch": "Open source. A star helps others find it.",
   "cancel": "Cancel",
   "delete": "Delete",
   "close": "Close",
   "copy": "Copy",
   "refresh": "Refresh",
-  "start": "Start",
-  "stop": "Stop",
-  "edit": "Edit",
   "protocol": "Protocol",
   "serviceKey": "Service Key",
   "localAddress": "Local Address",
   "serverAddress": "Server Address",
   "enableEncryption": "Enable Encryption",
   "enableKeepAlive": "Enable TCP Keep-Alive",
-  "configureInSettings": "Configure in Settings",
-
   "trayStatusOffline": "Offline · pb-mapper",
   "trayStatusConnections": "Connected · {count} connections",
   "@trayStatusConnections": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "trayStatusServices": "Connected · {count} services",
   "@trayStatusServices": {
-    "placeholders": { "count": { "type": "int" } }
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "trayStatusOnlineIdle": "Online · No services",
   "trayOpen": "Open pb-mapper",
   "trayRefresh": "Refresh status",
   "trayQuit": "Quit",
-
-  "registerTitle": "Register a Local Service",
-  "registerAction": "Register Service",
-  "registeredServices": "Registered Services ({count})",
-  "@registeredServices": {
-    "placeholders": { "count": { "type": "int" } }
-  },
   "deleteService": "Delete Service",
   "serviceKeyRequired": "Service key is required",
-  "localAddressHint": "127.0.0.1:8080",
-
-  "connectTitle": "Connect to Service",
-  "connectAction": "Connect",
-  "activeConnections": "Active Connections",
-  "selectService": "Select a service",
-  "enterServiceKey": "Enter service key",
-  "serviceKeyNeeded": "Please select or enter a service key",
-  "refreshServiceList": "Refresh service list",
-  "refreshAllStatus": "Refresh All Status",
   "deleteClientConfig": "Delete Client Configuration",
-  "clientLocalAddressHint": "127.0.0.1:9090",
-
-  "msgHeaderKeyHint": "32-byte key, leave empty for default",
   "exportConfig": "Export (Base64)",
   "importConfig": "Import (Base64)",
-  "checkServer": "Check Server Connectivity",
-  "serverReachable": "Server is reachable",
-  "serverUnreachable": "Server is not reachable yet",
-
   "logLevel": "Log Level",
   "logKeyword": "Keyword",
-  "logAll": "All",
   "clearLogs": "Clear logs",
   "copyVisibleLogs": "Copy visible logs",
   "scrollToBottom": "Scroll to bottom"

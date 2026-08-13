@@ -251,9 +251,9 @@ void main() {
     );
 
     expect(find.text('Step 1 of 3'), findsOneWidget);
-    expect(find.text('Where is your pb-mapper server?'), findsOneWidget);
+    expect(find.text('Where is your server?'), findsOneWidget);
 
-    await tester.tap(find.text('Skip setup'));
+    await tester.tap(find.text('Skip'));
     await tester.pump();
     expect(skipped, 1);
   });
@@ -268,7 +268,7 @@ void main() {
     await tester.pump();
 
     // Still on step 1, with the reason shown, rather than saving nonsense.
-    expect(find.text('Enter an address as host:port'), findsOneWidget);
+    expect(find.text('Use host:port'), findsOneWidget);
     expect(find.text('Step 1 of 3'), findsOneWidget);
   });
 
@@ -283,7 +283,7 @@ void main() {
     await tester.tap(find.text('Next'));
     await tester.pump();
 
-    expect(find.text('The key must be exactly 32 characters'), findsOneWidget);
+    expect(find.text('Must be exactly 32 characters'), findsOneWidget);
   });
 
   testWidgets('server-only mode starts at the server question', (tester) async {
@@ -300,7 +300,7 @@ void main() {
     // It opens on the server question. The counter says 3, because the hub
     // afterwards lets this visit carry on into setting up a service.
     expect(find.text('Step 1 of 3'), findsOneWidget);
-    expect(find.text('Where is your pb-mapper server?'), findsOneWidget);
+    expect(find.text('Where is your server?'), findsOneWidget);
   });
 
   testWidgets('a wizard that set nothing up finishes at home', (tester) async {
@@ -316,7 +316,7 @@ void main() {
     );
 
     // Skipping is not setting something up, so there is no workspace to open.
-    await tester.tap(find.text('Skip setup'));
+    await tester.tap(find.text('Skip'));
     await tester.pump();
     expect(landed, isNull);
   });
