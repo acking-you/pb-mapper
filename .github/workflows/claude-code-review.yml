@@ -1,0 +1,82 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: claude-code-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    name: Review pull request
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check Claude gateway configuration
+        shell: bash
+        env:
+          CLAUDE_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          CLAUDE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          missing=0
+          if [[ -z "$CLAUDE_BASE_URL" ]]; then
+            echo "::error::Repository secret ANTHROPIC_BASE_URL is not configured."
+            missing=1
+          fi
+          if [[ -z "$CLAUDE_API_KEY" ]]; then
+            echo "::error::Repository secret ANTHROPIC_API_KEY is not configured."
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Check out pull request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude review
+        # v1.0.191; pin the action because this job receives an API credential.
+        uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_CUSTOM_HEADERS: ${{ secrets.ANTHROPIC_CUSTOM_HEADERS }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. Read AGENTS.md, CLAUDE.md, and other
+            repository guidance first when present. Review only the PR changes
+            and directly affected code. Do not modify files or push commits.
+
+            Prioritize actionable findings over summaries or style preferences:
+            - correctness bugs and behavioral regressions
+            - security, trust-boundary, and secret-handling problems
+            - concurrency, cancellation, and resource-lifecycle issues
+            - protocol, API, data, and backward-compatibility problems
+            - missing tests for risky behavior
+
+            For each finding, state the severity, explain the concrete failure
+            scenario, and point to the narrowest relevant changed line. Use
+            mcp__github_inline_comment__create_inline_comment with confirmed=true
+            for line-specific findings. Use `gh pr comment` for one concise
+            top-level summary. If there are no actionable findings, post only a
+            short approval-style summary. Post review text only as GitHub PR
+            comments.
+          claude_args: |
+            --model "${{ vars.CLAUDE_MODEL || 'claude-sonnet-4-6' }}"
+            --max-turns 20
+            --allowedTools "Read,Glob,Grep,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
