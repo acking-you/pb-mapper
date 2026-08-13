@@ -245,9 +245,7 @@ void main() {
   testWidgets('wizard opens on step 1 and can be skipped', (tester) async {
     var skipped = 0;
     await tester.pumpWidget(
-      _wrap(
-        SetupWizardView(onFinished: (_) {}, onSkip: () => skipped++),
-      ),
+      _wrap(SetupWizardView(onFinished: (_) {}, onSkip: () => skipped++)),
     );
 
     expect(find.text('Step 1 of 3'), findsOneWidget);
@@ -301,6 +299,63 @@ void main() {
     // afterwards lets this visit carry on into setting up a service.
     expect(find.text('Step 1 of 3'), findsOneWidget);
     expect(find.text('Where is your server?'), findsOneWidget);
+  });
+
+  testWidgets('service key field offers registered services and free input', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      _wrap(
+        Scaffold(
+          body: SetupServiceKeyField(
+            controller: controller,
+            availableServices: const ['web', 'ssh', 'web', ''],
+            labelText: 'Service Key',
+            helperText: 'Choose or type a key',
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const Key('setup-service-key-dropdown')), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.arrow_drop_down));
+    await tester.pumpAndSettle();
+    expect(find.text('ssh'), findsOneWidget);
+    expect(find.text('web'), findsOneWidget);
+
+    await tester.tap(find.text('ssh'));
+    await tester.pumpAndSettle();
+    expect(controller.text, 'ssh');
+
+    await tester.enterText(find.byType(TextField), 'custom-key');
+    expect(controller.text, 'custom-key');
+  });
+
+  testWidgets('service key field stays a text input without suggestions', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      _wrap(
+        Scaffold(
+          body: SetupServiceKeyField(
+            controller: controller,
+            availableServices: const [],
+            labelText: 'Service Key',
+            helperText: 'Type a key',
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const Key('setup-service-key-input')), findsOneWidget);
+    expect(find.byType(DropdownMenu<String>), findsNothing);
   });
 
   testWidgets('a wizard that set nothing up finishes at home', (tester) async {
