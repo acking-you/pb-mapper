@@ -109,6 +109,26 @@ flutter:
   uses-material-design: true
   assets:
     - assets/tray/
+    # The OFL requires its notice to travel with the font, so the text is
+    # bundled and registered in main.dart rather than only living in the repo.
+    - assets/fonts/OFL.txt
+
+  # Reached only through fontFamilyFallback on Windows and Linux, where the
+  # system CJK face has no 500 or 600 weight; macOS gets PingFang SC, which
+  # does, and never touches this. Static instances rather than the variable
+  # font they were cut from, because Flutter does not map fontWeight onto a
+  # wght axis. Regenerate with tool/gen_cjk_subset.mjs.
+  fonts:
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC-Regular.subset.ttf
+          weight: 400
+        - asset: assets/fonts/NotoSansSC-Medium.subset.ttf
+          weight: 500
+        - asset: assets/fonts/NotoSansSC-SemiBold.subset.ttf
+          weight: 600
+        - asset: assets/fonts/NotoSansSC-Bold.subset.ttf
+          weight: 700
 
   # To add assets to your application, add an assets section, like this:
   # assets:

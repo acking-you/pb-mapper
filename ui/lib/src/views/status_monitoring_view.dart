@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/app_typography.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
@@ -250,8 +251,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                 ),
                 child: Text(
                   status.serverMap,
-                  style: TextStyle(
-                    fontFamily: 'Courier',
+                  style: AppTypography.mono(
                     fontSize: 14,
                     color: Theme.of(context).brightness == Brightness.dark
                         ? Colors.green.shade300
@@ -294,8 +294,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                       const SizedBox(height: 4),
                       Text(
                         status.activeConnections,
-                        style: TextStyle(
-                          fontFamily: 'Courier',
+                        style: AppTypography.mono(
                           fontSize: 12,
                           color: Theme.of(context).brightness == Brightness.dark
                               ? Colors.blue.shade300
@@ -315,8 +314,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                       const SizedBox(height: 4),
                       Text(
                         status.idleConnections,
-                        style: TextStyle(
-                          fontFamily: 'Courier',
+                        style: AppTypography.mono(
                           fontSize: 12,
                           color: Theme.of(context).brightness == Brightness.dark
                               ? Colors.orange.shade300
@@ -438,7 +436,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                       ),
                       title: Text(
                         serviceKey,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w600,
                         ),

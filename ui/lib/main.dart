@@ -3,6 +3,7 @@ import 'dart:async' show unawaited;
 import 'dart:io' show Platform, exit;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/views/client_connection_view.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
@@ -13,6 +14,7 @@ import 'package:pb_mapper_ui/src/views/configuration_view.dart';
 import 'package:pb_mapper_ui/src/views/log_view_page.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
+import 'package:pb_mapper_ui/src/common/app_typography.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
@@ -26,8 +28,20 @@ import 'package:pb_mapper_ui/src/common/tray/tray_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+/// Noto Sans SC is bundled under the SIL Open Font License, which asks that
+/// its notice be distributed with the font. Registering it puts the text in
+/// the standard Flutter licence listing alongside every package's.
+void _registerFontLicenses() {
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(<String>[
+      'NotoSansSC',
+    ], await rootBundle.loadString('assets/fonts/OFL.txt'));
+  });
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  _registerFontLicenses();
   if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
     await windowManager.ensureInitialized();
 
@@ -397,6 +411,22 @@ class _MyAppState extends State<MyApp> with WindowListener {
     }
   }
 
+  /// The two themes differ only in brightness. The CJK fallback is where the
+  /// platform differences live — see [AppTypography].
+  static ThemeData _buildTheme(Brightness brightness) {
+    return ThemeData(
+      useMaterial3: true,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: Colors.indigo,
+        brightness: brightness,
+      ),
+      fontFamilyFallback: AppTypography.uiFallback,
+      textTheme: const TextTheme(
+        titleLarge: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -409,23 +439,8 @@ class _MyAppState extends State<MyApp> with WindowListener {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-        textTheme: const TextTheme(
-          titleLarge: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
-        ),
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.indigo,
-          brightness: Brightness.dark,
-        ),
-        textTheme: const TextTheme(
-          titleLarge: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
-        ),
-      ),
+      theme: _buildTheme(Brightness.light),
+      darkTheme: _buildTheme(Brightness.dark),
       themeMode: _themeMode,
       // Pass this context down: the State's own context sits above MaterialApp
       // and so outside the Localizations scope it installs.

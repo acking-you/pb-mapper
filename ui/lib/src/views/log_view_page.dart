@@ -3,6 +3,7 @@ import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:pb_mapper_ui/src/common/app_typography.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
@@ -280,16 +281,14 @@ class _LogViewPageState extends State<LogViewPage> {
                       children: [
                         TextSpan(
                           text: '[${log.level.padRight(5)}] ',
-                          style: TextStyle(
-                            fontFamily: 'monospace',
+                          style: AppTypography.mono(
                             fontWeight: FontWeight.bold,
                             color: _levelColor(log.level, isDarkMode),
                           ),
                         ),
                         TextSpan(
                           text: '$timestamp : ',
-                          style: TextStyle(
-                            fontFamily: 'monospace',
+                          style: AppTypography.mono(
                             color: isDarkMode
                                 ? Colors.grey.shade500
                                 : Colors.grey.shade700,
@@ -297,8 +296,7 @@ class _LogViewPageState extends State<LogViewPage> {
                         ),
                         TextSpan(
                           text: log.message,
-                          style: TextStyle(
-                            fontFamily: 'monospace',
+                          style: AppTypography.mono(
                             color: isDarkMode ? Colors.white : Colors.black,
                           ),
                         ),
