@@ -76,6 +76,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
   final _keyController = TextEditingController();
   final _serviceKeyController = TextEditingController();
   final _localAddressController = TextEditingController();
+  final _serviceKeyFocusNode = FocusNode();
 
   _Step _step = _Step.server;
   bool _isRegisterRole = true;
@@ -84,6 +85,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
   String? _error;
   String? _serverNote;
   bool? _serverReachable;
+  List<String> _availableServices = const [];
 
   /// Everything set up in this session, newest last.
   final List<_Outcome> _outcomes = [];
@@ -124,6 +126,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
     _keyController.dispose();
     _serviceKeyController.dispose();
     _localAddressController.dispose();
+    _serviceKeyFocusNode.dispose();
     super.dispose();
   }
 
@@ -136,6 +139,9 @@ class _SetupWizardViewState extends State<SetupWizardView> {
           ? '127.0.0.1:8080'
           : '127.0.0.1:9090';
       _step = _Step.details;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _serviceKeyFocusNode.requestFocus();
     });
   }
 
@@ -157,6 +163,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
       _busy = true;
       _error = null;
       _serverNote = l10n.setupCheckingServer;
+      _availableServices = const [];
     });
 
     final result = await _api.updateConfig(
@@ -181,6 +188,9 @@ class _SetupWizardViewState extends State<SetupWizardView> {
     setState(() {
       _busy = false;
       _serverReachable = status.serverAvailable;
+      _availableServices = status.serverAvailable
+          ? List.unmodifiable(status.registeredServices)
+          : const [];
       _serverNote = status.serverAvailable
           ? l10n.setupServerOk
           : l10n.setupServerFailed;
@@ -241,6 +251,12 @@ class _SetupWizardViewState extends State<SetupWizardView> {
     );
     setState(() {
       _busy = false;
+      if (_isRegisterRole) {
+        _availableServices = List.unmodifiable({
+          ..._availableServices,
+          serviceKey,
+        });
+      }
       _outcomes.add(outcome);
       _current = outcome;
       _step = _Step.verify;
@@ -309,9 +325,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
   /// the one still fresh in mind. Only a visit that set nothing up goes home.
   AppSection _landingSection() {
     if (_outcomes.isEmpty) return AppSection.home;
-    return _outcomes.last.isRegister
-        ? AppSection.register
-        : AppSection.connect;
+    return _outcomes.last.isRegister ? AppSection.register : AppSection.connect;
   }
 
   void _addAnother({required bool register}) {
@@ -357,6 +371,8 @@ class _SetupWizardViewState extends State<SetupWizardView> {
               serverController: _serverController,
               keyController: _keyController,
               serviceKeyController: _serviceKeyController,
+              serviceKeyFocusNode: _serviceKeyFocusNode,
+              availableServices: _availableServices,
               localAddressController: _localAddressController,
               protocol: _protocol,
               onProtocolChanged: (value) => setState(() => _protocol = value),
@@ -406,6 +422,8 @@ class _StepCard extends StatelessWidget {
     required this.serverController,
     required this.keyController,
     required this.serviceKeyController,
+    required this.serviceKeyFocusNode,
+    required this.availableServices,
     required this.localAddressController,
     required this.protocol,
     required this.onProtocolChanged,
@@ -432,6 +450,8 @@ class _StepCard extends StatelessWidget {
   final TextEditingController serverController;
   final TextEditingController keyController;
   final TextEditingController serviceKeyController;
+  final FocusNode serviceKeyFocusNode;
+  final List<String> availableServices;
   final TextEditingController localAddressController;
   final String protocol;
   final ValueChanged<String> onProtocolChanged;
@@ -486,9 +506,10 @@ class _StepCard extends StatelessWidget {
             switch (step) {
               _Step.server => l10n.setupServerTitle,
               _Step.role => l10n.setupRoleTitle,
-              _Step.details => isRegisterRole
-                  ? l10n.setupDetailsTitleRegister
-                  : l10n.setupDetailsTitleConnect,
+              _Step.details =>
+                isRegisterRole
+                    ? l10n.setupDetailsTitleRegister
+                    : l10n.setupDetailsTitleConnect,
               _Step.verify => l10n.setupVerifyTitle,
               _Step.hub => l10n.setupDoneTitle,
             },
@@ -594,15 +615,14 @@ class _StepCard extends StatelessWidget {
 
       case _Step.details:
         return [
-          TextField(
+          SetupServiceKeyField(
             controller: serviceKeyController,
-            autofocus: true,
-            decoration: InputDecoration(
-              labelText: l10n.serviceKey,
-              helperText: l10n.setupServiceKeyBody,
-              helperMaxLines: 2,
-              border: const OutlineInputBorder(),
-            ),
+            focusNode: serviceKeyFocusNode,
+            availableServices: isRegisterRole ? const [] : availableServices,
+            labelText: l10n.serviceKey,
+            helperText: isRegisterRole || availableServices.isEmpty
+                ? l10n.setupServiceKeyBody
+                : l10n.setupServiceKeyBodyConnect,
           ),
           const SizedBox(height: 16),
           TextField(
@@ -710,10 +730,7 @@ class _StepCard extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           else
-            FilledButton(
-              onPressed: onContinue,
-              child: Text(l10n.setupNext),
-            ),
+            FilledButton(onPressed: onContinue, child: Text(l10n.setupNext)),
         ],
       );
     }
@@ -723,7 +740,10 @@ class _StepCard extends StatelessWidget {
         if (step == _Step.server)
           TextButton(onPressed: onSkip, child: Text(l10n.setupSkip))
         else
-          TextButton(onPressed: busy ? null : onBack, child: Text(l10n.setupBack)),
+          TextButton(
+            onPressed: busy ? null : onBack,
+            child: Text(l10n.setupBack),
+          ),
         const Spacer(),
         if (busy)
           const SizedBox(
@@ -799,6 +819,54 @@ class _HealthRow extends StatelessWidget {
             ),
           ),
         ),
+      ],
+    );
+  }
+}
+
+/// An editable service-key field that offers registered keys when available.
+class SetupServiceKeyField extends StatelessWidget {
+  const SetupServiceKeyField({
+    super.key,
+    required this.controller,
+    required this.availableServices,
+    required this.labelText,
+    required this.helperText,
+    this.focusNode,
+  });
+
+  final TextEditingController controller;
+  final FocusNode? focusNode;
+  final List<String> availableServices;
+  final String labelText;
+  final String helperText;
+
+  @override
+  Widget build(BuildContext context) {
+    final options =
+        availableServices
+            .map((key) => key.trim())
+            .where((key) => key.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort();
+
+    final optionsKey = options.map((key) => '${key.length}:$key').join();
+
+    return DropdownMenu<String>(
+      key: ValueKey('setup-service-key-input:$optionsKey'),
+      controller: controller,
+      focusNode: focusNode,
+      requestFocusOnTap: true,
+      enableFilter: true,
+      enableSearch: true,
+      expandedInsets: EdgeInsets.zero,
+      menuHeight: 240,
+      label: Text(labelText),
+      helperText: helperText,
+      dropdownMenuEntries: [
+        for (final serviceKey in options)
+          DropdownMenuEntry(value: serviceKey, label: serviceKey),
       ],
     );
   }

@@ -49,6 +49,7 @@
   "setupDetailsTitleRegister": "Which service do you want to share?",
   "setupDetailsTitleConnect": "Which service do you want to reach?",
   "setupServiceKeyBody": "Your own name for it. Both sides use the same one.",
+  "setupServiceKeyBodyConnect": "Choose a registered service, or type the shared key.",
   "setupLocalAddressBodyRegister": "Where your service already listens.",
   "setupLocalAddressBodyConnect": "A free local port.",
   "setupDoneTitle": "Ready",

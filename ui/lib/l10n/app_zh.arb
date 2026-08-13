@@ -49,6 +49,7 @@
   "setupDetailsTitleRegister": "要共享哪个服务？",
   "setupDetailsTitleConnect": "要访问哪个服务？",
   "setupServiceKeyBody": "你自己起的名字，两边用同一个。",
+  "setupServiceKeyBodyConnect": "选择已注册的服务，或直接输入双方约定的 Key。",
   "setupLocalAddressBodyRegister": "你的服务当前监听的地址。",
   "setupLocalAddressBodyConnect": "一个空闲的本地端口。",
   "setupDoneTitle": "完成",

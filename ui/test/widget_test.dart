@@ -245,9 +245,7 @@ void main() {
   testWidgets('wizard opens on step 1 and can be skipped', (tester) async {
     var skipped = 0;
     await tester.pumpWidget(
-      _wrap(
-        SetupWizardView(onFinished: (_) {}, onSkip: () => skipped++),
-      ),
+      _wrap(SetupWizardView(onFinished: (_) {}, onSkip: () => skipped++)),
     );
 
     expect(find.text('Step 1 of 3'), findsOneWidget);
@@ -303,6 +301,101 @@ void main() {
     expect(find.text('Where is your server?'), findsOneWidget);
   });
 
+  testWidgets('service key field offers registered services and free input', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      _wrap(
+        Scaffold(
+          body: SetupServiceKeyField(
+            controller: controller,
+            availableServices: const ['web', 'ssh', 'web', ''],
+            labelText: 'Service Key',
+            helperText: 'Choose or type a key',
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(DropdownMenu<String>), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.arrow_drop_down));
+    await tester.pumpAndSettle();
+    expect(find.text('ssh'), findsOneWidget);
+    expect(find.text('web'), findsOneWidget);
+
+    await tester.tap(find.text('ssh'));
+    await tester.pumpAndSettle();
+    expect(controller.text, 'ssh');
+
+    await tester.enterText(find.byType(TextField), 'custom-key');
+    expect(controller.text, 'custom-key');
+  });
+
+  testWidgets('service key field stays editable without suggestions', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      _wrap(
+        Scaffold(
+          body: SetupServiceKeyField(
+            controller: controller,
+            availableServices: const [],
+            labelText: 'Service Key',
+            helperText: 'Type a key',
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(DropdownMenu<String>), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'manual-key');
+    expect(controller.text, 'manual-key');
+  });
+
+  testWidgets('service key field rebuilds when suggestions change', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+
+    Future<void> pumpField(List<String> services) {
+      return tester.pumpWidget(
+        _wrap(
+          Scaffold(
+            body: SetupServiceKeyField(
+              controller: controller,
+              availableServices: services,
+              labelText: 'Service Key',
+              helperText: 'Choose or type a key',
+            ),
+          ),
+        ),
+      );
+    }
+
+    await pumpField(const ['web']);
+    final firstKey = tester
+        .widget<DropdownMenu<String>>(find.byType(DropdownMenu<String>))
+        .key;
+
+    await pumpField(const ['ssh']);
+    final refreshedMenu = tester.widget<DropdownMenu<String>>(
+      find.byType(DropdownMenu<String>),
+    );
+
+    expect(refreshedMenu.key, isNot(firstKey));
+    expect(refreshedMenu.dropdownMenuEntries.map((entry) => entry.value), [
+      'ssh',
+    ]);
+  });
   testWidgets('a wizard that set nothing up finishes at home', (tester) async {
     AppSection? landed;
     await tester.pumpWidget(
