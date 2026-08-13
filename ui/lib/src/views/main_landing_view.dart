@@ -177,6 +177,9 @@ class MainLandingView extends StatelessWidget {
     ];
 
     return Scaffold(
+      // Transparent on desktop so the shell's content panel shows through;
+      // on mobile this view is the whole screen and keeps its own surface.
+      backgroundColor: isMobile ? null : Colors.transparent,
       appBar: showAppBar
           ? AppBar(
               title: const Text('pb-mapper'),

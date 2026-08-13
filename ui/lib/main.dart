@@ -22,6 +22,26 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
     await windowManager.ensureInitialized();
+
+    // Hide the native title bar so the app draws one continuous surface: the
+    // grey strip above the content is otherwise a separate window frame that
+    // no theme can reach. macOS keeps its traffic lights, which sit inside the
+    // surface; Windows and Linux get caption buttons from window_manager.
+    final windowOptions = WindowOptions(
+      size: const Size(1200, 800),
+      minimumSize: const Size(720, 560),
+      center: true,
+      backgroundColor: Colors.transparent,
+      title: 'pb-mapper',
+      titleBarStyle: TitleBarStyle.hidden,
+      windowButtonVisibility: Platform.isMacOS,
+    );
+    unawaited(
+      windowManager.waitUntilReadyToShow(windowOptions, () async {
+        await windowManager.show();
+        await windowManager.focus();
+      }),
+    );
   }
   PbMapperService().initLogging();
   await createActors();
@@ -312,31 +332,18 @@ class _MyAppState extends State<MyApp> with WindowListener {
     return DesktopLayout(
       selectedIndex: _currentPage,
       onNavigationChanged: _navigateToPage,
-      child: ResponsiveScaffold(
-        title: _getPageTitle(),
-        body: _getCurrentPageContent(),
-        actions: _currentPage == 0
-            ? [
-                IconButton(
-                  icon: Icon(
-                    _themeMode == ThemeMode.dark
-                        ? Icons.light_mode
-                        : Icons.dark_mode,
-                  ),
-                  onPressed: toggleTheme,
-                ),
-              ]
-            : [
-                IconButton(
-                  icon: Icon(
-                    _themeMode == ThemeMode.dark
-                        ? Icons.light_mode
-                        : Icons.dark_mode,
-                  ),
-                  onPressed: toggleTheme,
-                ),
-              ],
-      ),
+      title: _getPageTitle() ?? 'pb-mapper',
+      titleBarActions: [
+        IconButton(
+          icon: Icon(
+            _themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode,
+          ),
+          iconSize: 18,
+          tooltip: 'Toggle theme',
+          onPressed: toggleTheme,
+        ),
+      ],
+      child: ResponsiveScaffold(body: _getCurrentPageContent()),
     );
   }
 
