@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <!-- macOS template image: black shape + alpha only. The system tints it to
+       match the menu bar, so state is carried by shape, never by colour.
+       active = filled badge with a check (services running). -->
+  <mask id="halo">
+    <rect width="36" height="36" fill="white"/>
+    <circle cx="27.5" cy="27.5" r="8.4" fill="black"/>
+  </mask>
+  <g mask="url(#halo)" fill="none" stroke="black" stroke-width="2.6"
+     stroke-linecap="round">
+    <rect x="9.4" y="9.2" width="11.8" height="7.6" rx="2.1" fill="black" stroke="none"/>
+    <rect x="11.9" y="5.6" width="2.4" height="4.0" rx="1.2" fill="black" stroke="none"/>
+    <rect x="16.5" y="5.6" width="2.4" height="4.0" rx="1.2" fill="black" stroke="none"/>
+    <path d="M21.6 13.1 C27.2 13.1 27.4 20.2 22.1 22.4 C16.2 24.9 11.2 24.2 8.2 29.2"/>
+  </g>
+  <circle cx="27.5" cy="27.5" r="6.3" fill="black"/>
+  <path d="M24.6 27.6 L26.8 29.9 L30.5 25.4" fill="none" stroke="white"
+        stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -124,7 +124,12 @@ class TrayService with TrayListener {
     final iconPath = _iconFor(next);
     if (_iconSupported) {
       await _invokeTrayMethod(
-        action: () => _trayManager.setIcon(iconPath),
+        // A template image is black plus alpha, and macOS tints it to match
+        // the menu bar: light in dark mode, dark in light mode, inverted while
+        // the item is highlighted. That is why the rest of the bar is
+        // monochrome, so the state has to read from the badge shape instead of
+        // colour. Only macOS has the concept; the flag is ignored elsewhere.
+        action: () => _trayManager.setIcon(iconPath, isTemplate: true),
         onUnsupported: () => _iconSupported = false,
         methodName: 'setIcon',
       );
@@ -197,6 +202,13 @@ class TrayService with TrayListener {
   String _assetPath(String base) {
     if (Platform.isWindows) {
       return '$base.ico';
+    }
+    if (Platform.isMacOS) {
+      // The plugin reads the asset with rootBundle.load, which takes an exact
+      // key and so never resolves a resolution variant, then pins the image to
+      // 18pt. Ask for the 2x file directly: on Retina it fills those points
+      // properly, and on a 1x display macOS scales it back down cleanly.
+      return '$base@2x.png';
     }
     return '$base.png';
   }
