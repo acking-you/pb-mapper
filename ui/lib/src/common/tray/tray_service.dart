@@ -203,17 +203,35 @@ class TrayService with TrayListener {
 
   @override
   void onTrayIconMouseDown() {
+    // On macOS the menu bar convention is that a left click opens the menu,
+    // and it is also the only click the plugin reports reliably there: the
+    // status item's right-click arrives through an NSView subview that does
+    // not always receive the event. Elsewhere a left click raises the window
+    // and the menu stays on the right button.
+    if (Platform.isMacOS) {
+      _popUpContextMenu();
+      return;
+    }
     _showApp?.call();
   }
 
   @override
   void onTrayIconRightMouseDown() {
+    _popUpContextMenu();
+  }
+
+  void _popUpContextMenu() {
     if (!_contextMenuSupported) {
       return;
     }
     unawaited(
       _invokeTrayMethod(
-        action: () => _trayManager.popUpContextMenu(),
+        // Win32 requires the menu's owner to be the foreground window before
+        // TrackPopupMenu, or the menu stays on screen when the user clicks
+        // away. bringAppToFront is the plugin's only route to
+        // SetForegroundWindow; it is deprecated upstream but still the fix.
+        // ignore: deprecated_member_use
+        action: () => _trayManager.popUpContextMenu(bringAppToFront: true),
         onUnsupported: () => _contextMenuSupported = false,
         methodName: 'popUpContextMenu',
       ),

@@ -28,10 +28,16 @@ FFI_TARGET_DIR="${ROOT_DIR}/ui/native/macos"
 mkdir -p "${FFI_TARGET_DIR}"
 cp "${STAGED_LIB}" "${FFI_TARGET_DIR}/${FFI_LIB_NAME}"
 
+# arm64 binaries must carry a signature to run at all, so the linker ad-hoc
+# signs them; x86_64 has no such rule and comes out unsigned. Xcode then fails
+# the app's CodeSign step on the unsigned nested dylib ("code object is not
+# signed at all"), so sign it here to make both architectures behave the same.
+codesign --force --sign - --timestamp=none "${FFI_TARGET_DIR}/${FFI_LIB_NAME}"
+
 for app in "${ROOT_DIR}/ui/build/macos/Build/Products"/*/*.app; do
   if [ -d "${app}" ]; then
     mkdir -p "${app}/Contents/Frameworks"
-    cp "${STAGED_LIB}" "${app}/Contents/Frameworks/${FFI_LIB_NAME}"
+    cp "${FFI_TARGET_DIR}/${FFI_LIB_NAME}" "${app}/Contents/Frameworks/${FFI_LIB_NAME}"
   fi
 done
 
