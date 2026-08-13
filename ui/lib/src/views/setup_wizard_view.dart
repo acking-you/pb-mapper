@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
@@ -38,7 +40,34 @@ class SetupWizardView extends StatefulWidget {
   State<SetupWizardView> createState() => _SetupWizardViewState();
 }
 
-enum _Step { server, role, details, done }
+enum _Step {
+  server,
+  role,
+  details,
+
+  /// Polling until the thing we just created is actually up.
+  verify,
+
+  /// The hub: what is working, and the choice to add more or stop.
+  hub,
+}
+
+/// What a tunnel we just created is doing.
+enum _Health { waiting, running, retrying, failed, stopped }
+
+/// One thing the wizard set up, and how it is doing.
+class _Outcome {
+  _Outcome({
+    required this.serviceKey,
+    required this.isRegister,
+    required this.health,
+  });
+
+  final String serviceKey;
+  final bool isRegister;
+  _Health health;
+  String message = '';
+}
 
 class _SetupWizardViewState extends State<SetupWizardView> {
   final PbMapperApi _api = PbMapperApi();
@@ -55,6 +84,12 @@ class _SetupWizardViewState extends State<SetupWizardView> {
   String? _error;
   String? _serverNote;
   bool? _serverReachable;
+
+  /// Everything set up in this session, newest last.
+  final List<_Outcome> _outcomes = [];
+
+  /// The one being watched on the verify step.
+  _Outcome? _current;
 
   int get _totalSteps => widget.mode == WizardMode.serverOnly ? 1 : 3;
 
@@ -148,7 +183,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
           ? l10n.setupServerOk
           : l10n.setupServerFailed;
       // Changing the server address is the whole task in serverOnly mode.
-      _step = widget.mode == WizardMode.serverOnly ? _Step.done : _Step.role;
+      _step = widget.mode == WizardMode.serverOnly ? _Step.hub : _Step.role;
     });
   }
 
@@ -194,10 +229,85 @@ class _SetupWizardViewState extends State<SetupWizardView> {
       });
       return;
     }
+
+    // Submitting is not the same as working. Watch the real status so the
+    // wizard only claims success once the tunnel is actually up.
+    final outcome = _Outcome(
+      serviceKey: serviceKey,
+      isRegister: _isRegisterRole,
+      health: _Health.waiting,
+    );
     setState(() {
       _busy = false;
-      _step = _Step.done;
+      _outcomes.add(outcome);
+      _current = outcome;
+      _step = _Step.verify;
     });
+    unawaited(_watch(outcome));
+  }
+
+  /// Polls until the tunnel reports a settled state, then stops.
+  ///
+  /// Retrying is settled too: a server that is not up yet will never turn
+  /// running, and making someone watch a spinner for that is worse than saying
+  /// so plainly.
+  Future<void> _watch(_Outcome outcome) async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+      if (!mounted) return;
+
+      final health = await _healthOf(outcome);
+      if (!mounted) return;
+      setState(() {
+        outcome.health = health.$1;
+        outcome.message = health.$2;
+      });
+      if (health.$1 == _Health.running ||
+          health.$1 == _Health.failed ||
+          health.$1 == _Health.retrying) {
+        return;
+      }
+    }
+  }
+
+  Future<(_Health, String)> _healthOf(_Outcome outcome) async {
+    try {
+      if (outcome.isRegister) {
+        final services = await _api.getServiceConfigs();
+        final match = services
+            .where((s) => s.serviceKey == outcome.serviceKey)
+            .firstOrNull;
+        if (match == null) return (_Health.waiting, '');
+        return (_healthFrom(match.status), match.statusMessage);
+      }
+      final clients = await _api.getClientConfigs();
+      final match = clients
+          .where((c) => c.serviceKey == outcome.serviceKey)
+          .firstOrNull;
+      if (match == null) return (_Health.waiting, '');
+      return (_healthFrom(match.status), match.statusMessage);
+    } catch (_) {
+      return (_Health.waiting, '');
+    }
+  }
+
+  static _Health _healthFrom(String status) => switch (status.toLowerCase()) {
+    'running' => _Health.running,
+    'retrying' => _Health.retrying,
+    'failed' => _Health.failed,
+    _ => _Health.stopped,
+  };
+
+  /// Back to the role question, keeping the server and everything already set
+  /// up, so adding a second tunnel does not mean starting over.
+  void _addAnother({required bool register}) {
+    setState(() {
+      _error = null;
+      _serviceKeyController.clear();
+      _current = null;
+    });
+    // The hub already asked which role, so go straight to its details.
+    _pickRole(register: register);
   }
 
   static bool _looksLikeHostPort(String value) {
@@ -241,12 +351,24 @@ class _SetupWizardViewState extends State<SetupWizardView> {
               onFinishDetails: _finishDetails,
               onBack: () => setState(() {
                 _error = null;
+                // Going back from a failed attempt drops it, so the hub does
+                // not list a tunnel the user chose to abandon and redo.
+                if (_step == _Step.verify && _current != null) {
+                  _outcomes.remove(_current);
+                  _current = null;
+                }
                 _step = switch (_step) {
                   _Step.details => _Step.role,
                   _Step.role => _Step.server,
+                  // Retrying a failed tunnel means editing what was entered.
+                  _Step.verify => _Step.details,
                   _ => _Step.server,
                 };
               }),
+              outcomes: _outcomes,
+              current: _current,
+              onAddAnother: _addAnother,
+              onContinue: () => setState(() => _step = _Step.hub),
               onSkip: widget.onSkip,
               onDone: () => widget.onFinished(
                 _isRegisterRole ? AppSection.register : AppSection.connect,
@@ -281,6 +403,10 @@ class _StepCard extends StatelessWidget {
     required this.onBack,
     required this.onSkip,
     required this.onDone,
+    required this.onAddAnother,
+    required this.onContinue,
+    required this.outcomes,
+    required this.current,
   });
 
   final WizardMode mode;
@@ -303,13 +429,22 @@ class _StepCard extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback onSkip;
   final VoidCallback onDone;
+  final void Function({required bool register}) onAddAnother;
+  final VoidCallback onContinue;
+  final List<_Outcome> outcomes;
+  final _Outcome? current;
 
   int get _stepNumber => switch (step) {
     _Step.server => 1,
     _Step.role => 2,
     _Step.details => 3,
-    _Step.done => 3,
+    _Step.verify => 3,
+    _Step.hub => 3,
   };
+
+  /// The counter is for the questions. Verifying and the hub are not questions,
+  /// so they do not carry one.
+  bool get _showsCounter => step != _Step.verify && step != _Step.hub;
 
   @override
   Widget build(BuildContext context) {
@@ -326,7 +461,7 @@ class _StepCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (step != _Step.done)
+          if (_showsCounter)
             Text(
               l10n.setupStepOf(_stepNumber, totalSteps),
               style: theme.textTheme.labelSmall?.copyWith(
@@ -342,7 +477,8 @@ class _StepCard extends StatelessWidget {
               _Step.details => isRegisterRole
                   ? l10n.setupDetailsTitleRegister
                   : l10n.setupDetailsTitleConnect,
-              _Step.done => l10n.setupDoneTitle,
+              _Step.verify => l10n.setupVerifyTitle,
+              _Step.hub => l10n.setupDoneTitle,
             },
             style: theme.textTheme.titleLarge?.copyWith(
               fontWeight: FontWeight.w700,
@@ -479,25 +615,56 @@ class _StepCard extends StatelessWidget {
           ),
         ];
 
-      case _Step.done:
+      case _Step.verify:
+        final outcome = current;
+        if (outcome == null) return const [];
+        return [_HealthRow(outcome: outcome)];
+
+      case _Step.hub:
         return [
-          Row(
-            children: [
-              Icon(Icons.check_circle, size: 18, color: scheme.primary),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  switch (mode) {
-                    WizardMode.serverOnly => l10n.setupDoneBodyServer,
-                    WizardMode.firstRun => isRegisterRole
-                        ? l10n.setupDoneBodyRegister
-                        : l10n.setupDoneBodyConnect,
-                  },
-                  style: theme.textTheme.bodyMedium,
+          if (mode == WizardMode.serverOnly)
+            Row(
+              children: [
+                Icon(Icons.check_circle, size: 18, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    l10n.setupDoneBodyServer,
+                    style: theme.textTheme.bodyMedium,
+                  ),
                 ),
+              ],
+            )
+          else ...[
+            Text(
+              outcomes.isEmpty ? l10n.setupNothingYet : l10n.setupWorking,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
               ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 10),
+            for (final outcome in outcomes)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _HealthRow(outcome: outcome),
+              ),
+            const SizedBox(height: 6),
+            // The choice the user came back for: set up the other end too, or
+            // another tunnel entirely.
+            _RoleChoice(
+              icon: Icons.upload_rounded,
+              title: l10n.setupAddRegister,
+              summary: l10n.roleRegisterSummary,
+              onPressed: () => onAddAnother(register: true),
+            ),
+            const SizedBox(height: 8),
+            _RoleChoice(
+              icon: Icons.download_rounded,
+              title: l10n.setupAddConnect,
+              summary: l10n.roleConnectSummary,
+              onPressed: () => onAddAnother(register: false),
+            ),
+          ],
         ];
     }
   }
@@ -505,10 +672,34 @@ class _StepCard extends StatelessWidget {
   Widget _actions(BuildContext context) {
     final l10n = context.l10n;
 
-    if (step == _Step.done) {
+    if (step == _Step.hub) {
       return Align(
         alignment: Alignment.centerRight,
-        child: FilledButton(onPressed: onDone, child: Text(l10n.setupFinish)),
+        child: FilledButton(onPressed: onDone, child: Text(l10n.setupDoneAll)),
+      );
+    }
+
+    if (step == _Step.verify) {
+      final settled = current?.health != _Health.waiting;
+      return Row(
+        children: [
+          if (current?.health == _Health.failed)
+            TextButton(onPressed: onBack, child: Text(l10n.setupRetry)),
+          const Spacer(),
+          // Only offer the way forward once the status has settled, so nobody
+          // walks away from a tunnel that turned out to be broken.
+          if (!settled)
+            const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            FilledButton(
+              onPressed: onContinue,
+              child: Text(l10n.setupNext),
+            ),
+        ],
       );
     }
 
@@ -533,6 +724,66 @@ class _StepCard extends StatelessWidget {
               step == _Step.details ? l10n.setupFinish : l10n.setupNext,
             ),
           ),
+      ],
+    );
+  }
+}
+
+/// One tunnel and what it is doing, in the wizard's own words.
+class _HealthRow extends StatelessWidget {
+  const _HealthRow({required this.outcome});
+
+  final _Outcome outcome;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final l10n = context.l10n;
+
+    final (icon, color, text) = switch (outcome.health) {
+      _Health.running => (
+        Icons.check_circle,
+        scheme.primary,
+        l10n.setupVerifyRunning(outcome.serviceKey),
+      ),
+      _Health.retrying => (
+        Icons.autorenew,
+        scheme.onSurfaceVariant,
+        l10n.setupVerifyRetrying(outcome.serviceKey),
+      ),
+      _Health.failed => (
+        Icons.error_outline,
+        scheme.error,
+        l10n.setupVerifyFailed(outcome.serviceKey, outcome.message),
+      ),
+      _Health.stopped => (
+        Icons.pause_circle_outline,
+        scheme.onSurfaceVariant,
+        l10n.setupVerifyStopped(outcome.serviceKey),
+      ),
+      _Health.waiting => (
+        Icons.more_horiz,
+        scheme.onSurfaceVariant,
+        l10n.setupVerifyWaiting,
+      ),
+    };
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: outcome.health == _Health.failed
+                  ? scheme.error
+                  : scheme.onSurface,
+            ),
+          ),
+        ),
       ],
     );
   }
