@@ -91,7 +91,9 @@ class _SetupWizardViewState extends State<SetupWizardView> {
   /// The one being watched on the verify step.
   _Outcome? _current;
 
-  int get _totalSteps => widget.mode == WizardMode.serverOnly ? 1 : 3;
+  /// Both modes can end up asking all three questions, since the hub lets a
+  /// server-only visit carry on into setting up a service.
+  int get _totalSteps => 3;
 
   @override
   void initState() {
@@ -622,7 +624,9 @@ class _StepCard extends StatelessWidget {
 
       case _Step.hub:
         return [
-          if (mode == WizardMode.serverOnly)
+          // Saving the server is worth confirming, but it is not the end of the
+          // job: the hub still offers to set up a service either way.
+          if (mode == WizardMode.serverOnly && outcomes.isEmpty) ...[
             Row(
               children: [
                 Icon(Icons.check_circle, size: 18, color: scheme.primary),
@@ -634,8 +638,9 @@ class _StepCard extends StatelessWidget {
                   ),
                 ),
               ],
-            )
-          else ...[
+            ),
+            const SizedBox(height: 14),
+          ] else ...[
             Text(
               outcomes.isEmpty ? l10n.setupNothingYet : l10n.setupWorking,
               style: theme.textTheme.bodySmall?.copyWith(
@@ -649,22 +654,22 @@ class _StepCard extends StatelessWidget {
                 child: _HealthRow(outcome: outcome),
               ),
             const SizedBox(height: 6),
-            // The choice the user came back for: set up the other end too, or
-            // another tunnel entirely.
-            _RoleChoice(
-              icon: Icons.upload_rounded,
-              title: l10n.setupAddRegister,
-              summary: l10n.roleRegisterSummary,
-              onPressed: () => onAddAnother(register: true),
-            ),
-            const SizedBox(height: 8),
-            _RoleChoice(
-              icon: Icons.download_rounded,
-              title: l10n.setupAddConnect,
-              summary: l10n.roleConnectSummary,
-              onPressed: () => onAddAnother(register: false),
-            ),
           ],
+          // The choice the user came back for: set up the other end too, or
+          // another tunnel entirely.
+          _RoleChoice(
+            icon: Icons.upload_rounded,
+            title: l10n.setupAddRegister,
+            summary: l10n.roleRegisterSummary,
+            onPressed: () => onAddAnother(register: true),
+          ),
+          const SizedBox(height: 8),
+          _RoleChoice(
+            icon: Icons.download_rounded,
+            title: l10n.setupAddConnect,
+            summary: l10n.roleConnectSummary,
+            onPressed: () => onAddAnother(register: false),
+          ),
         ];
     }
   }

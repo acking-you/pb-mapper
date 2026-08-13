@@ -286,7 +286,7 @@ void main() {
     expect(find.text('The key must be exactly 32 characters'), findsOneWidget);
   });
 
-  testWidgets('server-only mode is a single step', (tester) async {
+  testWidgets('server-only mode starts at the server question', (tester) async {
     await tester.pumpWidget(
       _wrap(
         SetupWizardView(
@@ -297,9 +297,9 @@ void main() {
       ),
     );
 
-    // Changing the server is one question, so the counter must not promise
-    // three, and there is no role to pick afterwards.
-    expect(find.text('Step 1 of 1'), findsOneWidget);
+    // It opens on the server question. The counter says 3, because the hub
+    // afterwards lets this visit carry on into setting up a service.
+    expect(find.text('Step 1 of 3'), findsOneWidget);
     expect(find.text('Where is your pb-mapper server?'), findsOneWidget);
   });
 
