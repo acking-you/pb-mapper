@@ -1,0 +1,97 @@
+{
+  "@@locale": "zh",
+
+  "appTitle": "pb-mapper",
+  "navRegister": "注册服务",
+  "navConnect": "连接服务",
+  "navStatus": "状态",
+  "navConfig": "设置",
+  "navLogs": "日志",
+  "pageRegister": "注册本机服务",
+  "pageConnect": "连接远程服务",
+  "pageStatus": "状态监控",
+  "pageConfig": "设置",
+  "pageLogs": "运行日志",
+
+  "toggleTheme": "切换主题",
+  "toggleLanguage": "切换语言",
+  "home": "首页",
+
+  "quickStart": "快速开始",
+  "quickStartStep1": "先填好 pb-mapper 服务器地址",
+  "quickStartStep1Action": "去设置",
+  "quickStartStep2": "选择这台机器的角色",
+  "roleRegisterSummary": "本机有服务要共享出去",
+  "roleRegisterDetail": "把本机的 TCP 或 UDP 端口以一个 key 发布出去，别人经服务器就能访问。",
+  "roleConnectSummary": "本机想访问别人共享的服务",
+  "roleConnectDetail": "订阅一个 key，在本地开一个端口，就像那个远程服务跑在本机一样。",
+  "starOnGitHub": "去 GitHub 点个 Star",
+  "starPitch": "pb-mapper 是开源项目，一个 Star 能帮更多人发现它。",
+  "viewRepository": "仓库",
+
+  "save": "保存",
+  "cancel": "取消",
+  "delete": "删除",
+  "close": "关闭",
+  "copy": "复制",
+  "refresh": "刷新",
+  "start": "启动",
+  "stop": "停止",
+  "edit": "编辑",
+  "protocol": "协议",
+  "serviceKey": "服务 Key",
+  "localAddress": "本地地址",
+  "serverAddress": "服务器地址",
+  "enableEncryption": "启用加密",
+  "enableKeepAlive": "启用 TCP Keep-Alive",
+  "configureInSettings": "去设置里配置",
+
+  "trayStatusOffline": "离线 · pb-mapper",
+  "trayStatusConnections": "已连接 · {count} 个连接",
+  "@trayStatusConnections": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "trayStatusServices": "已连接 · {count} 个服务",
+  "@trayStatusServices": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "trayStatusOnlineIdle": "在线 · 暂无服务",
+  "trayOpen": "打开 pb-mapper",
+  "trayRefresh": "刷新状态",
+  "trayQuit": "退出",
+
+  "registerTitle": "注册本机服务",
+  "registerAction": "注册服务",
+  "registeredServices": "已注册服务（{count}）",
+  "@registeredServices": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "deleteService": "删除服务",
+  "serviceKeyRequired": "请填写服务 Key",
+  "localAddressHint": "127.0.0.1:8080",
+
+  "connectTitle": "连接远程服务",
+  "connectAction": "连接",
+  "activeConnections": "当前连接",
+  "selectService": "选择一个服务",
+  "enterServiceKey": "输入服务 Key",
+  "serviceKeyNeeded": "请选择或输入服务 Key",
+  "refreshServiceList": "刷新服务列表",
+  "refreshAllStatus": "刷新全部状态",
+  "deleteClientConfig": "删除客户端配置",
+  "clientLocalAddressHint": "127.0.0.1:9090",
+
+  "msgHeaderKeyHint": "32 字节密钥，留空则使用默认值",
+  "exportConfig": "导出（Base64）",
+  "importConfig": "导入（Base64）",
+  "checkServer": "检测服务器连通性",
+  "serverReachable": "服务器可访问",
+  "serverUnreachable": "服务器暂时无法访问",
+
+  "logLevel": "日志级别",
+  "logKeyword": "关键词",
+  "logAll": "全部",
+  "clearLogs": "清空日志",
+  "copyVisibleLogs": "复制当前日志",
+  "scrollToBottom": "滚到底部"
+}

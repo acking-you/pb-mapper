@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/widgets/app_window_title_bar.dart';
 
@@ -28,13 +29,16 @@ class DesktopLayout extends StatefulWidget {
 }
 
 class _DesktopLayoutState extends State<DesktopLayout> {
-  static const _destinations = [
-    (Icons.app_registration_outlined, Icons.app_registration, 'Register'),
-    (Icons.cable_outlined, Icons.cable, 'Connect'),
-    (Icons.monitor_outlined, Icons.monitor, 'Status'),
-    (Icons.settings_outlined, Icons.settings, 'Config'),
-    (Icons.terminal_outlined, Icons.terminal, 'Logs'),
-  ];
+  List<(IconData, IconData, String)> _destinations(BuildContext context) {
+    final l10n = context.l10n;
+    return [
+      (Icons.app_registration_outlined, Icons.app_registration, l10n.navRegister),
+      (Icons.cable_outlined, Icons.cable, l10n.navConnect),
+      (Icons.monitor_outlined, Icons.monitor, l10n.navStatus),
+      (Icons.settings_outlined, Icons.settings, l10n.navConfig),
+      (Icons.terminal_outlined, Icons.terminal, l10n.navLogs),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +68,7 @@ class _DesktopLayoutState extends State<DesktopLayout> {
                   child: _Sidebar(
                     expanded: expanded,
                     selectedIndex: widget.selectedIndex,
-                    destinations: _destinations,
+                    destinations: _destinations(context),
                     onNavigationChanged: widget.onNavigationChanged,
                   ),
                 ),
@@ -114,9 +118,6 @@ class _Sidebar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -138,17 +139,6 @@ class _Sidebar extends StatelessWidget {
               expanded: expanded,
               selected: selectedIndex == i + 1,
               onPressed: () => onNavigationChanged(i + 1),
-            ),
-          ),
-        const Spacer(),
-        if (expanded)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 12, 14),
-            child: Text(
-              'pb-mapper',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant.withValues(alpha: 0.6),
-              ),
             ),
           ),
       ],

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -190,7 +191,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
               onPressed: () {
                 Navigator.of(dialogContext).pop();
               },
-              child: const Text('Close'),
+              child: Text(context.l10n.close),
             ),
             FilledButton.icon(
               onPressed: () async {
@@ -204,7 +205,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                 );
               },
               icon: const Icon(Icons.copy),
-              label: const Text('Copy'),
+              label: Text(context.l10n.copy),
             ),
           ],
         );
@@ -243,7 +244,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
               onPressed: () {
                 Navigator.of(dialogContext).pop();
               },
-              child: const Text('Cancel'),
+              child: Text(context.l10n.cancel),
             ),
             FilledButton.icon(
               onPressed: () {
@@ -424,7 +425,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                     child: OutlinedButton.icon(
                       onPressed: _isSaving ? null : _exportConfiguration,
                       icon: const Icon(Icons.upload_file),
-                      label: const Text('Export (Base64)'),
+                      label: Text(context.l10n.exportConfig),
                     ),
                   ),
                 ),
@@ -435,7 +436,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                     child: OutlinedButton.icon(
                       onPressed: _isSaving ? null : _importConfiguration,
                       icon: const Icon(Icons.download_for_offline),
-                      label: const Text('Import (Base64)'),
+                      label: Text(context.l10n.importConfig),
                     ),
                   ),
                 ),

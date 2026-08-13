@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 
@@ -159,7 +160,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                 ElevatedButton.icon(
                   onPressed: _loadStatus,
                   icon: const Icon(Icons.refresh, size: 18),
-                  label: const Text('Refresh'),
+                  label: Text(context.l10n.refresh),
                   style: ElevatedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 16,

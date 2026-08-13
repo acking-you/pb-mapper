@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/models/client_config.dart';
@@ -283,14 +284,14 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete Client Configuration'),
+        title: Text(context.l10n.deleteClientConfig),
         content: Text(
           'Are you sure you want to delete the client configuration for "${config.serviceKey}"?\n\nThis will permanently remove the configuration.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
+            child: Text(context.l10n.cancel),
           ),
           TextButton(
             onPressed: () {
@@ -308,7 +309,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
               });
             },
             style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
+            child: Text(context.l10n.delete),
           ),
         ],
       ),
@@ -364,8 +365,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                       onChanged: (value) {
                         setState(() => _selectedProtocol = value!);
                       },
-                      decoration: const InputDecoration(
-                        labelText: 'Protocol',
+                      decoration: InputDecoration(
+                        labelText: context.l10n.protocol,
                         border: OutlineInputBorder(),
                       ),
                     ),
@@ -392,8 +393,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                       _serviceKeyInputController.text = value ?? '';
                                     });
                                   },
-                                  decoration: const InputDecoration(
-                                    labelText: 'Service Key',
+                                  decoration: InputDecoration(
+                                    labelText: context.l10n.serviceKey,
                                     hintText: 'Select a service',
                                     border: OutlineInputBorder(),
                                     prefixIcon: Icon(Icons.vpn_key),
@@ -404,8 +405,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                   onChanged: (value) {
                                     setState(() => _selectedServiceKey = value.trim().isEmpty ? null : value.trim());
                                   },
-                                  decoration: const InputDecoration(
-                                    labelText: 'Service Key',
+                                  decoration: InputDecoration(
+                                    labelText: context.l10n.serviceKey,
                                     hintText: 'Enter service key',
                                     border: OutlineInputBorder(),
                                     prefixIcon: Icon(Icons.vpn_key),
@@ -423,15 +424,15 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                     const SizedBox(height: 16),
                     TextField(
                       controller: _localAddressController,
-                      decoration: const InputDecoration(
-                        labelText: 'Local Address',
+                      decoration: InputDecoration(
+                        labelText: context.l10n.localAddress,
                         hintText: '127.0.0.1:9090',
                         border: OutlineInputBorder(),
                       ),
                     ),
                     const SizedBox(height: 16),
                     SwitchListTile(
-                      title: const Text('Enable TCP Keep-Alive'),
+                      title: Text(context.l10n.enableKeepAlive),
                       value: _isKeepAliveEnabled,
                       onChanged: (value) {
                         setState(() => _isKeepAliveEnabled = value);

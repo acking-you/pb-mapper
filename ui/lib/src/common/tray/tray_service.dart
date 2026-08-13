@@ -24,18 +24,41 @@ class TrayStatus {
 
   int get connectionCount => activeConnections + connectedClients;
 
-  String get displayText {
+  String displayText(TrayStrings strings) {
     if (!serverAvailable) {
-      return 'Offline · pb-mapper';
+      return strings.offline;
     }
     if (activeConnections > 0 || connectedClients > 0) {
-      return 'Connected · $connectionCount connections';
+      return strings.connections(connectionCount);
     }
     if (registeredServices > 0) {
-      return 'Connected · $registeredServices services';
+      return strings.services(registeredServices);
     }
-    return 'Online · No services';
+    return strings.onlineIdle;
   }
+}
+
+/// The tray lives outside the widget tree, so it cannot read localizations from
+/// a BuildContext. The app hands it the current strings instead, and hands them
+/// again whenever the language changes.
+class TrayStrings {
+  const TrayStrings({
+    required this.offline,
+    required this.connections,
+    required this.services,
+    required this.onlineIdle,
+    required this.open,
+    required this.refresh,
+    required this.quit,
+  });
+
+  final String offline;
+  final String Function(int) connections;
+  final String Function(int) services;
+  final String onlineIdle;
+  final String open;
+  final String refresh;
+  final String quit;
 }
 
 class TrayService with TrayListener {
@@ -59,15 +82,27 @@ class TrayService with TrayListener {
   bool _iconSupported = true;
   bool _toolTipSupported = true;
   bool _contextMenuSupported = true;
+  TrayStrings? _strings;
+
+  /// Replaces the strings and redraws, so a language switch reaches the tray
+  /// without waiting for the next status poll.
+  Future<void> updateStrings(TrayStrings strings) async {
+    _strings = strings;
+    if (_initialized) {
+      await _applyStatus(_status);
+    }
+  }
 
   Future<void> initialize({
     required Future<TrayStatus> Function() statusProvider,
     required VoidCallback showApp,
     required VoidCallback quitApp,
+    required TrayStrings strings,
   }) async {
     if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) {
       return;
     }
+    _strings = strings;
     if (_initialized) {
       _statusProvider = statusProvider;
       _showApp = showApp;
@@ -121,6 +156,11 @@ class TrayService with TrayListener {
 
   Future<void> _applyStatus(TrayStatus next) async {
     _status = next;
+    final strings = _strings;
+    if (strings == null) {
+      return;
+    }
+    final statusText = next.displayText(strings);
     final iconPath = _iconFor(next);
     if (_iconSupported) {
       await _invokeTrayMethod(
@@ -136,7 +176,7 @@ class TrayService with TrayListener {
     }
     if (_toolTipSupported) {
       await _invokeTrayMethod(
-        action: () => _trayManager.setToolTip(next.displayText),
+        action: () => _trayManager.setToolTip(statusText),
         onUnsupported: () => _toolTipSupported = false,
         methodName: 'setToolTip',
       );
@@ -146,12 +186,12 @@ class TrayService with TrayListener {
         action: () => _trayManager.setContextMenu(
           Menu(
             items: [
-              MenuItem(key: 'status', label: next.displayText, disabled: true),
+              MenuItem(key: 'status', label: statusText, disabled: true),
               MenuItem.separator(),
-              MenuItem(key: 'open', label: 'Open pb-mapper'),
-              MenuItem(key: 'refresh', label: 'Refresh status'),
+              MenuItem(key: 'open', label: strings.open),
+              MenuItem(key: 'refresh', label: strings.refresh),
               MenuItem.separator(),
-              MenuItem(key: 'quit', label: 'Quit'),
+              MenuItem(key: 'quit', label: strings.quit),
             ],
           ),
         ),

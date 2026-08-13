@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
@@ -428,19 +429,19 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete Service'),
+        title: Text(context.l10n.deleteService),
         content: Text(
           'Are you sure you want to delete "${config.serviceKey}"?',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
+            child: Text(context.l10n.cancel),
           ),
           ElevatedButton(
             onPressed: () => Navigator.of(context).pop(true),
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('Delete'),
+            child: Text(context.l10n.delete),
           ),
         ],
       ),
@@ -557,16 +558,16 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                       onChanged: (value) {
                         setState(() => _selectedProtocol = value!);
                       },
-                      decoration: const InputDecoration(
-                        labelText: 'Protocol',
+                      decoration: InputDecoration(
+                        labelText: context.l10n.protocol,
                         border: OutlineInputBorder(),
                       ),
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: _serviceKeyController,
-                      decoration: const InputDecoration(
-                        labelText: 'Service Key',
+                      decoration: InputDecoration(
+                        labelText: context.l10n.serviceKey,
                         hintText: 'unique-service-key',
                         border: OutlineInputBorder(),
                         prefixIcon: Icon(Icons.vpn_key),
@@ -575,22 +576,22 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                     const SizedBox(height: 16),
                     TextField(
                       controller: _localAddressController,
-                      decoration: const InputDecoration(
-                        labelText: 'Local Address',
+                      decoration: InputDecoration(
+                        labelText: context.l10n.localAddress,
                         hintText: '127.0.0.1:8080',
                         border: OutlineInputBorder(),
                       ),
                     ),
                     const SizedBox(height: 16),
                     SwitchListTile(
-                      title: const Text('Enable Encryption'),
+                      title: Text(context.l10n.enableEncryption),
                       value: _isEncryptionEnabled,
                       onChanged: (value) {
                         setState(() => _isEncryptionEnabled = value);
                       },
                     ),
                     SwitchListTile(
-                      title: const Text('Enable TCP Keep-Alive'),
+                      title: Text(context.l10n.enableKeepAlive),
                       value: _isKeepAliveEnabled,
                       onChanged: (value) {
                         setState(() => _isKeepAliveEnabled = value);

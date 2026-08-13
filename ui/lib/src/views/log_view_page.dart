@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -154,8 +155,7 @@ class _LogViewPageState extends State<LogViewPage> {
                 child: DropdownButtonFormField<String?>(
                   initialValue: _levelFilter,
                   isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Log Level',
+                  decoration: InputDecoration(                    labelText: context.l10n.logLevel,
                     border: OutlineInputBorder(),
                   ),
                   items: [
@@ -183,7 +183,7 @@ class _LogViewPageState extends State<LogViewPage> {
                     controller: _keywordController,
                     onChanged: _onKeywordChanged,
                     decoration: InputDecoration(
-                      labelText: 'Keyword',
+                      labelText: context.l10n.logKeyword,
                       hintText: 'error, timeout, service-key...',
                       prefixIcon: const Icon(Icons.search),
                       suffixIcon: _keywordFilter.isEmpty
@@ -209,7 +209,7 @@ class _LogViewPageState extends State<LogViewPage> {
               controller: _keywordController,
               onChanged: _onKeywordChanged,
               decoration: InputDecoration(
-                labelText: 'Keyword',
+                labelText: context.l10n.logKeyword,
                 hintText: 'error, timeout, service-key...',
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: _keywordFilter.isEmpty
@@ -341,12 +341,12 @@ class _LogViewPageState extends State<LogViewPage> {
           IconButton(
             onPressed: _copyCurrentLogs,
             icon: const Icon(Icons.copy),
-            tooltip: 'Copy visible logs',
+            tooltip: context.l10n.copyVisibleLogs,
           ),
           IconButton(
             onPressed: _clearLogs,
             icon: const Icon(Icons.clear_all),
-            tooltip: 'Clear logs',
+            tooltip: context.l10n.clearLogs,
           ),
           IconButton(
             onPressed: _toggleFollowTail,
@@ -358,7 +358,7 @@ class _LogViewPageState extends State<LogViewPage> {
           IconButton(
             onPressed: _scrollToBottom,
             icon: const Icon(Icons.arrow_downward),
-            tooltip: 'Scroll to bottom',
+            tooltip: context.l10n.scrollToBottom,
           ),
         ],
       ),
@@ -381,7 +381,7 @@ class _LogViewPageState extends State<LogViewPage> {
       return _buildContent(context);
     }
     return Scaffold(
-      appBar: AppBar(title: const Text('Runtime Logs')),
+      appBar: AppBar(title: Text(context.l10n.pageLogs)),
       body: _buildContent(context),
     );
   }

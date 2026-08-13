@@ -52,3 +52,7 @@ app.*.map.json
 /lib/src/bincode
 /lib/src/serde
 /lib/src/bindings
+
+# Generated from lib/l10n/*.arb by `flutter pub get` (generate: true)
+/lib/l10n/app_localizations*.dart
+/l10n_untranslated.json

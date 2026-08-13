@@ -15,6 +15,10 @@ import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/common/locale_controller.dart';
 import 'package:pb_mapper_ui/src/common/tray/tray_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
@@ -98,6 +102,9 @@ class _MyAppState extends State<MyApp> with WindowListener {
 
   static const String _lastPageKey = 'last_visited_page';
 
+  /// null follows the system language.
+  Locale? _locale;
+
   @override
   void initState() {
     super.initState();
@@ -121,6 +128,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
     );
 
     unawaited(_restoreLastPage());
+    unawaited(_restoreLocale());
     unawaited(_initTray());
     if (!kIsWeb &&
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
@@ -156,6 +164,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
         statusProvider: _fetchTrayStatus,
         showApp: _showFromTray,
         quitApp: _quitFromTray,
+        strings: _trayStrings(),
       );
     } catch (e) {
       debugPrint('Tray initialization failed: $e');
@@ -246,6 +255,41 @@ class _MyAppState extends State<MyApp> with WindowListener {
     }
   }
 
+  Future<void> _restoreLocale() async {
+    final locale = await LocaleController.load();
+    if (locale != null && mounted) {
+      setState(() => _locale = locale);
+    }
+    await TrayService.instance.updateStrings(_trayStrings());
+  }
+
+  /// The tray is not a widget, so its strings are looked up from the active
+  /// locale rather than a BuildContext.
+  TrayStrings _trayStrings() {
+    final active =
+        _locale ??
+        LocaleController.resolve(PlatformDispatcher.instance.locale);
+    final l10n = lookupAppLocalizations(active);
+    return TrayStrings(
+      offline: l10n.trayStatusOffline,
+      connections: l10n.trayStatusConnections,
+      services: l10n.trayStatusServices,
+      onlineIdle: l10n.trayStatusOnlineIdle,
+      open: l10n.trayOpen,
+      refresh: l10n.trayRefresh,
+      quit: l10n.trayQuit,
+    );
+  }
+
+  void toggleLanguage() {
+    final system = PlatformDispatcher.instance.locale;
+    final next = LocaleController.next(_locale, system);
+    setState(() => _locale = next);
+    unawaited(LocaleController.save(next));
+    // The tray is outside the widget tree, so it needs the new strings pushed.
+    unawaited(TrayService.instance.updateStrings(_trayStrings()));
+  }
+
   void toggleTheme() {
     final brightness = MediaQuery.platformBrightnessOf(context);
     setState(() {
@@ -261,7 +305,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
     });
   }
 
-  Widget _getCurrentPageContent() {
+  Widget _getCurrentPageContent(BuildContext context) {
     switch (_currentPage) {
       case 1:
         return const ServiceRegistrationView();
@@ -287,6 +331,14 @@ class _MyAppState extends State<MyApp> with WindowListener {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'pb-mapper UI',
+      locale: _locale,
+      supportedLocales: LocaleController.supported,
+      localizationsDelegates: const [
+        AppLocalizations.delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
@@ -305,22 +357,26 @@ class _MyAppState extends State<MyApp> with WindowListener {
         ),
       ),
       themeMode: _themeMode,
+      // Pass this context down: the State's own context sits above MaterialApp
+      // and so outside the Localizations scope it installs.
       home: Builder(
         builder: (context) => ResponsiveLayout.isMobile(context)
-            ? _buildMobileApp()
-            : _buildDesktopApp(),
+            ? _buildMobileApp(context)
+            : _buildDesktopApp(context),
       ),
     );
   }
 
-  Widget _buildMobileApp() {
+  Widget _buildMobileApp(BuildContext context) {
     if (_currentPage == 0) {
-      return _getCurrentPageContent();
+      return _getCurrentPageContent(context);
     }
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_getPageTitle() ?? 'pb-mapper UI'),
+        title: Text(
+          _getPageTitle(context) ?? context.l10n.appTitle,
+        ),
         leading: IconButton(
           icon: const Icon(Icons.home),
           onPressed: () => _navigateToPage(0),
@@ -334,60 +390,84 @@ class _MyAppState extends State<MyApp> with WindowListener {
           ),
         ],
       ),
-      body: _getCurrentPageContent(),
+      body: _getCurrentPageContent(context),
       bottomNavigationBar: BottomNavigationBar(
         type: BottomNavigationBarType.fixed,
         selectedItemColor: Theme.of(context).colorScheme.primary,
         unselectedItemColor: Colors.grey,
         currentIndex: _currentPage - 1,
         onTap: (index) => _navigateToPage(index + 1),
-        items: const [
+        items: [
           BottomNavigationBarItem(
-            icon: Icon(Icons.app_registration),
-            label: 'Register',
+            icon: const Icon(Icons.app_registration),
+            label: context.l10n.navRegister,
           ),
-          BottomNavigationBarItem(icon: Icon(Icons.cable), label: 'Connect'),
-          BottomNavigationBarItem(icon: Icon(Icons.monitor), label: 'Status'),
-          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Config'),
-          BottomNavigationBarItem(icon: Icon(Icons.terminal), label: 'Logs'),
+          BottomNavigationBarItem(
+            icon: const Icon(Icons.cable),
+            label: context.l10n.navConnect,
+          ),
+          BottomNavigationBarItem(
+            icon: const Icon(Icons.monitor),
+            label: context.l10n.navStatus,
+          ),
+          BottomNavigationBarItem(
+            icon: const Icon(Icons.settings),
+            label: context.l10n.navConfig,
+          ),
+          BottomNavigationBarItem(
+            icon: const Icon(Icons.terminal),
+            label: context.l10n.navLogs,
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildDesktopApp() {
+  Widget _buildDesktopApp(BuildContext context) {
+    final l10n = context.l10n;
     return DesktopLayout(
       selectedIndex: _currentPage,
       onNavigationChanged: _navigateToPage,
-      title: _getPageTitle() ?? 'pb-mapper',
+      title: _getPageTitle(context) ?? l10n.appTitle,
       titleBarActions: [
+        IconButton(
+          icon: Text(
+            LocaleController.labelFor(
+              _locale,
+              PlatformDispatcher.instance.locale,
+            ),
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+          ),
+          iconSize: 18,
+          tooltip: l10n.toggleLanguage,
+          onPressed: toggleLanguage,
+        ),
         IconButton(
           icon: Icon(
             _themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode,
           ),
           iconSize: 18,
-          tooltip: 'Toggle theme',
+          tooltip: l10n.toggleTheme,
           onPressed: toggleTheme,
         ),
       ],
-      child: ResponsiveScaffold(body: _getCurrentPageContent()),
+      child: ResponsiveScaffold(body: _getCurrentPageContent(context)),
     );
   }
 
-  String? _getPageTitle() {
+  String? _getPageTitle(BuildContext context) {
+    final l10n = context.l10n;
     switch (_currentPage) {
-      case 0:
-        return null;
       case 1:
-        return 'Service Registration';
+        return l10n.pageRegister;
       case 2:
-        return 'Client Connection';
+        return l10n.pageConnect;
       case 3:
-        return 'Status Monitoring';
+        return l10n.pageStatus;
       case 4:
-        return 'Configuration';
+        return l10n.pageConfig;
       case 5:
-        return 'Runtime Logs';
+        return l10n.pageLogs;
       default:
         return null;
     }

@@ -1,0 +1,97 @@
+{
+  "@@locale": "en",
+
+  "appTitle": "pb-mapper",
+  "navRegister": "Register",
+  "navConnect": "Connect",
+  "navStatus": "Status",
+  "navConfig": "Config",
+  "navLogs": "Logs",
+  "pageRegister": "Service Registration",
+  "pageConnect": "Client Connection",
+  "pageStatus": "Status Monitoring",
+  "pageConfig": "Configuration",
+  "pageLogs": "Runtime Logs",
+
+  "toggleTheme": "Toggle theme",
+  "toggleLanguage": "Switch language",
+  "home": "Home",
+
+  "quickStart": "Quick Start",
+  "quickStartStep1": "Point pb-mapper at your server",
+  "quickStartStep1Action": "Configure",
+  "quickStartStep2": "Pick the role that matches this machine",
+  "roleRegisterSummary": "This machine has a service to share",
+  "roleRegisterDetail": "Publish a local TCP or UDP port under a key, so others can reach it through the server.",
+  "roleConnectSummary": "This machine wants to reach a shared service",
+  "roleConnectDetail": "Subscribe to a key and expose it as a local port, as if the remote service were running here.",
+  "starOnGitHub": "Star on GitHub",
+  "starPitch": "pb-mapper is open source. A star helps others find it.",
+  "viewRepository": "Repository",
+
+  "save": "Save",
+  "cancel": "Cancel",
+  "delete": "Delete",
+  "close": "Close",
+  "copy": "Copy",
+  "refresh": "Refresh",
+  "start": "Start",
+  "stop": "Stop",
+  "edit": "Edit",
+  "protocol": "Protocol",
+  "serviceKey": "Service Key",
+  "localAddress": "Local Address",
+  "serverAddress": "Server Address",
+  "enableEncryption": "Enable Encryption",
+  "enableKeepAlive": "Enable TCP Keep-Alive",
+  "configureInSettings": "Configure in Settings",
+
+  "trayStatusOffline": "Offline · pb-mapper",
+  "trayStatusConnections": "Connected · {count} connections",
+  "@trayStatusConnections": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "trayStatusServices": "Connected · {count} services",
+  "@trayStatusServices": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "trayStatusOnlineIdle": "Online · No services",
+  "trayOpen": "Open pb-mapper",
+  "trayRefresh": "Refresh status",
+  "trayQuit": "Quit",
+
+  "registerTitle": "Register a Local Service",
+  "registerAction": "Register Service",
+  "registeredServices": "Registered Services ({count})",
+  "@registeredServices": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "deleteService": "Delete Service",
+  "serviceKeyRequired": "Service key is required",
+  "localAddressHint": "127.0.0.1:8080",
+
+  "connectTitle": "Connect to Service",
+  "connectAction": "Connect",
+  "activeConnections": "Active Connections",
+  "selectService": "Select a service",
+  "enterServiceKey": "Enter service key",
+  "serviceKeyNeeded": "Please select or enter a service key",
+  "refreshServiceList": "Refresh service list",
+  "refreshAllStatus": "Refresh All Status",
+  "deleteClientConfig": "Delete Client Configuration",
+  "clientLocalAddressHint": "127.0.0.1:9090",
+
+  "msgHeaderKeyHint": "32-byte key, leave empty for default",
+  "exportConfig": "Export (Base64)",
+  "importConfig": "Import (Base64)",
+  "checkServer": "Check Server Connectivity",
+  "serverReachable": "Server is reachable",
+  "serverUnreachable": "Server is not reachable yet",
+
+  "logLevel": "Log Level",
+  "logKeyword": "Keyword",
+  "logAll": "All",
+  "clearLogs": "Clear logs",
+  "copyVisibleLogs": "Copy visible logs",
+  "scrollToBottom": "Scroll to bottom"
+}

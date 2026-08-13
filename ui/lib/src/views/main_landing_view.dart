@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/common/theme_change_button.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+const String kRepositoryUrl = 'https://github.com/ACking-you/pb-mapper';
 
 /// The landing page: how to get started, then the two roles to pick from.
 ///
@@ -22,11 +25,10 @@ class MainLandingView extends StatelessWidget {
     required this.onToggleTheme,
   });
 
-  Future<void> _launchGitHub() async {
-    const url = 'https://github.com/ACking-you/pb-mapper';
-    final uri = Uri.parse(url);
+  static Future<void> _launchGitHub() async {
+    final uri = Uri.parse(kRepositoryUrl);
     if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
   }
 
@@ -41,7 +43,7 @@ class MainLandingView extends StatelessWidget {
       backgroundColor: isMobile ? null : Colors.transparent,
       appBar: isMobile
           ? AppBar(
-              title: const Text('pb-mapper'),
+              title: Text(context.l10n.appTitle),
               elevation: 0,
               actions: [getThemeChangeButton(onToggleTheme, context)],
             )
@@ -100,10 +102,50 @@ class MainLandingView extends StatelessWidget {
                     ],
                   ),
                 ),
+              const SizedBox(height: 24),
+              const _StarFooter(),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The one place the project asks for a star. It sits below the two roles, so
+/// it never stands between a user and the thing they came to do.
+class _StarFooter extends StatelessWidget {
+  const _StarFooter();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Column(
+      children: [
+        Divider(color: scheme.outlineVariant.withValues(alpha: 0.4)),
+        const SizedBox(height: 12),
+        Wrap(
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 12,
+          runSpacing: 8,
+          children: [
+            Text(
+              context.l10n.starPitch,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: MainLandingView._launchGitHub,
+              icon: const Icon(Icons.star_rounded, size: 18),
+              label: Text(context.l10n.starOnGitHub),
+            ),
+          ],
+        ),
+      ],
     );
   }
 }
@@ -128,7 +170,7 @@ class _QuickStart extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Quick Start',
+            context.l10n.quickStart,
             style: theme.textTheme.titleSmall?.copyWith(
               fontWeight: FontWeight.w700,
             ),
@@ -141,13 +183,13 @@ class _QuickStart extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Point pb-mapper at your server',
+                  context.l10n.quickStartStep1,
                   style: theme.textTheme.bodyMedium,
                 ),
               ),
               TextButton(
                 onPressed: onConfiguration,
-                child: const Text('Configure'),
+                child: Text(context.l10n.quickStartStep1Action),
               ),
             ],
           ),
@@ -158,7 +200,7 @@ class _QuickStart extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Pick the role that matches this machine',
+                  context.l10n.quickStartStep2,
                   style: theme.textTheme.bodyMedium,
                 ),
               ),
@@ -203,40 +245,38 @@ class _StepNumber extends StatelessWidget {
 class _RoleCard extends StatelessWidget {
   const _RoleCard({
     required this.icon,
-    required this.title,
-    required this.summary,
-    required this.detail,
+    required this.isRegister,
     required this.onPressed,
   });
 
   factory _RoleCard.register({required VoidCallback onPressed}) => _RoleCard(
     icon: Icons.upload_rounded,
-    title: 'Register',
-    summary: 'This machine has a service to share',
-    detail: 'Publish a local TCP or UDP port under a key, so others can '
-        'reach it through the server.',
+    isRegister: true,
     onPressed: onPressed,
   );
 
   factory _RoleCard.connect({required VoidCallback onPressed}) => _RoleCard(
     icon: Icons.download_rounded,
-    title: 'Connect',
-    summary: 'This machine wants to reach a shared service',
-    detail: 'Subscribe to a key and expose it as a local port, as if the '
-        'remote service were running here.',
+    isRegister: false,
     onPressed: onPressed,
   );
 
   final IconData icon;
-  final String title;
-  final String summary;
-  final String detail;
+  final bool isRegister;
   final VoidCallback onPressed;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final l10n = context.l10n;
+    final title = isRegister ? l10n.navRegister : l10n.navConnect;
+    final summary = isRegister
+        ? l10n.roleRegisterSummary
+        : l10n.roleConnectSummary;
+    final detail = isRegister
+        ? l10n.roleRegisterDetail
+        : l10n.roleConnectDetail;
 
     return Material(
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.32),

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
 
 class EditServiceDialog extends StatefulWidget {
@@ -48,16 +49,16 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
           children: [
             TextField(
               controller: _serviceKeyController,
-              decoration: const InputDecoration(
-                labelText: 'Service Key',
+              decoration: InputDecoration(
+                labelText: context.l10n.serviceKey,
                 border: OutlineInputBorder(),
               ),
             ),
             const SizedBox(height: 16),
             TextField(
               controller: _localAddressController,
-              decoration: const InputDecoration(
-                labelText: 'Local Address',
+              decoration: InputDecoration(
+                labelText: context.l10n.localAddress,
                 hintText: '127.0.0.1:8080',
                 border: OutlineInputBorder(),
               ),
@@ -76,14 +77,14 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
               onChanged: (value) {
                 setState(() => _selectedProtocol = value!);
               },
-              decoration: const InputDecoration(
-                labelText: 'Protocol',
+              decoration: InputDecoration(
+                labelText: context.l10n.protocol,
                 border: OutlineInputBorder(),
               ),
             ),
             const SizedBox(height: 16),
             SwitchListTile(
-              title: const Text('Enable Encryption'),
+              title: Text(context.l10n.enableEncryption),
               value: _enableEncryption,
               onChanged: (value) => setState(() => _enableEncryption = value),
             ),
@@ -98,7 +99,7 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: Text(context.l10n.cancel),
         ),
         ElevatedButton(onPressed: _saveChanges, child: const Text('Save')),
       ],
