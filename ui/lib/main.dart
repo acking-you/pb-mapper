@@ -103,6 +103,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
 
   AppSection _section = AppSection.home;
   OpsTab _opsTab = OpsTab.status;
+  WizardMode _wizardMode = WizardMode.firstRun;
 
   static const String _lastSectionKey = 'last_section';
 
@@ -233,6 +234,15 @@ class _MyAppState extends State<MyApp> with WindowListener {
     unawaited(_persistSection(section));
   }
 
+  /// Opens the guided server step. Used by "Configure" and by the pages that
+  /// notice the server is not set yet.
+  void _openServerSetup() {
+    setState(() {
+      _wizardMode = WizardMode.serverOnly;
+      _section = AppSection.setup;
+    });
+  }
+
   void _goToOpsTab(OpsTab tab) {
     setState(() {
       _section = AppSection.ops;
@@ -257,7 +267,12 @@ class _MyAppState extends State<MyApp> with WindowListener {
     // Nothing configured yet means nothing to restore: walk the user through
     // setup rather than showing a page of choices they cannot judge.
     if (await SetupState.needsSetup(_api)) {
-      if (mounted) setState(() => _section = AppSection.setup);
+      if (mounted) {
+        setState(() {
+          _wizardMode = WizardMode.firstRun;
+          _section = AppSection.setup;
+        });
+      }
       return;
     }
     try {
@@ -286,7 +301,9 @@ class _MyAppState extends State<MyApp> with WindowListener {
       case 3:
         _goToOpsTab(OpsTab.status);
       case 4:
-        _goToOpsTab(OpsTab.config);
+        // These links appear when a page notices the server is unset, which is
+        // a question the wizard answers better than a settings form.
+        _openServerSetup();
       case 5:
         _goToOpsTab(OpsTab.logs);
       default:
@@ -361,12 +378,19 @@ class _MyAppState extends State<MyApp> with WindowListener {
         }
       case AppSection.setup:
         return SetupWizardView(
-          onFinished: _goTo,
+          mode: _wizardMode,
+          // Changing the server only should land back where the user was, not
+          // in a workspace they did not ask for.
+          onFinished: _wizardMode == WizardMode.serverOnly
+              ? (_) => _goTo(AppSection.home)
+              : _goTo,
           onSkip: () => _goTo(AppSection.home),
         );
       case AppSection.home:
         return MainLandingView(
-          onConfiguration: () => _goToOpsTab(OpsTab.config),
+          // "Configure" is a question, not a place: walk the user through it
+          // rather than dropping them on a settings page to work out.
+          onConfiguration: _openServerSetup,
           onServiceRegistration: () => _goTo(AppSection.register),
           onClientConnection: () => _goTo(AppSection.connect),
           onOperations: () => _goToOpsTab(OpsTab.status),

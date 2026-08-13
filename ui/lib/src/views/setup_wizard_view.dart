@@ -2,23 +2,37 @@ import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
+import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 
-/// The first-run wizard: fills in what a new user needs, one question a screen.
+/// Why the wizard is open.
+enum WizardMode {
+  /// Nothing is configured: ask everything, and set up the first service.
+  firstRun,
+
+  /// Someone chose to change where the server is. That is the whole job, so it
+  /// stops after the server step instead of asking for another service.
+  serverOnly,
+}
+
+/// A guided form, one question per screen.
 ///
-/// It does not stop at the server address. Someone new does not yet know what a
-/// service key is for, so the wizard carries them through registering or
-/// connecting their first service and leaves them with something that works.
+/// On a first run it does not stop at the server address: someone new does not
+/// yet know what a service key is for, so it carries them through registering
+/// or connecting their first service and leaves them with something that works.
+/// Reopened to change the server, it asks only that.
 class SetupWizardView extends StatefulWidget {
   const SetupWizardView({
     super.key,
     required this.onFinished,
     required this.onSkip,
+    this.mode = WizardMode.firstRun,
   });
 
   /// Called with the zone to open once setup succeeds.
   final ValueChanged<AppSection> onFinished;
   final VoidCallback onSkip;
+  final WizardMode mode;
 
   @override
   State<SetupWizardView> createState() => _SetupWizardViewState();
@@ -42,7 +56,30 @@ class _SetupWizardViewState extends State<SetupWizardView> {
   String? _serverNote;
   bool? _serverReachable;
 
-  static const int _totalSteps = 3;
+  int get _totalSteps => widget.mode == WizardMode.serverOnly ? 1 : 3;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadExisting();
+  }
+
+  /// Prefill from the saved config. Reopening the wizard to change the server
+  /// must not present empty fields, or confirming would wipe a working setup.
+  Future<void> _loadExisting() async {
+    try {
+      final config = await _api.fetchConfig();
+      if (!mounted) return;
+      setState(() {
+        if (SetupState.isServerConfigured(config.serverAddress)) {
+          _serverController.text = config.serverAddress;
+        }
+        _keyController.text = config.msgHeaderKey;
+      });
+    } catch (_) {
+      // An empty form is the right fallback for a first run.
+    }
+  }
 
   @override
   void dispose() {
@@ -110,7 +147,8 @@ class _SetupWizardViewState extends State<SetupWizardView> {
       _serverNote = status.serverAvailable
           ? l10n.setupServerOk
           : l10n.setupServerFailed;
-      _step = _Step.role;
+      // Changing the server address is the whole task in serverOnly mode.
+      _step = widget.mode == WizardMode.serverOnly ? _Step.done : _Step.role;
     });
   }
 
@@ -184,6 +222,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 560),
             child: _StepCard(
+              mode: widget.mode,
               step: _step,
               totalSteps: _totalSteps,
               busy: _busy,
@@ -222,6 +261,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
 
 class _StepCard extends StatelessWidget {
   const _StepCard({
+    required this.mode,
     required this.step,
     required this.totalSteps,
     required this.busy,
@@ -243,6 +283,7 @@ class _StepCard extends StatelessWidget {
     required this.onDone,
   });
 
+  final WizardMode mode;
   final _Step step;
   final int totalSteps;
   final bool busy;
@@ -446,9 +487,12 @@ class _StepCard extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  isRegisterRole
-                      ? l10n.setupDoneBodyRegister
-                      : l10n.setupDoneBodyConnect,
+                  switch (mode) {
+                    WizardMode.serverOnly => l10n.setupDoneBodyServer,
+                    WizardMode.firstRun => isRegisterRole
+                        ? l10n.setupDoneBodyRegister
+                        : l10n.setupDoneBodyConnect,
+                  },
                   style: theme.textTheme.bodyMedium,
                 ),
               ),

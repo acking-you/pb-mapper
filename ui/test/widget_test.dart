@@ -286,6 +286,23 @@ void main() {
     expect(find.text('The key must be exactly 32 characters'), findsOneWidget);
   });
 
+  testWidgets('server-only mode is a single step', (tester) async {
+    await tester.pumpWidget(
+      _wrap(
+        SetupWizardView(
+          mode: WizardMode.serverOnly,
+          onFinished: (_) {},
+          onSkip: () {},
+        ),
+      ),
+    );
+
+    // Changing the server is one question, so the counter must not promise
+    // three, and there is no role to pick afterwards.
+    expect(find.text('Step 1 of 1'), findsOneWidget);
+    expect(find.text('Where is your pb-mapper server?'), findsOneWidget);
+  });
+
   group('SetupState', () {
     test('the default address alone is not a configured server', () {
       expect(SetupState.isServerConfigured('localhost:7666'), isFalse);

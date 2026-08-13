@@ -56,6 +56,7 @@
   "setupDoneTitle": "Ready",
   "setupDoneBodyRegister": "Your service is registered. It will keep retrying if the server is not up yet.",
   "setupDoneBodyConnect": "Your tunnel is connected.",
+  "setupDoneBodyServer": "Server settings saved.",
   "setupBack": "Back",
   "setupNext": "Next",
   "setupFinish": "Finish",
