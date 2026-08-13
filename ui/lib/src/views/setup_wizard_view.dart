@@ -163,6 +163,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
       _busy = true;
       _error = null;
       _serverNote = l10n.setupCheckingServer;
+      _availableServices = const [];
     });
 
     final result = await _api.updateConfig(
@@ -850,8 +851,10 @@ class SetupServiceKeyField extends StatelessWidget {
             .toList()
           ..sort();
 
+    final optionsKey = options.map((key) => '${key.length}:$key').join();
+
     return DropdownMenu<String>(
-      key: const Key('setup-service-key-input'),
+      key: ValueKey('setup-service-key-input:$optionsKey'),
       controller: controller,
       focusNode: focusNode,
       requestFocusOnTap: true,
