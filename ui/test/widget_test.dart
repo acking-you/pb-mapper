@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/locale_controller.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
@@ -30,6 +31,7 @@ void main() {
           onConfiguration: () {},
           onServiceRegistration: () {},
           onClientConnection: () {},
+          onOperations: () {},
           onToggleTheme: () {},
         ),
       ),
@@ -51,6 +53,7 @@ void main() {
           onConfiguration: () {},
           onServiceRegistration: () {},
           onClientConnection: () {},
+          onOperations: () {},
           onToggleTheme: () {},
         ),
       ),
@@ -70,6 +73,7 @@ void main() {
           onConfiguration: () => config++,
           onServiceRegistration: () => register++,
           onClientConnection: () => connect++,
+          onOperations: () {},
           onToggleTheme: () {},
         ),
       ),
@@ -92,6 +96,7 @@ void main() {
           onConfiguration: () {},
           onServiceRegistration: () {},
           onClientConnection: () {},
+          onOperations: () {},
           onToggleTheme: () {},
         ),
         locale: const Locale('zh'),
@@ -116,8 +121,11 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         DesktopLayout(
-          selectedIndex: 1,
-          onNavigationChanged: (_) {},
+          section: AppSection.register,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onOps: () {},
+          onOpsTab: (_) {},
           title: 'Register',
           child: const SizedBox.shrink(),
         ),
@@ -126,8 +134,87 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Register'), findsWidgets);
-    expect(find.text('Connect'), findsOneWidget);
+  });
+
+  testWidgets('a workspace hides the other role', (tester) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.register,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          title: 'Register',
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    // The whole point of the split: registering must not put Connect, Status or
+    // Logs within reach.
+    expect(find.text('Connect'), findsNothing);
+    expect(find.text('Status'), findsNothing);
+    expect(find.text('Logs'), findsNothing);
+    // Ops and the way home stay available.
+    expect(find.text('Operations'), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
+  });
+
+  testWidgets('ops shows its three tabs and no roles', (tester) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    var picked = <OpsTab>[];
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.ops,
+          opsTab: OpsTab.config,
+          onHome: () {},
+          onOps: () {},
+          onOpsTab: picked.add,
+          title: 'Configuration',
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    expect(find.text('Status'), findsOneWidget);
+    expect(find.text('Config'), findsOneWidget);
     expect(find.text('Logs'), findsOneWidget);
+    expect(find.text('Register'), findsNothing);
+    expect(find.text('Connect'), findsNothing);
+
+    await tester.tap(find.text('Logs'));
+    expect(picked, [OpsTab.logs]);
+  });
+
+  testWidgets('home has no sidebar', (tester) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.home,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    expect(find.text('Home'), findsNothing);
+    expect(find.text('Operations'), findsNothing);
   });
 
   group('LocaleController', () {

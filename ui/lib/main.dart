@@ -11,6 +11,7 @@ import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/views/configuration_view.dart';
 import 'package:pb_mapper_ui/src/views/log_view_page.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
+import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
@@ -95,12 +96,13 @@ class _MyAppState extends State<MyApp> with WindowListener {
   /// creating this listener is not necessary.
   late final AppLifecycleListener _listener;
   ThemeMode _themeMode = ThemeMode.system;
-  int _currentPage =
-      0; // 0 = landing, 1 = register, 2 = connect, 3 = status, 4 = config, 5 = logs
   final PbMapperApi _api = PbMapperApi();
   bool _allowExit = false;
 
-  static const String _lastPageKey = 'last_visited_page';
+  AppSection _section = AppSection.home;
+  OpsTab _opsTab = OpsTab.status;
+
+  static const String _lastSectionKey = 'last_section';
 
   /// null follows the system language.
   Locale? _locale;
@@ -127,7 +129,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
       },
     );
 
-    unawaited(_restoreLastPage());
+    unawaited(_restoreLastSection());
     unawaited(_restoreLocale());
     unawaited(_initTray());
     if (!kIsWeb &&
@@ -224,34 +226,61 @@ class _MyAppState extends State<MyApp> with WindowListener {
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
   }
 
-  void _navigateToPage(int page) {
-    setState(() {
-      _currentPage = page;
-    });
-    unawaited(_persistPage(page));
+  void _goTo(AppSection section) {
+    setState(() => _section = section);
+    unawaited(_persistSection(section));
   }
 
-  /// Remember where the user was, so a daily user does not land on the guide
-  /// every launch. First run has nothing stored and falls back to the landing
-  /// page, which is where the guide is useful.
-  Future<void> _persistPage(int page) async {
+  void _goToOpsTab(OpsTab tab) {
+    setState(() {
+      _section = AppSection.ops;
+      _opsTab = tab;
+    });
+    unawaited(_persistSection(AppSection.ops));
+  }
+
+  /// Remember which zone the user was in, so a daily user does not pick a role
+  /// every launch. First run has nothing stored and opens home, where the guide
+  /// is useful.
+  Future<void> _persistSection(AppSection section) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt(_lastPageKey, page);
+      await prefs.setString(_lastSectionKey, section.name);
     } catch (_) {
-      // A missing preference only costs the restored page, so ignore it.
+      // A missing preference only costs the restored zone, so ignore it.
     }
   }
 
-  Future<void> _restoreLastPage() async {
+  Future<void> _restoreLastSection() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final page = prefs.getInt(_lastPageKey);
-      if (page != null && page > 0 && page <= 5 && mounted) {
-        setState(() => _currentPage = page);
-      }
+      final name = prefs.getString(_lastSectionKey);
+      if (name == null || !mounted) return;
+      final restored = AppSection.values.firstWhere(
+        (section) => section.name == name,
+        orElse: () => AppSection.home,
+      );
+      setState(() => _section = restored);
     } catch (_) {
-      // Fall through to the landing page.
+      // Fall through to home.
+    }
+  }
+
+  /// The pages that still navigate by calling into the old global manager.
+  void _navigateToPage(int page) {
+    switch (page) {
+      case 1:
+        _goTo(AppSection.register);
+      case 2:
+        _goTo(AppSection.connect);
+      case 3:
+        _goToOpsTab(OpsTab.status);
+      case 4:
+        _goToOpsTab(OpsTab.config);
+      case 5:
+        _goToOpsTab(OpsTab.logs);
+      default:
+        _goTo(AppSection.home);
     }
   }
 
@@ -306,22 +335,26 @@ class _MyAppState extends State<MyApp> with WindowListener {
   }
 
   Widget _getCurrentPageContent(BuildContext context) {
-    switch (_currentPage) {
-      case 1:
+    switch (_section) {
+      case AppSection.register:
         return const ServiceRegistrationView();
-      case 2:
+      case AppSection.connect:
         return const ClientConnectionView();
-      case 3:
-        return const StatusMonitoringView();
-      case 4:
-        return const ConfigurationView();
-      case 5:
-        return const LogViewPage(showScaffold: false);
-      default:
+      case AppSection.ops:
+        switch (_opsTab) {
+          case OpsTab.status:
+            return const StatusMonitoringView();
+          case OpsTab.config:
+            return const ConfigurationView();
+          case OpsTab.logs:
+            return const LogViewPage(showScaffold: false);
+        }
+      case AppSection.home:
         return MainLandingView(
-          onConfiguration: () => _navigateToPage(4),
-          onServiceRegistration: () => _navigateToPage(1),
-          onClientConnection: () => _navigateToPage(2),
+          onConfiguration: () => _goToOpsTab(OpsTab.config),
+          onServiceRegistration: () => _goTo(AppSection.register),
+          onClientConnection: () => _goTo(AppSection.connect),
+          onOperations: () => _goToOpsTab(OpsTab.status),
           onToggleTheme: toggleTheme,
         );
     }
@@ -368,18 +401,19 @@ class _MyAppState extends State<MyApp> with WindowListener {
   }
 
   Widget _buildMobileApp(BuildContext context) {
-    if (_currentPage == 0) {
+    if (_section == AppSection.home) {
       return _getCurrentPageContent(context);
     }
 
+    // Mobile mirrors the desktop zones: back out to home, and inside ops the
+    // three tabs sit at the bottom. A workspace has nothing to switch between.
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          _getPageTitle(context) ?? context.l10n.appTitle,
-        ),
+        title: Text(_getPageTitle(context) ?? context.l10n.appTitle),
         leading: IconButton(
-          icon: const Icon(Icons.home),
-          onPressed: () => _navigateToPage(0),
+          icon: const Icon(Icons.arrow_back),
+          tooltip: context.l10n.home,
+          onPressed: () => _goTo(AppSection.home),
         ),
         actions: [
           IconButton(
@@ -391,43 +425,40 @@ class _MyAppState extends State<MyApp> with WindowListener {
         ],
       ),
       body: _getCurrentPageContent(context),
-      bottomNavigationBar: BottomNavigationBar(
-        type: BottomNavigationBarType.fixed,
-        selectedItemColor: Theme.of(context).colorScheme.primary,
-        unselectedItemColor: Colors.grey,
-        currentIndex: _currentPage - 1,
-        onTap: (index) => _navigateToPage(index + 1),
-        items: [
-          BottomNavigationBarItem(
-            icon: const Icon(Icons.app_registration),
-            label: context.l10n.navRegister,
-          ),
-          BottomNavigationBarItem(
-            icon: const Icon(Icons.cable),
-            label: context.l10n.navConnect,
-          ),
-          BottomNavigationBarItem(
-            icon: const Icon(Icons.monitor),
-            label: context.l10n.navStatus,
-          ),
-          BottomNavigationBarItem(
-            icon: const Icon(Icons.settings),
-            label: context.l10n.navConfig,
-          ),
-          BottomNavigationBarItem(
-            icon: const Icon(Icons.terminal),
-            label: context.l10n.navLogs,
-          ),
-        ],
-      ),
+      bottomNavigationBar: _section == AppSection.ops
+          ? BottomNavigationBar(
+              type: BottomNavigationBarType.fixed,
+              selectedItemColor: Theme.of(context).colorScheme.primary,
+              unselectedItemColor: Colors.grey,
+              currentIndex: _opsTab.index,
+              onTap: (index) => _goToOpsTab(OpsTab.values[index]),
+              items: [
+                BottomNavigationBarItem(
+                  icon: const Icon(Icons.monitor),
+                  label: context.l10n.navStatus,
+                ),
+                BottomNavigationBarItem(
+                  icon: const Icon(Icons.settings),
+                  label: context.l10n.navConfig,
+                ),
+                BottomNavigationBarItem(
+                  icon: const Icon(Icons.terminal),
+                  label: context.l10n.navLogs,
+                ),
+              ],
+            )
+          : null,
     );
   }
 
   Widget _buildDesktopApp(BuildContext context) {
     final l10n = context.l10n;
     return DesktopLayout(
-      selectedIndex: _currentPage,
-      onNavigationChanged: _navigateToPage,
+      section: _section,
+      opsTab: _opsTab,
+      onHome: () => _goTo(AppSection.home),
+      onOps: () => _goToOpsTab(_opsTab),
+      onOpsTab: _goToOpsTab,
       title: _getPageTitle(context) ?? l10n.appTitle,
       titleBarActions: [
         IconButton(
@@ -457,18 +488,18 @@ class _MyAppState extends State<MyApp> with WindowListener {
 
   String? _getPageTitle(BuildContext context) {
     final l10n = context.l10n;
-    switch (_currentPage) {
-      case 1:
+    switch (_section) {
+      case AppSection.register:
         return l10n.pageRegister;
-      case 2:
+      case AppSection.connect:
         return l10n.pageConnect;
-      case 3:
-        return l10n.pageStatus;
-      case 4:
-        return l10n.pageConfig;
-      case 5:
-        return l10n.pageLogs;
-      default:
+      case AppSection.ops:
+        return switch (_opsTab) {
+          OpsTab.status => l10n.pageStatus,
+          OpsTab.config => l10n.pageConfig,
+          OpsTab.logs => l10n.pageLogs,
+        };
+      case AppSection.home:
         return null;
     }
   }

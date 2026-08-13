@@ -15,6 +15,7 @@ class MainLandingView extends StatelessWidget {
   final VoidCallback onConfiguration;
   final VoidCallback onServiceRegistration;
   final VoidCallback onClientConnection;
+  final VoidCallback onOperations;
   final VoidCallback onToggleTheme;
 
   const MainLandingView({
@@ -22,6 +23,7 @@ class MainLandingView extends StatelessWidget {
     required this.onConfiguration,
     required this.onServiceRegistration,
     required this.onClientConnection,
+    required this.onOperations,
     required this.onToggleTheme,
   });
 
@@ -102,10 +104,62 @@ class MainLandingView extends StatelessWidget {
                     ],
                   ),
                 ),
+              const SizedBox(height: 12),
+              _OpsEntry(onPressed: onOperations),
               const SizedBox(height: 24),
               const _StarFooter(),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The way into the ops zone. Deliberately quieter than the role cards: it is
+/// not a role, and most sessions do not start here.
+class _OpsEntry extends StatelessWidget {
+  const _OpsEntry({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return InkWell(
+      onTap: onPressed,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Icon(Icons.tune_rounded, size: 18, color: scheme.onSurfaceVariant),
+            const SizedBox(width: 10),
+            Text(
+              context.l10n.navOps,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                context.l10n.opsSummary,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            Icon(
+              Icons.chevron_right_rounded,
+              size: 18,
+              color: scheme.onSurfaceVariant,
+            ),
+          ],
         ),
       ),
     );
