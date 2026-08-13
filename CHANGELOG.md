@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.17] - 2026-08-14
+- Fixed the Windows tray icon looking blurry at 125%, 175%, 225% and 250% display scaling. The icons carried 16, 24, 32 and 48 but none of the sizes in between, and `LoadImage` answers a missing size by stretching the nearest entry with GDI, which does no filtering. They now carry an entry for every size the shell asks for.
+- Added colour vector sources for the Windows tray icons, which until now existed only as an unreproducible raster, together with a generator that renders every size from them rather than resampling one size from another.
+- Fixed the tray icon being sized for the wrong display on mixed-DPI desktops, and never reloading when the display scaling changed, by vendoring `tray_manager` with a DPI-aware Windows plugin.
+- Fixed Chinese text rendering at the wrong weight on Windows and Linux. The system fallback there has no 500 or 600 face, so a mixed line rendered its Chinese and its Latin at visibly different weights; a subset of Noto Sans SC is now bundled to supply them. macOS is unaffected, as PingFang SC already has every weight.
+- Fixed the log view and server status details falling back to a proportional font on Windows, where the requested `monospace` and `Courier` families match nothing, and columns stopped lining up.
+
 ## [0.2.14] - 2026-04-29
 - Added V2 control-connection registration metadata, lease responses, and per-service status reporting for exact `conn_id` and `generation` health checks.
 - Added server-cli suspect-state probing so missing remote registrations are detected and re-registered without relying on missing heartbeat guesses.
