@@ -46,6 +46,14 @@ dependencies:
   tray_manager: ^0.5.1
   window_manager: ^0.5.1
 
+# The published tray_manager sizes the Windows tray icon with GetSystemMetrics,
+# which is not per-monitor DPI aware, and never reloads it when the scaling
+# changes. The vendored copy fixes both — see
+# packages/tray_manager/WINDOWS_DPI_PATCH.md before bumping the version.
+dependency_overrides:
+  tray_manager:
+    path: packages/tray_manager
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <!-- Windows tray icon; see tray_idle.svg for where the geometry comes from.
+       active = green badge with a check: services or clients are running. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1976D2"/>
+      <stop offset="1" stop-color="#42A5F5"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.33" cy="0.28" r="0.78">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.42"/>
+      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="2.25" y="2.25" width="31.5" height="31.5" rx="6.891" fill="url(#tile)"/>
+
+  <g fill="#FFFFFF" stroke="#FFFFFF" stroke-width="0.281" stroke-linejoin="round">
+    <rect x="12.656" y="14.766" width="10.688" height="6.75" rx="1.266"/>
+    <rect x="14.344" y="12.656" width="1.125" height="2.531" rx="0.352"/>
+    <rect x="20.531" y="12.656" width="1.125" height="2.531" rx="0.352"/>
+    <path d="M23.06 18C25.8 18 28.13 19.9 28.13 21.94C28.13 26.4 25.6 29.5 21.66 29.25C19 29.04 16.2 23.79 12.94 23.79C10.9 23.79 8.72 25.9 8.72 28.69"
+          fill="none" stroke="#FFFFFF" stroke-width="1.266" stroke-linecap="round"/>
+  </g>
+
+  <circle cx="28.125" cy="28.125" r="5.625" fill="#25AD8C"/>
+  <circle cx="28.125" cy="28.125" r="5.625" fill="url(#gloss)"/>
+  <path d="M26.055 28.335L27.595 29.955L30.195 26.795" fill="none" stroke="#FFFFFF"
+        stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

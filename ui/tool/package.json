@@ -1,0 +1,14 @@
+{
+  "name": "pb-mapper-ui-tool",
+  "private": true,
+  "type": "module",
+  "description": "Build-time asset tooling for the pb-mapper Flutter UI. Not part of the app.",
+  "scripts": {
+    "tray-icons": "node gen_tray_icons.mjs"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "iconv-lite": "^0.7.3",
+    "subset-font": "^2.5.0"
+  }
+}

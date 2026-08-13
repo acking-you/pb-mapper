@@ -48,6 +48,9 @@ app.*.map.json
 /.cargo/
 /target/
 
+# Asset tooling in tool/ is run by hand, so its install is not checked in.
+/tool/node_modules/
+
 # Generated signals
 /lib/src/bincode
 /lib/src/serde

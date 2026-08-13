@@ -469,10 +469,9 @@ packages:
   tray_manager:
     dependency: "direct main"
     description:
-      name: tray_manager
-      sha256: "1a659b08baa6e9b91ef8ce16eda37740de398be1c4cf322b8a1ddfef25c68c5a"
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/tray_manager"
+      relative: true
+    source: path
     version: "0.5.3"
   tuple:
     dependency: "direct main"

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <!-- Windows tray icon. Unlike the macOS art one directory up, the taskbar
+       takes colour, so the state is carried by the badge tint as well as its
+       shape. Tile and glyph are the app icon's own geometry (icon_design/
+       app_icon_blue.svg) rescaled from 1024 to 36 units, so the tray and the
+       app icon stay the same drawing.
+       idle = amber badge with three dots: online, nothing running. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1976D2"/>
+      <stop offset="1" stop-color="#42A5F5"/>
+    </linearGradient>
+    <!-- Stands in for the lit top-left of the original badge. Flat enough to
+         survive being rasterised at 16px, where a photoreal highlight only
+         turns into a smudge. -->
+    <radialGradient id="gloss" cx="0.33" cy="0.28" r="0.78">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.42"/>
+      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="2.25" y="2.25" width="31.5" height="31.5" rx="6.891" fill="url(#tile)"/>
+
+  <g fill="#FFFFFF" stroke="#FFFFFF" stroke-width="0.281" stroke-linejoin="round">
+    <rect x="12.656" y="14.766" width="10.688" height="6.75" rx="1.266"/>
+    <rect x="14.344" y="12.656" width="1.125" height="2.531" rx="0.352"/>
+    <rect x="20.531" y="12.656" width="1.125" height="2.531" rx="0.352"/>
+    <path d="M23.06 18C25.8 18 28.13 19.9 28.13 21.94C28.13 26.4 25.6 29.5 21.66 29.25C19 29.04 16.2 23.79 12.94 23.79C10.9 23.79 8.72 25.9 8.72 28.69"
+          fill="none" stroke="#FFFFFF" stroke-width="1.266" stroke-linecap="round"/>
+  </g>
+
+  <circle cx="28.125" cy="28.125" r="5.625" fill="#F6AE36"/>
+  <circle cx="28.125" cy="28.125" r="5.625" fill="url(#gloss)"/>
+  <g fill="#FFFFFF">
+    <circle cx="26.675" cy="28.405" r="0.72"/>
+    <circle cx="28.125" cy="28.405" r="0.72"/>
+    <circle cx="29.575" cy="28.405" r="0.72"/>
+  </g>
+</svg>
