@@ -379,11 +379,9 @@ class _MyAppState extends State<MyApp> with WindowListener {
       case AppSection.setup:
         return SetupWizardView(
           mode: _wizardMode,
-          // Changing the server only should land back where the user was, not
-          // in a workspace they did not ask for.
-          onFinished: _wizardMode == WizardMode.serverOnly
-              ? (_) => _goTo(AppSection.home)
-              : _goTo,
+          // The wizard decides where to land, since it knows whether anything
+          // was set up and which end of the tunnel it was.
+          onFinished: _goTo,
           onSkip: () => _goTo(AppSection.home),
         );
       case AppSection.home:

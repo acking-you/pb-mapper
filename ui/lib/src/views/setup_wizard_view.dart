@@ -302,6 +302,18 @@ class _SetupWizardViewState extends State<SetupWizardView> {
 
   /// Back to the role question, keeping the server and everything already set
   /// up, so adding a second tunnel does not mean starting over.
+  /// Where to leave the user.
+  ///
+  /// The workspace for what they just set up, so they can see it in the page
+  /// that manages it. The last one wins when several were added, since that is
+  /// the one still fresh in mind. Only a visit that set nothing up goes home.
+  AppSection _landingSection() {
+    if (_outcomes.isEmpty) return AppSection.home;
+    return _outcomes.last.isRegister
+        ? AppSection.register
+        : AppSection.connect;
+  }
+
   void _addAnother({required bool register}) {
     setState(() {
       _error = null;
@@ -372,9 +384,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
               onAddAnother: _addAnother,
               onContinue: () => setState(() => _step = _Step.hub),
               onSkip: widget.onSkip,
-              onDone: () => widget.onFinished(
-                _isRegisterRole ? AppSection.register : AppSection.connect,
-              ),
+              onDone: () => widget.onFinished(_landingSection()),
             ),
           ),
         ),

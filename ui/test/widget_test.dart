@@ -303,6 +303,24 @@ void main() {
     expect(find.text('Where is your pb-mapper server?'), findsOneWidget);
   });
 
+  testWidgets('a wizard that set nothing up finishes at home', (tester) async {
+    AppSection? landed;
+    await tester.pumpWidget(
+      _wrap(
+        SetupWizardView(
+          mode: WizardMode.serverOnly,
+          onFinished: (section) => landed = section,
+          onSkip: () {},
+        ),
+      ),
+    );
+
+    // Skipping is not setting something up, so there is no workspace to open.
+    await tester.tap(find.text('Skip setup'));
+    await tester.pump();
+    expect(landed, isNull);
+  });
+
   group('SetupState', () {
     test('the default address alone is not a configured server', () {
       expect(SetupState.isServerConfigured('localhost:7666'), isFalse);
