@@ -700,12 +700,6 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                                   ?.copyWith(fontWeight: FontWeight.bold),
                             ),
                           ),
-                          TextButton.icon(
-                            onPressed: AppNavigationManager
-                                .navigateToConnectPage,
-                            icon: const Icon(Icons.cable),
-                            label: const Text('Open Connect'),
-                          ),
                         ],
                       ),
                       const SizedBox(height: 16),

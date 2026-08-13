@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
-import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 
 class ConfigurationView extends StatefulWidget {
   final VoidCallback? onToggleTheme;
@@ -467,23 +466,6 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                             : _serverCheckMessage),
                 ),
               ),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: AppNavigationManager.navigateToConnectPage,
-                  icon: const Icon(Icons.cable),
-                  label: const Text('Open Connect'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: AppNavigationManager.navigateToRegisterPage,
-                  icon: const Icon(Icons.app_registration),
-                  label: const Text('Open Register'),
-                ),
-              ],
             ),
             const SizedBox(height: 24),
             Card(

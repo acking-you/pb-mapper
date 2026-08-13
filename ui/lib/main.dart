@@ -16,6 +16,7 @@ import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/common/tray/tray_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 Future<void> main() async {
@@ -95,6 +96,8 @@ class _MyAppState extends State<MyApp> with WindowListener {
   final PbMapperApi _api = PbMapperApi();
   bool _allowExit = false;
 
+  static const String _lastPageKey = 'last_visited_page';
+
   @override
   void initState() {
     super.initState();
@@ -117,6 +120,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
       },
     );
 
+    unawaited(_restoreLastPage());
     unawaited(_initTray());
     if (!kIsWeb &&
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
@@ -215,6 +219,31 @@ class _MyAppState extends State<MyApp> with WindowListener {
     setState(() {
       _currentPage = page;
     });
+    unawaited(_persistPage(page));
+  }
+
+  /// Remember where the user was, so a daily user does not land on the guide
+  /// every launch. First run has nothing stored and falls back to the landing
+  /// page, which is where the guide is useful.
+  Future<void> _persistPage(int page) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_lastPageKey, page);
+    } catch (_) {
+      // A missing preference only costs the restored page, so ignore it.
+    }
+  }
+
+  Future<void> _restoreLastPage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final page = prefs.getInt(_lastPageKey);
+      if (page != null && page > 0 && page <= 5 && mounted) {
+        setState(() => _currentPage = page);
+      }
+    } catch (_) {
+      // Fall through to the landing page.
+    }
   }
 
   void toggleTheme() {
@@ -249,8 +278,6 @@ class _MyAppState extends State<MyApp> with WindowListener {
           onConfiguration: () => _navigateToPage(4),
           onServiceRegistration: () => _navigateToPage(1),
           onClientConnection: () => _navigateToPage(2),
-          onStatusMonitoring: () => _navigateToPage(3),
-          onLogs: () => _navigateToPage(5),
           onToggleTheme: toggleTheme,
         );
     }

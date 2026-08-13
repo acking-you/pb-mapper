@@ -3,12 +3,15 @@ import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/common/theme_change_button.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+/// The landing page: how to get started, then the two roles to pick from.
+///
+/// Status, Config and Logs are reachable from the sidebar. Repeating them here
+/// only asked the same question twice, so this page answers the one question a
+/// new user actually has: which end of the tunnel am I on?
 class MainLandingView extends StatelessWidget {
   final VoidCallback onConfiguration;
   final VoidCallback onServiceRegistration;
   final VoidCallback onClientConnection;
-  final VoidCallback onStatusMonitoring;
-  final VoidCallback onLogs;
   final VoidCallback onToggleTheme;
 
   const MainLandingView({
@@ -16,8 +19,6 @@ class MainLandingView extends StatelessWidget {
     required this.onConfiguration,
     required this.onServiceRegistration,
     required this.onClientConnection,
-    required this.onStatusMonitoring,
-    required this.onLogs,
     required this.onToggleTheme,
   });
 
@@ -29,158 +30,16 @@ class MainLandingView extends StatelessWidget {
     }
   }
 
-  Widget _buildFeatureCard({
-    required BuildContext context,
-    required VoidCallback onPressed,
-    required String title,
-    required String description,
-    required IconData icon,
-    required Color color,
-  }) {
-    return Card(
-      elevation: 4,
-      child: InkWell(
-        onTap: onPressed,
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            children: [
-              Icon(icon, size: 44, color: color),
-              const SizedBox(height: 12),
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                description,
-                style: TextStyle(fontSize: 14, color: Colors.grey[600]),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildQuickStartCard(BuildContext context) {
-    return Card(
-      color: Theme.of(context).brightness == Brightness.dark
-          ? Colors.blueGrey.shade900
-          : Colors.blue.shade50,
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.route_outlined,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                const SizedBox(width: 10),
-                Text(
-                  'Quick Start',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            const Text('1) Set `PB_MAPPER_SERVER` in Configuration'),
-            const SizedBox(height: 4),
-            const Text('2) Register local services'),
-            const SizedBox(height: 4),
-            const Text('3) Connect clients to registered services'),
-            const SizedBox(height: 14),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: onConfiguration,
-                  icon: const Icon(Icons.settings),
-                  label: const Text('Go to Config'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: onServiceRegistration,
-                  icon: const Icon(Icons.app_registration),
-                  label: const Text('Go to Register'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: onClientConnection,
-                  icon: const Icon(Icons.cable),
-                  label: const Text('Go to Connect'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final showAppBar = ResponsiveLayout.isMobile(context);
     final isMobile = ResponsiveLayout.isMobile(context);
-
-    final cards = <Widget>[
-      _buildFeatureCard(
-        context: context,
-        onPressed: onConfiguration,
-        title: 'Configuration',
-        description: 'Step 1: Configure `PB_MAPPER_SERVER` and runtime options',
-        icon: Icons.settings,
-        color: Colors.blueGrey,
-      ),
-      _buildFeatureCard(
-        context: context,
-        onPressed: onServiceRegistration,
-        title: 'Register',
-        description: 'Publish local services to your pb-mapper server',
-        icon: Icons.app_registration,
-        color: Colors.green,
-      ),
-      _buildFeatureCard(
-        context: context,
-        onPressed: onClientConnection,
-        title: 'Connect',
-        description: 'Create local client tunnels to registered services',
-        icon: Icons.cable,
-        color: Colors.orange,
-      ),
-      _buildFeatureCard(
-        context: context,
-        onPressed: onStatusMonitoring,
-        title: 'Status',
-        description: 'Inspect currently registered services and connections',
-        icon: Icons.monitor,
-        color: Colors.teal,
-      ),
-      _buildFeatureCard(
-        context: context,
-        onPressed: onLogs,
-        title: 'Logs',
-        description: 'Open the dedicated runtime log viewer',
-        icon: Icons.terminal,
-        color: Colors.indigo,
-      ),
-    ];
+    final theme = Theme.of(context);
 
     return Scaffold(
       // Transparent on desktop so the shell's content panel shows through;
       // on mobile this view is the whole screen and keeps its own surface.
       backgroundColor: isMobile ? null : Colors.transparent,
-      appBar: showAppBar
+      appBar: isMobile
           ? AppBar(
               title: const Text('pb-mapper'),
               elevation: 0,
@@ -189,70 +48,235 @@ class MainLandingView extends StatelessWidget {
           : null,
       body: ResponsiveLayout.wrapWithMaxWidth(
         context: context,
-        child: Padding(
-          padding: ResponsiveLayout.getScreenPadding(context),
-          child: SingleChildScrollView(
-            child: Column(
-              children: [
-                const SizedBox(height: 20),
-                GestureDetector(
+        child: SingleChildScrollView(
+          padding: EdgeInsets.symmetric(
+            horizontal: ResponsiveLayout.getHorizontalPadding(context),
+            vertical: isMobile ? 20 : 36,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: GestureDetector(
                   onTap: _launchGitHub,
                   child: Text(
                     'pb-mapper',
-                    style: TextStyle(
-                      fontSize: isMobile ? 56 : 72,
-                      fontWeight: FontWeight.bold,
-                      color: Theme.of(context).brightness == Brightness.dark
-                          ? Colors.white
-                          : Theme.of(context).primaryColor,
+                    style: theme.textTheme.displaySmall?.copyWith(
+                      fontSize: isMobile ? 34 : 40,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.5,
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
-                Text(
-                  'Network Tunneling & Proxy Client',
-                  style: TextStyle(
-                    fontSize: ResponsiveLayout.getFontSize(context, 22),
-                    color: Colors.grey[600],
-                    fontWeight: FontWeight.w500,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 20),
-                _buildQuickStartCard(context),
-                const SizedBox(height: 20),
-                isMobile
-                    ? Column(
-                        children:
-                            cards
-                                .expand(
-                                  (card) => [card, const SizedBox(height: 16)],
-                                )
-                                .toList()
-                              ..removeLast(),
-                      )
-                    : GridView.count(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        crossAxisCount: 2,
-                        crossAxisSpacing: 16,
-                        mainAxisSpacing: 16,
-                        childAspectRatio: 1.25,
-                        children: cards,
+              ),
+              const SizedBox(height: 28),
+              _QuickStart(onConfiguration: onConfiguration),
+              const SizedBox(height: 20),
+              if (isMobile)
+                Column(
+                  children: [
+                    _RoleCard.register(onPressed: onServiceRegistration),
+                    const SizedBox(height: 12),
+                    _RoleCard.connect(onPressed: onClientConnection),
+                  ],
+                )
+              else
+                // IntrinsicHeight so both cards match the taller one. Plain
+                // stretch would ask for infinite height here, because inside a
+                // scroll view the cross axis is unbounded.
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        child: _RoleCard.register(
+                          onPressed: onServiceRegistration,
+                        ),
                       ),
-                const SizedBox(height: 28),
-                Text(
-                  'Start with Configuration, then Register or Connect.',
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Colors.grey[600],
-                    fontStyle: FontStyle.italic,
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _RoleCard.connect(onPressed: onClientConnection),
+                      ),
+                    ],
                   ),
-                  textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 20),
-              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickStart extends StatelessWidget {
+  const _QuickStart({required this.onConfiguration});
+
+  final VoidCallback onConfiguration;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Quick Start',
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w700,
             ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              _StepNumber(1),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Point pb-mapper at your server',
+                  style: theme.textTheme.bodyMedium,
+                ),
+              ),
+              TextButton(
+                onPressed: onConfiguration,
+                child: const Text('Configure'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              _StepNumber(2),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Pick the role that matches this machine',
+                  style: theme.textTheme.bodyMedium,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StepNumber extends StatelessWidget {
+  const _StepNumber(this.value);
+
+  final int value;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: 20,
+      height: 20,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.14),
+        shape: BoxShape.circle,
+      ),
+      child: Text(
+        '$value',
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: scheme.primary,
+        ),
+      ),
+    );
+  }
+}
+
+/// One of the two ends of a tunnel. The wording is the whole point of this
+/// card: which side you are on decides everything else in the app.
+class _RoleCard extends StatelessWidget {
+  const _RoleCard({
+    required this.icon,
+    required this.title,
+    required this.summary,
+    required this.detail,
+    required this.onPressed,
+  });
+
+  factory _RoleCard.register({required VoidCallback onPressed}) => _RoleCard(
+    icon: Icons.upload_rounded,
+    title: 'Register',
+    summary: 'This machine has a service to share',
+    detail: 'Publish a local TCP or UDP port under a key, so others can '
+        'reach it through the server.',
+    onPressed: onPressed,
+  );
+
+  factory _RoleCard.connect({required VoidCallback onPressed}) => _RoleCard(
+    icon: Icons.download_rounded,
+    title: 'Connect',
+    summary: 'This machine wants to reach a shared service',
+    detail: 'Subscribe to a key and expose it as a local port, as if the '
+        'remote service were running here.',
+    onPressed: onPressed,
+  );
+
+  final IconData icon;
+  final String title;
+  final String summary;
+  final String detail;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Material(
+      color: scheme.surfaceContainerHighest.withValues(alpha: 0.32),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(icon, size: 20, color: scheme.primary),
+                  const SizedBox(width: 8),
+                  Text(
+                    title,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                summary,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                detail,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  height: 1.4,
+                ),
+              ),
+            ],
           ),
         ),
       ),
