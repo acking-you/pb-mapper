@@ -28,6 +28,43 @@
   "roleRegisterDetail": "Publish a local TCP or UDP port under a key, so others can reach it through the server.",
   "roleConnectSummary": "This machine wants to reach a shared service",
   "roleConnectDetail": "Subscribe to a key and expose it as a local port, as if the remote service were running here.",
+  "setupWelcomeTitle": "Let's get you set up",
+  "setupWelcomeBody": "Three short steps. You can change any of it later.",
+  "setupStepOf": "Step {current} of {total}",
+  "@setupStepOf": {
+    "placeholders": {
+      "current": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
+  "setupServerTitle": "Where is your pb-mapper server?",
+  "setupServerBody": "The public host and port your server listens on. Everything else goes through it.",
+  "setupServerHint": "example.com:7666",
+  "setupServerInvalid": "Enter an address as host:port",
+  "setupKeyLabel": "Message header key (optional)",
+  "setupKeyBody": "Only needed if your server was started with a key. Leave empty otherwise.",
+  "setupKeyInvalid": "The key must be exactly 32 characters",
+  "setupCheckingServer": "Checking the server…",
+  "setupServerOk": "Reached the server",
+  "setupServerFailed": "Could not reach it. You can continue and fix this later.",
+  "setupRoleTitle": "What is this machine doing?",
+  "setupDetailsTitleRegister": "Which local service do you want to share?",
+  "setupDetailsTitleConnect": "Which service do you want to reach?",
+  "setupServiceKeyBody": "A name you choose. The other side uses the same one.",
+  "setupLocalAddressBodyRegister": "The address your service already listens on.",
+  "setupLocalAddressBodyConnect": "A free local port. The remote service will appear here.",
+  "setupDoneTitle": "Ready",
+  "setupDoneBodyRegister": "Your service is registered. It will keep retrying if the server is not up yet.",
+  "setupDoneBodyConnect": "Your tunnel is connected.",
+  "setupBack": "Back",
+  "setupNext": "Next",
+  "setupFinish": "Finish",
+  "setupSkip": "Skip setup",
+  "setupFailed": "Setup failed: {message}",
+  "@setupFailed": {
+    "placeholders": { "message": { "type": "String" } }
+  },
+
   "starOnGitHub": "Star on GitHub",
   "starPitch": "pb-mapper is open source. A star helps others find it.",
   "viewRepository": "Repository",

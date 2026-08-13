@@ -44,7 +44,10 @@ class DesktopLayout extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final expanded = ResponsiveLayout.isDesktop(context);
-    final showSidebar = section != AppSection.home;
+    // Home is a choice and setup is a guided flow: neither has anywhere to
+    // navigate to, and a sidebar would only offer a way to get lost.
+    final showSidebar =
+        section != AppSection.home && section != AppSection.setup;
     final railWidth = expanded ? 208.0 : 76.0;
 
     return Scaffold(

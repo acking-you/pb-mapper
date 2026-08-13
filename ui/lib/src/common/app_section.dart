@@ -5,6 +5,9 @@
 /// machines, so a workspace shows only the job at hand. Status, config and logs
 /// are operations work: reachable from anywhere, but never mixed into a task.
 enum AppSection {
+  /// First run: a guided wizard instead of a page of choices.
+  setup,
+
   /// Pick a role, or head into ops.
   home,
 

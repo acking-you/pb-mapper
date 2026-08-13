@@ -5,7 +5,9 @@ import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/locale_controller.dart';
+import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
+import 'package:pb_mapper_ui/src/views/setup_wizard_view.dart';
 
 /// The views read their strings from Localizations, so tests need the delegates
 /// installed. Pin a locale so assertions do not depend on the host language.
@@ -215,6 +217,88 @@ void main() {
 
     expect(find.text('Home'), findsNothing);
     expect(find.text('Operations'), findsNothing);
+  });
+
+  testWidgets('setup has no sidebar', (tester) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.setup,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    // A guided flow must not offer a way to wander off mid-setup.
+    expect(find.text('Home'), findsNothing);
+    expect(find.text('Operations'), findsNothing);
+  });
+
+  testWidgets('wizard opens on step 1 and can be skipped', (tester) async {
+    var skipped = 0;
+    await tester.pumpWidget(
+      _wrap(
+        SetupWizardView(onFinished: (_) {}, onSkip: () => skipped++),
+      ),
+    );
+
+    expect(find.text('Step 1 of 3'), findsOneWidget);
+    expect(find.text('Where is your pb-mapper server?'), findsOneWidget);
+
+    await tester.tap(find.text('Skip setup'));
+    await tester.pump();
+    expect(skipped, 1);
+  });
+
+  testWidgets('wizard rejects an address without a port', (tester) async {
+    await tester.pumpWidget(
+      _wrap(SetupWizardView(onFinished: (_) {}, onSkip: () {})),
+    );
+
+    await tester.enterText(find.byType(TextField).first, 'example.com');
+    await tester.tap(find.text('Next'));
+    await tester.pump();
+
+    // Still on step 1, with the reason shown, rather than saving nonsense.
+    expect(find.text('Enter an address as host:port'), findsOneWidget);
+    expect(find.text('Step 1 of 3'), findsOneWidget);
+  });
+
+  testWidgets('wizard rejects a key of the wrong length', (tester) async {
+    await tester.pumpWidget(
+      _wrap(SetupWizardView(onFinished: (_) {}, onSkip: () {})),
+    );
+
+    final fields = find.byType(TextField);
+    await tester.enterText(fields.at(0), 'example.com:7666');
+    await tester.enterText(fields.at(1), 'too-short');
+    await tester.tap(find.text('Next'));
+    await tester.pump();
+
+    expect(find.text('The key must be exactly 32 characters'), findsOneWidget);
+  });
+
+  group('SetupState', () {
+    test('the default address alone is not a configured server', () {
+      expect(SetupState.isServerConfigured('localhost:7666'), isFalse);
+      expect(SetupState.isServerConfigured(''), isFalse);
+      expect(SetupState.isServerConfigured('   '), isFalse);
+    });
+
+    test('any other address counts as configured', () {
+      expect(SetupState.isServerConfigured('example.com:7666'), isTrue);
+      expect(SetupState.isServerConfigured('10.0.0.2:9000'), isTrue);
+      // Same host, different port: still a deliberate choice.
+      expect(SetupState.isServerConfigured('localhost:9000'), isTrue);
+    });
   });
 
   group('LocaleController', () {

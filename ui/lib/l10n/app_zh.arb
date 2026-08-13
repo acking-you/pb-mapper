@@ -28,6 +28,43 @@
   "roleRegisterDetail": "把本机的 TCP 或 UDP 端口以一个 key 发布出去，别人经服务器就能访问。",
   "roleConnectSummary": "本机想访问别人共享的服务",
   "roleConnectDetail": "订阅一个 key，在本地开一个端口，就像那个远程服务跑在本机一样。",
+  "setupWelcomeTitle": "来做一次初始配置",
+  "setupWelcomeBody": "三步就好，之后都可以随时修改。",
+  "setupStepOf": "第 {current} 步，共 {total} 步",
+  "@setupStepOf": {
+    "placeholders": {
+      "current": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
+  "setupServerTitle": "你的 pb-mapper 服务器在哪？",
+  "setupServerBody": "填服务器的公网地址和端口。之后所有流量都经过它。",
+  "setupServerHint": "example.com:7666",
+  "setupServerInvalid": "请按 host:port 的格式填写",
+  "setupKeyLabel": "消息头密钥（可选）",
+  "setupKeyBody": "只有服务器启动时带了密钥才需要填，否则留空。",
+  "setupKeyInvalid": "密钥必须是 32 个字符",
+  "setupCheckingServer": "正在检测服务器…",
+  "setupServerOk": "已连上服务器",
+  "setupServerFailed": "暂时连不上。可以先继续，之后再改。",
+  "setupRoleTitle": "这台机器要做什么？",
+  "setupDetailsTitleRegister": "要共享本机哪个服务？",
+  "setupDetailsTitleConnect": "要访问哪个服务？",
+  "setupServiceKeyBody": "你自己起的名字，对面用同一个。",
+  "setupLocalAddressBodyRegister": "你的服务当前监听的地址。",
+  "setupLocalAddressBodyConnect": "一个空闲的本地端口，远程服务会出现在这里。",
+  "setupDoneTitle": "完成",
+  "setupDoneBodyRegister": "服务已注册。若服务器还没起来，它会自动重试。",
+  "setupDoneBodyConnect": "隧道已连接。",
+  "setupBack": "上一步",
+  "setupNext": "下一步",
+  "setupFinish": "完成",
+  "setupSkip": "跳过配置",
+  "setupFailed": "配置失败：{message}",
+  "@setupFailed": {
+    "placeholders": { "message": { "type": "String" } }
+  },
+
   "starOnGitHub": "去 GitHub 点个 Star",
   "starPitch": "pb-mapper 是开源项目，一个 Star 能帮更多人发现它。",
   "viewRepository": "仓库",

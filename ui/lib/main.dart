@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/views/client_connection_view.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
 import 'package:pb_mapper_ui/src/views/service_registration_view.dart';
+import 'package:pb_mapper_ui/src/views/setup_wizard_view.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/views/configuration_view.dart';
 import 'package:pb_mapper_ui/src/views/log_view_page.dart';
@@ -14,6 +15,7 @@ import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
+import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -252,6 +254,12 @@ class _MyAppState extends State<MyApp> with WindowListener {
   }
 
   Future<void> _restoreLastSection() async {
+    // Nothing configured yet means nothing to restore: walk the user through
+    // setup rather than showing a page of choices they cannot judge.
+    if (await SetupState.needsSetup(_api)) {
+      if (mounted) setState(() => _section = AppSection.setup);
+      return;
+    }
     try {
       final prefs = await SharedPreferences.getInstance();
       final name = prefs.getString(_lastSectionKey);
@@ -260,6 +268,8 @@ class _MyAppState extends State<MyApp> with WindowListener {
         (section) => section.name == name,
         orElse: () => AppSection.home,
       );
+      // Setup is never restored: reaching it is decided by the checks above.
+      if (restored == AppSection.setup) return;
       setState(() => _section = restored);
     } catch (_) {
       // Fall through to home.
@@ -349,6 +359,11 @@ class _MyAppState extends State<MyApp> with WindowListener {
           case OpsTab.logs:
             return const LogViewPage(showScaffold: false);
         }
+      case AppSection.setup:
+        return SetupWizardView(
+          onFinished: _goTo,
+          onSkip: () => _goTo(AppSection.home),
+        );
       case AppSection.home:
         return MainLandingView(
           onConfiguration: () => _goToOpsTab(OpsTab.config),
@@ -401,7 +416,9 @@ class _MyAppState extends State<MyApp> with WindowListener {
   }
 
   Widget _buildMobileApp(BuildContext context) {
-    if (_section == AppSection.home) {
+    // Home and setup are full-screen on mobile: neither wants a back arrow,
+    // since setup has its own Skip and home is already the top level.
+    if (_section == AppSection.home || _section == AppSection.setup) {
       return _getCurrentPageContent(context);
     }
 
@@ -499,6 +516,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
           OpsTab.config => l10n.pageConfig,
           OpsTab.logs => l10n.pageLogs,
         };
+      case AppSection.setup:
       case AppSection.home:
         return null;
     }
