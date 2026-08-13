@@ -143,21 +143,6 @@ class _SetupWizardViewState extends State<SetupWizardView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _serviceKeyFocusNode.requestFocus();
     });
-    if (!register) unawaited(_refreshAvailableServices());
-  }
-
-  Future<void> _refreshAvailableServices() async {
-    try {
-      final status = await _api.forceRefreshServerStatus();
-      if (!mounted) return;
-      setState(() {
-        _availableServices = status.serverAvailable
-            ? List.unmodifiable(status.registeredServices)
-            : const [];
-      });
-    } catch (_) {
-      // Keep manual entry available when discovery fails.
-    }
   }
 
   Future<void> _saveServer() async {
@@ -265,6 +250,12 @@ class _SetupWizardViewState extends State<SetupWizardView> {
     );
     setState(() {
       _busy = false;
+      if (_isRegisterRole) {
+        _availableServices = List.unmodifiable({
+          ..._availableServices,
+          serviceKey,
+        });
+      }
       _outcomes.add(outcome);
       _current = outcome;
       _step = _Step.verify;
@@ -628,7 +619,7 @@ class _StepCard extends StatelessWidget {
             focusNode: serviceKeyFocusNode,
             availableServices: isRegisterRole ? const [] : availableServices,
             labelText: l10n.serviceKey,
-            helperText: isRegisterRole
+            helperText: isRegisterRole || availableServices.isEmpty
                 ? l10n.setupServiceKeyBody
                 : l10n.setupServiceKeyBodyConnect,
           ),
@@ -864,7 +855,6 @@ class SetupServiceKeyField extends StatelessWidget {
         key: const Key('setup-service-key-input'),
         controller: controller,
         focusNode: focusNode,
-        autofocus: true,
         decoration: InputDecoration(
           labelText: labelText,
           helperText: helperText,
