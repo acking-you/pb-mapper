@@ -142,69 +142,50 @@ class _ClientCardState extends State<ClientCard> {
     // play icon in the header and a green pill below it, which read as two
     // different buttons for the same thing.
     return ListCardShell(
-      child: Row(
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            margin: const EdgeInsets.only(right: 11),
-            decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
-          ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        _config.serviceKey,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Flexible(
-                      child: Text(
-                        _config.statusMessage.isNotEmpty
-                            ? _config.statusMessage
-                            : _getStatusText(context),
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(color: tone),
-                      ),
-                    ),
-                  ],
+      child: ListCardRow(
+        tone: tone,
+        heading: Row(
+          children: [
+            Flexible(
+              child: Text(
+                _config.serviceKey,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w600,
                 ),
-                const SizedBox(height: 5),
-                Row(
-                  children: [
-                    ListCardFact(
-                      icon: Icons.lan_outlined,
-                      label: _config.localAddress,
-                      onTap: _copyLocalAddress,
-                      tooltip: l10n.copy,
-                    ),
-                    const SizedBox(width: 12),
-                    ListCardFact(
-                      icon: Icons.swap_horiz_rounded,
-                      label: _config.protocol,
-                    ),
-                    if (_config.updatedAt != _config.createdAt) ...[
-                      const SizedBox(width: 12),
-                      ListCardFact(
-                        icon: Icons.schedule_rounded,
-                        label: _formatDateTime(context, _config.updatedAt),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
+              ),
             ),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Text(
+                _config.statusMessage.isNotEmpty
+                    ? _config.statusMessage
+                    : _getStatusText(context),
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(color: tone),
+              ),
+            ),
+          ],
+        ),
+        facts: [
+          ListCardFact(
+            icon: Icons.lan_outlined,
+            label: _config.localAddress,
+            onTap: _copyLocalAddress,
+            tooltip: l10n.copy,
           ),
-          const SizedBox(width: 12),
-          // One primary action, then the secondary ones as plain icons.
+          ListCardFact(
+            icon: Icons.swap_horiz_rounded,
+            label: _config.protocol,
+          ),
+          if (_config.updatedAt != _config.createdAt)
+            ListCardFact(
+              icon: Icons.schedule_rounded,
+              label: _formatDateTime(context, _config.updatedAt),
+            ),
+        ],
+        // One primary action, then the secondary ones as plain icons.
+        actions: [
           SizedBox(
             width: 88,
             height: 30,

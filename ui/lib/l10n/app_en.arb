@@ -16,6 +16,8 @@
   "toggleTheme": "Toggle theme",
   "toggleLanguage": "Switch language",
   "home": "Home",
+  "back": "Back",
+  "switchWorkspace": "Switch workspace",
   "quickStart": "Quick Start",
   "quickStartStep1": "Set your server address",
   "quickStartStep1Action": "Configure",
@@ -586,6 +588,23 @@
   "keyAutoSelected": "Using \"{key}\" from Status",
   "@keyAutoSelected": {
     "description": "Using \"{key}\" from Status",
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "registeringInProgress": "Registering…",
+  "serviceUpdated": "Service \"{key}\" updated",
+  "serviceConfigDeleted": "Configuration for \"{key}\" deleted",
+  "@serviceUpdated": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "@serviceConfigDeleted": {
     "placeholders": {
       "key": {
         "type": "String"

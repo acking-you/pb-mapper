@@ -17,11 +17,15 @@ enum AppSection {
   /// Subscribing to remote services.
   connect,
 
-  /// Status, configuration and logs.
+  /// Status and configuration.
   ops;
 
   bool get isWorkspace => this == register || this == connect;
 }
 
 /// The tabs inside the ops zone.
-enum OpsTab { status, config, logs }
+///
+/// Logs used to be a third tab here. They now live in both workspaces, where
+/// the question they answer is actually asked, and a copy under ops would only
+/// be a second door onto the same view.
+enum OpsTab { status, config }

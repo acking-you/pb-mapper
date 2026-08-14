@@ -105,73 +105,52 @@ class _ServiceCardState extends State<ServiceCard> {
 
     // Same shape as the connect row: dot, name and state, facts, one action.
     return ListCardShell(
-      child: Row(
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            margin: const EdgeInsets.only(right: 11),
-            decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
-          ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        _config.serviceKey,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Flexible(
-                      child: Text(
-                        _config.statusMessage.isNotEmpty
-                            ? _config.statusMessage
-                            : _getStatusText(context),
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(color: tone),
-                      ),
-                    ),
-                  ],
+      child: ListCardRow(
+        tone: tone,
+        heading: Row(
+          children: [
+            Flexible(
+              child: Text(
+                _config.serviceKey,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w600,
                 ),
-                const SizedBox(height: 5),
-                Row(
-                  children: [
-                    ListCardFact(
-                      icon: Icons.lan_outlined,
-                      label: _config.localAddress,
-                    ),
-                    const SizedBox(width: 12),
-                    ListCardFact(
-                      icon: Icons.swap_horiz_rounded,
-                      label: _config.protocol,
-                    ),
-                    if (_config.enableEncryption) ...[
-                      const SizedBox(width: 12),
-                      ListCardFact(
-                        icon: Icons.lock_outline_rounded,
-                        label: l10n.encrypted,
-                      ),
-                    ],
-                    if (_config.updatedAt != _config.createdAt) ...[
-                      const SizedBox(width: 12),
-                      ListCardFact(
-                        icon: Icons.schedule_rounded,
-                        label: _formatDateTime(context, _config.updatedAt),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
+              ),
             ),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Text(
+                _config.statusMessage.isNotEmpty
+                    ? _config.statusMessage
+                    : _getStatusText(context),
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(color: tone),
+              ),
+            ),
+          ],
+        ),
+        facts: [
+          ListCardFact(
+            icon: Icons.lan_outlined,
+            label: _config.localAddress,
           ),
-          const SizedBox(width: 12),
+          ListCardFact(
+            icon: Icons.swap_horiz_rounded,
+            label: _config.protocol,
+          ),
+          if (_config.enableEncryption)
+            ListCardFact(
+              icon: Icons.lock_outline_rounded,
+              label: l10n.encrypted,
+            ),
+          if (_config.updatedAt != _config.createdAt)
+            ListCardFact(
+              icon: Icons.schedule_rounded,
+              label: _formatDateTime(context, _config.updatedAt),
+            ),
+        ],
+        actions: [
           SizedBox(
             width: 88,
             height: 30,

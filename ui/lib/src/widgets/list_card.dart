@@ -232,6 +232,100 @@ class ListCardFact extends StatelessWidget {
   }
 }
 
+/// The shape of a list row: a status dot, what the row is, what you can do.
+///
+/// One line wherever there is room for one. The actions are a fixed ~190px —
+/// an 88px button and three icon buttons — so on a phone they left the name and
+/// the facts about 100px to fight over, and the facts, which are sized to their
+/// text and cannot shrink, simply overflowed. Below [_stackWidth] they drop to
+/// their own line and the row becomes two.
+///
+/// The switch is on the width this row actually gets, not on a global phone
+/// breakpoint: the same row also has to survive a narrow desktop window.
+class ListCardRow extends StatelessWidget {
+  const ListCardRow({
+    super.key,
+    required this.tone,
+    required this.heading,
+    required this.facts,
+    required this.actions,
+  });
+
+  /// Room for the actions plus a readable amount of name and facts.
+  static const double _stackWidth = 420;
+
+  final Color tone;
+  final Widget heading;
+  final List<Widget> facts;
+  final List<Widget> actions;
+
+  // Animated: the dot is the row's whole status signal, and a service going
+  // from stopped to running should read as a change rather than a repaint.
+  Widget _dot({required bool stacked}) => AnimatedContainer(
+    duration: const Duration(milliseconds: 260),
+    curve: Curves.easeOut,
+    width: 8,
+    height: 8,
+    // Stacked, the dot sits beside the first line of the heading rather than
+    // halfway down a two-line block.
+    margin: EdgeInsets.only(right: 11, top: stacked ? 6 : 0),
+    decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    // Wrap, not Row: a fact is sized to its text, so a row of them overflows
+    // the moment the panel is narrower than their total.
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      // Size to the text. Left at max the column fills whatever height it is
+      // given, which drags the row's height with it and strands the action
+      // halfway down a tall parent.
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        heading,
+        const SizedBox(height: 5),
+        Wrap(
+          spacing: 12,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: facts,
+        ),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth >= _stackWidth) {
+          return Row(
+            children: [
+              _dot(stacked: false),
+              Expanded(child: body),
+              const SizedBox(width: 12),
+              ...actions,
+            ],
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [_dot(stacked: true), Expanded(child: body)],
+            ),
+            const SizedBox(height: 10),
+            // Trailing, so the primary action keeps the same edge it has on the
+            // wide layout instead of jumping to the other side of the row.
+            Row(mainAxisAlignment: MainAxisAlignment.end, children: actions),
+          ],
+        );
+      },
+    );
+  }
+}
+
 /// The heading of a list pane: what you are looking at, and how many.
 class ListPaneHeader extends StatelessWidget {
   const ListPaneHeader({

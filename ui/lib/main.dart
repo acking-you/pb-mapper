@@ -11,12 +11,10 @@ import 'package:pb_mapper_ui/src/views/service_registration_view.dart';
 import 'package:pb_mapper_ui/src/views/setup_wizard_view.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/views/configuration_view.dart';
-import 'package:pb_mapper_ui/src/views/log_view_page.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/app_typography.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
-import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
@@ -125,6 +123,16 @@ class _MyAppState extends State<MyApp> with WindowListener {
   WorkspacePane _pane = WorkspacePane.form;
   int _registerCount = 0;
   int _connectCount = 0;
+
+  /// Where the user has been, oldest first, so the sidebar's back entry can
+  /// return them to it. Only zone changes are recorded: switching a tab or a
+  /// pane stays on the same screen, and burying the way out under a stack of
+  /// tab changes is what a back button is expected not to do.
+  final List<_Location> _history = [];
+
+  /// Deep enough for any real path through five zones, shallow enough that a
+  /// user clicking between zones all afternoon cannot grow it without bound.
+  static const int _maxHistory = 16;
 
   static const String _lastSectionKey = 'last_section';
 
@@ -253,11 +261,62 @@ class _MyAppState extends State<MyApp> with WindowListener {
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
   }
 
+  /// Records where the user is so [_goBack] can return them to it.
+  ///
+  /// Home is the root rather than a stop along the way: arriving there means
+  /// the trail behind is spent, and keeping it would let back walk into zones
+  /// the user had already left.
+  void _pushHistory() {
+    if (_section == AppSection.home || _section == AppSection.setup) return;
+    final here = _Location(_section, _opsTab, _pane);
+    if (_history.isNotEmpty && _history.last.section == here.section) {
+      _history.removeLast();
+    }
+    _history.add(here);
+    if (_history.length > _maxHistory) _history.removeAt(0);
+  }
+
   void _goTo(AppSection section) {
+    if (section == _section) return;
+    if (section == AppSection.home) {
+      _history.clear();
+    } else {
+      _pushHistory();
+    }
     setState(() {
       // A workspace is entered to do something, so start on the form; the list
       // is one click away in the sidebar.
-      if (section != _section) _pane = WorkspacePane.form;
+      _pane = WorkspacePane.form;
+      _section = section;
+    });
+    unawaited(_persistSection(section));
+  }
+
+  /// Returns to the previous zone, or home once the trail runs out.
+  void _goBack() {
+    if (_history.isEmpty) {
+      _goTo(AppSection.home);
+      return;
+    }
+    final previous = _history.removeLast();
+    setState(() {
+      _section = previous.section;
+      _opsTab = previous.opsTab;
+      _pane = previous.pane;
+    });
+    unawaited(_persistSection(previous.section));
+  }
+
+  /// Swaps between registering and connecting.
+  ///
+  /// A swap, not a trip: the two are peers, so this replaces the current
+  /// workspace rather than stacking on top of it. Backing out of ops afterwards
+  /// lands on the workspace the user actually left, not on the one they
+  /// happened to open first.
+  void _switchWorkspace(AppSection section) {
+    if (section == _section || !section.isWorkspace) return;
+    setState(() {
+      _pane = WorkspacePane.form;
       _section = section;
     });
     unawaited(_persistSection(section));
@@ -266,6 +325,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
   /// Opens the guided server step. Used by "Configure" and by the pages that
   /// notice the server is not set yet.
   void _openServerSetup() {
+    _pushHistory();
     setState(() {
       _wizardMode = WizardMode.serverOnly;
       _section = AppSection.setup;
@@ -273,6 +333,9 @@ class _MyAppState extends State<MyApp> with WindowListener {
   }
 
   void _goToOpsTab(OpsTab tab) {
+    // Changing tab inside ops is not a trip: only the way in is recorded, so
+    // backing out returns to the workspace rather than to the previous tab.
+    if (_section != AppSection.ops) _pushHistory();
     setState(() {
       _section = AppSection.ops;
       _opsTab = tab;
@@ -334,7 +397,10 @@ class _MyAppState extends State<MyApp> with WindowListener {
         // a question the wizard answers better than a settings form.
         _openServerSetup();
       case 5:
-        _goToOpsTab(OpsTab.logs);
+        // Logs left ops for the workspaces. Show the ones for the workspace
+        // the user is already in, and pick register if they are in neither.
+        if (!_isWorkspace) _goTo(AppSection.register);
+        setState(() => _pane = WorkspacePane.logs);
       default:
         _goTo(AppSection.home);
     }
@@ -416,8 +482,6 @@ class _MyAppState extends State<MyApp> with WindowListener {
             return const StatusMonitoringView();
           case OpsTab.config:
             return const ConfigurationView();
-          case OpsTab.logs:
-            return const LogViewPage(showScaffold: false);
         }
       case AppSection.setup:
         return SetupWizardView(
@@ -471,102 +535,57 @@ class _MyAppState extends State<MyApp> with WindowListener {
       theme: _buildTheme(Brightness.light),
       darkTheme: _buildTheme(Brightness.dark),
       themeMode: _themeMode,
+      // Every colour in the tree is lerped between the two themes over this,
+      // so switching does not repaint the window in one frame. The stock 200ms
+      // is quick enough to read as a flash on a full-window surface change.
+      themeAnimationDuration: const Duration(milliseconds: 350),
+      themeAnimationCurve: Curves.easeInOutCubic,
       // Pass this context down: the State's own context sits above MaterialApp
       // and so outside the Localizations scope it installs.
-      home: Builder(
-        builder: (context) => ResponsiveLayout.isMobile(context)
-            ? _buildMobileApp(context)
-            : _buildDesktopApp(context),
-      ),
+      // One shell for both layouts. They used to be two separate trees picked
+      // by width, which is why crossing the breakpoint swapped one for the
+      // other in a single frame instead of moving between them.
+      home: Builder(builder: _buildApp),
     );
   }
 
-  Widget _buildMobileApp(BuildContext context) {
-    // Home and setup are full-screen on mobile: neither wants a back arrow,
-    // since setup has its own Skip and home is already the top level.
-    if (_section == AppSection.home || _section == AppSection.setup) {
-      return _getCurrentPageContent(context);
-    }
-
-    // Mobile mirrors the desktop zones: back out to home, and inside ops the
-    // three tabs sit at the bottom. A workspace has nothing to switch between.
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_getPageTitle(context) ?? context.l10n.appTitle),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          tooltip: context.l10n.home,
-          onPressed: () => _goTo(AppSection.home),
-        ),
-        actions: [
-          IconButton(
-            icon: Icon(
-              _themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode,
-            ),
-            onPressed: toggleTheme,
+  /// Language and theme. Both layouts show them, so they are built once.
+  List<Widget> _chromeActions(BuildContext context) {
+    final l10n = context.l10n;
+    return [
+      IconButton(
+        icon: Text(
+          LocaleController.labelFor(
+            _locale,
+            PlatformDispatcher.instance.locale,
           ),
-        ],
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        ),
+        iconSize: 18,
+        tooltip: l10n.toggleLanguage,
+        onPressed: toggleLanguage,
       ),
-      body: _getCurrentPageContent(context),
-      bottomNavigationBar: _isWorkspace
-          // Mobile has no sidebar, so the two workspace panes live here or the
-          // list would have no way in.
-          ? BottomNavigationBar(
-              type: BottomNavigationBarType.fixed,
-              selectedItemColor: Theme.of(context).colorScheme.primary,
-              unselectedItemColor: Colors.grey,
-              currentIndex: _pane.index,
-              onTap: (index) =>
-                  setState(() => _pane = WorkspacePane.values[index]),
-              items: [
-                BottomNavigationBarItem(
-                  icon: const Icon(Icons.add),
-                  label: _section == AppSection.register
-                      ? context.l10n.navNewRegister
-                      : context.l10n.navNewConnect,
-                ),
-                BottomNavigationBarItem(
-                  icon: Icon(
-                    _section == AppSection.register ? Icons.dns : Icons.cable,
-                  ),
-                  label: _section == AppSection.register
-                      ? context.l10n.navRegisteredList
-                      : context.l10n.navConnectionList,
-                ),
-              ],
-            )
-          : _section == AppSection.ops
-          ? BottomNavigationBar(
-              type: BottomNavigationBarType.fixed,
-              selectedItemColor: Theme.of(context).colorScheme.primary,
-              unselectedItemColor: Colors.grey,
-              currentIndex: _opsTab.index,
-              onTap: (index) => _goToOpsTab(OpsTab.values[index]),
-              items: [
-                BottomNavigationBarItem(
-                  icon: const Icon(Icons.monitor),
-                  label: context.l10n.navStatus,
-                ),
-                BottomNavigationBarItem(
-                  icon: const Icon(Icons.settings),
-                  label: context.l10n.navConfig,
-                ),
-                BottomNavigationBarItem(
-                  icon: const Icon(Icons.terminal),
-                  label: context.l10n.navLogs,
-                ),
-              ],
-            )
-          : null,
-    );
+      IconButton(
+        icon: Icon(
+          _themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode,
+        ),
+        iconSize: 18,
+        tooltip: l10n.toggleTheme,
+        onPressed: toggleTheme,
+      ),
+    ];
   }
 
-  Widget _buildDesktopApp(BuildContext context) {
+  Widget _buildApp(BuildContext context) {
     final l10n = context.l10n;
     return DesktopLayout(
       section: _section,
       opsTab: _opsTab,
+      // The app mark goes home from anywhere; the sidebar's top slot either
+      // swaps workspaces or backs out of the zone.
       onHome: () => _goTo(AppSection.home),
+      onBack: _goBack,
+      onSwitchWorkspace: _switchWorkspace,
       onOps: () => _goToOpsTab(_opsTab),
       onOpsTab: _goToOpsTab,
       pane: _pane,
@@ -575,30 +594,11 @@ class _MyAppState extends State<MyApp> with WindowListener {
           ? _registerCount
           : _connectCount,
       // The title bar names the window, not the page: it sits beside the app
-      // mark, and the content already carries its own heading.
+      // mark, and the content already carries its own heading. The compact
+      // toolbar is the one that names the page.
       title: l10n.appTitle,
-      titleBarActions: [
-        IconButton(
-          icon: Text(
-            LocaleController.labelFor(
-              _locale,
-              PlatformDispatcher.instance.locale,
-            ),
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-          ),
-          iconSize: 18,
-          tooltip: l10n.toggleLanguage,
-          onPressed: toggleLanguage,
-        ),
-        IconButton(
-          icon: Icon(
-            _themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode,
-          ),
-          iconSize: 18,
-          tooltip: l10n.toggleTheme,
-          onPressed: toggleTheme,
-        ),
-      ],
+      pageTitle: _getPageTitle(context),
+      titleBarActions: _chromeActions(context),
       child: ResponsiveScaffold(body: _getCurrentPageContent(context)),
     );
   }
@@ -614,11 +614,25 @@ class _MyAppState extends State<MyApp> with WindowListener {
         return switch (_opsTab) {
           OpsTab.status => l10n.pageStatus,
           OpsTab.config => l10n.pageConfig,
-          OpsTab.logs => l10n.pageLogs,
         };
       case AppSection.setup:
       case AppSection.home:
         return null;
     }
   }
+}
+
+
+/// A place the user has been, complete enough to put them back on it.
+///
+/// The zone alone would drop them on the default tab or the form, which reads
+/// as a different screen from the one they left — so the tab and the pane
+/// travel with it.
+@immutable
+class _Location {
+  const _Location(this.section, this.opsTab, this.pane);
+
+  final AppSection section;
+  final OpsTab opsTab;
+  final WorkspacePane pane;
 }

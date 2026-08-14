@@ -2,19 +2,36 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/common/app_destination.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/locale_controller.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
+import 'package:pb_mapper_ui/src/models/client_config.dart';
+import 'package:pb_mapper_ui/src/models/service_config.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
 import 'package:pb_mapper_ui/src/views/setup_wizard_view.dart';
+import 'package:pb_mapper_ui/src/widgets/app_bottom_nav.dart';
+import 'package:pb_mapper_ui/src/widgets/client_card.dart';
+import 'package:pb_mapper_ui/src/widgets/service_card.dart';
 
 /// The views read their strings from Localizations, so tests need the delegates
 /// installed. Pin a locale so assertions do not depend on the host language.
-Widget _wrap(Widget child, {Locale locale = const Locale('en')}) {
+///
+/// Pin the platform too. Widget tests report android, which the shell reads as
+/// a phone and answers with bottom navigation however wide the window is — so
+/// a test of the desktop shell that did not say otherwise would be testing the
+/// wrong layout. The phone-layout tests drive that from width instead, and so
+/// do not care what this says.
+Widget _wrap(
+  Widget child, {
+  Locale locale = const Locale('en'),
+  TargetPlatform platform = TargetPlatform.windows,
+}) {
   return MaterialApp(
+    theme: ThemeData(platform: platform),
     locale: locale,
     supportedLocales: LocaleController.supported,
     localizationsDelegates: const [
@@ -25,6 +42,13 @@ Widget _wrap(Widget child, {Locale locale = const Locale('en')}) {
     ],
     home: child,
   );
+}
+
+/// A window wide enough for the side rail. The platform comes from [_wrap].
+void _desktopWindow(WidgetTester tester) {
+  tester.view.physicalSize = const Size(1600, 1200);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.reset);
 }
 
 void main() {
@@ -118,9 +142,7 @@ void main() {
     // that from the State that builds MaterialApp looked up above the
     // Localizations scope, threw, and left an empty grey window. Analysis
     // cannot catch it, so build the shell and assert nothing threw.
-    tester.view.physicalSize = const Size(1600, 1200);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+    _desktopWindow(tester);
 
     await tester.pumpWidget(
       _wrap(
@@ -128,6 +150,8 @@ void main() {
           section: AppSection.register,
           opsTab: OpsTab.status,
           onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
           onOps: () {},
           onOpsTab: (_) {},
           pane: WorkspacePane.form,
@@ -143,9 +167,7 @@ void main() {
   });
 
   testWidgets('a workspace hides the other role', (tester) async {
-    tester.view.physicalSize = const Size(1600, 1200);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+    _desktopWindow(tester);
 
     await tester.pumpWidget(
       _wrap(
@@ -153,6 +175,8 @@ void main() {
           section: AppSection.register,
           opsTab: OpsTab.status,
           onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
           onOps: () {},
           onOpsTab: (_) {},
           pane: WorkspacePane.form,
@@ -163,21 +187,69 @@ void main() {
       ),
     );
 
-    // The whole point of the split: registering must not put the connect
-    // workspace, Status or Logs within reach.
+    // The point of the split: registering must not mix the connect
+    // workspace's own entries or Status into the sidebar. Swapping role is
+    // still one click, but it lives behind the switcher rather than sitting
+    // alongside this workspace's destinations.
     expect(find.text('New Connection'), findsNothing);
     expect(find.text('Connections'), findsNothing);
     expect(find.text('Status'), findsNothing);
-    expect(find.text('Logs'), findsNothing);
-    // Ops and the way home stay available.
+    // Logs are the exception, and deliberately so: why a registration did not
+    // come up is a question you have without leaving the workspace.
+    expect(find.text('Logs'), findsOneWidget);
+    // Ops stays available. Home does not: it moved to the app mark, so the
+    // sidebar no longer spends its top slot on a destination.
     expect(find.text('Operations'), findsOneWidget);
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Home'), findsNothing);
+    // And the bottom bar is not in the tree at all while the rail is up.
+    expect(find.byType(NavigationBar), findsNothing);
+  });
+
+  testWidgets('crossing the breakpoint moves the navigation', (tester) async {
+    _desktopWindow(tester);
+
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.register,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
+          title: 'pb-mapper',
+          child: const Text('body'),
+        ),
+      ),
+    );
+
+    // Wide: rail up, no bar.
+    expect(find.text('Operations'), findsOneWidget);
+    expect(find.byType(NavigationBar), findsNothing);
+
+    tester.view.physicalSize = const Size(900, 700);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+
+    // Mid-flight both are in the tree — one shrinking, one arriving. That is
+    // the difference between a transition and the frame-one swap this
+    // replaced, where two separate trees were picked by width.
+    expect(find.text('Operations'), findsOneWidget);
+    expect(find.byType(NavigationBar), findsOneWidget);
+
+    await tester.pumpAndSettle();
+
+    // Settled compact: bar only, and the rail is gone rather than merely
+    // clipped, so its destinations are not read out twice.
+    expect(find.text('Operations'), findsNothing);
+    expect(find.byType(NavigationBar), findsOneWidget);
   });
 
   testWidgets('a short page starts at the top of the panel', (tester) async {
-    tester.view.physicalSize = const Size(1600, 1200);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+    _desktopWindow(tester);
 
     // Regression: the desktop body was wrapped in Center, which pinned a short
     // page vertically as well as horizontally. A one-row list ended up floating
@@ -197,9 +269,7 @@ void main() {
   });
 
   testWidgets('a workspace offers its form and its list', (tester) async {
-    tester.view.physicalSize = const Size(1600, 1200);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+    _desktopWindow(tester);
 
     var picked = <WorkspacePane>[];
     await tester.pumpWidget(
@@ -208,6 +278,8 @@ void main() {
           section: AppSection.connect,
           opsTab: OpsTab.status,
           onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
           onOps: () {},
           onOpsTab: (_) {},
           pane: WorkspacePane.form,
@@ -228,10 +300,250 @@ void main() {
     expect(picked, [WorkspacePane.list]);
   });
 
-  testWidgets('ops shows its three tabs and no roles', (tester) async {
-    tester.view.physicalSize = const Size(1600, 1200);
+  testWidgets('a workspace reaches the logs without leaving', (tester) async {
+    _desktopWindow(tester);
+
+    // Logs lived only under ops, so reading why a registration failed meant
+    // leaving the workspace. They are a destination in both workspaces now —
+    // the same view ops shows, reached without the detour.
+    var picked = <WorkspacePane>[];
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.register,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: picked.add,
+          title: 'pb-mapper',
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Logs'));
+    expect(picked, [WorkspacePane.logs]);
+  });
+
+  testWidgets('the compact bar is Material 3 and shares the rail list', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(375, 812);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
+
+    var picked = <WorkspacePane>[];
+    await tester.pumpWidget(
+      _wrap(
+        Builder(
+          builder: (context) => Scaffold(
+            bottomNavigationBar: AppBottomNav(
+              destinations: destinationsFor(
+                context,
+                section: AppSection.register,
+                opsTab: OpsTab.status,
+                pane: WorkspacePane.form,
+                itemCount: 7,
+                onPane: picked.add,
+                onOpsTab: (_) {},
+              ),
+            ),
+          ),
+        ),
+        platform: TargetPlatform.android,
+      ),
+    );
+
+    // Material 3's bar, with its pill indicator and label, rather than the
+    // Material 2 one it replaced — that drew a bare tinted icon and painted
+    // everything unselected a hardcoded grey the theme could not reach.
+    expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.byType(BottomNavigationBar), findsNothing);
+
+    // The destinations come from the same list the rail draws, so the count
+    // reaches the bar. It used to be spelled out for the rail alone.
+    expect(find.text('New Service'), findsOneWidget);
+    expect(find.text('Registered (7)'), findsOneWidget);
+    expect(find.text('Logs'), findsOneWidget);
+
+    await tester.tap(find.text('Logs'));
+    expect(picked, [WorkspacePane.logs]);
+  });
+
+  testWidgets('a wide touch screen still navigates from the bottom', (
+    tester,
+  ) async {
+    // A phone on its side measures 800px and a tablet more than that, so width
+    // alone cannot tell one from a small desktop window — which is how the rail
+    // ended up running down the left edge of a phone. No touch platform gets a
+    // rail, however wide it measures.
+    tester.view.physicalSize = const Size(1600, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.register,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
+          title: 'pb-mapper',
+          child: const Text('body'),
+        ),
+        platform: TargetPlatform.android,
+      ),
+    );
+
+    // Navigation is along the bottom, and the rail is not in the tree at all.
+    // "Operations" is the tell: it is a rail-only entry, since it leaves for
+    // another zone rather than switching what this one shows.
+    expect(find.text('body'), findsOneWidget);
+    expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.text('Operations'), findsNothing);
+  });
+
+  testWidgets('a narrow desktop window drops the rail too', (tester) async {
+    // Below the tablet breakpoint the rail had no room for its labels and
+    // shrank to a 76px strip of unlabelled icons. A labelled bar along the
+    // bottom is the better answer at that width.
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.register,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
+          title: 'pb-mapper',
+          child: const Text('body'),
+        ),
+      ),
+    );
+
+    expect(find.text('body'), findsOneWidget);
+    expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.text('Operations'), findsNothing);
+  });
+
+  testWidgets('a workspace swaps roles from its top slot', (tester) async {
+    _desktopWindow(tester);
+
+    // The slot used to say "Home", so swapping role meant leaving to the
+    // landing page and picking again. The two workspaces are peers, so the
+    // slot names the one you are in and swaps straight to the other.
+    var swapped = <AppSection>[];
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.register,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: swapped.add,
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
+          title: 'pb-mapper',
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    // Closed, it names the current workspace and nothing else: the other role
+    // is behind the menu rather than sitting in the sidebar.
+    expect(find.text('Connect'), findsNothing);
+
+    await tester.tap(find.text('Register'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Connect'), findsOneWidget);
+    await tester.tap(find.text('Connect'));
+    await tester.pumpAndSettle();
+
+    expect(swapped, [AppSection.connect]);
+  });
+
+  testWidgets('ops backs out instead of going home', (tester) async {
+    _desktopWindow(tester);
+
+    // Ops is reached from a workspace far more often than from home, so the
+    // way out returns to wherever the detour started.
+    var backs = 0;
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.ops,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onBack: () => backs++,
+          onSwitchWorkspace: (_) {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
+          title: 'pb-mapper',
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    expect(find.text('Home'), findsNothing);
+    expect(find.text('Back'), findsOneWidget);
+
+    await tester.tap(find.text('Back'));
+    expect(backs, 1);
+  });
+
+  testWidgets('the app mark is the way home', (tester) async {
+    _desktopWindow(tester);
+
+    // Home stopped being a sidebar entry, so it needs a place that does not
+    // move between zones. The mark is the only such spot.
+    var homes = 0;
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.ops,
+          opsTab: OpsTab.status,
+          onHome: () => homes++,
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
+          title: 'pb-mapper',
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('pb-mapper'));
+    await tester.pump();
+    expect(homes, 1);
+  });
+
+  testWidgets('ops shows its three tabs and no roles', (tester) async {
+    _desktopWindow(tester);
 
     var picked = <OpsTab>[];
     await tester.pumpWidget(
@@ -240,6 +552,8 @@ void main() {
           section: AppSection.ops,
           opsTab: OpsTab.config,
           onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
           onOps: () {},
           onOpsTab: picked.add,
           pane: WorkspacePane.form,
@@ -252,18 +566,18 @@ void main() {
 
     expect(find.text('Status'), findsOneWidget);
     expect(find.text('Config'), findsOneWidget);
-    expect(find.text('Logs'), findsOneWidget);
     expect(find.text('New Service'), findsNothing);
     expect(find.text('New Connection'), findsNothing);
+    // Logs moved into the workspaces. Keeping a copy here would be a second
+    // door onto the same view, one zone away from where the question is asked.
+    expect(find.text('Logs'), findsNothing);
 
-    await tester.tap(find.text('Logs'));
-    expect(picked, [OpsTab.logs]);
+    await tester.tap(find.text('Status'));
+    expect(picked, [OpsTab.status]);
   });
 
   testWidgets('home has no sidebar', (tester) async {
-    tester.view.physicalSize = const Size(1600, 1200);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+    _desktopWindow(tester);
 
     await tester.pumpWidget(
       _wrap(
@@ -271,6 +585,8 @@ void main() {
           section: AppSection.home,
           opsTab: OpsTab.status,
           onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
           onOps: () {},
           onOpsTab: (_) {},
           pane: WorkspacePane.form,
@@ -285,9 +601,7 @@ void main() {
   });
 
   testWidgets('setup has no sidebar', (tester) async {
-    tester.view.physicalSize = const Size(1600, 1200);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+    _desktopWindow(tester);
 
     await tester.pumpWidget(
       _wrap(
@@ -295,6 +609,8 @@ void main() {
           section: AppSection.setup,
           opsTab: OpsTab.status,
           onHome: () {},
+          onBack: () {},
+          onSwitchWorkspace: (_) {},
           onOps: () {},
           onOpsTab: (_) {},
           pane: WorkspacePane.form,
@@ -307,6 +623,84 @@ void main() {
     // A guided flow must not offer a way to wander off mid-setup.
     expect(find.text('Home'), findsNothing);
     expect(find.text('Operations'), findsNothing);
+  });
+
+  /// A register row with every fact turned on, which is the widest it gets.
+  Widget serviceRow() => ServiceCard(
+    config: ServiceConfig(
+      serviceKey: 'home-ubuntu',
+      localAddress: '127.0.0.1:8080',
+      protocol: 'TCP',
+      enableEncryption: true,
+      enableKeepAlive: true,
+      status: ServiceStatus.running,
+      updatedAt: DateTime.now().subtract(const Duration(hours: 3)),
+      createdAt: DateTime.now().subtract(const Duration(days: 2)),
+    ),
+  );
+
+  Widget clientRow() => ClientCard(
+    config: ClientConfig(
+      serviceKey: 'codex-remote',
+      localAddress: '127.0.0.1:9090',
+      protocol: 'TCP',
+      enableKeepAlive: true,
+      status: ClientStatus.running,
+      updatedAt: DateTime.now().subtract(const Duration(hours: 3)),
+      createdAt: DateTime.now().subtract(const Duration(days: 2)),
+    ),
+  );
+
+  testWidgets('list rows fit a phone', (tester) async {
+    // The row was drawn against a 1200px content panel: a fixed 88px action,
+    // three icon buttons, and a row of facts that are sized to their text and
+    // cannot shrink. On a phone the facts had under 100px to sit in and the row
+    // overflowed by 317px — the striped bar, on the first screen a phone user
+    // sees after registering anything.
+    tester.view.physicalSize = const Size(375, 812);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    for (final row in [serviceRow(), clientRow()]) {
+      await tester.pumpWidget(_wrap(Scaffold(body: row)));
+      expect(tester.takeException(), isNull);
+    }
+  });
+
+  testWidgets('a phone row puts its actions under the name', (tester) async {
+    tester.view.physicalSize = const Size(375, 812);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    // In a scroll view, as the list pane renders it: the height is unbounded
+    // there, and a row that only behaves under a bounded parent is not tested.
+    await tester.pumpWidget(
+      _wrap(Scaffold(body: SingleChildScrollView(child: serviceRow()))),
+    );
+
+    // Stacked, not merely un-overflowed: the name keeps a readable width
+    // because the actions moved to their own line beneath it.
+    final name = tester.getRect(find.text('home-ubuntu'));
+    final action = tester.getRect(find.text('Stop'));
+    expect(action.top, greaterThan(name.bottom));
+    expect(name.width, greaterThan(120));
+  });
+
+  testWidgets('a wide row keeps its actions on one line', (tester) async {
+    _desktopWindow(tester);
+
+    // The stacking is driven by the width the row is given, so the desktop
+    // layout has to be checked too or the fix would quietly cost a line there.
+    // In a scroll view, as the list pane renders it: the height is unbounded
+    // there, and a row that only behaves under a bounded parent is not tested.
+    await tester.pumpWidget(
+      _wrap(Scaffold(body: SingleChildScrollView(child: serviceRow()))),
+    );
+
+    final name = tester.getRect(find.text('home-ubuntu'));
+    final action = tester.getRect(find.text('Stop'));
+    expect(action.left, greaterThan(name.right));
+    expect(action.top, lessThan(name.bottom));
   });
 
   testWidgets('wizard opens on step 1 and can be skipped', (tester) async {

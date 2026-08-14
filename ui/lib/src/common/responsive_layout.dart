@@ -8,6 +8,32 @@ class ResponsiveLayout {
   static bool isMobile(BuildContext context) =>
       MediaQuery.of(context).size.width < mobileBreakpoint;
 
+  /// A phone or a tablet, whatever the window happens to measure.
+  ///
+  /// Width alone cannot tell a phone in landscape from a small desktop window:
+  /// both are around 800px, and only one of them should ever grow a side rail.
+  ///
+  /// Read from the theme rather than [defaultTargetPlatform] directly. That is
+  /// the same source Flutter's own adaptive widgets use, and unlike the debug
+  /// override it can be set for a subtree — which is how a test says which
+  /// platform it means.
+  static bool isTouchPlatform(BuildContext context) {
+    final platform = Theme.of(context).platform;
+    return platform == TargetPlatform.android || platform == TargetPlatform.iOS;
+  }
+
+  /// Whether navigation belongs at the bottom of the screen rather than in a
+  /// rail down the left edge.
+  ///
+  /// Always true on a phone or tablet: no touch platform puts its navigation
+  /// on the left, and a landscape phone measures wide enough to grow one.
+  /// On desktop it follows the window, because below [tabletBreakpoint] the
+  /// rail had no room for its labels and shrank to a 76px strip of unlabelled
+  /// icons — which is a worse answer than a labelled bar along the bottom.
+  static bool usesBottomNav(BuildContext context) =>
+      isTouchPlatform(context) ||
+      MediaQuery.of(context).size.width < tabletBreakpoint;
+
   static bool isTablet(BuildContext context) =>
       MediaQuery.of(context).size.width >= mobileBreakpoint &&
       MediaQuery.of(context).size.width < tabletBreakpoint;

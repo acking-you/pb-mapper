@@ -16,6 +16,8 @@
   "toggleTheme": "切换主题",
   "toggleLanguage": "切换语言",
   "home": "首页",
+  "back": "返回",
+  "switchWorkspace": "切换工作区",
   "quickStart": "快速开始",
   "quickStartStep1": "填好服务器地址",
   "quickStartStep1Action": "去设置",
@@ -329,5 +331,8 @@
   "updatedAt": "更新于 {time}",
   "noServicesHint": "在“新建服务”中添加",
   "serviceExists": "服务 \"{key}\" 已存在",
-  "keyAutoSelected": "已选用状态页的 \"{key}\""
+  "keyAutoSelected": "已选用状态页的 \"{key}\"",
+  "registeringInProgress": "注册中…",
+  "serviceUpdated": "服务「{key}」已更新",
+  "serviceConfigDeleted": "服务「{key}」的配置已删除"
 }
