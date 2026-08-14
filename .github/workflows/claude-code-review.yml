@@ -11,7 +11,6 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
-  id-token: write
 
 jobs:
   review:
@@ -21,7 +20,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Check Claude gateway configuration
@@ -44,9 +43,12 @@ jobs:
       - name: Check out pull request
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          # The focused reviewer compares against origin/<base>; make that ref
+          # available up front so Claude never spends turns trying to fetch it.
+          fetch-depth: 0
 
       - name: Run Claude review
+        id: claude-review
         # v1.0.191; pin the action because this job receives an API credential.
         uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126
         env:
@@ -54,6 +56,11 @@ jobs:
           ANTHROPIC_CUSTOM_HEADERS: ${{ secrets.ANTHROPIC_CUSTOM_HEADERS }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Use the job-scoped token so a PR that updates this workflow can
+          # still be reviewed. The action's OIDC app-token exchange otherwise
+          # treats a workflow mismatch as a successful skip.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          show_full_output: true
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -61,6 +68,25 @@ jobs:
             Review this pull request. Read AGENTS.md, CLAUDE.md, and other
             repository guidance first when present. Review only the PR changes
             and directly affected code. Do not modify files or push commits.
+
+            SPEED AND SCOPE ARE HARD REQUIREMENTS:
+            - Finish in one focused pass. Do not perform broad repository
+              exploration or repeatedly revisit files.
+            - Start with diff statistics and name/status only, using
+              `origin/${{ github.event.pull_request.base.ref }}...HEAD` as the
+              comparison range. That ref is already available: never run
+              `git fetch`, `git log`, `git branch`, or `git merge-base`. Never
+              load or print the complete PR diff.
+            - Select at most 10 high-risk modified or added files based on the
+              PR purpose and diff statistics. Inspect only their changed hunks
+              with path-scoped `git diff` commands.
+            - Skip the bodies of deleted legacy files, generated files,
+              mechanical changes, and unrelated tests. Follow a definition or
+              caller only when a changed hunk cannot be evaluated without it,
+              and stop after the nearest relevant dependency.
+            - Do not spend turns on progress narration or speculative findings.
+              If the review context is becoming large, stop investigating and
+              report only findings already confirmed from changed lines.
 
             Prioritize actionable findings over summaries or style preferences:
             - correctness bugs and behavioral regressions
@@ -77,6 +103,17 @@ jobs:
             short approval-style summary. Post review text only as GitHub PR
             comments.
           claude_args: |
-            --model "${{ vars.CLAUDE_MODEL || 'claude-sonnet-4-6' }}"
-            --max-turns 30
-            --allowedTools "Read,Glob,Grep,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --model "${{ vars.CLAUDE_MODEL || 'claude-sonnet-5' }}"
+            --max-turns 100
+            --allowedTools "Read,Glob,Grep,mcp__github_inline_comment__create_inline_comment,Bash(git diff:*),Bash(gh pr comment:*),Bash(gh pr view:*)"
+
+      - name: Require completed Claude review
+        if: always()
+        shell: bash
+        env:
+          REVIEW_CONCLUSION: ${{ steps.claude-review.outputs.conclusion }}
+        run: |
+          if [[ "$REVIEW_CONCLUSION" != "success" ]]; then
+            echo "::error::Claude review did not complete successfully (conclusion: ${REVIEW_CONCLUSION:-missing})."
+            exit 1
+          fi
