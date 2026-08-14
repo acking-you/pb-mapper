@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
 
 class ServiceCard extends StatefulWidget {
@@ -70,16 +71,16 @@ class _ServiceCardState extends State<ServiceCard> {
     }
   }
 
-  String _getStatusText() {
+  String _getStatusText(BuildContext context) {
     switch (_config.status) {
       case ServiceStatus.running:
-        return 'Running';
+        return context.l10n.statusRunning;
       case ServiceStatus.retrying:
-        return 'Retrying Connection';
+        return context.l10n.statusRetrying;
       case ServiceStatus.failed:
-        return 'Connection Failed';
+        return context.l10n.statusFailed;
       case ServiceStatus.stopped:
-        return 'Stopped';
+        return context.l10n.statusStopped;
     }
   }
 
@@ -95,7 +96,7 @@ class _ServiceCardState extends State<ServiceCard> {
       setState(() {
         _config = _config.copyWith(
           status: ServiceStatus.stopped,
-          statusMessage: 'Stopping...',
+          statusMessage: context.l10n.stopping,
         );
       });
     } else {
@@ -104,7 +105,7 @@ class _ServiceCardState extends State<ServiceCard> {
       setState(() {
         _config = _config.copyWith(
           status: ServiceStatus.retrying,
-          statusMessage: 'Starting...',
+          statusMessage: context.l10n.starting,
         );
       });
     }
@@ -165,8 +166,8 @@ class _ServiceCardState extends State<ServiceCard> {
                       tooltip:
                           _config.status == ServiceStatus.running ||
                               _config.status == ServiceStatus.retrying
-                          ? 'Stop Service'
-                          : 'Start Service',
+                          ? context.l10n.stopService
+                          : context.l10n.startService,
                       color:
                           _config.status == ServiceStatus.running ||
                               _config.status == ServiceStatus.retrying
@@ -177,13 +178,13 @@ class _ServiceCardState extends State<ServiceCard> {
                     IconButton(
                       onPressed: widget.onRefresh,
                       icon: const Icon(Icons.refresh, size: 20),
-                      tooltip: 'Refresh Status',
+                      tooltip: context.l10n.refreshStatus,
                     ),
                     // Edit button
                     IconButton(
                       onPressed: widget.onEdit,
                       icon: const Icon(Icons.edit, size: 20),
-                      tooltip: 'Edit Configuration',
+                      tooltip: context.l10n.editConfig,
                     ),
                     // Delete button (delete config permanently)
                     IconButton(
@@ -193,7 +194,7 @@ class _ServiceCardState extends State<ServiceCard> {
                         size: 20,
                         color: Colors.red,
                       ),
-                      tooltip: 'Delete Configuration',
+                      tooltip: context.l10n.deleteConfig,
                     ),
                   ],
                 ),
@@ -222,7 +223,7 @@ class _ServiceCardState extends State<ServiceCard> {
                   const SizedBox(width: 8),
                   _buildDetailChip(
                     icon: Icons.lock,
-                    label: 'Encrypted',
+                    label: context.l10n.encrypted,
                     color: Colors.orange,
                   ),
                 ],
@@ -240,7 +241,7 @@ class _ServiceCardState extends State<ServiceCard> {
                   child: Text(
                     _config.statusMessage.isNotEmpty
                         ? _config.statusMessage
-                        : _getStatusText(),
+                        : _getStatusText(context),
                     style: Theme.of(
                       context,
                     ).textTheme.bodySmall?.copyWith(color: _getStatusColor()),
@@ -274,8 +275,8 @@ class _ServiceCardState extends State<ServiceCard> {
                         : Text(
                             _config.status == ServiceStatus.running ||
                                     _config.status == ServiceStatus.retrying
-                                ? 'Stop'
-                                : 'Start',
+                                ? context.l10n.stop
+                                : context.l10n.start,
                             style: const TextStyle(fontSize: 12),
                           ),
                   ),
@@ -287,7 +288,9 @@ class _ServiceCardState extends State<ServiceCard> {
             if (_config.updatedAt != _config.createdAt) ...[
               const SizedBox(height: 8),
               Text(
-                'Updated: ${_formatDateTime(_config.updatedAt)}',
+                context.l10n.updatedAt(
+                  _formatDateTime(context, _config.updatedAt),
+                ),
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Colors.grey,
                   fontSize: 11,
@@ -330,18 +333,18 @@ class _ServiceCardState extends State<ServiceCard> {
     );
   }
 
-  String _formatDateTime(DateTime dateTime) {
-    final now = DateTime.now();
-    final difference = now.difference(dateTime);
+  String _formatDateTime(BuildContext context, DateTime dateTime) {
+    final l10n = context.l10n;
+    final difference = DateTime.now().difference(dateTime);
 
     if (difference.inMinutes < 1) {
-      return 'Just now';
+      return l10n.justNow;
     } else if (difference.inHours < 1) {
-      return '${difference.inMinutes}m ago';
+      return l10n.minutesAgo(difference.inMinutes);
     } else if (difference.inDays < 1) {
-      return '${difference.inHours}h ago';
+      return l10n.hoursAgo(difference.inHours);
     } else {
-      return '${difference.inDays}d ago';
+      return l10n.daysAgo(difference.inDays);
     }
   }
 }

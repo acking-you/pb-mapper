@@ -18,6 +18,7 @@ import 'package:pb_mapper_ui/src/common/app_typography.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
+import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -118,6 +119,12 @@ class _MyAppState extends State<MyApp> with WindowListener {
   AppSection _section = AppSection.home;
   OpsTab _opsTab = OpsTab.status;
   WizardMode _wizardMode = WizardMode.firstRun;
+
+  /// Which half of a workspace is showing, and how many items its list holds.
+  /// Both workspaces share this: entering one always starts on its form.
+  WorkspacePane _pane = WorkspacePane.form;
+  int _registerCount = 0;
+  int _connectCount = 0;
 
   static const String _lastSectionKey = 'last_section';
 
@@ -238,13 +245,21 @@ class _MyAppState extends State<MyApp> with WindowListener {
     exit(0);
   }
 
+  bool get _isWorkspace =>
+      _section == AppSection.register || _section == AppSection.connect;
+
   bool _isDesktop() {
     return !kIsWeb &&
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
   }
 
   void _goTo(AppSection section) {
-    setState(() => _section = section);
+    setState(() {
+      // A workspace is entered to do something, so start on the form; the list
+      // is one click away in the sidebar.
+      if (section != _section) _pane = WorkspacePane.form;
+      _section = section;
+    });
     unawaited(_persistSection(section));
   }
 
@@ -378,9 +393,23 @@ class _MyAppState extends State<MyApp> with WindowListener {
   Widget _getCurrentPageContent(BuildContext context) {
     switch (_section) {
       case AppSection.register:
-        return const ServiceRegistrationView();
+        return ServiceRegistrationView(
+          pane: _pane,
+          onCount: (count) {
+            if (count != _registerCount) {
+              setState(() => _registerCount = count);
+            }
+          },
+        );
       case AppSection.connect:
-        return const ClientConnectionView();
+        return ClientConnectionView(
+          pane: _pane,
+          onCount: (count) {
+            if (count != _connectCount) {
+              setState(() => _connectCount = count);
+            }
+          },
+        );
       case AppSection.ops:
         switch (_opsTab) {
           case OpsTab.status:
@@ -479,7 +508,34 @@ class _MyAppState extends State<MyApp> with WindowListener {
         ],
       ),
       body: _getCurrentPageContent(context),
-      bottomNavigationBar: _section == AppSection.ops
+      bottomNavigationBar: _isWorkspace
+          // Mobile has no sidebar, so the two workspace panes live here or the
+          // list would have no way in.
+          ? BottomNavigationBar(
+              type: BottomNavigationBarType.fixed,
+              selectedItemColor: Theme.of(context).colorScheme.primary,
+              unselectedItemColor: Colors.grey,
+              currentIndex: _pane.index,
+              onTap: (index) =>
+                  setState(() => _pane = WorkspacePane.values[index]),
+              items: [
+                BottomNavigationBarItem(
+                  icon: const Icon(Icons.add),
+                  label: _section == AppSection.register
+                      ? context.l10n.navNewRegister
+                      : context.l10n.navNewConnect,
+                ),
+                BottomNavigationBarItem(
+                  icon: Icon(
+                    _section == AppSection.register ? Icons.dns : Icons.cable,
+                  ),
+                  label: _section == AppSection.register
+                      ? context.l10n.navRegisteredList
+                      : context.l10n.navConnectionList,
+                ),
+              ],
+            )
+          : _section == AppSection.ops
           ? BottomNavigationBar(
               type: BottomNavigationBarType.fixed,
               selectedItemColor: Theme.of(context).colorScheme.primary,
@@ -513,6 +569,11 @@ class _MyAppState extends State<MyApp> with WindowListener {
       onHome: () => _goTo(AppSection.home),
       onOps: () => _goToOpsTab(_opsTab),
       onOpsTab: _goToOpsTab,
+      pane: _pane,
+      onPane: (pane) => setState(() => _pane = pane),
+      itemCount: _section == AppSection.register
+          ? _registerCount
+          : _connectCount,
       // The title bar names the window, not the page: it sits beside the app
       // mark, and the content already carries its own heading.
       title: l10n.appTitle,

@@ -95,7 +95,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
     // Show a snackbar to inform user about the action
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Navigated to Connect with service key "$serviceKey"'),
+        content: Text(context.l10n.navigatedToConnect(serviceKey)),
         duration: const Duration(seconds: 2),
         backgroundColor: Colors.green,
       ),
@@ -151,7 +151,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
             Row(
               children: [
                 Text(
-                  'Server Status',
+                  context.l10n.serverStatusTitle,
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontSize: ResponsiveLayout.getFontSize(context, 22),
                     fontWeight: FontWeight.bold,
@@ -212,7 +212,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
         ),
         const SizedBox(width: 12),
         Text(
-          isAvailable ? 'Available' : 'Unavailable',
+          isAvailable ? context.l10n.statusAvailable : context.l10n.statusUnavailable,
           style: TextStyle(
             color: isAvailable ? availableColor : unavailableColor,
             fontWeight: FontWeight.bold,
@@ -228,14 +228,14 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildDetailRow(
-          'Registered Services',
+          context.l10n.registeredServicesTitle,
           status.registeredServices.length.toString(),
         ),
         const SizedBox(height: 16),
         if (status.serverMap.isNotEmpty)
           ExpansionTile(
             title: Text(
-              'Server Map Details',
+              context.l10n.serverMapDetails,
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
             children: [
@@ -266,7 +266,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
             status.idleConnections.isNotEmpty)
           ExpansionTile(
             title: Text(
-              'Connection Details',
+              context.l10n.connectionDetails,
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
             children: [
@@ -285,7 +285,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                   children: [
                     if (status.activeConnections.isNotEmpty) ...[
                       Text(
-                        'Active:',
+                        context.l10n.connectionsActive,
                         style: TextStyle(
                           fontWeight: FontWeight.bold,
                           fontSize: 14,
@@ -305,7 +305,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                     ],
                     if (status.idleConnections.isNotEmpty) ...[
                       Text(
-                        'Idle:',
+                        context.l10n.connectionsIdle,
                         style: TextStyle(
                           fontWeight: FontWeight.bold,
                           fontSize: 14,
@@ -374,7 +374,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Registered Services',
+              context.l10n.registeredServicesTitle,
               style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                 fontSize: ResponsiveLayout.getFontSize(context, 20),
                 fontWeight: FontWeight.bold,
@@ -401,7 +401,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        'No services registered',
+                        context.l10n.noServicesRegistered,
                         style: TextStyle(
                           fontSize: 16,
                           color: Colors.grey.shade600,
@@ -442,7 +442,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
                         ),
                       ),
                       subtitle: Text(
-                        'Tap to connect to this service',
+                        context.l10n.tapToConnect,
                         style: TextStyle(fontSize: 14, color: availableColor),
                       ),
                       trailing: Icon(

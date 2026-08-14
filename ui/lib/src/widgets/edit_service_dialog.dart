@@ -42,7 +42,7 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Edit service'),
+      title: Text(context.l10n.editService),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -89,7 +89,7 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
               onChanged: (value) => setState(() => _enableEncryption = value),
             ),
             SwitchListTile(
-              title: const Text('Enable Keep-Alive'),
+              title: Text(context.l10n.enableKeepAlive),
               value: _enableKeepAlive,
               onChanged: (value) => setState(() => _enableKeepAlive = value),
             ),
@@ -101,7 +101,7 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: Text(context.l10n.cancel),
         ),
-        ElevatedButton(onPressed: _saveChanges, child: const Text('Save')),
+        ElevatedButton(onPressed: _saveChanges, child: Text(context.l10n.save)),
       ],
     );
   }
@@ -110,9 +110,7 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
     if (_serviceKeyController.text.isEmpty ||
         _localAddressController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Service key and local address are required'),
-        ),
+        SnackBar(content: Text(context.l10n.keyAndAddressRequired)),
       );
       return;
     }

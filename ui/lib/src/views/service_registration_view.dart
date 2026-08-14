@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
@@ -7,7 +8,19 @@ import 'package:pb_mapper_ui/src/widgets/service_card.dart';
 import 'package:pb_mapper_ui/src/widgets/edit_service_dialog.dart';
 
 class ServiceRegistrationView extends StatefulWidget {
-  const ServiceRegistrationView({super.key});
+  const ServiceRegistrationView({
+    super.key,
+    this.pane = WorkspacePane.form,
+    this.onCount,
+  });
+
+  /// The form or the list of what is already registered. They are separate
+  /// sidebar destinations, so only one is built at a time.
+  final WorkspacePane pane;
+
+  /// Reports how many services exist, so the sidebar entry can show the count
+  /// without fetching the list a second time.
+  final ValueChanged<int>? onCount;
 
   @override
   State<ServiceRegistrationView> createState() =>
@@ -84,6 +97,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     setState(() {
       _serviceConfigs = configs;
     });
+    widget.onCount?.call(configs.length);
   }
 
   ServiceStatus _parseStatus(String statusString) {
@@ -111,7 +125,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     if (_serviceKeyController.text.isEmpty) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Service key is required')));
+      ).showSnackBar(SnackBar(content: Text(context.l10n.serviceKeyRequired)));
       return;
     }
 
@@ -166,7 +180,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
           ScaffoldMessenger.of(
             context,
-          ).showSnackBar(SnackBar(content: Text('Registering $serviceKey...')));
+          ).showSnackBar(SnackBar(content: Text(context.l10n.registering(serviceKey))));
 
           // Poll for registration status
           _pollRegistrationStatus(serviceKey);
@@ -205,7 +219,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Service "$serviceKey" registered successfully'),
+              content: Text(context.l10n.registered(serviceKey)),
             ),
           );
         }
@@ -219,7 +233,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       setState(() => _isRegistering = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Registration timeout for "$serviceKey"'),
+          content: Text(context.l10n.registerTimeout(serviceKey)),
           backgroundColor: Colors.red,
         ),
       );
@@ -307,7 +321,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Testing new configuration...')),
+          SnackBar(content: Text(context.l10n.testingConfig)),
         );
       }
 
@@ -417,7 +431,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Failed to connect with new configuration for "${newConfig.serviceKey}"',
+            context.l10n.reconnectFailed(newConfig.serviceKey),
           ),
           backgroundColor: Colors.red,
         ),
@@ -431,7 +445,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       builder: (context) => AlertDialog(
         title: Text(context.l10n.deleteService),
         content: Text(
-          'Are you sure you want to delete "${config.serviceKey}"?',
+          context.l10n.deleteServiceConfirm(config.serviceKey),
         ),
         actions: [
           TextButton(
@@ -521,7 +535,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Refreshing status for "${config.serviceKey}"')),
+        SnackBar(content: Text(context.l10n.refreshingStatus(config.serviceKey))),
       );
     }
   }
@@ -534,14 +548,14 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Card(
+            if (widget.pane == WorkspacePane.form) Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Register Service',
+                      context.l10n.registerTitle,
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 16),
@@ -568,7 +582,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                       controller: _serviceKeyController,
                       decoration: InputDecoration(
                         labelText: context.l10n.serviceKey,
-                        hintText: 'unique-service-key',
+                        hintText: context.l10n.serviceKeyHint,
                         border: OutlineInputBorder(),
                         prefixIcon: Icon(Icons.vpn_key),
                       ),
@@ -613,9 +627,9 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                               crossAxisAlignment:
                                   CrossAxisAlignment.start,
                               children: [
-                                const Text(
-                                  'Server Address',
-                                  style: TextStyle(
+                                Text(
+                                  context.l10n.serverAddress,
+                                  style: const TextStyle(
                                     fontSize: 12,
                                     color: Colors.grey,
                                   ),
@@ -632,9 +646,9 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                             onPressed: () {
                               AppNavigationManager.navigateToConfigPage();
                             },
-                            child: const Text(
-                              'Configure in Settings',
-                              style: TextStyle(fontSize: 12),
+                            child: Text(
+                              context.l10n.quickStartStep1Action,
+                              style: const TextStyle(fontSize: 12),
                             ),
                           ),
                         ],
@@ -644,8 +658,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            SizedBox(
+            if (widget.pane == WorkspacePane.form) const SizedBox(height: 16),
+            if (widget.pane == WorkspacePane.form) SizedBox(
               height: 48,
               width: double.infinity,
               child: ElevatedButton(
@@ -673,14 +687,41 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                           ),
                         ],
                       )
-                    : const Text(
-                        'Register & Start',
+                    : Text(
+                        context.l10n.registerAction,
                         style: TextStyle(fontSize: 16),
                       ),
               ),
             ),
-            const SizedBox(height: 24),
-            if (_serviceConfigs.isNotEmpty) ...[
+            // The list is its own destination now, so an empty one has to say
+            // so rather than render nothing at all.
+            if (widget.pane == WorkspacePane.list &&
+                _serviceConfigs.isEmpty) ...[
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    children: [
+                      Icon(Icons.dns_outlined, size: 48, color: Colors.grey[400]),
+                      const SizedBox(height: 16),
+                      Text(
+                        context.l10n.noServicesRegistered,
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(color: Colors.grey[600]),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        context.l10n.noServicesHint,
+                        style: Theme.of(context).textTheme.bodySmall
+                            ?.copyWith(color: Colors.grey[500]),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            if (widget.pane == WorkspacePane.list &&
+                _serviceConfigs.isNotEmpty) ...[
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16.0),
@@ -693,7 +734,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              'Registered Services (${_serviceConfigs.length})',
+                              context.l10n.registeredList(_serviceConfigs.length),
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context)
                                   .textTheme

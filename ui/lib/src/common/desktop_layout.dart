@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
+import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/widgets/app_window_title_bar.dart';
 
 /// The desktop shell: a title bar across the top, a sidebar, and the content.
@@ -23,6 +24,11 @@ class DesktopLayout extends StatelessWidget {
   final VoidCallback onOps;
   final ValueChanged<OpsTab> onOpsTab;
 
+  /// Which half of a workspace is showing, and how many items its list holds.
+  final WorkspacePane pane;
+  final ValueChanged<WorkspacePane> onPane;
+  final int itemCount;
+
   const DesktopLayout({
     super.key,
     required this.section,
@@ -31,6 +37,9 @@ class DesktopLayout extends StatelessWidget {
     required this.onHome,
     required this.onOps,
     required this.onOpsTab,
+    required this.pane,
+    required this.onPane,
+    this.itemCount = 0,
     this.title,
     this.titleBarActions = const [],
   });
@@ -69,6 +78,9 @@ class DesktopLayout extends StatelessWidget {
                       onHome: onHome,
                       onOps: onOps,
                       onOpsTab: onOpsTab,
+                      pane: pane,
+                      onPane: onPane,
+                      itemCount: itemCount,
                     ),
                   ),
                 Expanded(
@@ -114,6 +126,9 @@ class _Sidebar extends StatelessWidget {
     required this.onHome,
     required this.onOps,
     required this.onOpsTab,
+    required this.pane,
+    required this.onPane,
+    required this.itemCount,
   });
 
   final bool expanded;
@@ -122,6 +137,9 @@ class _Sidebar extends StatelessWidget {
   final VoidCallback onHome;
   final VoidCallback onOps;
   final ValueChanged<OpsTab> onOpsTab;
+  final WorkspacePane pane;
+  final ValueChanged<WorkspacePane> onPane;
+  final int itemCount;
 
   @override
   Widget build(BuildContext context) {
@@ -140,27 +158,48 @@ class _Sidebar extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // In a workspace this single item names the job you are in. In
-              // ops it becomes the three ops tabs.
-              if (section == AppSection.register)
+              // A workspace has two destinations: the form that creates
+              // something, and what already exists. Stacking them made the
+              // list something you had to scroll to find. Ops keeps its tabs.
+              if (section == AppSection.register) ...[
                 _NavItem(
-                  icon: Icons.upload_rounded,
-                  selectedIcon: Icons.upload_rounded,
-                  label: l10n.navRegister,
+                  icon: Icons.add_rounded,
+                  selectedIcon: Icons.add_rounded,
+                  label: l10n.navNewRegister,
                   expanded: expanded,
-                  selected: true,
-                  onPressed: () {},
-                )
-              else if (section == AppSection.connect)
+                  selected: pane == WorkspacePane.form,
+                  onPressed: () => onPane(WorkspacePane.form),
+                ),
                 _NavItem(
-                  icon: Icons.download_rounded,
-                  selectedIcon: Icons.download_rounded,
-                  label: l10n.navConnect,
+                  icon: Icons.dns_outlined,
+                  selectedIcon: Icons.dns,
+                  label: itemCount > 0
+                      ? '${l10n.navRegisteredList} ($itemCount)'
+                      : l10n.navRegisteredList,
                   expanded: expanded,
-                  selected: true,
-                  onPressed: () {},
-                )
-              else if (inOps) ...[
+                  selected: pane == WorkspacePane.list,
+                  onPressed: () => onPane(WorkspacePane.list),
+                ),
+              ] else if (section == AppSection.connect) ...[
+                _NavItem(
+                  icon: Icons.add_rounded,
+                  selectedIcon: Icons.add_rounded,
+                  label: l10n.navNewConnect,
+                  expanded: expanded,
+                  selected: pane == WorkspacePane.form,
+                  onPressed: () => onPane(WorkspacePane.form),
+                ),
+                _NavItem(
+                  icon: Icons.cable_outlined,
+                  selectedIcon: Icons.cable,
+                  label: itemCount > 0
+                      ? '${l10n.navConnectionList} ($itemCount)'
+                      : l10n.navConnectionList,
+                  expanded: expanded,
+                  selected: pane == WorkspacePane.list,
+                  onPressed: () => onPane(WorkspacePane.list),
+                ),
+              ] else if (inOps) ...[
                 _NavItem(
                   icon: Icons.monitor_outlined,
                   selectedIcon: Icons.monitor,

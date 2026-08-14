@@ -109,7 +109,7 @@ class _LogViewPageState extends State<LogViewPage> {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Copied ${_filteredLogs.length} logs')),
+      SnackBar(content: Text(context.l10n.logsCopied(_filteredLogs.length))),
     );
   }
 
@@ -160,9 +160,9 @@ class _LogViewPageState extends State<LogViewPage> {
                     border: OutlineInputBorder(),
                   ),
                   items: [
-                    const DropdownMenuItem<String?>(
+                    DropdownMenuItem<String?>(
                       value: null,
-                      child: Text('All'),
+                      child: Text(context.l10n.logLevelAll),
                     ),
                     ...LogManager.logLevels.map(
                       (level) => DropdownMenuItem<String?>(
@@ -185,7 +185,7 @@ class _LogViewPageState extends State<LogViewPage> {
                     onChanged: _onKeywordChanged,
                     decoration: InputDecoration(
                       labelText: context.l10n.logKeyword,
-                      hintText: 'error, timeout…',
+                      hintText: context.l10n.logKeywordHint,
                       prefixIcon: const Icon(Icons.search),
                       suffixIcon: _keywordFilter.isEmpty
                           ? null
@@ -211,7 +211,7 @@ class _LogViewPageState extends State<LogViewPage> {
               onChanged: _onKeywordChanged,
               decoration: InputDecoration(
                 labelText: context.l10n.logKeyword,
-                hintText: 'error, timeout…',
+                hintText: context.l10n.logKeywordHint,
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: _keywordFilter.isEmpty
                     ? null
@@ -320,7 +320,9 @@ class _LogViewPageState extends State<LogViewPage> {
     if (_keywordFilter.isNotEmpty) {
       filterParts.add('keyword="$_keywordFilter"');
     }
-    final filterText = filterParts.isEmpty ? 'none' : filterParts.join(', ');
+    final filterText = filterParts.isEmpty
+        ? context.l10n.logFilterNone
+        : filterParts.join(', ');
 
     return Container(
       padding: ResponsiveLayout.getScreenPadding(context),
@@ -328,7 +330,11 @@ class _LogViewPageState extends State<LogViewPage> {
         children: [
           Expanded(
             child: Text(
-              '${_filteredLogs.length}/${_logManager.logCount} visible · filters: $filterText',
+              context.l10n.logSummary(
+                _filteredLogs.length,
+                _logManager.logCount,
+                filterText,
+              ),
               style: TextStyle(
                 color: Theme.of(context).brightness == Brightness.dark
                     ? Colors.grey.shade400
@@ -350,8 +356,8 @@ class _LogViewPageState extends State<LogViewPage> {
             onPressed: _toggleFollowTail,
             icon: Icon(_followTail ? Icons.link : Icons.link_off),
             tooltip: _followTail
-                ? 'Following newest logs'
-                : 'Follow newest logs',
+                ? context.l10n.followingNewest
+                : context.l10n.followNewest,
           ),
           IconButton(
             onPressed: _scrollToBottom,

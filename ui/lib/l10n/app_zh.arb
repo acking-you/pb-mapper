@@ -152,5 +152,180 @@
   "logKeyword": "关键词",
   "clearLogs": "清空日志",
   "copyVisibleLogs": "复制当前日志",
-  "scrollToBottom": "滚到底部"
+  "scrollToBottom": "滚到底部",
+  "configTitle": "pb-mapper 配置",
+  "currentConfig": "当前配置",
+  "saveConfig": "保存配置",
+  "saving": "保存中…",
+  "checkServer": "检测服务器连通性",
+  "serverAddressHelp": "要连接的 pb-mapper 服务器地址",
+  "msgHeaderKeyHelp": "用于消息校验与加密握手，填写时必须是 32 个字符。",
+  "keepAliveHelp": "为连接启用 TCP keep-alive",
+  "configServerAddress": "服务器地址：{value}",
+  "@configServerAddress": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "configKeepAlive": "Keep-alive：{value}",
+  "@configKeepAlive": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "configKeyPresent": "消息头密钥：{value}",
+  "@configKeyPresent": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "yes": "已设置",
+  "no": "未设置",
+  "configNote": "改动会在后续的注册与连接操作中生效。",
+  "exportTitle": "导出配置",
+  "importTitle": "导入配置",
+  "exportCopyHint": "复制下面这段字符串。",
+  "importPasteHint": "粘贴导出的 Base64 字符串。",
+  "base64String": "Base64 字符串",
+  "exportCopied": "配置已复制到剪贴板",
+  "importFailed": "导入失败：{error}",
+  "@importFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "saveFailed": "保存配置失败",
+  "serverCheckFailed": "服务器检测失败",
+  "keyLengthInvalid": "消息头密钥必须是 32 个字符",
+  "registerTitle": "注册服务",
+  "registerAction": "注册并启动",
+  "registeredList": "已注册服务（{count}）",
+  "@registeredList": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "connectTitle": "连接服务",
+  "connectAction": "连接",
+  "activeConnections": "当前连接",
+  "serviceKeyHint": "唯一的服务 key",
+  "selectService": "选择一个服务",
+  "enterServiceKey": "输入服务 key",
+  "serviceKeyNeeded": "请选择或输入服务 key",
+  "clientExists": "“{key}”的客户端已存在",
+  "@clientExists": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "registering": "正在注册 {key}…",
+  "@registering": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "registered": "{key} 已注册",
+  "@registered": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "registerTimeout": "{key} 注册超时",
+  "@registerTimeout": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "refreshingStatus": "正在刷新 {key}",
+  "@refreshingStatus": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "testingConfig": "正在测试新配置…",
+  "loading": "加载中…",
+  "navNewRegister": "新建服务",
+  "navNewConnect": "新建连接",
+  "navRegisteredList": "已注册",
+  "navConnectionList": "连接列表",
+  "serverStatusTitle": "服务器状态",
+  "statusAvailable": "可用",
+  "statusUnavailable": "不可用",
+  "registeredServicesTitle": "已注册服务",
+  "serverMapDetails": "映射详情",
+  "connectionDetails": "连接详情",
+  "connectionsActive": "活跃：",
+  "connectionsIdle": "空闲：",
+  "noServicesRegistered": "暂无已注册服务",
+  "tapToConnect": "点击以连接",
+  "navigatedToConnect": "已带着 \"{key}\" 打开连接页",
+  "refreshServiceList": "刷新服务列表",
+  "refreshAllStatus": "刷新全部",
+  "noClientConfigs": "暂无连接",
+  "noClientConfigsHint": "在“新建连接”中添加",
+  "deleteClientConfirm": "确定删除 \"{key}\" 的连接配置？",
+  "deleteServiceConfirm": "确定删除 \"{key}\"？",
+  "reconnectFailed": "使用新配置连接 \"{key}\" 失败",
+  "editService": "编辑服务",
+  "save": "保存",
+  "keyAndAddressRequired": "服务标识和本地地址不能为空",
+  "logLevelAll": "全部",
+  "logKeywordHint": "error, timeout…",
+  "logsCopied": "已复制 {count} 条日志",
+  "logFilterNone": "无",
+  "logSummary": "显示 {shown}/{total} · 过滤：{filters}",
+  "followingNewest": "正在跟随最新",
+  "followNewest": "跟随最新",
+  "importAction": "导入",
+  "serverReachable": "服务器可达",
+  "serverNotReachable": "服务器不可达",
+  "statusConnected": "已连接",
+  "statusRetrying": "重试中",
+  "statusFailed": "失败",
+  "statusDisconnected": "已断开",
+  "statusRunning": "运行中",
+  "statusStopped": "已停止",
+  "connect": "连接",
+  "disconnect": "断开",
+  "start": "启动",
+  "stop": "停止",
+  "startService": "启动服务",
+  "stopService": "停止服务",
+  "connecting": "连接中…",
+  "disconnecting": "断开中…",
+  "starting": "启动中…",
+  "stopping": "停止中…",
+  "openInBrowser": "在浏览器中打开",
+  "refreshStatus": "刷新状态",
+  "editConfig": "编辑",
+  "deleteConfig": "删除",
+  "encrypted": "已加密",
+  "copiedToClipboard": "已复制：{text}",
+  "cannotOpen": "无法打开 {url}",
+  "justNow": "刚刚",
+  "minutesAgo": "{count} 分钟前",
+  "hoursAgo": "{count} 小时前",
+  "daysAgo": "{count} 天前",
+  "updatedAt": "更新于 {time}",
+  "noServicesHint": "在“新建服务”中添加"
 }

@@ -6,6 +6,7 @@ import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/locale_controller.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
+import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
 import 'package:pb_mapper_ui/src/views/setup_wizard_view.dart';
 
@@ -128,6 +129,8 @@ void main() {
           onHome: () {},
           onOps: () {},
           onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
           title: 'Register',
           child: const SizedBox.shrink(),
         ),
@@ -151,20 +154,55 @@ void main() {
           onHome: () {},
           onOps: () {},
           onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
           title: 'Register',
           child: const SizedBox.shrink(),
         ),
       ),
     );
 
-    // The whole point of the split: registering must not put Connect, Status or
-    // Logs within reach.
-    expect(find.text('Connect'), findsNothing);
+    // The whole point of the split: registering must not put the connect
+    // workspace, Status or Logs within reach.
+    expect(find.text('New Connection'), findsNothing);
+    expect(find.text('Connections'), findsNothing);
     expect(find.text('Status'), findsNothing);
     expect(find.text('Logs'), findsNothing);
     // Ops and the way home stay available.
     expect(find.text('Operations'), findsOneWidget);
     expect(find.text('Home'), findsOneWidget);
+  });
+
+  testWidgets('a workspace offers its form and its list', (tester) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    var picked = <WorkspacePane>[];
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.connect,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: picked.add,
+          itemCount: 2,
+          title: 'Connect',
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+
+    // The list used to be below the form, reachable only by scrolling. Both
+    // halves are sidebar destinations now, and the count says what is there.
+    expect(find.text('New Connection'), findsOneWidget);
+    expect(find.text('Connections (2)'), findsOneWidget);
+
+    await tester.tap(find.text('Connections (2)'));
+    expect(picked, [WorkspacePane.list]);
   });
 
   testWidgets('ops shows its three tabs and no roles', (tester) async {
@@ -181,6 +219,8 @@ void main() {
           onHome: () {},
           onOps: () {},
           onOpsTab: picked.add,
+          pane: WorkspacePane.form,
+          onPane: (_) {},
           title: 'Configuration',
           child: const SizedBox.shrink(),
         ),
@@ -190,8 +230,8 @@ void main() {
     expect(find.text('Status'), findsOneWidget);
     expect(find.text('Config'), findsOneWidget);
     expect(find.text('Logs'), findsOneWidget);
-    expect(find.text('Register'), findsNothing);
-    expect(find.text('Connect'), findsNothing);
+    expect(find.text('New Service'), findsNothing);
+    expect(find.text('New Connection'), findsNothing);
 
     await tester.tap(find.text('Logs'));
     expect(picked, [OpsTab.logs]);
@@ -210,6 +250,8 @@ void main() {
           onHome: () {},
           onOps: () {},
           onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
           child: const SizedBox.shrink(),
         ),
       ),
@@ -232,6 +274,8 @@ void main() {
           onHome: () {},
           onOps: () {},
           onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
           child: const SizedBox.shrink(),
         ),
       ),

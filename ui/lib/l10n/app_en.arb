@@ -152,5 +152,426 @@
   "logKeyword": "Keyword",
   "clearLogs": "Clear logs",
   "copyVisibleLogs": "Copy visible logs",
-  "scrollToBottom": "Scroll to bottom"
+  "scrollToBottom": "Scroll to bottom",
+  "configTitle": "pb-mapper Configuration",
+  "currentConfig": "Current Configuration",
+  "saveConfig": "Save Configuration",
+  "saving": "Saving…",
+  "checkServer": "Check Server Connectivity",
+  "serverAddressHelp": "Address of the pb-mapper server to connect to",
+  "msgHeaderKeyHelp": "Used for the message checksum and encryption handshake. 32 characters when set.",
+  "keepAliveHelp": "Enable TCP keep-alive for connections",
+  "configServerAddress": "Server Address: {value}",
+  "@configServerAddress": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "configKeepAlive": "Keep-alive: {value}",
+  "@configKeepAlive": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "configKeyPresent": "Header key: {value}",
+  "@configKeyPresent": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "yes": "Yes",
+  "no": "No",
+  "configNote": "Changes apply to later register and connect operations.",
+  "exportTitle": "Export Configuration",
+  "importTitle": "Import Configuration",
+  "exportCopyHint": "Copy the string below.",
+  "importPasteHint": "Paste the exported Base64 string.",
+  "base64String": "Base64 string",
+  "exportCopied": "Configuration copied to clipboard",
+  "importFailed": "Import failed: {error}",
+  "@importFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "saveFailed": "Failed to save the configuration",
+  "serverCheckFailed": "Server check failed",
+  "keyLengthInvalid": "The header key must be exactly 32 characters",
+  "registerTitle": "Register Service",
+  "registerAction": "Register & Start",
+  "registeredList": "Registered Services ({count})",
+  "@registeredList": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "connectTitle": "Connect to Service",
+  "connectAction": "Connect",
+  "activeConnections": "Active Connections",
+  "serviceKeyHint": "unique-service-key",
+  "selectService": "Select a service",
+  "enterServiceKey": "Enter service key",
+  "serviceKeyNeeded": "Select or enter a service key",
+  "clientExists": "A client for \"{key}\" already exists",
+  "@clientExists": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "registering": "Registering {key}…",
+  "@registering": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "registered": "{key} registered",
+  "@registered": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "registerTimeout": "Registration timed out for {key}",
+  "@registerTimeout": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "refreshingStatus": "Refreshing {key}",
+  "@refreshingStatus": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "testingConfig": "Testing the new configuration…",
+  "loading": "Loading…",
+  "navNewRegister": "New Service",
+  "navNewConnect": "New Connection",
+  "navRegisteredList": "Registered",
+  "navConnectionList": "Connections",
+  "serverStatusTitle": "Server Status",
+  "@serverStatusTitle": {
+    "description": "Server Status"
+  },
+  "statusAvailable": "Available",
+  "@statusAvailable": {
+    "description": "Available"
+  },
+  "statusUnavailable": "Unavailable",
+  "@statusUnavailable": {
+    "description": "Unavailable"
+  },
+  "registeredServicesTitle": "Registered Services",
+  "@registeredServicesTitle": {
+    "description": "Registered Services"
+  },
+  "serverMapDetails": "Server Map",
+  "@serverMapDetails": {
+    "description": "Server Map"
+  },
+  "connectionDetails": "Connections",
+  "@connectionDetails": {
+    "description": "Connections"
+  },
+  "connectionsActive": "Active:",
+  "@connectionsActive": {
+    "description": "Active:"
+  },
+  "connectionsIdle": "Idle:",
+  "@connectionsIdle": {
+    "description": "Idle:"
+  },
+  "noServicesRegistered": "No services registered",
+  "@noServicesRegistered": {
+    "description": "No services registered"
+  },
+  "tapToConnect": "Tap to connect",
+  "@tapToConnect": {
+    "description": "Tap to connect"
+  },
+  "navigatedToConnect": "Opened Connect with \"{key}\"",
+  "@navigatedToConnect": {
+    "description": "Opened Connect with \"{key}\"",
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "refreshServiceList": "Refresh service list",
+  "@refreshServiceList": {
+    "description": "Refresh service list"
+  },
+  "refreshAllStatus": "Refresh all",
+  "@refreshAllStatus": {
+    "description": "Refresh all"
+  },
+  "noClientConfigs": "No connections yet",
+  "@noClientConfigs": {
+    "description": "No connections yet"
+  },
+  "noClientConfigsHint": "Add one from New connection",
+  "@noClientConfigsHint": {
+    "description": "Add one from New connection"
+  },
+  "deleteClientConfirm": "Delete the connection for \"{key}\"?",
+  "@deleteClientConfirm": {
+    "description": "Delete the connection for \"{key}\"?",
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "deleteServiceConfirm": "Delete \"{key}\"?",
+  "@deleteServiceConfirm": {
+    "description": "Delete \"{key}\"?",
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "reconnectFailed": "Could not connect with the new settings for \"{key}\"",
+  "@reconnectFailed": {
+    "description": "Could not connect with the new settings for \"{key}\"",
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "editService": "Edit service",
+  "@editService": {
+    "description": "Edit service"
+  },
+  "save": "Save",
+  "@save": {
+    "description": "Save"
+  },
+  "keyAndAddressRequired": "Service key and local address are required",
+  "@keyAndAddressRequired": {
+    "description": "Service key and local address are required"
+  },
+  "logLevelAll": "All",
+  "@logLevelAll": {
+    "description": "All"
+  },
+  "logKeywordHint": "error, timeout…",
+  "@logKeywordHint": {
+    "description": "error, timeout…"
+  },
+  "logsCopied": "Copied {count} logs",
+  "@logsCopied": {
+    "description": "Copied {count} logs",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "logFilterNone": "none",
+  "@logFilterNone": {
+    "description": "none"
+  },
+  "logSummary": "{shown}/{total} shown · filters: {filters}",
+  "@logSummary": {
+    "description": "{shown}/{total} shown · filters: {filters}",
+    "placeholders": {
+      "shown": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      },
+      "filters": {
+        "type": "String"
+      }
+    }
+  },
+  "followingNewest": "Following newest",
+  "@followingNewest": {
+    "description": "Following newest"
+  },
+  "followNewest": "Follow newest",
+  "@followNewest": {
+    "description": "Follow newest"
+  },
+  "importAction": "Import",
+  "@importAction": {
+    "description": "Import"
+  },
+  "serverReachable": "Server is reachable",
+  "@serverReachable": {
+    "description": "Server is reachable"
+  },
+  "serverNotReachable": "Server is not reachable",
+  "@serverNotReachable": {
+    "description": "Server is not reachable"
+  },
+  "statusConnected": "Connected",
+  "@statusConnected": {
+    "description": "Connected"
+  },
+  "statusRetrying": "Retrying",
+  "@statusRetrying": {
+    "description": "Retrying"
+  },
+  "statusFailed": "Failed",
+  "@statusFailed": {
+    "description": "Failed"
+  },
+  "statusDisconnected": "Disconnected",
+  "@statusDisconnected": {
+    "description": "Disconnected"
+  },
+  "statusRunning": "Running",
+  "@statusRunning": {
+    "description": "Running"
+  },
+  "statusStopped": "Stopped",
+  "@statusStopped": {
+    "description": "Stopped"
+  },
+  "connect": "Connect",
+  "@connect": {
+    "description": "Connect"
+  },
+  "disconnect": "Disconnect",
+  "@disconnect": {
+    "description": "Disconnect"
+  },
+  "start": "Start",
+  "@start": {
+    "description": "Start"
+  },
+  "stop": "Stop",
+  "@stop": {
+    "description": "Stop"
+  },
+  "startService": "Start service",
+  "@startService": {
+    "description": "Start service"
+  },
+  "stopService": "Stop service",
+  "@stopService": {
+    "description": "Stop service"
+  },
+  "connecting": "Connecting…",
+  "@connecting": {
+    "description": "Connecting…"
+  },
+  "disconnecting": "Disconnecting…",
+  "@disconnecting": {
+    "description": "Disconnecting…"
+  },
+  "starting": "Starting…",
+  "@starting": {
+    "description": "Starting…"
+  },
+  "stopping": "Stopping…",
+  "@stopping": {
+    "description": "Stopping…"
+  },
+  "openInBrowser": "Open in browser",
+  "@openInBrowser": {
+    "description": "Open in browser"
+  },
+  "refreshStatus": "Refresh status",
+  "@refreshStatus": {
+    "description": "Refresh status"
+  },
+  "editConfig": "Edit",
+  "@editConfig": {
+    "description": "Edit"
+  },
+  "deleteConfig": "Delete",
+  "@deleteConfig": {
+    "description": "Delete"
+  },
+  "encrypted": "Encrypted",
+  "@encrypted": {
+    "description": "Encrypted"
+  },
+  "copiedToClipboard": "Copied: {text}",
+  "@copiedToClipboard": {
+    "description": "Copied: {text}",
+    "placeholders": {
+      "text": {
+        "type": "String"
+      }
+    }
+  },
+  "cannotOpen": "Cannot open {url}",
+  "@cannotOpen": {
+    "description": "Cannot open {url}",
+    "placeholders": {
+      "url": {
+        "type": "String"
+      }
+    }
+  },
+  "justNow": "Just now",
+  "@justNow": {
+    "description": "Just now"
+  },
+  "minutesAgo": "{count}m ago",
+  "@minutesAgo": {
+    "description": "{count}m ago",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "hoursAgo": "{count}h ago",
+  "@hoursAgo": {
+    "description": "{count}h ago",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "daysAgo": "{count}d ago",
+  "@daysAgo": {
+    "description": "{count}d ago",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "updatedAt": "Updated {time}",
+  "@updatedAt": {
+    "description": "Updated {time}",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "noServicesHint": "Add one from New Service",
+  "@noServicesHint": {
+    "description": "Add one from New Service"
+  }
 }

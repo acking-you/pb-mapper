@@ -65,8 +65,8 @@ class _ConfigurationViewState extends State<ConfigurationView> {
     final msgHeaderKey = _msgHeaderKeyController.text.trim();
     if (msgHeaderKey.isNotEmpty && msgHeaderKey.length != 32) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('MSG_HEADER_KEY must be exactly 32 characters'),
+        SnackBar(
+          content: Text(context.l10n.keyLengthInvalid),
           backgroundColor: Colors.red,
         ),
       );
@@ -103,8 +103,8 @@ class _ConfigurationViewState extends State<ConfigurationView> {
         _isSaving = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to save configuration'),
+        SnackBar(
+          content: Text(context.l10n.saveFailed),
           backgroundColor: Colors.red,
         ),
       );
@@ -124,8 +124,8 @@ class _ConfigurationViewState extends State<ConfigurationView> {
         _isCheckingServer = false;
         _serverReachable = status.serverAvailable;
         _serverCheckMessage = status.serverAvailable
-            ? 'Server is reachable'
-            : 'Server is not reachable yet';
+            ? context.l10n.serverReachable
+            : context.l10n.serverNotReachable;
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -141,11 +141,11 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       setState(() {
         _isCheckingServer = false;
         _serverReachable = false;
-        _serverCheckMessage = 'Server check failed';
+        _serverCheckMessage = context.l10n.serverCheckFailed;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Server check failed'),
+        SnackBar(
+          content: Text(context.l10n.serverCheckFailed),
           backgroundColor: Colors.red,
         ),
       );
@@ -171,15 +171,15 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('Export Configuration'),
+          title: Text(context.l10n.exportTitle),
           content: SizedBox(
             width: 560,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Copy the string below.',
+                Text(
+                  context.l10n.exportCopyHint,
                 ),
                 const SizedBox(height: 12),
                 SelectableText(encoded),
@@ -198,8 +198,8 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                 await Clipboard.setData(ClipboardData(text: encoded));
                 if (!mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Configuration export copied to clipboard'),
+                  SnackBar(
+                    content: Text(context.l10n.exportCopied),
                     backgroundColor: Colors.green,
                   ),
                 );
@@ -219,21 +219,21 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
-          title: const Text('Import Configuration'),
+          title: Text(context.l10n.importTitle),
           content: SizedBox(
             width: 560,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Paste the exported Base64 string.'),
+                Text(context.l10n.importPasteHint),
                 const SizedBox(height: 12),
                 TextField(
                   controller: controller,
                   maxLines: 6,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     border: OutlineInputBorder(),
-                    hintText: 'Base64 string',
+                    hintText: context.l10n.base64String,
                   ),
                 ),
               ],
@@ -251,7 +251,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                 Navigator.of(dialogContext).pop(controller.text.trim());
               },
               icon: const Icon(Icons.download),
-              label: const Text('Import'),
+              label: Text(context.l10n.importAction),
             ),
           ],
         );
@@ -324,7 +324,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Import failed: $e'),
+          content: Text(context.l10n.importFailed('$e')),
           backgroundColor: Colors.red,
         ),
       );
@@ -346,36 +346,36 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'PB-Mapper Configuration',
+                      context.l10n.configTitle,
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: _serverAddressController,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'PB_MAPPER_SERVER',
                         hintText: 'localhost:7666',
                         border: OutlineInputBorder(),
                         helperText:
-                            'Address of the pb-mapper server to connect to',
+                            context.l10n.serverAddressHelp,
                       ),
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: _msgHeaderKeyController,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'MSG_HEADER_KEY',
                         hintText: '32 characters, or empty',
                         border: OutlineInputBorder(),
                         helperText:
-                            'Used for message checksum/encryption handshake. Must be 32 chars when set.',
+                            context.l10n.msgHeaderKeyHelp,
                       ),
                     ),
                     const SizedBox(height: 16),
                     SwitchListTile(
                       title: const Text('PB_MAPPER_KEEP_ALIVE'),
-                      subtitle: const Text(
-                        'Enable TCP keep-alive for connections',
+                      subtitle: Text(
+                        context.l10n.keepAliveHelp,
                       ),
                       value: _isKeepAliveEnabled,
                       onChanged: (value) {
@@ -398,7 +398,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                   ),
                 ),
                 child: _isSaving
-                    ? const Row(
+                    ? Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           SizedBox(
@@ -407,11 +407,11 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           ),
                           SizedBox(width: 12),
-                          Text('Saving...', style: TextStyle(fontSize: 16)),
+                          Text(context.l10n.saving, style: TextStyle(fontSize: 16)),
                         ],
                       )
-                    : const Text(
-                        'Save Configuration',
+                    : Text(
+                        context.l10n.saveConfig,
                         style: TextStyle(fontSize: 16),
                       ),
               ),
@@ -463,7 +463,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                   _isCheckingServer
                       ? 'Checking Server...'
                       : (_serverReachable == null
-                            ? 'Check Server Connectivity'
+                            ? context.l10n.checkServer
                             : _serverCheckMessage),
                 ),
               ),
@@ -476,7 +476,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Current Configuration',
+                      context.l10n.currentConfig,
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 16),
@@ -495,7 +495,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                               ),
                             ],
                           )
-                        : const Text('Loading…'),
+                        : Text(context.l10n.loading),
                     const SizedBox(height: 16),
                     Text(
                       'Note: Changes apply to subsequent register/connect operations.',

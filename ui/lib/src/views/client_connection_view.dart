@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
@@ -6,7 +7,19 @@ import 'package:pb_mapper_ui/src/models/client_config.dart';
 import 'package:pb_mapper_ui/src/widgets/client_card.dart';
 
 class ClientConnectionView extends StatefulWidget {
-  const ClientConnectionView({super.key});
+  const ClientConnectionView({
+    super.key,
+    this.pane = WorkspacePane.form,
+    this.onCount,
+  });
+
+  /// The form or the list of existing connections. They are separate sidebar
+  /// destinations, so only one is built at a time.
+  final WorkspacePane pane;
+
+  /// Reports how many connections exist, so the sidebar entry can show the
+  /// count without fetching the list a second time.
+  final ValueChanged<int>? onCount;
 
   @override
   State<ClientConnectionView> createState() => _ClientConnectionViewState();
@@ -79,6 +92,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         _clientConfigs = [];
         _isLoading = false;
       });
+      widget.onCount?.call(0);
     }
   }
 
@@ -105,6 +119,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
       _clientConfigs = clientConfigs;
       _isLoading = false;
     });
+    widget.onCount?.call(clientConfigs.length);
   }
 
   ClientStatus _parseClientStatus(String statusString) {
@@ -164,7 +179,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     final serviceKey = _effectiveServiceKey;
     if (serviceKey.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select or enter a service key')),
+        SnackBar(content: Text(context.l10n.serviceKeyNeeded)),
       );
       return;
     }
@@ -183,7 +198,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     if (existingClient.serviceKey.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Client for "$serviceKey" already exists'),
+          content: Text(context.l10n.clientExists(serviceKey)),
           backgroundColor: Colors.orange,
           duration: const Duration(seconds: 3),
         ),
@@ -285,9 +300,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text(context.l10n.deleteClientConfig),
-        content: Text(
-          'Are you sure you want to delete the client configuration for "${config.serviceKey}"?\n\nThis will permanently remove the configuration.',
-        ),
+        content: Text(context.l10n.deleteClientConfirm(config.serviceKey)),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
@@ -341,14 +354,14 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Card(
+            if (widget.pane == WorkspacePane.form) Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Connect to Service',
+                      context.l10n.connectTitle,
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 16),
@@ -395,7 +408,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                   },
                                   decoration: InputDecoration(
                                     labelText: context.l10n.serviceKey,
-                                    hintText: 'Select a service',
+                                    hintText: context.l10n.selectService,
                                     border: OutlineInputBorder(),
                                     prefixIcon: Icon(Icons.vpn_key),
                                   ),
@@ -407,7 +420,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                                   },
                                   decoration: InputDecoration(
                                     labelText: context.l10n.serviceKey,
-                                    hintText: 'Enter service key',
+                                    hintText: context.l10n.enterServiceKey,
                                     border: OutlineInputBorder(),
                                     prefixIcon: Icon(Icons.vpn_key),
                                   ),
@@ -417,7 +430,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                         IconButton(
                           onPressed: _loadAvailableServices,
                           icon: const Icon(Icons.refresh),
-                          tooltip: 'Refresh service list',
+                          tooltip: context.l10n.refreshServiceList,
                         ),
                       ],
                     ),
@@ -454,9 +467,9 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                               crossAxisAlignment:
                                   CrossAxisAlignment.start,
                               children: [
-                                const Text(
-                                  'Server Address',
-                                  style: TextStyle(
+                                Text(
+                                  context.l10n.serverAddress,
+                                  style: const TextStyle(
                                     fontSize: 12,
                                     color: Colors.grey,
                                   ),
@@ -473,9 +486,9 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                             onPressed: () {
                               AppNavigationManager.navigateToConfigPage();
                             },
-                            child: const Text(
-                              'Configure in Settings',
-                              style: TextStyle(fontSize: 12),
+                            child: Text(
+                              context.l10n.quickStartStep1Action,
+                              style: const TextStyle(fontSize: 12),
                             ),
                           ),
                         ],
@@ -485,8 +498,8 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            SizedBox(
+            if (widget.pane == WorkspacePane.form) const SizedBox(height: 16),
+            if (widget.pane == WorkspacePane.form) SizedBox(
               height: 48,
               width: double.infinity,
               child: ElevatedButton(
@@ -504,11 +517,11 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            if (_isLoading) ...[
+            if (widget.pane == WorkspacePane.list && _isLoading) ...[
               const SizedBox(height: 24),
               const Center(child: CircularProgressIndicator()),
-            ] else if (_clientConfigs.isEmpty) ...[
+            ] else if (widget.pane == WorkspacePane.list &&
+                _clientConfigs.isEmpty) ...[
               const SizedBox(height: 24),
               Card(
                 child: Padding(
@@ -522,13 +535,13 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'No client configurations',
+                        context.l10n.noClientConfigs,
                         style: Theme.of(context).textTheme.titleMedium
                             ?.copyWith(color: Colors.grey[600]),
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Create a new connection above to get started',
+                        context.l10n.noClientConfigsHint,
                         style: Theme.of(context).textTheme.bodySmall
                             ?.copyWith(color: Colors.grey[500]),
                       ),
@@ -536,19 +549,19 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                   ),
                 ),
               ),
-            ] else ...[
+            ] else if (widget.pane == WorkspacePane.list) ...[
               const SizedBox(height: 24),
               Row(
                 children: [
                   Text(
-                    'Active Connections',
+                    context.l10n.activeConnections,
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   const Spacer(),
                   IconButton(
                     onPressed: _loadClientConfigs,
                     icon: const Icon(Icons.refresh),
-                    tooltip: 'Refresh All Status',
+                    tooltip: context.l10n.refreshAllStatus,
                   ),
                 ],
               ),
