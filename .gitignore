@@ -3,9 +3,11 @@ target
 .idea
 .vscode
 .cargo
+# The staged FFI library, under every platform's name for it. The lib-prefixed
+# patterns alone missed Windows, where the file is pb_mapper_ffi.dll with no
+# prefix — so a 7.8MB build artifact sat untracked and unignored, one `git add
+# .` away from the history.
 ui/native/**/libpb_mapper_ffi.*
-ui/native/**/libpb_mapper_ffi.so
-ui/native/**/libpb_mapper_ffi.dylib
-ui/native/**/libpb_mapper_ffi.dll
-ui/native/**/libpb_mapper_ffi.a
-ui/native/**/libpb_mapper_ffi.lib
+ui/native/**/pb_mapper_ffi.*
+# Packaging output: msix payloads and store assets, tens of megabytes of it.
+ui/dist/
