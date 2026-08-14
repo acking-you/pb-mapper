@@ -11,7 +11,72 @@ permissions:
   contents: read
 
 jobs:
+  # Which half of the repo moved. A Dart-only change has no business spending
+  # several minutes building the Rust workspace, and the reverse holds too.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      flutter: ${{ steps.filter.outputs.flutter }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Resolve something to diff against. Anything we cannot resolve — a
+          # brand new branch, a force push, a rewritten history — falls through
+          # to checking everything, because guessing wrong here means shipping
+          # an untested change.
+          base=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+
+          if [ -z "$base" ] \
+            || [ "$base" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "No usable base commit; checking everything."
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "flutter=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "$base" HEAD)"
+          echo "Changed files:"
+          echo "$changed"
+
+          rust=false
+          flutter=false
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            case "$file" in
+              # pb-mapper-ffi lives under ui/ but is a workspace member, so it
+              # belongs to the Rust side and must be matched before ui/*.
+              ui/native/*) rust=true ;;
+              ui/*) flutter=true ;;
+              src/*|tests/*|examples/*) rust=true ;;
+              Cargo.toml|Cargo.lock|rust-toolchain.toml|rustfmt.toml) rust=true ;;
+              # A change to this workflow has to prove itself on both.
+              .github/workflows/syntax-check.yml) rust=true; flutter=true ;;
+            esac
+          done <<< "$changed"
+
+          echo "rust=$rust"
+          echo "flutter=$flutter"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "flutter=$flutter" >> "$GITHUB_OUTPUT"
+
   rust-syntax-check:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,19 +103,17 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy on workspace (lib and bin targets only)
-        run: cargo clippy --workspace --lib --bins --all-features -- -D warnings
+      # --all-targets, so the test code is linted too. It was excluded before,
+      # which left the largest untested-by-clippy surface in the repo.
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Run Clippy on pb-mapper-server binary
-        run: cargo clippy --bin pb-mapper-server --all-features -- -D warnings
-
-      - name: Run Clippy on pb-mapper-server-cli binary  
-        run: cargo clippy --bin pb-mapper-server-cli --all-features -- -D warnings
-
-      - name: Run Clippy on pb-mapper-client-cli binary
-        run: cargo clippy --bin pb-mapper-client-cli --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --all-features
 
   flutter-syntax-check:
+    needs: changes
+    if: needs.changes.outputs.flutter == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -65,7 +128,10 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.41.4
+          # Matches the version the project is developed against (ui/.dart_tool
+          # records the same). A CI on an older SDK green-lights code the
+          # local toolchain would reject, and vice versa.
+          flutter-version: 3.44.9
           channel: "stable"
           cache: true  # Enable Flutter SDK cache
 
@@ -84,3 +150,6 @@ jobs:
 
       - name: Run Flutter analyzer
         run: flutter analyze --no-fatal-infos
+
+      - name: Run widget tests
+        run: flutter test
