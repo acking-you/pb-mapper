@@ -58,6 +58,7 @@ jobs:
           import json
           import os
           import pathlib
+          import re
           import subprocess
           import uuid
 
@@ -139,6 +140,92 @@ jobs:
                   value -= 60
               return value + min(churn(path), 100)
 
+          excerpt_terms = {
+              "auth", "block", "cache", "credential", "dispatch", "error", "fail",
+              "guard", "inspect", "key", "migration", "moderation", "permit", "policy",
+              "record", "request", "response", "review", "secret", "session", "token",
+              "usage", "validate",
+          }
+
+          def bounded_diff(diff, budget=176, chunk_size=44):
+              chunks = []
+              current = []
+              old_line = None
+              new_line = None
+
+              def flush():
+                  nonlocal current
+                  for offset in range(0, len(current), chunk_size):
+                      chunk = current[offset:offset + chunk_size]
+                      text = "\n".join(chunk).lower()
+                      score_value = 40 * sum(term in text for term in excerpt_terms)
+                      score_value += 80 * len(
+                          re.findall(r"\b(?:async\s+fn|fn|def|class|enum|impl|struct)\b", text)
+                      )
+                      function_names = re.findall(
+                          r"\b(?:async\s+fn|fn|def)\s+([a-zA-Z_][a-zA-Z0-9_]*)", text
+                      )
+                      score_value += 300 * sum(
+                          any(term in name.lower() for term in excerpt_terms)
+                          for name in function_names
+                      )
+                      entrypoint_prefixes = (
+                          "authenticate_", "authorize_", "block_", "dispatch_", "execute_",
+                          "handle_", "inspect_", "migrate_", "process_", "review_", "validate_",
+                      )
+                      score_value += 800 * sum(
+                          name.lower().startswith(entrypoint_prefixes)
+                          for name in function_names
+                      )
+                      score_value += sum(line.startswith("+") for line in chunk)
+                      if "cfg(test)" in text or "mod tests" in text:
+                          score_value -= 300
+                      chunks.append((len(chunks), score_value, chunk))
+                  current = []
+
+              for raw in diff.splitlines():
+                  match = re.match(
+                      r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)", raw
+                  )
+                  if match:
+                      flush()
+                      old_line = int(match.group(1))
+                      new_line = int(match.group(2))
+                      current.append(f"@@ RIGHT line {new_line}{match.group(3)}")
+                  elif new_line is None:
+                      continue
+                  elif raw.startswith("+") and not raw.startswith("+++"):
+                      current.append(f"+ {new_line:6d} | {raw[1:]}")
+                      new_line += 1
+                  elif raw.startswith("-") and not raw.startswith("---"):
+                      current.append(f"-        | {raw[1:]}")
+                      old_line += 1
+                  elif raw.startswith(" "):
+                      current.append(f"  {new_line:6d} | {raw[1:]}")
+                      old_line += 1
+                      new_line += 1
+                  elif raw.startswith("\\"):
+                      current.append(raw)
+              flush()
+
+              total_lines = sum(len(chunk) for _, _, chunk in chunks)
+              if total_lines <= budget:
+                  return [line for _, _, chunk in chunks for line in chunk], 0
+
+              chunk_limit = max(1, budget // chunk_size)
+              chosen = sorted(
+                  sorted(chunks, key=lambda item: (-item[1], item[0]))[:chunk_limit],
+                  key=lambda item: item[0],
+              )
+              lines = []
+              previous_index = None
+              for index, _, chunk in chosen:
+                  if previous_index is not None and index != previous_index + 1:
+                      lines.append("... lower-risk changed sections omitted ...")
+                  lines.extend(chunk)
+                  previous_index = index
+              return lines, total_lines - sum(len(chunk) for _, _, chunk in chosen)
+
           candidates = [path for path in changed if not is_generated(path)]
           selected = sorted(candidates, key=lambda path: (-score(path), path))[:8]
           pathlib.Path(".claude-review-files.json").write_text(
@@ -177,9 +264,16 @@ jobs:
           sections.extend(f"- {path}" for path in inventory)
           if len(changed) > len(inventory):
               sections.append(f"- ... {len(changed) - len(inventory)} more paths omitted")
-          sections.extend(["", "# Selected changed hunks"])
+          sections.extend(
+              [
+                  "",
+                  "# Selected changed hunks",
+                  "Diff excerpts use `+ N |` for an added RIGHT-side line N, "
+                  "`N |` for context, and `- |` for a removed line.",
+              ]
+          )
 
-          remaining_lines = 1400
+          remaining_lines = 1760
           for path in selected:
               if remaining_lines <= 0:
                   break
@@ -187,18 +281,17 @@ jobs:
                   "diff",
                   "--no-ext-diff",
                   "--no-textconv",
-                  "--unified=12",
+                  "--unified=6",
                   base,
                   head,
                   "--",
                   path,
               ).decode("utf-8", "replace")
-              lines = diff.splitlines()
-              take = min(len(lines), 240, remaining_lines)
-              sections.extend(["", f"## {path}", "```diff", *lines[:take], "```"])
-              if take < len(lines):
-                  sections.append(f"[diff truncated: {len(lines) - take} lines omitted]")
-              remaining_lines -= take
+              lines, omitted = bounded_diff(diff, budget=min(220, remaining_lines))
+              sections.extend(["", f"## {path}", "```diff", *lines, "```"])
+              if omitted:
+                  sections.append(f"[bounded diff: {omitted} lower-risk lines omitted]")
+              remaining_lines -= len(lines)
 
           if not selected:
               sections.append("No reviewable modified or added files were selected.")
