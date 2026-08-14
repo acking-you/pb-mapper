@@ -513,7 +513,9 @@ class _MyAppState extends State<MyApp> with WindowListener {
       onHome: () => _goTo(AppSection.home),
       onOps: () => _goToOpsTab(_opsTab),
       onOpsTab: _goToOpsTab,
-      title: _getPageTitle(context) ?? l10n.appTitle,
+      // The title bar names the window, not the page: it sits beside the app
+      // mark, and the content already carries its own heading.
+      title: l10n.appTitle,
       titleBarActions: [
         IconButton(
           icon: Text(

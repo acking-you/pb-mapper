@@ -310,6 +310,19 @@ class TrayService with TrayListener {
   }
 
   Future<void> showFromTray() async {
+    if (await _windowManager.isMinimized()) {
+      await _windowManager.restore();
+    }
+    await _windowManager.show();
+    await _windowManager.focus();
+
+    // macOS hides by ordering the window out, which also drops the app from the
+    // foreground. A single show/focus pair sometimes lands while the shell still
+    // owns activation — the click on the tray just gave it away — and the window
+    // stays gone. Confirm it came back and ask once more if it did not.
+    if (!Platform.isMacOS) return;
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    if (await _windowManager.isVisible()) return;
     await _windowManager.show();
     await _windowManager.focus();
   }

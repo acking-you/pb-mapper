@@ -85,16 +85,31 @@ class _AppWindowTitleBarState extends State<AppWindowTitleBar>
                     await windowManager.maximize();
                   }
                 },
-                child: Align(
-                  alignment: Alignment.center,
-                  child: Text(
-                    widget.title ?? '',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: theme.colorScheme.onSurface,
-                    ),
+                // Left aligned, next to the app mark. A centred title reads as
+                // a page heading and competed with the one the content already
+                // shows; beside the icon it reads as what the window is.
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 10),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.hub_rounded,
+                        size: 15,
+                        color: theme.colorScheme.primary,
+                      ),
+                      const SizedBox(width: 7),
+                      Flexible(
+                        child: Text(
+                          widget.title ?? '',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelLarge?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: theme.colorScheme.onSurface,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
