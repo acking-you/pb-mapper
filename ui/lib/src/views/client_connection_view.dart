@@ -5,6 +5,7 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/models/client_config.dart';
 import 'package:pb_mapper_ui/src/widgets/client_card.dart';
+import 'package:pb_mapper_ui/src/widgets/list_card.dart';
 
 class ClientConnectionView extends StatefulWidget {
   const ClientConnectionView({
@@ -149,9 +150,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(
-                'Service key "$selectedKey" auto-selected from Status page',
-              ),
+              content: Text(context.l10n.keyAutoSelected(selectedKey)),
               backgroundColor: Colors.green,
               duration: const Duration(seconds: 3),
             ),
@@ -518,54 +517,30 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
               ),
             ),
             if (widget.pane == WorkspacePane.list && _isLoading) ...[
-              const SizedBox(height: 24),
-              const Center(child: CircularProgressIndicator()),
+              const Padding(
+                padding: EdgeInsets.only(top: 40),
+                child: Center(child: CircularProgressIndicator()),
+              ),
             ] else if (widget.pane == WorkspacePane.list &&
                 _clientConfigs.isEmpty) ...[
-              const SizedBox(height: 24),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    children: [
-                      Icon(
-                        Icons.link_off,
-                        size: 48,
-                        color: Colors.grey[400],
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        context.l10n.noClientConfigs,
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(color: Colors.grey[600]),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        context.l10n.noClientConfigsHint,
-                        style: Theme.of(context).textTheme.bodySmall
-                            ?.copyWith(color: Colors.grey[500]),
-                      ),
-                    ],
-                  ),
-                ),
+              ListPaneHeader(
+                title: context.l10n.activeConnections,
+                count: 0,
+                onRefresh: _loadClientConfigs,
+                refreshTooltip: context.l10n.refreshAllStatus,
+              ),
+              ListPaneEmpty(
+                icon: Icons.cable_outlined,
+                title: context.l10n.noClientConfigs,
+                hint: context.l10n.noClientConfigsHint,
               ),
             ] else if (widget.pane == WorkspacePane.list) ...[
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Text(
-                    context.l10n.activeConnections,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    onPressed: _loadClientConfigs,
-                    icon: const Icon(Icons.refresh),
-                    tooltip: context.l10n.refreshAllStatus,
-                  ),
-                ],
+              ListPaneHeader(
+                title: context.l10n.activeConnections,
+                count: _clientConfigs.length,
+                onRefresh: _loadClientConfigs,
+                refreshTooltip: context.l10n.refreshAllStatus,
               ),
-              const SizedBox(height: 8),
               ..._clientConfigs.map(
                 (config) => ClientCard(
                   key: Key(config.serviceKey),

@@ -573,5 +573,23 @@
   "noServicesHint": "Add one from New Service",
   "@noServicesHint": {
     "description": "Add one from New Service"
+  },
+  "serviceExists": "Service \"{key}\" already exists",
+  "@serviceExists": {
+    "description": "Service \"{key}\" already exists",
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "keyAutoSelected": "Using \"{key}\" from Status",
+  "@keyAutoSelected": {
+    "description": "Using \"{key}\" from Status",
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
   }
 }

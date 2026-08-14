@@ -4,6 +4,7 @@ import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
+import 'package:pb_mapper_ui/src/widgets/list_card.dart';
 import 'package:pb_mapper_ui/src/widgets/service_card.dart';
 import 'package:pb_mapper_ui/src/widgets/edit_service_dialog.dart';
 
@@ -145,7 +146,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Service "${_serviceKeyController.text}" already exists',
+            context.l10n.serviceExists(_serviceKeyController.text),
           ),
         ),
       );
@@ -695,72 +696,33 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
             ),
             // The list is its own destination now, so an empty one has to say
             // so rather than render nothing at all.
-            if (widget.pane == WorkspacePane.list &&
-                _serviceConfigs.isEmpty) ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    children: [
-                      Icon(Icons.dns_outlined, size: 48, color: Colors.grey[400]),
-                      const SizedBox(height: 16),
-                      Text(
-                        context.l10n.noServicesRegistered,
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(color: Colors.grey[600]),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        context.l10n.noServicesHint,
-                        style: Theme.of(context).textTheme.bodySmall
-                            ?.copyWith(color: Colors.grey[500]),
-                      ),
-                    ],
+            if (widget.pane == WorkspacePane.list) ...[
+              ListPaneHeader(
+                title: context.l10n.registeredServicesTitle,
+                count: _serviceConfigs.length,
+                onRefresh: _loadServiceConfigs,
+                refreshTooltip: context.l10n.refreshAllStatus,
+              ),
+              if (_serviceConfigs.isEmpty)
+                ListPaneEmpty(
+                  icon: Icons.dns_outlined,
+                  title: context.l10n.noServicesRegistered,
+                  hint: context.l10n.noServicesHint,
+                )
+              else
+                // The rows used to sit inside another Card, which drew a box
+                // around a list of boxes.
+                ..._serviceConfigs.map(
+                  (config) => ServiceCard(
+                    key: Key(config.serviceKey),
+                    config: config,
+                    onEdit: () => _editService(config),
+                    onDelete: () => _deleteService(config),
+                    onStartStop: () => _startStopService(config),
+                    onRefresh: () => _refreshServiceStatus(config),
+                    onStatusChanged: _onServiceStatusChanged,
                   ),
                 ),
-              ),
-            ],
-            if (widget.pane == WorkspacePane.list &&
-                _serviceConfigs.isNotEmpty) ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.dns, color: Colors.blue),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              context.l10n.registeredList(_serviceConfigs.length),
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleMedium
-                                  ?.copyWith(fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      ..._serviceConfigs.map(
-                        (config) => ServiceCard(
-                          key: Key(config.serviceKey),
-                          config: config,
-                          onEdit: () => _editService(config),
-                          onDelete: () => _deleteService(config),
-                          onStartStop: () => _startStopService(config),
-                          onRefresh: () => _refreshServiceStatus(config),
-                          onStatusChanged: _onServiceStatusChanged,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
             ],
           ],
         ),

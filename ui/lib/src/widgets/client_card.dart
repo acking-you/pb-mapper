@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/models/client_config.dart';
+import 'package:pb_mapper_ui/src/widgets/list_card.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class ClientCard extends StatefulWidget {
@@ -55,32 +56,6 @@ class _ClientCardState extends State<ClientCard> {
       ).showSnackBar(
         SnackBar(content: Text(context.l10n.copiedToClipboard(addr))),
       );
-    }
-  }
-
-  Color _getStatusColor() {
-    switch (_config.status) {
-      case ClientStatus.running:
-        return Colors.green;
-      case ClientStatus.retrying:
-        return Colors.orange;
-      case ClientStatus.failed:
-        return Colors.red;
-      case ClientStatus.stopped:
-        return Colors.grey;
-    }
-  }
-
-  IconData _getStatusIcon() {
-    switch (_config.status) {
-      case ClientStatus.running:
-        return Icons.check_circle;
-      case ClientStatus.retrying:
-        return Icons.sync;
-      case ClientStatus.failed:
-        return Icons.error;
-      case ClientStatus.stopped:
-        return Icons.stop_circle;
     }
   }
 
@@ -153,224 +128,139 @@ class _ClientCardState extends State<ClientCard> {
     }
   }
 
+  bool get _isUp =>
+      _config.status == ClientStatus.running ||
+      _config.status == ClientStatus.retrying;
+
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header row with service name and status
-            Row(
+    final theme = Theme.of(context);
+    final l10n = context.l10n;
+    final tone = _statusTone().resolve(context);
+
+    // Two rows, not three. The old card put the action on both rows: a green
+    // play icon in the header and a green pill below it, which read as two
+    // different buttons for the same thing.
+    return ListCardShell(
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            margin: const EdgeInsets.only(right: 11),
+            decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Status indicator
-                Container(
-                  width: 12,
-                  height: 12,
-                  decoration: BoxDecoration(
-                    color: _getStatusColor(),
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Service key
-                Expanded(
-                  child: Text(
-                    _config.serviceKey,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                // Action buttons
                 Row(
-                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Open in browser
-                    IconButton(
-                      onPressed: _openLocalAddress,
-                      icon: const Icon(Icons.open_in_new, size: 20),
-                      tooltip: context.l10n.openInBrowser,
-                    ),
-                    // Connect/Disconnect button
-                    IconButton(
-                      onPressed: widget.onConnectDisconnect,
-                      icon: Icon(
-                        _config.status == ClientStatus.running ||
-                                _config.status == ClientStatus.retrying
-                            ? Icons.stop
-                            : Icons.play_arrow,
-                        size: 20,
+                    Flexible(
+                      child: Text(
+                        _config.serviceKey,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                      tooltip:
-                          _config.status == ClientStatus.running ||
-                              _config.status == ClientStatus.retrying
-                          ? context.l10n.disconnect
-                          : context.l10n.connect,
-                      color:
-                          _config.status == ClientStatus.running ||
-                              _config.status == ClientStatus.retrying
-                          ? Colors.orange
-                          : Colors.green,
                     ),
-                    // Refresh button
-                    IconButton(
-                      onPressed: widget.onRefresh,
-                      icon: const Icon(Icons.refresh, size: 20),
-                      tooltip: context.l10n.refreshStatus,
-                    ),
-                    // Delete button (delete config permanently)
-                    IconButton(
-                      onPressed: widget.onDelete,
-                      icon: const Icon(
-                        Icons.delete_forever,
-                        size: 20,
-                        color: Colors.red,
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        _config.statusMessage.isNotEmpty
+                            ? _config.statusMessage
+                            : _getStatusText(context),
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(color: tone),
                       ),
-                      tooltip: context.l10n.deleteConfig,
                     ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Row(
+                  children: [
+                    ListCardFact(
+                      icon: Icons.lan_outlined,
+                      label: _config.localAddress,
+                      onTap: _copyLocalAddress,
+                      tooltip: l10n.copy,
+                    ),
+                    const SizedBox(width: 12),
+                    ListCardFact(
+                      icon: Icons.swap_horiz_rounded,
+                      label: _config.protocol,
+                    ),
+                    if (_config.updatedAt != _config.createdAt) ...[
+                      const SizedBox(width: 12),
+                      ListCardFact(
+                        icon: Icons.schedule_rounded,
+                        label: _formatDateTime(context, _config.updatedAt),
+                      ),
+                    ],
                   ],
                 ),
               ],
             ),
-
-            const SizedBox(height: 12),
-
-            // Client details (no encryption chip since clients don't support encryption)
-            Row(
-              children: [
-                _buildDetailChip(
-                  icon: Icons.computer,
-                  label: _config.localAddress,
-                  color: Colors.blue,
-                  onTap: _copyLocalAddress,
-                ),
-                const SizedBox(width: 8),
-                _buildDetailChip(
-                  icon: _config.protocol == 'TCP' ? Icons.share : Icons.grain,
-                  label: _config.protocol,
-                  color: _config.protocol == 'TCP'
-                      ? Colors.green
-                      : Colors.purple,
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-
-            // Status row
-            Row(
-              children: [
-                Icon(_getStatusIcon(), size: 16, color: _getStatusColor()),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    _config.statusMessage.isNotEmpty
-                        ? _config.statusMessage
-                        : _getStatusText(context),
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: _getStatusColor()),
-                  ),
-                ),
-                // Connect/Disconnect button
-                SizedBox(
-                  height: 32,
-                  child: ElevatedButton(
-                    onPressed: _isOperating ? null : _toggleConnection,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor:
-                          _config.status == ClientStatus.running ||
-                              _config.status == ClientStatus.retrying
-                          ? Colors.red
-                          : Colors.green,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
+          ),
+          const SizedBox(width: 12),
+          // One primary action, then the secondary ones as plain icons.
+          SizedBox(
+            width: 88,
+            height: 30,
+            child: _isOperating
+                ? const Center(
+                    child: SizedBox(
+                      width: 15,
+                      height: 15,
+                      child: CircularProgressIndicator(strokeWidth: 2),
                     ),
-                    child: _isOperating
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : Text(
-                            _config.status == ClientStatus.running ||
-                                    _config.status == ClientStatus.retrying
-                                ? context.l10n.disconnect
-                                : context.l10n.connect,
-                            style: const TextStyle(fontSize: 12),
-                          ),
+                  )
+                : _isUp
+                ? OutlinedButton(
+                    onPressed: _toggleConnection,
+                    style: listCardActionStyle(context, filled: false),
+                    child: Text(l10n.disconnect),
+                  )
+                : FilledButton(
+                    onPressed: _toggleConnection,
+                    style: listCardActionStyle(context, filled: true),
+                    child: Text(l10n.connect),
                   ),
-                ),
-              ],
-            ),
-
-            // Last updated info
-            if (_config.updatedAt != _config.createdAt) ...[
-              const SizedBox(height: 8),
-              Text(
-                context.l10n.updatedAt(
-                  _formatDateTime(context, _config.updatedAt),
-                ),
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Colors.grey,
-                  fontSize: 11,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDetailChip({
-    required IconData icon,
-    required String label,
-    required Color color,
-    VoidCallback? onTap,
-  }) {
-    final chip = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: color),
+          ),
           const SizedBox(width: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              color: color,
-              fontWeight: FontWeight.w500,
-            ),
+          ListCardIconAction(
+            icon: Icons.open_in_new_rounded,
+            tooltip: l10n.openInBrowser,
+            onPressed: _openLocalAddress,
+          ),
+          ListCardIconAction(
+            icon: Icons.refresh_rounded,
+            tooltip: l10n.refreshStatus,
+            onPressed: widget.onRefresh,
+          ),
+          ListCardIconAction(
+            icon: Icons.delete_outline_rounded,
+            tooltip: l10n.deleteConfig,
+            onPressed: widget.onDelete,
+            danger: true,
           ),
         ],
       ),
     );
+  }
 
-    if (onTap == null) return chip;
-
-    return Tooltip(
-      message: context.l10n.copy,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: chip,
-      ),
-    );
+  StatusTone _statusTone() {
+    switch (_config.status) {
+      case ClientStatus.running:
+        return StatusTone.ok;
+      case ClientStatus.retrying:
+        return StatusTone.pending;
+      case ClientStatus.failed:
+        return StatusTone.bad;
+      case ClientStatus.stopped:
+        return StatusTone.idle;
+    }
   }
 
   String _formatDateTime(BuildContext context, DateTime dateTime) {

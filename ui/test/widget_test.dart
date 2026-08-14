@@ -5,6 +5,7 @@ import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/common/app_section.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/locale_controller.dart';
+import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
@@ -171,6 +172,28 @@ void main() {
     // Ops and the way home stay available.
     expect(find.text('Operations'), findsOneWidget);
     expect(find.text('Home'), findsOneWidget);
+  });
+
+  testWidgets('a short page starts at the top of the panel', (tester) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    // Regression: the desktop body was wrapped in Center, which pinned a short
+    // page vertically as well as horizontally. A one-row list ended up floating
+    // in the middle of the window with empty space above it.
+    await tester.pumpWidget(
+      _wrap(
+        Builder(
+          builder: (context) => ResponsiveLayout.wrapWithMaxWidth(
+            context: context,
+            child: const SizedBox(height: 80, child: Text('row')),
+          ),
+        ),
+      ),
+    );
+
+    expect(tester.getTopLeft(find.text('row')).dy, 0);
   });
 
   testWidgets('a workspace offers its form and its list', (tester) async {

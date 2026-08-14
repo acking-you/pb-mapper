@@ -122,7 +122,10 @@ class ResponsiveLayout {
     final maxWidth = getMaxContentWidth(context);
     if (maxWidth == double.infinity) return child;
 
-    return Center(
+    // Align, not Center: Center pins the child vertically too, which left a
+    // short page such as a one-row list floating in the middle of the window.
+    return Align(
+      alignment: Alignment.topCenter,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: child,

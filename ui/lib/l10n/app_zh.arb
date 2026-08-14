@@ -327,5 +327,7 @@
   "hoursAgo": "{count} 小时前",
   "daysAgo": "{count} 天前",
   "updatedAt": "更新于 {time}",
-  "noServicesHint": "在“新建服务”中添加"
+  "noServicesHint": "在“新建服务”中添加",
+  "serviceExists": "服务 \"{key}\" 已存在",
+  "keyAutoSelected": "已选用状态页的 \"{key}\""
 }

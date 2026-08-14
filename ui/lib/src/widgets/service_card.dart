@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
+import 'package:pb_mapper_ui/src/widgets/list_card.dart';
 
 class ServiceCard extends StatefulWidget {
   final ServiceConfig config;
@@ -42,32 +43,6 @@ class _ServiceCardState extends State<ServiceCard> {
         _config = widget.config;
         _isOperating = false;
       });
-    }
-  }
-
-  Color _getStatusColor() {
-    switch (_config.status) {
-      case ServiceStatus.running:
-        return Colors.green;
-      case ServiceStatus.retrying:
-        return Colors.orange;
-      case ServiceStatus.failed:
-        return Colors.red;
-      case ServiceStatus.stopped:
-        return Colors.grey;
-    }
-  }
-
-  IconData _getStatusIcon() {
-    switch (_config.status) {
-      case ServiceStatus.running:
-        return Icons.check_circle;
-      case ServiceStatus.retrying:
-        return Icons.sync;
-      case ServiceStatus.failed:
-        return Icons.error;
-      case ServiceStatus.stopped:
-        return Icons.stop_circle;
     }
   }
 
@@ -118,219 +93,141 @@ class _ServiceCardState extends State<ServiceCard> {
     });
   }
 
+  bool get _isUp =>
+      _config.status == ServiceStatus.running ||
+      _config.status == ServiceStatus.retrying;
+
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header row with service name and status
-            Row(
+    final theme = Theme.of(context);
+    final l10n = context.l10n;
+    final tone = _statusTone().resolve(context);
+
+    // Same shape as the connect row: dot, name and state, facts, one action.
+    return ListCardShell(
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            margin: const EdgeInsets.only(right: 11),
+            decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Status indicator
-                Container(
-                  width: 12,
-                  height: 12,
-                  decoration: BoxDecoration(
-                    color: _getStatusColor(),
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Service key
-                Expanded(
-                  child: Text(
-                    _config.serviceKey,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                // Action buttons
                 Row(
-                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Start/Stop button
-                    IconButton(
-                      onPressed: widget.onStartStop,
-                      icon: Icon(
-                        _config.status == ServiceStatus.running ||
-                                _config.status == ServiceStatus.retrying
-                            ? Icons.stop
-                            : Icons.play_arrow,
-                        size: 20,
+                    Flexible(
+                      child: Text(
+                        _config.serviceKey,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                      tooltip:
-                          _config.status == ServiceStatus.running ||
-                              _config.status == ServiceStatus.retrying
-                          ? context.l10n.stopService
-                          : context.l10n.startService,
-                      color:
-                          _config.status == ServiceStatus.running ||
-                              _config.status == ServiceStatus.retrying
-                          ? Colors.orange
-                          : Colors.green,
                     ),
-                    // Refresh button
-                    IconButton(
-                      onPressed: widget.onRefresh,
-                      icon: const Icon(Icons.refresh, size: 20),
-                      tooltip: context.l10n.refreshStatus,
-                    ),
-                    // Edit button
-                    IconButton(
-                      onPressed: widget.onEdit,
-                      icon: const Icon(Icons.edit, size: 20),
-                      tooltip: context.l10n.editConfig,
-                    ),
-                    // Delete button (delete config permanently)
-                    IconButton(
-                      onPressed: widget.onDelete,
-                      icon: const Icon(
-                        Icons.delete_forever,
-                        size: 20,
-                        color: Colors.red,
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        _config.statusMessage.isNotEmpty
+                            ? _config.statusMessage
+                            : _getStatusText(context),
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(color: tone),
                       ),
-                      tooltip: context.l10n.deleteConfig,
                     ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Row(
+                  children: [
+                    ListCardFact(
+                      icon: Icons.lan_outlined,
+                      label: _config.localAddress,
+                    ),
+                    const SizedBox(width: 12),
+                    ListCardFact(
+                      icon: Icons.swap_horiz_rounded,
+                      label: _config.protocol,
+                    ),
+                    if (_config.enableEncryption) ...[
+                      const SizedBox(width: 12),
+                      ListCardFact(
+                        icon: Icons.lock_outline_rounded,
+                        label: l10n.encrypted,
+                      ),
+                    ],
+                    if (_config.updatedAt != _config.createdAt) ...[
+                      const SizedBox(width: 12),
+                      ListCardFact(
+                        icon: Icons.schedule_rounded,
+                        label: _formatDateTime(context, _config.updatedAt),
+                      ),
+                    ],
                   ],
                 ),
               ],
             ),
-
-            const SizedBox(height: 12),
-
-            // Service details
-            Row(
-              children: [
-                _buildDetailChip(
-                  icon: Icons.computer,
-                  label: _config.localAddress,
-                  color: Colors.blue,
-                ),
-                const SizedBox(width: 8),
-                _buildDetailChip(
-                  icon: _config.protocol == 'TCP' ? Icons.share : Icons.grain,
-                  label: _config.protocol,
-                  color: _config.protocol == 'TCP'
-                      ? Colors.green
-                      : Colors.purple,
-                ),
-                if (_config.enableEncryption) ...[
-                  const SizedBox(width: 8),
-                  _buildDetailChip(
-                    icon: Icons.lock,
-                    label: context.l10n.encrypted,
-                    color: Colors.orange,
-                  ),
-                ],
-              ],
-            ),
-
-            const SizedBox(height: 12),
-
-            // Status row
-            Row(
-              children: [
-                Icon(_getStatusIcon(), size: 16, color: _getStatusColor()),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    _config.statusMessage.isNotEmpty
-                        ? _config.statusMessage
-                        : _getStatusText(context),
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: _getStatusColor()),
-                  ),
-                ),
-                // Start/Stop button
-                SizedBox(
-                  height: 32,
-                  child: ElevatedButton(
-                    onPressed: _isOperating ? null : _toggleService,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor:
-                          _config.status == ServiceStatus.running ||
-                              _config.status == ServiceStatus.retrying
-                          ? Colors.red
-                          : Colors.green,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
+          ),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 88,
+            height: 30,
+            child: _isOperating
+                ? const Center(
+                    child: SizedBox(
+                      width: 15,
+                      height: 15,
+                      child: CircularProgressIndicator(strokeWidth: 2),
                     ),
-                    child: _isOperating
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : Text(
-                            _config.status == ServiceStatus.running ||
-                                    _config.status == ServiceStatus.retrying
-                                ? context.l10n.stop
-                                : context.l10n.start,
-                            style: const TextStyle(fontSize: 12),
-                          ),
+                  )
+                : _isUp
+                ? OutlinedButton(
+                    onPressed: _toggleService,
+                    style: listCardActionStyle(context, filled: false),
+                    child: Text(l10n.stop),
+                  )
+                : FilledButton(
+                    onPressed: _toggleService,
+                    style: listCardActionStyle(context, filled: true),
+                    child: Text(l10n.start),
                   ),
-                ),
-              ],
-            ),
-
-            // Last updated info
-            if (_config.updatedAt != _config.createdAt) ...[
-              const SizedBox(height: 8),
-              Text(
-                context.l10n.updatedAt(
-                  _formatDateTime(context, _config.updatedAt),
-                ),
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Colors.grey,
-                  fontSize: 11,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDetailChip({
-    required IconData icon,
-    required String label,
-    required Color color,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: color),
+          ),
           const SizedBox(width: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              color: color,
-              fontWeight: FontWeight.w500,
-            ),
+          ListCardIconAction(
+            icon: Icons.refresh_rounded,
+            tooltip: l10n.refreshStatus,
+            onPressed: widget.onRefresh,
+          ),
+          ListCardIconAction(
+            icon: Icons.edit_outlined,
+            tooltip: l10n.editConfig,
+            onPressed: widget.onEdit,
+          ),
+          ListCardIconAction(
+            icon: Icons.delete_outline_rounded,
+            tooltip: l10n.deleteConfig,
+            onPressed: widget.onDelete,
+            danger: true,
           ),
         ],
       ),
     );
+  }
+
+  StatusTone _statusTone() {
+    switch (_config.status) {
+      case ServiceStatus.running:
+        return StatusTone.ok;
+      case ServiceStatus.retrying:
+        return StatusTone.pending;
+      case ServiceStatus.failed:
+        return StatusTone.bad;
+      case ServiceStatus.stopped:
+        return StatusTone.idle;
+    }
   }
 
   String _formatDateTime(BuildContext context, DateTime dateTime) {
