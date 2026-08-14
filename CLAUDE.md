@@ -24,9 +24,9 @@ The system consists of three main binary components:
    - Supports both TCP and UDP protocols
    - Provides status checking capabilities
 
-4. **UI Module** (`ui/`): Flutter-based graphical interface using Rinf framework
+4. **UI Module** (`ui/`): Flutter graphical interface
    - Replaces all CLI functionality with a user-friendly GUI
-   - Built with Flutter and Rinf for Rust-Flutter integration
+   - Calls into Rust through raw `dart:ffi` against the `pb-mapper-ffi` crate
    - Provides comprehensive service management interface
 
 The system works by creating a bridge between local services and remote clients through a public server, enabling access to services behind NAT/firewalls.
@@ -43,10 +43,12 @@ pb-mapper/
 │   ├── local/             # Local service handlers (server/client)
 │   ├── common/            # Shared utilities and protocols
 │   └── utils/             # Helper functions
-├── ui/                    # Flutter UI with Rinf framework
+├── ui/                    # Flutter UI, talking to Rust over dart:ffi
 │   ├── lib/               # Flutter application code
-│   ├── native/hub/        # Rust-Flutter bridge (Rinf)
-│   └── documentation/     # Rinf framework documentation
+│   │   ├── l10n/          # ARB sources and generated AppLocalizations
+│   │   └── src/ffi/       # The Dart side of the FFI boundary
+│   ├── native/pb_mapper_ffi/  # C ABI crate (a workspace member)
+│   └── test/              # Widget tests
 ├── examples/              # Example implementations
 ├── tests/                 # Integration tests
 ├── docker/                # Docker deployment configuration
@@ -91,29 +93,35 @@ pb-mapper/
   - `udp.rs`: UDP-specific utilities
 
 #### Flutter UI (`ui/`)
-- **`lib/src/views/`**: UI pages and components
-  - `main_landing_view.dart`: Main application entry point
-  - `server_management_view.dart` & `server_management_page.dart`: Server control interface
-  - `service_registration_view.dart` & `service_registration_page.dart`: Service registration UI
-  - `client_connection_view.dart` & `client_connection_page.dart`: Client connection interface
-  - `status_monitoring_view.dart`: Status and monitoring dashboard
-  - `configuration_view.dart`: Configuration management
-  - `log_display_widget.dart`: Log viewing interface
+- **`lib/src/views/`**: One file per zone the shell can show
+  - `main_landing_view.dart`: Home — pick a role, or head into ops
+  - `setup_wizard_view.dart`: First-run guided setup
+  - `service_registration_view.dart`: The register workspace (form / list / logs)
+  - `client_connection_view.dart`: The connect workspace (form / list / logs)
+  - `status_monitoring_view.dart`: Status dashboard
+  - `configuration_view.dart`: Settings
+  - `log_view_page.dart`: The log stream, shown inside both workspaces
 
-- **`lib/src/common/`**: Shared UI utilities
-  - `function.dart`: Common UI functions
-  - `theme_change_button.dart`: Theme switching component
-  - `log_manager.dart`: Log management system
+- **`lib/src/common/`**: Shell and shared utilities
+  - `app_section.dart` / `workspace_pane.dart`: Where the user is
+  - `app_destination.dart`: The zone's destinations, described once and drawn
+    by both the side rail and the bottom bar
+  - `desktop_layout.dart`: The shell, and the animated move between the rail
+    and the bottom bar
+  - `responsive_layout.dart`: Breakpoints, and `usesBottomNav`
+  - `nav_transitions.dart`: The rail/bar transition
+  - `polling.dart`: `pollUntilSettled` and `firstWhereOrNull`
+  - `log_manager.dart`: Log collection
 
-- **`lib/src/bindings/`**: Rinf-generated Rust-Flutter bindings
-  - `signals/`: Auto-generated signal handlers for Rust-Flutter communication
-  - `serde/`: Serialization/deserialization utilities
-  - `bincode/`: Binary encoding support
+- **`lib/src/ffi/`**: The Dart side of the boundary
+  - `pb_mapper_ffi.dart`: Raw `dart:ffi` symbol lookups and library loading
+  - `pb_mapper_service.dart`: FFI dispatch on a background isolate
+  - `pb_mapper_api.dart`: `PbMapperApiClient`, the interface the views take,
+    and `PbMapperApi`, the real implementation over the FFI
 
-- **`native/hub/`**: Rust backend for Flutter (Rinf integration)
-  - `src/actors/`: Actor-based concurrent processing
-  - `src/signals/`: Signal handling for UI communication
-  - Integration with main pb-mapper library
+- **`native/pb_mapper_ffi/`**: The Rust C ABI crate (a workspace member)
+  - Every call returns a JSON envelope: `{"success": bool, "message": …, "data": …}`
+  - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
 
 ### Key Components
 
@@ -147,7 +155,31 @@ pb-mapper/
 
 ## UI Module Implementation
 
-The UI module provides a complete graphical interface that replaces all CLI functionality. It's built with Flutter and uses the Rinf framework for seamless Rust-Flutter integration through message-passing.
+The UI module provides a complete graphical interface that replaces all CLI
+functionality. It is Flutter calling into Rust over raw `dart:ffi`.
+
+> The project used the Rinf framework — signals, actors, generated bindings —
+> and no longer does. If you find a document, comment or memory describing
+> `DartSignal`, `RustSignal`, `Notifiable` or `PbMapperActor` in this repo,
+> it is describing an architecture that was removed. See `ui/README.md` for
+> why the FFI layer returns a JSON envelope instead.
+
+### How the UI talks to Rust
+
+1. A view holds a `PbMapperApiClient` — an interface, taken as a constructor
+   parameter and defaulting to the real `PbMapperApi()`.
+2. `PbMapperApi` calls `PbMapperService`, which dispatches the FFI call on a
+   background isolate so the UI thread stays responsive.
+3. `pb_mapper_ffi.dart` looks the symbol up in the loaded library and passes
+   JSON across the boundary.
+4. Rust logs are pushed back through a `NativeCallable` and surface as
+   `PbMapperService.logStream`.
+
+**When adding a call**, change all four in step: the Rust export, the Dart
+symbol lookup, `PbMapperApiClient`, and `PbMapperApi`. The interface is what
+makes a missing implementation a compile error rather than a runtime crash,
+and it is what lets a widget test substitute `FakePbMapperApi`
+(`ui/test/fake_pb_mapper_api.dart`) instead of loading the native library.
 
 ### Current UI Implementation Status
 
@@ -207,24 +239,6 @@ The UI is fully implemented with the following structure:
 - **Application Settings**: UI preferences and configuration persistence
 - **Profile Management**: Save and load configuration profiles
 
-### Rinf Integration Details
-
-The UI uses Rinf framework for Rust-Flutter communication:
-
-- **Signal-based Communication**: Type-safe message passing between Rust and Flutter
-- **Auto-generated Bindings** (`lib/src/bindings/`): Rust types automatically exposed to Flutter
-- **Actor System** (`native/hub/src/actors/`): Concurrent request processing
-- **Signal Handlers** (`native/hub/src/signals/`): Business logic implementation
-
-### Signal Types Available
-
-- **Server Control**: `StartServerRequest`, `StopServerRequest`, `ServerStatusUpdate`
-- **Service Management**: `RegisterServiceRequest`, `RegisteredServicesUpdate`, `RegisteredServiceInfo`
-- **Client Operations**: `ConnectServiceRequest`, `DisconnectServiceRequest`, `ClientConnectionStatus`
-- **Status Monitoring**: `ActiveConnectionsUpdate`, `ActiveConnectionInfo`
-- **Configuration**: `UpdateConfigRequest`, `ConfigStatusUpdate`, `RequestConfig`
-- **Logging**: `LogMessage` with integrated log collection and display
-
 ## Key Features
 
 ### Core Networking
@@ -247,7 +261,7 @@ The UI uses Rinf framework for Rust-Flutter communication:
 
 ### User Interface
 - **Flutter GUI**: Modern, responsive cross-platform interface
-- **Rinf Integration**: Seamless Rust-Flutter communication
+- **FFI Integration**: Direct `dart:ffi` calls into the `pb-mapper-ffi` crate
 - **Real-time Updates**: Live status monitoring and log streaming
 - **Configuration Management**: Persistent settings and environment variable management
 - **Multi-platform**: Desktop, mobile, and web support
@@ -275,10 +289,11 @@ The UI uses Rinf framework for Rust-Flutter communication:
 - **android-dev**: Android-specific build optimizations
 
 ### UI Development Guidelines
-- **Framework**: Flutter 3.9+ with Material Design components
-- **State Management**: Built-in Flutter state management with Rinf signal integration
-- **Architecture**: Page/View pattern with clear separation of concerns
-- **Real-time Updates**: Signal-based reactive UI updates from Rust backend
+- **Framework**: Flutter 3.44.9, Material 3. CI pins the same version.
+- **State Management**: Plain `StatefulWidget` state; no state-management package
+- **Architecture**: A shell (`desktop_layout.dart`) that owns navigation, and
+  one view per zone. Views take their API as a parameter so they can be tested.
+- **Real-time Updates**: Polled through `pollUntilSettled`, plus the log stream
 - **Error Handling**: Graceful error handling with user-friendly feedback
 - **Responsive Design**: Adaptive layouts for different screen sizes
 
@@ -286,205 +301,6 @@ The UI uses Rinf framework for Rust-Flutter communication:
 - **`PB_MAPPER_SERVER`**: Default remote server address for CLI tools
 - **`PB_MAPPER_KEEP_ALIVE`**: Global TCP keep-alive setting ("ON" to enable)
 - **`RUST_LOG`**: Tracing level configuration (supports env-filter)
-
-## Rinf Framework Integration
-
-The UI leverages the Rinf framework for seamless Rust-Flutter integration, enabling type-safe communication between the Rust backend and Flutter frontend.
-
-### Rinf Architecture
-
-- **Message-Passing System**: Bidirectional communication through signals
-- **Type Safety**: Auto-generated Dart bindings from Rust types
-- **Actor Model**: Concurrent processing in `native/hub/src/actors/`
-- **Signal Handlers**: Business logic implementation in `native/hub/src/signals/`
-
-### Actor Usage Pattern
-
-The core business logic is implemented using an actor-based pattern with the `messages` crate:
-
-#### 1. Actor Definition (`pb_mapper_actor.rs`)
-```rust
-use messages::prelude::{Context, Address, Notifiable};
-
-pub struct PbMapperActor {
-    // State fields
-    config: AppConfig,
-    server_handle: Option<JoinHandle<()>>,
-    // ... other state
-}
-
-impl PbMapperActor {
-    pub fn new(self_addr: Address<Self>) -> Self {
-        let mut owned_tasks = OwnedTasks::new();
-        
-        // Spawn signal listeners for each DartSignal type
-        owned_tasks.spawn(Self::listen_to_start_server(self_addr.clone()));
-        owned_tasks.spawn(Self::listen_to_update_config(self_addr.clone()));
-        // ... other listeners
-        
-        Self { /* initialize fields */ }
-    }
-}
-```
-
-#### 2. Signal Listeners
-Each DartSignal type requires a dedicated listener method:
-```rust
-async fn listen_to_update_config(mut self_addr: Address<Self>) {
-    let receiver = UpdateConfigRequest::get_dart_signal_receiver();
-    while let Some(signal_pack) = receiver.recv().await {
-        let _ = self_addr.notify(signal_pack.message).await;
-    }
-}
-```
-
-#### 3. Business Logic Implementation
-Business logic is implemented via `Notifiable` trait:
-```rust
-#[async_trait]
-impl Notifiable<UpdateConfigRequest> for PbMapperActor {
-    async fn notify(&mut self, msg: UpdateConfigRequest, _: &Context<Self>) {
-        // Update configuration in memory
-        self.config.server_address = msg.server_address;
-        self.config.keep_alive_enabled = msg.enable_keep_alive;
-        
-        // Save to file and send feedback
-        match self.save_config() {
-            Ok(_) => {
-                ConfigSaveResult {
-                    success: true,
-                    message: "Configuration saved successfully".to_string(),
-                }.send_signal_to_dart();
-                
-                // Trigger status update to refresh UI
-                self.send_config_status().await;
-            }
-            Err(e) => {
-                ConfigSaveResult {
-                    success: false,
-                    message: format!("Failed to save configuration: {}", e),
-                }.send_signal_to_dart();
-            }
-        }
-    }
-}
-```
-
-#### 4. Actor Registration
-The actor is created and started in `actors/mod.rs`:
-```rust
-pub async fn create_actors() {
-    let start_receiver = CreateActors::get_dart_signal_receiver();
-    start_receiver.recv().await;
-
-    let pb_mapper_context = Context::new();
-    let pb_mapper_addr = pb_mapper_context.address();
-    
-    let pb_mapper_actor = PbMapperActor::new(pb_mapper_addr);
-    spawn(pb_mapper_context.run(pb_mapper_actor));
-}
-```
-
-### Communication Flow
-
-1. **Flutter → Rust**: UI sends signals (e.g., `UpdateConfigRequest`) to Rust
-2. **Signal Reception**: Dedicated listener receives signal via `get_dart_signal_receiver()`
-3. **Actor Notification**: Listener calls `self_addr.notify(message)` to forward to actor
-4. **Business Logic**: Actor's `Notifiable` implementation processes the request
-5. **Rust → Flutter**: Actor sends response signals (e.g., `ConfigSaveResult`) back to UI
-6. **UI Updates**: Flutter rebuilds interface based on received signals
-
-### Signal Types and Patterns
-
-#### DartSignal (Flutter → Rust)
-```rust
-#[derive(Deserialize, DartSignal)]
-pub struct UpdateConfigRequest {
-    pub server_address: String,
-    pub enable_keep_alive: bool,
-}
-```
-- Requires listener method: `listen_to_update_config()`
-- Requires `Notifiable` implementation for business logic
-- Sent from Flutter: `UpdateConfigRequest(...).sendSignalToRust()`
-
-#### RustSignal (Rust → Flutter)
-```rust
-#[derive(Serialize, RustSignal)]
-pub struct ConfigSaveResult {
-    pub success: bool,
-    pub message: String,
-}
-```
-- Sent from Rust: `ConfigSaveResult {...}.send_signal_to_dart()`
-- Received in Flutter: `ConfigSaveResult.rustSignalStream.listen(...)`
-
-### Key Integration Points
-
-- **Server Operations**: Start/stop server with real-time status feedback
-- **Service Management**: Register/unregister services with live updates
-- **Client Connections**: Establish connections with status monitoring
-- **Configuration**: Persist and sync settings between Rust and Flutter
-- **Logging**: Real-time log streaming from Rust to Flutter UI
-
-### Implementation Requirements
-
-For each new DartSignal type, you must implement:
-
-1. **Signal Definition** in `src/signals/server_signals.rs`:
-   ```rust
-   #[derive(Deserialize, DartSignal)]
-   pub struct YourRequest {
-       pub field: String,
-   }
-   ```
-
-2. **Listener Method** in `pb_mapper_actor.rs`:
-   ```rust
-   async fn listen_to_your_request(mut self_addr: Address<Self>) {
-       let receiver = YourRequest::get_dart_signal_receiver();
-       while let Some(signal_pack) = receiver.recv().await {
-           let _ = self_addr.notify(signal_pack.message).await;
-       }
-   }
-   ```
-
-3. **Spawn Listener** in actor's `new()` method:
-   ```rust
-   owned_tasks.spawn(Self::listen_to_your_request(self_addr.clone()));
-   ```
-
-4. **Business Logic** via `Notifiable` trait:
-   ```rust
-   #[async_trait]
-   impl Notifiable<YourRequest> for PbMapperActor {
-       async fn notify(&mut self, msg: YourRequest, _: &Context<Self>) {
-           // Implement your business logic here
-           // Send response signals as needed
-       }
-   }
-   ```
-
-### Error Handling Patterns
-
-- Use `Result<(), String>` for methods that need Send trait compatibility
-- Always send feedback signals for user-initiated actions
-- Use `tracing::error!` for logging errors in actor methods
-- Handle actor notification failures gracefully with `let _ = self_addr.notify(...).await;`
-
-### State Management
-
-- Actor state is mutable and thread-safe within the actor context
-- Use `Arc<RwLock<T>>` for shared state between actor and spawned tasks
-- Configuration persistence should be handled synchronously in the actor
-- Status updates should be triggered after state changes
-
-### Rinf Documentation
-
-Comprehensive Rinf documentation is available in `ui/documentation/`:
-- **Getting Started**: `ui/documentation/source/tutorial.md`
-- **Complete Guide**: `ui/documentation/source/` (includes actor model, state management, etc.)
-- **API Reference**: Auto-generated signal and type documentation
 
 ## Development Workflow
 
