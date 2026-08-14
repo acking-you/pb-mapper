@@ -1,14 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/polling.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/views/log_view_page.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/models/client_config.dart';
 import 'package:pb_mapper_ui/src/widgets/client_card.dart';
 import 'package:pb_mapper_ui/src/widgets/list_card.dart';
 
 class ClientConnectionView extends StatefulWidget {
+  /// Defaults to the real FFI-backed client; tests pass a fake.
+  final PbMapperApiClient? api;
+
   const ClientConnectionView({
+    this.api,
     super.key,
     this.pane = WorkspacePane.form,
     this.onCount,
@@ -27,7 +33,7 @@ class ClientConnectionView extends StatefulWidget {
 }
 
 class _ClientConnectionViewState extends State<ClientConnectionView> {
-  final PbMapperApi _api = PbMapperApi();
+  late final PbMapperApiClient _api = widget.api ?? PbMapperApi();
   final _localAddressController = TextEditingController(text: '127.0.0.1:9090');
   final _serviceKeyInputController = TextEditingController();
   bool _isKeepAliveEnabled = true;
@@ -184,17 +190,11 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     }
 
     // Check if client already exists
-    final existingClient = _clientConfigs.firstWhere(
+    final existingClient = _clientConfigs.firstWhereOrNull(
       (client) => client.serviceKey == serviceKey,
-      orElse: () => ClientConfig(
-        serviceKey: '',
-        localAddress: '',
-        protocol: '',
-        enableKeepAlive: false,
-      ),
     );
 
-    if (existingClient.serviceKey.isNotEmpty) {
+    if (existingClient != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(context.l10n.clientExists(serviceKey)),
@@ -252,32 +252,21 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         });
   }
 
-  // Poll the native status cache for a short time so the UI reflects state changes quickly.
+  /// Waits out the retry loop, so the row shows the state it settled on rather
+  /// than the one it was in the instant the request was accepted.
   Future<void> _pollClientStatusUntilStable(String serviceKey) async {
-    for (int i = 0; i < 10; i++) {
-      await Future.delayed(const Duration(seconds: 1));
-      if (!mounted) return;
+    await pollUntilSettled(
+      attempt: () async {
+        if (!mounted) return true;
+        await _loadClientConfigs();
+        if (!mounted) return true;
 
-      await _loadClientConfigs();
-
-      final config = _clientConfigs.firstWhere(
-        (c) => c.serviceKey == serviceKey,
-        orElse: () => ClientConfig(
-          serviceKey: '',
-          localAddress: '',
-          protocol: '',
-          enableKeepAlive: false,
-        ),
-      );
-
-      if (config.serviceKey.isEmpty) {
-        continue;
-      }
-
-      if (config.status != ClientStatus.retrying) {
-        return;
-      }
-    }
+        final config = _clientConfigs.firstWhereOrNull(
+          (c) => c.serviceKey == serviceKey,
+        );
+        return config != null && config.status != ClientStatus.retrying;
+      },
+    );
   }
 
   void _handleClientDisconnect(ClientConfig config) {
@@ -347,6 +336,13 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
 
   @override
   Widget build(BuildContext context) {
+    // The log pane replaces the body but not this State, so a peek at the logs
+    // does not empty a half-typed form. It also has to sit outside the scroll
+    // view below: it scrolls its own list and needs a bounded height.
+    if (widget.pane == WorkspacePane.logs) {
+      return const LogViewPage(showScaffold: false);
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: SingleChildScrollView(

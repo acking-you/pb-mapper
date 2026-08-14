@@ -197,18 +197,73 @@ class ClientStatusSignal {
   }
 }
 
-class PbMapperApi {
+/// Everything the UI asks of the Rust side.
+///
+/// The views take one of these rather than reaching for [PbMapperApi], which
+/// is a singleton over `dart:ffi` and so drags a loaded native library into
+/// anything that touches it. That is why the view layer had no tests at all:
+/// there was nothing to put in its place.
+///
+/// An interface rather than a subclassable base class on purpose. A fake that
+/// forgets a method fails to compile here; a fake that inherited from the real
+/// class would quietly fall through to the FFI instead.
+abstract interface class PbMapperApiClient {
+  Future<OperationResult> setAppDirectoryPath(String path);
+
+  Future<ConfigStatus> fetchConfig();
+  Future<OperationResult> updateConfig({
+    required String serverAddress,
+    required bool keepAlive,
+    required String msgHeaderKey,
+  });
+
+  Future<OperationResult> startServer({
+    required int port,
+    required bool keepAlive,
+  });
+  Future<OperationResult> stopServer();
+  Future<LocalServerStatus> getLocalServerStatus();
+  Future<ServerStatusDetail> getServerStatusDetail();
+  Future<ServerStatusDetail> forceRefreshServerStatus();
+
+  Future<List<ServiceConfigInfo>> getServiceConfigs();
+  Future<ServiceStatusSignal> getServiceStatus(String serviceKey);
+  Future<OperationResult> registerService({
+    required String serviceKey,
+    required String localAddress,
+    required String protocol,
+    required bool enableEncryption,
+    required bool enableKeepAlive,
+  });
+  Future<OperationResult> unregisterService(String serviceKey);
+  Future<OperationResult> deleteServiceConfig(String serviceKey);
+
+  Future<List<ClientConfigInfo>> getClientConfigs();
+  Future<ClientStatusSignal> getClientStatus(String serviceKey);
+  Future<OperationResult> connectService({
+    required String serviceKey,
+    required String localAddress,
+    required String protocol,
+    required bool enableKeepAlive,
+  });
+  Future<OperationResult> disconnectService(String serviceKey);
+  Future<OperationResult> deleteClientConfig(String serviceKey);
+}
+
+class PbMapperApi implements PbMapperApiClient {
   static final PbMapperApi _instance = PbMapperApi._internal();
   factory PbMapperApi() => _instance;
   PbMapperApi._internal();
 
   final PbMapperService _service = PbMapperService();
 
+  @override
   Future<OperationResult> setAppDirectoryPath(String path) async {
     final result = await _service.setAppDirectoryPath(path);
     return _resultFrom(result);
   }
 
+  @override
   Future<ConfigStatus> fetchConfig() async {
     final result = await _service.getConfig();
     if (result['success'] == true) {
@@ -221,6 +276,7 @@ class PbMapperApi {
     );
   }
 
+  @override
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,
@@ -234,6 +290,7 @@ class PbMapperApi {
     return _resultFrom(result);
   }
 
+  @override
   Future<OperationResult> startServer({
     required int port,
     required bool keepAlive,
@@ -242,11 +299,13 @@ class PbMapperApi {
     return _resultFrom(result);
   }
 
+  @override
   Future<OperationResult> stopServer() async {
     final result = await _service.stopServer();
     return _resultFrom(result);
   }
 
+  @override
   Future<LocalServerStatus> getLocalServerStatus() async {
     final result = await _service.getLocalServerStatus();
     if (result['success'] == true) {
@@ -260,6 +319,7 @@ class PbMapperApi {
     );
   }
 
+  @override
   Future<ServerStatusDetail> getServerStatusDetail() async {
     final result = await _service.getServerStatusDetail();
     if (result['success'] == true) {
@@ -274,6 +334,7 @@ class PbMapperApi {
     );
   }
 
+  @override
   Future<ServerStatusDetail> forceRefreshServerStatus() async {
     final result = await _service.forceRefreshServerStatus();
     if (result['success'] == true) {
@@ -288,6 +349,7 @@ class PbMapperApi {
     );
   }
 
+  @override
   Future<List<ServiceConfigInfo>> getServiceConfigs() async {
     final result = await _service.getServiceConfigs();
     if (result['success'] == true) {
@@ -308,6 +370,7 @@ class PbMapperApi {
     return [];
   }
 
+  @override
   Future<ServiceStatusSignal> getServiceStatus(String serviceKey) async {
     final result = await _service.getServiceStatus(serviceKey);
     if (result['success'] == true) {
@@ -320,6 +383,7 @@ class PbMapperApi {
     );
   }
 
+  @override
   Future<OperationResult> registerService({
     required String serviceKey,
     required String localAddress,
@@ -337,16 +401,19 @@ class PbMapperApi {
     return _resultFrom(result);
   }
 
+  @override
   Future<OperationResult> unregisterService(String serviceKey) async {
     final result = await _service.unregisterService(serviceKey);
     return _resultFrom(result);
   }
 
+  @override
   Future<OperationResult> deleteServiceConfig(String serviceKey) async {
     final result = await _service.deleteServiceConfig(serviceKey);
     return _resultFrom(result);
   }
 
+  @override
   Future<List<ClientConfigInfo>> getClientConfigs() async {
     final result = await _service.getClientConfigs();
     if (result['success'] == true) {
@@ -367,6 +434,7 @@ class PbMapperApi {
     return [];
   }
 
+  @override
   Future<ClientStatusSignal> getClientStatus(String serviceKey) async {
     final result = await _service.getClientStatus(serviceKey);
     if (result['success'] == true) {
@@ -379,6 +447,7 @@ class PbMapperApi {
     );
   }
 
+  @override
   Future<OperationResult> connectService({
     required String serviceKey,
     required String localAddress,
@@ -394,11 +463,13 @@ class PbMapperApi {
     return _resultFrom(result);
   }
 
+  @override
   Future<OperationResult> disconnectService(String serviceKey) async {
     final result = await _service.disconnectService(serviceKey);
     return _resultFrom(result);
   }
 
+  @override
   Future<OperationResult> deleteClientConfig(String serviceKey) async {
     final result = await _service.deleteClientConfig(serviceKey);
     return _resultFrom(result);

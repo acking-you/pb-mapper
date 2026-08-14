@@ -29,12 +29,16 @@ class SetupWizardView extends StatefulWidget {
     required this.onFinished,
     required this.onSkip,
     this.mode = WizardMode.firstRun,
+    this.api,
   });
 
   /// Called with the zone to open once setup succeeds.
   final ValueChanged<AppSection> onFinished;
   final VoidCallback onSkip;
   final WizardMode mode;
+
+  /// Defaults to the real FFI-backed client; tests pass a fake.
+  final PbMapperApiClient? api;
 
   @override
   State<SetupWizardView> createState() => _SetupWizardViewState();
@@ -70,7 +74,7 @@ class _Outcome {
 }
 
 class _SetupWizardViewState extends State<SetupWizardView> {
-  final PbMapperApi _api = PbMapperApi();
+  late final PbMapperApiClient _api = widget.api ?? PbMapperApi();
 
   final _serverController = TextEditingController();
   final _keyController = TextEditingController();

@@ -8,14 +8,17 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 class ConfigurationView extends StatefulWidget {
   final VoidCallback? onToggleTheme;
 
-  const ConfigurationView({super.key, this.onToggleTheme});
+  const ConfigurationView({super.key, this.onToggleTheme, this.api});
+
+  /// Defaults to the real FFI-backed client; tests pass a fake.
+  final PbMapperApiClient? api;
 
   @override
   State<ConfigurationView> createState() => _ConfigurationViewState();
 }
 
 class _ConfigurationViewState extends State<ConfigurationView> {
-  final PbMapperApi _api = PbMapperApi();
+  late final PbMapperApiClient _api = widget.api ?? PbMapperApi();
   final _serverAddressController = TextEditingController(
     text: 'localhost:7666',
   );
@@ -485,10 +488,16 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Server Address: ${_currentConfig!.serverAddress}',
+                                context.l10n.configServerAddress(
+                                  _currentConfig!.serverAddress,
+                                ),
                               ),
                               Text(
-                                'Keep-Alive Enabled: ${_currentConfig!.keepAliveEnabled ? 'Yes' : 'No'}',
+                                context.l10n.configKeepAlive(
+                                  _currentConfig!.keepAliveEnabled
+                                      ? context.l10n.yes
+                                      : context.l10n.no,
+                                ),
                               ),
                               Text(
                                 'MSG_HEADER_KEY Configured: ${_currentConfig!.msgHeaderKey.isNotEmpty ? 'Yes' : 'No'}',

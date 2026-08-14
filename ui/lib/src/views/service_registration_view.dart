@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/polling.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/views/log_view_page.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
 import 'package:pb_mapper_ui/src/widgets/list_card.dart';
@@ -13,7 +15,12 @@ class ServiceRegistrationView extends StatefulWidget {
     super.key,
     this.pane = WorkspacePane.form,
     this.onCount,
+    this.api,
   });
+
+  /// Defaults to the real FFI-backed client. Tests pass a fake, which is what
+  /// makes anything in this file reachable from a widget test at all.
+  final PbMapperApiClient? api;
 
   /// The form or the list of what is already registered. They are separate
   /// sidebar destinations, so only one is built at a time.
@@ -29,7 +36,7 @@ class ServiceRegistrationView extends StatefulWidget {
 }
 
 class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
-  final PbMapperApi _api = PbMapperApi();
+  late final PbMapperApiClient _api = widget.api ?? PbMapperApi();
   final _serviceKeyController = TextEditingController();
   final _localAddressController = TextEditingController(text: '127.0.0.1:8080');
   bool _isEncryptionEnabled = true;
@@ -131,18 +138,11 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     }
 
     // Check if service key already exists
-    final existingConfig = _serviceConfigs.firstWhere(
+    final existingConfig = _serviceConfigs.firstWhereOrNull(
       (config) => config.serviceKey == _serviceKeyController.text,
-      orElse: () => ServiceConfig(
-        serviceKey: '',
-        localAddress: '',
-        protocol: '',
-        enableEncryption: false,
-        enableKeepAlive: false,
-      ),
     );
 
-    if (existingConfig.serviceKey.isNotEmpty) {
+    if (existingConfig != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -188,49 +188,31 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         });
   }
 
-  void _pollRegistrationStatus(String serviceKey) async {
-    // Poll for up to 30 seconds to check registration status
-    for (int i = 0; i < 30; i++) {
-      await Future.delayed(Duration(seconds: 1));
+  /// Waits for the registration to show up in the native config list.
+  Future<void> _pollRegistrationStatus(String serviceKey) async {
+    var registered = false;
 
-      if (!mounted) return;
+    await pollUntilSettled(
+      attempts: 30,
+      attempt: () async {
+        if (!mounted) return true;
+        final configs = await _fetchServiceConfigs();
+        if (!mounted) return true;
+        setState(() => _serviceConfigs = configs);
 
-      // Check if service was successfully registered by loading configs
-      final configs = await _fetchServiceConfigs();
-      if (!mounted) return;
-      setState(() {
-        _serviceConfigs = configs;
-      });
+        final config = configs.firstWhereOrNull(
+          (c) => c.serviceKey == serviceKey,
+        );
+        if (config == null) return false;
 
-      final config = configs.firstWhere(
-        (c) => c.serviceKey == serviceKey,
-        orElse: () => ServiceConfig(
-          serviceKey: '',
-          localAddress: '',
-          protocol: '',
-          enableEncryption: false,
-          enableKeepAlive: false,
-        ),
-      );
+        registered = true;
+        return true;
+      },
+    );
 
-      if (config.serviceKey.isNotEmpty) {
-        // Service was successfully saved, stop polling
-        setState(() => _isRegistering = false);
-        _clearForm();
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(context.l10n.registered(serviceKey)),
-            ),
-          );
-        }
-        await _pollServiceStatusUntilStable(serviceKey);
-        return;
-      }
-    }
+    if (!mounted) return;
 
-    // Timeout after 30 seconds
-    if (mounted) {
+    if (!registered) {
       setState(() => _isRegistering = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -238,41 +220,34 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
           backgroundColor: Colors.red,
         ),
       );
+      return;
     }
+
+    setState(() => _isRegistering = false);
+    _clearForm();
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(context.l10n.registered(serviceKey))));
+
+    await _pollServiceStatusUntilStable(serviceKey);
   }
 
-  // Poll the native status cache for a short time so the UI reflects state changes quickly.
+  /// Waits out the retry loop, so the row shows the state it settled on rather
+  /// than the one it was in the instant the request was accepted.
   Future<void> _pollServiceStatusUntilStable(String serviceKey) async {
-    for (int i = 0; i < 10; i++) {
-      await Future.delayed(const Duration(seconds: 1));
-      if (!mounted) return;
+    await pollUntilSettled(
+      attempt: () async {
+        if (!mounted) return true;
+        final configs = await _fetchServiceConfigs();
+        if (!mounted) return true;
+        setState(() => _serviceConfigs = configs);
 
-      final configs = await _fetchServiceConfigs();
-      if (!mounted) return;
-
-      setState(() {
-        _serviceConfigs = configs;
-      });
-
-      final config = configs.firstWhere(
-        (c) => c.serviceKey == serviceKey,
-        orElse: () => ServiceConfig(
-          serviceKey: '',
-          localAddress: '',
-          protocol: '',
-          enableEncryption: false,
-          enableKeepAlive: false,
-        ),
-      );
-
-      if (config.serviceKey.isEmpty) {
-        continue;
-      }
-
-      if (config.status != ServiceStatus.retrying) {
-        return;
-      }
-    }
+        final config = configs.firstWhereOrNull(
+          (c) => c.serviceKey == serviceKey,
+        );
+        return config != null && config.status != ServiceStatus.retrying;
+      },
+    );
   }
 
   void _clearForm() {
@@ -293,25 +268,18 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
     if (updatedConfig != null) {
       // Check if the new service key already exists (exclude current service being edited)
-      final existingConfig = _serviceConfigs.firstWhere(
+      final existingConfig = _serviceConfigs.firstWhereOrNull(
         (c) =>
             c.serviceKey == updatedConfig.serviceKey &&
             c.serviceKey != config.serviceKey,
-        orElse: () => ServiceConfig(
-          serviceKey: '',
-          localAddress: '',
-          protocol: '',
-          enableEncryption: false,
-          enableKeepAlive: false,
-        ),
       );
 
-      if (existingConfig.serviceKey.isNotEmpty) {
+      if (existingConfig != null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Service key "${updatedConfig.serviceKey}" already exists',
+                context.l10n.serviceExists(updatedConfig.serviceKey),
               ),
               backgroundColor: Colors.red,
             ),
@@ -389,18 +357,11 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         _serviceConfigs = configs;
       });
 
-      final testConfig = configs.firstWhere(
+      final testConfig = configs.firstWhereOrNull(
         (c) => c.serviceKey == newConfig.serviceKey,
-        orElse: () => ServiceConfig(
-          serviceKey: '',
-          localAddress: '',
-          protocol: '',
-          enableEncryption: false,
-          enableKeepAlive: false,
-        ),
       );
 
-      if (testConfig.serviceKey.isNotEmpty &&
+      if (testConfig != null &&
           (testConfig.status == ServiceStatus.running ||
               testConfig.status == ServiceStatus.retrying)) {
         // New configuration works! Now clean up old service if it's different
@@ -414,7 +375,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Service "${newConfig.serviceKey}" updated successfully',
+                context.l10n.serviceUpdated(newConfig.serviceKey),
               ),
               backgroundColor: Colors.green,
             ),
@@ -472,7 +433,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Service "${config.serviceKey}" configuration deleted',
+              context.l10n.serviceConfigDeleted(config.serviceKey),
             ),
           ),
         );
@@ -543,6 +504,13 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
   @override
   Widget build(BuildContext context) {
+    // The log pane replaces the body but not this State, so a peek at the logs
+    // does not empty a half-typed form. It also has to sit outside the scroll
+    // view below: it scrolls its own list and needs a bounded height.
+    if (widget.pane == WorkspacePane.logs) {
+      return const LogViewPage(showScaffold: false);
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: SingleChildScrollView(
@@ -671,20 +639,20 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
                   ),
                 ),
                 child: _isRegistering
-                    ? const Row(
+                    ? Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          SizedBox(
+                          const SizedBox(
                             width: 16,
                             height: 16,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
                             ),
                           ),
-                          SizedBox(width: 8),
+                          const SizedBox(width: 8),
                           Text(
-                            'Registering...',
-                            style: TextStyle(fontSize: 16),
+                            context.l10n.registeringInProgress,
+                            style: const TextStyle(fontSize: 16),
                           ),
                         ],
                       )

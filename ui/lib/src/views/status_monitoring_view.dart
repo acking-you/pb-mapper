@@ -48,14 +48,17 @@ class AppNavigationManager {
 }
 
 class StatusMonitoringView extends StatefulWidget {
-  const StatusMonitoringView({super.key});
+  const StatusMonitoringView({super.key, this.api});
+
+  /// Defaults to the real FFI-backed client; tests pass a fake.
+  final PbMapperApiClient? api;
 
   @override
   State<StatusMonitoringView> createState() => _StatusMonitoringViewState();
 }
 
 class _StatusMonitoringViewState extends State<StatusMonitoringView> {
-  final PbMapperApi _api = PbMapperApi();
+  late final PbMapperApiClient _api = widget.api ?? PbMapperApi();
   ServerStatusDetail? _status;
 
   @override
