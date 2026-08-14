@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.18] - 2026-08-15
+- Changed the way out of a workspace. The sidebar's top entry said "Home" and always went there, which meant leaving ops — usually reached from a workspace — dropped you on the landing page to pick a role again. Home is now the app mark in the title bar, the one control in the same place everywhere; the sidebar entry swaps between registering and connecting inside a workspace, and is a real Back elsewhere, returning to the screen you left rather than that zone's default.
+- Added the log view to both the register and connect workspaces. Why a registration did not come up is a question you have without leaving the workspace, and the answer used to be one zone away. Removed from Operations rather than duplicated: it is the same view, not a second one.
+- Fixed navigation appearing as a rail down the left edge on phones. Between 600 and 1024 pixels the sidebar shrank to a strip of unlabelled icons, and a phone in landscape measures inside that range. Any touch platform now navigates from the bottom whatever its window measures, and so does a desktop window too narrow to label a rail.
+- Fixed a list row overflowing by 317 pixels on a phone. The row was laid out against a desktop-width panel — a fixed action button, three icon buttons, and facts sized to their text — leaving under 100 pixels for the content. The facts now wrap, and where the row is narrow the actions drop to their own line.
+- Fixed a window narrowed past the breakpoint losing its title bar, and with it the ability to be moved, minimised or closed.
+- Replaced the bottom navigation with Material 3's, which has the pill indicator and the label under the icon; the old one drew a bare tinted icon and painted everything unselected a fixed grey that ignored the theme. Both navigations now read one list of destinations, so the bottom bar no longer shows different icons from the sidebar or drops the count off the list entry.
+- Added an animated transition between the sidebar and the bottom bar, which previously swapped in a single frame, and slowed the theme change so switching does not repaint the window at once.
+- Fixed eight strings still rendering in English under Chinese, in the register and configuration screens. Most already had a translation that was simply not being read.
+
 ## [0.2.17] - 2026-08-14
 - Fixed the Windows tray icon looking blurry at 125%, 175%, 225% and 250% display scaling. The icons carried 16, 24, 32 and 48 but none of the sizes in between, and `LoadImage` answers a missing size by stretching the nearest entry with GDI, which does no filtering. They now carry an entry for every size the shell asks for.
 - Added colour vector sources for the Windows tray icons, which until now existed only as an unreproducible raster, together with a generator that renders every size from them rather than resampling one size from another.
