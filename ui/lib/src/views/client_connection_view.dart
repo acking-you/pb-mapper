@@ -274,7 +274,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   /// on screen while the client was failing to reach the server, so the
   /// settled state gets its own message.
   Future<void> _pollClientStatusUntilStable(String serviceKey) async {
-    await pollUntilSettled(
+    await waitUntilSettled(
       attempt: () async {
         if (!mounted) return true;
         await _loadClientConfigs();

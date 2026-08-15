@@ -959,13 +959,20 @@ Phase −1 is a bug fix and a release in its own right; nothing below depends on
 the CLI being wanted. Do it first regardless.
 
 Phase 2 is where the requirement is actually met and should not be deferred; it
-also improves the existing UI whether or not the CLI is ever used. It **removes**
-code rather than adding a second mechanism beside the first: `pollUntilSettled`
-(`common/polling.dart`, three call sites in the two workspace views) and the
-10-second `Future.delayed` fallbacks in `service_card.dart:88` and
-`client_card.dart:98` exist only because nothing tells the UI when something
-changed. Once something does, they go, and `TrayService`'s six-second
-`Timer.periodic` becomes event-driven with it.
+also improves the existing UI whether or not the CLI is ever used.
+
+It was supposed to *delete* the polling. Reading it changed that: the loop in
+`common/polling.dart` is not only keeping the list fresh, it is also what
+notices a service that came up **failed** and raises the red toast for it.
+Deleting it would have taken that with it. So the wait was converted rather
+than removed — `waitUntilSettled` now blocks on the change stream instead of a
+one-second timer, which reacts sooner and asks the native side nothing in the
+meantime, with a slow tick left as a backstop rather than the mechanism.
+
+The 10-second `Future.delayed` in `service_card.dart` and `client_card.dart`
+stays for the same reason: it is labelled "clear operating state if no status
+update received", which is a fallback for the event never arriving, not a second
+copy of the mechanism.
 
 Phase 3's `tunnel.rs` extraction is the one remaining refactor of existing code,
 and doing it before the headless path exists means the shared implementation is

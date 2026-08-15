@@ -204,8 +204,10 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   Future<void> _pollRegistrationStatus(String serviceKey) async {
     var registered = false;
 
-    await pollUntilSettled(
-      attempts: 30,
+    await waitUntilSettled(
+      // Registration has to reach the pb-mapper server before the entry
+      // appears, so it gets longer than the default.
+      timeout: const Duration(seconds: 30),
       attempt: () async {
         if (!mounted) return true;
         final configs = await _fetchServiceConfigs();
@@ -244,7 +246,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   /// Waits out the retry loop, so the row shows the state it settled on rather
   /// than the one it was in the instant the request was accepted.
   Future<void> _pollServiceStatusUntilStable(String serviceKey) async {
-    await pollUntilSettled(
+    await waitUntilSettled(
       attempt: () async {
         if (!mounted) return true;
         final configs = await _fetchServiceConfigs();

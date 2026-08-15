@@ -153,15 +153,29 @@ mod imp {
     pub type Stream = UnixStream;
     pub type Server = UnixListener;
 
+    /// `sockaddr_un.sun_path` is 104 bytes on macOS and 108 on Linux, including
+    /// the terminator. Overrunning it is not a graceful failure — the path is
+    /// silently truncated and the two sides bind and connect to different
+    /// names — so it is checked rather than hoped for.
+    const SUN_PATH_MAX: usize = 100;
+
     pub fn endpoint() -> String {
         if let Ok(custom) = std::env::var(super::ENDPOINT_ENV) {
             if !custom.is_empty() {
                 return custom;
             }
         }
-        // XDG_RUNTIME_DIR is already per-user and cleaned on logout; TMPDIR on
-        // macOS is per-user too. The home fallback is last because it survives
-        // reboots and so needs the stale-socket handling below most.
+        // XDG_RUNTIME_DIR is per-user and cleaned on logout, which is what a
+        // socket wants. TMPDIR is the macOS equivalent and matters more there
+        // than it looks: the app is sandboxed, so TMPDIR resolves inside the
+        // bundle's container. Both the window and a `pb_mapper_ui <verb>` are
+        // the same signed bundle and therefore land in the same container,
+        // which is what lets them find each other.
+        //
+        // Deliberately *not* the config directory, even though both sides
+        // agree on that too: under the macOS sandbox it is
+        // `~/Library/Containers/<id>/Data/Library/Application Support/…`,
+        // which overruns sun_path on its own.
         let base = std::env::var("XDG_RUNTIME_DIR")
             .or_else(|_| std::env::var("TMPDIR"))
             .map(PathBuf::from)
@@ -170,13 +184,41 @@ mod imp {
                     .map(|h| PathBuf::from(h).join(".cache"))
                     .unwrap_or_else(|_| PathBuf::from("/tmp"))
             });
-        base.join("pb-mapper-ui")
-            .join("ctl.sock")
-            .to_string_lossy()
-            .into_owned()
+        let path = base.join("pb-mapper-ui").join("ctl.sock");
+        let path = path.to_string_lossy().into_owned();
+        if path.len() <= SUN_PATH_MAX {
+            return path;
+        }
+        // Somewhere unusually deep. Fall back to the shortest per-user path
+        // that still exists on every unix, rather than truncating.
+        let uid = unsafe { libc_getuid() };
+        format!("/tmp/pb-mapper-ui-{uid}.sock")
+    }
+
+    extern "C" {
+        #[link_name = "getuid"]
+        fn libc_getuid() -> u32;
+    }
+
+    /// Reject a path that cannot round-trip, with a message that names the way
+    /// out, instead of binding to a silently truncated name.
+    fn check_length(name: &str) -> io::Result<()> {
+        if name.len() > SUN_PATH_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "control socket path is {} bytes, over the {SUN_PATH_MAX}-byte \
+                     limit for a unix socket: {name}. Set {} to something shorter.",
+                    name.len(),
+                    super::ENDPOINT_ENV
+                ),
+            ));
+        }
+        Ok(())
     }
 
     pub fn bind_first(name: &str) -> io::Result<Server> {
+        check_length(name)?;
         let path = PathBuf::from(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -218,6 +260,7 @@ mod imp {
     }
 
     pub async fn connect(name: &str) -> io::Result<Stream> {
+        check_length(name)?;
         UnixStream::connect(name).await
     }
 }
