@@ -11,6 +11,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  id-token: write
 
 jobs:
   review:
@@ -316,10 +317,6 @@ jobs:
           ANTHROPIC_CUSTOM_HEADERS: ${{ secrets.ANTHROPIC_CUSTOM_HEADERS }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Use the job-scoped token so a PR that updates this workflow can
-          # still be reviewed. The action's OIDC app-token exchange otherwise
-          # treats a workflow mismatch as a successful skip.
-          github_token: ${{ secrets.GITHUB_TOKEN }}
           show_full_output: true
           display_report: true
           # Post each confirmed line finding as Claude discovers it instead of
@@ -373,7 +370,7 @@ jobs:
         if: steps.claude-review.outputs.conclusion == 'success'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.claude-review.outputs.github_token }}
           REVIEW_JSON: ${{ steps.claude-review.outputs.structured_output }}
           REVIEW_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-sonnet-5' }}
           REPOSITORY: ${{ github.repository }}
