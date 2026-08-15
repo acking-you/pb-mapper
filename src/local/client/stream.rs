@@ -10,7 +10,7 @@ use super::error::{
     EncodeSubcribeReqSnafu, ReadSubcribeRespSnafu, Result, SubcribeRespNotMatchSnafu,
     WriteSubcribeReqSnafu,
 };
-use crate::common::config::{control_io_timeout, IS_KEEPALIVE};
+use crate::common::config::control_io_timeout;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
 use crate::common::message::{
@@ -29,12 +29,13 @@ pub async fn handle_local_stream<
     mut local_stream: LocalStream,
     key: Arc<str>,
     remote_addr: A,
+    keep_alive: bool,
 ) -> Result<()> {
     let mut remote_stream = each_addr(remote_addr, TcpStream::connect)
         .await
         .context(ConnectRemoteStreamSnafu)?;
 
-    if *IS_KEEPALIVE {
+    if keep_alive {
         snafu_error_handle!(
             set_tcp_keep_alive(&remote_stream),
             "remote stream set keepalive"

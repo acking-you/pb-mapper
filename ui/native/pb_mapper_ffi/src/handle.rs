@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
-use crate::response::{err_message, ok_message};
+use crate::response::{err_ctl, err_null_handle, ok_message};
 use crate::state::PbMapperState;
 
 /// Opaque handle for the pb-mapper runtime and shared state.
@@ -58,7 +58,7 @@ pub unsafe extern "C" fn pb_mapper_set_app_dir(
     path: *const c_char,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let path_opt = if path.is_null() {
@@ -79,6 +79,6 @@ pub unsafe extern "C" fn pb_mapper_set_app_dir(
 
     match result {
         Ok(_) => ok_message("app directory updated"),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }

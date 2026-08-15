@@ -1,9 +1,9 @@
 //! Logging system for FFI interface.
 
 use std::ffi::{c_char, c_int, CString};
-use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::callback::CallbackSlot;
 
 /// Log callback function type.
 /// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
@@ -12,17 +12,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub type LogCallback = extern "C" fn(level: c_int, message: *const c_char, timestamp: u64);
 
 /// Global log callback
-static LOG_CALLBACK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static LOG_CALLBACK: CallbackSlot<LogCallback> = CallbackSlot::empty();
 
 /// Internal function to send log to callback
 pub(crate) fn send_log(level: c_int, message: &str) {
-    let ptr = LOG_CALLBACK.load(Ordering::SeqCst);
-    if ptr.is_null() {
+    let Some(callback) = LOG_CALLBACK.load() else {
         return;
-    }
+    };
 
     if let Ok(c_msg) = CString::new(message) {
-        let callback: LogCallback = unsafe { std::mem::transmute(ptr) };
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -38,8 +36,7 @@ pub(crate) fn send_log(level: c_int, message: &str) {
 /// `callback` must be a valid function pointer or null to disable logging.
 #[no_mangle]
 pub extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
-    let ptr = callback.map(|f| f as *mut ()).unwrap_or(ptr::null_mut());
-    LOG_CALLBACK.store(ptr, Ordering::SeqCst);
+    LOG_CALLBACK.store(callback);
 }
 
 /// Free a string allocated by the library (e.g., from log callback or JSON result).

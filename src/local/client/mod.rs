@@ -31,16 +31,25 @@ pub async fn run_client_side_cli<LocalListener: ListenerProvider, A: ToSocketAdd
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
+    keep_alive: bool,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_with_callback::<LocalListener, A>(local_addr, remote_addr, key, None).await
+    run_client_side_cli_with_callback::<LocalListener, A>(
+        local_addr,
+        remote_addr,
+        key,
+        keep_alive,
+        None,
+    )
+    .await
 }
 
 pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, A: ToSocketAddrs>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
+    keep_alive: bool,
     status_callback: Option<ClientStatusCallback>,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
@@ -163,7 +172,9 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
                     let key = key.clone();
                     let failure_tx = stream_failure_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_local_stream(stream, key, remote_addr).await {
+                        if let Err(e) =
+                            handle_local_stream(stream, key, remote_addr, keep_alive).await
+                        {
                             let reason = snafu::Report::from_error(e).to_string();
                             tracing::warn!(
                                 event = "client_local_stream_failed_before_forward",

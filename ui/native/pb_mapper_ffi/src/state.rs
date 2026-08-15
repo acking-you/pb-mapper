@@ -1,25 +1,25 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use pb_mapper::common::checksum::set_process_msg_header_key;
-use pb_mapper::common::config::{
-    get_pb_mapper_server_async, get_sockaddr_async, PB_MAPPER_KEEP_ALIVE,
-};
+use pb_mapper::common::config::{get_pb_mapper_server_async, get_sockaddr_async};
 use pb_mapper::common::message::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper::local::client::status::get_status;
 use pb_mapper::local::client::{run_client_side_cli_with_callback, ClientStatusCallback};
-use pb_mapper::local::server::{run_server_side_cli_with_callback, StatusCallback};
+use pb_mapper::local::server::{
+    run_server_side_cli_with_callback, ServerTunnelOptions, StatusCallback,
+};
 use pb_mapper::pb_server::{run_server_with_shutdown, ServerStatusInfo};
 use pb_mapper::utils::addr::each_addr;
 use uni_stream::stream::got_one_socket_addr;
@@ -27,6 +27,8 @@ use uni_stream::stream::{
     ListenerProvider, StreamProvider, TcpListenerProvider, TcpStreamProvider, UdpListenerProvider,
     UdpStreamProvider,
 };
+
+use crate::error::CtlError;
 
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 const STATUS_REFRESH_TIMEOUT: Duration = Duration::from_millis(3000);
@@ -42,10 +44,10 @@ struct StatusCacheEntry {
 async fn check_service_with_get_status(
     server_addr: &str,
     service_key: &str,
-) -> Result<bool, String> {
+) -> Result<bool, CtlError> {
     let addr = get_sockaddr_async(server_addr)
         .await
-        .map_err(|e| format!("Invalid server address: {e}"))?;
+        .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
 
     match TcpStreamProvider::from_addr(addr).await {
         Ok(mut stream) => {
@@ -56,7 +58,7 @@ async fn check_service_with_get_status(
                         if keys.contains(&service_key.to_string()) {
                             Ok(true)
                         } else {
-                            Err("Service not found in server".to_string())
+                            Err(CtlError::not_found("Service not found in server"))
                         }
                     }
                     _ => Ok(true),
@@ -64,19 +66,20 @@ async fn check_service_with_get_status(
                 Err(_) => Ok(false),
             }
         }
-        Err(_) => Err("Cannot connect to server".to_string()),
+        Err(_) => Err(CtlError::server_unreachable("Cannot connect to server")),
     }
 }
 
 async fn fetch_real_status_with_addr(
     server_addr: &str,
-) -> Result<(Vec<String>, RemoteIdData), String> {
+) -> Result<(Vec<String>, RemoteIdData), CtlError> {
     let (keys_result, remote_id_result) = tokio::join!(
         get_server_keys_with_addr(server_addr),
         get_remote_id_data_with_addr(server_addr),
     );
 
-    let services = keys_result.map_err(|e| format!("Failed to get server keys: {e}"))?;
+    let services =
+        keys_result.map_err(|e| CtlError::internal(format!("Failed to get server keys: {e}")))?;
     let remote_id_data = remote_id_result.unwrap_or_else(|e| {
         tracing::warn!("Failed to get remote-id data: {}, using empty data", e);
         RemoteIdData {
@@ -89,24 +92,26 @@ async fn fetch_real_status_with_addr(
     Ok((services, remote_id_data))
 }
 
-async fn get_server_keys_with_addr(server_addr: &str) -> Result<Vec<String>, String> {
+async fn get_server_keys_with_addr(server_addr: &str) -> Result<Vec<String>, CtlError> {
     use tokio::net::TcpStream;
 
-    let socket_addr = got_one_socket_addr(server_addr)
-        .await
-        .map_err(|e| format!("Invalid server address {server_addr}: {e}"))?;
+    let socket_addr = got_one_socket_addr(server_addr).await.map_err(|e| {
+        CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
+    })?;
 
     let mut stream = each_addr(socket_addr, TcpStream::connect)
         .await
-        .map_err(|e| format!("Failed to connect to server: {e}"))?;
+        .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
 
     let status_resp = get_status(&mut stream, PbConnStatusReq::Keys)
         .await
-        .map_err(|e| format!("Failed to get status: {e}"))?;
+        .map_err(|e| CtlError::internal(format!("Failed to get status: {e}")))?;
 
     match status_resp {
         PbConnStatusResp::Keys(keys) => Ok(keys),
-        _ => Err("Unexpected response type for Keys request".to_string()),
+        _ => Err(CtlError::protocol(
+            "Unexpected response type for Keys request",
+        )),
     }
 }
 
@@ -120,14 +125,14 @@ async fn get_server_keys_with_addr(server_addr: &str) -> Result<Vec<String>, Str
 async fn get_service_conns_with_addr(
     server_addr: &str,
     service_key: &str,
-) -> Result<Vec<ServiceConnInfo>, String> {
-    let socket_addr = got_one_socket_addr(server_addr)
-        .await
-        .map_err(|e| format!("Invalid server address {server_addr}: {e}"))?;
+) -> Result<Vec<ServiceConnInfo>, CtlError> {
+    let socket_addr = got_one_socket_addr(server_addr).await.map_err(|e| {
+        CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
+    })?;
 
     let mut stream = each_addr(socket_addr, TcpStream::connect)
         .await
-        .map_err(|e| format!("Failed to connect to server: {e}"))?;
+        .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
 
     let status_resp = get_status(
         &mut stream,
@@ -136,7 +141,7 @@ async fn get_service_conns_with_addr(
         },
     )
     .await
-    .map_err(|e| format!("Failed to get status: {e}"))?;
+    .map_err(|e| CtlError::internal(format!("Failed to get status: {e}")))?;
 
     match status_resp {
         PbConnStatusResp::Service { connections, .. } => Ok(connections
@@ -149,24 +154,26 @@ async fn get_service_conns_with_addr(
                 last_rx_age_ms: c.last_rx_age_ms,
             })
             .collect()),
-        _ => Err("Unexpected response type for Service request".to_string()),
+        _ => Err(CtlError::protocol(
+            "Unexpected response type for Service request",
+        )),
     }
 }
 
-async fn get_remote_id_data_with_addr(server_addr: &str) -> Result<RemoteIdData, String> {
+async fn get_remote_id_data_with_addr(server_addr: &str) -> Result<RemoteIdData, CtlError> {
     use tokio::net::TcpStream;
 
-    let socket_addr = got_one_socket_addr(server_addr)
-        .await
-        .map_err(|e| format!("Invalid server address {server_addr}: {e}"))?;
+    let socket_addr = got_one_socket_addr(server_addr).await.map_err(|e| {
+        CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
+    })?;
 
     let mut stream = each_addr(socket_addr, TcpStream::connect)
         .await
-        .map_err(|e| format!("Failed to connect to server: {e}"))?;
+        .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
 
     let status_resp = get_status(&mut stream, PbConnStatusReq::RemoteId)
         .await
-        .map_err(|e| format!("Failed to get status: {e}"))?;
+        .map_err(|e| CtlError::internal(format!("Failed to get status: {e}")))?;
 
     match status_resp {
         PbConnStatusResp::RemoteId {
@@ -178,7 +185,9 @@ async fn get_remote_id_data_with_addr(server_addr: &str) -> Result<RemoteIdData,
             active,
             idle,
         }),
-        _ => Err("Unexpected response type for RemoteId request".to_string()),
+        _ => Err(CtlError::protocol(
+            "Unexpected response type for RemoteId request",
+        )),
     }
 }
 
@@ -189,13 +198,15 @@ fn cache_is_stale(last_update: Option<Instant>, ttl: Duration) -> bool {
     }
 }
 
-fn normalize_msg_header_key(msg_header_key: String) -> Result<String, String> {
+fn normalize_msg_header_key(msg_header_key: String) -> Result<String, CtlError> {
     let normalized = msg_header_key.trim().to_string();
     if normalized.is_empty() {
         return Ok(normalized);
     }
     if normalized.len() != 32 {
-        return Err("MSG_HEADER_KEY must be exactly 32 bytes (256-bit) when provided".to_string());
+        return Err(CtlError::invalid_argument(
+            "MSG_HEADER_KEY must be exactly 32 bytes (256-bit) when provided",
+        ));
     }
     Ok(normalized)
 }
@@ -348,6 +359,72 @@ struct ConnectionInfo {
     status: String,
 }
 
+/// Holds a service key for the duration of one setup, and releases it however
+/// that setup ends.
+///
+/// Setting a tunnel up runs its slow parts — DNS, the preflight connect — with
+/// the state lock released. That reopens a window the old always-locked version
+/// closed by accident: two callers, say the window and a terminal, could both
+/// get through the preflight and both insert, and the second would overwrite
+/// the first's [`JoinHandle`], leaving a tunnel running that nothing could
+/// abort. Holding the key across the gap is what closes it again.
+///
+/// The set is behind a `std::sync::Mutex` rather than tokio's so that `Drop` can
+/// release it; it is only ever held for a set insert or remove.
+struct KeyClaim {
+    key: String,
+    claims: Arc<StdMutex<HashSet<String>>>,
+}
+
+impl Drop for KeyClaim {
+    fn drop(&mut self) {
+        if let Ok(mut claims) = self.claims.lock() {
+            claims.remove(&self.key);
+        }
+    }
+}
+
+/// Claims `key`, or reports that someone else is already setting it up.
+fn claim_key(
+    claims: &Arc<StdMutex<HashSet<String>>>,
+    key: &str,
+    what: &str,
+) -> Result<KeyClaim, CtlError> {
+    let mut guard = claims
+        .lock()
+        .map_err(|_| CtlError::internal(format!("{what} state for '{key}' is poisoned")))?;
+    if !guard.insert(key.to_string()) {
+        return Err(CtlError::already_in_progress(format!(
+            "'{key}' is already {what}"
+        )));
+    }
+    Ok(KeyClaim {
+        key: key.to_string(),
+        claims: claims.clone(),
+    })
+}
+
+/// Everything [`PbMapperState::finish_register`] needs once the slow work is done.
+struct RegisterCommit {
+    service_key: String,
+    local_address: String,
+    protocol: String,
+    enable_encryption: bool,
+    enable_keep_alive: bool,
+    local_sock_addr: SocketAddr,
+    remote_sock_addr: SocketAddr,
+}
+
+/// Everything [`PbMapperState::finish_connect`] needs once the slow work is done.
+struct ConnectCommit {
+    service_key: String,
+    local_address: String,
+    protocol: String,
+    enable_keep_alive: bool,
+    local_sock_addr: SocketAddr,
+    remote_sock_addr: SocketAddr,
+}
+
 pub struct PbMapperState {
     server_handle: Option<JoinHandle<()>>,
     server_shutdown_token: Option<CancellationToken>,
@@ -368,6 +445,10 @@ pub struct PbMapperState {
     client_status_cache: Arc<RwLock<HashMap<String, StatusCacheEntry>>>,
     service_status_refreshing: Arc<RwLock<HashSet<String>>>,
     client_status_refreshing: Arc<RwLock<HashSet<String>>>,
+    /// Keys currently being set up. See [`KeyClaim`]. Separate sets because a
+    /// key can legitimately be registered and connected to at the same time.
+    registering: Arc<StdMutex<HashSet<String>>>,
+    connecting: Arc<StdMutex<HashSet<String>>>,
 }
 
 impl PbMapperState {
@@ -423,6 +504,8 @@ impl PbMapperState {
             client_status_cache: Arc::new(RwLock::new(HashMap::new())),
             service_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
             client_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
+            registering: Arc::new(StdMutex::new(HashSet::new())),
+            connecting: Arc::new(StdMutex::new(HashSet::new())),
         };
 
         let config = temp_state.load_config().unwrap_or_else(|e| {
@@ -456,6 +539,8 @@ impl PbMapperState {
             client_status_cache: Arc::new(RwLock::new(HashMap::new())),
             service_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
             client_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
+            registering: Arc::new(StdMutex::new(HashSet::new())),
+            connecting: Arc::new(StdMutex::new(HashSet::new())),
         };
         if let Err(e) = state.apply_msg_header_key_env() {
             tracing::error!("Failed to apply MSG_HEADER_KEY during init: {}", e);
@@ -463,7 +548,7 @@ impl PbMapperState {
         state
     }
 
-    pub fn set_app_directory_path(&mut self, path: Option<String>) -> Result<(), String> {
+    pub fn set_app_directory_path(&mut self, path: Option<String>) -> Result<(), CtlError> {
         self.app_directory_path = path;
         self.config_dir = Self::get_config_dir(&self.app_directory_path);
 
@@ -479,28 +564,28 @@ impl PbMapperState {
         Ok(())
     }
 
-    fn apply_msg_header_key_env(&self) -> Result<(), String> {
-        if self.config.msg_header_key.is_empty() {
-            set_process_msg_header_key(None)
-        } else {
-            set_process_msg_header_key(Some(&self.config.msg_header_key))
-        }
+    fn apply_msg_header_key_env(&self) -> Result<(), CtlError> {
+        let key = (!self.config.msg_header_key.is_empty()).then_some(&*self.config.msg_header_key);
+        // The library validates the key's length and shape; a rejection here is
+        // the stored setting being wrong, not something going wrong.
+        set_process_msg_header_key(key).map_err(CtlError::invalid_argument)
     }
 
     #[allow(unused_variables)]
     fn get_config_dir(app_directory_path: &Option<String>) -> PathBuf {
+        // An explicit path wins everywhere. Mobile is where it normally comes
+        // from — Flutter hands it over, because there is no OS config dir to
+        // discover — but honouring it on desktop too is what lets a test point
+        // a state at a temporary directory instead of the user's real config.
+        if let Some(app_dir) = app_directory_path {
+            let path = PathBuf::from(app_dir).join("pb-mapper-ui");
+            tracing::info!("Using caller-provided app directory: {:?}", path);
+            return path;
+        }
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
-            if let Some(app_dir) = app_directory_path {
-                let path = PathBuf::from(app_dir).join("pb-mapper-ui");
-                tracing::info!("Using Flutter-provided app directory: {:?}", path);
-                return path;
-            } else {
-                tracing::warn!(
-                    "No app directory provided for mobile platform, using relative path"
-                );
-                PathBuf::from("pb-mapper-ui")
-            }
+            tracing::warn!("No app directory provided for mobile platform, using relative path");
+            PathBuf::from("pb-mapper-ui")
         }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
@@ -534,12 +619,13 @@ impl PbMapperState {
         config_file
     }
 
-    pub fn load_config(&self) -> Result<AppConfig, String> {
+    pub fn load_config(&self) -> Result<AppConfig, CtlError> {
         let config_path = self.get_config_file_path();
         if config_path.exists() {
-            let contents = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+            let contents =
+                fs::read_to_string(config_path).map_err(|e| CtlError::io(e.to_string()))?;
             let mut config: AppConfig =
-                serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+                serde_json::from_str(&contents).map_err(|e| CtlError::io(e.to_string()))?;
             config.msg_header_key = normalize_msg_header_key(config.msg_header_key)?;
             Ok(config)
         } else {
@@ -547,10 +633,11 @@ impl PbMapperState {
         }
     }
 
-    pub fn save_config(&self) -> Result<(), String> {
+    pub fn save_config(&self) -> Result<(), CtlError> {
         let config_path = self.get_config_file_path();
-        let contents = serde_json::to_string_pretty(&self.config).map_err(|e| e.to_string())?;
-        fs::write(config_path, contents).map_err(|e| e.to_string())?;
+        let contents =
+            serde_json::to_string_pretty(&self.config).map_err(|e| CtlError::io(e.to_string()))?;
+        fs::write(config_path, contents).map_err(|e| CtlError::io(e.to_string()))?;
         Ok(())
     }
 
@@ -574,16 +661,18 @@ impl PbMapperState {
         }
     }
 
-    pub fn save_service_configs(&self, store: &ServiceConfigStore) -> Result<(), String> {
+    pub fn save_service_configs(&self, store: &ServiceConfigStore) -> Result<(), CtlError> {
         let path = self.get_service_config_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| CtlError::io(format!("Failed to create config dir: {e}")))?;
         }
 
         let content = serde_json::to_string_pretty(store)
-            .map_err(|e| format!("Failed to serialize config: {e}"))?;
+            .map_err(|e| CtlError::io(format!("Failed to serialize config: {e}")))?;
 
-        fs::write(&path, content).map_err(|e| format!("Failed to write config file: {e}"))?;
+        fs::write(&path, content)
+            .map_err(|e| CtlError::io(format!("Failed to write config file: {e}")))?;
         Ok(())
     }
 
@@ -594,7 +683,7 @@ impl PbMapperState {
         protocol: &str,
         enable_encryption: bool,
         enable_keep_alive: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), CtlError> {
         let mut store = self.load_service_configs();
         let now = SystemTime::now();
 
@@ -615,7 +704,7 @@ impl PbMapperState {
         self.save_service_configs(&store)
     }
 
-    pub fn delete_service_config(&self, service_key: &str) -> Result<(), String> {
+    pub fn delete_service_config(&self, service_key: &str) -> Result<(), CtlError> {
         let mut store = self.load_service_configs();
         store.services.remove(service_key);
         self.save_service_configs(&store)
@@ -633,17 +722,18 @@ impl PbMapperState {
         }
     }
 
-    pub fn save_client_configs(&self, store: &ClientConfigStore) -> Result<(), String> {
+    pub fn save_client_configs(&self, store: &ClientConfigStore) -> Result<(), CtlError> {
         let path = self.get_client_config_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| CtlError::io(format!("Failed to create config dir: {e}")))?;
         }
 
         let content = serde_json::to_string_pretty(store)
-            .map_err(|e| format!("Failed to serialize client config: {e}"))?;
+            .map_err(|e| CtlError::io(format!("Failed to serialize client config: {e}")))?;
 
         fs::write(&path, content)
-            .map_err(|e| format!("Failed to write client config file: {e}"))?;
+            .map_err(|e| CtlError::io(format!("Failed to write client config file: {e}")))?;
         Ok(())
     }
 
@@ -653,7 +743,7 @@ impl PbMapperState {
         local_address: &str,
         protocol: &str,
         enable_keep_alive: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), CtlError> {
         let mut store = self.load_client_configs();
         let now = SystemTime::now();
 
@@ -673,30 +763,28 @@ impl PbMapperState {
         self.save_client_configs(&store)
     }
 
-    pub fn delete_client_config(&self, service_key: &str) -> Result<(), String> {
+    pub fn delete_client_config(&self, service_key: &str) -> Result<(), CtlError> {
         let mut store = self.load_client_configs();
         store.clients.remove(service_key);
         self.save_client_configs(&store)
     }
 
-    pub async fn start_server(&mut self, port: u16, enable_keep_alive: bool) -> Result<(), String> {
+    pub async fn start_server(
+        &mut self,
+        port: u16,
+        enable_keep_alive: bool,
+    ) -> Result<(), CtlError> {
         if self.server_handle.is_some() {
-            return Err("Server is already running".to_string());
-        }
-
-        if enable_keep_alive {
-            std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
-        } else {
-            std::env::remove_var(PB_MAPPER_KEEP_ALIVE);
+            return Err(CtlError::already_exists("Server is already running"));
         }
 
         let ip_addr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
         let bind_addr = std::net::SocketAddr::new(ip_addr, port);
 
         // Preflight bind to surface "port already in use" errors before spawning.
-        let listener = TcpListener::bind(bind_addr)
-            .await
-            .map_err(|e| format!("Failed to bind server on {bind_addr}: {e}"))?;
+        let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
+            CtlError::address_in_use(format!("Failed to bind server on {bind_addr}: {e}"))
+        })?;
         drop(listener);
 
         tracing::info!("Starting pb-mapper server on {}:{}", ip_addr, port);
@@ -711,6 +799,7 @@ impl PbMapperState {
                 (ip_addr, port),
                 shutdown_token_clone,
                 Some(status_receiver),
+                enable_keep_alive,
             )
             .await
             {
@@ -741,7 +830,7 @@ impl PbMapperState {
         Ok(())
     }
 
-    pub async fn stop_server(&mut self) -> Result<(), String> {
+    pub async fn stop_server(&mut self) -> Result<(), CtlError> {
         if let (Some(handle), Some(shutdown_token)) =
             (self.server_handle.take(), self.server_shutdown_token.take())
         {
@@ -790,43 +879,30 @@ impl PbMapperState {
             tracing::info!("pb-mapper server stopped, all services and connections terminated");
             Ok(())
         } else {
-            Err("Server is not running".to_string())
+            Err(CtlError::not_found("Server is not running"))
         }
     }
 
-    pub async fn register_service(
-        &mut self,
-        service_key: String,
-        local_address: String,
-        protocol: String,
-        enable_encryption: bool,
-        enable_keep_alive: bool,
-    ) -> Result<(), String> {
-        if self.service_handles.contains_key(&service_key) {
+    async fn finish_register(&mut self, commit: RegisterCommit) -> Result<(), CtlError> {
+        let RegisterCommit {
+            service_key,
+            local_address,
+            protocol,
+            enable_encryption,
+            enable_keep_alive,
+            local_sock_addr,
+            remote_sock_addr,
+        } = commit;
+
+        if let Some(previous) = self.service_handles.remove(&service_key) {
             tracing::warn!(
                 "Service '{service_key}' is already registered, replacing existing handle"
             );
-            self.service_handles.remove(&service_key);
+            // Dropping a `JoinHandle` does not stop the task. Without this the
+            // replaced tunnel kept running and retrying, with nothing left
+            // holding a handle able to abort it.
+            previous.abort();
         }
-
-        if enable_keep_alive {
-            std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
-        }
-
-        let local_sock_addr = get_sockaddr_async(&local_address)
-            .await
-            .map_err(|e| format!("Invalid local address: {e}"))?;
-        let remote_sock_addr = get_pb_mapper_server_async(Some(&self.config.server_address))
-            .await
-            .map_err(|e| format!("Invalid server address: {e}"))?;
-
-        // Preflight remote server connectivity to surface errors early.
-        TcpStream::connect(remote_sock_addr).await.map_err(|e| {
-            format!(
-                "Failed to connect to server {}: {e}",
-                self.config.server_address
-            )
-        })?;
 
         tracing::info!(
             "Registering service '{}' with protocol {}, local address {}, server address {}",
@@ -843,7 +919,7 @@ impl PbMapperState {
             enable_encryption,
             enable_keep_alive,
         )
-        .map_err(|e| format!("Failed to save service configuration: {e}"))?;
+        .map_err(|e| CtlError::io(format!("Failed to save service configuration: {e}")))?;
 
         let key_clone = service_key.clone();
         let service_key_for_status = service_key.clone();
@@ -862,8 +938,11 @@ impl PbMapperState {
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
-                    enable_encryption,
-                    false,
+                    ServerTunnelOptions {
+                        need_codec: enable_encryption,
+                        is_datagram: false,
+                        keep_alive: enable_keep_alive,
+                    },
                     Some(callback),
                 )
                 .await;
@@ -874,8 +953,11 @@ impl PbMapperState {
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
-                    enable_encryption,
-                    true,
+                    ServerTunnelOptions {
+                        need_codec: enable_encryption,
+                        is_datagram: true,
+                        keep_alive: enable_keep_alive,
+                    },
                     Some(callback),
                 )
                 .await;
@@ -913,7 +995,7 @@ impl PbMapperState {
         Ok(())
     }
 
-    pub async fn unregister_service(&mut self, service_key: String) -> Result<(), String> {
+    pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
         if let Some(handle) = self.service_handles.remove(&service_key) {
             handle.abort();
         }
@@ -928,14 +1010,16 @@ impl PbMapperState {
             tracing::info!("Service '{}' unregistered successfully", service_key);
             Ok(())
         } else {
-            Err(format!("Service '{service_key}' is not registered"))
+            Err(CtlError::not_found(format!(
+                "Service '{service_key}' is not registered"
+            )))
         }
     }
 
     pub async fn delete_service_config_and_stop(
         &mut self,
         service_key: String,
-    ) -> Result<(), String> {
+    ) -> Result<(), CtlError> {
         if let Some(handle) = self.service_handles.remove(&service_key) {
             handle.abort();
         }
@@ -945,44 +1029,26 @@ impl PbMapperState {
         self.delete_service_config(&service_key)
     }
 
-    pub async fn connect_service(
-        &mut self,
-        service_key: String,
-        local_address: String,
-        protocol: String,
-        enable_keep_alive: bool,
-    ) -> Result<(), String> {
-        if self.client_handles.contains_key(&service_key) {
+    async fn finish_connect(&mut self, commit: ConnectCommit) -> Result<(), CtlError> {
+        let ConnectCommit {
+            service_key,
+            local_address,
+            protocol,
+            enable_keep_alive,
+            local_sock_addr,
+            remote_sock_addr,
+        } = commit;
+
+        if let Some(previous) = self.client_handles.remove(&service_key) {
             tracing::warn!(
                 "Client for service '{service_key}' is already connected, replacing handle"
             );
-            self.client_handles.remove(&service_key);
+            // As in `finish_register`: dropping the handle leaves the old
+            // client's retry loop running with nothing able to stop it.
+            previous.abort();
         }
 
-        if enable_keep_alive {
-            std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
-        }
-
-        let local_sock_addr = get_sockaddr_async(&local_address)
-            .await
-            .map_err(|e| format!("Invalid local address: {e}"))?;
-        let remote_sock_addr = get_pb_mapper_server_async(Some(&self.config.server_address))
-            .await
-            .map_err(|e| format!("Invalid server address: {e}"))?;
-
-        // Preflight local bind to detect "port already in use" before starting client.
         let protocol_upper = protocol.to_uppercase();
-        if protocol_upper == "TCP" {
-            let listener = TcpListenerProvider::bind(local_sock_addr)
-                .await
-                .map_err(|e| format!("Failed to bind local address {local_address}: {e}"))?;
-            drop(listener);
-        } else {
-            let listener = UdpListenerProvider::bind(local_sock_addr)
-                .await
-                .map_err(|e| format!("Failed to bind local address {local_address}: {e}"))?;
-            drop(listener);
-        }
 
         tracing::info!(
             "Connecting to service '{}' with protocol {}, local address {}, server address {}",
@@ -1007,6 +1073,7 @@ impl PbMapperState {
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
+                    enable_keep_alive,
                     Some(status_callback),
                 )
                 .await;
@@ -1017,6 +1084,7 @@ impl PbMapperState {
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
+                    enable_keep_alive,
                     Some(status_callback),
                 )
                 .await;
@@ -1053,7 +1121,17 @@ impl PbMapperState {
         Ok(())
     }
 
-    pub async fn disconnect_service(&mut self, service_key: String) -> Result<(), String> {
+    /// Claims a service key for a registration. See [`KeyClaim`].
+    fn claim_registering(&self, service_key: &str) -> Result<KeyClaim, CtlError> {
+        claim_key(&self.registering, service_key, "being registered")
+    }
+
+    /// Claims a service key for a client connection. See [`KeyClaim`].
+    fn claim_connecting(&self, service_key: &str) -> Result<KeyClaim, CtlError> {
+        claim_key(&self.connecting, service_key, "being connected")
+    }
+
+    pub async fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
         // Aborting the task is the part that matters: it is what stops the
         // retry loop still dialling in the background.
         let aborted = match self.client_handles.remove(&service_key) {
@@ -1079,14 +1157,16 @@ impl PbMapperState {
             tracing::info!("Disconnected from service '{}'", service_key);
             Ok(())
         } else {
-            Err(format!("Service '{service_key}' is not connected"))
+            Err(CtlError::not_found(format!(
+                "Service '{service_key}' is not connected"
+            )))
         }
     }
 
     pub async fn delete_client_config_and_stop(
         &mut self,
         service_key: String,
-    ) -> Result<(), String> {
+    ) -> Result<(), CtlError> {
         if let Some(handle) = self.client_handles.remove(&service_key) {
             handle.abort();
         }
@@ -1105,7 +1185,7 @@ impl PbMapperState {
         server_address: String,
         keep_alive: bool,
         msg_header_key: String,
-    ) -> Result<(), String> {
+    ) -> Result<(), CtlError> {
         let msg_header_key = normalize_msg_header_key(msg_header_key)?;
         self.config.server_address = server_address;
         self.config.keep_alive_enabled = keep_alive;
@@ -1281,7 +1361,7 @@ impl PbMapperState {
         });
     }
 
-    pub async fn get_server_status_detail(&self) -> Result<ServerStatusDetail, String> {
+    pub async fn get_server_status_detail(&self) -> Result<ServerStatusDetail, CtlError> {
         self.force_refresh_server_status().await
     }
 
@@ -1290,7 +1370,7 @@ impl PbMapperState {
     pub async fn get_service_conns(
         &self,
         service_key: String,
-    ) -> Result<Vec<ServiceConnInfo>, String> {
+    ) -> Result<Vec<ServiceConnInfo>, CtlError> {
         let server_addr = self.config.server_address.clone();
         match tokio::time::timeout(
             FORCE_REFRESH_TIMEOUT,
@@ -1299,15 +1379,15 @@ impl PbMapperState {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(format!(
+            Err(_) => Err(CtlError::timeout(format!(
                 "Timed out asking {server_addr} about {service_key}"
-            )),
+            ))),
         }
     }
 
     /// Perform a blocking status refresh — waits for the actual network result
     /// instead of returning stale cache.
-    pub async fn force_refresh_server_status(&self) -> Result<ServerStatusDetail, String> {
+    pub async fn force_refresh_server_status(&self) -> Result<ServerStatusDetail, CtlError> {
         let server_addr = self.config.server_address.clone();
 
         let detail = match tokio::time::timeout(
@@ -1537,5 +1617,244 @@ impl PbMapperState {
 
     async fn calculate_client_status(&self, service_key: &str) -> (String, String) {
         self.get_cached_client_status(service_key).await
+    }
+}
+
+/// Registers a service, holding the state lock only for the bookkeeping.
+///
+/// Three phases. The middle one is the point: resolving addresses and dialling
+/// the pb-mapper server are unbounded — a blackholed address costs the whole
+/// connect timeout — and while they ran under the lock every other caller waited
+/// them out, including a status read that wanted nothing from this key at all.
+pub async fn register_service(
+    state: &Arc<Mutex<PbMapperState>>,
+    service_key: String,
+    local_address: String,
+    protocol: String,
+    enable_encryption: bool,
+    enable_keep_alive: bool,
+) -> Result<(), CtlError> {
+    // 1. Claim the key and take what the slow work needs. Microseconds.
+    //    `_claim` is held to the end of the function on purpose: dropping it
+    //    early would release the key while the setup is still running.
+    let (_claim, server_address) = {
+        let state = state.lock().await;
+        let claim = state.claim_registering(&service_key)?;
+        (claim, state.config.server_address.clone())
+    };
+
+    // 2. The slow parts, with the lock released.
+    let local_sock_addr = get_sockaddr_async(&local_address)
+        .await
+        .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
+    let remote_sock_addr = get_pb_mapper_server_async(Some(&server_address))
+        .await
+        .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
+    // Preflight remote server connectivity to surface errors early.
+    TcpStream::connect(remote_sock_addr).await.map_err(|e| {
+        CtlError::server_unreachable(format!("Failed to connect to server {server_address}: {e}"))
+    })?;
+
+    // 3. Commit. Microseconds again.
+    state
+        .lock()
+        .await
+        .finish_register(RegisterCommit {
+            service_key,
+            local_address,
+            protocol,
+            enable_encryption,
+            enable_keep_alive,
+            local_sock_addr,
+            remote_sock_addr,
+        })
+        .await
+}
+
+/// Connects to a registered service. Phased exactly like [`register_service`];
+/// the slow step here is the local bind that proves the port is free.
+pub async fn connect_service(
+    state: &Arc<Mutex<PbMapperState>>,
+    service_key: String,
+    local_address: String,
+    protocol: String,
+    enable_keep_alive: bool,
+) -> Result<(), CtlError> {
+    let (_claim, server_address) = {
+        let state = state.lock().await;
+        let claim = state.claim_connecting(&service_key)?;
+        (claim, state.config.server_address.clone())
+    };
+
+    let local_sock_addr = get_sockaddr_async(&local_address)
+        .await
+        .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
+    let remote_sock_addr = get_pb_mapper_server_async(Some(&server_address))
+        .await
+        .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
+
+    // Preflight local bind to detect "port already in use" before starting client.
+    if protocol.to_uppercase() == "TCP" {
+        let listener = TcpListenerProvider::bind(local_sock_addr)
+            .await
+            .map_err(|e| {
+                CtlError::address_in_use(format!(
+                    "Failed to bind local address {local_address}: {e}"
+                ))
+            })?;
+        drop(listener);
+    } else {
+        let listener = UdpListenerProvider::bind(local_sock_addr)
+            .await
+            .map_err(|e| {
+                CtlError::address_in_use(format!(
+                    "Failed to bind local address {local_address}: {e}"
+                ))
+            })?;
+        drop(listener);
+    }
+
+    state
+        .lock()
+        .await
+        .finish_connect(ConnectCommit {
+            service_key,
+            local_address,
+            protocol,
+            enable_keep_alive,
+            local_sock_addr,
+            remote_sock_addr,
+        })
+        .await
+}
+
+#[cfg(test)]
+// The crate denies these so a panic never reaches a Flutter caller through the
+// FFI boundary. In a test a panic *is* the failure report.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorCode;
+
+    /// A state rooted in a temporary directory, so a test never reads or writes
+    /// the real user config.
+    fn temp_state(name: &str) -> (Arc<Mutex<PbMapperState>>, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "pb-mapper-ffi-test-{name}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let state = PbMapperState::new(Some(root.to_string_lossy().into_owned()));
+        (Arc::new(Mutex::new(state)), root)
+    }
+
+    /// The claim is what stands in for the lock that registration no longer
+    /// holds across its slow phase. Without it, two callers — the window and a
+    /// terminal, say — could both finish the preflight and both insert, and the
+    /// second would overwrite the first's `JoinHandle`, leaving a tunnel with
+    /// nothing able to abort it.
+    #[tokio::test]
+    async fn a_second_registration_of_the_same_key_is_refused() {
+        let (state, root) = temp_state("claim");
+
+        let held = {
+            let guard = state.lock().await;
+            guard
+                .claim_registering("home")
+                .expect("first claim should succeed")
+        };
+
+        let err = register_service(
+            &state,
+            "home".to_string(),
+            "127.0.0.1:8080".to_string(),
+            "TCP".to_string(),
+            false,
+            false,
+        )
+        .await
+        .expect_err("a claimed key must be refused");
+        assert_eq!(
+            err.code(),
+            ErrorCode::AlreadyInProgress,
+            "expected a claim error, got: {err}"
+        );
+
+        // A different key is unaffected: the claim is per key, not a global gate.
+        {
+            let guard = state.lock().await;
+            guard
+                .claim_registering("other")
+                .expect("an unrelated key should still be claimable");
+        }
+
+        drop(held);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The claim has to survive every way a setup can end, including the ones
+    /// that return early. It is released by `Drop` precisely so that no error
+    /// path can forget it — this pins that.
+    #[tokio::test]
+    async fn a_failed_registration_releases_its_claim() {
+        let (state, root) = temp_state("release");
+
+        // Fails in phase 2, while the claim is held.
+        let first = register_service(
+            &state,
+            "home".to_string(),
+            "not a socket address".to_string(),
+            "TCP".to_string(),
+            false,
+            false,
+        )
+        .await
+        .expect_err("an unparseable local address should fail");
+        assert_eq!(
+            first.code(),
+            ErrorCode::InvalidAddress,
+            "expected an address error, got: {first}"
+        );
+
+        // If the claim had leaked, this would be refused rather than reaching
+        // the same address parsing it failed on before.
+        let second = register_service(
+            &state,
+            "home".to_string(),
+            "not a socket address".to_string(),
+            "TCP".to_string(),
+            false,
+            false,
+        )
+        .await
+        .expect_err("still an unparseable address");
+        assert_ne!(
+            second.code(),
+            ErrorCode::AlreadyInProgress,
+            "the claim leaked after a failed registration: {second}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Registering and connecting share a key space in the UI but not a claim:
+    /// exposing `home` and subscribing to `home` are different operations and
+    /// must not block each other.
+    #[tokio::test]
+    async fn registering_and_connecting_claim_separately() {
+        let (state, root) = temp_state("separate");
+
+        let guard = state.lock().await;
+        let _registering = guard
+            .claim_registering("home")
+            .expect("register claim should succeed");
+        guard
+            .claim_connecting("home")
+            .expect("connecting the same key must not be blocked by registering it");
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -7,7 +7,7 @@ use pb_mapper::common::message::{
     MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };
 use pb_mapper::local::client::run_client_side_cli;
-use pb_mapper::local::server::run_server_side_cli;
+use pb_mapper::local::server::{run_server_side_cli, ServerTunnelOptions};
 use pb_mapper::pb_server::run_server;
 use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -127,8 +127,11 @@ async fn run_pb_mapper_server_cli(
                 local_addr,
                 remote_addr,
                 key.into(),
-                need_codec,
-                true,
+                ServerTunnelOptions {
+                    need_codec,
+                    is_datagram: true,
+                    keep_alive: false,
+                },
             )
             .await
         }
@@ -137,8 +140,11 @@ async fn run_pb_mapper_server_cli(
                 local_addr,
                 remote_addr,
                 key.into(),
-                need_codec,
-                false,
+                ServerTunnelOptions {
+                    need_codec,
+                    is_datagram: false,
+                    keep_alive: false,
+                },
             )
             .await
         }
@@ -157,6 +163,7 @@ async fn run_pb_mapper_client_cli(
                 local_addr.to_string(),
                 remote_addr.to_string(),
                 key.into(),
+                false,
             )
             .await
         }
@@ -165,6 +172,7 @@ async fn run_pb_mapper_client_cli(
                 local_addr.to_string(),
                 remote_addr.to_string(),
                 key.into(),
+                false,
             )
             .await
         }
