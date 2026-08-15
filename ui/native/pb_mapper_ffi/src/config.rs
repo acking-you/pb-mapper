@@ -6,14 +6,14 @@ use std::ffi::{c_char, c_int};
 use serde_json::json;
 
 use crate::handle::PbMapperHandle;
-use crate::response::{err_message, ok_data, ok_message, parse_c_string};
+use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 use crate::state::AppConfig;
 
 /// Get current app config.
 #[no_mangle]
 pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let handle = unsafe { &mut *handle };
@@ -39,16 +39,16 @@ pub unsafe extern "C" fn pb_mapper_update_config(
     msg_header_key: *const c_char,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let server_address = match parse_c_string(server_address, "server_address") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
     let msg_header_key = match parse_c_string(msg_header_key, "msg_header_key") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
 
     let handle = unsafe { &mut *handle };
@@ -62,6 +62,6 @@ pub unsafe extern "C" fn pb_mapper_update_config(
 
     match result {
         Ok(_) => ok_message("configuration saved"),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }

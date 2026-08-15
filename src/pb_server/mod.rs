@@ -21,7 +21,7 @@ use self::error::{
 };
 use self::server::handle_server_conn;
 use self::status::handle_show_status;
-use crate::common::config::{control_io_timeout, server_lease_timeout, IS_KEEPALIVE};
+use crate::common::config::{control_io_timeout, keep_alive_from_env, server_lease_timeout};
 use crate::common::conn_id::{ConnIdProvider, RemoteConnId};
 use crate::common::manager::{ForwardMessage, SenderChan, TaskManager};
 use crate::common::message::command::{
@@ -317,8 +317,12 @@ impl ConnIdProvider<RemoteConnId> for RemoteIdProvider {
 }
 type ServerMananger = TaskManager<ManagerTask, ConnTask, RemoteConnId, RemoteIdProvider>;
 
+/// Run a server that takes its keep-alive setting from the environment.
+///
+/// Callers that own the setting — the binary, and the UI, which has a toggle for
+/// it — should use [`run_server_with_shutdown`] and pass it explicitly.
 pub async fn run_server<A: ToSocketAddrs>(addr: A) -> std::io::Result<()> {
-    run_server_with_shutdown(addr, CancellationToken::new(), None).await
+    run_server_with_shutdown(addr, CancellationToken::new(), None, keep_alive_from_env()).await
 }
 
 pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
@@ -327,6 +331,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
     status_channel: Option<
         tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<ServerStatusInfo>>,
     >,
+    keep_alive: bool,
 ) -> std::io::Result<()> {
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
     // represent the mapping of the `key` to the id of the server-side conn
@@ -348,7 +353,7 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
 
     let listener_handle = tokio::spawn(async move {
         tokio::select! {
-            result = handle_listener(task_sender, listener) => {
+            result = handle_listener(task_sender, listener, keep_alive) => {
                 if let Err(e) = result {
                     tracing::error!("Listener error: {}", e);
                 }
@@ -920,7 +925,11 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
     Ok(())
 }
 
-async fn handle_listener(task_sender: ManagerTaskSender, listener: TcpListener) -> Result<()> {
+async fn handle_listener(
+    task_sender: ManagerTaskSender,
+    listener: TcpListener,
+    keep_alive: bool,
+) -> Result<()> {
     loop {
         let (stream, addr) = listener.accept().await.context(ServerListenSnafu)?;
         tracing::debug!(
@@ -929,7 +938,7 @@ async fn handle_listener(task_sender: ManagerTaskSender, listener: TcpListener) 
             "accepted tcp connection"
         );
         // set keepalive (optional) and nodelay
-        if *IS_KEEPALIVE {
+        if keep_alive {
             snafu_error_handle!(set_tcp_keep_alive(&stream).context(TaskCenterSetKeepAliveSnafu));
         }
         snafu_error_handle!(set_tcp_nodelay(&stream), "remote stream set nodelay");

@@ -1,9 +1,10 @@
 use better_mimalloc_rs::MiMalloc;
 use clap::Parser;
 use pb_mapper::common::checksum::{setup_machine_msg_header_key, MACHINE_MSG_HEADER_KEY_PATH};
-use pb_mapper::common::config::{init_tracing, PB_MAPPER_KEEP_ALIVE};
-use pb_mapper::pb_server::run_server;
+use pb_mapper::common::config::{init_tracing, keep_alive_from_env};
+use pb_mapper::pb_server::run_server_with_shutdown;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tokio_util::sync::CancellationToken;
 
 #[global_allocator]
 static GLOBAL_MIMALLOC: MiMalloc = MiMalloc;
@@ -38,9 +39,8 @@ async fn main() {
     MiMalloc::init();
     let cli = Cli::parse();
     init_tracing();
-    if cli.keep_alive {
-        std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
-    }
+    // The flag wins; the env is the fallback it has always documented.
+    let keep_alive = cli.keep_alive || keep_alive_from_env();
     if cli.use_machine_msg_header_key {
         match setup_machine_msg_header_key() {
             Ok(_) => {
@@ -64,7 +64,14 @@ async fn main() {
     } else {
         IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
     };
-    if let Err(e) = run_server((ip_addr, cli.pb_mapper_port)).await {
+    if let Err(e) = run_server_with_shutdown(
+        (ip_addr, cli.pb_mapper_port),
+        CancellationToken::new(),
+        None,
+        keep_alive,
+    )
+    .await
+    {
         tracing::error!("Failed to start pb-mapper server: {e}");
     }
 }

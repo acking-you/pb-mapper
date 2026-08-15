@@ -11,7 +11,7 @@ use pb_mapper::common::message::{
     get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
 };
 use pb_mapper::local::client::run_client_side_cli_with_callback;
-use pb_mapper::local::server::run_server_side_cli_with_callback;
+use pb_mapper::local::server::{run_server_side_cli_with_callback, ServerTunnelOptions};
 use pb_mapper::pb_server::{get_init_request, run_server_with_shutdown};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -148,7 +148,7 @@ async fn status_service_reports_registered_v2_control_connection() {
     let shutdown_token = CancellationToken::new();
     let server_shutdown = shutdown_token.clone();
     let server = tokio::spawn(async move {
-        run_server_with_shutdown(server_addr, server_shutdown, None)
+        run_server_with_shutdown(server_addr, server_shutdown, None, false)
             .await
             .unwrap();
     });
@@ -267,8 +267,11 @@ async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_sta
         local_addr,
         remote_addr,
         Arc::from("sf-backend"),
-        false,
-        false,
+        ServerTunnelOptions {
+            need_codec: false,
+            is_datagram: false,
+            keep_alive: false,
+        },
         None,
     ));
 
@@ -322,6 +325,7 @@ async fn client_closes_initial_status_probe_after_key_check() {
         local_addr,
         remote_addr,
         Arc::from("sf-backend"),
+        false,
         None,
     ));
 
@@ -399,6 +403,7 @@ async fn client_rechecks_remote_key_while_listener_is_active() {
         local_addr,
         remote_addr,
         Arc::from("sf-backend"),
+        false,
         None,
     ));
 
@@ -451,7 +456,7 @@ async fn subscribe_retires_unacked_control_connection() {
     let shutdown_token = CancellationToken::new();
     let server_shutdown = shutdown_token.clone();
     let server = tokio::spawn(async move {
-        run_server_with_shutdown(server_addr, server_shutdown, None)
+        run_server_with_shutdown(server_addr, server_shutdown, None, false)
             .await
             .unwrap();
     });
@@ -515,7 +520,7 @@ async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection
     let shutdown_token = CancellationToken::new();
     let server_shutdown = shutdown_token.clone();
     let server = tokio::spawn(async move {
-        run_server_with_shutdown(server_addr, server_shutdown, None)
+        run_server_with_shutdown(server_addr, server_shutdown, None, false)
             .await
             .unwrap();
     });
@@ -634,7 +639,7 @@ async fn subscribe_missing_key_closes_without_hanging() {
     let shutdown_token = CancellationToken::new();
     let server_shutdown = shutdown_token.clone();
     let server = tokio::spawn(async move {
-        run_server_with_shutdown(server_addr, server_shutdown, None)
+        run_server_with_shutdown(server_addr, server_shutdown, None, false)
             .await
             .unwrap();
     });
@@ -679,7 +684,7 @@ async fn subscribe_bypasses_unacked_stale_control_connection() {
     let shutdown_token = CancellationToken::new();
     let server_shutdown = shutdown_token.clone();
     let server = tokio::spawn(async move {
-        run_server_with_shutdown(server_addr, server_shutdown, None)
+        run_server_with_shutdown(server_addr, server_shutdown, None, false)
             .await
             .unwrap();
     });
@@ -784,7 +789,7 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
     let shutdown_token = CancellationToken::new();
     let server_shutdown = shutdown_token.clone();
     let server = tokio::spawn(async move {
-        run_server_with_shutdown(server_addr, server_shutdown, None)
+        run_server_with_shutdown(server_addr, server_shutdown, None, false)
             .await
             .unwrap();
     });

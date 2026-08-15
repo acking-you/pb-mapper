@@ -1,8 +1,7 @@
 use better_mimalloc_rs::MiMalloc;
 use clap::Parser;
 use pb_mapper::common::config::{
-    get_pb_mapper_server_async, get_sockaddr_async, init_tracing, LocalService,
-    PB_MAPPER_KEEP_ALIVE,
+    get_pb_mapper_server_async, get_sockaddr_async, init_tracing, keep_alive_from_env, LocalService,
 };
 use pb_mapper::local::client::{handle_status_cli, run_client_side_cli};
 use pb_mapper::snafu_error_get_or_return;
@@ -38,9 +37,8 @@ async fn main() {
     MiMalloc::init();
     let cli = Cli::parse();
     init_tracing();
-    if cli.keep_alive {
-        std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
-    }
+    // The flag wins; the env is the fallback it has always documented.
+    let keep_alive = cli.keep_alive || keep_alive_from_env();
     match cli.local_server {
         LocalService::UdpServer { key, addr } => {
             run_client_side_cli::<UdpListenerProvider, _>(
@@ -49,6 +47,7 @@ async fn main() {
                     get_pb_mapper_server_async(cli.pb_mapper_server.as_deref()).await
                 ),
                 key.into(),
+                keep_alive,
             )
             .await
         }
@@ -59,6 +58,7 @@ async fn main() {
                     get_pb_mapper_server_async(cli.pb_mapper_server.as_deref()).await
                 ),
                 key.into(),
+                keep_alive,
             )
             .await;
         }

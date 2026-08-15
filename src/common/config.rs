@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::{LazyLock, Once};
+use std::sync::Once;
 use std::time::Duration;
 
 use clap::{Subcommand, ValueEnum};
@@ -324,19 +324,25 @@ pub fn client_health_check_timeout() -> Duration {
     )
 }
 
-/// Controls whether the keepalive option for TCP is enabled, depending on the value of the
-/// environment variable `PB_MAPPER_KEEP_ALIVE`
-pub static IS_KEEPALIVE: LazyLock<bool> = LazyLock::new(|| {
-    if std::env::var(PB_MAPPER_KEEP_ALIVE).is_ok() {
-        tracing::info!(
-            "TCP keep-alive is already on, due to the setting of the env:`{PB_MAPPER_KEEP_ALIVE}` "
-        );
-        true
-    } else {
-        tracing::info!("By default TCP keep-alive is off");
-        false
+/// Whether the environment asks for TCP keep-alive, from `PB_MAPPER_KEEP_ALIVE`.
+///
+/// A default for a process to read once at startup — not something the tunnels
+/// consult. Keep-alive is a per-tunnel parameter because one process can run
+/// many tunnels that disagree about it, which is why this is a function and not
+/// the `LazyLock<bool>` it used to be: that froze on the first tunnel to touch
+/// a socket and left every later one, including the UI's own toggle, unable to
+/// change it.
+pub fn keep_alive_from_env() -> bool {
+    match std::env::var(PB_MAPPER_KEEP_ALIVE) {
+        // The documented spelling is `ON`; the previous check was `is_ok()`,
+        // which turned keep-alive on for any value at all — `OFF` included.
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "on" | "1" | "true" | "yes"
+        ),
+        Err(_) => false,
     }
-});
+}
 
 #[inline]
 pub fn get_pb_mapper_server(addr: Option<&str>) -> Result<SocketAddr> {
@@ -411,5 +417,43 @@ mod tests {
         assert_eq!(parse_log_format("json"), LogFormat::Json);
         assert_eq!(parse_log_format(" JSON "), LogFormat::Json);
         assert_eq!(parse_log_format("unknown"), LogFormat::Pretty);
+    }
+
+    /// One test rather than several, because these share process-wide state and
+    /// the test runner threads them.
+    #[test]
+    fn keep_alive_reads_the_environment_every_time() {
+        let restore = std::env::var(PB_MAPPER_KEEP_ALIVE).ok();
+
+        std::env::remove_var(PB_MAPPER_KEEP_ALIVE);
+        assert!(!keep_alive_from_env(), "absent means off");
+
+        std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
+        assert!(keep_alive_from_env(), "the documented spelling");
+
+        // The regression. This used to be a `LazyLock<bool>`, so the answer was
+        // whatever the first caller in the process saw and could never change —
+        // which is why the UI's per-service toggle did nothing after the first
+        // tunnel started.
+        std::env::set_var(PB_MAPPER_KEEP_ALIVE, "OFF");
+        assert!(
+            !keep_alive_from_env(),
+            "OFF must mean off; the old check was `is_ok()`, so any value at \
+             all — OFF included — turned keep-alive on"
+        );
+
+        for truthy in ["on", "1", "true", "yes", " ON "] {
+            std::env::set_var(PB_MAPPER_KEEP_ALIVE, truthy);
+            assert!(keep_alive_from_env(), "{truthy:?} should enable");
+        }
+        for falsy in ["", "off", "0", "false", "no"] {
+            std::env::set_var(PB_MAPPER_KEEP_ALIVE, falsy);
+            assert!(!keep_alive_from_env(), "{falsy:?} should not enable");
+        }
+
+        match restore {
+            Some(value) => std::env::set_var(PB_MAPPER_KEEP_ALIVE, value),
+            None => std::env::remove_var(PB_MAPPER_KEEP_ALIVE),
+        }
     }
 }

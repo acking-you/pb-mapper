@@ -6,7 +6,7 @@ use std::ffi::{c_char, c_int};
 use serde_json::json;
 
 use crate::handle::PbMapperHandle;
-use crate::response::{err_message, ok_data, ok_message, parse_c_string};
+use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 use crate::state::{ClientConfigInfo, ClientStatusResponse};
 
 /// Connect client to service.
@@ -19,37 +19,39 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
     enable_keep_alive: c_int,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let service_key = match parse_c_string(service_key, "service_key") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
     let local_address = match parse_c_string(local_address, "local_address") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
     let protocol = match parse_c_string(protocol, "protocol") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
 
     let handle = unsafe { &mut *handle };
     let state = handle.state.clone();
+    // See `pb_mapper_register_service`: the connect path releases the state lock
+    // for its slow phase, so the caller must not be holding it.
     let result = handle.runtime.block_on(async move {
-        let mut state = state.lock().await;
-        let connect_result = state
-            .connect_service(
-                service_key.clone(),
-                local_address.clone(),
-                protocol.clone(),
-                enable_keep_alive != 0,
-            )
-            .await;
+        let connect_result = crate::state::connect_service(
+            &state,
+            service_key.clone(),
+            local_address.clone(),
+            protocol.clone(),
+            enable_keep_alive != 0,
+        )
+        .await;
 
         match connect_result {
             Ok(_) => {
+                let state = state.lock().await;
                 if let Err(e) = state.save_client_config(
                     &service_key,
                     &local_address,
@@ -70,7 +72,7 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
     match result {
         Ok(Some(warning)) => ok_message(&warning),
         Ok(None) => ok_message("client connection started"),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }
 
@@ -81,12 +83,12 @@ pub unsafe extern "C" fn pb_mapper_disconnect_service(
     service_key: *const c_char,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let service_key = match parse_c_string(service_key, "service_key") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
 
     let handle = unsafe { &mut *handle };
@@ -98,7 +100,7 @@ pub unsafe extern "C" fn pb_mapper_disconnect_service(
 
     match result {
         Ok(_) => ok_message("client disconnected"),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }
 
@@ -109,12 +111,12 @@ pub unsafe extern "C" fn pb_mapper_delete_client_config(
     service_key: *const c_char,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let service_key = match parse_c_string(service_key, "service_key") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
 
     let handle = unsafe { &mut *handle };
@@ -126,7 +128,7 @@ pub unsafe extern "C" fn pb_mapper_delete_client_config(
 
     match result {
         Ok(_) => ok_message("client config deleted"),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }
 
@@ -136,7 +138,7 @@ pub unsafe extern "C" fn pb_mapper_get_client_configs_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let handle = unsafe { &mut *handle };
@@ -156,12 +158,12 @@ pub unsafe extern "C" fn pb_mapper_get_client_status_json(
     service_key: *const c_char,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let service_key = match parse_c_string(service_key, "service_key") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
 
     let handle = unsafe { &mut *handle };

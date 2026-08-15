@@ -19,7 +19,7 @@ use self::error::{
 use self::stream::handle_stream;
 use crate::common::config::{
     control_conn_pool_size, control_heartbeat_interval, control_heartbeat_tolerance,
-    control_io_timeout, control_suspect_grace, registration_probe_timeout, IS_KEEPALIVE,
+    control_io_timeout, control_suspect_grace, registration_probe_timeout,
 };
 use crate::common::message::command::{
     LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq,
@@ -120,14 +120,34 @@ pub enum ServiceStatus {
     Failed,
 }
 
+/// How a local-server tunnel forwards: the codec, the transport, and whether
+/// its sockets keep alive.
+///
+/// Grouped rather than passed as three adjacent `bool`s, which is a
+/// transposition waiting to happen at a call site — and named fields make the
+/// call sites say which is which.
+#[derive(Clone, Copy, Debug)]
+pub struct ServerTunnelOptions {
+    pub need_codec: bool,
+    pub is_datagram: bool,
+    pub keep_alive: bool,
+}
+
 #[derive(Clone, Debug)]
 struct ServerCliRunConfig<A> {
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
-    need_codec: bool,
-    is_datagram: bool,
+    options: ServerTunnelOptions,
     worker_index: usize,
+}
+
+/// Where a stream request should connect, and how.
+#[derive(Clone, Copy, Debug)]
+struct StreamTarget<A> {
+    local_addr: A,
+    remote_addr: A,
+    keep_alive: bool,
 }
 
 fn duration_to_millis(duration: Duration) -> u64 {
@@ -208,30 +228,21 @@ pub async fn run_server_side_cli<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
-    need_codec: bool,
-    is_datagram: bool,
+    options: ServerTunnelOptions,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
     A: ToSocketAddrs + Debug + Copy,
 {
-    run_server_side_cli_with_callback::<LocalStream, A>(
-        local_addr,
-        remote_addr,
-        key,
-        need_codec,
-        is_datagram,
-        None,
-    )
-    .await
+    run_server_side_cli_with_callback::<LocalStream, A>(local_addr, remote_addr, key, options, None)
+        .await
 }
 
 pub async fn run_server_side_cli_with_callback<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
-    need_codec: bool,
-    is_datagram: bool,
+    options: ServerTunnelOptions,
     status_callback: Option<StatusCallback>,
 ) where
     LocalStream: StreamProvider + Send + 'static,
@@ -268,8 +279,7 @@ pub async fn run_server_side_cli_with_callback<LocalStream, A>(
                     local_addr,
                     remote_addr,
                     worker_key,
-                    need_codec,
-                    is_datagram,
+                    options,
                     None,
                     worker_index,
                 )
@@ -281,8 +291,7 @@ pub async fn run_server_side_cli_with_callback<LocalStream, A>(
         local_addr,
         remote_addr,
         key,
-        need_codec,
-        is_datagram,
+        options,
         status_callback,
         0,
     )
@@ -302,8 +311,7 @@ async fn run_server_side_cli_worker<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
-    need_codec: bool,
-    is_datagram: bool,
+    options: ServerTunnelOptions,
     status_callback: Option<StatusCallback>,
     worker_index: usize,
 ) where
@@ -315,8 +323,7 @@ async fn run_server_side_cli_worker<LocalStream, A>(
         local_addr,
         remote_addr,
         key: key.clone(),
-        need_codec,
-        is_datagram,
+        options,
         worker_index,
     };
     let mut retry_backoff = RetryBackoff::default();
@@ -380,8 +387,12 @@ where
         local_addr,
         remote_addr,
         key,
-        need_codec,
-        is_datagram,
+        options:
+            ServerTunnelOptions {
+                need_codec,
+                is_datagram,
+                keep_alive,
+            },
         worker_index,
     } = config;
     let local_addr = match got_one_socket_addr(local_addr).await {
@@ -415,7 +426,7 @@ where
         "local server connected to pb server"
     );
 
-    if *IS_KEEPALIVE {
+    if keep_alive {
         snafu_error_handle!(
             set_tcp_keep_alive(&manager_stream),
             "manager stream set tcp keep alive"
@@ -606,8 +617,11 @@ where
                 snafu_error_get_or_continue!(
                     handle_request::<LocalStream, _>(
                         msg,
-                        local_addr,
-                        remote_addr,
+                        StreamTarget {
+                            local_addr,
+                            remote_addr,
+                            keep_alive,
+                        },
                         key.clone(),
                         registration.conn_id,
                         &write_tx,
@@ -762,8 +776,7 @@ async fn handle_request<
     A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
 >(
     msg: &[u8],
-    local_addr: A,
-    remote_addr: A,
+    target: StreamTarget<A>,
     key: Arc<str>,
     conn_id: u32,
     write_tx: &tokio::sync::mpsc::UnboundedSender<LocalControlWrite>,
@@ -799,11 +812,12 @@ where
             tokio::spawn(async move {
                 snafu_error_handle!(
                     handle_stream::<LocalStream, _>(
-                        local_addr,
-                        remote_addr,
+                        target.local_addr,
+                        target.remote_addr,
                         key,
                         client_id,
-                        server_generation
+                        server_generation,
+                        target.keep_alive
                     )
                     .await
                 )

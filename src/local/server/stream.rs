@@ -10,7 +10,7 @@ use super::error::{
     DecodePbConnStreamRespSnafu, EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu,
     ReadPbConnStreamRespSnafu, Result, WritePbConnStreamReqSnafu,
 };
-use crate::common::config::{control_io_timeout, IS_KEEPALIVE};
+use crate::common::config::control_io_timeout;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
 use crate::common::message::{
@@ -33,6 +33,7 @@ pub async fn handle_stream<
     key: Arc<str>,
     client_id: u32,
     server_generation: u64,
+    keep_alive: bool,
 ) -> Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -59,7 +60,7 @@ where
             }
             .fail()?,
         };
-    if *IS_KEEPALIVE {
+    if keep_alive {
         snafu_error_handle!(
             set_tcp_keep_alive(&remote_stream),
             "remote stream set keepalive"

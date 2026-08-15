@@ -1,12 +1,11 @@
 use better_mimalloc_rs::MiMalloc;
 use clap::Parser;
 use pb_mapper::common::config::{
-    get_pb_mapper_server_async, get_sockaddr_async, init_tracing, LocalService,
-    PB_MAPPER_KEEP_ALIVE,
+    get_pb_mapper_server_async, get_sockaddr_async, init_tracing, keep_alive_from_env, LocalService,
 };
 use pb_mapper::common::message::forward::StreamForward;
 use pb_mapper::local::client::handle_status_cli;
-use pb_mapper::local::server::run_server_side_cli;
+use pb_mapper::local::server::{run_server_side_cli, ServerTunnelOptions};
 use pb_mapper::snafu_error_get_or_return;
 use uni_stream::stream::{StreamProvider, TcpStreamProvider, UdpStreamProvider};
 
@@ -37,8 +36,7 @@ struct Cli {
 }
 
 async fn run_register<LocalStream: StreamProvider + Send + 'static>(
-    need_codec: bool,
-    is_datagram: bool,
+    options: ServerTunnelOptions,
     key: String,
     local_addr: &str,
     remote_addr: Option<&str>,
@@ -47,14 +45,7 @@ async fn run_register<LocalStream: StreamProvider + Send + 'static>(
 {
     let local_addr = snafu_error_get_or_return!(get_sockaddr_async(local_addr).await);
     let remote_addr = snafu_error_get_or_return!(get_pb_mapper_server_async(remote_addr).await);
-    run_server_side_cli::<LocalStream, _>(
-        local_addr,
-        remote_addr,
-        key.into(),
-        need_codec,
-        is_datagram,
-    )
-    .await
+    run_server_side_cli::<LocalStream, _>(local_addr, remote_addr, key.into(), options).await
 }
 
 #[tokio::main]
@@ -62,14 +53,16 @@ async fn main() {
     MiMalloc::init();
     let cli = Cli::parse();
     init_tracing();
-    if cli.keep_alive {
-        std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
-    }
+    // The flag wins; the env is the fallback it has always documented.
+    let keep_alive = cli.keep_alive || keep_alive_from_env();
     match cli.local_server {
         LocalService::UdpServer { key, addr } => {
             run_register::<UdpStreamProvider>(
-                cli.codec,
-                true,
+                ServerTunnelOptions {
+                    need_codec: cli.codec,
+                    is_datagram: true,
+                    keep_alive,
+                },
                 key,
                 &addr,
                 cli.pb_mapper_server.as_deref(),
@@ -78,8 +71,11 @@ async fn main() {
         }
         LocalService::TcpServer { key, addr } => {
             run_register::<TcpStreamProvider>(
-                cli.codec,
-                false,
+                ServerTunnelOptions {
+                    need_codec: cli.codec,
+                    is_datagram: false,
+                    keep_alive,
+                },
                 key,
                 &addr,
                 cli.pb_mapper_server.as_deref(),

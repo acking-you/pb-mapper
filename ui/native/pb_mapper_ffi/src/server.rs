@@ -6,7 +6,7 @@ use std::ffi::{c_char, c_int};
 use serde_json::json;
 
 use crate::handle::PbMapperHandle;
-use crate::response::{err_message, ok_data, ok_message, parse_c_string};
+use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 
 /// Start pb-mapper server.
 #[no_mangle]
@@ -16,7 +16,7 @@ pub unsafe extern "C" fn pb_mapper_start_server(
     enable_keep_alive: c_int,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let handle = unsafe { &mut *handle };
@@ -28,7 +28,7 @@ pub unsafe extern "C" fn pb_mapper_start_server(
 
     match result {
         Ok(_) => ok_message("server started"),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }
 
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn pb_mapper_start_server(
 #[no_mangle]
 pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let handle = unsafe { &mut *handle };
@@ -48,7 +48,7 @@ pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *
 
     match result {
         Ok(_) => ok_message("server stopped"),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }
 
@@ -58,7 +58,7 @@ pub unsafe extern "C" fn pb_mapper_get_local_server_status_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let handle = unsafe { &mut *handle };
@@ -82,12 +82,12 @@ pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
     service_key: *const c_char,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let service_key = match parse_c_string(service_key, "service_key") {
         Ok(v) => v,
-        Err(e) => return err_message(&e),
+        Err(e) => return err_ctl(&e),
     };
 
     let handle = unsafe { &mut *handle };
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
 
     match result {
         Ok(conns) => ok_data(serde_json::to_value(conns).unwrap_or_else(|_| json!([]))),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }
 
@@ -109,7 +109,7 @@ pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let handle = unsafe { &mut *handle };
@@ -121,7 +121,7 @@ pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
 
     match result {
         Ok(detail) => ok_data(serde_json::to_value(detail).unwrap_or_else(|_| json!({}))),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }
 
@@ -131,7 +131,7 @@ pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
     if handle.is_null() {
-        return err_message("handle is null");
+        return err_null_handle();
     }
 
     let handle = unsafe { &mut *handle };
@@ -143,6 +143,6 @@ pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
 
     match result {
         Ok(detail) => ok_data(serde_json::to_value(detail).unwrap_or_else(|_| json!({}))),
-        Err(e) => err_message(&e),
+        Err(e) => err_ctl(&e),
     }
 }
