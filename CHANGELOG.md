@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.19] - 2026-08-15
+- Fixed a failing connection or registration having no way to be stopped. `failed` does not mean the client gave up — it means the status probe could not reach the server, while the retry loop carries on dialling. The row offered Connect in that state, so a failing tunnel retried indefinitely with nothing in the interface able to stop it.
+- Fixed connecting reporting success before it had connected. Accepting the request and coming up are different events, and only the first had a message, so a green "client connection started" appeared while the client was failing to reach the server. The settled result now gets its own message, in red, with the reason beneath it.
+- Split Operations into Status, Services and Config. The status page carried both the server's state and the list of registered services side by side, which put the longer of the two — the one you scroll — into half a window.
+- Added the connections a service is actually holding, on the Services page. Expanding a key lists each control connection with its id, how long since it was last heard from, its generation, its protocol version, and whether the server considers it healthy. This information was previously shown as a Rust debug dump of the whole connection map.
+- Added selection and one-click copying for service keys and connection ids, and made the whole row open rather than just its chevron.
+- Replaced the notification bar with stacking toasts. The previous one showed a single message at a time, replaced it mid-read when another arrived, and could not be dismissed. Errors now stay until closed; everything else clears itself.
+
 ## [0.2.18] - 2026-08-15
 - Changed the way out of a workspace. The sidebar's top entry said "Home" and always went there, which meant leaving ops — usually reached from a workspace — dropped you on the landing page to pick a role again. Home is now the app mark in the title bar, the one control in the same place everywhere; the sidebar entry swaps between registering and connecting inside a workspace, and is a real Back elsewhere, returning to the screen you left rather than that zone's default.
 - Added the log view to both the register and connect workspaces. Why a registration did not come up is a question you have without leaving the workspace, and the answer used to be one zone away. Removed from Operations rather than duplicated: it is the same view, not a second one.
