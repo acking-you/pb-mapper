@@ -2,6 +2,7 @@ import 'dart:ui';
 import 'dart:async' show unawaited;
 import 'dart:io' show Platform, exit;
 import 'package:flutter/material.dart';
+import 'package:toastification/toastification.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
@@ -9,6 +10,7 @@ import 'package:pb_mapper_ui/src/views/client_connection_view.dart';
 import 'package:pb_mapper_ui/src/views/main_landing_view.dart';
 import 'package:pb_mapper_ui/src/views/service_registration_view.dart';
 import 'package:pb_mapper_ui/src/views/setup_wizard_view.dart';
+import 'package:pb_mapper_ui/src/views/registered_services_view.dart';
 import 'package:pb_mapper_ui/src/views/status_monitoring_view.dart';
 import 'package:pb_mapper_ui/src/views/configuration_view.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
@@ -418,8 +420,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
   /// locale rather than a BuildContext.
   TrayStrings _trayStrings() {
     final active =
-        _locale ??
-        LocaleController.resolve(PlatformDispatcher.instance.locale);
+        _locale ?? LocaleController.resolve(PlatformDispatcher.instance.locale);
     final l10n = lookupAppLocalizations(active);
     return TrayStrings(
       offline: l10n.trayStatusOffline,
@@ -480,6 +481,8 @@ class _MyAppState extends State<MyApp> with WindowListener {
         switch (_opsTab) {
           case OpsTab.status:
             return const StatusMonitoringView();
+          case OpsTab.services:
+            return const RegisteredServicesView();
           case OpsTab.config:
             return const ConfigurationView();
         }
@@ -522,30 +525,34 @@ class _MyAppState extends State<MyApp> with WindowListener {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'pb-mapper UI',
-      locale: _locale,
-      supportedLocales: LocaleController.supported,
-      localizationsDelegates: const [
-        AppLocalizations.delegate,
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      theme: _buildTheme(Brightness.light),
-      darkTheme: _buildTheme(Brightness.dark),
-      themeMode: _themeMode,
-      // Every colour in the tree is lerped between the two themes over this,
-      // so switching does not repaint the window in one frame. The stock 200ms
-      // is quick enough to read as a flash on a full-window surface change.
-      themeAnimationDuration: const Duration(milliseconds: 350),
-      themeAnimationCurve: Curves.easeInOutCubic,
-      // Pass this context down: the State's own context sits above MaterialApp
-      // and so outside the Localizations scope it installs.
-      // One shell for both layouts. They used to be two separate trees picked
-      // by width, which is why crossing the breakpoint swapped one for the
-      // other in a single frame instead of moving between them.
-      home: Builder(builder: _buildApp),
+    // Toasts render into an overlay above the whole app, which is what lets
+    // them stack and outlive the Scaffold — or dialog — they were raised from.
+    return ToastificationWrapper(
+      child: MaterialApp(
+        title: 'pb-mapper UI',
+        locale: _locale,
+        supportedLocales: LocaleController.supported,
+        localizationsDelegates: const [
+          AppLocalizations.delegate,
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        theme: _buildTheme(Brightness.light),
+        darkTheme: _buildTheme(Brightness.dark),
+        themeMode: _themeMode,
+        // Every colour in the tree is lerped between the two themes over this,
+        // so switching does not repaint the window in one frame. The stock 200ms
+        // is quick enough to read as a flash on a full-window surface change.
+        themeAnimationDuration: const Duration(milliseconds: 350),
+        themeAnimationCurve: Curves.easeInOutCubic,
+        // Pass this context down: the State's own context sits above MaterialApp
+        // and so outside the Localizations scope it installs.
+        // One shell for both layouts. They used to be two separate trees picked
+        // by width, which is why crossing the breakpoint swapped one for the
+        // other in a single frame instead of moving between them.
+        home: Builder(builder: _buildApp),
+      ),
     );
   }
 
@@ -613,6 +620,7 @@ class _MyAppState extends State<MyApp> with WindowListener {
       case AppSection.ops:
         return switch (_opsTab) {
           OpsTab.status => l10n.pageStatus,
+          OpsTab.services => l10n.pageServices,
           OpsTab.config => l10n.pageConfig,
         };
       case AppSection.setup:
@@ -621,7 +629,6 @@ class _MyAppState extends State<MyApp> with WindowListener {
     }
   }
 }
-
 
 /// A place the user has been, complete enough to put them back on it.
 ///

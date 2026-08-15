@@ -64,8 +64,7 @@ class _ServiceCardState extends State<ServiceCard> {
 
     setState(() => _isOperating = true);
 
-    if (_config.status == ServiceStatus.running ||
-        _config.status == ServiceStatus.retrying) {
+    if (_config.isLive) {
       // Stop the service via parent callback
       widget.onStartStop?.call();
       setState(() {
@@ -93,9 +92,7 @@ class _ServiceCardState extends State<ServiceCard> {
     });
   }
 
-  bool get _isUp =>
-      _config.status == ServiceStatus.running ||
-      _config.status == ServiceStatus.retrying;
+  bool get _isUp => _config.isLive;
 
   @override
   Widget build(BuildContext context) {
@@ -131,14 +128,8 @@ class _ServiceCardState extends State<ServiceCard> {
           ],
         ),
         facts: [
-          ListCardFact(
-            icon: Icons.lan_outlined,
-            label: _config.localAddress,
-          ),
-          ListCardFact(
-            icon: Icons.swap_horiz_rounded,
-            label: _config.protocol,
-          ),
+          ListCardFact(icon: Icons.lan_outlined, label: _config.localAddress),
+          ListCardFact(icon: Icons.swap_horiz_rounded, label: _config.protocol),
           if (_config.enableEncryption)
             ListCardFact(
               icon: Icons.lock_outline_rounded,

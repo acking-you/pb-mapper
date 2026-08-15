@@ -16,6 +16,18 @@ class ClientConfig {
   final DateTime createdAt;
   DateTime updatedAt;
   ClientStatus status;
+
+  /// Whether a background task exists to stop — not whether it is working.
+  ///
+  /// `failed` means the status probe could not reach the server, not that the
+  /// client gave up: its retry loop is still running and still dialling. Only
+  /// `stopped` means the handle has been aborted.
+  ///
+  /// Lives on the model because the same rule was written out in three places
+  /// — the button's label, the card's own toggle, and the view's handler — and
+  /// fixing one of them left a row whose button said Disconnect and reconnected
+  /// when pressed.
+  bool get isLive => status != ClientStatus.stopped;
   String statusMessage;
 
   ClientConfig({

@@ -25,7 +25,17 @@ enum AppSection {
 
 /// The tabs inside the ops zone.
 ///
-/// Logs used to be a third tab here. They now live in both workspaces, where
-/// the question they answer is actually asked, and a copy under ops would only
-/// be a second door onto the same view.
-enum OpsTab { status, config }
+/// Logs used to be a tab here. They now live in both workspaces, where the
+/// question they answer is actually asked, and a copy under ops would only be
+/// a second door onto the same view.
+enum OpsTab {
+  /// Whether the server is up, and what it is holding.
+  status,
+
+  /// What is registered on it. This shared the status page, which made one
+  /// screen answer two questions and left the list of services — the longer
+  /// of the two, and the one you scroll — squeezed into half a window.
+  services,
+
+  config,
+}

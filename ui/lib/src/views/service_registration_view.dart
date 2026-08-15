@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/polling.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
@@ -131,9 +132,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
   void _registerService() {
     if (_serviceKeyController.text.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(context.l10n.serviceKeyRequired)));
+      showToast(context, context.l10n.serviceKeyRequired);
       return;
     }
 
@@ -143,12 +142,9 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     );
 
     if (existingConfig != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            context.l10n.serviceExists(_serviceKeyController.text),
-          ),
-        ),
+      showToast(
+        context,
+        context.l10n.serviceExists(_serviceKeyController.text),
       );
       return;
     }
@@ -170,18 +166,11 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
           if (!mounted) return;
           if (!result.success) {
             setState(() => _isRegistering = false);
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(result.message),
-                backgroundColor: Colors.red,
-              ),
-            );
+            showToast(context, result.message, kind: ToastKind.error);
             return;
           }
 
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(context.l10n.registering(serviceKey))));
+          showToast(context, context.l10n.registering(serviceKey));
 
           // Poll for registration status
           _pollRegistrationStatus(serviceKey);
@@ -214,20 +203,17 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
     if (!registered) {
       setState(() => _isRegistering = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.registerTimeout(serviceKey)),
-          backgroundColor: Colors.red,
-        ),
+      showToast(
+        context,
+        context.l10n.registerTimeout(serviceKey),
+        kind: ToastKind.error,
       );
       return;
     }
 
     setState(() => _isRegistering = false);
     _clearForm();
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(context.l10n.registered(serviceKey))));
+    showToast(context, context.l10n.registered(serviceKey));
 
     await _pollServiceStatusUntilStable(serviceKey);
   }
@@ -247,6 +233,22 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         );
         return config != null && config.status != ServiceStatus.retrying;
       },
+    );
+
+    if (!mounted) return;
+    final settled = _serviceConfigs.firstWhereOrNull(
+      (c) => c.serviceKey == serviceKey,
+    );
+    if (settled == null || settled.status != ServiceStatus.failed) return;
+
+    // Accepting the request and coming up are different things, and only the
+    // first one had a message. A green "registered" while the service was
+    // failing to reach the server is what this replaces.
+    showToast(
+      context,
+      context.l10n.registerFailedStatus(serviceKey),
+      kind: ToastKind.error,
+      description: settled.statusMessage.isEmpty ? null : settled.statusMessage,
     );
   }
 
@@ -276,22 +278,17 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
       if (existingConfig != null) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                context.l10n.serviceExists(updatedConfig.serviceKey),
-              ),
-              backgroundColor: Colors.red,
-            ),
+          showToast(
+            context,
+            context.l10n.serviceExists(updatedConfig.serviceKey),
+            kind: ToastKind.error,
           );
         }
         return;
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.testingConfig)),
-        );
+        showToast(context, context.l10n.testingConfig);
       }
 
       // Handle same-key edits: if service key hasn't changed, stop existing service first
@@ -300,12 +297,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         final stopResult = await _api.unregisterService(config.serviceKey);
         if (!stopResult.success) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(stopResult.message),
-                backgroundColor: Colors.red,
-              ),
-            );
+            showToast(context, stopResult.message, kind: ToastKind.error);
           }
           return;
         }
@@ -325,12 +317,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
       if (!registerResult.success) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(registerResult.message),
-              backgroundColor: Colors.red,
-            ),
-          );
+          showToast(context, registerResult.message, kind: ToastKind.error);
         }
         return;
       }
@@ -372,13 +359,10 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         }
 
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                context.l10n.serviceUpdated(newConfig.serviceKey),
-              ),
-              backgroundColor: Colors.green,
-            ),
+          showToast(
+            context,
+            context.l10n.serviceUpdated(newConfig.serviceKey),
+            kind: ToastKind.success,
           );
         }
         return;
@@ -390,13 +374,10 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     await _api.deleteServiceConfig(newConfig.serviceKey);
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            context.l10n.reconnectFailed(newConfig.serviceKey),
-          ),
-          backgroundColor: Colors.red,
-        ),
+      showToast(
+        context,
+        context.l10n.reconnectFailed(newConfig.serviceKey),
+        kind: ToastKind.error,
       );
     }
   }
@@ -406,9 +387,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text(context.l10n.deleteService),
-        content: Text(
-          context.l10n.deleteServiceConfirm(config.serviceKey),
-        ),
+        content: Text(context.l10n.deleteServiceConfirm(config.serviceKey)),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -430,12 +409,9 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
       await _loadServiceConfigs();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              context.l10n.serviceConfigDeleted(config.serviceKey),
-            ),
-          ),
+        showToast(
+          context,
+          context.l10n.serviceConfigDeleted(config.serviceKey),
         );
       }
     }
@@ -448,16 +424,14 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   }
 
   void _startStopService(ServiceConfig config) async {
-    if (config.status == ServiceStatus.running ||
-        config.status == ServiceStatus.retrying) {
+    if (config.isLive) {
       // Stop the service
       final result = await _api.unregisterService(config.serviceKey);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(result.message),
-            backgroundColor: result.success ? Colors.green : Colors.red,
-          ),
+        showToast(
+          context,
+          result.message,
+          kind: result.success ? ToastKind.success : ToastKind.error,
         );
       }
     } else {
@@ -470,11 +444,10 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         enableKeepAlive: config.enableKeepAlive,
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(result.message),
-            backgroundColor: result.success ? Colors.green : Colors.red,
-          ),
+        showToast(
+          context,
+          result.message,
+          kind: result.success ? ToastKind.success : ToastKind.error,
         );
       }
 
@@ -496,9 +469,7 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
     _api.getServiceStatus(config.serviceKey).then((_) => _loadServiceConfigs());
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(context.l10n.refreshingStatus(config.serviceKey))),
-      );
+      showToast(context, context.l10n.refreshingStatus(config.serviceKey));
     }
   }
 
@@ -517,151 +488,150 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (widget.pane == WorkspacePane.form) Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      context.l10n.registerTitle,
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 16),
-                    DropdownButtonFormField<String>(
-                      initialValue: _selectedProtocol,
-                      items: ['TCP', 'UDP']
-                          .map(
-                            (protocol) => DropdownMenuItem(
-                              value: protocol,
-                              child: Text(protocol),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        setState(() => _selectedProtocol = value!);
-                      },
-                      decoration: InputDecoration(
-                        labelText: context.l10n.protocol,
-                        border: OutlineInputBorder(),
+            if (widget.pane == WorkspacePane.form)
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        context.l10n.registerTitle,
+                        style: Theme.of(context).textTheme.titleLarge,
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _serviceKeyController,
-                      decoration: InputDecoration(
-                        labelText: context.l10n.serviceKey,
-                        hintText: context.l10n.serviceKeyHint,
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.vpn_key),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        initialValue: _selectedProtocol,
+                        items: ['TCP', 'UDP']
+                            .map(
+                              (protocol) => DropdownMenuItem(
+                                value: protocol,
+                                child: Text(protocol),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          setState(() => _selectedProtocol = value!);
+                        },
+                        decoration: InputDecoration(
+                          labelText: context.l10n.protocol,
+                          border: OutlineInputBorder(),
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _localAddressController,
-                      decoration: InputDecoration(
-                        labelText: context.l10n.localAddress,
-                        hintText: '127.0.0.1:8080',
-                        border: OutlineInputBorder(),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _serviceKeyController,
+                        decoration: InputDecoration(
+                          labelText: context.l10n.serviceKey,
+                          hintText: context.l10n.serviceKeyHint,
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.vpn_key),
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    SwitchListTile(
-                      title: Text(context.l10n.enableEncryption),
-                      value: _isEncryptionEnabled,
-                      onChanged: (value) {
-                        setState(() => _isEncryptionEnabled = value);
-                      },
-                    ),
-                    SwitchListTile(
-                      title: Text(context.l10n.enableKeepAlive),
-                      value: _isKeepAliveEnabled,
-                      onChanged: (value) {
-                        setState(() => _isKeepAliveEnabled = value);
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey),
-                        borderRadius: BorderRadius.circular(8),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _localAddressController,
+                        decoration: InputDecoration(
+                          labelText: context.l10n.localAddress,
+                          hintText: '127.0.0.1:8080',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.dns, color: Colors.blue),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  context.l10n.serverAddress,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
+                      const SizedBox(height: 16),
+                      SwitchListTile(
+                        title: Text(context.l10n.enableEncryption),
+                        value: _isEncryptionEnabled,
+                        onChanged: (value) {
+                          setState(() => _isEncryptionEnabled = value);
+                        },
+                      ),
+                      SwitchListTile(
+                        title: Text(context.l10n.enableKeepAlive),
+                        value: _isKeepAliveEnabled,
+                        onChanged: (value) {
+                          setState(() => _isKeepAliveEnabled = value);
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.dns, color: Colors.blue),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    context.l10n.serverAddress,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  _serverAddress,
-                                  style: const TextStyle(fontSize: 16),
-                                ),
-                              ],
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    _serverAddress,
+                                    style: const TextStyle(fontSize: 16),
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                          TextButton(
-                            onPressed: () {
-                              AppNavigationManager.navigateToConfigPage();
-                            },
-                            child: Text(
-                              context.l10n.quickStartStep1Action,
-                              style: const TextStyle(fontSize: 12),
+                            TextButton(
+                              onPressed: () {
+                                AppNavigationManager.navigateToConfigPage();
+                              },
+                              child: Text(
+                                context.l10n.quickStartStep1Action,
+                                style: const TextStyle(fontSize: 12),
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            if (widget.pane == WorkspacePane.form) const SizedBox(height: 16),
-            if (widget.pane == WorkspacePane.form) SizedBox(
-              height: 48,
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: !_isRegistering ? _registerService : null,
-                style: ElevatedButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(24),
+                    ],
                   ),
                 ),
-                child: _isRegistering
-                    ? Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            context.l10n.registeringInProgress,
-                            style: const TextStyle(fontSize: 16),
-                          ),
-                        ],
-                      )
-                    : Text(
-                        context.l10n.registerAction,
-                        style: TextStyle(fontSize: 16),
-                      ),
               ),
-            ),
+            if (widget.pane == WorkspacePane.form) const SizedBox(height: 16),
+            if (widget.pane == WorkspacePane.form)
+              SizedBox(
+                height: 48,
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: !_isRegistering ? _registerService : null,
+                  style: ElevatedButton.styleFrom(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                  ),
+                  child: _isRegistering
+                      ? Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              context.l10n.registeringInProgress,
+                              style: const TextStyle(fontSize: 16),
+                            ),
+                          ],
+                        )
+                      : Text(
+                          context.l10n.registerAction,
+                          style: TextStyle(fontSize: 16),
+                        ),
+                ),
+              ),
             // The list is its own destination now, so an empty one has to say
             // so rather than render nothing at all.
             if (widget.pane == WorkspacePane.list) ...[

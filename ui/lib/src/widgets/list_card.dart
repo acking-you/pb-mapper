@@ -149,9 +149,7 @@ class ListPaneEmpty extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 34),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: scheme.outlineVariant.withValues(alpha: 0.6),
-        ),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6)),
       ),
       child: Column(
         children: [
@@ -313,7 +311,10 @@ class ListCardRow extends StatelessWidget {
           children: [
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: [_dot(stacked: true), Expanded(child: body)],
+              children: [
+                _dot(stacked: true),
+                Expanded(child: body),
+              ],
             ),
             const SizedBox(height: 10),
             // Trailing, so the primary action keeps the same edge it has on the

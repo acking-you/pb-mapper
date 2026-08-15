@@ -334,5 +334,17 @@
   "keyAutoSelected": "已选用状态页的 \"{key}\"",
   "registeringInProgress": "注册中…",
   "serviceUpdated": "服务「{key}」已更新",
-  "serviceConfigDeleted": "服务「{key}」的配置已删除"
+  "serviceConfigDeleted": "服务「{key}」的配置已删除",
+  "navServices": "服务",
+  "pageServices": "服务",
+  "serverHoldsNothing": "服务器没有为该服务保持任何连接",
+  "connGeneration": "第 {value} 代",
+  "connProtocol": "v{value}",
+  "connLastSeen": "{value}前收到",
+  "connUnhealthy": "不健康",
+  "connCount": "保持 {count} 个",
+  "connectionIds": "连接 ID",
+  "noConnectionIds": "无",
+  "connectFailed": "{key} 连接未成功",
+  "registerFailedStatus": "{key} 注册未成功"
 }

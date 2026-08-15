@@ -35,8 +35,7 @@ class AppDestination {
 
   /// The label as both navigations render it. An empty list says nothing
   /// rather than "(0)", which reads as a broken counter.
-  String get fullLabel =>
-      (count ?? 0) > 0 ? '$label ($count)' : label;
+  String get fullLabel => (count ?? 0) > 0 ? '$label ($count)' : label;
 }
 
 /// The destinations of the current zone, or none for the zones without any.
@@ -90,6 +89,13 @@ List<AppDestination> destinationsFor(
         label: l10n.navStatus,
         selected: opsTab == OpsTab.status,
         onPressed: () => onOpsTab(OpsTab.status),
+      ),
+      AppDestination(
+        icon: Icons.dns_outlined,
+        selectedIcon: Icons.dns,
+        label: l10n.navServices,
+        selected: opsTab == OpsTab.services,
+        onPressed: () => onOpsTab(OpsTab.services),
       ),
       AppDestination(
         icon: Icons.settings_outlined,

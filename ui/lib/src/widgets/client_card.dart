@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/models/client_config.dart';
@@ -51,11 +52,7 @@ class _ClientCardState extends State<ClientCard> {
     if (addr.isEmpty) return;
     await Clipboard.setData(ClipboardData(text: addr));
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
-        SnackBar(content: Text(context.l10n.copiedToClipboard(addr))),
-      );
+      showToast(context, context.l10n.copiedToClipboard(addr));
     }
   }
 
@@ -77,8 +74,7 @@ class _ClientCardState extends State<ClientCard> {
 
     setState(() => _isOperating = true);
 
-    if (_config.status == ClientStatus.running ||
-        _config.status == ClientStatus.retrying) {
+    if (_config.isLive) {
       // Disconnect via parent callback
       widget.onConnectDisconnect?.call();
       setState(() {
@@ -122,15 +118,11 @@ class _ClientCardState extends State<ClientCard> {
     if (uri != null && await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     } else if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(context.l10n.cannotOpen(urlString))));
+      showToast(context, context.l10n.cannotOpen(urlString));
     }
   }
 
-  bool get _isUp =>
-      _config.status == ClientStatus.running ||
-      _config.status == ClientStatus.retrying;
+  bool get _isUp => _config.isLive;
 
   @override
   Widget build(BuildContext context) {
@@ -174,10 +166,7 @@ class _ClientCardState extends State<ClientCard> {
             onTap: _copyLocalAddress,
             tooltip: l10n.copy,
           ),
-          ListCardFact(
-            icon: Icons.swap_horiz_rounded,
-            label: _config.protocol,
-          ),
+          ListCardFact(icon: Icons.swap_horiz_rounded, label: _config.protocol),
           if (_config.updatedAt != _config.createdAt)
             ListCardFact(
               icon: Icons.schedule_rounded,

@@ -201,6 +201,10 @@ class PbMapperService {
     return _runJsonOnWorker('getServiceStatus', {'serviceKey': serviceKey});
   }
 
+  Future<Map<String, dynamic>> getServiceConns(String serviceKey) {
+    return _runJsonOnWorker('getServiceConns', {'serviceKey': serviceKey});
+  }
+
   Future<Map<String, dynamic>> getClientConfigs() {
     return _runJsonOnWorker('getClientConfigs', {});
   }
@@ -336,6 +340,10 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
       case 'getServiceStatus':
         arg1 = (params['serviceKey'] as String).toNativeUtf8();
         result = ffi.pbMapperGetServiceStatus(handle, arg1);
+        break;
+      case 'getServiceConns':
+        arg1 = (params['serviceKey'] as String).toNativeUtf8();
+        result = ffi.pbMapperGetServiceConns(handle, arg1);
         break;
       case 'getClientConfigs':
         result = ffi.pbMapperGetClientConfigs(handle);

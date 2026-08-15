@@ -11,6 +11,8 @@ class FakePbMapperApi implements PbMapperApiClient {
   FakePbMapperApi({
     this.services = const [],
     this.clients = const [],
+    this.serverServices = const [],
+    this.conns = const {},
     this.config = const ConfigStatus(
       serverAddress: 'lb7666.top:7666',
       keepAliveEnabled: true,
@@ -73,19 +75,34 @@ class FakePbMapperApi implements PbMapperApiClient {
         uptimeSeconds: 0,
       );
 
+  /// What the remote server reports as registered, which is not the same list
+  /// as [services] — that one is what this machine has configured locally.
+  List<String> serverServices;
+
+  /// The hand-formatted connection-id lines the server sends.
+  String activeConnections = '';
+  String idleConnections = '';
+
   @override
   Future<ServerStatusDetail> getServerStatusDetail() async =>
-      const ServerStatusDetail(
+      ServerStatusDetail(
         serverAvailable: true,
-        registeredServices: [],
+        registeredServices: serverServices,
         serverMap: '',
-        activeConnections: '',
-        idleConnections: '',
+        activeConnections: activeConnections,
+        idleConnections: idleConnections,
       );
 
   @override
   Future<ServerStatusDetail> forceRefreshServerStatus() async =>
       getServerStatusDetail();
+
+  /// What the server is holding, keyed by service. Absent means no connections.
+  Map<String, List<ServiceConnInfo>> conns;
+
+  @override
+  Future<List<ServiceConnInfo>> getServiceConns(String serviceKey) async =>
+      conns[serviceKey] ?? const [];
 
   @override
   Future<List<ServiceConfigInfo>> getServiceConfigs() async => services;
@@ -158,6 +175,21 @@ class FakePbMapperApi implements PbMapperApiClient {
     return _ok;
   }
 }
+
+/// A control connection the server is holding.
+ServiceConnInfo fakeConn({
+  required int connId,
+  bool healthy = true,
+  int generation = 1,
+  int protocolVersion = 2,
+  Duration lastRxAge = const Duration(milliseconds: 800),
+}) => ServiceConnInfo(
+  connId: connId,
+  generation: generation,
+  protocolVersion: protocolVersion,
+  healthy: healthy,
+  lastRxAge: lastRxAge,
+);
 
 /// A connection, with only the fields a test usually cares about.
 ClientConfigInfo fakeClient({

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/polling.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
@@ -154,12 +155,10 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
       // Show a helpful message
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(context.l10n.keyAutoSelected(selectedKey)),
-              backgroundColor: Colors.green,
-              duration: const Duration(seconds: 3),
-            ),
+          showToast(
+            context,
+            context.l10n.keyAutoSelected(selectedKey),
+            kind: ToastKind.success,
           );
         }
       });
@@ -183,9 +182,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   void _connectService() {
     final serviceKey = _effectiveServiceKey;
     if (serviceKey.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(context.l10n.serviceKeyNeeded)),
-      );
+      showToast(context, context.l10n.serviceKeyNeeded);
       return;
     }
 
@@ -195,12 +192,10 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
     );
 
     if (existingClient != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.clientExists(serviceKey)),
-          backgroundColor: Colors.orange,
-          duration: const Duration(seconds: 3),
-        ),
+      showToast(
+        context,
+        context.l10n.clientExists(serviceKey),
+        kind: ToastKind.warning,
       );
       return;
     }
@@ -214,12 +209,10 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         )
         .then((result) {
           if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(result.message),
-              backgroundColor: result.success ? Colors.green : Colors.red,
-              duration: const Duration(seconds: 3),
-            ),
+          showToast(
+            context,
+            result.message,
+            kind: result.success ? ToastKind.success : ToastKind.error,
           );
           _loadClientConfigs();
           if (result.success) {
@@ -238,12 +231,10 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         )
         .then((result) {
           if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(result.message),
-              backgroundColor: result.success ? Colors.green : Colors.red,
-              duration: const Duration(seconds: 2),
-            ),
+          showToast(
+            context,
+            result.message,
+            kind: result.success ? ToastKind.success : ToastKind.error,
           );
           _loadClientConfigs();
           if (result.success) {
@@ -252,8 +243,13 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         });
   }
 
-  /// Waits out the retry loop, so the row shows the state it settled on rather
-  /// than the one it was in the instant the request was accepted.
+  /// Waits out the retry loop, then says how it went.
+  ///
+  /// `connectService` returning success only means the request was accepted;
+  /// whether the tunnel came up shows a moment later. Reporting the first
+  /// answer as the outcome is what put a green "client connection started"
+  /// on screen while the client was failing to reach the server, so the
+  /// settled state gets its own message.
   Future<void> _pollClientStatusUntilStable(String serviceKey) async {
     await pollUntilSettled(
       attempt: () async {
@@ -267,17 +263,28 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         return config != null && config.status != ClientStatus.retrying;
       },
     );
+
+    if (!mounted) return;
+    final settled = _clientConfigs.firstWhereOrNull(
+      (c) => c.serviceKey == serviceKey,
+    );
+    if (settled == null || settled.status != ClientStatus.failed) return;
+
+    showToast(
+      context,
+      context.l10n.connectFailed(serviceKey),
+      kind: ToastKind.error,
+      description: settled.statusMessage.isEmpty ? null : settled.statusMessage,
+    );
   }
 
   void _handleClientDisconnect(ClientConfig config) {
     _api.disconnectService(config.serviceKey).then((result) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(result.message),
-          backgroundColor: result.success ? Colors.green : Colors.red,
-          duration: const Duration(seconds: 2),
-        ),
+      showToast(
+        context,
+        result.message,
+        kind: result.success ? ToastKind.success : ToastKind.error,
       );
       _loadClientConfigs();
     });
@@ -286,25 +293,30 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
   void _handleClientDelete(ClientConfig config) {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(context.l10n.deleteClientConfig),
-        content: Text(context.l10n.deleteClientConfirm(config.serviceKey)),
+      // Named, so the toast below cannot accidentally use it: the dialog is
+      // popped before the delete finishes, and its context goes with it.
+      builder: (dialogContext) => AlertDialog(
+        title: Text(dialogContext.l10n.deleteClientConfig),
+        content: Text(
+          dialogContext.l10n.deleteClientConfirm(config.serviceKey),
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text(context.l10n.cancel),
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: Text(dialogContext.l10n.cancel),
           ),
           TextButton(
             onPressed: () {
-              Navigator.of(context).pop();
-              final messenger = ScaffoldMessenger.of(context);
+              Navigator.of(dialogContext).pop();
               _api.deleteClientConfig(config.serviceKey).then((result) {
                 if (!mounted) return;
-                messenger.showSnackBar(
-                  SnackBar(
-                    content: Text(result.message),
-                    backgroundColor: result.success ? Colors.green : Colors.red,
-                  ),
+                // This view's context, guarded by `mounted`. Toasts go to an
+                // overlay rather than the nearest Scaffold, so nothing has to
+                // capture a messenger before the dialog closes.
+                showToast(
+                  context,
+                  result.message,
+                  kind: result.success ? ToastKind.success : ToastKind.error,
                 );
                 _loadClientConfigs();
               });
@@ -349,169 +361,175 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (widget.pane == WorkspacePane.form) Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      context.l10n.connectTitle,
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 16),
-                    DropdownButtonFormField<String>(
-                      initialValue: _selectedProtocol,
-                      items: ['TCP', 'UDP']
-                          .map(
-                            (protocol) => DropdownMenuItem(
-                              value: protocol,
-                              child: Text(protocol),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        setState(() => _selectedProtocol = value!);
-                      },
-                      decoration: InputDecoration(
-                        labelText: context.l10n.protocol,
-                        border: OutlineInputBorder(),
+            if (widget.pane == WorkspacePane.form)
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        context.l10n.connectTitle,
+                        style: Theme.of(context).textTheme.titleLarge,
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: _availableServices.isNotEmpty
-                              ? DropdownButtonFormField<String>(
-                                  initialValue:
-                                      _availableServices.contains(_selectedServiceKey)
-                                      ? _selectedServiceKey
-                                      : null,
-                                  items: _availableServices.map((serviceKey) {
-                                    return DropdownMenuItem(
-                                      value: serviceKey,
-                                      child: Text(serviceKey),
-                                    );
-                                  }).toList(),
-                                  onChanged: (value) {
-                                    setState(() {
-                                      _selectedServiceKey = value;
-                                      _serviceKeyInputController.text = value ?? '';
-                                    });
-                                  },
-                                  decoration: InputDecoration(
-                                    labelText: context.l10n.serviceKey,
-                                    hintText: context.l10n.selectService,
-                                    border: OutlineInputBorder(),
-                                    prefixIcon: Icon(Icons.vpn_key),
-                                  ),
-                                )
-                              : TextField(
-                                  controller: _serviceKeyInputController,
-                                  onChanged: (value) {
-                                    setState(() => _selectedServiceKey = value.trim().isEmpty ? null : value.trim());
-                                  },
-                                  decoration: InputDecoration(
-                                    labelText: context.l10n.serviceKey,
-                                    hintText: context.l10n.enterServiceKey,
-                                    border: OutlineInputBorder(),
-                                    prefixIcon: Icon(Icons.vpn_key),
-                                  ),
-                                ),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        initialValue: _selectedProtocol,
+                        items: ['TCP', 'UDP']
+                            .map(
+                              (protocol) => DropdownMenuItem(
+                                value: protocol,
+                                child: Text(protocol),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          setState(() => _selectedProtocol = value!);
+                        },
+                        decoration: InputDecoration(
+                          labelText: context.l10n.protocol,
+                          border: OutlineInputBorder(),
                         ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          onPressed: _loadAvailableServices,
-                          icon: const Icon(Icons.refresh),
-                          tooltip: context.l10n.refreshServiceList,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _localAddressController,
-                      decoration: InputDecoration(
-                        labelText: context.l10n.localAddress,
-                        hintText: '127.0.0.1:9090',
-                        border: OutlineInputBorder(),
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    SwitchListTile(
-                      title: Text(context.l10n.enableKeepAlive),
-                      value: _isKeepAliveEnabled,
-                      onChanged: (value) {
-                        setState(() => _isKeepAliveEnabled = value);
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
+                      const SizedBox(height: 16),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Icon(Icons.dns, color: Colors.blue),
-                          const SizedBox(width: 12),
                           Expanded(
-                            child: Column(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  context.l10n.serverAddress,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
+                            child: _availableServices.isNotEmpty
+                                ? DropdownButtonFormField<String>(
+                                    initialValue:
+                                        _availableServices.contains(
+                                          _selectedServiceKey,
+                                        )
+                                        ? _selectedServiceKey
+                                        : null,
+                                    items: _availableServices.map((serviceKey) {
+                                      return DropdownMenuItem(
+                                        value: serviceKey,
+                                        child: Text(serviceKey),
+                                      );
+                                    }).toList(),
+                                    onChanged: (value) {
+                                      setState(() {
+                                        _selectedServiceKey = value;
+                                        _serviceKeyInputController.text =
+                                            value ?? '';
+                                      });
+                                    },
+                                    decoration: InputDecoration(
+                                      labelText: context.l10n.serviceKey,
+                                      hintText: context.l10n.selectService,
+                                      border: OutlineInputBorder(),
+                                      prefixIcon: Icon(Icons.vpn_key),
+                                    ),
+                                  )
+                                : TextField(
+                                    controller: _serviceKeyInputController,
+                                    onChanged: (value) {
+                                      setState(
+                                        () => _selectedServiceKey =
+                                            value.trim().isEmpty
+                                            ? null
+                                            : value.trim(),
+                                      );
+                                    },
+                                    decoration: InputDecoration(
+                                      labelText: context.l10n.serviceKey,
+                                      hintText: context.l10n.enterServiceKey,
+                                      border: OutlineInputBorder(),
+                                      prefixIcon: Icon(Icons.vpn_key),
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  _serverAddress,
-                                  style: const TextStyle(fontSize: 16),
-                                ),
-                              ],
-                            ),
                           ),
-                          TextButton(
-                            onPressed: () {
-                              AppNavigationManager.navigateToConfigPage();
-                            },
-                            child: Text(
-                              context.l10n.quickStartStep1Action,
-                              style: const TextStyle(fontSize: 12),
-                            ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            onPressed: _loadAvailableServices,
+                            icon: const Icon(Icons.refresh),
+                            tooltip: context.l10n.refreshServiceList,
                           ),
                         ],
                       ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            if (widget.pane == WorkspacePane.form) const SizedBox(height: 16),
-            if (widget.pane == WorkspacePane.form) SizedBox(
-              height: 48,
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _effectiveServiceKey.isNotEmpty
-                    ? _connectService
-                    : null,
-                style: ElevatedButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(24),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _localAddressController,
+                        decoration: InputDecoration(
+                          labelText: context.l10n.localAddress,
+                          hintText: '127.0.0.1:9090',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      SwitchListTile(
+                        title: Text(context.l10n.enableKeepAlive),
+                        value: _isKeepAliveEnabled,
+                        onChanged: (value) {
+                          setState(() => _isKeepAliveEnabled = value);
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.dns, color: Colors.blue),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    context.l10n.serverAddress,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    _serverAddress,
+                                    style: const TextStyle(fontSize: 16),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () {
+                                AppNavigationManager.navigateToConfigPage();
+                              },
+                              child: Text(
+                                context.l10n.quickStartStep1Action,
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                child: const Text(
-                  'Connect',
-                  style: TextStyle(fontSize: 16),
+              ),
+            if (widget.pane == WorkspacePane.form) const SizedBox(height: 16),
+            if (widget.pane == WorkspacePane.form)
+              SizedBox(
+                height: 48,
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _effectiveServiceKey.isNotEmpty
+                      ? _connectService
+                      : null,
+                  style: ElevatedButton.styleFrom(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                  ),
+                  child: const Text('Connect', style: TextStyle(fontSize: 16)),
                 ),
               ),
-            ),
             if (widget.pane == WorkspacePane.list && _isLoading) ...[
               const Padding(
                 padding: EdgeInsets.only(top: 40),
@@ -541,9 +559,7 @@ class _ClientConnectionViewState extends State<ClientConnectionView> {
                 (config) => ClientCard(
                   key: Key(config.serviceKey),
                   config: config,
-                  onConnectDisconnect: () =>
-                      config.status == ClientStatus.running ||
-                              config.status == ClientStatus.retrying
+                  onConnectDisconnect: () => config.isLive
                       ? _handleClientDisconnect(config)
                       : _handleClientConnect(config),
                   onDelete: () => _handleClientDelete(config),

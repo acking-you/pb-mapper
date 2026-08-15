@@ -610,5 +610,59 @@
         "type": "String"
       }
     }
+  },
+  "navServices": "Services",
+  "pageServices": "Services",
+  "serverHoldsNothing": "The server is holding no connections for this service",
+  "connGeneration": "gen {value}",
+  "connProtocol": "v{value}",
+  "connLastSeen": "seen {value} ago",
+  "connUnhealthy": "Unhealthy",
+  "connCount": "{count} held",
+  "connectionIds": "Connection IDs",
+  "noConnectionIds": "None",
+  "@connGeneration": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "@connProtocol": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "@connLastSeen": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "@connCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "connectFailed": "{key} could not connect",
+  "registerFailedStatus": "{key} could not register",
+  "@connectFailed": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
+  "@registerFailedStatus": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
   }
 }

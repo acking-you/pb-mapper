@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:pb_mapper_ui/src/common/app_typography.dart';
+import 'package:pb_mapper_ui/src/widgets/connection_view.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/common/responsive_layout.dart';
@@ -88,22 +88,8 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
     }
   }
 
-  void _navigateToConnection(BuildContext context, String serviceKey) {
-    // Store service key for later use
-    ServiceKeyManager.setSelectedServiceKey(serviceKey);
-
-    // Navigate to Connect page
-    AppNavigationManager.navigateToConnectPage();
-
-    // Show a snackbar to inform user about the action
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(context.l10n.navigatedToConnect(serviceKey)),
-        duration: const Duration(seconds: 2),
-        backgroundColor: Colors.green,
-      ),
-    );
-  }
+  // Tapping a service to connect moved with the list, to
+  // RegisteredServicesView.
 
   @override
   Widget build(BuildContext context) {
@@ -117,32 +103,14 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
     );
   }
 
-  Widget _buildMobileLayout(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildServerStatusCard(context),
-        SizedBox(height: ResponsiveLayout.getVerticalSpacing(context)),
-        _buildServicesCard(context),
-      ],
-    );
-  }
+  // The registered-services list left this page for its own destination. It
+  // was the longer of the two things here and the one you scroll, and putting
+  // it beside the status made one screen answer two questions.
+  Widget _buildMobileLayout(BuildContext context) =>
+      _buildServerStatusCard(context);
 
-  Widget _buildDesktopLayout(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(child: _buildServerStatusCard(context)),
-            SizedBox(width: ResponsiveLayout.getHorizontalPadding(context)),
-            Expanded(child: _buildServicesCard(context)),
-          ],
-        ),
-      ],
-    );
-  }
+  Widget _buildDesktopLayout(BuildContext context) =>
+      _buildServerStatusCard(context);
 
   Widget _buildServerStatusCard(BuildContext context) {
     return Card(
@@ -215,7 +183,9 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
         ),
         const SizedBox(width: 12),
         Text(
-          isAvailable ? context.l10n.statusAvailable : context.l10n.statusUnavailable,
+          isAvailable
+              ? context.l10n.statusAvailable
+              : context.l10n.statusUnavailable,
           style: TextStyle(
             color: isAvailable ? availableColor : unavailableColor,
             fontWeight: FontWeight.bold,
@@ -226,7 +196,7 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
     );
   }
 
-  Widget _buildServerDetails(BuildContext context, dynamic status) {
+  Widget _buildServerDetails(BuildContext context, ServerStatusDetail status) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -235,101 +205,21 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
           status.registeredServices.length.toString(),
         ),
         const SizedBox(height: 16),
-        if (status.serverMap.isNotEmpty)
-          ExpansionTile(
-            title: Text(
-              context.l10n.serverMapDetails,
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16.0),
-                margin: const EdgeInsets.symmetric(horizontal: 16.0),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).brightness == Brightness.dark
-                      ? Colors.grey.shade800
-                      : Colors.grey.shade100,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  status.serverMap,
-                  style: AppTypography.mono(
-                    fontSize: 14,
-                    color: Theme.of(context).brightness == Brightness.dark
-                        ? Colors.green.shade300
-                        : Colors.green.shade700,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
+        // The pool of connection ids, as chips you can copy rather than the
+        // `count:… max:… list:[…]` line the server formats. What each service
+        // is actually holding lives on the Services page, which asks the
+        // protocol's structured query instead of reading a Debug dump.
+        if (status.activeConnections.isNotEmpty) ...[
+          ConnectionIdChips(
+            label: context.l10n.connectionsActive,
+            raw: status.activeConnections,
           ),
-        if (status.activeConnections.isNotEmpty ||
-            status.idleConnections.isNotEmpty)
-          ExpansionTile(
-            title: Text(
-              context.l10n.connectionDetails,
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16.0),
-                margin: const EdgeInsets.symmetric(horizontal: 16.0),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).brightness == Brightness.dark
-                      ? Colors.grey.shade800
-                      : Colors.grey.shade100,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (status.activeConnections.isNotEmpty) ...[
-                      Text(
-                        context.l10n.connectionsActive,
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        status.activeConnections,
-                        style: AppTypography.mono(
-                          fontSize: 12,
-                          color: Theme.of(context).brightness == Brightness.dark
-                              ? Colors.blue.shade300
-                              : Colors.blue.shade700,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                    ],
-                    if (status.idleConnections.isNotEmpty) ...[
-                      Text(
-                        context.l10n.connectionsIdle,
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        status.idleConnections,
-                        style: AppTypography.mono(
-                          fontSize: 12,
-                          color: Theme.of(context).brightness == Brightness.dark
-                              ? Colors.orange.shade300
-                              : Colors.orange.shade700,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
+          const SizedBox(height: 16),
+        ],
+        if (status.idleConnections.isNotEmpty)
+          ConnectionIdChips(
+            label: context.l10n.connectionsIdle,
+            raw: status.idleConnections,
           ),
       ],
     );
@@ -365,105 +255,6 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildServicesCard(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: EdgeInsets.all(ResponsiveLayout.getCardPadding(context)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              context.l10n.registeredServicesTitle,
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                fontSize: ResponsiveLayout.getFontSize(context, 20),
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 16),
-            if (_status == null)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(20),
-                  child: CircularProgressIndicator(),
-                ),
-              )
-            else if (_status!.registeredServices.isEmpty)
-              Container(
-                padding: const EdgeInsets.all(24),
-                child: Center(
-                  child: Column(
-                    children: [
-                      Icon(
-                        Icons.info_outline,
-                        size: 48,
-                        color: Colors.grey.shade400,
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        context.l10n.noServicesRegistered,
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Colors.grey.shade600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              )
-            else
-              Column(
-                children: _status!.registeredServices.map<Widget>((serviceKey) {
-                  final isDark =
-                      Theme.of(context).brightness == Brightness.dark;
-                  final availableColor = isDark
-                      ? Colors.green.shade400
-                      : Colors.green.shade600;
-
-                  return Card(
-                    margin: const EdgeInsets.symmetric(vertical: 6),
-                    color: Theme.of(context).brightness == Brightness.dark
-                        ? Colors.grey.shade800.withValues(alpha: 0.7)
-                        : Colors.green.shade50,
-                    child: ListTile(
-                      leading: Container(
-                        width: 12,
-                        height: 12,
-                        decoration: BoxDecoration(
-                          color: availableColor,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      title: Text(
-                        serviceKey,
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      subtitle: Text(
-                        context.l10n.tapToConnect,
-                        style: TextStyle(fontSize: 14, color: availableColor),
-                      ),
-                      trailing: Icon(
-                        Icons.arrow_forward_ios,
-                        size: 16,
-                        color: availableColor,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 8,
-                      ),
-                      onTap: () => _navigateToConnection(context, serviceKey),
-                    ),
-                  );
-                }).toList(),
-              ),
-          ],
-        ),
       ),
     );
   }

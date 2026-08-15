@@ -197,6 +197,36 @@ class ClientStatusSignal {
   }
 }
 
+/// One control connection the server is holding for a service key.
+///
+/// This is what the status page's "Server Map" is really made of. That section
+/// used to render `serverMap`, a `format!("{map:?}")` of the whole thing on the
+/// server side — every one of these fields was in there, flattened into a
+/// Debug dump nothing could read.
+class ServiceConnInfo {
+  final int connId;
+  final int generation;
+  final int protocolVersion;
+  final bool healthy;
+  final Duration lastRxAge;
+
+  const ServiceConnInfo({
+    required this.connId,
+    required this.generation,
+    required this.protocolVersion,
+    required this.healthy,
+    required this.lastRxAge,
+  });
+
+  factory ServiceConnInfo.fromMap(Map<String, dynamic> map) => ServiceConnInfo(
+    connId: _asInt(map['connId']),
+    generation: _asInt(map['generation']),
+    protocolVersion: _asInt(map['protocolVersion']),
+    healthy: _asBool(map['healthy']),
+    lastRxAge: Duration(milliseconds: _asInt(map['lastRxAgeMs'])),
+  );
+}
+
 /// Everything the UI asks of the Rust side.
 ///
 /// The views take one of these rather than reaching for [PbMapperApi], which
@@ -228,6 +258,10 @@ abstract interface class PbMapperApiClient {
 
   Future<List<ServiceConfigInfo>> getServiceConfigs();
   Future<ServiceStatusSignal> getServiceStatus(String serviceKey);
+
+  /// What the remote server is holding for [serviceKey], structured.
+  Future<List<ServiceConnInfo>> getServiceConns(String serviceKey);
+
   Future<OperationResult> registerService({
     required String serviceKey,
     required String localAddress,
@@ -347,6 +381,22 @@ class PbMapperApi implements PbMapperApiClient {
       activeConnections: '',
       idleConnections: '',
     );
+  }
+
+  @override
+  Future<List<ServiceConnInfo>> getServiceConns(String serviceKey) async {
+    final result = await _service.getServiceConns(serviceKey);
+    // `data` is the array itself here, not an object wrapping one: the Rust
+    // side serialises the Vec straight through.
+    if (result['success'] == true && result['data'] is List) {
+      return (result['data'] as List)
+          .whereType<Map>()
+          .map(
+            (item) => ServiceConnInfo.fromMap(Map<String, dynamic>.from(item)),
+          )
+          .toList();
+    }
+    return [];
   }
 
   @override

@@ -276,6 +276,12 @@ class PbMapperFFI {
         _PbMapperGetServiceStatusDart
       >('pb_mapper_get_service_status_json');
 
+  late final pbMapperGetServiceConns = lib
+      .lookupFunction<
+        _PbMapperGetServiceStatusNative,
+        _PbMapperGetServiceStatusDart
+      >('pb_mapper_get_service_conns_json');
+
   late final pbMapperGetClientConfigs = lib
       .lookupFunction<
         _PbMapperGetClientConfigsNative,
