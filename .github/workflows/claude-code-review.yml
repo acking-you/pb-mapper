@@ -350,7 +350,7 @@ jobs:
             For every confirmed finding, immediately call
             mcp__github_inline_comment__create_inline_comment with confirmed=true;
             do not wait until the end to publish all findings. Then return the
-            required structured review object for the final summary and audit
+            required structured review object for the final report and audit
             log. Keep the summary under 120 words. For each finding, state the
             concrete failure scenario in the body and use the narrowest relevant
             added line. Return an empty findings array when there are no proven
@@ -365,44 +365,6 @@ jobs:
             --json-schema '{"type":"object","additionalProperties":false,"properties":{"summary":{"type":"string","maxLength":2000},"findings":{"type":"array","maxItems":10,"items":{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"},"line":{"type":"integer","minimum":1},"severity":{"type":"string","enum":["critical","high","medium","low"]},"title":{"type":"string","maxLength":160},"body":{"type":"string","maxLength":2000}},"required":["path","line","severity","title","body"]}}},"required":["summary","findings"]}'
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,Task,WebSearch,WebFetch"
-
-      - name: Publish Claude review
-        if: steps.claude-review.outputs.conclusion == 'success'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.claude-review.outputs.github_token }}
-          REVIEW_JSON: ${{ steps.claude-review.outputs.structured_output }}
-          REVIEW_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-sonnet-5' }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          python3 <<'PY'
-          import json
-          import os
-          import subprocess
-
-          result = json.loads(os.environ["REVIEW_JSON"])
-          head = os.environ["HEAD_SHA"]
-
-          review_body = (
-              f"## Claude review (`{os.environ['REVIEW_MODEL']}`)\n\n"
-              f"{result.get('summary') or 'Review completed.'}"
-          )
-          payload = {"commit_id": head, "body": review_body, "event": "COMMENT"}
-
-          endpoint = (
-              f"repos/{os.environ['REPOSITORY']}/pulls/"
-              f"{os.environ['PR_NUMBER']}/reviews"
-          )
-          posted = subprocess.run(
-              ["gh", "api", "--method", "POST", endpoint, "--input", "-"],
-              input=json.dumps(payload),
-              text=True,
-          )
-          if posted.returncode:
-              raise SystemExit(posted.returncode)
-          PY
 
       - name: Require completed Claude review
         if: always()
