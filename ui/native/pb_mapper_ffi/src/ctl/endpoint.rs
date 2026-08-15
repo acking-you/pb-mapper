@@ -251,13 +251,11 @@ mod imp {
         }
     }
 
-    /// Unix listeners serve every connection from one object.
-    pub fn bind_next(_name: &str) -> io::Result<Server> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "unix listeners do not need per-connection instances",
-        ))
-    }
+    // No `bind_next` here on purpose. A named pipe serves one client per
+    // instance, so Windows has to open the next one after every accept; a unix
+    // listener serves every connection from the one object. Stubbing it out to
+    // keep the two platforms symmetrical would be a function that exists only
+    // to return an error nobody should ever see.
 
     pub async fn connect(name: &str) -> io::Result<Stream> {
         check_length(name)?;
@@ -265,7 +263,10 @@ mod imp {
     }
 }
 
-pub use imp::{bind_first, bind_next, connect, endpoint};
+/// Windows only: see the note where the unix side would have defined it.
+#[cfg(windows)]
+pub use imp::bind_next;
+pub use imp::{bind_first, connect, endpoint};
 
 /// Whether a UI is listening right now.
 ///
