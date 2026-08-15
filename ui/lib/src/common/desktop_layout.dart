@@ -232,7 +232,9 @@ class _DesktopLayoutState extends State<DesktopLayout>
                   child: _CompactToolbar(
                     section: widget.section,
                     pageTitle: widget.pageTitle,
+                    onHome: widget.onHome,
                     onBack: widget.onBack,
+                    onOps: widget.onOps,
                     onSwitchWorkspace: widget.onSwitchWorkspace,
                     // The title bar above already carries these where there is
                     // one; repeating them would put two theme toggles one row
@@ -300,20 +302,54 @@ class _DesktopLayoutState extends State<DesktopLayout>
 }
 
 /// The controls the rail's top slot carries, for the layout that has no rail.
+///
+/// It carries the same ones, and no more. Drawing a control here that the wide
+/// layout does not have makes the two layouts disagree about what the zone
+/// offers, which is what a back arrow beside the workspace switcher did.
 class _CompactToolbar extends StatelessWidget {
   const _CompactToolbar({
     required this.section,
     required this.pageTitle,
+    required this.onHome,
     required this.onBack,
+    required this.onOps,
     required this.onSwitchWorkspace,
     required this.actions,
   });
 
   final AppSection section;
   final String? pageTitle;
+  final VoidCallback onHome;
   final VoidCallback onBack;
+  final VoidCallback onOps;
   final ValueChanged<AppSection> onSwitchWorkspace;
   final List<Widget> actions;
+
+  /// Mirrors the rail's top slot.
+  ///
+  /// A workspace swaps to its peer rather than backing out, and that swap is
+  /// the title. A back arrow beside it would point where the switcher already
+  /// goes, and the wide layout has no such control.
+  Widget? _leading(BuildContext context) {
+    if (!section.isWorkspace) {
+      return IconButton(
+        icon: const Icon(Icons.arrow_back),
+        tooltip: context.l10n.back,
+        onPressed: onBack,
+      );
+    }
+    // Without a title bar there is no app mark, and so nothing anywhere that
+    // goes home. The mark moves here rather than a second Back being invented
+    // for it: home is a jump to the top, not a step backwards.
+    if (!AppWindowTitleBar.isSupported) {
+      return IconButton(
+        icon: const Icon(Icons.hub_rounded),
+        tooltip: context.l10n.home,
+        onPressed: onHome,
+      );
+    }
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -323,11 +359,7 @@ class _CompactToolbar extends StatelessWidget {
       elevation: 0,
       scrolledUnderElevation: 0,
       automaticallyImplyLeading: false,
-      leading: IconButton(
-        icon: const Icon(Icons.arrow_back),
-        tooltip: context.l10n.back,
-        onPressed: onBack,
-      ),
+      leading: _leading(context),
       // No rail to hang the workspace swap on, so it lives on the title — the
       // same one-click swap, in the only slot this layout has for it.
       title: section.isWorkspace
@@ -336,7 +368,19 @@ class _CompactToolbar extends StatelessWidget {
               onSelected: onSwitchWorkspace,
             )
           : Text(pageTitle ?? context.l10n.appTitle),
-      actions: actions,
+      actions: [
+        // Ops is a zone, not one of this zone's destinations, so it stays out
+        // of the bottom bar the way it stays out of the rail's list. It had no
+        // compact home at all before, which left it unreachable from a
+        // workspace once the window was narrow enough to lose the rail.
+        if (section != AppSection.ops)
+          IconButton(
+            icon: const Icon(Icons.tune_rounded),
+            tooltip: context.l10n.navOps,
+            onPressed: onOps,
+          ),
+        ...actions,
+      ],
     );
   }
 }
@@ -570,8 +614,9 @@ class _WorkspaceSwitcher extends StatelessWidget {
   final AppSection section;
   final ValueChanged<AppSection> onSelected;
 
-  static IconData _iconFor(AppSection section) =>
-      section == AppSection.register ? Icons.upload_rounded : Icons.download_rounded;
+  static IconData _iconFor(AppSection section) => section == AppSection.register
+      ? Icons.upload_rounded
+      : Icons.download_rounded;
 
   static String _labelFor(BuildContext context, AppSection section) =>
       section == AppSection.register
@@ -652,7 +697,6 @@ class _WorkspaceSwitcher extends StatelessWidget {
   }
 }
 
-
 class _NavItem extends StatelessWidget {
   const _NavItem({required this.destination, required this.expanded});
 
@@ -668,7 +712,9 @@ class _NavItem extends StatelessWidget {
     final icon = destination.icon;
     final selectedIcon = destination.selectedIcon;
     final onPressed = destination.onPressed;
-    final foreground = selected ? scheme.onSecondaryContainer : scheme.onSurfaceVariant;
+    final foreground = selected
+        ? scheme.onSecondaryContainer
+        : scheme.onSurfaceVariant;
 
     final content = Row(
       mainAxisAlignment: expanded

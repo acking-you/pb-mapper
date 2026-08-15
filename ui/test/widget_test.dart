@@ -412,6 +412,82 @@ void main() {
     expect(find.text('Operations'), findsNothing);
   });
 
+  testWidgets('the compact toolbar offers what the rail offers, no more', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    var backs = 0;
+    var ops = 0;
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.register,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onBack: () => backs++,
+          onSwitchWorkspace: (_) {},
+          onOps: () => ops++,
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
+          title: 'pb-mapper',
+          pageTitle: 'Register',
+          child: const Text('body'),
+        ),
+      ),
+    );
+
+    // A workspace swaps rather than backs out, so the toolbar shows the
+    // switcher and no back arrow — the same controls the rail's top slot has.
+    // The arrow appeared here and nowhere else, which had the two layouts
+    // disagreeing about what a workspace offers.
+    expect(find.byIcon(Icons.arrow_back), findsNothing);
+    expect(find.text('Register'), findsWidgets);
+
+    // Ops is reachable. It is a zone rather than one of this zone's
+    // destinations, so it sits in the toolbar rather than the bottom bar —
+    // and before this it had no compact home at all, which left it
+    // unreachable from a workspace on any narrow window.
+    await tester.tap(find.byIcon(Icons.tune_rounded));
+    expect(ops, 1);
+    expect(backs, 0);
+  });
+
+  testWidgets('the compact toolbar backs out of ops', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    var backs = 0;
+    await tester.pumpWidget(
+      _wrap(
+        DesktopLayout(
+          section: AppSection.ops,
+          opsTab: OpsTab.status,
+          onHome: () {},
+          onBack: () => backs++,
+          onSwitchWorkspace: (_) {},
+          onOps: () {},
+          onOpsTab: (_) {},
+          pane: WorkspacePane.form,
+          onPane: (_) {},
+          title: 'pb-mapper',
+          pageTitle: 'Status',
+          child: const Text('body'),
+        ),
+      ),
+    );
+
+    // Outside a workspace the arrow is the way out, and ops does not offer
+    // itself a second entrance.
+    expect(find.byIcon(Icons.tune_rounded), findsNothing);
+    await tester.tap(find.byIcon(Icons.arrow_back));
+    expect(backs, 1);
+  });
+
   testWidgets('a narrow desktop window drops the rail too', (tester) async {
     // Below the tablet breakpoint the rail had no room for its labels and
     // shrank to a 76px strip of unlabelled icons. A labelled bar along the
