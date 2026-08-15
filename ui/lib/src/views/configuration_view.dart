@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 
@@ -67,12 +68,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
     if (_isSaving) return; // Prevent multiple simultaneous saves
     final msgHeaderKey = _msgHeaderKeyController.text.trim();
     if (msgHeaderKey.isNotEmpty && msgHeaderKey.length != 32) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.keyLengthInvalid),
-          backgroundColor: Colors.red,
-        ),
-      );
+      showToast(context, context.l10n.keyLengthInvalid, kind: ToastKind.error);
       return;
     }
 
@@ -91,11 +87,10 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       setState(() {
         _isSaving = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(result.message),
-          backgroundColor: result.success ? Colors.green : Colors.red,
-        ),
+      showToast(
+        context,
+        result.message,
+        kind: result.success ? ToastKind.success : ToastKind.error,
       );
 
       await _loadConfig();
@@ -105,12 +100,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       setState(() {
         _isSaving = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.saveFailed),
-          backgroundColor: Colors.red,
-        ),
-      );
+      showToast(context, context.l10n.saveFailed, kind: ToastKind.error);
     }
   }
 
@@ -131,14 +121,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
             : context.l10n.serverNotReachable;
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_serverCheckMessage),
-          backgroundColor: status.serverAvailable
-              ? Colors.green
-              : Colors.orange,
-        ),
-      );
+      showToast(context, _serverCheckMessage, kind: ToastKind.success);
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -146,12 +129,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
         _serverReachable = false;
         _serverCheckMessage = context.l10n.serverCheckFailed;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.serverCheckFailed),
-          backgroundColor: Colors.red,
-        ),
-      );
+      showToast(context, context.l10n.serverCheckFailed, kind: ToastKind.error);
     }
   }
 
@@ -181,9 +159,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  context.l10n.exportCopyHint,
-                ),
+                Text(context.l10n.exportCopyHint),
                 const SizedBox(height: 12),
                 SelectableText(encoded),
               ],
@@ -200,11 +176,10 @@ class _ConfigurationViewState extends State<ConfigurationView> {
               onPressed: () async {
                 await Clipboard.setData(ClipboardData(text: encoded));
                 if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(context.l10n.exportCopied),
-                    backgroundColor: Colors.green,
-                  ),
+                showToast(
+                  context,
+                  context.l10n.exportCopied,
+                  kind: ToastKind.success,
                 );
               },
               icon: const Icon(Icons.copy),
@@ -325,11 +300,10 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       await _saveConfiguration();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(context.l10n.importFailed('$e')),
-          backgroundColor: Colors.red,
-        ),
+      showToast(
+        context,
+        context.l10n.importFailed('$e'),
+        kind: ToastKind.error,
       );
     }
   }
@@ -359,8 +333,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         labelText: 'PB_MAPPER_SERVER',
                         hintText: 'localhost:7666',
                         border: OutlineInputBorder(),
-                        helperText:
-                            context.l10n.serverAddressHelp,
+                        helperText: context.l10n.serverAddressHelp,
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -370,16 +343,13 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         labelText: 'MSG_HEADER_KEY',
                         hintText: '32 characters, or empty',
                         border: OutlineInputBorder(),
-                        helperText:
-                            context.l10n.msgHeaderKeyHelp,
+                        helperText: context.l10n.msgHeaderKeyHelp,
                       ),
                     ),
                     const SizedBox(height: 16),
                     SwitchListTile(
                       title: const Text('PB_MAPPER_KEEP_ALIVE'),
-                      subtitle: Text(
-                        context.l10n.keepAliveHelp,
-                      ),
+                      subtitle: Text(context.l10n.keepAliveHelp),
                       value: _isKeepAliveEnabled,
                       onChanged: (value) {
                         setState(() => _isKeepAliveEnabled = value);
@@ -410,7 +380,10 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           ),
                           SizedBox(width: 12),
-                          Text(context.l10n.saving, style: TextStyle(fontSize: 16)),
+                          Text(
+                            context.l10n.saving,
+                            style: TextStyle(fontSize: 16),
+                          ),
                         ],
                       )
                     : Text(

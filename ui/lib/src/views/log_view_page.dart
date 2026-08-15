@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/common/app_typography.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
@@ -108,9 +109,7 @@ class _LogViewPageState extends State<LogViewPage> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(context.l10n.logsCopied(_filteredLogs.length))),
-    );
+    showToast(context, context.l10n.logsCopied(_filteredLogs.length));
   }
 
   void _clearLogs() {
@@ -156,7 +155,8 @@ class _LogViewPageState extends State<LogViewPage> {
                 child: DropdownButtonFormField<String?>(
                   initialValue: _levelFilter,
                   isExpanded: true,
-                  decoration: InputDecoration(                    labelText: context.l10n.logLevel,
+                  decoration: InputDecoration(
+                    labelText: context.l10n.logLevel,
                     border: OutlineInputBorder(),
                   ),
                   items: [

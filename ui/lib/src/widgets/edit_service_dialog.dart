@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/models/service_config.dart';
 
@@ -109,9 +110,7 @@ class _EditServiceDialogState extends State<EditServiceDialog> {
   void _saveChanges() {
     if (_serviceKeyController.text.isEmpty ||
         _localAddressController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(context.l10n.keyAndAddressRequired)),
-      );
+      showToast(context, context.l10n.keyAndAddressRequired);
       return;
     }
 
