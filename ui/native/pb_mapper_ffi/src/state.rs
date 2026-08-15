@@ -110,6 +110,49 @@ async fn get_server_keys_with_addr(server_addr: &str) -> Result<Vec<String>, Str
     }
 }
 
+/// The connections the server is holding for one service key.
+///
+/// The UI used to render `server_map`, which is `format!("{map:?}")` on the
+/// server side — a Debug dump, and so not something anything should parse. The
+/// same data is already available structured through `PbConnStatusReq::Service`,
+/// which the CLI has always used and the FFI never exposed. No wire change:
+/// servers already answer this.
+async fn get_service_conns_with_addr(
+    server_addr: &str,
+    service_key: &str,
+) -> Result<Vec<ServiceConnInfo>, String> {
+    let socket_addr = got_one_socket_addr(server_addr)
+        .await
+        .map_err(|e| format!("Invalid server address {server_addr}: {e}"))?;
+
+    let mut stream = each_addr(socket_addr, TcpStream::connect)
+        .await
+        .map_err(|e| format!("Failed to connect to server: {e}"))?;
+
+    let status_resp = get_status(
+        &mut stream,
+        PbConnStatusReq::Service {
+            key: service_key.to_string(),
+        },
+    )
+    .await
+    .map_err(|e| format!("Failed to get status: {e}"))?;
+
+    match status_resp {
+        PbConnStatusResp::Service { connections, .. } => Ok(connections
+            .into_iter()
+            .map(|c| ServiceConnInfo {
+                conn_id: c.conn_id,
+                generation: c.generation,
+                protocol_version: c.protocol_version,
+                healthy: c.healthy,
+                last_rx_age_ms: c.last_rx_age_ms,
+            })
+            .collect()),
+        _ => Err("Unexpected response type for Service request".to_string()),
+    }
+}
+
 async fn get_remote_id_data_with_addr(server_addr: &str) -> Result<RemoteIdData, String> {
     use tokio::net::TcpStream;
 
@@ -248,6 +291,21 @@ pub struct ServerStatusDetail {
     pub server_map: String,
     pub active_connections: String,
     pub idle_connections: String,
+}
+
+/// One control connection the server is holding for a service key.
+///
+/// Mirrors `PbServiceConnStatus` from the protocol. Every field is real,
+/// which is the point: the string this replaces could only ever say that a
+/// connection existed.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceConnInfo {
+    pub conn_id: u32,
+    pub generation: u64,
+    pub protocol_version: u16,
+    pub healthy: bool,
+    pub last_rx_age_ms: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -996,17 +1054,28 @@ impl PbMapperState {
     }
 
     pub async fn disconnect_service(&mut self, service_key: String) -> Result<(), String> {
-        if let Some(handle) = self.client_handles.remove(&service_key) {
-            handle.abort();
-        }
+        // Aborting the task is the part that matters: it is what stops the
+        // retry loop still dialling in the background.
+        let aborted = match self.client_handles.remove(&service_key) {
+            Some(handle) => {
+                handle.abort();
+                true
+            }
+            None => false,
+        };
 
-        if self
+        let was_listed = self
             .active_connections
             .write()
             .await
             .remove(&service_key)
-            .is_some()
-        {
+            .is_some();
+
+        // Reported failure only when there was nothing to stop. It used to key
+        // off the bookkeeping map alone, so a client whose task had been
+        // aborted could still be reported as "not connected" — an error for an
+        // operation that had in fact just done its job.
+        if aborted || was_listed {
             tracing::info!("Disconnected from service '{}'", service_key);
             Ok(())
         } else {
@@ -1214,6 +1283,26 @@ impl PbMapperState {
 
     pub async fn get_server_status_detail(&self) -> Result<ServerStatusDetail, String> {
         self.force_refresh_server_status().await
+    }
+
+    /// The connections the server holds for one key, from the protocol's own
+    /// structured query rather than the Debug dump in `server_map`.
+    pub async fn get_service_conns(
+        &self,
+        service_key: String,
+    ) -> Result<Vec<ServiceConnInfo>, String> {
+        let server_addr = self.config.server_address.clone();
+        match tokio::time::timeout(
+            FORCE_REFRESH_TIMEOUT,
+            get_service_conns_with_addr(&server_addr, &service_key),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "Timed out asking {server_addr} about {service_key}"
+            )),
+        }
     }
 
     /// Perform a blocking status refresh — waits for the actual network result
