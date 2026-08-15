@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/polling.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
@@ -47,9 +49,28 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
   List<ServiceConfig> _serviceConfigs = [];
   bool _isRegistering = false;
 
+  ChangeSubscription? _changes;
+
+
   @override
+
   void initState() {
+
     super.initState();
+
+    // Reload when anything changes this list, including a change made
+
+    // from a terminal while this window was open.
+
+    _changes = ChangeSubscription.listen(
+
+      PbMapperService.changeStream,
+
+      {StateChangeKind.services},
+
+      (_) { if (mounted) _loadServiceConfigs(); },
+
+    );
     _loadConfig();
     _loadServiceConfigs();
   }
@@ -125,6 +146,8 @@ class _ServiceRegistrationViewState extends State<ServiceRegistrationView> {
 
   @override
   void dispose() {
+
+    _changes?.cancel();
     _serviceKeyController.dispose();
     _localAddressController.dispose();
     super.dispose();

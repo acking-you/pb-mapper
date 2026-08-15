@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 
 import 'package:flutter/material.dart';
@@ -31,14 +33,35 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   String _serverCheckMessage = '';
   ConfigStatus? _currentConfig;
 
+  ChangeSubscription? _changes;
+
+
   @override
+
   void initState() {
+
     super.initState();
+
+    // Reload when anything changes this list, including a change made
+
+    // from a terminal while this window was open.
+
+    _changes = ChangeSubscription.listen(
+
+      PbMapperService.changeStream,
+
+      {StateChangeKind.config},
+
+      (_) { if (mounted) _loadConfig(); },
+
+    );
     _loadConfig();
   }
 
   @override
   void dispose() {
+
+    _changes?.cancel();
     _serverAddressController.dispose();
     _msgHeaderKeyController.dispose();
     super.dispose();

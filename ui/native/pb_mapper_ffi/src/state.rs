@@ -28,7 +28,9 @@ use uni_stream::stream::{
     UdpStreamProvider,
 };
 
+use crate::ctl::Origin;
 use crate::error::CtlError;
+use crate::events;
 
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 const STATUS_REFRESH_TIMEOUT: Duration = Duration::from_millis(3000);
@@ -1117,6 +1119,18 @@ impl PbMapperState {
             .await
             .insert(service_key.clone(), connection_info);
 
+        // Persist here rather than at the FFI boundary, so a connection made
+        // from a terminal is remembered exactly like one made from the window.
+        // `finish_register` has always done this; leaving it out here meant a
+        // CLI `connect` started a client that never appeared in the list.
+        if let Err(e) =
+            self.save_client_config(&service_key, &local_address, &protocol, enable_keep_alive)
+        {
+            // The client is up either way, so this is a warning and not a
+            // failure: losing the config costs the entry after a restart.
+            tracing::warn!("Failed to save client config for '{service_key}': {e}");
+        }
+
         tracing::info!("Connected to service '{}' successfully", service_key);
         Ok(())
     }
@@ -1541,8 +1555,11 @@ impl PbMapperState {
                 ),
             };
 
-            {
+            let changed = {
                 let mut cache = cache.write().await;
+                let changed = cache
+                    .get(&key)
+                    .is_none_or(|entry| entry.status != status || entry.message != message);
                 cache.insert(
                     key.clone(),
                     StatusCacheEntry {
@@ -1551,6 +1568,13 @@ impl PbMapperState {
                         updated_at: Instant::now(),
                     },
                 );
+                changed
+            };
+            // Only transitions the user can perceive. These run on a timer for
+            // every configured entry, so emitting on every refresh would reload
+            // the list several times a second for no visible reason.
+            if changed {
+                events::emit(events::ChangeKind::Services, Some(&key), Origin::Internal);
             }
 
             let mut refreshing = refreshing.write().await;
@@ -1594,8 +1618,11 @@ impl PbMapperState {
                 ),
             };
 
-            {
+            let changed = {
                 let mut cache = cache.write().await;
+                let changed = cache
+                    .get(&key)
+                    .is_none_or(|entry| entry.status != status || entry.message != message);
                 cache.insert(
                     key.clone(),
                     StatusCacheEntry {
@@ -1604,6 +1631,13 @@ impl PbMapperState {
                         updated_at: Instant::now(),
                     },
                 );
+                changed
+            };
+            // Only transitions the user can perceive. These run on a timer for
+            // every configured entry, so emitting on every refresh would reload
+            // the list several times a second for no visible reason.
+            if changed {
+                events::emit(events::ChangeKind::Clients, Some(&key), Origin::Internal);
             }
 
             let mut refreshing = refreshing.write().await;

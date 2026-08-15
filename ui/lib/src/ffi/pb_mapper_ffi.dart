@@ -3,6 +3,12 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
+/// State-change callback: one JSON payload, freed with `pb_mapper_free_string`.
+///
+/// Invoked from Rust worker threads, so it must be bound with
+/// `NativeCallable.listener`.
+typedef ChangeCallbackNative = Void Function(Pointer<Utf8> payload);
+
 /// Log callback: level 0..4, message pointer, timestamp seconds.
 typedef LogCallbackNative =
     Void Function(Int32 level, Pointer<Utf8> message, Uint64 timestamp);
@@ -227,6 +233,12 @@ class PbMapperFFI {
         _PbMapperStartControlServerNative,
         _PbMapperStartControlServerDart
       >('pb_mapper_start_control_server');
+
+  late final pbMapperSetChangeCallback = lib
+      .lookupFunction<
+        Void Function(Pointer<NativeFunction<ChangeCallbackNative>>),
+        void Function(Pointer<NativeFunction<ChangeCallbackNative>>)
+      >('pb_mapper_set_change_callback');
 
   late final pbMapperCliMain = lib
       .lookupFunction<_PbMapperCliMainNative, _PbMapperCliMainDart>(

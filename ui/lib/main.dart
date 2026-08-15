@@ -74,6 +74,7 @@ Future<void> main(List<String> args) async {
     );
   }
   PbMapperService().initLogging();
+  PbMapperService().initChangeEvents();
   await createActors();
   // Accept commands from other processes. Failing here is not fatal: the app
   // is still a window, and refusing to open because a pipe is unavailable

@@ -5,6 +5,8 @@ use std::ffi::{c_char, c_int};
 
 use serde_json::json;
 
+use crate::ctl::Origin;
+use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 use crate::state::{ServiceConfigInfo, ServiceStatusResponse};
@@ -54,7 +56,10 @@ pub unsafe extern "C" fn pb_mapper_register_service(
     });
 
     match result {
-        Ok(_) => ok_message("service registration started"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Services, None, Origin::Ui);
+            ok_message("service registration started")
+        }
         Err(e) => err_ctl(&e),
     }
 }
@@ -82,7 +87,10 @@ pub unsafe extern "C" fn pb_mapper_unregister_service(
     });
 
     match result {
-        Ok(_) => ok_message("service unregistered"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Services, None, Origin::Ui);
+            ok_message("service unregistered")
+        }
         Err(e) => err_ctl(&e),
     }
 }
@@ -110,7 +118,10 @@ pub unsafe extern "C" fn pb_mapper_delete_service_config(
     });
 
     match result {
-        Ok(_) => ok_message("service config deleted"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Services, None, Origin::Ui);
+            ok_message("service config deleted")
+        }
         Err(e) => err_ctl(&e),
     }
 }

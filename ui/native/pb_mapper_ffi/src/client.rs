@@ -5,6 +5,8 @@ use std::ffi::{c_char, c_int};
 
 use serde_json::json;
 
+use crate::ctl::Origin;
+use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 use crate::state::{ClientConfigInfo, ClientStatusResponse};
@@ -39,39 +41,25 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
     let state = handle.state.clone();
     // See `pb_mapper_register_service`: the connect path releases the state lock
     // for its slow phase, so the caller must not be holding it.
+    // Saving the config is `connect_service`'s job, not this layer's — that is
+    // what makes a connection from the window and one from a terminal end up
+    // in the same state.
     let result = handle.runtime.block_on(async move {
-        let connect_result = crate::state::connect_service(
+        crate::state::connect_service(
             &state,
-            service_key.clone(),
-            local_address.clone(),
-            protocol.clone(),
+            service_key,
+            local_address,
+            protocol,
             enable_keep_alive != 0,
         )
-        .await;
-
-        match connect_result {
-            Ok(_) => {
-                let state = state.lock().await;
-                if let Err(e) = state.save_client_config(
-                    &service_key,
-                    &local_address,
-                    &protocol,
-                    enable_keep_alive != 0,
-                ) {
-                    tracing::warn!("Failed to save client config: {}", e);
-                    return Ok(Some(format!(
-                        "Client started, but failed to save config: {e}"
-                    )));
-                }
-                Ok(None)
-            }
-            Err(e) => Err(e),
-        }
+        .await
     });
 
     match result {
-        Ok(Some(warning)) => ok_message(&warning),
-        Ok(None) => ok_message("client connection started"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Clients, None, Origin::Ui);
+            ok_message("client connection started")
+        }
         Err(e) => err_ctl(&e),
     }
 }
@@ -99,7 +87,10 @@ pub unsafe extern "C" fn pb_mapper_disconnect_service(
     });
 
     match result {
-        Ok(_) => ok_message("client disconnected"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Clients, None, Origin::Ui);
+            ok_message("client disconnected")
+        }
         Err(e) => err_ctl(&e),
     }
 }
@@ -127,7 +118,10 @@ pub unsafe extern "C" fn pb_mapper_delete_client_config(
     });
 
     match result {
-        Ok(_) => ok_message("client config deleted"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Clients, None, Origin::Ui);
+            ok_message("client config deleted")
+        }
         Err(e) => err_ctl(&e),
     }
 }

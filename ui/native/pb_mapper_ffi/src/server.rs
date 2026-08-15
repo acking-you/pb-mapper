@@ -5,6 +5,8 @@ use std::ffi::{c_char, c_int};
 
 use serde_json::json;
 
+use crate::ctl::Origin;
+use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 
@@ -27,7 +29,10 @@ pub unsafe extern "C" fn pb_mapper_start_server(
     });
 
     match result {
-        Ok(_) => ok_message("server started"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Server, None, Origin::Ui);
+            ok_message("server started")
+        }
         Err(e) => err_ctl(&e),
     }
 }
@@ -47,7 +52,10 @@ pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *
     });
 
     match result {
-        Ok(_) => ok_message("server stopped"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Server, None, Origin::Ui);
+            ok_message("server stopped")
+        }
         Err(e) => err_ctl(&e),
     }
 }

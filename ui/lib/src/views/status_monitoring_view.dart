@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/widgets/connection_view.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
@@ -61,11 +63,41 @@ class _StatusMonitoringViewState extends State<StatusMonitoringView> {
   late final PbMapperApiClient _api = widget.api ?? PbMapperApi();
   ServerStatusDetail? _status;
 
+  ChangeSubscription? _changes;
+
+
   @override
+
   void initState() {
+
     super.initState();
+
+    // Reload when anything changes this list, including a change made
+
+    // from a terminal while this window was open.
+
+    _changes = ChangeSubscription.listen(
+
+      PbMapperService.changeStream,
+
+      {StateChangeKind.server, StateChangeKind.services, StateChangeKind.clients},
+
+      (_) { if (mounted) _loadStatus(); },
+
+    );
     _loadStatus();
   }
+
+  @override
+
+  void dispose() {
+
+    _changes?.cancel();
+
+    super.dispose();
+
+  }
+
 
   Future<void> _loadStatus() async {
     try {

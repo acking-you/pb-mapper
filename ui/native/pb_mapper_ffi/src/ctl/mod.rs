@@ -17,6 +17,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::error::CtlError;
+use crate::events::ChangeKind;
 use crate::state::{self, PbMapperState};
 
 /// Who asked. Not part of the wire format: the control server stamps `Cli` on
@@ -105,13 +106,26 @@ impl Command {
     /// tunnel afterwards; queries fall back freely, because either way the
     /// answer describes the same pb-mapper server.
     pub fn is_mutating(&self) -> bool {
-        matches!(
-            self,
-            Command::Register(_)
-                | Command::Unregister { .. }
-                | Command::Connect(_)
-                | Command::Disconnect { .. }
-        )
+        self.affects().is_some()
+    }
+
+    /// Which list this invalidates, and for which key. `None` for a query.
+    ///
+    /// Derived from the same enum the protocol uses, so a new mutating command
+    /// cannot be added without deciding what it invalidates.
+    pub fn affects(&self) -> Option<(ChangeKind, Option<String>)> {
+        match self {
+            Command::Register(args) => Some((ChangeKind::Services, Some(args.key.clone()))),
+            Command::Unregister { key } => Some((ChangeKind::Services, Some(key.clone()))),
+            Command::Connect(args) => Some((ChangeKind::Clients, Some(args.key.clone()))),
+            Command::Disconnect { key } => Some((ChangeKind::Clients, Some(key.clone()))),
+            Command::Hello
+            | Command::Status
+            | Command::Services
+            | Command::Clients
+            | Command::Connections { .. }
+            | Command::ConfigGet => None,
+        }
     }
 }
 
@@ -129,8 +143,17 @@ pub async fn dispatch(
     command: Command,
     origin: Origin,
 ) -> proto::Response {
+    let affected = command.affects();
     match run(state, command, origin).await {
-        Ok(response) => response,
+        Ok(response) => {
+            // Announce only what succeeded, and only from here — the boundary
+            // is where the origin is known, so `PbMapperState` never has to
+            // learn who called it.
+            if let Some((kind, key)) = affected {
+                crate::events::emit(kind, key.as_deref(), origin);
+            }
+            response
+        }
         Err(error) => proto::Response::err(&error),
     }
 }

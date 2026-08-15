@@ -5,6 +5,8 @@ use std::ffi::{c_char, c_int};
 
 use serde_json::json;
 
+use crate::ctl::Origin;
+use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 use crate::state::AppConfig;
@@ -61,7 +63,10 @@ pub unsafe extern "C" fn pb_mapper_update_config(
     });
 
     match result {
-        Ok(_) => ok_message("configuration saved"),
+        Ok(_) => {
+            events::emit(events::ChangeKind::Config, None, Origin::Ui);
+            ok_message("configuration saved")
+        }
         Err(e) => err_ctl(&e),
     }
 }

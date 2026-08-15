@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod ctl;
 mod error;
+mod events;
 mod handle;
 mod logging;
 mod response;
@@ -22,6 +23,7 @@ pub use client::{
     pb_mapper_get_client_configs_json, pb_mapper_get_client_status_json,
 };
 pub use config::{pb_mapper_get_config_json, pb_mapper_update_config};
+pub use events::pb_mapper_set_change_callback;
 pub use handle::{
     pb_mapper_create, pb_mapper_destroy, pb_mapper_set_app_dir, pb_mapper_start_control_server,
     PbMapperHandle,

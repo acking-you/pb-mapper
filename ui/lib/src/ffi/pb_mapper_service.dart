@@ -5,6 +5,8 @@ import 'dart:ffi';
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 
+import 'package:pb_mapper_ui/src/common/state_change.dart';
+
 import 'pb_mapper_ffi.dart';
 
 /// Log entry from native library.
@@ -34,6 +36,46 @@ class PbMapperService {
   static Stream<LogMessage> get logStream => _logController.stream;
 
   static NativeCallable<LogCallbackNative>? _logCallable;
+
+  static final StreamController<StateChange> _changeController =
+      StreamController<StateChange>.broadcast();
+
+  /// Fires when something the UI shows has gone stale, whoever changed it —
+  /// this window, a terminal, or a background status probe.
+  ///
+  /// Events carry identity only; listeners re-read through the normal API.
+  static Stream<StateChange> get changeStream => _changeController.stream;
+
+  static NativeCallable<ChangeCallbackNative>? _changeCallable;
+
+  /// Begin delivering [changeStream]. Safe to call more than once.
+  void initChangeEvents() {
+    if (_changeCallable != null) return;
+    ensureInitialized();
+    // `.listener` and not `.isolateLocal`: Rust calls this from its own worker
+    // threads, where an isolate-local callback would be undefined behaviour.
+    _changeCallable = NativeCallable<ChangeCallbackNative>.listener(
+      _changeCallback,
+    );
+    _ffi.pbMapperSetChangeCallback(_changeCallable!.nativeFunction);
+  }
+
+  static void _changeCallback(Pointer<Utf8> payload) {
+    try {
+      if (payload == nullptr) return;
+      final decoded = jsonDecode(payload.toDartString());
+      if (decoded is Map<String, dynamic>) {
+        _changeController.add(StateChange.fromMap(decoded));
+      }
+    } catch (_) {
+      // A malformed event is not worth taking the app down for; the next one,
+      // or the next user action, re-reads everything anyway.
+    } finally {
+      if (payload != nullptr) {
+        PbMapperFFI().pbMapperFreeString(payload);
+      }
+    }
+  }
 
   void ensureInitialized() {
     if (_handle == null || _handle == nullptr) {

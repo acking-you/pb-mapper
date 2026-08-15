@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 
@@ -38,11 +40,41 @@ class _RegisteredServicesViewState extends State<RegisteredServicesView> {
   final Map<String, List<ServiceConnInfo>> _conns = {};
   final Set<String> _loadingConns = {};
 
+  ChangeSubscription? _changes;
+
+
   @override
+
   void initState() {
+
     super.initState();
+
+    // Reload when anything changes this list, including a change made
+
+    // from a terminal while this window was open.
+
+    _changes = ChangeSubscription.listen(
+
+      PbMapperService.changeStream,
+
+      {StateChangeKind.services, StateChangeKind.server},
+
+      (_) { if (mounted) _load(); },
+
+    );
     _load();
   }
+
+  @override
+
+  void dispose() {
+
+    _changes?.cancel();
+
+    super.dispose();
+
+  }
+
 
   Future<void> _load() async {
     setState(() => _loading = true);
