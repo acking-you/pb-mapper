@@ -800,6 +800,7 @@ name = "pb-mapper-ffi"
 version = "0.1.0"
 dependencies = [
  "better_mimalloc_rs",
+ "clap",
  "dirs",
  "pb-mapper",
  "serde",
