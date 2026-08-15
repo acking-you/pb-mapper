@@ -16,6 +16,7 @@ serde_json = "1.0"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+clap.workspace = true
 better_mimalloc_rs.workspace = true
 tokio-util = "0.7"
 dirs = "5.0"

@@ -86,6 +86,23 @@ class PbMapperService {
     }
   }
 
+  /// Start accepting commands from `pb_mapper_ui <verb>` in other processes.
+  ///
+  /// Synchronous and on the main isolate on purpose: it only spawns a listener
+  /// onto the Rust runtime and returns, and it has to happen before the window
+  /// appears so a command issued moments later is not refused.
+  void startControlServer() {
+    try {
+      final result = _ffi.pbMapperStartControlServer(_requireHandle());
+      final decoded = _decodeJsonStatic(_ffi, result);
+      if (decoded['success'] != true) {
+        debugPrint('control server: ${decoded['message']}');
+      }
+    } catch (e) {
+      debugPrint('control server could not start: $e');
+    }
+  }
+
   void dispose() {
     if (_handle != null && _handle != nullptr) {
       _ffi.pbMapperDestroy(_handle!);

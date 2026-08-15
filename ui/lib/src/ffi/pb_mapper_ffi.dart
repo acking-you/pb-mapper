@@ -19,6 +19,20 @@ typedef _PbMapperSetAppDirNative =
 typedef _PbMapperSetAppDirDart =
     Pointer<Utf8> Function(Pointer<Void> handle, Pointer<Utf8> path);
 
+typedef _PbMapperStartControlServerNative =
+    Pointer<Utf8> Function(Pointer<Void> handle);
+typedef _PbMapperStartControlServerDart =
+    Pointer<Utf8> Function(Pointer<Void> handle);
+
+/// argc/argv in, exit code out — or [kNotACommand] when this is a normal launch.
+typedef _PbMapperCliMainNative =
+    Int32 Function(Int32 argc, Pointer<Pointer<Utf8>> argv);
+typedef _PbMapperCliMainDart =
+    int Function(int argc, Pointer<Pointer<Utf8>> argv);
+
+/// Returned by `pb_mapper_cli_main` when argv is not a command.
+const int kNotACommand = -1;
+
 typedef _PbMapperStartServerNative =
     Pointer<Utf8> Function(
       Pointer<Void> handle,
@@ -206,6 +220,17 @@ class PbMapperFFI {
   late final pbMapperSetAppDir = lib
       .lookupFunction<_PbMapperSetAppDirNative, _PbMapperSetAppDirDart>(
         'pb_mapper_set_app_dir',
+      );
+
+  late final pbMapperStartControlServer = lib
+      .lookupFunction<
+        _PbMapperStartControlServerNative,
+        _PbMapperStartControlServerDart
+      >('pb_mapper_start_control_server');
+
+  late final pbMapperCliMain = lib
+      .lookupFunction<_PbMapperCliMainNative, _PbMapperCliMainDart>(
+        'pb_mapper_cli_main',
       );
 
   late final pbMapperStartServer = lib

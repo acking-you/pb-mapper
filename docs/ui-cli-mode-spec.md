@@ -845,23 +845,41 @@ looks fine in a pipe.
 in the very run where every write fails. Neither writer reports the problem;
 output simply disappears.
 
-**Decision.** The design already has Rust doing all CLI output, so the CLI would
-work without touching the runner. Fix it anyway — it is four lines, and leaving
-a trap that silently eats any `print` a later change adds is not worth saving
-them:
+**And `AttachConsole` itself is harmful when the shell redirects.** Building the
+CLI turned this up: the first version of the fix produced a working exit code
+and no output at all. Measured with a redirect in place:
+
+```
+before AttachConsole:  GetStdHandle = 0x6c   DISK (the file)    <- already fine
+after  AttachConsole:  GetStdHandle = 0xb8   CHAR (a console)   <- clobbered
+```
+
+`AttachConsole` replaces the process std handles, so `pb_mapper_ui status >
+out.txt` had its output diverted to a console window and the file stayed empty.
+Attaching is only correct when there is nothing there to begin with.
+
+**The fix, both halves together** (`ui/windows/runner/main.cpp`):
 
 ```cpp
-if (::AttachConsole(ATTACH_PARENT_PROCESS)) {
-  FILE* unused;
-  freopen_s(&unused, "CONOUT$", "w", stdout);
-  freopen_s(&unused, "CONOUT$", "w", stderr);
-} else if (::IsDebuggerPresent()) {
-  CreateAndAttachConsole();
+HANDLE existing_stdout = ::GetStdHandle(STD_OUTPUT_HANDLE);
+bool stdout_already_usable =
+    existing_stdout != nullptr && existing_stdout != INVALID_HANDLE_VALUE &&
+    ::GetFileType(existing_stdout) != FILE_TYPE_UNKNOWN;
+
+if (!stdout_already_usable) {
+  if (::AttachConsole(ATTACH_PARENT_PROCESS)) {
+    FILE *unused;
+    freopen_s(&unused, "CONOUT$", "w", stdout);
+    freopen_s(&unused, "CONOUT$", "w", stderr);
+  } else if (::IsDebuggerPresent()) {
+    CreateAndAttachConsole();
+  }
 }
 ```
 
-The `freopen_s` calls sit inside the success branch, so a launch with no parent
-console — Explorer, the Start menu — never reaches them and is unaffected.
+- redirected: leave everything alone; both writers already work
+- unredirected from a terminal: attach for Rust, `freopen_s` for the C runtime
+- no console at all: the attach fails and nothing happens
 
 ### Windows: window flash — **measured; there is none**
 
@@ -931,7 +949,7 @@ Each phase ends somewhere demonstrable.
 |---|---|---|
 | −1 | **P0** `TunnelOptions`; **P1** three-phase locking + in-flight set; **P2** `CtlError`; **P3** `CallbackSlot` | The keep-alive toggle works per service; no lock is held across I/O. Ships on its own |
 | 0 | **Done.** Windows stdout, window flash, engine startup, pipe DACL — all measured; see the platform notes | Runner needs a 4-line `freopen_s`; the pipe needs an explicit DACL; no flash; 254 ms |
-| 1 | `ctl` module, `Command`, `dispatch`, `ControlServer`, `hello` + `status` only | `pb_mapper_ui status` answers from a running UI |
+| 1 | **Done.** `ctl` module, `Command`, `dispatch`, `ControlServer`, CLI entry, runner fix — and the whole command surface rather than just `hello`/`status`, since dispatch is one arm per existing state method | `pb_mapper_ui status` answers from a running UI |
 | 2 | `events.rs`, change callback, Dart `changeStream`, view subscriptions; **delete `polling.dart`** and the card timeouts it stands in for | Registering from a terminal updates the open window by itself, and nothing polls |
 | 3 | `tunnel.rs` extraction, headless mode, signal handling | The same commands work with no UI running |
 | 4 | Full command surface, `--json`, exit codes, `watch`, `pb-mapper-ctl` target | The tool is complete |

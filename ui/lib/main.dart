@@ -19,6 +19,7 @@ import 'package:pb_mapper_ui/src/common/app_typography.dart';
 import 'package:pb_mapper_ui/src/common/desktop_layout.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/common/workspace_pane.dart';
+import 'package:pb_mapper_ui/src/ffi/cli_entry.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -40,7 +41,13 @@ void _registerFontLicenses() {
   });
 }
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
+  // `pb_mapper_ui status` and friends are handled by Rust and never reach the
+  // window. Rust also decides what counts as a command, so there is no verb
+  // list here to fall out of step with the one in `Command`.
+  final exitCode = CliEntry.run(args);
+  if (exitCode != null) exit(exitCode);
+
   WidgetsFlutterBinding.ensureInitialized();
   _registerFontLicenses();
   if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
@@ -68,6 +75,10 @@ Future<void> main() async {
   }
   PbMapperService().initLogging();
   await createActors();
+  // Accept commands from other processes. Failing here is not fatal: the app
+  // is still a window, and refusing to open because a pipe is unavailable
+  // would be a poor trade.
+  PbMapperService().startControlServer();
   runApp(MyApp());
 }
 

@@ -12,13 +12,13 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// What kind of failure this is, for a caller that has to branch on it.
 ///
 /// Consumers must treat an unrecognised code as [`Internal`](Self::Internal):
 /// variants are added as the surface grows, and that is not a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     /// No such service, connection, or running server.
@@ -42,6 +42,11 @@ pub enum ErrorCode {
     /// Reading or writing local configuration failed.
     Io,
     /// Anything with no more specific answer.
+    ///
+    /// Also where a code this build does not recognise lands, so an older CLI
+    /// talking to a newer UI degrades to a generic failure rather than failing
+    /// to parse the response at all.
+    #[serde(other)]
     Internal,
 }
 

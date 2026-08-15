@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
+use crate::error::CtlError;
 use crate::response::{err_ctl, err_null_handle, ok_message};
 use crate::state::PbMapperState;
 
@@ -15,6 +17,14 @@ use crate::state::PbMapperState;
 pub struct PbMapperHandle {
     pub(crate) runtime: Runtime,
     pub(crate) state: Arc<Mutex<PbMapperState>>,
+    /// Stops the control server when the handle goes away.
+    pub(crate) control_shutdown: CancellationToken,
+}
+
+impl Drop for PbMapperHandle {
+    fn drop(&mut self) {
+        self.control_shutdown.cancel();
+    }
 }
 
 /// Create a new pb-mapper handle.
@@ -32,9 +42,40 @@ pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
     let handle = PbMapperHandle {
         runtime,
         state: Arc::new(Mutex::new(state)),
+        control_shutdown: CancellationToken::new(),
     };
 
     Box::into_raw(Box::new(handle))
+}
+
+/// Start accepting commands from `pb_mapper_ui <verb>` in other processes.
+///
+/// Failure is not fatal and is reported as such: if the endpoint cannot be
+/// claimed — most often because another UI already holds it — the app should
+/// carry on as a window. Refusing to open because a pipe is unavailable would
+/// be a poor trade.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by `pb_mapper_create`.
+#[no_mangle]
+pub unsafe extern "C" fn pb_mapper_start_control_server(
+    handle: *mut PbMapperHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return err_null_handle();
+    }
+    let handle = unsafe { &mut *handle };
+    let state = handle.state.clone();
+    let shutdown = handle.control_shutdown.clone();
+
+    // `start` spawns onto this runtime, so it has to be entered first.
+    let _guard = handle.runtime.enter();
+    match crate::ctl::server::start(state, shutdown) {
+        Ok(endpoint) => ok_message(&format!("control server listening on {endpoint}")),
+        Err(e) => err_ctl(&CtlError::io(format!(
+            "control server not started: {e}. The UI still works as a window."
+        ))),
+    }
 }
 
 /// Destroy handle and free resources.
