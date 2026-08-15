@@ -465,11 +465,31 @@ pub fn endpoint() -> Endpoint;   // ctl/endpoint.rs
 running two profiles side by side.
 
 **Access control is the OS boundary and nothing else.** The socket is `0600`
-inside a `0700` directory the user owns. The named pipe gets an explicit DACL
-granting only the creating user; `interprocess` sets a default that must be
-*verified in phase 1* rather than assumed, because the Windows default for
-named pipes is more permissive than the unix one. No token file, no TCP port,
-no shared secret to leak into a log.
+inside a `0700` directory the user owns. No token file, no TCP port, no shared
+secret to leak into a log.
+
+**On Windows an explicit DACL is required, not optional.** Measured: a pipe
+created with a default security descriptor comes out as
+
+```
+D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;S-1-5-21-…-1001)(A;;FR;;;WD)(A;;FR;;;AN)
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+— `WD` is Everyone and `AN` is Anonymous, both granted `FILE_GENERIC_READ`. Any
+local process, under any account, could open the control pipe and read what the
+server writes. That is not the "OS boundary is the boundary" story this design
+rests on.
+
+Supplying `D:P(A;;FA;;;OW)(A;;FA;;;SY)` produces exactly those two entries and
+nothing else — `P` blocks inheritance, so no parent ACL can widen it again. The
+implementation should name the current user's SID rather than `OW`, but the
+mechanism is confirmed.
+
+This has to be checked against `interprocess` when the dependency is actually
+added: a plain listener almost certainly passes a null `lpSecurityAttributes`,
+which is the bad case above. If the crate offers no way to supply a descriptor,
+the control server creates the pipe itself.
 
 **Discovery is a connect attempt.** Not a PID file, not a lock file — those go
 stale and produce the worst failure mode, which is a CLI that reports "no UI"
@@ -792,25 +812,60 @@ Rust makes headless mode uniform across desktop targets. The platform-specific
 work is confined to four points, three of which are now understood well enough
 to plan around.
 
-### Windows: stdout on a GUI-subsystem binary — **must verify**
+### Windows: stdout on a GUI-subsystem binary — **measured; the runner needs a fix**
 
 `ui/windows/runner/main.cpp:12` calls `AttachConsole(ATTACH_PARENT_PROCESS)`,
 but the `freopen_s` that rebinds `stdout`/`stderr` to `CONOUT$` lives only in
-the `CreateAndAttachConsole()` branch in `utils.cpp`. Attaching to the parent
-console therefore succeeds while the CRT's stdout may still point nowhere.
+the `CreateAndAttachConsole()` branch in `utils.cpp`. Two probes — a
+GUI-subsystem Rust binary reproducing the runner, and the real app with a
+temporary Dart branch — say what that costs:
 
-This is the first thing to test, because a CLI that cannot print is not a CLI.
-If confirmed, the fix is to perform the same rebinding on the attach path — a
-few lines in the runner.
+| | Rust `println!` | C runtime / Dart |
+|---|---|---|
+| before `AttachConsole` | handle is `0x0` | `_fileno(stdout) = -2` |
+| after `AttachConsole` | handle is a **console** | `_fileno(stdout) = -2` — **still nothing** |
+| after `freopen("CONOUT$")` | console | `_fileno(stdout) = 3`, flush ok |
 
-Note that Rust's `println!` does not use the C runtime's `stdout`; it writes to
-the handle from `GetStdHandle(STD_OUTPUT_HANDLE)`. So the failure may be
-partial — Rust output appearing while Dart's `print` vanishes, or the reverse.
-The test must check both sides, not just that *something* appears.
+Rust's `println!` goes to `GetStdHandle(STD_OUTPUT_HANDLE)`, which
+`AttachConsole` populates, so it works. Dart's `stdout` resolves through the C
+runtime's descriptor, which `AttachConsole` does not touch. Run unredirected
+from a terminal, Dart fails outright:
 
-### Windows: window flash — **very likely a non-issue**
+```
+stdout write+flush: FAILED FileSystemException: writeFrom failed,
+                    path = '' (OS Error: 句柄无效。, errno = 6)   // ERROR_INVALID_HANDLE
+```
 
-Reading the runner settles this better than guessing:
+Redirect it (`pb_mapper_ui status > out.txt`) and it works, because the shell
+supplies a real descriptor — so this breaks in exactly the interactive case and
+looks fine in a pipe.
+
+**Two silent-failure traps found along the way.** Rust's `println!` returns
+`Ok` when the handle is null, and Dart's `stdout.hasTerminal` returns **`true`**
+in the very run where every write fails. Neither writer reports the problem;
+output simply disappears.
+
+**Decision.** The design already has Rust doing all CLI output, so the CLI would
+work without touching the runner. Fix it anyway — it is four lines, and leaving
+a trap that silently eats any `print` a later change adds is not worth saving
+them:
+
+```cpp
+if (::AttachConsole(ATTACH_PARENT_PROCESS)) {
+  FILE* unused;
+  freopen_s(&unused, "CONOUT$", "w", stdout);
+  freopen_s(&unused, "CONOUT$", "w", stderr);
+} else if (::IsDebuggerPresent()) {
+  CreateAndAttachConsole();
+}
+```
+
+The `freopen_s` calls sit inside the success branch, so a launch with no parent
+console — Explorer, the Start menu — never reaches them and is unaffected.
+
+### Windows: window flash — **measured; there is none**
+
+Reading the runner predicted this and a build confirmed it:
 
 - `win32_window.cpp:137` creates the window with `WS_OVERLAPPEDWINDOW` and
   **not** `WS_VISIBLE`.
@@ -819,12 +874,13 @@ Reading the runner settles this better than guessing:
   Flutter renders its first frame.**
 - CLI mode never calls `runApp`, so no frame is ever produced.
 
-So `window.Create()` running unconditionally in `wWinMain` does not show
-anything. Still worth confirming on a real build, because
-`flutter_controller_->ForceRedraw()` on the next line exists specifically to
-provoke that callback, and `window_manager` is also in the tree. But the prior
-is strongly "no flash", and the fallback — inspecting `argv` in `wWinMain` — has
-not been needed.
+A build whose `main(List<String> args)` exits before `runApp` was polled for a
+window for its whole life: `MainWindowHandle` stayed `0` across 4,097 polls,
+while the same binary launched normally showed one immediately. `window.Create()`
+running unconditionally in `wWinMain` costs nothing visible.
+
+No `argv` check in `wWinMain` is needed, which is what kept the CLI logic out of
+C++ in the first place.
 
 ### macOS: the runner does not forward arguments — **confirmed gap**
 
@@ -843,21 +899,24 @@ Alternatively macOS ships `pb-mapper-ctl` and the `.app` bundle stays
 GUI-only — defensible, since `Foo.app/Contents/MacOS/Foo` is not a path anyone
 types. The five lines are cheap enough to do anyway.
 
-### Startup latency
+### Startup latency — **measured at ~254 ms**
 
 Attached mode boots the Flutter engine and the Dart VM before Dart can dispatch
-to the FFI. Expect a few hundred milliseconds for what is a socket round trip.
-Acceptable interactively, poor in a loop.
+to the FFI. Five runs of a build that exits immediately in CLI mode: 247, 253,
+254, 257, 275 ms — median **254 ms**, and that is the floor, before the socket
+round trip or any work.
+
+Fine interactively. Poor in a loop, and noticeable in a shell prompt or a
+`watch`-style script.
 
 Mitigation, in order of preference:
 
-1. Ship `pb-mapper-ctl` for scripting; it has no engine.
-2. If it matters for `pb_mapper_ui` itself, move the argv check into the runner
-   so the engine never starts for a command. That is per-platform C++/Swift/C —
-   the cost the current design is arranged to avoid, and worth paying only if
-   measurement says so.
+1. Ship `pb-mapper-ctl` for scripting; no engine, so this cost disappears.
+2. Move the argv check into the runner so the engine never starts for a command.
+   That is per-platform C++/Swift/C — the cost this design is arranged to avoid.
 
-Phase 0 measures it rather than assuming.
+254 ms is not bad enough to justify (2) on its own; (1) covers the case that
+cares. Revisit only if `pb_mapper_ui` itself ends up in a hot loop.
 
 ### Android and iOS
 
@@ -871,7 +930,7 @@ Each phase ends somewhere demonstrable.
 | Phase | Contents | Done when |
 |---|---|---|
 | −1 | **P0** `TunnelOptions`; **P1** three-phase locking + in-flight set; **P2** `CtlError`; **P3** `CallbackSlot` | The keep-alive toggle works per service; no lock is held across I/O. Ships on its own |
-| 0 | Verify Windows stdout and window flash; measure engine startup; check `interprocess` pipe DACL | We know whether any runner needs changing, and what attached mode costs |
+| 0 | **Done.** Windows stdout, window flash, engine startup, pipe DACL — all measured; see the platform notes | Runner needs a 4-line `freopen_s`; the pipe needs an explicit DACL; no flash; 254 ms |
 | 1 | `ctl` module, `Command`, `dispatch`, `ControlServer`, `hello` + `status` only | `pb_mapper_ui status` answers from a running UI |
 | 2 | `events.rs`, change callback, Dart `changeStream`, view subscriptions; **delete `polling.dart`** and the card timeouts it stands in for | Registering from a terminal updates the open window by itself, and nothing polls |
 | 3 | `tunnel.rs` extraction, headless mode, signal handling | The same commands work with no UI running |
@@ -940,9 +999,10 @@ The point of these is that the two execution paths cannot silently diverge.
   --headless` holds a terminal open on a process that is nominally a GUI app.
   Correct, but surprising; the help text should say so, and `pb-mapper-ctl` is
   the better answer for that use.
-- **Windows named pipe permissions.** The default DACL is more generous than a
-  `0600` socket. Phase 0 checks it and phase 1 sets an explicit one if needed.
-  Getting this wrong would mean any local process could command the tunnels.
+- **Windows named pipe permissions.** Confirmed in phase 0: the default DACL
+  grants Everyone and Anonymous read. Phase 1 must set an explicit one and have
+  a test that reads the descriptor back, because getting it wrong is silent —
+  the pipe works exactly the same either way.
 - **Two execution paths for one operation.** Mitigated structurally by
   `tunnel.rs` and one `Command` enum, and tested by parity test 3 — but it stays
   on this list, because it is the failure this design exists to prevent.
