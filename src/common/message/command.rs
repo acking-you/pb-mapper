@@ -159,6 +159,21 @@ pub enum AdminRequest {
     },
 }
 
+impl AdminRequest {
+    pub fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            Self::KeyIssue { .. }
+                | Self::KeyRenew { .. }
+                | Self::KeyRevoke { .. }
+                | Self::KeyGc
+                | Self::AuthStateReset { .. }
+                | Self::RootKeyRotate { .. }
+                | Self::LegacyProtocolSet { .. }
+        )
+    }
+}
+
 const fn default_page_size() -> u16 {
     100
 }

@@ -63,6 +63,105 @@ async fn wait_for_server(server_addr: SocketAddr) -> TcpStream {
     .expect("server did not start")
 }
 
+#[tokio::test]
+async fn explicit_invalid_msg_header_key_fails_server_startup() {
+    let state_dir =
+        std::env::temp_dir().join(format!("pb-mapper-invalid-env-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_pb-mapper"));
+    command
+        .arg("server")
+        .arg("--port")
+        .arg("0")
+        .arg("--auth-state-dir")
+        .arg(&state_dir)
+        .env("MSG_HEADER_KEY", "invalid")
+        .kill_on_drop(true);
+
+    let output = timeout(Duration::from_secs(3), command.output())
+        .await
+        .expect("invalid explicit key must fail instead of starting the server")
+        .unwrap();
+    assert!(!output.status.success());
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(logs.contains("administrator_key_invalid"), "logs: {logs}");
+    assert!(!state_dir.join("admin.key").exists());
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
+async fn admin_all_preserves_json_output_mode() {
+    let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = probe_listener.local_addr().unwrap();
+    drop(probe_listener);
+    let config = auth_config(server_addr);
+    let _ = std::fs::remove_dir_all(&config.state_dir);
+    write_admin_key_file(&config.state_dir.join("admin.key"), TEST_ADMIN_KEY, true).unwrap();
+    let runtime = AuthRuntime::start(
+        *TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
+        config.clone(),
+    )
+    .await
+    .unwrap();
+    let admin = runtime.authenticate(0).unwrap();
+    runtime
+        .issue(
+            &admin,
+            Duration::from_secs(120),
+            Some("json-output".to_string()),
+        )
+        .await
+        .unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let server_config = config.clone();
+    let server = tokio::spawn(async move {
+        run_server_with_auth_config(server_addr, server_shutdown, None, false, server_config)
+            .await
+            .unwrap();
+    });
+    drop(wait_for_server(server_addr).await);
+
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_pb-mapper"));
+    command
+        .arg("admin")
+        .arg("--server")
+        .arg(server_addr.to_string())
+        .arg("--output")
+        .arg("json")
+        .arg("key")
+        .arg("list")
+        .arg("--all")
+        .env("MSG_HEADER_KEY", TEST_ADMIN_KEY)
+        .env("RUST_LOG", "off")
+        .kill_on_drop(true);
+    let output = timeout(Duration::from_secs(3), command.output())
+        .await
+        .expect("admin JSON request timed out")
+        .unwrap();
+    assert!(output.status.success());
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(
+        document["data"]["KeyList"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    shutdown.cancel();
+    server.await.unwrap();
+    let _ = std::fs::remove_dir_all(config.state_dir);
+}
+
 async fn read_secure_request(
     security: &ServerSecurity,
     stream: &mut TcpStream,
@@ -211,12 +310,13 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
     )
     .await
     .unwrap();
+    let admin = runtime.authenticate(0).unwrap();
     let first = runtime
-        .issue(Duration::from_secs(120), Some("first".to_string()))
+        .issue(&admin, Duration::from_secs(120), Some("first".to_string()))
         .await
         .unwrap();
     let second = runtime
-        .issue(Duration::from_secs(120), Some("second".to_string()))
+        .issue(&admin, Duration::from_secs(120), Some("second".to_string()))
         .await
         .unwrap();
     drop(runtime);
@@ -325,7 +425,7 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
 }
 
 #[tokio::test]
-async fn revoking_temporary_credential_closes_active_data_stream() {
+async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
     let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = probe_listener.local_addr().unwrap();
     drop(probe_listener);
@@ -339,8 +439,13 @@ async fn revoking_temporary_credential_closes_active_data_stream() {
     )
     .await
     .unwrap();
+    let admin = runtime.authenticate(0).unwrap();
     let issued = runtime
-        .issue(Duration::from_secs(120), Some("active-stream".to_string()))
+        .issue(
+            &admin,
+            Duration::from_secs(120),
+            Some("active-stream".to_string()),
+        )
         .await
         .unwrap();
     drop(runtime);
@@ -356,17 +461,21 @@ async fn revoking_temporary_credential_closes_active_data_stream() {
     });
 
     let credential = parse_credential(&issued.credential).unwrap();
+    let admin_credential =
+        Credential::Admin(*TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap());
     let service = "revoked-stream";
     let mut control = wait_for_server(server_addr).await;
-    let control_session = ClientHeaderSession::new_v2(&credential).unwrap();
-    let register = PbConnRequest::Register {
+    let control_session = ClientHeaderSession::new_v2(&admin_credential).unwrap();
+    let register = PbConnRequest::RegisterScoped {
         need_codec: false,
         is_datagram: false,
         key: service.to_string(),
+        namespace: issued.metadata.key_id,
+        force_namespace: true,
         protocol_version: Some(2),
         client_instance_id: Some("active-stream-test".to_string()),
-        heartbeat_interval_ms: Some(50),
-        heartbeat_tolerance_ms: Some(150),
+        heartbeat_interval_ms: Some(5_000),
+        heartbeat_tolerance_ms: Some(15_000),
     };
     control_session
         .write_initial(&mut control, &register.encode().unwrap())
@@ -424,12 +533,13 @@ async fn revoking_temporary_credential_closes_active_data_stream() {
         .unwrap();
 
     let mut provider = wait_for_server(server_addr).await;
-    let provider_session = ClientHeaderSession::new_v2(&credential).unwrap();
+    let provider_session = ClientHeaderSession::new_v2(&admin_credential).unwrap();
     provider_session
         .write_initial(
             &mut provider,
-            &PbConnRequest::Stream {
+            &PbConnRequest::StreamScoped {
                 key: service.to_string(),
+                namespace: issued.metadata.key_id,
                 dst_id: client_id,
                 server_generation,
             }
@@ -469,8 +579,6 @@ async fn revoking_temporary_credential_closes_active_data_stream() {
         .unwrap();
     assert_eq!(&ready, b"ready");
 
-    let admin_credential =
-        Credential::Admin(*TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap());
     let (_, _, revoked) = send_v2_request(
         server_addr,
         &admin_credential,
@@ -485,12 +593,15 @@ async fn revoking_temporary_credential_closes_active_data_stream() {
     ));
 
     let mut byte = [0_u8; 1];
-    for (name, stream) in [("subscriber", &mut subscriber), ("provider", &mut provider)] {
-        let read = timeout(Duration::from_secs(1), stream.read(&mut byte))
-            .await
-            .unwrap_or_else(|_| panic!("revoked {name} data stream was not closed"))
-            .unwrap();
-        assert_eq!(read, 0, "revoked {name} data stream remained open");
+    let read = timeout(Duration::from_secs(1), subscriber.read(&mut byte))
+        .await
+        .expect("revoked subscriber data stream was not closed")
+        .unwrap();
+    assert_eq!(read, 0, "revoked subscriber data stream remained open");
+
+    match timeout(Duration::from_millis(200), control_reader.read_msg()).await {
+        Err(_) | Ok(Ok(_)) => {}
+        Ok(Err(error)) => panic!("administrator registration was cancelled too: {error}"),
     }
 
     shutdown_token.cancel();

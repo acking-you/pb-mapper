@@ -1,0 +1,483 @@
+use super::*;
+
+impl AuthRuntime {
+    pub async fn from_process(config: AuthConfig) -> Result<Self, AuthFailure> {
+        prepare_state_dir(&config.state_dir)?;
+        let credential = load_server_admin_credential(&config.state_dir)?;
+        let Credential::Admin(admin_key) = credential else {
+            return Err(AuthFailure::new(
+                "administrator_key_required",
+                "the relay server must start with the administrator credential",
+                false,
+            ));
+        };
+        Self::start(admin_key, config).await
+    }
+
+    pub async fn start(admin_key: AesKeyType, config: AuthConfig) -> Result<Self, AuthFailure> {
+        prepare_state_dir(&config.state_dir)?;
+        let instance_id = load_or_create_instance_id(&config.state_dir)?;
+        let (loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
+        let mut slots = (0..config.max_temporary_keys)
+            .map(|_| SlotHot::default())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let mut cold = HashMap::new();
+        let mut wheel = TimingWheel::new(unix_seconds());
+        let now = unix_seconds();
+
+        let admin_lease = Arc::new(AuthLease::new(0, u64::MAX));
+        if let Some(state) = loaded.as_ref() {
+            for (index, generation) in state.generations.iter().copied().enumerate() {
+                if let Some(slot) = slots.get_mut(index) {
+                    slot.generation = generation;
+                }
+            }
+            for entry in &state.entries {
+                let index = key_slot(entry.key_id) as usize;
+                let Some(slot) = slots.get_mut(index) else {
+                    continue;
+                };
+                if slot.generation != key_generation(entry.key_id) {
+                    continue;
+                }
+                let state = if entry.state == SlotState::Active && entry.expires_at <= now {
+                    SlotState::Expired
+                } else {
+                    entry.state
+                };
+                slot.state = state;
+                slot.expires_at = entry.expires_at;
+                cold.insert(
+                    entry.key_id,
+                    ColdMetadata {
+                        issued_at: entry.issued_at,
+                        label: entry.label.clone(),
+                    },
+                );
+                if state == SlotState::Active {
+                    let lease = Arc::new(AuthLease::new(entry.key_id, entry.expires_at));
+                    slot.lease = Arc::downgrade(&lease);
+                    wheel.insert(lease);
+                }
+            }
+        }
+
+        let legacy_protocol = loaded
+            .as_ref()
+            .map(|state| state.legacy_protocol)
+            .unwrap_or(config.legacy_protocol);
+        let mut admin_replay_order = loaded
+            .as_ref()
+            .map(|state| {
+                state
+                    .admin_replays
+                    .iter()
+                    .filter(|record| {
+                        now.saturating_sub(record.client_timestamp)
+                            <= ADMIN_REPLAY_RETENTION.as_secs()
+                    })
+                    .cloned()
+                    .collect::<VecDeque<_>>()
+            })
+            .unwrap_or_default();
+        while admin_replay_order.len() > ADMIN_REPLAY_CAPACITY {
+            admin_replay_order.pop_front();
+        }
+        let admin_replays = admin_replay_order
+            .iter()
+            .map(|record| record.fingerprint)
+            .collect::<HashSet<_>>();
+        let mut audit_records: VecDeque<AuditRecord> = loaded
+            .as_ref()
+            .map(|state| state.audit_records.iter().cloned().collect())
+            .unwrap_or_default();
+        while audit_records.len() > AUDIT_RECORD_CAPACITY {
+            audit_records.pop_front();
+        }
+        let inner = Arc::new(AuthStateInner {
+            admin: RwLock::new(AdminState {
+                key: admin_key,
+                lease: Arc::downgrade(&admin_lease),
+            }),
+            instance_id: RwLock::new(instance_id),
+            slots: RwLock::new(slots),
+            safe_mode: AtomicBool::new(safe_mode),
+            legacy_protocol_allowed: AtomicBool::new(legacy_protocol.is_allowed()),
+            active_legacy_connections: AtomicU64::new(0),
+            last_legacy_connection_at: AtomicU64::new(0),
+            auth_successes: AtomicU64::new(0),
+            auth_failures: AtomicU64::new(0),
+            audit_records: RwLock::new(audit_records),
+        });
+        let (command_tx, command_rx) = mpsc::channel(256);
+        let runtime = Self {
+            inner: Arc::downgrade(&inner),
+            command_tx,
+            config: config.clone(),
+        };
+
+        tokio::spawn(run_auth_actor(
+            inner,
+            admin_lease,
+            command_rx,
+            config,
+            AuthActorState::new(cold, wheel, admin_replays, admin_replay_order),
+        ));
+        Ok(runtime)
+    }
+
+    pub fn config(&self) -> &AuthConfig {
+        &self.config
+    }
+
+    fn inner(&self) -> Result<Arc<AuthStateInner>, AuthFailure> {
+        self.inner.upgrade().ok_or_else(|| {
+            AuthFailure::new(
+                "auth_state_unavailable",
+                "authentication state manager is not running",
+                true,
+            )
+        })
+    }
+
+    pub fn admin_key(&self) -> Result<AesKeyType, AuthFailure> {
+        Ok(self.inner()?.admin_key())
+    }
+
+    pub fn derive_key(&self, key_id: u64) -> Result<AesKeyType, AuthFailure> {
+        let inner = self.inner()?;
+        if key_id == 0 {
+            return Ok(inner.admin_key());
+        }
+        derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)
+    }
+
+    pub fn authenticate(&self, key_id: u64) -> Result<AuthContext, AuthFailure> {
+        let presented_key = self.derive_key(key_id)?;
+        self.authenticate_presented(key_id, &presented_key)
+    }
+
+    pub fn authenticate_presented(
+        &self,
+        key_id: u64,
+        presented_key: &AesKeyType,
+    ) -> Result<AuthContext, AuthFailure> {
+        let inner = self.inner()?;
+        if key_id == 0 {
+            let admin = inner
+                .admin
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !bool::from(presented_key.ct_eq(&admin.key)) {
+                inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+                return Err(AuthFailure::new(
+                    "administrator_key_rotated",
+                    "administrator credential no longer matches the active root key",
+                    false,
+                ));
+            }
+            let lease = admin.lease.upgrade().ok_or_else(|| {
+                AuthFailure::new(
+                    "administrator_key_rotated",
+                    "administrator credential was rotated",
+                    false,
+                )
+            })?;
+            inner.auth_successes.fetch_add(1, Ordering::Relaxed);
+            return Ok(AuthContext::from_lease(0, true, &lease));
+        }
+        if inner.safe_mode.load(Ordering::Acquire) {
+            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(AuthFailure::new(
+                "temporary_key_store_unavailable",
+                "temporary key state is unavailable; administrator reset is required",
+                false,
+            ));
+        }
+
+        let expected_key = derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)?;
+        if !bool::from(presented_key.ct_eq(&expected_key)) {
+            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(AuthFailure::new(
+                "temporary_key_invalid",
+                "temporary credential does not match the active relay key material",
+                false,
+            ));
+        }
+
+        let index = key_slot(key_id) as usize;
+        let generation = key_generation(key_id);
+        let slots = inner
+            .slots
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(slot) = slots.get(index) else {
+            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(AuthFailure::new(
+                "temporary_key_not_found",
+                "temporary key id is outside the configured slot table",
+                false,
+            ));
+        };
+        if slot.generation != generation {
+            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(AuthFailure::new(
+                "temporary_key_generation_mismatch",
+                "temporary key generation does not match the current slot",
+                false,
+            ));
+        }
+        let failure = match slot.state {
+            SlotState::Free => Some(AuthFailure::new(
+                "temporary_key_not_found",
+                "temporary key does not exist",
+                false,
+            )),
+            SlotState::Expired => Some(AuthFailure::new(
+                "temporary_key_expired",
+                "temporary key has expired",
+                false,
+            )),
+            SlotState::Revoked => Some(AuthFailure::new(
+                "temporary_key_revoked",
+                "temporary key was revoked",
+                false,
+            )),
+            SlotState::Active if slot.expires_at <= unix_seconds() => {
+                if let Some(lease) = slot.lease.upgrade() {
+                    lease.cancellation.cancel();
+                }
+                Some(AuthFailure::new(
+                    "temporary_key_expired",
+                    "temporary key has expired",
+                    false,
+                ))
+            }
+            SlotState::Active => None,
+        };
+        if let Some(failure) = failure {
+            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(failure);
+        }
+        let lease = slot.lease.upgrade().ok_or_else(|| {
+            inner.auth_failures.fetch_add(1, Ordering::Relaxed);
+            AuthFailure::new(
+                "temporary_key_inactive",
+                "temporary key lease is no longer active",
+                true,
+            )
+        })?;
+        inner.auth_successes.fetch_add(1, Ordering::Relaxed);
+        Ok(AuthContext::from_lease(key_id, false, &lease))
+    }
+
+    pub fn legacy_protocol_allowed(&self) -> Result<bool, AuthFailure> {
+        Ok(self
+            .inner()?
+            .legacy_protocol_allowed
+            .load(Ordering::Acquire))
+    }
+
+    pub fn record_legacy_connection(&self) -> Result<LegacyConnectionGuard, AuthFailure> {
+        let inner = self.inner()?;
+        inner
+            .active_legacy_connections
+            .fetch_add(1, Ordering::AcqRel);
+        inner
+            .last_legacy_connection_at
+            .store(unix_seconds(), Ordering::Release);
+        Ok(LegacyConnectionGuard {
+            inner: Arc::downgrade(&inner),
+        })
+    }
+
+    async fn request<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, AuthFailure>>) -> AuthCommand,
+    ) -> Result<T, AuthFailure> {
+        let (response, receiver) = oneshot::channel();
+        self.command_tx.send(build(response)).await.map_err(|_| {
+            AuthFailure::new(
+                "auth_state_unavailable",
+                "authentication state manager is not running",
+                true,
+            )
+        })?;
+        receiver.await.map_err(|_| {
+            AuthFailure::new(
+                "auth_state_unavailable",
+                "authentication state manager dropped the response",
+                true,
+            )
+        })?
+    }
+
+    pub async fn claim_admin_mutation(
+        &self,
+        authorization: &AuthContext,
+        fingerprint: [u8; 32],
+        client_timestamp: u64,
+    ) -> Result<(), AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::ClaimAdminMutation {
+            authority,
+            fingerprint,
+            client_timestamp,
+            response,
+        })
+        .await
+    }
+
+    pub async fn issue(
+        &self,
+        authorization: &AuthContext,
+        ttl: Duration,
+        label: Option<String>,
+    ) -> Result<IssuedTemporaryKey, AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::Issue {
+            authority,
+            ttl,
+            label,
+            response,
+        })
+        .await
+    }
+
+    pub async fn list(
+        &self,
+        authorization: &AuthContext,
+        page: u32,
+        page_size: u16,
+    ) -> Result<KeyPage, AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::List {
+            authority,
+            page,
+            page_size,
+            response,
+        })
+        .await
+    }
+
+    pub async fn show(
+        &self,
+        authorization: &AuthContext,
+        key_id: u64,
+        reveal: bool,
+    ) -> Result<IssuedTemporaryKey, AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::Show {
+            authority,
+            key_id,
+            reveal,
+            response,
+        })
+        .await
+    }
+
+    pub async fn renew(
+        &self,
+        authorization: &AuthContext,
+        key_id: u64,
+        ttl: Duration,
+    ) -> Result<IssuedTemporaryKey, AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::Renew {
+            authority,
+            key_id,
+            ttl,
+            response,
+        })
+        .await
+    }
+
+    pub async fn revoke(
+        &self,
+        authorization: &AuthContext,
+        key_id: u64,
+    ) -> Result<TemporaryKeyMetadata, AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::Revoke {
+            authority,
+            key_id,
+            response,
+        })
+        .await
+    }
+
+    pub async fn gc(&self, authorization: &AuthContext) -> Result<u64, AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::Gc {
+            authority,
+            response,
+        })
+        .await
+    }
+
+    pub async fn reset(&self, authorization: &AuthContext) -> Result<(), AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::Reset {
+            authority,
+            response,
+        })
+        .await
+    }
+
+    pub async fn rotate_root(
+        &self,
+        authorization: &AuthContext,
+        new_key: AesKeyType,
+    ) -> Result<(), AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::RotateRoot {
+            authority,
+            new_key,
+            response,
+        })
+        .await
+    }
+
+    pub async fn set_legacy_protocol(
+        &self,
+        authorization: &AuthContext,
+        policy: LegacyProtocolPolicy,
+    ) -> Result<(), AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::SetLegacyProtocol {
+            authority,
+            policy,
+            response,
+        })
+        .await
+    }
+
+    pub async fn status(&self, authorization: &AuthContext) -> Result<AuthStatus, AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::Status {
+            authority,
+            response,
+        })
+        .await
+    }
+
+    pub async fn audit_admin(
+        &self,
+        authorization: &AuthContext,
+        action: impl Into<String>,
+        key_id: Option<u64>,
+        detail: Option<String>,
+    ) -> Result<(), AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        let action = action.into();
+        self.request(|response| AuthCommand::Audit {
+            authority,
+            action,
+            key_id,
+            detail,
+            response,
+        })
+        .await
+    }
+}

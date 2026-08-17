@@ -66,10 +66,11 @@ TCP 连接仍有自己的 V2 首帧，但不会在其上再做多轮鉴权交换
 | 1 | Flags，当前必须为 `0` |
 | 2 | Reserved，当前必须为 `0` |
 | 8 | 大端 key ID；`0` 表示管理员 |
-| 16 | 随机 connection salt |
+| 16 | connection salt：8 字节 Unix 时间戳 + 8 字节随机数 |
 
-前缀不承担保密作用，但会作为每个加密帧的 AAD 被完整认证。未知版本、flags 或
-reserved 值会在请求分发前被拒绝。
+前缀不承担保密作用，但会作为每个加密帧的 AAD 被完整认证。未知版本、flags、
+reserved 值或超出五分钟时钟偏差窗口的时间戳会在请求分发前被拒绝。未认证的首个
+加密请求上限为 64 KiB；鉴权完成后的后续帧仍沿用正常协议上限。
 
 ### 双向密钥与计数器
 
@@ -86,9 +87,11 @@ HKDF-SHA256 使用 connection salt 作为 salt，凭据的 32 字节 secret 作�
 
 ### 重放检测
 
-服务端对 `(key_id, connection_salt)` 做指纹，并使用两个轮换的 1 MiB Bloom filter
-覆盖当前与上一个 60 秒窗口。疑似重复会返回可重试错误
-`connection_salt_replayed`；一次性 admin CLI 会自动换 salt 重试一次。
+服务端对 `(key_id, connection_salt)` 做指纹，并在同一个临界区内完成两个轮换的
+1 MiB Bloom filter 的检查与写入，覆盖当前与上一个 60 秒窗口。疑似重复会返回
+可重试错误 `connection_salt_replayed`；一次性 admin CLI 会自动换 salt 重试一次。
+会修改状态的管理员请求还会在分发前把精确指纹写入加密 WAL；该记录在十分钟内跨
+重启、跨 compact 保留，不能通过等待 Bloom 窗口结束或重启进程来重放旧操作。
 
 ## 临时凭据生命周期
 
@@ -116,9 +119,12 @@ tombstone 以给出稳定错误后，槽位可以复用。显式 `key gc` 可立
 
 ### 根密钥轮换与状态重置
 
-根密钥轮换先用新密钥写空 snapshot、追加审计、持久化 `admin.key`，再切换内存状态。
-它会使全部临时凭据失效，并关闭旧管理员或临时凭据建立的连接。CLI 在发请求前保存
-候选 key，完成后再用新 key 执行一次 `admin status` 验证。
+根密钥轮换先用新密钥写空 snapshot，同时保留有上限的审计历史，持久化
+`admin.key`，再把密钥与管理员 lease 作为一次状态变更切换。它会使全部临时凭据失效，
+并关闭旧管理员或临时凭据建立的连接。CLI 在发请求前保存候选 key，完成后再用新 key
+执行一次 `admin status` 验证。未指定 `--key-file` 时，恢复副本默认写到
+`$XDG_CONFIG_HOME/pb-mapper`（或 `$HOME/.config/pb-mapper`），不要求本机能写
+`/var/lib`。
 
 `auth-state reset --confirm` 同样会清空临时凭据，并轮换 server instance ID。这样即使
 原槽位表损坏或丢失，旧凭据也不会因为未来复用了相同 key ID 而重新有效。
@@ -156,8 +162,13 @@ tombstone 以给出稳定错误后，槽位可以复用。显式 `key gc` 可立
 | `auth.wal` | 带长度前缀、逐条加密的 mutation 与 audit |
 
 变更只有在 WAL 同步成功后才对外确认。后台 actor 每五分钟原子替换 snapshot 并截断
-WAL。无效文件头、完整性验证失败、WAL 截断、schema 不匹配或 compact 失败都会进入
-safe mode：临时凭据全部 fail closed，管理员仍可查看状态并执行显式 reset。
+WAL；snapshot 同时保存有上限的审计历史和仍有效的管理员重放声明，compact 不会丢弃
+这些安全记录。无效文件头、完整性验证失败、WAL 截断、schema 不匹配或 compact 失败
+都会进入 safe mode：临时凭据全部 fail closed，管理员仍可查看状态并执行显式 reset。
+
+Flutter 启动服务端时使用应用配置目录下的 `auth/` 子目录，并且只有 TCP listener 与
+认证状态都初始化成功后才会报告 running；桌面和移动端无需写 `/var/lib`，初始化失败
+时也不会出现虚假的运行状态。
 
 ## 管理命令与输出
 
@@ -173,8 +184,9 @@ pb-mapper admin --server relay.example.com:7666 auth-state reset --confirm
 pb-mapper admin --server relay.example.com:7666 root-key rotate
 ```
 
-`--output human|json|ndjson` 控制展示格式。默认每页 100，最大 1000；`--all` 自动翻页
-并逐行输出 NDJSON，避免 CLI 一次缓存完整列表。稳定错误结构包含 `code`、`message`、
+`--output human|json|ndjson` 控制展示格式。默认每页 100，最大 1000；`--all` 自动翻完
+所有页面并保留选定的输出格式。大列表应选择 NDJSON 流式输出；JSON 输出单个合并文档，
+human 输出单个合并表格。稳定错误结构包含 `code`、`message`、
 `retryable` 与 `server_time`。
 
 日志记录 auth stage、key ID、peer 与 reason，但不记录凭据。相同
@@ -219,11 +231,14 @@ Docker 必须持久化 `/var/lib/pb-mapper/auth`；否则重建容器会产生�
 ## 代码索引
 
 - 凭据格式与进程配置：`src/common/checksum.rs`
-- 固定槽位、时间轮、加密 WAL 与生命周期 actor：`src/common/auth.rs`
-- V2 帧、双向派生、计数器与 replay filter：`src/common/message/secure.rs`
-- 命名空间分发与资源限制：`src/pb_server/mod.rs`
+- 认证 facade 与共享模型：`src/common/auth.rs`
+- 生命周期 actor、持久化、runtime 与时间轮：
+  `src/common/auth/{actor,persistence,runtime,timing_wheel}.rs`
+- V2 session facade、frame、限流与 replay 模块：
+  `src/common/message/secure.rs` 与 `src/common/message/secure/`
+- 中继状态、runtime loop 与连接分发：`src/pb_server/{mod,runtime,connection}.rs`
 - 管理请求执行：`src/pb_server/admin.rs`
-- 统一 CLI：`src/bin/pb-mapper.rs`
+- 统一 CLI 与管理员命令模块：`src/bin/pb-mapper.rs`、`src/bin/pb-mapper/admin.rs`
 
 ## 总结
 

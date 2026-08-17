@@ -4,7 +4,7 @@ use tokio::net::TcpStream;
 
 use super::error::Error;
 use super::{ManagerTask, ManagerTaskSender, Result};
-use crate::common::auth::{AuthFailure, AuthRuntime};
+use crate::common::auth::{AuthContext, AuthFailure, AuthRuntime};
 use crate::common::checksum::{parse_credential, Credential};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{
@@ -15,13 +15,14 @@ use crate::common::message::MessageWriter;
 
 pub async fn handle_admin_request(
     request: AdminRequest,
+    authorization: AuthContext,
     auth: AuthRuntime,
     manager: ManagerTaskSender,
     conn_id: RemoteConnId,
     mut conn: TcpStream,
     session: ServerHeaderSession,
 ) -> Result<()> {
-    let result = execute(request, auth, manager).await;
+    let result = execute(request, &authorization, auth, manager).await;
     let response = match result {
         Ok(response) => PbConnResponse::Admin(response),
         Err(failure) => {
@@ -55,47 +56,56 @@ pub async fn handle_admin_request(
 
 async fn execute(
     request: AdminRequest,
+    authorization: &AuthContext,
     auth: AuthRuntime,
     manager: ManagerTaskSender,
 ) -> std::result::Result<AdminResponse, AuthFailure> {
     match request {
         AdminRequest::KeyIssue { ttl_seconds, label } => auth
-            .issue(Duration::from_secs(ttl_seconds), label)
+            .issue(authorization, Duration::from_secs(ttl_seconds), label)
             .await
             .map(AdminResponse::KeyIssued),
         AdminRequest::KeyList { page, page_size } => {
             audit_read(
                 &auth,
+                authorization,
                 "temporary_key_list",
                 None,
                 Some(format!("page={page},page_size={page_size}")),
             )
             .await;
-            auth.list(page, page_size).await.map(AdminResponse::KeyList)
+            auth.list(authorization, page, page_size)
+                .await
+                .map(AdminResponse::KeyList)
         }
-        AdminRequest::KeyShow { key_id } => {
-            auth.show(key_id, false).await.map(AdminResponse::KeyShown)
-        }
-        AdminRequest::KeyReveal { key_id } => {
-            auth.show(key_id, true).await.map(AdminResponse::KeyShown)
-        }
+        AdminRequest::KeyShow { key_id } => auth
+            .show(authorization, key_id, false)
+            .await
+            .map(AdminResponse::KeyShown),
+        AdminRequest::KeyReveal { key_id } => auth
+            .show(authorization, key_id, true)
+            .await
+            .map(AdminResponse::KeyShown),
         AdminRequest::KeyRenew {
             key_id,
             ttl_seconds,
         } => auth
-            .renew(key_id, Duration::from_secs(ttl_seconds))
+            .renew(authorization, key_id, Duration::from_secs(ttl_seconds))
             .await
             .map(AdminResponse::KeyRenewed),
-        AdminRequest::KeyRevoke { key_id } => {
-            auth.revoke(key_id).await.map(AdminResponse::KeyRevoked)
-        }
+        AdminRequest::KeyRevoke { key_id } => auth
+            .revoke(authorization, key_id)
+            .await
+            .map(AdminResponse::KeyRevoked),
         AdminRequest::KeyGc => auth
-            .gc()
+            .gc(authorization)
             .await
             .map(|removed| AdminResponse::KeyGc { removed }),
         AdminRequest::AuthStatus => {
-            audit_read(&auth, "auth_status", None, None).await;
-            auth.status().await.map(AdminResponse::AuthStatus)
+            audit_read(&auth, authorization, "auth_status", None, None).await;
+            auth.status(authorization)
+                .await
+                .map(AdminResponse::AuthStatus)
         }
         AdminRequest::AuthStateReset { confirm } => {
             if !confirm {
@@ -105,7 +115,7 @@ async fn execute(
                     false,
                 ));
             }
-            auth.reset().await?;
+            auth.reset(authorization).await?;
             Ok(AdminResponse::Ok {
                 action: "auth_state_reset".to_string(),
             })
@@ -120,13 +130,13 @@ async fn execute(
                     false,
                 ));
             };
-            auth.rotate_root(new_key).await?;
+            auth.rotate_root(authorization, new_key).await?;
             Ok(AdminResponse::Ok {
                 action: "administrator_key_rotated".to_string(),
             })
         }
         AdminRequest::LegacyProtocolSet { policy } => {
-            auth.set_legacy_protocol(policy).await?;
+            auth.set_legacy_protocol(authorization, policy).await?;
             Ok(AdminResponse::Ok {
                 action: "legacy_protocol_updated".to_string(),
             })
@@ -138,6 +148,7 @@ async fn execute(
         } => {
             audit_read(
                 &auth,
+                authorization,
                 "service_list",
                 key_id,
                 Some(format!("page={page},page_size={page_size}")),
@@ -174,6 +185,7 @@ async fn execute(
         } => {
             audit_read(
                 &auth,
+                authorization,
                 "connection_list",
                 key_id,
                 Some(format!("page={page},page_size={page_size}")),
@@ -206,8 +218,17 @@ async fn execute(
     }
 }
 
-async fn audit_read(auth: &AuthRuntime, action: &str, key_id: Option<u64>, detail: Option<String>) {
-    if let Err(error) = auth.audit_admin(action, key_id, detail).await {
+async fn audit_read(
+    auth: &AuthRuntime,
+    authorization: &AuthContext,
+    action: &str,
+    key_id: Option<u64>,
+    detail: Option<String>,
+) {
+    if let Err(error) = auth
+        .audit_admin(authorization, action, key_id, detail)
+        .await
+    {
         tracing::warn!(
             event = "admin_audit_failed",
             auth_stage = "audit",

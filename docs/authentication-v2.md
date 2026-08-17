@@ -75,11 +75,14 @@ Every new client writes this 32-byte clear-text routing prefix:
 | 1 | Flags, currently `0` |
 | 2 | Reserved, currently `0` |
 | 8 | Big-endian key ID; `0` means administrator |
-| 16 | Random connection salt |
+| 16 | Connection salt: 8-byte Unix timestamp plus 8 random bytes |
 
 The prefix is not secret. It is authenticated as associated data on every
-encrypted frame. Unsupported flags, versions, and non-zero reserved bytes are
-rejected before request dispatch.
+encrypted frame. Unsupported flags, versions, non-zero reserved bytes, and
+timestamps outside the five-minute clock-skew window are rejected before
+request dispatch. The encrypted first request is capped at 64 KiB before
+authentication, while authenticated continuation frames retain the normal
+protocol limit.
 
 ### Directional frame keys
 
@@ -109,11 +112,14 @@ uses server-to-client counter `0`. Later control frames continue from counter
 
 ### Replay resistance
 
-The relay fingerprints `(key_id, connection_salt)` and checks two rotating
-1 MiB Bloom filters covering the current and previous 60-second windows. A
-probable duplicate returns the stable retryable error
+The relay fingerprints `(key_id, connection_salt)` and atomically checks and
+inserts it in two rotating 1 MiB Bloom filters covering the current and previous
+60-second windows. A probable duplicate returns the stable retryable error
 `connection_salt_replayed`; one-shot administrator CLI operations retry once
-with a fresh salt.
+with a fresh salt. Mutating administrator requests additionally claim their
+exact fingerprint in the encrypted WAL before dispatch. Those claims survive
+restart and compaction for ten minutes, so an old captured mutation cannot be
+replayed after the Bloom window or a process restart.
 
 ## Credential lifecycle
 
@@ -153,11 +159,14 @@ pb-mapper admin --server relay.example.com:7666 key gc
 
 ### Root rotation and state reset
 
-Root rotation writes an empty snapshot encrypted with the new key, appends the
-audit record, persists `admin.key`, and then switches live state. It invalidates
-all temporary credentials and closes connections authenticated with the old
-administrator or temporary keys. The CLI stages the candidate key before the
-request and verifies the new key with an authenticated status call.
+Root rotation writes an empty snapshot encrypted with the new key, preserves
+the bounded audit history, persists `admin.key`, and then switches the key and
+administrator lease as one state transition. It invalidates all temporary
+credentials and closes connections authenticated with the old administrator or
+temporary keys. The CLI stages the candidate key before the request and verifies
+the new key with an authenticated status call. When `--key-file` is omitted,
+the recovery copy is written below `$XDG_CONFIG_HOME/pb-mapper` (or
+`$HOME/.config/pb-mapper`) rather than requiring local `/var/lib` access.
 
 An explicit auth-state reset also invalidates all temporary credentials. It
 rotates the server instance ID so credentials from a corrupted or lost slot
@@ -200,7 +209,14 @@ The default state directory is `/var/lib/pb-mapper/auth`:
 
 The directory is mode `0700`. Mutating operations acknowledge only after the
 WAL record is synced. The actor compacts state every five minutes with an atomic
-snapshot replacement and WAL truncation.
+snapshot replacement and WAL truncation. The snapshot carries the bounded
+audit history and active administrator replay claims, so compaction does not
+discard either security record.
+
+The Flutter server uses its application config directory's `auth/` child and
+does not report itself running until both the TCP listener and authentication
+state have initialized successfully. This keeps desktop/mobile starts writable
+without pretending that a failed `/var/lib` initialization succeeded.
 
 Invalid authentication-state headers, failed integrity checks, truncated WAL
 records, schema mismatch, and failed compaction place temporary authentication
@@ -222,8 +238,9 @@ pb-mapper admin --server relay.example.com:7666 root-key rotate
 ```
 
 `--output human|json|ndjson` controls rendering. Pages default to 100 and are
-capped at 1000. `--all` follows pages and emits one NDJSON object per item so a
-large inventory does not need to be buffered by the CLI.
+capped at 1000. `--all` follows every page while preserving the selected output
+format. NDJSON is the streaming choice for large inventories; JSON emits one
+combined document and human output emits one combined table.
 
 Stable structured errors contain `code`, `message`, `retryable`, and
 `server_time`. Authentication failure logs include stage, key ID, peer, and
@@ -279,13 +296,16 @@ state.
 ## Code index
 
 - Credential format and process configuration: `src/common/checksum.rs`
-- Slot table, timing wheel, encrypted WAL, and lifecycle actor:
-  `src/common/auth.rs`
-- V2 framing, key derivation, counters, and replay filter:
-  `src/common/message/secure.rs`
-- Namespace dispatch and relay resource limits: `src/pb_server/mod.rs`
+- Authentication facade and shared model: `src/common/auth.rs`
+- Lifecycle actor, persistence, runtime, and timing wheel:
+  `src/common/auth/{actor,persistence,runtime,timing_wheel}.rs`
+- V2 session facade plus frame, limiter, and replay modules:
+  `src/common/message/secure.rs` and `src/common/message/secure/`
+- Relay state, runtime loop, and connection dispatch:
+  `src/pb_server/{mod,runtime,connection}.rs`
 - Administrator request execution: `src/pb_server/admin.rs`
-- Unified command surface: `src/bin/pb-mapper.rs`
+- Unified CLI and administrator command module: `src/bin/pb-mapper.rs` and
+  `src/bin/pb-mapper/admin.rs`
 
 ## Summary
 

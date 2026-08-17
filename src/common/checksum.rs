@@ -28,6 +28,7 @@ const DERIVE_MSG_HEADER_KEY_CHARSET: &[u8] =
 
 struct MsgHeaderKeyState {
     credential: RwLock<Option<Credential>>,
+    load_error: RwLock<Option<String>>,
     hash: AtomicU32,
 }
 
@@ -63,15 +64,14 @@ fn key_len_error(input: &str) -> String {
     )
 }
 
-fn load_credential_from_env() -> Option<Credential> {
-    let raw = std::env::var(ENV_MSG_HEADER_KEY).ok()?;
-    match parse_credential(raw.trim()) {
-        Ok(credential) => Some(credential),
-        Err(error) => {
-            tracing::error!(reason = "credential_invalid", %error, "invalid MSG_HEADER_KEY");
-            None
-        }
-    }
+fn load_credential_from_env() -> Result<Option<Credential>, String> {
+    let Some(raw) = std::env::var_os(ENV_MSG_HEADER_KEY) else {
+        return Ok(None);
+    };
+    let raw = raw
+        .into_string()
+        .map_err(|_| format!("`{ENV_MSG_HEADER_KEY}` must contain valid UTF-8 credential text"))?;
+    parse_credential(raw.trim()).map(Some)
 }
 
 fn update_runtime_credential(credential: Option<Credential>) {
@@ -84,6 +84,10 @@ fn update_runtime_credential(credential: Option<Credential>) {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = credential;
+    *MSG_HEADER_KEY_STATE
+        .load_error
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     MSG_HEADER_KEY_STATE.hash.store(hash, Ordering::Release);
 }
 
@@ -92,19 +96,34 @@ fn update_runtime_credential(credential: Option<Credential>) {
 /// This state is mutable so FFI/UI can update `MSG_HEADER_KEY` at runtime
 /// without restarting the process.
 static MSG_HEADER_KEY_STATE: LazyLock<MsgHeaderKeyState> = LazyLock::new(|| {
-    let credential = load_credential_from_env();
+    let (credential, load_error) = match load_credential_from_env() {
+        Ok(credential) => (credential, None),
+        Err(error) => {
+            tracing::error!(reason = "credential_invalid", %error, "invalid MSG_HEADER_KEY");
+            (None, Some(error))
+        }
+    };
     let hash = credential
         .as_ref()
         .map(|credential| gen_checksum_by_key(credential.key()))
         .unwrap_or_default();
     MsgHeaderKeyState {
         credential: RwLock::new(credential),
+        load_error: RwLock::new(load_error),
         hash: AtomicU32::new(hash),
     }
 });
 
 /// Return the configured process credential, failing closed when none exists.
 pub fn get_process_credential() -> Result<Credential, String> {
+    if let Some(error) = MSG_HEADER_KEY_STATE
+        .load_error
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return Err(error);
+    }
     MSG_HEADER_KEY_STATE
         .credential
         .read()

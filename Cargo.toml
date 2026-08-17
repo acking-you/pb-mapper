@@ -27,6 +27,7 @@ once_cell.workspace = true
 uni-stream.workspace = true
 kanal.workspace = true
 base64.workspace = true
+subtle.workspace = true
 
 [dev-dependencies]
 dotenvy = "0.15.7"
@@ -66,6 +67,7 @@ trust-dns-resolver = { version = "0.23.2" }
 ring = "0.17.14"
 once_cell = "1.20.2"
 base64 = "0.22.1"
+subtle = "2.6.1"
 uni-stream = { git = "https://github.com/acking-you/uni-stream.git", branch = "master" }
 kanal = { git = "https://github.com/acking-you/kanal.git", branch = "dev/pb-mapper" }
 
