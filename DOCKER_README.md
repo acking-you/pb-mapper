@@ -128,7 +128,7 @@ telnet your-server-ip 7666
 pb-mapper creates secure tunnels between your local services and remote clients through a public server:
 
 ```
-[Local Service] ↔ [pb-mapper-server-cli] ↔ [pb-mapper Server] ↔ [pb-mapper-client] ↔ [Remote Client]
+[Local Service] ↔ [pb-mapper register] ↔ [pb-mapper server] ↔ [pb-mapper connect] ↔ [Remote Client]
      :8080              registers with           :7666            connects from          :9090
                         service-key "my-app"                      service-key "my-app"
 ```
@@ -154,10 +154,10 @@ For other architectures, you can build the image yourself using the provided Doc
 |-----|-------------|
 | `latest-x86_64_musl` | Latest stable x86_64 build (recommended) |
 | `latest-aarch64_musl` | Latest stable ARM64 build |
-| `latest` | Multi-arch manifest (automatically selects architecture) |
-| `v1.x.x-x86_64_musl` | Specific version x86_64 build |
-| `v1.x.x-aarch64_musl` | Specific version ARM64 build |
-| `v1.x.x` | Specific version multi-arch manifest |
+| `v0.3.0-x86_64_musl` | Tagged-release x86_64 build |
+| `v0.3.0-aarch64_musl` | Tagged-release ARM64 build |
+| `0.3.0-x86_64_musl` | Semver x86_64 alias |
+| `0.3.0-aarch64_musl` | Semver ARM64 alias |
 
 **Recommendation**: Use `latest-x86_64_musl` for x86_64 systems or `latest-aarch64_musl` for ARM64 systems for best compatibility.
 
@@ -250,9 +250,9 @@ services:
 
 ## 📖 Related Tools
 
-To use this server, you'll also need:
-- **pb-mapper-server-cli**: Register local services ([Download releases](https://github.com/acking-you/pb-mapper/releases))
-- **pb-mapper-client-cli**: Connect to remote services ([Download releases](https://github.com/acking-you/pb-mapper/releases))
+The same released `pb-mapper` binary provides the other roles:
+- **`pb-mapper register`**: Register local services ([Download releases](https://github.com/acking-you/pb-mapper/releases))
+- **`pb-mapper connect`**: Connect to remote services ([Download releases](https://github.com/acking-you/pb-mapper/releases))
 - **pb-mapper UI**: Cross-platform GUI for all operations ([Download releases](https://github.com/acking-you/pb-mapper/releases))
 
 ## 🔗 Links

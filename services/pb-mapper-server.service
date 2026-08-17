@@ -1,12 +1,16 @@
 [Unit]
-Description=Public Mapper Server Service
-After=network.target
+Description=pb-mapper public relay
+After=network-online.target
+Wants=network-online.target
+
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root
-ExecStart=/bin/sh -c 'ulimit -n 65535 && export RUST_LOG=error && exec {your command}'
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/pb-mapper/server.env
+ExecStart=/usr/local/bin/pb-mapper server --port 7666 --use-machine-msg-header-key
 Restart=on-failure
-RestartSec=5s
+RestartSec=3
+LimitNOFILE=65535
+
 [Install]
 WantedBy=multi-user.target

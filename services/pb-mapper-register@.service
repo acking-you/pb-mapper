@@ -1,0 +1,16 @@
+[Unit]
+Description=pb-mapper service registration (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=RUST_LOG=info
+Environment=TRANSPORT=tcp
+EnvironmentFile=/etc/pb-mapper/register/%i.env
+ExecStart=/usr/local/bin/pb-mapper register ${TRANSPORT} --key ${SERVICE_KEY} --addr ${LOCAL_ADDR} --server ${PB_MAPPER_SERVER} $REGISTER_EXTRA_ARGS
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

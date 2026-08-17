@@ -6,25 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Rust-based network tunneling/proxy system called `pb-mapper` that allows exposing local services to clients over a public network. The project enables users to access their home services (like file transfer servers) from anywhere by creating secure tunnels through a public server.
 
-The system consists of three main binary components:
+The system uses one **pb-mapper** binary (`src/bin/pb-mapper.rs`) with explicit role commands:
 
-1. **pb-mapper-server** (`src/bin/pb-mapper-server.rs`): Central server that manages connections between local services and clients
+1. **`pb-mapper server`**: Central server that manages connections between local services and clients
    - Runs on port 7666 by default
    - Supports IPv4/IPv6 configuration
    - Manages service registration and client subscription mappings
    - Handles connection forwarding and keep-alive mechanisms
 
-2. **pb-mapper-server-cli** (`src/bin/pb-mapper-server-cli.rs`): Registers local services with the central server
+2. **`pb-mapper register`**: Registers local services with the central server
    - Exposes local TCP/UDP services to the public server
    - Supports encryption codec for secure communication
    - Configurable via environment variables and command-line arguments
 
-3. **pb-mapper-client-cli** (`src/bin/pb-mapper-client-cli.rs`): Connects to registered services through the central server
+3. **`pb-mapper connect`**: Connects to registered services through the central server
    - Subscribes to remote services and creates local listening endpoints
    - Supports both TCP and UDP protocols
-   - Provides status checking capabilities
 
-4. **UI Module** (`ui/`): Flutter graphical interface
+4. **`pb-mapper status`**: Queries remote IDs and registered service keys
+
+5. **UI Module** (`ui/`): Flutter graphical interface
    - Replaces all CLI functionality with a user-friendly GUI
    - Calls into Rust through raw `dart:ffi` against the `pb-mapper-ffi` crate
    - Provides comprehensive service management interface
@@ -38,7 +39,7 @@ The system works by creating a bridge between local services and remote clients 
 ```
 pb-mapper/
 ├── src/                    # Main Rust codebase
-│   ├── bin/               # Binary executables (server, server-cli, client-cli)
+│   ├── bin/               # Unified pb-mapper CLI entry point
 │   ├── pb_server/         # Central server implementation
 │   ├── local/             # Local service handlers (server/client)
 │   ├── common/            # Shared utilities and protocols
@@ -64,12 +65,12 @@ pb-mapper/
   - `status.rs`: Server status reporting
   - `mod.rs`: Server manager with ManagerTask and ConnTask enums
 
-- **`src/local/server/`**: Local service registration (server-cli functionality)
+- **`src/local/server/`**: Local service registration (`register` functionality)
   - `stream.rs`: Stream handling for service registration
   - `mod.rs`: Registration logic and server-side CLI implementation
   - `error.rs`: Server-specific error handling
 
-- **`src/local/client/`**: Client connection handling (client-cli functionality)
+- **`src/local/client/`**: Client connection handling (`connect` functionality)
   - `stream.rs`: Stream management for client connections
   - `status.rs`: Status checking and reporting
   - `mod.rs`: Client-side CLI implementation
@@ -307,11 +308,11 @@ The UI is fully implemented with the following structure:
 ### Building the Project
 
 ```bash
-# Build server components
-make build-pb-mapper-server
+# Build the unified CLI
+make build-pb-mapper
 
 # Build with musl for static linking
-make build-pb-mapper-server-x86_64_musl
+make build-pb-mapper-x86_64_musl
 
 # Build and run Flutter UI
 cd ui && flutter run
@@ -321,8 +322,8 @@ cd ui && flutter run
 
 ```bash
 # Build and release Docker images
-make release-pb-mapper-server-docker-image
-make release-pb-mapper-server-x86-64-musl-docker-image
+make release-pb-mapper-docker-image
+make release-pb-mapper-x86-64-musl-docker-image
 
 # Run with docker-compose
 docker-compose -f docker/docker-compose.yml up

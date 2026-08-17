@@ -1,4 +1,4 @@
-name: Build and Push pb-mapper-server Docker Images
+name: Build and Push pb-mapper Docker Images
 
 on:
   push:
@@ -43,25 +43,20 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Build pb-mapper binary
+        uses: houseabsolute/actions-rust-cross@v1
         with:
+          target: ${{ matrix.target.arch }}-unknown-linux-musl
           toolchain: 1.88.0
-          targets: ${{ matrix.target.arch }}-unknown-linux-musl
-
-      - name: Build pb-mapper-server binary
-        uses: actions-rs/cargo@v1
-        with:
-          use-cross: true
-          command: build
-          args: --bin pb-mapper-server --verbose --release --target ${{ matrix.target.arch }}-unknown-linux-musl
+          args: "--locked --release --bin pb-mapper"
+          strip: true
 
       - name: Prepare files for Docker build
         run: |
           # Copy binary to expected location for Docker build
           mkdir -p target/release
-          cp target/${{ matrix.target.arch }}-unknown-linux-musl/release/pb-mapper-server target/release/
-          cp scripts/release/entrypoint/pb-mapper-server.sh target/release/
+          cp target/${{ matrix.target.arch }}-unknown-linux-musl/release/pb-mapper target/release/
+          cp scripts/release/entrypoint/pb-mapper.sh target/release/
 
       - name: Extract metadata
         id: meta
@@ -74,13 +69,13 @@ jobs:
             type=semver,pattern={{version}},suffix=-${{ matrix.target.suffix }}
             type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.target.suffix }}
             type=semver,pattern={{major}},suffix=-${{ matrix.target.suffix }}
-            type=raw,value=latest,suffix=-${{ matrix.target.suffix }},enable={{is_default_branch}}
+            type=raw,value=latest,suffix=-${{ matrix.target.suffix }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./docker/pb-mapper-server.dockerfile
+          file: ./docker/pb-mapper.dockerfile
           platforms: ${{ matrix.target.platform }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}

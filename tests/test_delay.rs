@@ -307,7 +307,7 @@ async fn test_pb_mapper_server_no_codec() {
 
     let echo_server_handle =
         tokio::spawn(async move { run_echo_server(server_type, &remote_echo).await.unwrap() });
-    // run pb-mapper-server
+    // run the pb-mapper server role
     let pb_server = pb_mapper_server.clone();
     let pb_mapper_server_handle = tokio::spawn(async move {
         run_pb_mapper_server(&pb_server).await;
@@ -359,7 +359,7 @@ async fn test_pb_mapper_server_codec() {
 
     let echo_server_handle =
         tokio::spawn(async move { run_echo_server(server_type, &remote_echo).await.unwrap() });
-    // run pb-mapper-server
+    // run the pb-mapper server role
     let pb_server = pb_mapper_server.clone();
     let pb_mapper_server_handle = tokio::spawn(async move {
         run_pb_mapper_server(&pb_server).await;

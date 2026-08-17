@@ -1,11 +1,11 @@
 #!/bin/bash
 TAG ?= dev
 
-build-pb-mapper-server:
-	bash ./scripts/build/pb-mapper-server.sh
+build-pb-mapper:
+	bash ./scripts/build/pb-mapper.sh
 
-build-pb-mapper-server-x86_64_musl:
-	bash ./scripts/build/pb-mapper-server-x86_64_linux_musl.sh
+build-pb-mapper-x86_64_musl:
+	bash ./scripts/build/pb-mapper-x86_64_linux_musl.sh
 
 # Build the Linux FFI library and stage it for Flutter.
 build-pb-mapper-ffi-linux:
@@ -81,15 +81,15 @@ release-ui-windows-no-ffi:
 	cd ui && dart pub global run fastforge:main release --name production
 release-ui-windows: build-pb-mapper-ffi-windows release-ui-windows-no-ffi
 
-release-pb-mapper-server-docker-image: build-pb-mapper-server
-	bash ./scripts/release/pb-mapper-server-docker-image.sh
+release-pb-mapper-docker-image: build-pb-mapper
+	bash ./scripts/release/pb-mapper-docker-image.sh
 
-release-pb-mapper-server-x86-64-musl-docker-image: build-pb-mapper-server-x86_64_musl
-	bash ./scripts/release/pb-mapper-server-x86-64-linux-musl-docker-image.sh
+release-pb-mapper-x86-64-musl-docker-image: build-pb-mapper-x86_64_musl
+	bash ./scripts/release/pb-mapper-x86-64-linux-musl-docker-image.sh
 
 .PHONY: \
-	build-pb-mapper-server \
-	build-pb-mapper-server-x86_64_musl \
+	build-pb-mapper \
+	build-pb-mapper-x86_64_musl \
 	build-pb-mapper-ffi-linux \
 	build-pb-mapper-ffi-macos \
 	build-pb-mapper-ffi-windows \
@@ -107,5 +107,5 @@ release-pb-mapper-server-x86-64-musl-docker-image: build-pb-mapper-server-x86_64
 	build-ui-ios-release \
 	release-ui-windows-no-ffi \
 	release-ui-windows \
-	release-pb-mapper-server-docker-image \
-	release-pb-mapper-server-x86-64-musl-docker-image
+	release-pb-mapper-docker-image \
+	release-pb-mapper-x86-64-musl-docker-image

@@ -1,6 +1,6 @@
 ---
 name: pb-mapper-release-pipeline
-description: Execute the pb-mapper release process end-to-end for server binaries and Flutter UI, including changelog updates, strict local validation, semantic version tagging, GitHub workflow triggering, and release monitoring. Use when preparing a new `vX.Y.Z` release or rerolling a failed release as the next patch version.
+description: Execute the pb-mapper release process end-to-end for the unified CLI and Flutter UI, including changelog updates, strict local validation, semantic version tagging, GitHub workflow triggering, and release monitoring.
 ---
 
 # Pb Mapper Release Pipeline
@@ -14,7 +14,7 @@ Validate locally, update `CHANGELOG.md`, push commit and annotated tag, then mon
 
 Follow this workflow for all official releases in this repository:
 
-- server binary release (`.github/workflows/release.yml`)
+- unified CLI release (`.github/workflows/release.yml`)
 - UI release (`.github/workflows/release-ui.yml`)
 
 Tagging `vX.Y.Z` triggers both workflows. The UI workflow publishes to `vX.Y.Z-ui`.
@@ -56,7 +56,8 @@ Run the same strict checks used in CI:
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --lib --bins --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 flutter analyze
 ```
 
@@ -67,8 +68,9 @@ If release workflow logic changed, also validate syntax:
 ```bash
 python - <<'PY'
 import yaml
+yaml.safe_load(open('.github/workflows/release.yml', 'r', encoding='utf-8'))
 yaml.safe_load(open('.github/workflows/release-ui.yml', 'r', encoding='utf-8'))
-print('release-ui.yml OK')
+print('release workflows OK')
 PY
 ```
 
@@ -93,7 +95,7 @@ git push origin vX.Y.Z
 
 This push triggers:
 
-- `build and deploy` (server binaries)
+- `Build and release pb-mapper CLI` (one CLI artifact per target)
 - `Release pb-mapper UI` (UI artifacts and `vX.Y.Z-ui` release)
 
 ## Step 5: Monitor Workflows
@@ -101,7 +103,7 @@ This push triggers:
 Track both workflow runs:
 
 ```bash
-gh run list --workflow "build and deploy" --limit 5
+gh run list --workflow "Build and release pb-mapper CLI" --limit 5
 gh run list --workflow "Release pb-mapper UI" --limit 5
 ```
 
@@ -124,7 +126,7 @@ gh release view vX.Y.Z-ui
 
 Check that:
 
-- binary archives exist for all expected targets
+- one `pb-mapper` archive and checksum exist for every expected CLI target
 - UI assets exist for Windows/Linux/macOS/Android/iOS jobs that succeeded
 - UI release body contains the current version changelog section
 

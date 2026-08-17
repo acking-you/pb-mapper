@@ -2,45 +2,18 @@ use std::net::SocketAddr;
 use std::sync::Once;
 use std::time::Duration;
 
-use clap::{Subcommand, ValueEnum};
+use clap::ValueEnum;
 use snafu::ResultExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 
 use super::error::{CfgPbServerEnvNotExistSnafu, Result};
 
-#[derive(Debug, Subcommand)]
-pub enum LocalService {
-    /// UDP server
-    UdpServer {
-        /// [required] The key registered with the remote server to represent this service
-        #[arg(short, long)]
-        key: String,
-        /// [required] addr(ip:port) for exposed
-        #[arg(short, long)]
-        addr: String,
-    },
-    /// TCP server
-    TcpServer {
-        /// [required] The key registered with the remote server to represent this service
-        #[arg(short, long)]
-        key: String,
-        /// [required] addr(ip:port) for exposed
-        #[arg(short, long)]
-        addr: String,
-    },
-    /// Show Status
-    Status {
-        /// status operate
-        op: StatusOp,
-    },
-}
-
 #[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum StatusOp {
-    /// get active remote id
+    /// Get active remote connection IDs.
     RemoteId,
-    // get active service key
+    /// Get registered service keys.
     Keys,
 }
 

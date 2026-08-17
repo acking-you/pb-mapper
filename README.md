@@ -26,7 +26,7 @@
 
 ## Highlights
 
-- **One public port** — a service-key registry replaces per-service port planning; CLI and GUI share the same workflow.
+- **One binary, one public port** — `pb-mapper` provides every runtime role, while a service-key registry replaces per-service port planning.
 - **Optional encryption** — AES-256-GCM (via `ring`) on forwarded traffic, enabled with `--codec` at registration.
 - **Proven in production** — on real workloads (e.g. a Palworld UDP server), latency matches frp with a directly exposed port.
 
@@ -36,18 +36,18 @@
 
 With an AI coding agent (Claude Code, Cursor, Kiro), the built-in skills handle deployment interactively. The binary is downloaded locally and uploaded over SCP, so the remote host needs no GitHub access.
 
-- `/pb-mapper-server-deploy` — deploys `pb-mapper-server` as a systemd service.
-- `/pb-mapper-client-cli-deploy` — same flow for `pb-mapper-client-cli`, plus end-to-end validation.
+- `/pb-mapper-server-deploy` — deploys `pb-mapper server` as a systemd service.
+- `/pb-mapper-connect-deploy` — deploys `pb-mapper connect` as a managed tunnel and validates it end to end.
 
 ### Alternative — one-liner install script
 
-If the remote host can reach GitHub directly, this installs `pb-mapper-server` as a systemd service on Linux (x86_64, musl) — port `7666`, `--use-machine-msg-header-key` on, key stored at `/var/lib/pb-mapper-server/msg_header_key`.
+If the remote host can reach GitHub directly, this installs the unified `pb-mapper` binary and runs its `server` command as a systemd service on Linux (x86_64, musl) — port `7666`, `--use-machine-msg-header-key` on, key stored at `/var/lib/pb-mapper-server/msg_header_key`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
 ```
 
-After install, load the same key for `pb-mapper-server-cli` and `pb-mapper-client-cli`:
+After install, load the same key before running `pb-mapper register` or `pb-mapper connect`:
 
 ```bash
 export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
@@ -57,11 +57,11 @@ export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
 
 ![pb-mapper architecture](docs/assets/architecture.svg)
 
-- **Local service side** (green) — `pb-mapper-server-cli` registers a local TCP/UDP service.
-- **Public network** (blue) — `pb-mapper-server` keeps the registry and forwards data bidirectionally.
-- **Remote client side** (orange) — `pb-mapper-client-cli` subscribes to a key and exposes it as a local port.
+- **Local service side** (green) — `pb-mapper register` registers a local TCP/UDP service.
+- **Public network** (blue) — `pb-mapper server` keeps the registry and forwards data bidirectionally.
+- **Remote client side** (orange) — `pb-mapper connect` subscribes to a key and exposes it as a local port.
 
-Either CLI can be replaced by the Flutter UI.
+The register and connect workflows are also available in the Flutter UI.
 
 ### Example: reach a home web server from a coffee shop
 
@@ -70,37 +70,38 @@ Your web server runs on `localhost:8080` at home.
 ```
                   Home LAN                    Public Server                Coffee Shop
           ┌─────────────────────┐       ┌──────────────────┐       ┌──────────────────┐
-          │  Web Server :8080   │       │  pb-mapper-server│       │  Browser :3000   │
+          │  Web Server :8080   │       │ pb-mapper server │       │  Browser :3000   │
           │        ↑            │       │     :7666        │       │       ↑          │
-          │  server-cli ────────┼──────►│  key='web' ──────┼◄──────┼── client-cli     │
+          │ register ───────────┼──────►│  key='web' ──────┼◄──────┼── connect        │
           └─────────────────────┘       └──────────────────┘       └──────────────────┘
 ```
 
 ```bash
 # 1. on the public server — start the central router
-pb-mapper-server --port 7666
+pb-mapper server --port 7666
 
 # 2. at home — register the web server under key 'web'
-pb-mapper-server-cli --server <public-ip>:7666 --key web --local 127.0.0.1:8080
+pb-mapper register tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:8080
 
 # 3. at the coffee shop — subscribe and expose it locally
-pb-mapper-client-cli --server <public-ip>:7666 --key web --local 127.0.0.1:3000
+pb-mapper connect tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:3000
 ```
 
 Open `http://localhost:3000` in the coffee-shop browser — traffic flows through the public server back home.
 
 ## Components
 
-| Component | Role |
+| Command | Role |
 | --- | --- |
-| `pb-mapper-server` | Central router (default port `7666`) |
-| `pb-mapper-server-cli` | Registers a local TCP/UDP service with the server |
-| `pb-mapper-client-cli` | Subscribes to a registered service and exposes a local port |
-| **Flutter UI** (`ui/`) | GUI replacement for both CLIs |
+| `pb-mapper server` | Central router (default port `7666`) |
+| `pb-mapper register tcp\|udp` | Registers a local TCP/UDP service with the server |
+| `pb-mapper connect tcp\|udp` | Subscribes to a registered service and exposes a local port |
+| `pb-mapper status keys\|remote-id` | Queries the central router |
+| **Flutter UI** (`ui/`) | GUI for server, register, connect, and status workflows |
 
 ## Developer view
 
-- **Rust core** — binaries in `src/bin/`; shared protocol and networking in `src/common` and `src/utils`; server / client internals in `src/pb_server`, `src/local/server`, `src/local/client`.
+- **Rust core** — the unified entry point is `src/bin/pb-mapper.rs`; shared protocol and networking live in `src/common` and `src/utils`; server / register / connect internals live in `src/pb_server`, `src/local/server`, and `src/local/client`.
 - **Flutter UI** — views in `ui/lib/src/views`, FFI layers in `ui/lib/src/ffi`, Rust bridge in `ui/native/pb_mapper_ffi`. FFI calls run on a background isolate, and Rust returns JSON (`{success, message, data}`) to keep the C ABI stable.
 
 ## Documentation
@@ -115,7 +116,7 @@ Open `http://localhost:3000` in the coffee-shop browser — traffic flows throug
 - `ui/` — Flutter UI + native bridge
 - `docs/` — documentation and assets
 - `docker/`, `services/`, `scripts/`, `tests/` — deployment and tooling
-- `skills/` — AI coding agent deployment skills (server, client-cli)
+- `skills/` — AI coding agent deployment skills (server and connect tunnel)
 
 ## License
 

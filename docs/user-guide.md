@@ -4,16 +4,16 @@
 
 ## Overview
 
-pb-mapper exposes local TCP/UDP services through a public server using a service key. It includes three CLI binaries and an optional Flutter GUI.
+pb-mapper exposes local TCP/UDP services through a public relay using a service key. One `pb-mapper` binary provides the `server`, `register`, `connect`, and `status` commands, alongside an optional Flutter GUI.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A["Local TCP or UDP service"] --> B["pb-mapper-server-cli"]
+    A["Local TCP or UDP service"] --> B["pb-mapper register"]
     B --> C["V2 control connection pool"]
-    C --> D["pb-mapper-server"]
-    E["pb-mapper-client-cli"] --> F["Local listener"]
+    C --> D["pb-mapper server"]
+    E["pb-mapper connect"] --> F["Local listener"]
     G["Remote user app"] --> F
     F --> E
     E --> D
@@ -22,15 +22,15 @@ flowchart LR
     B --> A
 ```
 
-The server is the public rendezvous point. A `pb-mapper-server-cli` process registers one service key and keeps a small pool of long-lived control connections to the server. A `pb-mapper-client-cli` process first checks that the requested service key has a healthy registered control connection, then opens a local listener for downstream users.
+The `server` role is the public rendezvous point. A `register` process registers one service key and keeps a small pool of long-lived control connections to the relay. A `connect` process first checks that the requested service key has a healthy registered control connection, then opens a local listener for downstream users.
 
-When a user connects to the client-side local listener, the client subscribes to the service key on the server. The server selects a healthy registered control connection, asks the matching server-cli to open a data stream, waits for an acknowledgement, and then forwards bytes between the client stream and the local service.
+When a user connects to the connect-side local listener, that process subscribes to the service key. The relay selects a healthy registered control connection, asks the matching register process to open a data stream, waits for an acknowledgement, and then forwards bytes between the client stream and the local service.
 
 ```mermaid
 sequenceDiagram
-    participant S as server cli
-    participant R as pb mapper server
-    participant C as client cli
+    participant S as pb-mapper register
+    participant R as pb-mapper server
+    participant C as pb-mapper connect
     participant U as user app
 
     S->>R: Register V2 with service key
@@ -50,7 +50,7 @@ sequenceDiagram
     C-->>U: forward service bytes
 ```
 
-Control connections are leased rather than guessed from a single missing heartbeat. If a registered server-cli stops receiving control-plane activity for longer than the tolerance window, it opens a separate status probe and verifies that the exact `conn_id` and `generation` are still present on the server. If that registration is missing, or if the probe keeps failing past the suspect grace window, the server-cli reconnects and registers a fresh control connection. The server side also expires idle V2 control connections, and subscribe requests skip unhealthy or stale registrations.
+Control connections are leased rather than guessed from a single missing heartbeat. If a register process stops receiving control-plane activity for longer than the tolerance window, it opens a separate status probe and verifies that the exact `conn_id` and `generation` are still present on the relay. If that registration is missing, or if the probe keeps failing past the suspect grace window, the process reconnects and registers a fresh control connection. The relay also expires idle V2 control connections, and subscribe requests skip unhealthy or stale registrations.
 
 ## Prerequisites
 
@@ -63,13 +63,7 @@ Download prebuilt binaries from GitHub Releases and extract them:
 
 - Releases: https://github.com/acking-you/pb-mapper/releases
 
-Each binary is packaged separately:
-
-- `pb-mapper-server-<version>-<target>.tar.gz` / `.zip`
-- `pb-mapper-server-cli-<version>-<target>.tar.gz` / `.zip`
-- `pb-mapper-client-cli-<version>-<target>.tar.gz` / `.zip`
-
-After extracting, add the binaries to your PATH or run them from the extracted folder.
+Each target has one archive, named `pb-mapper-<target>.tar.gz` on Unix-like systems or `pb-mapper-<target>.zip` on Windows. After extracting, add `pb-mapper` to your PATH or run it from the extracted folder.
 
 ## Build from source (optional)
 
@@ -77,25 +71,25 @@ After extracting, add the binaries to your PATH or run them from the extracted f
 
 Requires the Rust toolchain (see `rust-toolchain.toml` for the pinned version).
 
-Build all Rust binaries:
+Build the Rust CLI:
 
 ```bash
 cargo build --release
 ```
 
-Build just the server with Make:
+Build the CLI with Make:
 
 ```bash
-make build-pb-mapper-server
+make build-pb-mapper
 ```
 
-Cross-build a musl server binary:
+Cross-build a musl CLI binary:
 
 ```bash
-make build-pb-mapper-server-x86_64_musl
+make build-pb-mapper-x86_64_musl
 ```
 
-Binaries are placed under `target/release/` (for example, `pb-mapper-server`).
+The binary is placed at `target/release/pb-mapper`.
 
 ### Flutter UI (optional)
 
@@ -111,12 +105,12 @@ If you added the binaries to your PATH, use them directly. Otherwise, prefix wit
 ### 1) Start the central server
 
 ```bash
-pb-mapper-server --pb-mapper-port 7666
+pb-mapper server --port 7666
 ```
 
 Optional flags:
 
-- `--use-ipv6`: enable IPv6 listening
+- `--ipv6`: enable IPv6 listening
 - `--keep-alive`: enable TCP keep-alive
 - `--use-machine-msg-header-key`: derive `MSG_HEADER_KEY` from current machine hostname + MAC,
   and write it to `/var/lib/pb-mapper-server/msg_header_key`
@@ -127,7 +121,7 @@ When you want each deployed server to use a host-specific key (instead of the bu
 start server with:
 
 ```bash
-pb-mapper-server --pb-mapper-port 7666 --use-machine-msg-header-key
+pb-mapper server --port 7666 --use-machine-msg-header-key
 ```
 
 This will:
@@ -136,11 +130,11 @@ This will:
 - set server process `MSG_HEADER_KEY` automatically
 - persist the key to `/var/lib/pb-mapper-server/msg_header_key`
 
-Then use the same key for `pb-mapper-server-cli` or `pb-mapper-client-cli`:
+Then use the same key for the `register` and `connect` commands:
 
 ```bash
 export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
-pb-mapper-server-cli --pb-mapper-server "your-server:7666" tcp-server --key "my-service" --addr "127.0.0.1:8080"
+pb-mapper register tcp --server "your-server:7666" --key "my-service" --addr "127.0.0.1:8080"
 ```
 
 ### 2) Register a local service
@@ -148,8 +142,8 @@ pb-mapper-server-cli --pb-mapper-server "your-server:7666" tcp-server --key "my-
 Register a TCP service:
 
 ```bash
-pb-mapper-server-cli --pb-mapper-server "your-server:7666" \
-  tcp-server \
+pb-mapper register tcp \
+  --server "your-server:7666" \
   --key "my-service" \
   --addr "127.0.0.1:8080"
 ```
@@ -157,19 +151,19 @@ pb-mapper-server-cli --pb-mapper-server "your-server:7666" \
 Register a UDP service:
 
 ```bash
-pb-mapper-server-cli --pb-mapper-server "your-server:7666" \
-  udp-server \
+pb-mapper register udp \
+  --server "your-server:7666" \
   --key "my-udp" \
   --addr "127.0.0.1:8211"
 ```
 
-To enable optional AES-256-GCM message encryption for forwarded traffic, add `--codec` before the subcommand when registering the service (for example, `pb-mapper-server-cli --codec tcp-server ...`).
+To enable optional AES-256-GCM message encryption for forwarded traffic, add `--codec` to the register command.
 
 ### 3) Connect from a remote client
 
 ```bash
-pb-mapper-client-cli --pb-mapper-server "your-server:7666" \
-  tcp-server \
+pb-mapper connect tcp \
+  --server "your-server:7666" \
   --key "my-service" \
   --addr "127.0.0.1:9090"
 ```
@@ -179,8 +173,8 @@ After step 3, the remote machine can access the service at `127.0.0.1:9090`.
 ### Status commands
 
 ```bash
-pb-mapper-server-cli --pb-mapper-server "your-server:7666" status remote-id
-pb-mapper-server-cli --pb-mapper-server "your-server:7666" status keys
+pb-mapper status remote-id --server "your-server:7666"
+pb-mapper status keys --server "your-server:7666"
 ```
 
 ## Run (GUI)
@@ -202,10 +196,10 @@ flutter run
 - `PB_MAPPER_STREAM_READY_TIMEOUT`: wait after a stream ack for the server-side data stream to arrive before trying another connection, default `1s`
 - `PB_MAPPER_STREAM_RECOVERY_TIMEOUT`: keep a client subscribe open while stale control connections are retired and replacement control connections register, default `2s`
 - `PB_MAPPER_CONTROL_CONN_POOL_SIZE`: number of parallel server-side control connections per registered service, default `2`, maximum `16`
-- `PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL`: interval between server-cli control heartbeats, default `2s`
+- `PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL`: interval between register-role control heartbeats, default `2s`
 - `PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE`: how long a registered control connection may go without inbound control activity before it becomes suspect and is probed, default `6s`
 - `PB_MAPPER_CONTROL_SUSPECT_GRACE`: additional grace after a failed remote registration probe before reconnecting, default `2s`
-- `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`: timeout for each server-cli remote registration status probe, default `1s`
+- `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`: timeout for each register-role remote registration status probe, default `1s`
 - `PB_MAPPER_SERVER_LEASE_TIMEOUT`: server-side idle lease timeout for V2 registered control connections, default `15s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`: how often the client-side local listener rechecks that the remote service key is still registered, default `15s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`: timeout for each client-side remote key health check, default `5s`

@@ -1,0 +1,16 @@
+[Unit]
+Description=pb-mapper client tunnel (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=RUST_LOG=info
+Environment=TRANSPORT=tcp
+EnvironmentFile=/etc/pb-mapper/connect/%i.env
+ExecStart=/usr/local/bin/pb-mapper connect ${TRANSPORT} --key ${SERVICE_KEY} --addr ${LOCAL_ADDR} --server ${PB_MAPPER_SERVER} $CONNECT_EXTRA_ARGS
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

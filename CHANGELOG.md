@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-08-18
+- Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.
+- Consolidated release archives into one cross-platform binary artifact per target and updated Docker, installers, systemd templates, build scripts, deployment skills, and documentation to use it.
+- Fixed cancellation-induced TCP tail loss during half-close handling and added a regression test for delayed final writes.
+- Made client relay-health checks tolerant of transient failures with safer intervals, timeouts, and a configurable consecutive-failure threshold.
+
 ## [0.2.19] - 2026-08-15
 - Fixed a failing connection or registration having no way to be stopped. `failed` does not mean the client gave up — it means the status probe could not reach the server, while the retry loop carries on dialling. The row offered Connect in that state, so a failing tunnel retried indefinitely with nothing in the interface able to stop it.
 - Fixed connecting reporting success before it had connected. Accepting the request and coming up are different events, and only the first had a message, so a green "client connection started" appeared while the client was failing to reach the server. The settled result now gets its own message, in red, with the reason beneath it.

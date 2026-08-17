@@ -144,11 +144,11 @@ pb-mapper 是一个 Rust 写的网络穿透工具。它的特点是：
 - **可选加密**：支持传输加密，保护数据安全
 - **跨平台**：Linux、macOS、Windows、Android、iOS 都支持
 
-它的工作原理很简单：你有一台公网服务器，pb-mapper-server 跑在上面。你的 PC 通过 pb-mapper 把本地服务"注册"上去，然后手机通过 pb-mapper "订阅"这个服务，就能访问了。
+它的工作原理很简单：你有一台公网服务器，`pb-mapper server` 跑在上面。你的 PC 通过 `pb-mapper register` 把本地服务注册上去，然后手机通过 `pb-mapper connect` 订阅这个服务，就能访问了。
 
-### Step 1：部署 pb-mapper-server 到公网服务器
+### Step 1：部署 pb-mapper server 到公网服务器
 
-> 💡 PPT 第 9 页：一键部署 pb-mapper-server
+> 💡 PPT 第 9 页：一键部署 pb-mapper server
 
 这一步最简单。如果你用 Claude Code 或者其他 AI 编程助手，直接用 pb-mapper 项目提供的部署 skill：
 
@@ -157,7 +157,7 @@ pb-mapper 是一个 Rust 写的网络穿透工具。它的特点是：
 ```
 
 AI 会自动帮你：
-1. 编译 pb-mapper-server
+1. 下载或编译统一的 pb-mapper 二进制
 2. 通过 SSH 上传到你的服务器
 3. 配置 systemd 服务
 4. 启动并验证
@@ -171,7 +171,7 @@ AI 会自动帮你：
 在你的 PC 上打开 pb-mapper 的 Flutter UI App。
 
 操作很直观：
-1. 填入公网服务器地址（就是刚才部署 pb-mapper-server 的那台）
+1. 填入公网服务器地址（就是刚才部署 `pb-mapper server` 的那台）
 2. 设置一个服务 Key，比如 `hapi-hub`
 3. 本地服务地址填 `127.0.0.1:3006`（HAPI Hub 的地址）
 4. 选择 TCP 协议
@@ -195,13 +195,13 @@ AI 会自动帮你：
 
 > 如果你不想在手机上装 App，还有一种方式——
 
-在 pb-mapper-server 所在的公网服务器上，用 AI 编程助手执行：
+在 `pb-mapper server` 所在的公网服务器上，用 AI 编程助手执行：
 
 ```
-/pb-mapper-client-cli-deploy
+/pb-mapper-connect-deploy
 ```
 
-这会在服务器上部署一个 client-cli，订阅 `hapi-hub` 服务并监听一个公网端口。
+这会在服务器上部署一个 `pb-mapper connect` 进程，订阅 `hapi-hub` 服务并监听一个公网端口。
 
 然后你在手机浏览器里直接输入 `http://你的服务器IP:端口` 就能访问 HAPI Web。
 
@@ -262,6 +262,6 @@ AI 会自动帮你：
 | 安装 Bun | `curl -fsSL https://bun.sh/install \| bash` |
 | 构建 HAPI | `cd hapi && bun install && bun run build:single-exe` |
 | 启动 HAPI | `hapi` |
-| 部署 pb-mapper-server | AI 助手中执行 `/pb-mapper-server-deploy` |
-| 部署 client-cli（备选） | AI 助手中执行 `/pb-mapper-client-cli-deploy` |
+| 部署 pb-mapper server | AI 助手中执行 `/pb-mapper-server-deploy` |
+| 部署 connect（备选） | AI 助手中执行 `/pb-mapper-connect-deploy` |
 | HAPI Web 地址 | `http://localhost:3006` |

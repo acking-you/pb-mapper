@@ -1,5 +1,12 @@
 # pb-mapper UI as a CLI — design spec
 
+> Historical design note: the standalone CLI was consolidated in v0.3.0. In
+> current commands, `pb-mapper-server` maps to `pb-mapper server`,
+> `pb-mapper-server-cli` maps to `pb-mapper register`, and
+> `pb-mapper-client-cli` maps to `pb-mapper connect`. The older executable
+> names below are retained only where they describe the design context that
+> preceded the unified binary.
+
 ## Goal
 
 `pb_mapper_ui` should be usable as a command-line tool as well as a window:

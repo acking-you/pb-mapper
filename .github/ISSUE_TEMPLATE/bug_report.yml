@@ -24,9 +24,10 @@ body:
       label: Affected Component
       description: Which area is impacted?
       options:
-        - pb-mapper-server
-        - pb-mapper-server-cli
-        - pb-mapper-client-cli
+        - pb-mapper server
+        - pb-mapper register
+        - pb-mapper connect
+        - pb-mapper status
         - Flutter UI
         - Docker / deployment scripts
         - Documentation

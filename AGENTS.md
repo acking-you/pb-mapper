@@ -1,28 +1,29 @@
 # Repository Guidelines
 
 ## Architecture Overview
-- Three binaries in `src/bin/`:
-  - `pb-mapper-server`: central router (default port 7666)
-  - `pb-mapper-server-cli`: registers local TCP/UDP services to server
-  - `pb-mapper-client-cli`: connects to a service via server and exposes a local port
+- One `pb-mapper` binary in `src/bin/` with four role commands:
+  - `server`: central router (default port 7666)
+  - `register`: registers local TCP/UDP services with the router
+  - `connect`: connects to a registered service and exposes a local port
+  - `status`: queries router IDs and registered keys
 - Core crates: `src/pb_server`, `src/local/{server,client}`, `src/common` (protocol, streams, listeners), `src/utils`.
 
 ## Project Structure & Modules
-- `src/`: Rust backend and binaries
-  - `src/bin/`: CLI binaries listed above
+- `src/`: Rust backend and CLI
+  - `src/bin/pb-mapper.rs`: unified CLI entry point
   - `src/pb_server`, `src/local`, `src/common`, `src/utils`
 - `ui/`: Flutter UI; Rust bridge under `ui/native/*`
 - `tests/`: integration tests; loads env from `tests/.env`
 - `docker/`, `services/`, `scripts/`: container, systemd, build/release
 
 ## Build, Test, and Development Commands
-- Build (release): `make build-pb-mapper-server`
-- Cross-build (musl): `make build-pb-mapper-server-x86_64_musl`
-- Run server: `cargo run --bin pb-mapper-server -- --port 7666`
-- Register service: `cargo run --bin pb-mapper-server-cli -- --service-key k --local-addr 127.0.0.1:8080 --server-addr host:7666`
-- Connect client: `cargo run --bin pb-mapper-client-cli -- --service-key k --local-addr 127.0.0.1:9090 --server-addr host:7666`
+- Build (release): `make build-pb-mapper`
+- Cross-build (musl): `make build-pb-mapper-x86_64_musl`
+- Run server: `cargo run --bin pb-mapper -- server --port 7666`
+- Register service: `cargo run --bin pb-mapper -- register tcp --key k --addr 127.0.0.1:8080 --server host:7666`
+- Connect client: `cargo run --bin pb-mapper -- connect tcp --key k --addr 127.0.0.1:9090 --server host:7666`
 - Tests: `cargo test` (see Testing for env)
-- Docker (server): `make release-pb-mapper-server-docker-image`
+- Docker (server): `make release-pb-mapper-docker-image`
 - UI (optional): `cd ui && flutter run`
 Notes: CI builds release artifacts on tags `vX.Y.Z` (see `.github/workflows/release.yml`).
 
@@ -50,4 +51,4 @@ Notes: CI builds release artifacts on tags `vX.Y.Z` (see `.github/workflows/rele
 ## Security & Configuration Tips
 - Never commit secrets; use `.env` and document required variables
 - Helpful envs: `RUST_LOG=info`, `PB_MAPPER_SERVER=host:7666`, `PB_MAPPER_KEEP_ALIVE=ON`
-- Systemd: edit `services/pb-mapper-server.service` ExecStart to point to your built binary
+- Systemd: install the unified binary at `/usr/local/bin/pb-mapper`; role-specific units live in `services/`

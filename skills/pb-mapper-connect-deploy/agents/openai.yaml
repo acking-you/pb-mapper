@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pb Mapper Connect Deploy"
+  short_description: "Deploy pb-mapper connect as a Linux systemd tunnel service"
+  default_prompt: "Use this skill to deploy or upgrade the unified pb-mapper binary, run its connect command through systemd, and verify tunnel health."

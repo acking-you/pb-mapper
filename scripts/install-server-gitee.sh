@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # Configuration
-VERSION="0.2.1"
-ARCH="x86_64-unknown-linux-musl"
-TARBALL="pb-mapper-server-v${VERSION}-${ARCH}.tar.gz"
+VERSION="${PB_MAPPER_VERSION:-0.3.0}"
+ARCH="${PB_MAPPER_ARCH:-x86_64-unknown-linux-musl}"
+TARBALL="pb-mapper-${ARCH}.tar.gz"
 DOWNLOAD_URL="https://gitee.com/acking-you/pb-mapper/releases/download/v${VERSION}/${TARBALL}"
-INSTALL_DIR="/opt/pb-mapper-server"
+INSTALL_DIR="/usr/local/bin"
 SERVICE_NAME="pb-mapper-server"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
-PORT="7666"
+PORT="${PB_MAPPER_PORT:-7666}"
 
 # Re-run with sudo if needed
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -57,15 +57,15 @@ fi
 # Extract and locate binary
 mkdir -p "$TMP_DIR/extract"
 tar -xzf "$ARCHIVE_PATH" -C "$TMP_DIR/extract"
-BIN_PATH=$(find "$TMP_DIR/extract" -type f -name "pb-mapper-server" -perm -u+x | head -n 1)
+BIN_PATH=$(find "$TMP_DIR/extract" -type f -name "pb-mapper" -perm -u+x -print -quit)
 if [ -z "$BIN_PATH" ]; then
-  echo "pb-mapper-server binary not found in archive." >&2
+  echo "pb-mapper binary not found in archive." >&2
   exit 1
 fi
 
 # Install binary
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$BIN_PATH" "${INSTALL_DIR}/pb-mapper-server"
+install -m 0755 "$BIN_PATH" "${INSTALL_DIR}/pb-mapper"
 
 # Stop and remove existing service if present
 if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
@@ -86,8 +86,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/pb-mapper-server --pb-mapper-port ${PORT} --use-machine-msg-header-key
+ExecStart=${INSTALL_DIR}/pb-mapper server --port ${PORT} --use-machine-msg-header-key
 Environment=RUST_LOG=info
 Restart=on-failure
 RestartSec=3
@@ -101,6 +100,6 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}.service"
 
-echo "pb-mapper-server is installed and running."
+echo "pb-mapper server is installed and running."
 echo "Service name: ${SERVICE_NAME}.service"
 echo "Machine-derived key file: /var/lib/pb-mapper-server/msg_header_key"

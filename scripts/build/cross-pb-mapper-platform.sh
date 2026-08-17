@@ -1,13 +1,14 @@
-#!/bin/bash
-# check args num
-if [ "$#" -ne 2 ]; then
-    echo "Usage: $0 [BIN_NAME] [PLATFORM]"
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 [PLATFORM]"
     exit 1
 fi
 
-export BIN_NAME=$1
-PLATFORM=$2
-SCRIPT_DIR=$(cd `dirname $0`; pwd)
+export BIN_NAME="pb-mapper"
+PLATFORM=$1
+SCRIPT_DIR=$(cd "$(dirname "$0")"; pwd)
 export PROJECT_DIR="$SCRIPT_DIR/../.."
 
 case $PLATFORM in
@@ -16,7 +17,7 @@ case $PLATFORM in
         export TARGET_NAME="x86_64-pc-windows-gnu"
         ;;
     macos-x86)
-        echo "build for macos(x86-64)..."
+        echo "build for macos(arm64)..."
         export TARGET_NAME="x86_64-apple-darwin"
         ;;
     macos-arm)
@@ -38,4 +39,4 @@ case $PLATFORM in
         ;;
 esac
 
-bash $SCRIPT_DIR/cross-build.sh
+bash "$SCRIPT_DIR/cross-build.sh"

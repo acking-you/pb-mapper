@@ -6,7 +6,7 @@
 
 [pb-mapper](https://github.com/acking-you/pb-mapper) 是我自己写的一套 TCP/UDP 公网穿透系统。
 
-跟 frp 那种"一个服务占一个端口"的思路不同，pb-mapper 所有本地服务共用同一个公网端口，靠一个 **service key** 做注册和订阅。公网侧跑一个 `pb-mapper-server` 当会合点，维护服务注册表，负责双向流转发。
+跟 frp 那种"一个服务占一个端口"的思路不同，pb-mapper 所有本地服务共用同一个公网端口，靠一个 **service key** 做注册和订阅。公网侧运行 `pb-mapper server` 作为会合点，维护服务注册表，负责双向流转发。
 
 说人话就是：家里的网盘、编译机、UDP 游戏房、博客后端……想暴露几个就暴露几个，VPS 上只开 `7666` 一个端口，不用每加一个服务就去防火墙多放一行规则。
 
@@ -16,16 +16,16 @@ flowchart LR
         S1["SSH :22"]
         S2["Web :8080"]
         S3["Palworld UDP :8211"]
-        CLI1["pb-mapper-server-cli"]
+        CLI1["pb-mapper register"]
         S1 --> CLI1
         S2 --> CLI1
         S3 --> CLI1
     end
     subgraph pub["🌐 公网 VPS"]
-        SRV["pb-mapper-server<br/>:7666"]
+        SRV["pb-mapper server<br/>:7666"]
     end
     subgraph out["💻 任意远端"]
-        CLI2["pb-mapper-client-cli<br/>/ Flutter UI"]
+        CLI2["pb-mapper connect<br/>/ Flutter UI"]
         USR["用户 App"]
         USR --> CLI2
     end
@@ -66,7 +66,7 @@ flowchart LR
 
 ## 怎么用
 
-公网服务端（`pb-mapper-server`）在 VPS 上部署一次，之后家里和外面随便哪台机器都能连。部署方式我留了三条路，挑适合你的就行。
+公网服务端（`pb-mapper server`）在 VPS 上部署一次，之后家里和外面随便哪台机器都能连。部署方式我留了三条路，挑适合你的就行。
 
 ### 方式一：AI Agent 一键部署
 
@@ -75,7 +75,7 @@ flowchart LR
 | Skill | 干什么 |
 |---|---|
 | `/pb-mapper-server-deploy` | 本地下载二进制 → SCP 传到 VPS → 写 systemd unit → 启动 |
-| `/pb-mapper-client-cli-deploy` | 同样的流程，在任意 Linux 机器上起一条 client 隧道 |
+| `/pb-mapper-connect-deploy` | 同样的流程，在任意 Linux 机器上起一条 connect 隧道 |
 
 全程交互式，会问你 SSH 信息、端口、加密 key。GitHub 下载不通的话会自动走代理兜底，远程主机不需要能访问 GitHub。
 
@@ -93,21 +93,21 @@ curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts
 
 三个二进制，名字就是功能：
 
-- `pb-mapper-server`：公网中继
-- `pb-mapper-server-cli`：跑在本地服务那一侧，把 `127.0.0.1:xxx` 注册成一个 service key
-- `pb-mapper-client-cli`：跑在使用方那一侧，订阅 service key，在本地开一个监听端口
+- `pb-mapper server`：公网中继
+- `pb-mapper register`：跑在本地服务那一侧，把 `127.0.0.1:xxx` 注册成一个 service key
+- `pb-mapper connect`：跑在使用方那一侧，订阅 service key，在本地开一个监听端口
 
 举个例子——从咖啡店访问家里 `localhost:8080` 的 web 服务：
 
 ```bash
 # VPS 上
-pb-mapper-server --port 7666
+pb-mapper server --port 7666
 
 # 家里
-pb-mapper-server-cli --server <vps-ip>:7666 --key web --local 127.0.0.1:8080
+pb-mapper register tcp --server <vps-ip>:7666 --key web --addr 127.0.0.1:8080
 
 # 咖啡店
-pb-mapper-client-cli --server <vps-ip>:7666 --key web --local 127.0.0.1:3000
+pb-mapper connect tcp --server <vps-ip>:7666 --key web --addr 127.0.0.1:3000
 # 浏览器打开 http://localhost:3000 就能访问家里的 web 服务了
 ```
 
