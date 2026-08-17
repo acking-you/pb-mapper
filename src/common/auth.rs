@@ -131,19 +131,46 @@ fn parse_legacy_protocol_policy(value: &str) -> Option<LegacyProtocolPolicy> {
 }
 
 fn env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| (*value >= min) && (*value <= max))
-        .unwrap_or(default)
+    env_bounded(name, default, min, max)
 }
 
 fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| (*value >= min) && (*value <= max))
-        .unwrap_or(default)
+    env_bounded(name, default, min, max)
+}
+
+fn env_bounded<T>(name: &str, default: T, min: T, max: T) -> T
+where
+    T: std::str::FromStr + PartialOrd + Copy + fmt::Display,
+{
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => default,
+        Ok(raw) => match raw.parse::<T>() {
+            Ok(value) if value >= min && value <= max => value,
+            _ => {
+                tracing::warn!(
+                    event = "auth_config_value_invalid",
+                    variable = name,
+                    value = raw,
+                    min = %min,
+                    max = %max,
+                    fallback = %default,
+                    "invalid authentication configuration value; using the default"
+                );
+                default
+            }
+        },
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                event = "auth_config_value_invalid",
+                variable = name,
+                min = %min,
+                max = %max,
+                fallback = %default,
+                "authentication configuration value is not UTF-8; using the default"
+            );
+            default
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
