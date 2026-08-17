@@ -245,8 +245,7 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
         let key = initialize_admin_key(&key_path, args.force_init_admin_key)?;
         set_process_msg_header_key(Some(&key))?;
         eprintln!("administrator key initialized at {}", key_path.display());
-    }
-    if args.use_machine_msg_header_key {
+    } else if args.use_machine_msg_header_key {
         tracing::warn!(
             "--use-machine-msg-header-key is a legacy compatibility option; prefer a random administrator key"
         );
