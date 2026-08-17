@@ -6,6 +6,7 @@
 //!                                       |
 //! large clock jump -> bounded bucket scan + rebuild (never second-by-second catch-up)
 //! overdue insert --> immediate-due queue --> next advance, without a wheel revolution
+//! reset/rotation -> cancel every wheel-owned lease -> clear all buckets
 //! ```
 //!
 //! The wheel owns strong `Arc<AuthLease>` references. Request-facing structures retain
@@ -157,6 +158,14 @@ impl TimingWheel {
     }
 
     pub(super) fn clear(&mut self, now: u64) {
+        let mut entries = std::mem::take(&mut self.immediate_due);
+        take_all_entries(&mut self.level0, &mut entries);
+        take_all_entries(&mut self.level1, &mut entries);
+        take_all_entries(&mut self.level2, &mut entries);
+        take_all_entries(&mut self.level3, &mut entries);
+        for entry in entries {
+            entry.lease.cancellation.cancel();
+        }
         *self = Self::new(now);
     }
 }

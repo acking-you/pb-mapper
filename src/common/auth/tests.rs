@@ -381,3 +381,36 @@ fn timing_wheel_expires_cascaded_boundary_entry_without_an_extra_tick() {
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].key_id(), lease.key_id());
 }
+
+#[test]
+fn timing_wheel_clear_cancels_owned_leases() {
+    let now = 1_000;
+    let lease = Arc::new(AuthLease::new(make_key_id(1, 0), now + 60));
+    let cancellation = lease.cancellation_token();
+    let mut wheel = TimingWheel::new(now);
+    wheel.insert(lease);
+
+    wheel.clear(now + 1);
+    assert!(cancellation.is_cancelled());
+}
+
+#[test]
+fn replay_pruning_removes_only_records_outside_the_retention_window() {
+    let now = 10_000;
+    let expired = AdminReplayRecord {
+        fingerprint: [1; 32],
+        client_timestamp: now - ADMIN_REPLAY_RETENTION.as_secs() - 1,
+    };
+    let current = AdminReplayRecord {
+        fingerprint: [2; 32],
+        client_timestamp: now,
+    };
+    let mut replay_set = HashSet::from([expired.fingerprint, current.fingerprint]);
+    let mut replay_order = VecDeque::from([expired, current.clone()]);
+
+    super::actor::prune_expired_admin_replays(now, &mut replay_set, &mut replay_order);
+
+    assert_eq!(replay_set, HashSet::from([current.fingerprint]));
+    assert_eq!(replay_order.len(), 1);
+    assert_eq!(replay_order[0].fingerprint, current.fingerprint);
+}

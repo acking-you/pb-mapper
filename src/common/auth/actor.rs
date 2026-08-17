@@ -113,14 +113,11 @@ pub(super) async fn run_auth_actor(
                         }
                     }
                 }
-                admin_replay_order.retain(|record| {
-                    let keep = now.saturating_sub(record.client_timestamp)
-                        <= ADMIN_REPLAY_RETENTION.as_secs();
-                    if !keep {
-                        admin_replays.remove(&record.fingerprint);
-                    }
-                    keep
-                });
+                prune_expired_admin_replays(
+                    now,
+                    &mut admin_replays,
+                    &mut admin_replay_order,
+                );
                 if now.saturating_sub(last_snapshot_at) >= SNAPSHOT_COMPACTION_INTERVAL.as_secs() {
                     let snapshot = build_snapshot(&inner, &cold, &admin_replay_order);
                     if let Err(error) = write_snapshot_and_truncate_wal(
@@ -258,6 +255,8 @@ fn actor_claim_admin_mutation(
     fingerprint: [u8; 32],
     client_timestamp: u64,
 ) -> Result<(), AuthFailure> {
+    let now = unix_seconds();
+    prune_expired_admin_replays(now, admin_replays, admin_replay_order);
     if admin_replays.contains(&fingerprint) {
         return Err(AuthFailure::new(
             "admin_request_replayed",
@@ -272,7 +271,6 @@ fn actor_claim_admin_mutation(
             true,
         ));
     }
-    let now = unix_seconds();
     if now.abs_diff(client_timestamp) > ADMIN_REPLAY_RETENTION.as_secs() / 2 {
         return Err(AuthFailure::new(
             "admin_request_timestamp_invalid",
@@ -292,6 +290,20 @@ fn actor_claim_admin_mutation(
     admin_replays.insert(fingerprint);
     admin_replay_order.push_back(record);
     Ok(())
+}
+
+pub(super) fn prune_expired_admin_replays(
+    now: u64,
+    admin_replays: &mut HashSet<[u8; 32]>,
+    admin_replay_order: &mut VecDeque<AdminReplayRecord>,
+) {
+    admin_replay_order.retain(|record| {
+        let keep = now.saturating_sub(record.client_timestamp) <= ADMIN_REPLAY_RETENTION.as_secs();
+        if !keep {
+            admin_replays.remove(&record.fingerprint);
+        }
+        keep
+    });
 }
 
 fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> {
