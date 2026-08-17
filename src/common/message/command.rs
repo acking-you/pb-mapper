@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use super::super::error::{MsgSerializeSnafu, Result};
+use crate::common::auth::{
+    AuthStatus, IssuedTemporaryKey, KeyPage, LegacyProtocolPolicy, TemporaryKeyMetadata,
+};
 use crate::common::checksum::AesKeyType;
 
 pub const CONTROL_PROTOCOL_V2: u16 = 2;
@@ -58,16 +61,166 @@ pub enum PbConnRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heartbeat_tolerance_ms: Option<u64>,
     },
+    RegisterScoped {
+        need_codec: bool,
+        is_datagram: bool,
+        key: String,
+        namespace: u64,
+        force_namespace: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_version: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_instance_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat_interval_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat_tolerance_ms: Option<u64>,
+    },
     Subcribe {
         key: String,
     },
+    SubcribeScoped {
+        key: String,
+        namespace: u64,
+    },
     Status(PbConnStatusReq),
+    StatusScoped {
+        status: PbConnStatusReq,
+        namespace: u64,
+    },
     Stream {
         key: String,
         dst_id: u32,
         #[serde(default)]
         server_generation: u64,
     },
+    StreamScoped {
+        key: String,
+        namespace: u64,
+        dst_id: u32,
+        #[serde(default)]
+        server_generation: u64,
+    },
+    Admin(AdminRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub enum AdminRequest {
+    KeyIssue {
+        ttl_seconds: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    KeyList {
+        #[serde(default)]
+        page: u32,
+        #[serde(default = "default_page_size")]
+        page_size: u16,
+    },
+    KeyShow {
+        key_id: u64,
+    },
+    KeyReveal {
+        key_id: u64,
+    },
+    KeyRenew {
+        key_id: u64,
+        ttl_seconds: u64,
+    },
+    KeyRevoke {
+        key_id: u64,
+    },
+    KeyGc,
+    AuthStatus,
+    AuthStateReset {
+        confirm: bool,
+    },
+    RootKeyRotate {
+        new_admin_key: String,
+    },
+    LegacyProtocolSet {
+        policy: LegacyProtocolPolicy,
+    },
+    ConnectionList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_id: Option<u64>,
+        #[serde(default)]
+        page: u32,
+        #[serde(default = "default_page_size")]
+        page_size: u16,
+    },
+    ServiceList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_id: Option<u64>,
+        #[serde(default)]
+        page: u32,
+        #[serde(default = "default_page_size")]
+        page_size: u16,
+    },
+}
+
+const fn default_page_size() -> u16 {
+    100
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PbErrorResponse {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub server_time: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AdminServiceInfo {
+    pub key_id: u64,
+    pub namespace: u64,
+    pub service_name: String,
+    pub transport: String,
+    pub codec_enabled: bool,
+    pub connection_count: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AdminConnectionInfo {
+    pub key_id: u64,
+    pub namespace: u64,
+    pub service_name: String,
+    pub conn_id: u32,
+    pub generation: u64,
+    pub protocol_version: u16,
+    pub healthy: bool,
+    pub transport: String,
+    pub codec_enabled: bool,
+    pub last_rx_age_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AdminServicePage {
+    pub schema_version: u16,
+    pub items: Vec<AdminServiceInfo>,
+    pub next_page: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AdminConnectionPage {
+    pub schema_version: u16,
+    pub items: Vec<AdminConnectionInfo>,
+    pub next_page: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum AdminResponse {
+    KeyIssued(IssuedTemporaryKey),
+    KeyList(KeyPage),
+    KeyShown(IssuedTemporaryKey),
+    KeyRenewed(IssuedTemporaryKey),
+    KeyRevoked(TemporaryKeyMetadata),
+    KeyGc { removed: u64 },
+    AuthStatus(AuthStatus),
+    Services(AdminServicePage),
+    Connections(AdminConnectionPage),
+    Ok { action: String },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -87,6 +240,22 @@ pub enum PbConnResponse {
         codec_key: Option<AesKeyType>,
     },
     Status(PbConnStatusResp),
+    Admin(AdminResponse),
+    Error(PbErrorResponse),
+}
+
+impl PbConnResponse {
+    pub fn error(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
+        Self::Error(PbErrorResponse {
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            server_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -123,17 +292,6 @@ pub enum LocalServer {
     },
 }
 
-const CONTENT_SHOW_LIMIT_SIZE: usize = 1024;
-
-#[inline]
-fn get_content(raw_content: String) -> String {
-    if raw_content.len() > CONTENT_SHOW_LIMIT_SIZE {
-        raw_content[0..CONTENT_SHOW_LIMIT_SIZE].to_string()
-    } else {
-        raw_content
-    }
-}
-
 macro_rules! gen_impl_msg_serializer {
     ($struct_name:ident) => {
         impl MessageSerializer for $struct_name {
@@ -141,7 +299,7 @@ macro_rules! gen_impl_msg_serializer {
                 serde_json::to_vec(self).with_context(|_| MsgSerializeSnafu {
                     action: "encode",
                     struct_name: stringify!($struct_name),
-                    content: get_content(format!("{self:?}")),
+                    content: "payload redacted".to_string(),
                 })
             }
 
@@ -149,7 +307,7 @@ macro_rules! gen_impl_msg_serializer {
                 serde_json::from_slice(msg).with_context(|_| MsgSerializeSnafu {
                     action: "decode",
                     struct_name: stringify!($struct_name),
-                    content: get_content(format!("{}", String::from_utf8_lossy(msg))),
+                    content: format!("{}-byte payload redacted", msg.len()),
                 })
             }
         }

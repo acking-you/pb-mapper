@@ -56,7 +56,7 @@ impl Aes256GcmCodec {
     }
 
     pub fn try_new_with_default_key() -> RingResult<Self> {
-        let key = get_msg_header_key();
+        let key = get_msg_header_key().map_err(|_| ring::error::Unspecified)?;
         Aes256GcmCodec::try_new(key.as_ref())
     }
 

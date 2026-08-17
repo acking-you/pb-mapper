@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod buffer;
 pub mod checksum;
 pub mod config;

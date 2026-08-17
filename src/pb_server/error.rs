@@ -8,6 +8,8 @@ use crate::common::{self};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(super)))]
 pub enum Error {
+    #[snafu(display("administrator operation failed: {detail}"))]
+    AdminOperation { detail: String },
     /// server task center error
     #[snafu(display("read pb conn init request with `conn_id:{conn_id}`"))]
     TaskCenterReadInitRequest {
@@ -201,6 +203,8 @@ pub enum Error {
         tool: &'static str,
         source: common::error::Error,
     },
+    #[snafu(display("client data stream credential is inactive: {detail}"))]
+    ClientConnAuthInactive { detail: String },
     #[snafu(display(
         "send deregister client task error with `key:{key}` `server:{server_id:?}` <-> \
          `client:{client_id}`, type:{source:?} detail:{source}"

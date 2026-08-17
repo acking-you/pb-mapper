@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Configuration
-VERSION="${PB_MAPPER_VERSION:-0.3.0}"
+VERSION="${PB_MAPPER_VERSION:-0.4.0}"
 ARCH="${PB_MAPPER_ARCH:-x86_64-unknown-linux-musl}"
 TARBALL="pb-mapper-${ARCH}.tar.gz"
 DOWNLOAD_URL="https://github.com/acking-you/pb-mapper/releases/download/v${VERSION}/${TARBALL}"
@@ -10,6 +10,9 @@ INSTALL_DIR="/usr/local/bin"
 SERVICE_NAME="pb-mapper-server"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 PORT="${PB_MAPPER_PORT:-7666}"
+AUTH_DIR="/var/lib/pb-mapper/auth"
+ADMIN_KEY_PATH="${AUTH_DIR}/admin.key"
+LEGACY_KEY_PATH="/var/lib/pb-mapper-server/msg_header_key"
 
 # Re-run with sudo if needed
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -67,6 +70,14 @@ fi
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$BIN_PATH" "${INSTALL_DIR}/pb-mapper"
 
+# Preserve the former machine-derived credential on upgrade. New installations let
+# pb-mapper create a random administrator key on first start.
+install -d -m 0700 "$AUTH_DIR"
+if [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
+  install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
+  echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
+fi
+
 # Stop and remove existing service if present
 if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
   systemctl stop "${SERVICE_NAME}.service"
@@ -86,8 +97,10 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_DIR}/pb-mapper server --port ${PORT} --use-machine-msg-header-key
+ExecStart=${INSTALL_DIR}/pb-mapper server --port ${PORT}
 Environment=RUST_LOG=info
+StateDirectory=pb-mapper
+StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65535
@@ -102,4 +115,5 @@ systemctl enable --now "${SERVICE_NAME}.service"
 
 echo "pb-mapper server is installed and running."
 echo "Service name: ${SERVICE_NAME}.service"
-echo "Machine-derived key file: /var/lib/pb-mapper-server/msg_header_key"
+echo "Administrator key file: /var/lib/pb-mapper/auth/admin.key"
+echo "Read it locally as root and issue temporary credentials for register/connect clients."

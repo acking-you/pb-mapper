@@ -13,6 +13,8 @@ async fn main() {
             need_codec: false,
             is_datagram: false,
             keep_alive: false,
+            namespace: None,
+            force_namespace: false,
         },
     )
     .await;

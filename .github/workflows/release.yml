@@ -77,3 +77,7 @@ jobs:
             LICENSE
             README.md
             README.zh-CN.md
+            docs/authentication-v2.md
+            docs/authentication-v2.zh-CN.md
+            docs/user-guide.md
+            docs/user-guide.zh-CN.md

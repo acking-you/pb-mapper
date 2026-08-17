@@ -5,8 +5,13 @@ services:
     image: ackingliu/pb-mapper:x86_64_musl
     environment:
       PB_MAPPER_PORT: 7666
-      USE_MACHINE_MSG_HEADER_KEY: true
+      USE_MACHINE_MSG_HEADER_KEY: false
       RUST_LOG: error
+    volumes:
+      - pb-mapper-auth:/var/lib/pb-mapper/auth
     ports:
       - "7666:7666"
     restart: unless-stopped
+
+volumes:
+  pb-mapper-auth:

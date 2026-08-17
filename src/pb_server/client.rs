@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use snafu::ResultExt;
@@ -21,7 +22,8 @@ use crate::common::message::forward::{
     CodecForwardReader, CodecForwardWriter, NormalDatagramReader, NormalDatagramWriter,
     NormalForwardReader, NormalForwardWriter,
 };
-use crate::common::message::{get_decodec, get_encodec, get_header_msg_writer, MessageWriter};
+use crate::common::message::secure::ServerHeaderSession;
+use crate::common::message::{get_decodec, get_encodec, MessageWriter};
 use crate::pb_server::error::{
     ClientConnCreateHeaderToolSnafu, ClientConnEncodeStreamRespSnafu,
     ClientConnWriteStreamRespSnafu,
@@ -137,17 +139,26 @@ const CLIENT_CONN_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 1. Request server stream
 /// 2. Forward the traffic between client stream and server stream
-#[instrument(skip(task_sender, conn))]
+#[instrument(skip(task_sender, conn, session))]
 pub async fn handle_client_conn(
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
     mut conn: TcpStream,
+    session: ServerHeaderSession,
 ) -> Result<()> {
     let prev_time = Instant::now();
     let mut guard = ClientConnGuard::new(conn_id, None, task_sender.clone(), key.clone());
-    let (mut server_stream, server_id, codec_key, is_datagram) =
-        match get_server_stream(&mut conn, key.clone(), conn_id, task_sender.clone()).await {
+    let (mut server_stream, server_session, server_id, codec_key, is_datagram) =
+        match get_server_stream(
+            &mut conn,
+            &session,
+            key.clone(),
+            conn_id,
+            task_sender.clone(),
+        )
+        .await
+        {
             Ok(res) => res,
             Err(e) => {
                 tracing::warn!(
@@ -162,8 +173,17 @@ pub async fn handle_client_conn(
             }
         };
     guard.set_server_id(server_id);
+    let server_cancellation = server_session
+        .context()
+        .map_err(|error| super::error::Error::ClientConnAuthInactive {
+            detail: error.to_string(),
+        })?
+        .cancellation_token()
+        .map_err(|error| super::error::Error::ClientConnAuthInactive {
+            detail: error.to_string(),
+        })?;
 
-    let result = async {
+    let forwarding = async {
         let duration = Instant::now() - prev_time;
 
         tracing::info!(
@@ -182,7 +202,8 @@ pub async fn handle_client_conn(
 
         // response message to server to indicate that stream handling has finished
         {
-            let mut msg_writer = get_header_msg_writer(&mut server_writer)
+            let mut msg_writer = server_session
+                .response_writer(&mut server_writer)
                 .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
             let msg = PbConnResponse::Stream { codec_key }.encode().context(
                 ClientConnEncodeStreamRespSnafu {
@@ -247,8 +268,20 @@ pub async fn handle_client_conn(
         }
 
         Ok(())
-    }
-    .await;
+    };
+    let result = tokio::select! {
+            result = forwarding => result,
+            _ = server_cancellation.cancelled() => {
+                tracing::info!(
+                    event = "connection_auth_expired",
+                    key = %key,
+                    client_conn_id = %conn_id,
+                    server_conn_id = %server_id,
+                    "closing active data stream because its registering credential expired or was revoked"
+                );
+                Ok(())
+            }
+    };
     match &result {
         Ok(()) => tracing::info!(
             event = "client_forward_finished",
@@ -297,14 +330,16 @@ async fn retire_server_conn(
 
 async fn write_subscribe_response(
     conn: &mut TcpStream,
+    session: &ServerHeaderSession,
     key: &ImutableKey,
     conn_id: RemoteConnId,
     server_id: RemoteConnId,
     codec_key: Option<AesKeyType>,
     is_datagram: bool,
 ) -> Result<()> {
-    let mut msg_writer =
-        get_header_msg_writer(conn).context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
+    let mut msg_writer = session
+        .response_writer(conn)
+        .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
     let msg = PbConnResponse::Subcribe {
         codec_key,
         client_id: conn_id.into(),
@@ -336,10 +371,17 @@ async fn write_subscribe_response(
 
 async fn get_server_stream(
     conn: &mut TcpStream,
+    session: &ServerHeaderSession,
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
-) -> Result<(TcpStream, RemoteConnId, Option<AesKeyType>, bool)> {
+) -> Result<(
+    TcpStream,
+    ServerHeaderSession,
+    RemoteConnId,
+    Option<AesKeyType>,
+    bool,
+)> {
     let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
     let ack_timeout = stream_ack_timeout();
     let ready_timeout = stream_ready_timeout();
@@ -407,7 +449,11 @@ async fn get_server_stream(
                 );
                 (codec_key, is_datagram, server_conn_id, server_generation)
             }
-            ConnTask::SubcribeFailed { reason } => {
+            ConnTask::SubcribeFailed {
+                code,
+                reason,
+                retryable,
+            } => {
                 tracing::warn!(
                     event = "subscribe_failed",
                     key = %key,
@@ -415,6 +461,7 @@ async fn get_server_stream(
                     reason = %reason,
                     "subscribe failed before stream forwarding"
                 );
+                write_subscribe_error(conn, session, &code, &reason, retryable).await?;
                 ClientConnSubcribeFailedSnafu {
                     key: key.clone(),
                     conn_id,
@@ -492,10 +539,19 @@ async fn get_server_stream(
                 server_id,
                 server_generation: response_generation,
                 stream,
+                session: stream_session,
             } if response_generation == server_generation => {
-                write_subscribe_response(conn, &key, conn_id, server_id, codec_key, is_datagram)
-                    .await?;
-                return Ok((stream, server_id, codec_key, is_datagram));
+                write_subscribe_response(
+                    conn,
+                    session,
+                    &key,
+                    conn_id,
+                    server_id,
+                    codec_key,
+                    is_datagram,
+                )
+                .await?;
+                return Ok((stream, stream_session, server_id, codec_key, is_datagram));
             }
             ConnTask::StreamAck {
                 server_id,
@@ -557,12 +613,21 @@ async fn get_server_stream(
             server_id,
             server_generation: response_generation,
             stream,
+            session: stream_session,
         } = resp
         {
             if response_generation == server_generation {
-                write_subscribe_response(conn, &key, conn_id, server_id, codec_key, is_datagram)
-                    .await?;
-                return Ok((stream, server_id, codec_key, is_datagram));
+                write_subscribe_response(
+                    conn,
+                    session,
+                    &key,
+                    conn_id,
+                    server_id,
+                    codec_key,
+                    is_datagram,
+                )
+                .await?;
+                return Ok((stream, stream_session, server_id, codec_key, is_datagram));
             }
             tracing::warn!(
                 event = "server_stream_generation_mismatch",
@@ -584,4 +649,29 @@ async fn get_server_stream(
         }
         .fail()?
     }
+}
+
+async fn write_subscribe_error(
+    conn: &mut TcpStream,
+    session: &ServerHeaderSession,
+    code: &str,
+    reason: &str,
+    retryable: bool,
+) -> Result<()> {
+    let message = PbConnResponse::error(code, reason, retryable)
+        .encode()
+        .context(ClientConnEncodeSubcribeRespSnafu {
+            key: Arc::from("<rejected>"),
+            conn_id: RemoteConnId::default(),
+        })?;
+    let mut writer = session
+        .response_writer(conn)
+        .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
+    writer
+        .write_msg(&message)
+        .await
+        .context(ClientConnWriteSubcribeRespSnafu {
+            key: Arc::from("<rejected>"),
+            conn_id: RemoteConnId::default(),
+        })
 }

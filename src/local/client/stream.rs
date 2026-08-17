@@ -13,9 +13,8 @@ use super::error::{
 use crate::common::config::control_io_timeout;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
-use crate::common::message::{
-    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
-};
+use crate::common::message::secure::ClientHeaderSession;
+use crate::common::message::MessageReader;
 use crate::local::client::error::CreateHeaderToolSnafu;
 use crate::snafu_error_handle;
 use uni_stream::addr::{each_addr, ToSocketAddrs};
@@ -30,6 +29,7 @@ pub async fn handle_local_stream<
     key: Arc<str>,
     remote_addr: A,
     keep_alive: bool,
+    namespace: Option<u64>,
 ) -> Result<()> {
     let mut remote_stream = each_addr(remote_addr, TcpStream::connect)
         .await
@@ -47,14 +47,19 @@ pub async fn handle_local_stream<
     let (codec_key, client_id, server_id) = {
         let timeout = control_io_timeout();
         // handle request
-        let msg = PbConnRequest::Subcribe {
-            key: key.to_string(),
-        }
-        .encode()
-        .context(EncodeSubcribeReqSnafu)?;
-        let mut msg_writer = get_header_msg_writer(&mut remote_stream)
-            .context(CreateHeaderToolSnafu { action: "writer" })?;
-        match tokio::time::timeout(timeout, msg_writer.write_msg(&msg)).await {
+        let request = match namespace {
+            Some(namespace) => PbConnRequest::SubcribeScoped {
+                key: key.to_string(),
+                namespace,
+            },
+            None => PbConnRequest::Subcribe {
+                key: key.to_string(),
+            },
+        };
+        let msg = request.encode().context(EncodeSubcribeReqSnafu)?;
+        let session = ClientHeaderSession::from_process()
+            .context(CreateHeaderToolSnafu { action: "session" })?;
+        match tokio::time::timeout(timeout, session.write_initial(&mut remote_stream, &msg)).await {
             Ok(result) => result.context(WriteSubcribeReqSnafu)?,
             Err(_) => ControlIoTimeoutSnafu {
                 action: "write subcribe request",
@@ -63,7 +68,8 @@ pub async fn handle_local_stream<
             .fail()?,
         }
         // handle response
-        let mut msg_reader = get_header_msg_reader(&mut remote_stream)
+        let mut msg_reader = session
+            .response_reader(&mut remote_stream)
             .context(CreateHeaderToolSnafu { action: "reader" })?;
         let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
             Ok(result) => result.context(ReadSubcribeRespSnafu)?,
@@ -80,6 +86,10 @@ pub async fn handle_local_stream<
                 client_id,
                 server_id,
             } => (codec_key, client_id, server_id),
+            PbConnResponse::Error(error) => SubcribeRespNotMatchSnafu {
+                resp: format!("{}: {}", error.code, error.message),
+            }
+            .fail()?,
             resp => SubcribeRespNotMatchSnafu {
                 resp: format!("{resp:?}"),
             }

@@ -17,9 +17,8 @@ use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{
     LocalServer, MessageSerializer, PbConnResponse, PbServerRequest, CONTROL_PROTOCOL_V2,
 };
-use crate::common::message::{
-    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
-};
+use crate::common::message::secure::ServerHeaderSession;
+use crate::common::message::{MessageReader, MessageWriter};
 
 /// Ensure that server-side connections are properly deregistered before a normal connection is
 /// disconnected or an exception occurs
@@ -132,18 +131,30 @@ enum ServerControlWrite {
     Pong(Vec<u8>),
 }
 
+pub struct ServerRegistration {
+    pub key: ImutableKey,
+    pub need_codec: bool,
+    pub is_datagram: bool,
+    pub protocol_version: u16,
+    pub conn_id: RemoteConnId,
+}
+
 /// Maintaining a connection to the server.
 /// This connection is used to send channel request
-#[instrument(skip(task_sender))]
+#[instrument(skip(registration, task_sender, session))]
 pub async fn handle_server_conn(
-    key: ImutableKey,
-    need_codec: bool,
-    is_datagram: bool,
-    protocol_version: u16,
-    conn_id: RemoteConnId,
+    registration: ServerRegistration,
     task_sender: ManagerTaskSender,
-    conn: TcpStream,
+    mut conn: TcpStream,
+    session: ServerHeaderSession,
 ) -> Result<()> {
+    let ServerRegistration {
+        key,
+        need_codec,
+        is_datagram,
+        protocol_version,
+        conn_id,
+    } = registration;
     let (tx, rx) = kanal::bounded_async(DEFAULT_SERVER_CHAN_CAP);
 
     // register metadate
@@ -187,6 +198,30 @@ pub async fn handle_server_conn(
             lease_ttl_ms,
         } = response
         else {
+            if let ConnTask::RegisterFailed {
+                code,
+                reason,
+                retryable,
+            } = response
+            {
+                let response = PbConnResponse::error(code, reason, retryable)
+                    .encode()
+                    .context(ServerConnEncodeRegisterRespSnafu {
+                        key: key.clone(),
+                        conn_id,
+                    })?;
+                let mut writer = session
+                    .response_writer(&mut conn)
+                    .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+                writer
+                    .write_msg(&response)
+                    .await
+                    .context(ServerConnWriteRegisteredOkSnafu {
+                        key: key.clone(),
+                        conn_id,
+                    })?;
+                return Ok(());
+            }
             ServerConnRegisteredRespNotMatchSnafu {
                 key: key.clone(),
                 conn_id,
@@ -203,7 +238,8 @@ pub async fn handle_server_conn(
         );
 
         let (mut reader, mut writer) = conn.into_split();
-        let mut msg_reader = get_header_msg_reader(&mut reader)
+        let mut msg_reader = session
+            .continuation_reader(&mut reader)
             .context(ServerConnCreateHeaderToolSnafu { tool: "reader" })?;
         // Keep one header writer for the register response and all later control frames. The
         // encrypted header codec is stateful; recreating it between frames breaks peer decoding.
@@ -224,7 +260,8 @@ pub async fn handle_server_conn(
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<ServerControlWrite>();
         let writer_key = key.clone();
         let mut writer_handle = tokio::spawn(async move {
-            let mut msg_writer = get_header_msg_writer(&mut writer)
+            let mut msg_writer = session
+                .response_writer(&mut writer)
                 .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
             msg_writer.write_msg(&register_response).await.context(
                 ServerConnWriteRegisteredOkSnafu {

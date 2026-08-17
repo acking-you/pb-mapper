@@ -7,9 +7,18 @@ if [ -z "${PB_MAPPER_PORT:-}" ]; then
   exit 1
 fi
 
-USE_MACHINE_MSG_HEADER_KEY=${USE_MACHINE_MSG_HEADER_KEY:-true}
+USE_MACHINE_MSG_HEADER_KEY=${USE_MACHINE_MSG_HEADER_KEY:-false}
 
 ARGS=(-p "$PB_MAPPER_PORT")
+AUTH_DIR="${PB_MAPPER_AUTH_STATE_DIR:-/var/lib/pb-mapper/auth}"
+ADMIN_KEY_PATH="$AUTH_DIR/admin.key"
+LEGACY_KEY_PATH="/var/lib/pb-mapper-server/msg_header_key"
+
+install -d -m 0700 "$AUTH_DIR"
+if [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
+  install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
+  echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
+fi
 
 if [ "${USE_IPV6:-false}" = "true" ]; then
   echo "USE_IPV6 is set to true"
@@ -19,10 +28,16 @@ else
 fi
 
 if [ "$USE_MACHINE_MSG_HEADER_KEY" = "true" ]; then
-  echo "USE_MACHINE_MSG_HEADER_KEY is set to true"
+  echo "WARNING: USE_MACHINE_MSG_HEADER_KEY is a legacy compatibility mode"
   ARGS+=(--use-machine-msg-header-key)
 else
   echo "USE_MACHINE_MSG_HEADER_KEY is set to false"
+fi
+
+if [ -n "${MSG_HEADER_KEY:-}" ]; then
+  echo "Using the configured administrator credential"
+else
+  echo "Using or initializing $ADMIN_KEY_PATH"
 fi
 
 exec ./pb-mapper server "${ARGS[@]}"

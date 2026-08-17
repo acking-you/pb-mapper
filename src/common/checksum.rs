@@ -6,6 +6,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{LazyLock, RwLock};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use rand::RngExt;
 use ring::digest::{digest, SHA256};
 
@@ -13,52 +15,75 @@ use super::message::DataLenType;
 
 pub type ChecksumType = u32;
 
-const DEFAULT_KEY: &str = "abcdefghijklmnopqlsn123456789j01";
 /// Environment variable used by server/client processes to carry the 32-byte header key.
 pub const ENV_MSG_HEADER_KEY: &str = "MSG_HEADER_KEY";
 /// Fixed file path used to persist a machine-derived key for operators to reuse.
 pub const MACHINE_MSG_HEADER_KEY_PATH: &str = "/var/lib/pb-mapper-server/msg_header_key";
+pub const ADMIN_KEY_PATH: &str = "/var/lib/pb-mapper/auth/admin.key";
+pub const TEMP_CREDENTIAL_PREFIX: &str = "pbmt1_";
 
 const DERIVE_MSG_HEADER_KEY_TAG: &str = "pb-mapper-msg-header-key-v1";
 const DERIVE_MSG_HEADER_KEY_CHARSET: &[u8] =
     b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 struct MsgHeaderKeyState {
-    key: RwLock<Vec<u8>>,
+    credential: RwLock<Option<Credential>>,
     hash: AtomicU32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Credential {
+    Admin(AesKeyType),
+    Temporary { key_id: u64, key: AesKeyType },
+}
+
+impl Credential {
+    pub fn key_id(&self) -> u64 {
+        match self {
+            Self::Admin(_) => 0,
+            Self::Temporary { key_id, .. } => *key_id,
+        }
+    }
+
+    pub fn key(&self) -> &AesKeyType {
+        match self {
+            Self::Admin(key) | Self::Temporary { key, .. } => key,
+        }
+    }
+
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Self::Admin(_))
+    }
+}
+
 fn key_len_error(input: &str) -> String {
-    format!("`{ENV_MSG_HEADER_KEY}` must have 256 bit(32 byte)!. current input key:{input}")
+    format!(
+        "`{ENV_MSG_HEADER_KEY}` administrator key must be exactly 32 bytes; received {} bytes",
+        input.len()
+    )
 }
 
-fn load_msg_header_key_from_env_or_default() -> Vec<u8> {
-    let key = match std::env::var(ENV_MSG_HEADER_KEY) {
-        Ok(k) => {
-            let key = k.as_bytes();
-            if key.len() != 32 {
-                tracing::warn!("{}", key_len_error(&k));
-                std::process::exit(1);
-            }
-            key.to_vec()
+fn load_credential_from_env() -> Option<Credential> {
+    let raw = std::env::var(ENV_MSG_HEADER_KEY).ok()?;
+    match parse_credential(raw.trim()) {
+        Ok(credential) => Some(credential),
+        Err(error) => {
+            tracing::error!(reason = "credential_invalid", %error, "invalid MSG_HEADER_KEY");
+            None
         }
-        Err(_) => {
-            tracing::warn!(
-                "No ENV:`{ENV_MSG_HEADER_KEY}` provided,we use default key:{DEFAULT_KEY}"
-            );
-            DEFAULT_KEY.as_bytes().to_vec()
-        }
-    };
-    key
+    }
 }
 
-fn update_runtime_msg_header_key(key: Vec<u8>) {
-    let hash = gen_checksum_by_key(&key);
+fn update_runtime_credential(credential: Option<Credential>) {
+    let hash = credential
+        .as_ref()
+        .map(|credential| gen_checksum_by_key(credential.key()))
+        .unwrap_or_default();
     let mut guard = MSG_HEADER_KEY_STATE
-        .key
+        .credential
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = key;
+    *guard = credential;
     MSG_HEADER_KEY_STATE.hash.store(hash, Ordering::Release);
 }
 
@@ -67,43 +92,106 @@ fn update_runtime_msg_header_key(key: Vec<u8>) {
 /// This state is mutable so FFI/UI can update `MSG_HEADER_KEY` at runtime
 /// without restarting the process.
 static MSG_HEADER_KEY_STATE: LazyLock<MsgHeaderKeyState> = LazyLock::new(|| {
-    let key = load_msg_header_key_from_env_or_default();
-    let hash = gen_checksum_by_key(&key);
+    let credential = load_credential_from_env();
+    let hash = credential
+        .as_ref()
+        .map(|credential| gen_checksum_by_key(credential.key()))
+        .unwrap_or_default();
     MsgHeaderKeyState {
-        key: RwLock::new(key),
+        credential: RwLock::new(credential),
         hash: AtomicU32::new(hash),
     }
 });
 
-/// Get current message header key bytes.
-pub fn get_msg_header_key() -> Vec<u8> {
+/// Return the configured process credential, failing closed when none exists.
+pub fn get_process_credential() -> Result<Credential, String> {
     MSG_HEADER_KEY_STATE
-        .key
+        .credential
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
+        .ok_or_else(|| {
+            format!(
+                "`{ENV_MSG_HEADER_KEY}` is required; no insecure default credential is available"
+            )
+        })
+}
+
+/// Get current message header key bytes.
+pub fn get_msg_header_key() -> Result<Vec<u8>, String> {
+    get_process_credential().map(|credential| credential.key().to_vec())
 }
 
 /// Set process `MSG_HEADER_KEY` and update runtime checksum/key state.
 ///
-/// - `Some(non-empty)` => validate length 32, set env, apply immediately.
-/// - `None` or empty => remove env and reset to default key.
+/// - `Some(non-empty)` => validate an admin or temporary credential and apply it immediately.
+/// - `None` or empty => remove the credential. Subsequent network operations fail closed.
 pub fn set_process_msg_header_key(msg_header_key: Option<&str>) -> Result<(), String> {
     let normalized = msg_header_key.map(str::trim).unwrap_or("");
     if normalized.is_empty() {
         std::env::remove_var(ENV_MSG_HEADER_KEY);
-        update_runtime_msg_header_key(DEFAULT_KEY.as_bytes().to_vec());
+        update_runtime_credential(None);
         return Ok(());
     }
 
-    let key = normalized.as_bytes();
-    if key.len() != 32 {
-        return Err(key_len_error(normalized));
-    }
+    let credential = parse_credential(normalized)?;
 
     std::env::set_var(ENV_MSG_HEADER_KEY, normalized);
-    update_runtime_msg_header_key(key.to_vec());
+    update_runtime_credential(Some(credential));
     Ok(())
+}
+
+pub fn parse_credential(raw: &str) -> Result<Credential, String> {
+    if let Some(encoded) = raw.strip_prefix(TEMP_CREDENTIAL_PREFIX) {
+        let payload = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| "temporary credential is not valid base64url".to_string())?;
+        if payload.len() != 45 {
+            return Err(format!(
+                "temporary credential payload must be 45 bytes, got {}",
+                payload.len()
+            ));
+        }
+        if payload[0] != 1 {
+            return Err(format!(
+                "unsupported temporary credential version {}",
+                payload[0]
+            ));
+        }
+        let expected = digest(&SHA256, &payload[..41]);
+        if expected.as_ref()[..4] != payload[41..45] {
+            return Err("temporary credential checksum mismatch".to_string());
+        }
+        let key_id = u64::from_be_bytes(payload[1..9].try_into().expect("fixed key id width"));
+        if key_id == 0 {
+            return Err("temporary credential key id must not be zero".to_string());
+        }
+        let key = payload[9..41]
+            .try_into()
+            .expect("fixed temporary key width");
+        return Ok(Credential::Temporary { key_id, key });
+    }
+
+    let bytes = raw.as_bytes();
+    if bytes.len() != 32 {
+        return Err(key_len_error(raw));
+    }
+    Ok(Credential::Admin(
+        bytes.try_into().expect("validated admin key width"),
+    ))
+}
+
+pub fn encode_temporary_credential(key_id: u64, key: &AesKeyType) -> String {
+    let mut payload = Vec::with_capacity(45);
+    payload.push(1);
+    payload.extend_from_slice(&key_id.to_be_bytes());
+    payload.extend_from_slice(key);
+    let checksum = digest(&SHA256, &payload);
+    payload.extend_from_slice(&checksum.as_ref()[..4]);
+    format!(
+        "{TEMP_CREDENTIAL_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(payload)
+    )
 }
 
 /// Derive a stable machine-specific `MSG_HEADER_KEY` and persist it.
@@ -363,7 +451,7 @@ fn write_machine_msg_header_key(key: &str) -> io::Result<()> {
         )
     })?;
     #[cfg(unix)]
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
@@ -408,7 +496,10 @@ mod tests {
     #[test]
     fn test_random_checksum() {
         use super::*;
-        println!("{}", gen_checksum_by_key(DEFAULT_KEY.as_bytes()));
+        println!(
+            "{}",
+            gen_checksum_by_key(b"0123456789abcdefghijklmnopqrstuv")
+        );
     }
 
     #[test]
@@ -423,5 +514,25 @@ mod tests {
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 32);
         assert!(key1.chars().all(|ch| ch.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn temporary_credential_round_trip_and_checksum() {
+        use super::*;
+
+        let key = [7_u8; 32];
+        let encoded = encode_temporary_credential(0x0000_0007_0000_002a, &key);
+        assert_eq!(
+            parse_credential(&encoded).unwrap(),
+            Credential::Temporary {
+                key_id: 0x0000_0007_0000_002a,
+                key
+            }
+        );
+
+        let mut corrupted = encoded.into_bytes();
+        let last = corrupted.last_mut().unwrap();
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        assert!(parse_credential(std::str::from_utf8(&corrupted).unwrap()).is_err());
     }
 }

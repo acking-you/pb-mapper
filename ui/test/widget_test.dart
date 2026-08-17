@@ -818,7 +818,12 @@ void main() {
     await tester.tap(find.text('Next'));
     await tester.pump();
 
-    expect(find.text('Must be exactly 32 characters'), findsOneWidget);
+    expect(
+      find.text(
+        'Use a 32-character administrator key or a pbmt1_ temporary credential',
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('server-only mode starts at the server question', (tester) async {

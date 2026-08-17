@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use pb_mapper::common::checksum::set_process_msg_header_key;
+use pb_mapper::common::checksum::{parse_credential, set_process_msg_header_key};
 use pb_mapper::common::config::{get_pb_mapper_server_async, get_sockaddr_async};
 use pb_mapper::common::message::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper::local::client::status::get_status;
@@ -205,11 +205,7 @@ fn normalize_msg_header_key(msg_header_key: String) -> Result<String, CtlError> 
     if normalized.is_empty() {
         return Ok(normalized);
     }
-    if normalized.len() != 32 {
-        return Err(CtlError::invalid_argument(
-            "MSG_HEADER_KEY must be exactly 32 bytes (256-bit) when provided",
-        ));
-    }
+    parse_credential(&normalized).map_err(CtlError::invalid_argument)?;
     Ok(normalized)
 }
 
@@ -944,6 +940,8 @@ impl PbMapperState {
                         need_codec: enable_encryption,
                         is_datagram: false,
                         keep_alive: enable_keep_alive,
+                        namespace: None,
+                        force_namespace: false,
                     },
                     Some(callback),
                 )
@@ -959,6 +957,8 @@ impl PbMapperState {
                         need_codec: enable_encryption,
                         is_datagram: true,
                         keep_alive: enable_keep_alive,
+                        namespace: None,
+                        force_namespace: false,
                     },
                     Some(callback),
                 )

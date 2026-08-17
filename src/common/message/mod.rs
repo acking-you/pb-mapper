@@ -2,6 +2,7 @@
 //! messages
 pub mod command;
 pub mod forward;
+pub mod secure;
 use snafu::{ensure, ResultExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -281,7 +282,10 @@ pub fn get_header_msg_writer<T: AsyncWriteExt + Unpin>(
 
 #[inline]
 pub fn get_default_encodec() -> Result<Aes256GcmEnCodec> {
-    let key = get_msg_header_key();
+    let key = get_msg_header_key().map_err(|detail| error::Error::MsgCodec {
+        action: "load configured credential",
+        detail,
+    })?;
     Aes256GcmEnCodec::try_new(&key).map_err(|e| error::Error::MsgCodec {
         action: "create default encodec",
         detail: format!("{e}"),
@@ -290,7 +294,10 @@ pub fn get_default_encodec() -> Result<Aes256GcmEnCodec> {
 
 #[inline]
 pub fn get_default_decodec() -> Result<Aes256GcmDeCodec> {
-    let key = get_msg_header_key();
+    let key = get_msg_header_key().map_err(|detail| error::Error::MsgCodec {
+        action: "load configured credential",
+        detail,
+    })?;
     Aes256GcmDeCodec::try_new(&key).map_err(|e| error::Error::MsgCodec {
         action: "create default decodec",
         detail: format!("{e}"),

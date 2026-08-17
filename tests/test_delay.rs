@@ -2,17 +2,19 @@ use std::env;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use pb_mapper::common::auth::{AuthConfig, LegacyProtocolPolicy};
 use pb_mapper::common::config::init_tracing;
 use pb_mapper::common::message::{
     MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };
 use pb_mapper::local::client::run_client_side_cli;
 use pb_mapper::local::server::{run_server_side_cli, ServerTunnelOptions};
-use pb_mapper::pb_server::run_server;
+use pb_mapper::pb_server::run_server_with_auth_config;
 use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::time::{timeout, Instant};
+use tokio_util::sync::CancellationToken;
 use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 use uni_stream::stream::{StreamProvider, StreamSplit, TcpStreamProvider, UdpStreamProvider};
@@ -109,7 +111,20 @@ async fn run_udp_echo_server(addr: &str) -> Result<(), Box<dyn std::error::Error
 }
 
 async fn run_pb_mapper_server(addr: &str) {
-    if let Err(e) = run_server(addr).await {
+    let port = addr
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .unwrap_or_default();
+    let auth_config = AuthConfig {
+        state_dir: std::env::temp_dir()
+            .join(format!("pb-mapper-delay-{}-{port}", std::process::id())),
+        max_temporary_keys: 64,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    if let Err(e) =
+        run_server_with_auth_config(addr, CancellationToken::new(), None, false, auth_config).await
+    {
         eprintln!("pb-mapper server failed to start: {e}");
     }
 }
@@ -131,6 +146,8 @@ async fn run_pb_mapper_server_cli(
                     need_codec,
                     is_datagram: true,
                     keep_alive: false,
+                    namespace: None,
+                    force_namespace: false,
                 },
             )
             .await
@@ -144,6 +161,8 @@ async fn run_pb_mapper_server_cli(
                     need_codec,
                     is_datagram: false,
                     keep_alive: false,
+                    namespace: None,
+                    force_namespace: false,
                 },
             )
             .await

@@ -26,9 +26,8 @@ use crate::common::message::command::{
     PbConnStatusResp, PbServerRequest, CONTROL_PROTOCOL_V2,
 };
 use crate::common::message::forward::StreamForward;
-use crate::common::message::{
-    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
-};
+use crate::common::message::secure::ClientHeaderSession;
+use crate::common::message::{MessageReader, MessageWriter};
 use crate::utils::timeout::RetryBackoff;
 use crate::{
     snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_get_or_return_ok,
@@ -131,6 +130,8 @@ pub struct ServerTunnelOptions {
     pub need_codec: bool,
     pub is_datagram: bool,
     pub keep_alive: bool,
+    pub namespace: Option<u64>,
+    pub force_namespace: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +149,7 @@ struct StreamTarget<A> {
     local_addr: A,
     remote_addr: A,
     keep_alive: bool,
+    namespace: Option<u64>,
 }
 
 fn duration_to_millis(duration: Duration) -> u64 {
@@ -166,17 +168,19 @@ async fn probe_remote_registration(
     remote_addr: SocketAddr,
     key: Arc<str>,
     registration: ControlRegistration,
+    namespace: Option<u64>,
 ) -> RegistrationProbeResult {
     let timeout = registration_probe_timeout();
     let result = tokio::time::timeout(timeout, async {
         let mut stream = each_addr(remote_addr, TcpStream::connect)
             .await
             .map_err(|e| format!("connect remote status stream failed: {e}"))?;
-        crate::local::client::status::get_status(
+        crate::local::client::status::get_status_scoped(
             &mut stream,
             PbConnStatusReq::Service {
                 key: key.to_string(),
             },
+            namespace,
         )
         .await
         .map_err(|e| {
@@ -392,6 +396,8 @@ where
                 need_codec,
                 is_datagram,
                 keep_alive,
+                namespace,
+                force_namespace,
             },
         worker_index,
     } = config;
@@ -437,12 +443,31 @@ where
         "manager stream set tcp nodelay"
     );
 
-    // start register server with key
-    {
-        let timeout = control_io_timeout();
-        let heartbeat_interval = control_heartbeat_interval();
-        let heartbeat_tolerance = control_heartbeat_tolerance();
-        let msg = snafu_error_get_or_return_ok!(PbConnRequest::Register {
+    // Start registration with a protocol-v2 first frame. The session is reused for all
+    // subsequent control messages on this TCP connection.
+    let session = match ClientHeaderSession::from_process() {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::error!("create manager protocol-v2 session failed: {error}");
+            return Err(Status::ConnectRemote);
+        }
+    };
+    let timeout = control_io_timeout();
+    let heartbeat_interval = control_heartbeat_interval();
+    let heartbeat_tolerance = control_heartbeat_tolerance();
+    let request = match namespace {
+        Some(namespace) => PbConnRequest::RegisterScoped {
+            key: key.to_string(),
+            namespace,
+            force_namespace,
+            need_codec,
+            is_datagram,
+            protocol_version: Some(CONTROL_PROTOCOL_V2),
+            client_instance_id: Some(new_client_instance_id(worker_index)),
+            heartbeat_interval_ms: Some(duration_to_millis(heartbeat_interval)),
+            heartbeat_tolerance_ms: Some(duration_to_millis(heartbeat_tolerance)),
+        },
+        None => PbConnRequest::Register {
             key: key.to_string(),
             need_codec,
             is_datagram,
@@ -450,27 +475,19 @@ where
             client_instance_id: Some(new_client_instance_id(worker_index)),
             heartbeat_interval_ms: Some(duration_to_millis(heartbeat_interval)),
             heartbeat_tolerance_ms: Some(duration_to_millis(heartbeat_tolerance)),
+        },
+    };
+    let msg = snafu_error_get_or_return_ok!(request.encode().context(EncodeRegisterReqSnafu));
+    match tokio::time::timeout(timeout, session.write_initial(&mut manager_stream, &msg)).await {
+        Ok(result) => snafu_error_get_or_return_ok!(result.context(SendRegisterReqSnafu)),
+        Err(_) => snafu_error_get_or_return_ok!(ControlIoTimeoutSnafu {
+            action: "send register request",
+            timeout,
         }
-        .encode()
-        .context(EncodeRegisterReqSnafu));
-        let mut msg_writer = match get_header_msg_writer(&mut manager_stream) {
-            Ok(writer) => writer,
-            Err(e) => {
-                tracing::error!("create manager header writer failed: {e}");
-                return Err(Status::ConnectRemote);
-            }
-        };
-        match tokio::time::timeout(timeout, msg_writer.write_msg(&msg)).await {
-            Ok(result) => snafu_error_get_or_return_ok!(result.context(SendRegisterReqSnafu)),
-            Err(_) => snafu_error_get_or_return_ok!(ControlIoTimeoutSnafu {
-                action: "send register request",
-                timeout,
-            }
-            .fail()),
-        }
+        .fail()),
     }
     let (mut reader, mut writer) = manager_stream.into_split();
-    let mut msg_reader = match get_header_msg_reader(&mut reader) {
+    let mut msg_reader = match session.response_reader(&mut reader) {
         Ok(reader) => reader,
         Err(e) => {
             tracing::error!("create manager header reader failed: {e}");
@@ -508,6 +525,16 @@ where
                 protocol_version: 1,
                 lease_ttl_ms: 0,
             },
+            PbConnResponse::Error(error) => {
+                tracing::error!(
+                    event = "local_server_registration_rejected",
+                    reason = %error.code,
+                    retryable = error.retryable,
+                    message = %error.message,
+                    "pb server rejected service registration"
+                );
+                snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail())
+            }
             _ => snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail()),
         };
         tracing::info!(
@@ -536,7 +563,7 @@ where
     let writer_key = key.clone();
     let writer_registration = registration;
     let mut writer_handle = tokio::spawn(async move {
-        let mut msg_writer = match get_header_msg_writer(&mut writer) {
+        let mut msg_writer = match session.continuation_writer(&mut writer) {
             Ok(writer) => writer,
             Err(e) => {
                 tracing::error!("create manager header writer failed: {e}");
@@ -621,6 +648,7 @@ where
                             local_addr,
                             remote_addr,
                             keep_alive,
+                            namespace,
                         },
                         key.clone(),
                         registration.conn_id,
@@ -671,7 +699,13 @@ where
                     let probe_tx = probe_tx.clone();
                     let probe_key = key.clone();
                     tokio::spawn(async move {
-                        let result = probe_remote_registration(remote_addr, probe_key, registration).await;
+                        let result = probe_remote_registration(
+                            remote_addr,
+                            probe_key,
+                            registration,
+                            namespace,
+                        )
+                        .await;
                         let _ = probe_tx.send(result);
                     });
                 }
@@ -817,7 +851,8 @@ where
                         key,
                         client_id,
                         server_generation,
-                        target.keep_alive
+                        target.keep_alive,
+                        target.namespace,
                     )
                     .await
                 )

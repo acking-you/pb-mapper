@@ -59,6 +59,8 @@ pub enum Error {
         // specific error explanation
         detail: String,
     },
+    #[snafu(display("protocol-v2 error: {detail}"))]
+    MsgProtocol { detail: String },
     #[snafu(display("`{action}` forward message failed: {source}"))]
     MsgForward {
         // must be "read" or "write"

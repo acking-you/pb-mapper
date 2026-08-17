@@ -1,3 +1,4 @@
+mod admin;
 mod client;
 mod error;
 mod server;
@@ -13,22 +14,26 @@ use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
+use self::admin::handle_admin_request;
 use self::client::handle_client_conn;
 use self::error::{
     TaskCenterDecodeInitRequestSnafu, TaskCenterInitRequestTimeoutSnafu,
     TaskCenterReadInitRequestSnafu, TaskCenterSendListenerSnafu, TaskCenterSendStatusRespSnafu,
     TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
 };
-use self::server::handle_server_conn;
+use self::server::{handle_server_conn, ServerRegistration};
 use self::status::handle_show_status;
+use crate::common::auth::{AuthConfig, AuthContext, AuthRuntime};
 use crate::common::config::{control_io_timeout, keep_alive_from_env, server_lease_timeout};
 use crate::common::conn_id::{ConnIdProvider, RemoteConnId};
 use crate::common::manager::{ForwardMessage, SenderChan, TaskManager};
 use crate::common::message::command::{
+    AdminConnectionInfo, AdminConnectionPage, AdminServiceInfo, AdminServicePage,
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
     PbServiceConnStatus,
 };
-use crate::common::message::{get_header_msg_reader, MessageReader};
+use crate::common::message::secure::{ServerHeaderSession, ServerSecurity};
+use crate::common::message::{get_header_msg_reader, MessageReader, MessageWriter};
 use crate::pb_server::error::{
     ServerListenSnafu, TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,
     TaskCenterSendStreamRespToClientSnafu, TaskCenterSendSubcribeRespSnafu,
@@ -61,7 +66,9 @@ pub enum ManagerTask {
         excluded_server_conns: Vec<(RemoteConnId, u64)>,
     },
     Stream {
+        key: ImutableKey,
         stream: TcpStream,
+        session: ServerHeaderSession,
         server_id: RemoteConnId,
         client_id: RemoteConnId,
         server_generation: u64,
@@ -74,10 +81,23 @@ pub enum ManagerTask {
     Status {
         conn_sender: ConnTaskSender,
         status: PbConnStatusReq,
+        namespace: u64,
         conn_id: RemoteConnId,
     },
     StatusQuery {
         response_sender: tokio::sync::oneshot::Sender<ServerStatusInfo>,
+    },
+    AdminServiceList {
+        key_id: Option<u64>,
+        page: u32,
+        page_size: u16,
+        response_sender: tokio::sync::oneshot::Sender<AdminServicePage>,
+    },
+    AdminConnectionList {
+        key_id: Option<u64>,
+        page: u32,
+        page_size: u16,
+        response_sender: tokio::sync::oneshot::Sender<AdminConnectionPage>,
     },
     DeRegisterServerConn {
         key: ImutableKey,
@@ -103,6 +123,11 @@ pub enum ConnTask {
         protocol_version: u16,
         lease_ttl_ms: u64,
     },
+    RegisterFailed {
+        code: String,
+        reason: String,
+        retryable: bool,
+    },
     SubcribeResp {
         server_conn_id: RemoteConnId,
         server_generation: u64,
@@ -110,7 +135,9 @@ pub enum ConnTask {
         is_datagram: bool,
     },
     SubcribeFailed {
+        code: String,
         reason: String,
+        retryable: bool,
     },
     SubcribeRetry {
         reason: String,
@@ -130,6 +157,7 @@ pub enum ConnTask {
         server_id: RemoteConnId,
         server_generation: u64,
         stream: TcpStream,
+        session: ServerHeaderSession,
     },
     StatusResp(PbConnResponse),
 }
@@ -157,6 +185,46 @@ pub struct ServerConnInfo {
 }
 
 pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<ServerConnInfo>>;
+
+struct NamespaceRateLimit {
+    tokens: f64,
+    last_refill: Instant,
+    rate_per_second: f64,
+    burst: f64,
+}
+
+impl NamespaceRateLimit {
+    fn new(rate_per_second: usize, burst: usize) -> Self {
+        Self {
+            tokens: burst as f64,
+            last_refill: Instant::now(),
+            rate_per_second: rate_per_second as f64,
+            burst: burst as f64,
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        let now = Instant::now();
+        self.tokens = (self.tokens
+            + now.duration_since(self.last_refill).as_secs_f64() * self.rate_per_second)
+            .min(self.burst);
+        self.last_refill = now;
+        if self.tokens < 1.0 {
+            false
+        } else {
+            self.tokens -= 1.0;
+            true
+        }
+    }
+}
+
+fn env_limit(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
 
 #[derive(Debug, Clone)]
 pub struct ServerStatusInfo {
@@ -253,7 +321,9 @@ async fn send_subcribe_failed(
     let reason = reason.into();
     if conn_sender
         .send(ConnTask::SubcribeFailed {
+            code: "service_not_available".to_string(),
             reason: reason.clone(),
+            retryable: true,
         })
         .await
         .is_err()
@@ -333,10 +403,42 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
     >,
     keep_alive: bool,
 ) -> std::io::Result<()> {
+    run_server_with_auth_config(
+        addr,
+        shutdown_token,
+        status_channel,
+        keep_alive,
+        AuthConfig::default(),
+    )
+    .await
+}
+
+pub async fn run_server_with_auth_config<A: ToSocketAddrs>(
+    addr: A,
+    shutdown_token: CancellationToken,
+    status_channel: Option<
+        tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<ServerStatusInfo>>,
+    >,
+    keep_alive: bool,
+    auth_config: AuthConfig,
+) -> std::io::Result<()> {
+    let auth = AuthRuntime::from_process(auth_config)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let security = ServerSecurity::new(auth);
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
     // represent the mapping of the `key` to the id of the server-side conn
     let mut server_conn_map = ServerConnMap::new();
-    let mut pending_streams = hashbrown::HashMap::<RemoteConnId, (RemoteConnId, u64)>::new();
+    let mut pending_streams =
+        hashbrown::HashMap::<RemoteConnId, (RemoteConnId, u64, ImutableKey)>::new();
+    let mut namespace_stream_counts = hashbrown::HashMap::<u64, usize>::new();
+    let mut namespace_rate_limits = hashbrown::HashMap::<u64, NamespaceRateLimit>::new();
+    let max_services_per_namespace = env_limit("PB_MAPPER_MAX_SERVICES_PER_NAMESPACE", 256);
+    let max_register_connections_per_service =
+        env_limit("PB_MAPPER_MAX_REGISTER_CONNECTIONS_PER_SERVICE", 16);
+    let max_streams_per_namespace = env_limit("PB_MAPPER_MAX_STREAMS_PER_NAMESPACE", 1024);
+    let new_streams_per_second = env_limit("PB_MAPPER_NEW_STREAMS_PER_SECOND", 100);
+    let new_streams_burst = env_limit("PB_MAPPER_NEW_STREAMS_BURST", 200);
     let mut next_server_generation = 1_u64;
 
     let listener = TcpListener::bind(addr).await?;
@@ -399,6 +501,97 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
         };
 
         match task {
+            ManagerTask::AdminServiceList {
+                key_id,
+                page,
+                page_size,
+                response_sender,
+            } => {
+                let page_size = page_size.clamp(1, 1000) as usize;
+                let start = (page as usize).saturating_mul(page_size);
+                let mut all = server_conn_map
+                    .iter()
+                    .filter_map(|(key, connections)| {
+                        let (namespace, service_name) = split_scoped_service_key(key);
+                        if key_id.is_some_and(|key_id| key_id != namespace) {
+                            return None;
+                        }
+                        let first = connections.first()?;
+                        Some(AdminServiceInfo {
+                            key_id: namespace,
+                            namespace,
+                            service_name: service_name.to_string(),
+                            transport: if first.is_datagram { "udp" } else { "tcp" }.to_string(),
+                            codec_enabled: first.need_codec,
+                            connection_count: connections.len() as u32,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                all.sort_by(|left, right| {
+                    left.namespace
+                        .cmp(&right.namespace)
+                        .then_with(|| left.service_name.cmp(&right.service_name))
+                });
+                let items = all.iter().skip(start).take(page_size).cloned().collect();
+                let next_page =
+                    (start.saturating_add(page_size) < all.len()).then_some(page.saturating_add(1));
+                let _ = response_sender.send(AdminServicePage {
+                    schema_version: 1,
+                    items,
+                    next_page,
+                });
+            }
+            ManagerTask::AdminConnectionList {
+                key_id,
+                page,
+                page_size,
+                response_sender,
+            } => {
+                let now = Instant::now();
+                let page_size = page_size.clamp(1, 1000) as usize;
+                let start = (page as usize).saturating_mul(page_size);
+                let mut all = server_conn_map
+                    .iter()
+                    .flat_map(|(key, connections)| {
+                        let (namespace, service_name) = split_scoped_service_key(key);
+                        connections.iter().filter_map(move |connection| {
+                            if key_id.is_some_and(|key_id| key_id != namespace) {
+                                return None;
+                            }
+                            Some(AdminConnectionInfo {
+                                key_id: namespace,
+                                namespace,
+                                service_name: service_name.to_string(),
+                                conn_id: connection.conn_id.into(),
+                                generation: connection.generation,
+                                protocol_version: connection.protocol_version,
+                                healthy: connection.health == ServerConnHealth::Healthy,
+                                transport: if connection.is_datagram { "udp" } else { "tcp" }
+                                    .to_string(),
+                                codec_enabled: connection.need_codec,
+                                last_rx_age_ms: now
+                                    .duration_since(connection.last_rx_at)
+                                    .as_millis()
+                                    as u64,
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                all.sort_by(|left, right| {
+                    left.namespace
+                        .cmp(&right.namespace)
+                        .then_with(|| left.service_name.cmp(&right.service_name))
+                        .then_with(|| left.conn_id.cmp(&right.conn_id))
+                });
+                let items = all.iter().skip(start).take(page_size).cloned().collect();
+                let next_page =
+                    (start.saturating_add(page_size) < all.len()).then_some(page.saturating_add(1));
+                let _ = response_sender.send(AdminConnectionPage {
+                    schema_version: 1,
+                    items,
+                    next_page,
+                });
+            }
             ManagerTask::StatusQuery { response_sender } => {
                 let total_connections = server_conn_map
                     .values()
@@ -425,23 +618,55 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
             ManagerTask::Status {
                 conn_sender,
                 status,
+                namespace,
                 conn_id,
             } => {
                 let resp = match status {
                     PbConnStatusReq::RemoteId => {
+                        let scoped = server_conn_map
+                            .iter()
+                            .filter(|(key, _)| split_scoped_service_key(key).0 == namespace)
+                            .map(|(key, value)| (split_scoped_service_key(key).1, value))
+                            .collect::<Vec<_>>();
+                        let registered_ids = scoped
+                            .iter()
+                            .flat_map(|(_, connections)| {
+                                connections.iter().map(|connection| connection.conn_id)
+                            })
+                            .collect::<Vec<_>>();
+                        let client_ids = pending_streams
+                            .iter()
+                            .filter_map(|(client_id, (_, _, key))| {
+                                (split_scoped_service_key(key).0 == namespace).then_some(*client_id)
+                            })
+                            .collect::<Vec<_>>();
                         PbConnResponse::Status(PbConnStatusResp::RemoteId {
-                            server_map: format!("{server_conn_map:?}"),
-                            active: manager.active_conn_id_msg(),
-                            idle: manager.idle_conn_id_msg(),
+                            server_map: format!("{scoped:?}"),
+                            active: format!(
+                                "registered={registered_ids:?}, clients={client_ids:?}"
+                            ),
+                            idle: "namespace scoped; use `pb-mapper admin connection list` for global inspection"
+                                .to_string(),
                         })
                     }
                     PbConnStatusReq::Keys => PbConnResponse::Status(PbConnStatusResp::Keys(
-                        server_conn_map.keys().map(|k| k.to_string()).collect(),
+                        server_conn_map
+                            .keys()
+                            .filter_map(|key| {
+                                let (key_namespace, service_name) = split_scoped_service_key(key);
+                                (key_namespace == namespace).then(|| service_name.to_string())
+                            })
+                            .collect(),
                     )),
                     PbConnStatusReq::Service { key } => {
-                        let key: ImutableKey = key.into();
+                        let display_key = key.clone();
+                        let key: ImutableKey = if namespace == 0 {
+                            key.into()
+                        } else {
+                            Arc::from(format!("@{namespace:016x}\u{0}{key}"))
+                        };
                         PbConnResponse::Status(PbConnStatusResp::Service {
-                            key: key.to_string(),
+                            key: display_key,
                             connections: service_status_connections(&server_conn_map, &key),
                         })
                     }
@@ -469,9 +694,11 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     "accepted pb connection"
                 );
                 let manager_task_sender = manager.get_task_sender();
+                let security = security.clone();
                 tokio::spawn(async move {
                     snafu_error_handle!(
-                        handle_conn(conn_id, peer_addr, manager_task_sender, stream).await
+                        handle_conn(conn_id, peer_addr, manager_task_sender, stream, security)
+                            .await
                     );
                 });
             }
@@ -479,13 +706,24 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 let removed_from_service_map =
                     remove_server_conn(&mut server_conn_map, &key, conn_id);
                 let removed_from_active_map = manager.deregister_conn(conn_id);
-                pending_streams.retain(|_, (server_id, _)| *server_id != conn_id);
+                let removed_pending_streams = remove_pending_streams_for_server(
+                    &mut pending_streams,
+                    &mut namespace_stream_counts,
+                    conn_id,
+                );
+                release_namespace_rate_limit_if_idle(
+                    split_scoped_service_key(&key).0,
+                    &server_conn_map,
+                    &pending_streams,
+                    &mut namespace_rate_limits,
+                );
                 tracing::info!(
                     event = "server_conn_deregistered",
                     key = %key,
                     conn_id = %conn_id,
                     removed_from_service_map,
                     removed_from_active_map,
+                    removed_pending_streams,
                     registered_services = server_conn_map.len(),
                     server_connections = registered_server_conn_count(&server_conn_map),
                     active_connections = manager.active_conn_count(),
@@ -512,14 +750,17 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 let removed_from_service_map =
                     remove_server_conn(&mut server_conn_map, &key, conn_id);
                 let removed_from_active_map = manager.deregister_conn(conn_id);
-                let mut removed_pending_streams = 0usize;
-                pending_streams.retain(|_, (server_id, _)| {
-                    let keep = *server_id != conn_id;
-                    if !keep {
-                        removed_pending_streams += 1;
-                    }
-                    keep
-                });
+                let removed_pending_streams = remove_pending_streams_for_server(
+                    &mut pending_streams,
+                    &mut namespace_stream_counts,
+                    conn_id,
+                );
+                release_namespace_rate_limit_if_idle(
+                    split_scoped_service_key(&key).0,
+                    &server_conn_map,
+                    &pending_streams,
+                    &mut namespace_rate_limits,
+                );
                 let retire_notified = conn_sender
                     .as_ref()
                     .and_then(|sender| {
@@ -550,13 +791,25 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 server_id,
                 client_id,
             } => {
-                pending_streams.remove(&client_id);
+                let removed_namespace = pending_streams.remove(&client_id).map(|(_, _, key)| {
+                    let namespace = split_scoped_service_key(&key).0;
+                    decrement_namespace_stream_count(&mut namespace_stream_counts, namespace);
+                    namespace
+                });
                 let removed_server_conn = if let Some(server_id) = server_id {
                     manager.deregister_conn(server_id)
                 } else {
                     false
                 };
                 let removed_client_conn = manager.deregister_conn(client_id);
+                if let Some(namespace) = removed_namespace {
+                    release_namespace_rate_limit_if_idle(
+                        namespace,
+                        &server_conn_map,
+                        &pending_streams,
+                        &mut namespace_rate_limits,
+                    );
+                }
                 if removed_server_conn || removed_client_conn {
                     tracing::info!(
                         event = "client_conn_deregistered",
@@ -591,6 +844,51 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 is_datagram,
                 protocol_version,
             } => {
+                let namespace = split_scoped_service_key(&key).0;
+                let existing = server_conn_map.get(&key);
+                let failure = if existing.is_some_and(|connections| {
+                    connections
+                        .first()
+                        .is_some_and(|connection| connection.is_datagram != is_datagram)
+                }) {
+                    Some((
+                        "service_transport_mismatch",
+                        "the service name is already registered with a different transport",
+                        false,
+                    ))
+                } else if existing.is_some_and(|connections| {
+                    connections.len() >= max_register_connections_per_service
+                }) {
+                    Some((
+                        "service_connection_limit_exceeded",
+                        "the service has reached its register connection limit",
+                        true,
+                    ))
+                } else if existing.is_none()
+                    && server_conn_map
+                        .keys()
+                        .filter(|registered| split_scoped_service_key(registered).0 == namespace)
+                        .count()
+                        >= max_services_per_namespace
+                {
+                    Some((
+                        "namespace_service_limit_exceeded",
+                        "the namespace has reached its service name limit",
+                        true,
+                    ))
+                } else {
+                    None
+                };
+                if let Some((code, reason, retryable)) = failure {
+                    let _ = conn_sender
+                        .send(ConnTask::RegisterFailed {
+                            code: code.to_string(),
+                            reason: reason.to_string(),
+                            retryable,
+                        })
+                        .await;
+                    continue;
+                }
                 let generation = next_server_generation;
                 next_server_generation = next_server_generation.saturating_add(1).max(1);
                 let now = Instant::now();
@@ -648,13 +946,15 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     .context(TaskCenterSendRegisterRespSnafu { key, conn_id }));
             }
             ManagerTask::Stream {
+                key,
                 stream,
+                session,
                 server_id,
                 client_id,
                 server_generation,
             } => {
-                let Some((expected_control_conn_id, expected_generation)) =
-                    pending_streams.get(&client_id).copied()
+                let Some((expected_control_conn_id, expected_generation, expected_key)) =
+                    pending_streams.get(&client_id).cloned()
                 else {
                     tracing::warn!(
                         event = "stale_stream_without_pending_client",
@@ -665,6 +965,17 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     );
                     continue;
                 };
+                if key != expected_key {
+                    tracing::warn!(
+                        event = "stream_namespace_mismatch",
+                        stream_conn_id = %server_id,
+                        client_conn_id = %client_id,
+                        expected_key = %expected_key,
+                        actual_key = %key,
+                        "dropping stream that does not belong to the pending namespace and service"
+                    );
+                    continue;
+                }
                 if server_generation != 0 && expected_generation != server_generation {
                     tracing::warn!(
                         event = "stale_stream_generation_mismatch",
@@ -703,7 +1014,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     .send(ConnTask::StreamResp {
                         server_id,
                         server_generation: expected_generation,
-                        stream
+                        stream,
+                        session,
                     })
                     .await
                     .map_err(|_| kanal::SendError(()))
@@ -716,8 +1028,8 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
             } => {
                 let recorded_activity =
                     record_server_conn_activity_by_conn_id(&mut server_conn_map, server_id);
-                let Some((expected_server_id, expected_generation)) =
-                    pending_streams.get(&client_id).copied()
+                let Some((expected_server_id, expected_generation, _)) =
+                    pending_streams.get(&client_id).cloned()
                 else {
                     tracing::warn!(
                         event = "stale_stream_ack_without_pending_client",
@@ -767,6 +1079,22 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                 conn_sender,
                 excluded_server_conns,
             } => {
+                let namespace = split_scoped_service_key(&key).0;
+                if namespace_stream_counts
+                    .get(&namespace)
+                    .copied()
+                    .unwrap_or_default()
+                    >= max_streams_per_namespace
+                {
+                    let _ = conn_sender
+                        .send(ConnTask::SubcribeFailed {
+                            code: "namespace_stream_limit_exceeded".to_string(),
+                            reason: "the namespace has reached its active stream limit".to_string(),
+                            retryable: true,
+                        })
+                        .await;
+                    continue;
+                }
                 let Some(server_conn_id_list) = server_conn_map.get(&key).cloned() else {
                     let reason = format!("server key `{key}` is not registered");
                     tracing::warn!(
@@ -785,6 +1113,22 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     }
                     continue;
                 };
+                if !namespace_rate_limits
+                    .entry(namespace)
+                    .or_insert_with(|| {
+                        NamespaceRateLimit::new(new_streams_per_second, new_streams_burst)
+                    })
+                    .allow()
+                {
+                    let _ = conn_sender
+                        .send(ConnTask::SubcribeFailed {
+                            code: "namespace_stream_rate_exceeded".to_string(),
+                            reason: "the namespace new-stream rate limit was exceeded".to_string(),
+                            retryable: true,
+                        })
+                        .await;
+                    continue;
+                }
                 let mut selected = false;
                 let mut candidates = Vec::new();
                 candidates.extend(server_conn_id_list.iter().rev().copied().filter(|info| {
@@ -845,7 +1189,12 @@ pub async fn run_server_with_shutdown<A: ToSocketAddrs>(
                     if manager.get_conn_sender_chan(&conn_id).is_none() {
                         manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                     }
-                    pending_streams.insert(conn_id, (server_conn_id, server_generation));
+                    let is_new_stream = pending_streams
+                        .insert(conn_id, (server_conn_id, server_generation, key.clone()))
+                        .is_none();
+                    if is_new_stream {
+                        *namespace_stream_counts.entry(namespace).or_default() += 1;
+                    }
                     // 2. Response subcribe ok
                     if let Err(e) = conn_sender
                         .send(ConnTask::SubcribeResp {
@@ -953,15 +1302,158 @@ async fn handle_listener(
     }
 }
 
-#[instrument(skip(manager_task_sender, conn), fields(conn_id = %conn_id, peer_addr = %peer_addr))]
+#[instrument(skip(manager_task_sender, conn, security), fields(conn_id = %conn_id, peer_addr = %peer_addr))]
 async fn handle_conn(
     conn_id: RemoteConnId,
     peer_addr: SocketAddr,
     manager_task_sender: ManagerTaskSender,
     mut conn: TcpStream,
+    security: ServerSecurity,
 ) -> Result<()> {
-    // handle by action
-    let init_request = get_init_request(&mut conn, conn_id).await?;
+    let timeout = control_io_timeout();
+    let initial = match tokio::time::timeout(timeout, security.read_initial(&mut conn)).await {
+        Err(_) => TaskCenterInitRequestTimeoutSnafu { conn_id, timeout }.fail()?,
+        Ok(Err(error)) => {
+            let key_id = error
+                .response_session
+                .as_ref()
+                .map(|session| session.key_id())
+                .unwrap_or_default();
+            let decision = security.record_failure_log(peer_addr.ip(), key_id, &error.failure.code);
+            if decision.suppressed > 0 {
+                tracing::warn!(
+                    event = "auth_failures_suppressed",
+                    peer_ip = %peer_addr.ip(),
+                    key_id,
+                    reason = %error.failure.code,
+                    suppressed = decision.suppressed,
+                    "suppressed repeated authentication failures in the previous window"
+                );
+            }
+            if decision.emit {
+                tracing::warn!(
+                    event = "auth_failed",
+                    auth_stage = "initial_frame",
+                    conn_id = %conn_id,
+                    peer_addr = %peer_addr,
+                    key_id,
+                    reason = %error.failure.code,
+                    retryable = error.failure.retryable,
+                    error = %error.failure.message,
+                    "connection authentication failed"
+                );
+            }
+            if let Some(session) = error.response_session {
+                write_protocol_error(&mut conn, &session, &error.failure).await;
+            }
+            return Ok(());
+        }
+        Ok(Ok(initial)) => initial,
+    };
+    let init_request = match PbConnRequest::decode(&initial.payload) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(
+                event = "auth_failed",
+                auth_stage = "request_decode",
+                conn_id = %conn_id,
+                peer_addr = %peer_addr,
+                error = %error,
+                "authenticated request could not be decoded"
+            );
+            write_protocol_error(
+                &mut conn,
+                &initial.session,
+                &crate::common::auth::AuthFailure::new(
+                    "request_decode_failed",
+                    "authenticated request payload is malformed",
+                    false,
+                ),
+            )
+            .await;
+            return Ok(());
+        }
+    };
+    let mut requested_namespace = None;
+    let mut force_register_namespace = false;
+    let init_request = match init_request {
+        PbConnRequest::RegisterScoped {
+            need_codec,
+            is_datagram,
+            key,
+            namespace,
+            force_namespace,
+            protocol_version,
+            client_instance_id,
+            heartbeat_interval_ms,
+            heartbeat_tolerance_ms,
+        } => {
+            requested_namespace = Some(namespace);
+            force_register_namespace = force_namespace;
+            PbConnRequest::Register {
+                need_codec,
+                is_datagram,
+                key,
+                protocol_version,
+                client_instance_id,
+                heartbeat_interval_ms,
+                heartbeat_tolerance_ms,
+            }
+        }
+        PbConnRequest::SubcribeScoped { key, namespace } => {
+            requested_namespace = Some(namespace);
+            PbConnRequest::Subcribe { key }
+        }
+        PbConnRequest::StatusScoped { status, namespace } => {
+            requested_namespace = Some(namespace);
+            PbConnRequest::Status(status)
+        }
+        PbConnRequest::StreamScoped {
+            key,
+            namespace,
+            dst_id,
+            server_generation,
+        } => {
+            requested_namespace = Some(namespace);
+            PbConnRequest::Stream {
+                key,
+                dst_id,
+                server_generation,
+            }
+        }
+        request => request,
+    };
+    let session = initial.session;
+    let auth_context = match session.context() {
+        Ok(context) => context.clone(),
+        Err(error) => {
+            tracing::warn!(conn_id = %conn_id, peer_addr = %peer_addr, %error, "missing auth context");
+            return Ok(());
+        }
+    };
+    tracing::info!(
+        event = "auth_succeeded",
+        auth_stage = "session",
+        conn_id = %conn_id,
+        peer_addr = %peer_addr,
+        key_id = auth_context.key_id,
+        namespace = auth_context.namespace,
+        protocol = ?session.protocol(),
+        is_admin = auth_context.is_admin,
+        "connection authentication succeeded"
+    );
+    let effective_namespace = match resolve_namespace(
+        &auth_context,
+        requested_namespace,
+        force_register_namespace,
+        matches!(&init_request, PbConnRequest::Register { .. }),
+    ) {
+        Ok(namespace) => namespace,
+        Err(failure) => {
+            write_protocol_error(&mut conn, &session, &failure).await;
+            return Ok(());
+        }
+    };
     match init_request {
         PbConnRequest::Register {
             key,
@@ -987,16 +1479,37 @@ async fn handle_conn(
                 is_datagram,
                 "received pb init request"
             );
-            handle_server_conn(
-                key.into(),
-                need_codec,
-                is_datagram,
-                protocol_version,
-                conn_id,
+            let key = match scoped_service_key(&auth_context, effective_namespace, &key) {
+                Ok(key) => key,
+                Err(failure) => {
+                    write_protocol_error(&mut conn, &session, &failure).await;
+                    return Ok(());
+                }
+            };
+            let cancellation = match auth_context.cancellation_token() {
+                Ok(token) => token,
+                Err(failure) => {
+                    write_protocol_error(&mut conn, &session, &failure).await;
+                    return Ok(());
+                }
+            };
+            tokio::select! {
+                result = handle_server_conn(
+                ServerRegistration {
+                    key,
+                    need_codec,
+                    is_datagram,
+                    protocol_version,
+                    conn_id,
+                },
                 manager_task_sender,
                 conn,
-            )
-            .await?;
+                session,
+                ) => result?,
+                _ = cancellation.cancelled() => {
+                    tracing::info!(event = "connection_auth_expired", key_id = auth_context.key_id, conn_id = %conn_id, "closing registered service connection");
+                }
+            }
         }
         PbConnRequest::Subcribe { key } => {
             tracing::info!(
@@ -1007,7 +1520,26 @@ async fn handle_conn(
                 key = %key,
                 "received pb init request"
             );
-            handle_client_conn(key.into(), conn_id, manager_task_sender, conn).await?;
+            let key = match scoped_service_key(&auth_context, effective_namespace, &key) {
+                Ok(key) => key,
+                Err(failure) => {
+                    write_protocol_error(&mut conn, &session, &failure).await;
+                    return Ok(());
+                }
+            };
+            let cancellation = match auth_context.cancellation_token() {
+                Ok(token) => token,
+                Err(failure) => {
+                    write_protocol_error(&mut conn, &session, &failure).await;
+                    return Ok(());
+                }
+            };
+            tokio::select! {
+                result = handle_client_conn(key, conn_id, manager_task_sender, conn, session) => result?,
+                _ = cancellation.cancelled() => {
+                    tracing::info!(event = "connection_auth_expired", key_id = auth_context.key_id, conn_id = %conn_id, "closing subscribed data connection");
+                }
+            }
         }
         PbConnRequest::Stream {
             key,
@@ -1024,10 +1556,18 @@ async fn handle_conn(
                 server_generation,
                 "received pb init request"
             );
-            let key = ImutableKey::from(key);
+            let key = match scoped_service_key(&auth_context, effective_namespace, &key) {
+                Ok(key) => key,
+                Err(failure) => {
+                    write_protocol_error(&mut conn, &session, &failure).await;
+                    return Ok(());
+                }
+            };
             manager_task_sender
                 .send(ManagerTask::Stream {
+                    key: key.clone(),
                     stream: conn,
+                    session,
                     server_id: conn_id,
                     client_id: dst_id.into(),
                     server_generation,
@@ -1045,10 +1585,182 @@ async fn handle_conn(
                 status = ?status,
                 "received pb init request"
             );
-            handle_show_status(status, manager_task_sender, conn_id, conn).await?;
+            handle_show_status(
+                status,
+                effective_namespace,
+                manager_task_sender,
+                conn_id,
+                conn,
+                session,
+            )
+            .await?;
         }
+        PbConnRequest::Admin(request) => {
+            if !auth_context.is_admin {
+                write_protocol_error(
+                    &mut conn,
+                    &session,
+                    &crate::common::auth::AuthFailure::new(
+                        "admin_permission_required",
+                        "administrator credential is required for this operation",
+                        false,
+                    ),
+                )
+                .await;
+                return Ok(());
+            }
+            handle_admin_request(
+                request,
+                security.auth().clone(),
+                manager_task_sender,
+                conn_id,
+                conn,
+                session,
+            )
+            .await?;
+        }
+        PbConnRequest::RegisterScoped { .. }
+        | PbConnRequest::SubcribeScoped { .. }
+        | PbConnRequest::StatusScoped { .. }
+        | PbConnRequest::StreamScoped { .. } => unreachable!("scoped request was normalized"),
     }
     Ok(())
+}
+
+async fn write_protocol_error(
+    conn: &mut TcpStream,
+    session: &ServerHeaderSession,
+    failure: &crate::common::auth::AuthFailure,
+) {
+    let response = PbConnResponse::error(
+        failure.code.clone(),
+        failure.message.clone(),
+        failure.retryable,
+    );
+    let Ok(message) = response.encode() else {
+        return;
+    };
+    let Ok(mut writer) = session.response_writer(conn) else {
+        return;
+    };
+    if let Err(error) = writer.write_msg(&message).await {
+        tracing::debug!(%error, reason = %failure.code, "failed to write structured protocol error");
+    }
+}
+
+fn resolve_namespace(
+    context: &AuthContext,
+    requested: Option<u64>,
+    force_register_namespace: bool,
+    is_register: bool,
+) -> std::result::Result<u64, crate::common::auth::AuthFailure> {
+    let namespace = requested.unwrap_or(context.namespace);
+    if !context.is_admin && namespace != context.namespace {
+        return Err(crate::common::auth::AuthFailure::new(
+            "namespace_access_denied",
+            "temporary credentials can only access their own namespace",
+            false,
+        ));
+    }
+    if context.is_admin && is_register && namespace != 0 && !force_register_namespace {
+        return Err(crate::common::auth::AuthFailure::new(
+            "namespace_force_required",
+            "administrator registration in a temporary namespace requires --force",
+            false,
+        ));
+    }
+    Ok(namespace)
+}
+
+fn scoped_service_key(
+    context: &AuthContext,
+    namespace: u64,
+    service_name: &str,
+) -> std::result::Result<ImutableKey, crate::common::auth::AuthFailure> {
+    if service_name.is_empty() || service_name.len() > 1024 || service_name.contains('\0') {
+        return Err(crate::common::auth::AuthFailure::new(
+            "service_name_invalid",
+            "service names must be 1-1024 bytes and must not contain NUL",
+            false,
+        ));
+    }
+    if !context.is_admin
+        && (service_name.len() > 128
+            || !service_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)))
+    {
+        return Err(crate::common::auth::AuthFailure::new(
+            "service_name_invalid",
+            "temporary-key service names must be 1-128 ASCII bytes from [A-Za-z0-9._:-]",
+            false,
+        ));
+    }
+    if namespace == 0 {
+        Ok(Arc::from(service_name))
+    } else {
+        Ok(Arc::from(format!("@{namespace:016x}\u{0}{service_name}")))
+    }
+}
+
+fn split_scoped_service_key(key: &str) -> (u64, &str) {
+    let Some((prefix, name)) = key.split_once('\0') else {
+        return (0, key);
+    };
+    let Some(hex) = prefix.strip_prefix('@') else {
+        return (0, key);
+    };
+    match u64::from_str_radix(hex, 16) {
+        Ok(namespace) => (namespace, name),
+        Err(_) => (0, key),
+    }
+}
+
+fn decrement_namespace_stream_count(
+    namespace_stream_counts: &mut hashbrown::HashMap<u64, usize>,
+    namespace: u64,
+) {
+    let Some(count) = namespace_stream_counts.get_mut(&namespace) else {
+        return;
+    };
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+        namespace_stream_counts.remove(&namespace);
+    }
+}
+
+fn release_namespace_rate_limit_if_idle(
+    namespace: u64,
+    server_conn_map: &ServerConnMap,
+    pending_streams: &hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>,
+    namespace_rate_limits: &mut hashbrown::HashMap<u64, NamespaceRateLimit>,
+) {
+    let has_registered_service = server_conn_map
+        .keys()
+        .any(|key| split_scoped_service_key(key).0 == namespace);
+    let has_pending_stream = pending_streams
+        .values()
+        .any(|(_, _, key)| split_scoped_service_key(key).0 == namespace);
+    if !has_registered_service && !has_pending_stream {
+        namespace_rate_limits.remove(&namespace);
+    }
+}
+
+fn remove_pending_streams_for_server(
+    pending_streams: &mut hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>,
+    namespace_stream_counts: &mut hashbrown::HashMap<u64, usize>,
+    server_id_to_remove: RemoteConnId,
+) -> usize {
+    let mut removed = 0;
+    pending_streams.retain(|_, (server_id, _, key)| {
+        if *server_id != server_id_to_remove {
+            return true;
+        }
+        decrement_namespace_stream_count(namespace_stream_counts, split_scoped_service_key(key).0);
+        removed += 1;
+        false
+    });
+    removed
 }
 
 pub async fn get_init_request(

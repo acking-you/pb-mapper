@@ -9,7 +9,8 @@ use super::error::{
 use super::{ConnTask, ManagerTask, ManagerTaskSender};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{MessageSerializer, PbConnStatusReq};
-use crate::common::message::{get_header_msg_writer, MessageWriter};
+use crate::common::message::secure::ServerHeaderSession;
+use crate::common::message::MessageWriter;
 
 struct StatusConnGuard {
     conn_id: RemoteConnId,
@@ -85,9 +86,11 @@ impl Drop for StatusConnGuard {
 
 pub async fn handle_show_status(
     status: PbConnStatusReq,
+    namespace: u64,
     manager_sender: ManagerTaskSender,
     conn_id: RemoteConnId,
     mut conn: TcpStream,
+    session: ServerHeaderSession,
 ) -> Result<()> {
     let info_span = info_span!("show status", "{status:?},{conn_id:?}");
     let mut guard = StatusConnGuard::new(conn_id, manager_sender.clone());
@@ -97,6 +100,7 @@ pub async fn handle_show_status(
         let req = ManagerTask::Status {
             conn_sender: tx,
             status,
+            namespace,
             conn_id,
         };
         manager_sender
@@ -108,7 +112,8 @@ pub async fn handle_show_status(
         let resp = rx.recv().await.context(StatusRecvConnTaskSnafu)?;
         if let ConnTask::StatusResp(resp) = resp {
             let msg = resp.encode().context(StatusEncodeRespSnafu)?;
-            let mut msg_writer = get_header_msg_writer(&mut conn)
+            let mut msg_writer = session
+                .response_writer(&mut conn)
                 .context(StatusCreateHeaderToolSnafu { tool: "writer" })?;
             msg_writer
                 .write_msg(&msg)

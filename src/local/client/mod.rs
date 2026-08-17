@@ -13,7 +13,7 @@ use tokio::time::MissedTickBehavior;
 use uni_stream::udp::set_custom_timeout;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
-use self::status::get_status;
+use self::status::{get_status, get_status_scoped};
 use self::stream::handle_local_stream;
 use crate::common::config::{
     client_health_check_interval, client_health_check_timeout, client_health_failure_threshold,
@@ -48,11 +48,55 @@ pub async fn run_client_side_cli<LocalListener: ListenerProvider, A: ToSocketAdd
     .await
 }
 
+pub async fn run_client_side_cli_scoped<LocalListener: ListenerProvider, A: ToSocketAddrs>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    keep_alive: bool,
+    namespace: Option<u64>,
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
+    run_client_side_cli_with_callback_scoped::<LocalListener, A>(
+        local_addr,
+        remote_addr,
+        key,
+        keep_alive,
+        namespace,
+        None,
+    )
+    .await
+}
+
 pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, A: ToSocketAddrs>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     keep_alive: bool,
+    status_callback: Option<ClientStatusCallback>,
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
+    run_client_side_cli_with_callback_scoped::<LocalListener, A>(
+        local_addr,
+        remote_addr,
+        key,
+        keep_alive,
+        None,
+        status_callback,
+    )
+    .await
+}
+
+pub async fn run_client_side_cli_with_callback_scoped<
+    LocalListener: ListenerProvider,
+    A: ToSocketAddrs,
+>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    keep_alive: bool,
+    namespace: Option<u64>,
     status_callback: Option<ClientStatusCallback>,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
@@ -92,7 +136,7 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
             "client probing remote server"
         );
 
-        if let Err(reason) = probe_remote_key(remote_addr, key.as_ref()).await {
+        if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace).await {
             let retry_delay = retry_backoff.next_delay();
             tracing::warn!(
                 event = "client_remote_probe_failed",
@@ -178,7 +222,7 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
                     let failure_tx = stream_failure_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_local_stream(stream, key, remote_addr, keep_alive).await
+                            handle_local_stream(stream, key, remote_addr, keep_alive, namespace).await
                         {
                             let reason = snafu::Report::from_error(e).to_string();
                             tracing::warn!(
@@ -192,7 +236,7 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
                     });
                 }
                 _ = health_interval.tick() => {
-                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref()).await {
+                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace).await {
                         consecutive_health_failures = consecutive_health_failures.saturating_add(1);
                         if consecutive_health_failures < health_failure_threshold {
                             tracing::warn!(
@@ -234,7 +278,7 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
                         stream_failure = %stream_failure,
                         "local stream failure reported; probing remote key"
                     );
-                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref()).await {
+                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace).await {
                         tracing::warn!(
                             event = "client_remote_probe_failed_after_stream_error",
                             key = %key,
@@ -268,9 +312,13 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
     }
 }
 
-async fn probe_remote_key(remote_addr: SocketAddr, key: &str) -> std::result::Result<(), String> {
+async fn probe_remote_key(
+    remote_addr: SocketAddr,
+    key: &str,
+    namespace: Option<u64>,
+) -> std::result::Result<(), String> {
     let timeout = client_health_check_timeout();
-    match tokio::time::timeout(timeout, probe_remote_key_once(remote_addr, key)).await {
+    match tokio::time::timeout(timeout, probe_remote_key_once(remote_addr, key, namespace)).await {
         Ok(result) => result,
         Err(_) => Err(format!("remote key probe timed out after {timeout:?}")),
     }
@@ -279,12 +327,14 @@ async fn probe_remote_key(remote_addr: SocketAddr, key: &str) -> std::result::Re
 async fn probe_remote_key_once(
     remote_addr: SocketAddr,
     key: &str,
+    namespace: Option<u64>,
 ) -> std::result::Result<(), String> {
     match fetch_remote_status(
         remote_addr,
         PbConnStatusReq::Service {
             key: key.to_string(),
         },
+        namespace,
     )
     .await
     {
@@ -312,7 +362,7 @@ async fn probe_remote_key_once(
         }
     }
 
-    let status_resp = fetch_remote_status(remote_addr, PbConnStatusReq::Keys).await?;
+    let status_resp = fetch_remote_status(remote_addr, PbConnStatusReq::Keys, namespace).await?;
     let PbConnStatusResp::Keys(keys) = status_resp else {
         return Err(format!(
             "expected keys status response, got {status_resp:?}"
@@ -330,11 +380,12 @@ async fn probe_remote_key_once(
 async fn fetch_remote_status(
     remote_addr: SocketAddr,
     req: PbConnStatusReq,
+    namespace: Option<u64>,
 ) -> std::result::Result<PbConnStatusResp, String> {
     let mut stream = each_addr(remote_addr, TcpStream::connect)
         .await
         .map_err(|e| format!("connect remote stream failed: {e}"))?;
-    get_status(&mut stream, req)
+    get_status_scoped(&mut stream, req, namespace)
         .await
         .map_err(|e| format!("get status failed: {}", snafu::Report::from_error(e)))
 }
@@ -357,8 +408,30 @@ pub async fn handle_status_cli<A: ToSocketAddrs + Debug + Copy + Send + 'static>
     op: StatusOp,
     addr: A,
 ) {
+    handle_status_cli_scoped(op, addr, None).await
+}
+
+pub async fn handle_status_cli_scoped<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
+    op: StatusOp,
+    addr: A,
+    namespace: Option<u64>,
+) {
     match op {
-        StatusOp::RemoteId => show_status(addr, PbConnStatusReq::RemoteId).await,
-        StatusOp::Keys => show_status(addr, PbConnStatusReq::Keys).await,
+        StatusOp::RemoteId => show_status_scoped(addr, PbConnStatusReq::RemoteId, namespace).await,
+        StatusOp::Keys => show_status_scoped(addr, PbConnStatusReq::Keys, namespace).await,
     }
+}
+
+pub async fn show_status_scoped<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
+    remote_addr: A,
+    req: PbConnStatusReq,
+    namespace: Option<u64>,
+) {
+    let mut stream = snafu_error_get_or_return!(
+        each_addr(remote_addr, TcpStream::connect).await,
+        "get status stream"
+    );
+    let status = snafu_error_get_or_return!(get_status_scoped(&mut stream, req, namespace).await);
+    let status = snafu_error_get_or_return!(serde_json::to_string_pretty(&status));
+    println!("Status:{status}");
 }

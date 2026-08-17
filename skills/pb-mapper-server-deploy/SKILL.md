@@ -39,7 +39,6 @@ Prompt the user for each value below. Do NOT assume or hardcode any value.
 | `SERVER_PORT` | `pb-mapper server` listening port | `7666` | User can override |
 | `USE_IPV6` | Listen on IPv6 (`::`) instead of IPv4? | `false` | Optional |
 | `ENABLE_KEEP_ALIVE` | Enable TCP keep-alive? | `false` | Optional |
-| `USE_MACHINE_KEY` | Use machine-derived msg header key? | `true` | Recommended; generates and persists a 32-char key |
 | `VERSION` | Release version (without `v` prefix) | Latest release | Auto-detect or user-specified |
 | `TARGET_TRIPLE` | Build target | `x86_64-unknown-linux-musl` | User can override |
 
@@ -66,9 +65,6 @@ if [ "${USE_IPV6}" = "true" ]; then
 fi
 if [ "${ENABLE_KEEP_ALIVE}" = "true" ]; then
   EXTRA_FLAGS="${EXTRA_FLAGS} --keep-alive"
-fi
-if [ "${USE_MACHINE_KEY}" = "true" ]; then
-  EXTRA_FLAGS="${EXTRA_FLAGS} --use-machine-msg-header-key"
 fi
 export EXTRA_FLAGS
 ```
@@ -138,6 +134,8 @@ After=network.target
 Type=simple
 ExecStart=/usr/local/bin/pb-mapper server --port ${SERVER_PORT} ${EXTRA_FLAGS}
 Environment=RUST_LOG=info
+StateDirectory=pb-mapper
+StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65535
@@ -165,13 +163,25 @@ ssh ${SSH_PORT_OPT} "${SSH_TARGET}" "sudo systemctl --no-pager --full status pb-
 ssh ${SSH_PORT_OPT} "${SSH_TARGET}" "ss -tlnp | grep ':${SERVER_PORT}'"
 ```
 
-If `USE_MACHINE_KEY=true`, retrieve the generated key for use with `register` and `connect`:
+On a fresh installation, the relay creates a random administrator key with mode
+`0600`. Retrieve it once to initialize the administrator CLI:
 
 ```bash
-ssh ${SSH_PORT_OPT} "${SSH_TARGET}" "sudo cat /var/lib/pb-mapper-server/msg_header_key"
+ssh ${SSH_PORT_OPT} "${SSH_TARGET}" "sudo cat /var/lib/pb-mapper/auth/admin.key"
 ```
 
-Store this key securely — it is needed by `pb-mapper register` and `pb-mapper connect` when `--codec` or `MSG_HEADER_KEY` is used.
+Store it securely. Do not distribute it to ordinary register/connect instances.
+Instead, load it only in the administrator shell and issue a scoped temporary
+credential:
+
+```bash
+export MSG_HEADER_KEY='<administrator-key>'
+pb-mapper admin --server "${SSH_HOST}:${SERVER_PORT}" key issue --ttl 30d --label '<owner-or-purpose>'
+```
+
+Copy the returned `pbmt1_...` credential to the business instance. Use
+`pb-mapper admin key renew <key-id> --ttl 30d` to extend it in place without
+changing deployed credentials.
 
 ## Troubleshooting Checklist
 
@@ -180,7 +190,8 @@ Use this quick triage when the server fails to start or accept connections:
 - Port already in use: check with `ss -tlnp | grep :${SERVER_PORT}` and stop the conflicting process.
 - Firewall blocking: ensure the server port is open (`ufw allow ${SERVER_PORT}/tcp` or equivalent).
 - Service crashes on start: inspect logs with `journalctl -u pb-mapper-server -n 200 --no-pager`.
-- Machine key not generated: verify `/var/lib/pb-mapper-server/` directory exists and is writable; check logs for key derivation errors.
+- Administrator key missing: verify `/var/lib/pb-mapper/auth/` is writable and inspect startup logs for `administrator_key_initialized` or an `auth_stage` error.
+- Temporary clients rejected: run `pb-mapper admin status`, then `pb-mapper admin key show <key-id>` and correlate the stable error code in the server log.
 - Permission denied: binary must be owned by root with `0755` permissions.
 
 ## Safe Update Procedure

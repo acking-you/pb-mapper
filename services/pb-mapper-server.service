@@ -7,7 +7,9 @@ Wants=network-online.target
 Type=simple
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/pb-mapper/server.env
-ExecStart=/usr/local/bin/pb-mapper server --port 7666 --use-machine-msg-header-key
+ExecStart=/usr/local/bin/pb-mapper server --port 7666
+StateDirectory=pb-mapper
+StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65535

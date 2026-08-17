@@ -9,36 +9,46 @@ use crate::common::config::control_io_timeout;
 use crate::common::message::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
 };
-use crate::common::message::{
-    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
-};
+use crate::common::message::secure::ClientHeaderSession;
+use crate::common::message::MessageReader;
 
 pub async fn get_status<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
     remote_stream: &mut S,
     req: PbConnStatusReq,
 ) -> super::error::Result<PbConnStatusResp> {
-    let timeout = control_io_timeout();
-    let msg = PbConnRequest::Status(req)
-        .encode()
-        .context(EncodeStatusReqSnafu)?;
+    get_status_scoped(remote_stream, req, None).await
+}
 
-    // send status request
-    {
-        let mut msg_writer = get_header_msg_writer(remote_stream)
-            .context(CreateHeaderToolSnafu { action: "writer" })?;
-        match tokio::time::timeout(timeout, msg_writer.write_msg(&msg)).await {
-            Ok(result) => result.context(WriteStatusReqSnafu)?,
-            Err(_) => ControlIoTimeoutSnafu {
-                action: "write status request",
-                timeout,
-            }
-            .fail()?,
+pub async fn get_status_scoped<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
+    remote_stream: &mut S,
+    req: PbConnStatusReq,
+    namespace: Option<u64>,
+) -> super::error::Result<PbConnStatusResp> {
+    let timeout = control_io_timeout();
+    let request = match namespace {
+        Some(namespace) => PbConnRequest::StatusScoped {
+            status: req,
+            namespace,
+        },
+        None => PbConnRequest::Status(req),
+    };
+    let msg = request.encode().context(EncodeStatusReqSnafu)?;
+
+    let session =
+        ClientHeaderSession::from_process().context(CreateHeaderToolSnafu { action: "session" })?;
+    match tokio::time::timeout(timeout, session.write_initial(remote_stream, &msg)).await {
+        Ok(result) => result.context(WriteStatusReqSnafu)?,
+        Err(_) => ControlIoTimeoutSnafu {
+            action: "write status request",
+            timeout,
         }
+        .fail()?,
     }
 
     // get status
-    let mut msg_reader =
-        get_header_msg_reader(remote_stream).context(CreateHeaderToolSnafu { action: "reader" })?;
+    let mut msg_reader = session
+        .response_reader(remote_stream)
+        .context(CreateHeaderToolSnafu { action: "reader" })?;
     let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
         Ok(result) => result.context(ReadStatusRespSnafu)?,
         Err(_) => ControlIoTimeoutSnafu {
@@ -50,8 +60,12 @@ pub async fn get_status<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
     let resp = PbConnResponse::decode(msg).context(DecodeStatusRespSnafu)?;
     match resp {
         PbConnResponse::Status(status) => Ok(status),
-        _ => StatusRespNotMatchSnafu {
-            resp: String::from_utf8_lossy(msg),
+        PbConnResponse::Error(error) => StatusRespNotMatchSnafu {
+            resp: format!("{}: {}", error.code, error.message),
+        }
+        .fail(),
+        other => StatusRespNotMatchSnafu {
+            resp: format!("{other:?}"),
         }
         .fail(),
     }

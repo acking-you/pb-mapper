@@ -13,9 +13,8 @@ use super::error::{
 use crate::common::config::control_io_timeout;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
-use crate::common::message::{
-    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
-};
+use crate::common::message::secure::ClientHeaderSession;
+use crate::common::message::MessageReader;
 use crate::local::server::error::CreateHeaderToolSnafu;
 use crate::snafu_error_handle;
 use uni_stream::addr::{each_addr, ToSocketAddrs};
@@ -34,6 +33,7 @@ pub async fn handle_stream<
     client_id: u32,
     server_generation: u64,
     keep_alive: bool,
+    namespace: Option<u64>,
 ) -> Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -42,13 +42,20 @@ where
     let client_id_span = info_span!("client_id", key_ref, client_id);
     let _enter = client_id_span.enter();
 
-    let msg = PbConnRequest::Stream {
-        key: key.to_string(),
-        dst_id: client_id,
-        server_generation,
-    }
-    .encode()
-    .context(EncodePbConnStreamReqSnafu)?;
+    let request = match namespace {
+        Some(namespace) => PbConnRequest::StreamScoped {
+            key: key.to_string(),
+            namespace,
+            dst_id: client_id,
+            server_generation,
+        },
+        None => PbConnRequest::Stream {
+            key: key.to_string(),
+            dst_id: client_id,
+            server_generation,
+        },
+    };
+    let msg = request.encode().context(EncodePbConnStreamReqSnafu)?;
 
     let timeout = control_io_timeout();
     let mut remote_stream =
@@ -70,9 +77,9 @@ where
 
     // write stream request and read response
     let codec_key = {
-        let mut msg_writer = get_header_msg_writer(&mut remote_stream)
-            .context(CreateHeaderToolSnafu { action: "writer" })?;
-        match tokio::time::timeout(timeout, msg_writer.write_msg(&msg)).await {
+        let session = ClientHeaderSession::from_process()
+            .context(CreateHeaderToolSnafu { action: "session" })?;
+        match tokio::time::timeout(timeout, session.write_initial(&mut remote_stream, &msg)).await {
             Ok(result) => result.context(WritePbConnStreamReqSnafu)?,
             Err(_) => ControlIoTimeoutSnafu {
                 action: "write pb conn stream request",
@@ -80,7 +87,8 @@ where
             }
             .fail()?,
         }
-        let mut msg_reader = get_header_msg_reader(&mut remote_stream)
+        let mut msg_reader = session
+            .response_reader(&mut remote_stream)
             .context(CreateHeaderToolSnafu { action: "reader" })?;
         let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
             Ok(result) => result.context(ReadPbConnStreamRespSnafu)?,
@@ -93,6 +101,10 @@ where
         let resp = PbConnResponse::decode(msg).context(DecodePbConnStreamRespSnafu)?;
         match resp {
             PbConnResponse::Stream { codec_key } => codec_key,
+            PbConnResponse::Error(error) => PbConnStreamRespNotMatchSnafu {
+                resp: format!("{}: {}", error.code, error.message),
+            }
+            .fail()?,
             _ => PbConnStreamRespNotMatchSnafu {
                 resp: format!("{resp:?}"),
             }
