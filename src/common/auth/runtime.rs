@@ -68,6 +68,11 @@ impl AuthRuntime {
                     ColdMetadata {
                         issued_at: entry.issued_at,
                         label: entry.label.clone(),
+                        tombstoned_at: match state {
+                            SlotState::Expired => entry.tombstoned_at.unwrap_or(entry.expires_at),
+                            SlotState::Revoked => entry.tombstoned_at.unwrap_or(0),
+                            SlotState::Free | SlotState::Active => 0,
+                        },
                     },
                 );
                 if state == SlotState::Active {

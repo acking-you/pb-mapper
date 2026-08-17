@@ -58,6 +58,7 @@ pub(super) fn build_snapshot(
                 issued_at: cold.issued_at,
                 expires_at: slot.expires_at,
                 label: cold.label.clone(),
+                tombstoned_at: (cold.tombstoned_at != 0).then_some(cold.tombstoned_at),
             })
         })
         .collect();
@@ -222,8 +223,9 @@ pub(super) fn apply_persisted_mutation(
                 })?;
             entry.expires_at = expires_at;
             entry.state = SlotState::Active;
+            entry.tombstoned_at = None;
         }
-        StateMutation::Revoke { key_id, .. } => {
+        StateMutation::Revoke { key_id, at } => {
             let entry = snapshot
                 .entries
                 .iter_mut()
@@ -236,6 +238,7 @@ pub(super) fn apply_persisted_mutation(
                     )
                 })?;
             entry.state = SlotState::Revoked;
+            entry.tombstoned_at = Some(at);
         }
         StateMutation::LegacyProtocol(policy) => snapshot.legacy_protocol = policy,
     }

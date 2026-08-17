@@ -416,6 +416,7 @@ pub struct AuthStatus {
 struct ColdMetadata {
     issued_at: u64,
     label: Option<String>,
+    tombstoned_at: u64,
 }
 
 enum AuthCommand {
@@ -660,6 +661,8 @@ struct PersistedEntry {
     issued_at: u64,
     expires_at: u64,
     label: Option<String>,
+    #[serde(default)]
+    tombstoned_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

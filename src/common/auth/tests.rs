@@ -105,6 +105,15 @@ async fn issue_renew_revoke_and_persist() {
             .code,
         "temporary_key_revoked"
     );
+    let instance_id = load_or_create_instance_id(&state_dir).unwrap();
+    let persisted = try_load_persisted_state(&config, &admin_key, instance_id).unwrap();
+    let revoked = persisted
+        .entries
+        .iter()
+        .find(|entry| entry.key_id == issued.metadata.key_id)
+        .unwrap();
+    assert_eq!(revoked.state, SlotState::Revoked);
+    assert!(revoked.tombstoned_at.is_some());
     drop(runtime);
 
     tokio::time::sleep(Duration::from_millis(20)).await;

@@ -54,7 +54,6 @@ pub(super) async fn run_auth_actor(
         mut admin_replays,
         mut admin_replay_order,
     } = state;
-    let now = unix_seconds();
     let mut tombstones = inner
         .slots
         .read()
@@ -62,12 +61,22 @@ pub(super) async fn run_auth_actor(
         .iter()
         .enumerate()
         .filter_map(|(index, slot)| {
-            matches!(slot.state, SlotState::Expired | SlotState::Revoked).then_some((
-                now.saturating_add(TOMBSTONE_RETENTION.as_secs()),
-                make_key_id(slot.generation, index as u32),
+            if !matches!(slot.state, SlotState::Expired | SlotState::Revoked) {
+                return None;
+            }
+            let key_id = make_key_id(slot.generation, index as u32);
+            let tombstoned_at = cold
+                .get(&key_id)
+                .map(|metadata| metadata.tombstoned_at)
+                .unwrap_or(0);
+            Some((
+                tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs()),
+                key_id,
             ))
         })
-        .collect::<VecDeque<_>>();
+        .collect::<Vec<_>>();
+    tombstones.sort_unstable_by_key(|(cleanup_at, _)| *cleanup_at);
+    let mut tombstones = VecDeque::from(tombstones);
     let mut last_snapshot_at = unix_seconds();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -87,7 +96,15 @@ pub(super) async fn run_auth_actor(
                         if slot.generation == key_generation(key_id) && slot.state == SlotState::Active {
                             slot.state = SlotState::Expired;
                             lease.cancellation.cancel();
-                            tombstones.push_back((now.saturating_add(TOMBSTONE_RETENTION.as_secs()), key_id));
+                            let tombstoned_at = slot.expires_at;
+                            if let Some(metadata) = cold.get_mut(&key_id) {
+                                metadata.tombstoned_at = tombstoned_at;
+                            }
+                            push_tombstone(
+                                &mut tombstones,
+                                tombstoned_at,
+                                key_id,
+                            );
                             tracing::info!(
                                 event = "temporary_key_expired",
                                 auth_stage = "expiry",
@@ -186,7 +203,7 @@ pub(super) async fn run_auth_actor(
                     }
                     AuthCommand::Revoke { authority, key_id, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_revoke(&inner, &config, &cold, &mut tombstones, key_id));
+                            .and_then(|()| actor_revoke(&inner, &config, &mut cold, &mut tombstones, key_id));
                         let _ = response.send(result);
                     }
                     AuthCommand::Gc { authority, response } => {
@@ -379,6 +396,7 @@ fn actor_issue(
         issued_at,
         expires_at,
         label: label.clone(),
+        tombstoned_at: None,
     };
     append_mutation(
         config,
@@ -391,7 +409,14 @@ fn actor_issue(
     slot.state = SlotState::Active;
     slot.expires_at = expires_at;
     slot.lease = Arc::downgrade(&lease);
-    cold.insert(key_id, ColdMetadata { issued_at, label });
+    cold.insert(
+        key_id,
+        ColdMetadata {
+            issued_at,
+            label,
+            tombstoned_at: 0,
+        },
+    );
     wheel.insert(lease);
     drop(slots);
     metadata_with_credential(inner, cold, key_id, true)
@@ -512,7 +537,7 @@ fn actor_renew(
 fn actor_revoke(
     inner: &Arc<AuthStateInner>,
     config: &AuthConfig,
-    cold: &HashMap<u64, ColdMetadata>,
+    cold: &mut HashMap<u64, ColdMetadata>,
     tombstones: &mut VecDeque<(u64, u64)>,
     key_id: u64,
 ) -> Result<TemporaryKeyMetadata, AuthFailure> {
@@ -532,22 +557,24 @@ fn actor_revoke(
             false,
         ));
     }
-    let cold_metadata = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
+    let label = cold
+        .get(&key_id)
+        .ok_or_else(|| key_not_found(key_id))?
+        .label
+        .clone();
     append_mutation(
         config,
         inner,
         StateMutation::Revoke { key_id, at: now },
-        audit(
-            "temporary_key_revoke",
-            Some(key_id),
-            cold_metadata.label.clone(),
-        ),
+        audit("temporary_key_revoke", Some(key_id), label.clone()),
     )?;
     slot.state = SlotState::Revoked;
     if let Some(lease) = slot.lease.upgrade() {
         lease.cancellation.cancel();
     }
-    tombstones.push_back((now.saturating_add(TOMBSTONE_RETENTION.as_secs()), key_id));
+    let cold_metadata = cold.get_mut(&key_id).ok_or_else(|| key_not_found(key_id))?;
+    cold_metadata.tombstoned_at = now;
+    push_tombstone(tombstones, now, key_id);
     Ok(TemporaryKeyMetadata {
         key_id,
         state: slot_state_name(slot.state).to_string(),
@@ -555,6 +582,12 @@ fn actor_revoke(
         expires_at: slot.expires_at,
         label: cold_metadata.label.clone(),
     })
+}
+
+fn push_tombstone(tombstones: &mut VecDeque<(u64, u64)>, tombstoned_at: u64, key_id: u64) {
+    let cleanup_at = tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs());
+    let index = tombstones.partition_point(|(current, _)| *current <= cleanup_at);
+    tombstones.insert(index, (cleanup_at, key_id));
 }
 
 fn actor_gc(
