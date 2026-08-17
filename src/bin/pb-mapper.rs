@@ -91,7 +91,11 @@ struct ServerArgs {
     #[arg(long, default_value = DEFAULT_AUTH_STATE_DIR)]
     auth_state_dir: PathBuf,
     /// Create a random administrator key before starting the relay.
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        conflicts_with = "use_machine_msg_header_key",
+        default_value_t = false
+    )]
     init_admin_key: bool,
     /// Replace an existing administrator key when used with --init-admin-key.
     #[arg(long, requires = "init_admin_key", default_value_t = false)]
@@ -483,6 +487,13 @@ mod tests {
         assert!(Cli::try_parse_from(
             ["pb-mapper", "admin", "key", "issue", "--ttl", "1fortnight",]
         )
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "pb-mapper",
+            "server",
+            "--init-admin-key",
+            "--use-machine-msg-header-key",
+        ])
         .is_err());
     }
 }

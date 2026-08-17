@@ -253,7 +253,8 @@ New clients always emit protocol v2. A v0.4 server defaults to accepting legacy
 framing so older clients can be upgraded without an outage. Operators can view
 legacy connection counters, upgrade all clients, and then set the policy to
 `deny`. Upgrade the relay before any client because v0.3 relays do not understand
-the v2 first-frame magic.
+the v2 first-frame magic. An explicitly configured `PB_MAPPER_LEGACY_PROTOCOL`
+is trimmed and must be `allow` or `deny`; malformed values fail closed to `deny`.
 
 Fresh servers generate a random administrator key. Both the relay and install
 scripts preserve an existing `/var/lib/pb-mapper-server/msg_header_key` by

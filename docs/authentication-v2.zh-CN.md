@@ -196,7 +196,9 @@ human 输出单个合并表格。稳定错误结构包含 `code`、`message`、
 
 新客户端固定发送 V2。0.4 服务端默认暂时接受旧帧，方便滚动升级；确认
 `active_legacy_connections` 归零后，可执行 `legacy-protocol set deny`。必须先升级中继、
-再升级客户端，因为 0.3 中继无法识别 V2 首帧 magic。
+再升级客户端，因为 0.3 中继无法识别 V2 首帧 magic。显式配置的
+`PB_MAPPER_LEGACY_PROTOCOL` 会先去除首尾空白，并且只能是 `allow` 或 `deny`；
+无效值会 fail closed 为 `deny`。
 
 新安装会随机生成管理员密钥。中继自身与安装脚本在未配置新 key 或环境变量时，如果
 发现旧的 `/var/lib/pb-mapper-server/msg_header_key`，会将其复制到新路径，保留现有

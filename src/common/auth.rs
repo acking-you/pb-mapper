@@ -96,15 +96,37 @@ impl Default for AuthConfig {
                 MIN_TEMP_KEY_TTL.as_secs(),
                 365 * 24 * 60 * 60,
             )),
-            legacy_protocol: match std::env::var("PB_MAPPER_LEGACY_PROTOCOL")
-                .unwrap_or_else(|_| "allow".to_string())
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "deny" => LegacyProtocolPolicy::Deny,
-                _ => LegacyProtocolPolicy::Allow,
-            },
+            legacy_protocol: legacy_protocol_from_env(),
         }
+    }
+}
+
+fn legacy_protocol_from_env() -> LegacyProtocolPolicy {
+    match std::env::var("PB_MAPPER_LEGACY_PROTOCOL") {
+        Err(std::env::VarError::NotPresent) => LegacyProtocolPolicy::Allow,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::error!(
+                event = "legacy_protocol_config_invalid",
+                "PB_MAPPER_LEGACY_PROTOCOL is not UTF-8; denying legacy framing"
+            );
+            LegacyProtocolPolicy::Deny
+        }
+        Ok(value) => parse_legacy_protocol_policy(&value).unwrap_or_else(|| {
+            tracing::error!(
+                event = "legacy_protocol_config_invalid",
+                value,
+                "PB_MAPPER_LEGACY_PROTOCOL must be `allow` or `deny`; denying legacy framing"
+            );
+            LegacyProtocolPolicy::Deny
+        }),
+    }
+}
+
+fn parse_legacy_protocol_policy(value: &str) -> Option<LegacyProtocolPolicy> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "allow" => Some(LegacyProtocolPolicy::Allow),
+        "deny" => Some(LegacyProtocolPolicy::Deny),
+        _ => None,
     }
 }
 

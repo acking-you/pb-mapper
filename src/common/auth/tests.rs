@@ -22,6 +22,20 @@ fn temp_state_dir(name: &str) -> PathBuf {
 }
 
 #[test]
+fn legacy_protocol_policy_trims_valid_values_and_rejects_unknown_values() {
+    assert_eq!(
+        parse_legacy_protocol_policy(" allow\n"),
+        Some(LegacyProtocolPolicy::Allow)
+    );
+    assert_eq!(
+        parse_legacy_protocol_policy(" DENY "),
+        Some(LegacyProtocolPolicy::Deny)
+    );
+    assert_eq!(parse_legacy_protocol_policy("enabled"), None);
+    assert_eq!(parse_legacy_protocol_policy(""), None);
+}
+
+#[test]
 fn key_id_round_trip() {
     let key_id = make_key_id(42, 65_535);
     assert_eq!(key_generation(key_id), 42);
