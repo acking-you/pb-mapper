@@ -1,3 +1,15 @@
+//! Relay server domain model and module wiring.
+//!
+//! ```text
+//! TCP listener -> connection authentication/dispatch -> ManagerTask queue
+//!                                                    -> routing runtime
+//! registered control connection <------ ConnTask ----+------> subscriber
+//! ```
+//!
+//! `connection` owns per-socket protocol/authentication concerns, while `runtime`
+//! serializes global routing maps and quotas. Service-side and client-side tunnel loops
+//! remain isolated in `server` and `client`.
+
 mod admin;
 mod client;
 mod error;

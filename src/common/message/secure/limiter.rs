@@ -1,3 +1,14 @@
+//! Cardinality-bounded suppression for repeated authentication failure logs.
+//!
+//! ```text
+//! (peer IP, key id, reason) -> per-window counter -> emit first / suppress repeats
+//!                too many distinct keys ---------> shared overflow bucket
+//! ```
+//!
+//! This limits log amplification from the public relay port without changing protocol
+//! decisions: every authentication failure is still rejected, only duplicate logging
+//! is coalesced.
+
 #[derive(Clone, Copy, Debug)]
 pub struct FailureLogDecision {
     pub emit: bool,

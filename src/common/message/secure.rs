@@ -4,6 +4,18 @@
 //! request. It does not add a handshake or round trip. All following control messages on the
 //! same TCP connection use independently derived directional keys and monotonically increasing
 //! 64-bit counters.
+//!
+//! ```text
+//! first flight: PBM2 | version | key id | timestamp+salt | counter | len | ciphertext
+//!                         |           |                         |
+//!                         |           +-> replay/time checks    +-> bounded AEAD open
+//!                         +-> derive directional session keys
+//!
+//! continuation: counter(n+1) | len | ciphertext -> same authenticated session
+//! ```
+//!
+//! This root module coordinates client/server sessions. Frame mechanics, replay admission,
+//! log suppression, and protocol tests are isolated in focused child modules.
 
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};

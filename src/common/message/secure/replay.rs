@@ -1,3 +1,14 @@
+//! Fast process-local duplicate admission guard for protocol-v2 first flights.
+//!
+//! ```text
+//! key id + salt -> SHA-256 fingerprint -> current Bloom window
+//!                                      -> previous Bloom window
+//! ```
+//!
+//! `check_and_insert` is called while one mutex is held, making concurrent admission
+//! atomic. This Bloom filter protects all connection types from immediate duplicates;
+//! administrator mutations additionally use the exact durable replay set in `auth`.
+
 use super::*;
 
 pub(super) fn replay_fingerprint(key_id: u64, salt: &[u8; CONNECTION_SALT_LEN]) -> [u8; 32] {

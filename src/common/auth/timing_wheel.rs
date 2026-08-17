@@ -1,3 +1,14 @@
+//! Hierarchical expiry scheduler for temporary credential leases.
+//!
+//! ```text
+//! lease(expires_at) -> level/slot bucket -> one-second actor tick -> expired leases
+//!          renew ----> version bump ------^ stale bucket entries are ignored
+//! ```
+//!
+//! The wheel owns strong `Arc<AuthLease>` references. Request-facing structures retain
+//! only `Weak` references, so expiry, revoke, reset, and root rotation have one clear
+//! cancellation owner without keeping dead credentials alive indefinitely.
+
 use super::*;
 
 struct WheelEntry {

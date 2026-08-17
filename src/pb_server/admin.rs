@@ -1,3 +1,14 @@
+//! Server-side administrator request execution.
+//!
+//! ```text
+//! authenticated AdminRequest -> revalidated AuthContext -> auth actor / manager
+//!                                                        -> AdminResponse
+//! ```
+//!
+//! Credential lifecycle operations go to `AuthRuntime`; service and connection
+//! inventory requests go to the routing manager. Read operations are audited without
+//! weakening the primary response when only audit emission fails.
+
 use std::time::Duration;
 
 use tokio::net::TcpStream;

@@ -1,3 +1,15 @@
+//! Administrator CLI: command parsing, one-shot V2 requests, pagination, and rendering.
+//!
+//! ```text
+//! admin args -> AdminRequest -> authenticated V2 connection -> relay
+//!     ^                                                    |
+//!     +--- human / JSON / NDJSON <- AdminResponse <--------+
+//! ```
+//!
+//! `--all` keeps the selected output contract: human and JSON aggregate pages,
+//! while NDJSON deliberately streams one item at a time. Root-key rotation stages
+//! a recovery copy before contacting the relay, then verifies the new credential.
+
 use super::*;
 
 #[derive(Debug, Args)]

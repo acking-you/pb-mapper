@@ -1,3 +1,18 @@
+//! Public authentication runtime facade and hot-path credential checks.
+//!
+//! ```text
+//! process credential + persisted state
+//!                 |
+//!                 v
+//!       hot slot table (Weak leases) <---- request authentication
+//!                 |
+//!                 +----> lifecycle actor (strong leases + time wheel)
+//! ```
+//!
+//! Read-only authentication stays synchronous and allocation-light. Every administrator
+//! API captures a weak authority lease and sends it to the actor, where it is compared
+//! with the current lease immediately before the operation executes.
+
 use super::*;
 
 impl AuthRuntime {

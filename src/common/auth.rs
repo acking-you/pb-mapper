@@ -4,6 +4,18 @@
 //! keys are derived from `(root key, server instance id, key id)` and the hot slot table
 //! stores only lifecycle metadata plus a weak lease reference. The background actor owns
 //! the strong leases through a hierarchical timing wheel.
+//!
+//! ```text
+//! administrator key + instance id + key id -> derived temporary credential
+//!                                      |
+//! request -> AuthContext -> Weak lease -+-> actor-owned Arc lease -> timing wheel
+//!                                      +-> cancel on expiry/revoke/reset/rotation
+//!
+//! AuthRuntime facade -> serialized actor -> encrypted snapshot + WAL
+//! ```
+//!
+//! The facade/model types remain in this root module; runtime checks, actor mutations,
+//! persistence, expiry scheduling, and focused tests live in their respective children.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;

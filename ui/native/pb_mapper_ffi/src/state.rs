@@ -1,3 +1,14 @@
+//! Shared Flutter-FFI application state and module boundaries.
+//!
+//! ```text
+//! Flutter command -> Arc<Mutex<PbMapperState>> -> configuration / runtime / status
+//!                                             -> change events back to Flutter
+//! ```
+//!
+//! Slow DNS, bind, and connectivity work is deliberately performed outside the global
+//! state lock. Per-key claims prevent duplicate setup while keeping unrelated UI reads
+//! and operations responsive.
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

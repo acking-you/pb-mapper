@@ -1,3 +1,19 @@
+//! Per-connection admission, authentication, namespace resolution, and role dispatch.
+//!
+//! ```text
+//! accepted TCP socket
+//!       |
+//!       v
+//! bounded V2/legacy first frame -> AuthContext -> namespace policy
+//!       |                                      |
+//!       +-> structured auth error              +-> register / subscribe / stream
+//!                                              +-> status / administrator request
+//! ```
+//!
+//! Long-lived register and subscribe futures are raced against the credential's
+//! cancellation token here. This outer guard closes a subscriber even when the paired
+//! service stream belongs to a different credential.
+
 use super::*;
 
 pub(super) async fn handle_listener(

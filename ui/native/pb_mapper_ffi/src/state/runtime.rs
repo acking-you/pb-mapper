@@ -1,3 +1,15 @@
+//! Runtime lifecycle for the embedded relay, registered services, and local clients.
+//!
+//! ```text
+//! start relay: bind listener -> initialize app-local auth -> spawn -> mark running
+//! register:    resolved addresses -> spawn control pool -> retain JoinHandle
+//! connect:     preflight local bind -> spawn listener ----> retain JoinHandle
+//! stop:        cancel relay + abort owned tunnel tasks + clear runtime maps
+//! ```
+//!
+//! Readiness is published only after both listener binding and authentication
+//! initialization succeed, preventing the UI from displaying a phantom running relay.
+
 use super::*;
 
 impl PbMapperState {

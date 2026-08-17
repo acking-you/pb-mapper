@@ -1,3 +1,16 @@
+//! Relay orchestration and the serialized routing-manager event loop.
+//!
+//! ```text
+//! listener task ---- Accept -------+
+//! control tasks ---- Register -----+-> ManagerTask loop -> routing maps / quotas
+//! subscriber ------- Subcribe -----+                    -> ConnTask responses
+//! provider stream -- Stream/Ack ---+
+//! ```
+//!
+//! The manager loop is the single writer for connection IDs, registrations, pending
+//! streams, per-namespace counts, and rate limits. Socket I/O runs in spawned connection
+//! tasks and communicates with this state only through typed tasks.
+
 use super::*;
 
 struct RemoteIdProvider {

@@ -1,3 +1,15 @@
+//! Durable, encrypted authentication state and audit/replay retention.
+//!
+//! ```text
+//! startup:   admin.key -> decrypt snapshot -> replay WAL -> in-memory state
+//! mutation:  command   -> fsync encrypted WAL -> publish hot-state change
+//! compact:   hot state + audit + replay set -> snapshot -> truncate WAL
+//! ```
+//!
+//! Snapshot replacement and administrator-key files use atomic rename. Bounded audit
+//! and replay collections are carried through compaction so security history does not
+//! disappear when the WAL is truncated.
+
 use super::*;
 
 pub(super) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {

@@ -1,3 +1,16 @@
+//! Unified command-line entry point for every pb-mapper role.
+//!
+//! ```text
+//!                       +-> server   (relay)
+//! process args -> clap -+-> register (publish a local service)
+//!                       +-> connect  (open a local listener)
+//!                       +-> status   (namespace-scoped inspection)
+//!                       +-> admin    (credential/control plane)
+//! ```
+//!
+//! Role-specific execution stays below this dispatch layer. Administrator parsing,
+//! pagination, wire requests, and output rendering live in the `admin` module.
+
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;

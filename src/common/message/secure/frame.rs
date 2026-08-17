@@ -1,3 +1,15 @@
+//! Protocol-v2 key derivation and directional authenticated frame codecs.
+//!
+//! ```text
+//! credential + connection salt -> HKDF -> c2s key / s2c key
+//! plaintext -> counter + length + AEAD(AAD) -> encrypted frame
+//! encrypted frame -> bound length -> verify counter/tag -> plaintext
+//! ```
+//!
+//! Counters are monotonic per direction and are included in both the nonce and AAD.
+//! The initial reader can impose a smaller pre-authentication limit before allocating
+//! a body; continuation frames retain the normal protocol maximum.
+
 use super::*;
 
 #[derive(Clone)]

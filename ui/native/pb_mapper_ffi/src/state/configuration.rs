@@ -1,3 +1,14 @@
+//! User-writable configuration storage and in-memory state initialization.
+//!
+//! ```text
+//! app directory -> pb-mapper-ui/config.json -> AppConfig -> process credential
+//!               -> services.json / clients.json -> remembered tunnel definitions
+//! ```
+//!
+//! An explicit Flutter app directory wins on every platform. This same directory is
+//! the root for relay authentication state, so desktop and mobile UI processes never
+//! depend on root-owned `/var/lib` paths.
+
 use super::*;
 
 impl PbMapperState {

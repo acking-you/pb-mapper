@@ -1,3 +1,14 @@
+//! End-to-end protocol-v2 framing and admission invariants.
+//!
+//! ```text
+//! client session -> duplex transport -> ServerSecurity -> authenticated context
+//! captured frame -- concurrent replay -----------------> exactly one admission
+//! oversized first header ------------------------------> reject before body read
+//! ```
+//!
+//! These tests intentionally exercise both administrator and derived temporary
+//! credentials, while lifecycle persistence remains covered by `common::auth::tests`.
+
 use super::*;
 use crate::common::auth::{AuthConfig, LegacyProtocolPolicy};
 use crate::common::checksum::encode_temporary_credential;

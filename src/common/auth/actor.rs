@@ -1,3 +1,21 @@
+//! Serialized owner of mutable authentication lifecycle state.
+//!
+//! ```text
+//! authenticated admin command
+//!           |
+//!           v
+//!   validate current admin lease
+//!           |
+//!           v
+//! append encrypted WAL -> mutate slots / leases / timing wheel
+//!           |
+//!           +-> periodic snapshot + bounded replay/audit retention
+//! ```
+//!
+//! Keeping authorization revalidation and mutations in one actor prevents a request
+//! authenticated before root rotation from executing against the new administrator
+//! state. The actor is also the sole strong owner of temporary-key leases.
+
 use super::*;
 
 pub(super) struct AuthActorState {

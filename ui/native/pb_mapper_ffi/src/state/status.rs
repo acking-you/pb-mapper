@@ -1,3 +1,16 @@
+//! Non-blocking status views and bounded asynchronous refresh scheduling for Flutter.
+//!
+//! ```text
+//! UI read -> cached snapshot -> immediate response
+//!              |
+//!              +-- stale? -> one deduplicated network refresh -> cache + change event
+//! force refresh -----------------------------------------> awaited network result
+//! ```
+//!
+//! Service, client, and embedded-relay caches are independent. Refresh markers prevent
+//! duplicate probes, while visible events are emitted only when the displayed state
+//! actually changes.
+
 use super::*;
 
 impl PbMapperState {

@@ -1,3 +1,15 @@
+//! Authentication invariants exercised at the state-machine boundary.
+//!
+//! ```text
+//! issue -> renew -> expire/revoke -> persist/restart
+//!   |                                |
+//!   +-> lease cancellation           +-> encrypted recovery
+//! root rotate -> reject old key + reject already-authenticated old context
+//! ```
+//!
+//! Protocol framing has its own tests under `common::message::secure::tests`; this
+//! module focuses on lifecycle, persistence, audit, replay, and timing-wheel behavior.
+
 use super::*;
 
 fn temp_state_dir(name: &str) -> PathBuf {
