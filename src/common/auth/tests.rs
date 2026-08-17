@@ -21,6 +21,11 @@ fn temp_state_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("pb-mapper-{name}-{}", hex(&suffix)))
 }
 
+fn authenticate_for_test(runtime: &AuthRuntime, key_id: u64) -> Result<AuthContext, AuthFailure> {
+    let key = runtime.derive_key(key_id)?;
+    runtime.authenticate_presented(key_id, &key)
+}
+
 #[test]
 fn legacy_protocol_policy_trims_valid_values_and_rejects_unknown_values() {
     assert_eq!(
@@ -73,13 +78,13 @@ async fn issue_renew_revoke_and_persist() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = runtime.authenticate(0).unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
     let issued = runtime
         .issue(&admin, Duration::from_secs(60), Some("demo".to_string()))
         .await
         .unwrap();
     assert!(issued.credential.starts_with("pbmt1_"));
-    let context = runtime.authenticate(issued.metadata.key_id).unwrap();
+    let context = authenticate_for_test(&runtime, issued.metadata.key_id).unwrap();
     assert!(!context.is_admin);
     let cancellation = context.cancellation_token().unwrap();
     let renewed = runtime
@@ -99,8 +104,7 @@ async fn issue_renew_revoke_and_persist() {
         "temporary_key_revoked"
     );
     assert_eq!(
-        runtime
-            .authenticate(issued.metadata.key_id)
+        authenticate_for_test(&runtime, issued.metadata.key_id)
             .unwrap_err()
             .code,
         "temporary_key_revoked"
@@ -119,8 +123,7 @@ async fn issue_renew_revoke_and_persist() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     let restored = AuthRuntime::start(admin_key, config).await.unwrap();
     assert_eq!(
-        restored
-            .authenticate(issued.metadata.key_id)
+        authenticate_for_test(&restored, issued.metadata.key_id)
             .unwrap_err()
             .code,
         "temporary_key_revoked"
@@ -139,7 +142,7 @@ async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
-    let admin = runtime.authenticate(0).unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
     let before = runtime.status(&admin).await.unwrap().server_instance_id;
     let old = runtime
         .issue(
@@ -149,7 +152,7 @@ async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
         )
         .await
         .unwrap();
-    let old_context = runtime.authenticate(old.metadata.key_id).unwrap();
+    let old_context = authenticate_for_test(&runtime, old.metadata.key_id).unwrap();
     let old_cancellation = old_context.cancellation_token().unwrap();
 
     runtime.reset(&admin).await.unwrap();
@@ -157,7 +160,7 @@ async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
     let after = runtime.status(&admin).await.unwrap().server_instance_id;
     assert_ne!(after, before);
     assert!(old_cancellation.is_cancelled());
-    assert!(runtime.authenticate(old.metadata.key_id).is_err());
+    assert!(authenticate_for_test(&runtime, old.metadata.key_id).is_err());
     let replacement = runtime
         .issue(
             &admin,
@@ -185,7 +188,7 @@ async fn corrupt_wal_fails_temporary_keys_closed_until_admin_reset() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = runtime.authenticate(0).unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
     let issued = runtime
         .issue(
             &admin,
@@ -199,11 +202,10 @@ async fn corrupt_wal_fails_temporary_keys_closed_until_admin_reset() {
     std::fs::write(state_dir.join("auth.wal"), b"broken-wal").unwrap();
 
     let recovered = AuthRuntime::start(admin_key, config).await.unwrap();
-    let recovered_admin = recovered.authenticate(0).unwrap();
+    let recovered_admin = authenticate_for_test(&recovered, 0).unwrap();
     assert!(recovered.status(&recovered_admin).await.unwrap().safe_mode);
     assert_eq!(
-        recovered
-            .authenticate(issued.metadata.key_id)
+        authenticate_for_test(&recovered, issued.metadata.key_id)
             .unwrap_err()
             .code,
         "temporary_key_store_unavailable"
@@ -279,7 +281,7 @@ async fn admitted_admin_mutation_replay_survives_restart() {
     let fingerprint = [0x5a; 32];
     let timestamp = unix_seconds();
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = runtime.authenticate(0).unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
     runtime
         .claim_admin_mutation(&admin, fingerprint, timestamp)
         .await
@@ -288,7 +290,7 @@ async fn admitted_admin_mutation_replay_survives_restart() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let restored = AuthRuntime::start(admin_key, config).await.unwrap();
-    let restored_admin = restored.authenticate(0).unwrap();
+    let restored_admin = authenticate_for_test(&restored, 0).unwrap();
     assert_eq!(
         restored
             .claim_admin_mutation(&restored_admin, fingerprint, timestamp)
@@ -314,7 +316,7 @@ async fn snapshot_compaction_preserves_audit_records() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = runtime.authenticate(0).unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
     runtime
         .issue(&admin, Duration::from_secs(60), Some("audited".to_string()))
         .await

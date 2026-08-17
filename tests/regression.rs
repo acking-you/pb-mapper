@@ -107,7 +107,9 @@ async fn admin_all_preserves_json_output_mode() {
     )
     .await
     .unwrap();
-    let admin = runtime.authenticate(0).unwrap();
+    let admin = runtime
+        .authenticate_presented(0, TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+        .unwrap();
     runtime
         .issue(
             &admin,
@@ -313,7 +315,9 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
     )
     .await
     .unwrap();
-    let admin = runtime.authenticate(0).unwrap();
+    let admin = runtime
+        .authenticate_presented(0, TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+        .unwrap();
     let first = runtime
         .issue(&admin, Duration::from_secs(120), Some("first".to_string()))
         .await
@@ -442,7 +446,9 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
     )
     .await
     .unwrap();
-    let admin = runtime.authenticate(0).unwrap();
+    let admin = runtime
+        .authenticate_presented(0, TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+        .unwrap();
     let issued = runtime
         .issue(
             &admin,

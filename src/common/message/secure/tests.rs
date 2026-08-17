@@ -62,7 +62,7 @@ async fn temporary_credential_authenticates_without_storing_secret() {
     let admin = *b"0123456789abcdefghijklmnopqrstuv";
     let config = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
-    let admin_context = auth.authenticate(0).unwrap();
+    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
     let issued = auth
         .issue(&admin_context, std::time::Duration::from_secs(60), None)
         .await

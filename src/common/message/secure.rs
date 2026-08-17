@@ -359,13 +359,6 @@ impl ServerSecurity {
                 failure,
                 response_session: None,
             })?;
-        let context = self
-            .auth
-            .authenticate(0)
-            .map_err(|failure| ServerInitialError {
-                failure,
-                response_session: None,
-            })?;
         let checksum = u32::from_be_bytes(checksum_bytes);
         let datalen = reader
             .read_u32()
@@ -416,6 +409,13 @@ impl ServerSecurity {
                     "legacy credential or encrypted frame is invalid",
                     false,
                 ),
+                response_session: None,
+            })?;
+        let context = self
+            .auth
+            .authenticate_presented(0, &key)
+            .map_err(|failure| ServerInitialError {
+                failure,
                 response_session: None,
             })?;
         let legacy_guard =

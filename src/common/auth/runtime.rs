@@ -161,21 +161,16 @@ impl AuthRuntime {
         })
     }
 
-    pub fn admin_key(&self) -> Result<AesKeyType, AuthFailure> {
+    pub(crate) fn admin_key(&self) -> Result<AesKeyType, AuthFailure> {
         Ok(self.inner()?.admin_key())
     }
 
-    pub fn derive_key(&self, key_id: u64) -> Result<AesKeyType, AuthFailure> {
+    pub(crate) fn derive_key(&self, key_id: u64) -> Result<AesKeyType, AuthFailure> {
         let inner = self.inner()?;
         if key_id == 0 {
             return Ok(inner.admin_key());
         }
         derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)
-    }
-
-    pub fn authenticate(&self, key_id: u64) -> Result<AuthContext, AuthFailure> {
-        let presented_key = self.derive_key(key_id)?;
-        self.authenticate_presented(key_id, &presented_key)
     }
 
     pub fn authenticate_presented(
