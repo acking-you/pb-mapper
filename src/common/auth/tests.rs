@@ -339,3 +339,20 @@ fn timing_wheel_ignores_stale_renewal_entry() {
     assert!(wheel.advance(now + 6).is_empty());
     assert_eq!(wheel.advance(now + 20).len(), 1);
 }
+
+#[test]
+fn timing_wheel_fast_forwards_large_clock_jumps() {
+    let now = 1_000;
+    let target = now + 7 * 24 * 60 * 60;
+    let expired = Arc::new(AuthLease::new(make_key_id(1, 0), now + 5));
+    let future = Arc::new(AuthLease::new(make_key_id(1, 1), target + 20));
+    let mut wheel = TimingWheel::new(now);
+    wheel.insert(expired.clone());
+    wheel.insert(future.clone());
+
+    let due = wheel.advance(target);
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].key_id(), expired.key_id());
+    assert!(wheel.advance(target + 19).is_empty());
+    assert_eq!(wheel.advance(target + 20).len(), 1);
+}

@@ -3,6 +3,8 @@
 //! ```text
 //! lease(expires_at) -> level/slot bucket -> one-second actor tick -> expired leases
 //!          renew ----> version bump ------^ stale bucket entries are ignored
+//!                                       |
+//! large clock jump -> bounded bucket scan + rebuild (never second-by-second catch-up)
 //! ```
 //!
 //! The wheel owns strong `Arc<AuthLease>` references. Request-facing structures retain
@@ -10,6 +12,8 @@
 //! cancellation owner without keeping dead credentials alive indefinitely.
 
 use super::*;
+
+const MAX_INCREMENTAL_ADVANCE_SECONDS: u64 = 256;
 
 struct WheelEntry {
     lease: Arc<AuthLease>,
@@ -56,6 +60,10 @@ impl TimingWheel {
     }
 
     pub(super) fn advance(&mut self, target: u64) -> Vec<Arc<AuthLease>> {
+        if target.saturating_sub(self.now) > MAX_INCREMENTAL_ADVANCE_SECONDS {
+            return self.fast_forward(target);
+        }
+
         let mut due = Vec::new();
         while self.now < target {
             self.now = self.now.saturating_add(1);
@@ -77,6 +85,28 @@ impl TimingWheel {
                         self.insert(entry.lease);
                     }
                 }
+            }
+        }
+        due
+    }
+
+    fn fast_forward(&mut self, target: u64) -> Vec<Arc<AuthLease>> {
+        self.now = target;
+        let mut entries = Vec::new();
+        take_all_entries(&mut self.level0, &mut entries);
+        take_all_entries(&mut self.level1, &mut entries);
+        take_all_entries(&mut self.level2, &mut entries);
+        take_all_entries(&mut self.level3, &mut entries);
+
+        let mut due = Vec::new();
+        for entry in entries {
+            if entry.version != entry.lease.wheel_version.load(Ordering::Acquire) {
+                continue;
+            }
+            if entry.lease.expires_at() <= target {
+                due.push(entry.lease);
+            } else {
+                self.insert_with_version(entry.lease, entry.version);
             }
         }
         due
@@ -112,4 +142,10 @@ impl TimingWheel {
 
 fn empty_buckets(count: usize) -> Vec<Vec<WheelEntry>> {
     std::iter::repeat_with(Vec::new).take(count).collect()
+}
+
+fn take_all_entries(buckets: &mut [Vec<WheelEntry>], entries: &mut Vec<WheelEntry>) {
+    for bucket in buckets {
+        entries.append(bucket);
+    }
 }
