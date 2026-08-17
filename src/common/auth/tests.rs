@@ -220,6 +220,14 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
     };
     let runtime = AuthRuntime::start(old_key, config).await.unwrap();
     let old_admin = runtime.authenticate_presented(0, &old_key).unwrap();
+    let mistyped_key = *b"1123456789abcdefghijklmnopqrstuv";
+    assert_eq!(
+        runtime
+            .authenticate_presented(0, &mistyped_key)
+            .unwrap_err()
+            .code,
+        "administrator_key_invalid"
+    );
 
     runtime
         .rotate_root(&old_admin, new_key)
@@ -231,7 +239,7 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
             .authenticate_presented(0, &old_key)
             .unwrap_err()
             .code,
-        "administrator_key_rotated"
+        "administrator_key_invalid"
     );
     assert_eq!(
         runtime

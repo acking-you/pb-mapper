@@ -187,8 +187,8 @@ impl AuthRuntime {
             if !bool::from(presented_key.ct_eq(&admin.key)) {
                 inner.auth_failures.fetch_add(1, Ordering::Relaxed);
                 return Err(AuthFailure::new(
-                    "administrator_key_rotated",
-                    "administrator credential no longer matches the active root key",
+                    "administrator_key_invalid",
+                    "administrator credential does not match the active root key",
                     false,
                 ));
             }

@@ -174,10 +174,13 @@ async fn read_secure_request(
 }
 
 fn auth_config(server_addr: SocketAddr) -> AuthConfig {
+    static CONFIG_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
     set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
+    let sequence = CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     AuthConfig {
         state_dir: std::env::temp_dir().join(format!(
-            "pb-mapper-regression-{}-{}",
+            "pb-mapper-regression-{}-{}-{sequence}",
             std::process::id(),
             server_addr.port()
         )),
