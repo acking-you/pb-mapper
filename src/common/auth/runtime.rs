@@ -32,14 +32,19 @@ impl AuthRuntime {
     pub async fn start(admin_key: AesKeyType, config: AuthConfig) -> Result<Self, AuthFailure> {
         prepare_state_dir(&config.state_dir)?;
         let instance_id = load_or_create_instance_id(&config.state_dir)?;
-        let (loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
+        let (mut loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
+        let now = unix_seconds();
+        if let Some(state) = loaded.as_mut() {
+            if normalize_tombstone_times(state, now) {
+                write_snapshot_and_truncate_wal(&config, &admin_key, state)?;
+            }
+        }
         let mut slots = (0..config.max_temporary_keys)
             .map(|_| SlotHot::default())
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let mut cold = HashMap::new();
-        let mut wheel = TimingWheel::new(unix_seconds());
-        let now = unix_seconds();
+        let mut wheel = TimingWheel::new(now);
 
         let admin_lease = Arc::new(AuthLease::new(0, u64::MAX));
         if let Some(state) = loaded.as_ref() {
@@ -70,7 +75,7 @@ impl AuthRuntime {
                         label: entry.label.clone(),
                         tombstoned_at: match state {
                             SlotState::Expired => entry.tombstoned_at.unwrap_or(entry.expires_at),
-                            SlotState::Revoked => entry.tombstoned_at.unwrap_or(0),
+                            SlotState::Revoked => entry.tombstoned_at.unwrap_or(now),
                             SlotState::Free | SlotState::Active => 0,
                         },
                     },

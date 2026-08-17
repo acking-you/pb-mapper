@@ -1,7 +1,7 @@
 //! Durable, encrypted authentication state and audit/replay retention.
 //!
 //! ```text
-//! startup:   admin.key -> decrypt snapshot -> replay WAL -> in-memory state
+//! startup:   admin.key -> decrypt snapshot -> replay WAL -> normalize -> in-memory state
 //! mutation:  command   -> fsync encrypted WAL -> publish hot-state change
 //! compact:   hot state + audit + replay set -> snapshot -> truncate WAL
 //! ```
@@ -79,6 +79,33 @@ pub(super) fn build_snapshot(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone(),
     }
+}
+
+pub(super) fn normalize_tombstone_times(snapshot: &mut PersistedSnapshot, now: u64) -> bool {
+    let mut changed = false;
+    for entry in &mut snapshot.entries {
+        if entry.tombstoned_at.is_some() {
+            continue;
+        }
+        let tombstoned_at = match entry.state {
+            SlotState::Expired => Some(entry.expires_at),
+            SlotState::Revoked => snapshot
+                .audit_records
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.action == "temporary_key_revoke" && record.key_id == Some(entry.key_id)
+                })
+                .map(|record| record.at)
+                .or(Some(now)),
+            SlotState::Free | SlotState::Active => None,
+        };
+        if tombstoned_at.is_some() {
+            entry.tombstoned_at = tombstoned_at;
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(super) fn empty_snapshot(

@@ -54,6 +54,7 @@ pub(super) async fn run_auth_actor(
         mut admin_replays,
         mut admin_replay_order,
     } = state;
+    let now = unix_seconds();
     let mut tombstones = inner
         .slots
         .read()
@@ -68,7 +69,7 @@ pub(super) async fn run_auth_actor(
             let tombstoned_at = cold
                 .get(&key_id)
                 .map(|metadata| metadata.tombstoned_at)
-                .unwrap_or(0);
+                .unwrap_or(now);
             Some((
                 tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs()),
                 key_id,

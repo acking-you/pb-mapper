@@ -425,3 +425,45 @@ fn replay_pruning_removes_only_records_outside_the_retention_window() {
     assert_eq!(replay_order.len(), 1);
     assert_eq!(replay_order[0].fingerprint, current.fingerprint);
 }
+
+#[test]
+fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
+    let now = 10_000;
+    let revoked_with_audit = PersistedEntry {
+        key_id: make_key_id(1, 0),
+        state: SlotState::Revoked,
+        issued_at: 100,
+        expires_at: 20_000,
+        label: None,
+        tombstoned_at: None,
+    };
+    let revoked_without_audit = PersistedEntry {
+        key_id: make_key_id(1, 1),
+        state: SlotState::Revoked,
+        issued_at: 100,
+        expires_at: 20_000,
+        label: None,
+        tombstoned_at: None,
+    };
+    let audit_at = now - 30;
+    let mut snapshot = PersistedSnapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        instance_id: [1; INSTANCE_ID_LEN],
+        generations: vec![1, 1],
+        entries: vec![revoked_with_audit, revoked_without_audit],
+        legacy_protocol: LegacyProtocolPolicy::Deny,
+        admin_replays: Vec::new(),
+        audit_records: VecDeque::from([AuditRecord {
+            at: audit_at,
+            action: "temporary_key_revoke".to_string(),
+            key_id: Some(make_key_id(1, 0)),
+            label: None,
+        }]),
+    };
+
+    assert!(normalize_tombstone_times(&mut snapshot, now));
+    assert_eq!(snapshot.entries[0].tombstoned_at, Some(audit_at));
+    assert_eq!(snapshot.entries[1].tombstoned_at, Some(now));
+    assert!(!normalize_tombstone_times(&mut snapshot, now + 1));
+    assert_eq!(snapshot.entries[1].tombstoned_at, Some(now));
+}
