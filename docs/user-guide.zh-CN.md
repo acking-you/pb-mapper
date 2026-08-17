@@ -206,8 +206,9 @@ flutter run
 - `PB_MAPPER_CONTROL_SUSPECT_GRACE`：远端注册探测失败后的额外宽限时间，超过后主动重连，默认 `2s`
 - `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`：server-cli 每次远端注册状态探测的超时时间，默认 `1s`
 - `PB_MAPPER_SERVER_LEASE_TIMEOUT`：server 侧 V2 已注册控制连接的空闲租约超时，默认 `15s`
-- `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`：client 侧本地 listener 重新确认远端 service key 仍已注册的间隔，默认 `1s`
-- `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`：client 侧每次远端 key 健康检查的超时时间，默认 `1s`
+- `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`：client 侧本地 listener 重新确认远端 service key 仍已注册的间隔，默认 `15s`
+- `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`：client 侧每次远端 key 健康检查的超时时间，默认 `5s`
+- `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`：连续多少次健康检查失败后才重启 client 侧本地 listener，默认 `3`
 - `PB_MAPPER_TUNNEL_IDLE_TIMEOUT`：TCP 隧道双向完全空闲后的关闭时间，默认 `1h`
 - `PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT`：TCP 隧道半关闭后另一方向无数据时的关闭时间，默认 `60s`
 - `RUST_LOG`：日志级别，例如 `info` 或 `debug`

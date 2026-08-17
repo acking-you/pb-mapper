@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pb_mapper::common::message::command::{
@@ -334,9 +334,10 @@ async fn client_closes_initial_status_probe_after_key_check() {
 }
 
 #[tokio::test]
-async fn client_rechecks_remote_key_while_listener_is_active() {
+async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
     let _health_interval = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL", "20ms");
     let _health_timeout = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT", "200ms");
+    let _health_threshold = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD", "3");
 
     let local_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = local_probe.local_addr().unwrap();
@@ -344,15 +345,16 @@ async fn client_rechecks_remote_key_while_listener_is_active() {
 
     let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = remote_listener.local_addr().unwrap();
-    let key_available = Arc::new(AtomicBool::new(true));
+    let failed_status_responses = Arc::new(AtomicUsize::new(0));
     let status_count = Arc::new(AtomicUsize::new(0));
+    let status_changes = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let fake_key_available = key_available.clone();
+    let fake_failed_status_responses = failed_status_responses.clone();
     let fake_status_count = status_count.clone();
     let fake_server = tokio::spawn(async move {
         loop {
             let (mut stream, _) = remote_listener.accept().await.unwrap();
-            let key_available = fake_key_available.clone();
+            let failed_status_responses = fake_failed_status_responses.clone();
             let status_count = fake_status_count.clone();
             tokio::spawn(async move {
                 let Ok(request) = get_init_request(&mut stream, 0.into()).await else {
@@ -361,7 +363,14 @@ async fn client_rechecks_remote_key_while_listener_is_active() {
                 match request {
                     PbConnRequest::Status(PbConnStatusReq::Service { key }) => {
                         status_count.fetch_add(1, Ordering::SeqCst);
-                        let connections = if key_available.load(Ordering::SeqCst) {
+                        let should_fail = failed_status_responses
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                                remaining.checked_sub(1)
+                            })
+                            .is_ok();
+                        let connections = if should_fail {
+                            Vec::new()
+                        } else {
                             vec![PbServiceConnStatus {
                                 conn_id: 1,
                                 generation: 1,
@@ -369,8 +378,6 @@ async fn client_rechecks_remote_key_while_listener_is_active() {
                                 healthy: true,
                                 last_rx_age_ms: 0,
                             }]
-                        } else {
-                            Vec::new()
                         };
                         let response =
                             PbConnResponse::Status(PbConnStatusResp::Service { key, connections })
@@ -381,10 +388,15 @@ async fn client_rechecks_remote_key_while_listener_is_active() {
                     }
                     PbConnRequest::Status(PbConnStatusReq::Keys) => {
                         status_count.fetch_add(1, Ordering::SeqCst);
-                        let keys = if key_available.load(Ordering::SeqCst) {
-                            vec!["sf-backend".to_string()]
-                        } else {
+                        let should_fail = failed_status_responses
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                                remaining.checked_sub(1)
+                            })
+                            .is_ok();
+                        let keys = if should_fail {
                             Vec::new()
+                        } else {
+                            vec!["sf-backend".to_string()]
                         };
                         let response = PbConnResponse::Status(PbConnStatusResp::Keys(keys))
                             .encode()
@@ -392,19 +404,25 @@ async fn client_rechecks_remote_key_while_listener_is_active() {
                         let mut writer = get_header_msg_writer(&mut stream).unwrap();
                         writer.write_msg(&response).await.unwrap();
                     }
-                    PbConnRequest::Subcribe { .. } => {}
+                    PbConnRequest::Subcribe { .. } => std::future::pending().await,
                     _ => {}
                 }
             });
         }
     });
 
+    let callback_status_changes = status_changes.clone();
     let client = tokio::spawn(run_client_side_cli_with_callback::<TcpListenerProvider, _>(
         local_addr,
         remote_addr,
         Arc::from("sf-backend"),
         false,
-        None,
+        Some(Box::new(move |status| {
+            callback_status_changes
+                .lock()
+                .unwrap()
+                .push(status.to_string());
+        })),
     ));
 
     timeout(Duration::from_secs(1), async {
@@ -430,18 +448,28 @@ async fn client_rechecks_remote_key_while_listener_is_active() {
     .expect("client listener did not bind after key probe");
 
     let baseline = status_count.load(Ordering::SeqCst);
-    key_available.store(false, Ordering::SeqCst);
+    failed_status_responses.store(2, Ordering::SeqCst);
 
     timeout(Duration::from_secs(1), async {
         loop {
-            if status_count.load(Ordering::SeqCst) > baseline {
+            if status_count.load(Ordering::SeqCst) >= baseline + 3 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("client did not recheck remote key while listener was active");
+    .expect("client did not recover after one failed health check");
+
+    assert!(
+        TcpStream::connect(local_addr).await.is_ok(),
+        "client listener stopped after one transient health-check failure"
+    );
+    assert_eq!(
+        status_changes.lock().unwrap().as_slice(),
+        ["connected"],
+        "a single failed health check must not restart the listener"
+    );
 
     client.abort();
     fake_server.abort();

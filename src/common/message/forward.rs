@@ -295,16 +295,45 @@ impl ForwardDirectionState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ForwardActivity {
+    bytes: usize,
+    at: Instant,
+}
+
+async fn copy_with_activity<R: ForwardReader, W: ForwardWriter>(
+    mut reader: R,
+    mut writer: W,
+    activity_tx: tokio::sync::mpsc::UnboundedSender<ForwardActivity>,
+) -> Result<usize> {
+    let mut length = 0;
+    loop {
+        let src = reader.read().await?;
+        let n = src.len();
+        if n == 0 {
+            break;
+        }
+        writer.write(src).await?;
+        length += n;
+        let _ = activity_tx.send(ForwardActivity {
+            bytes: n,
+            at: Instant::now(),
+        });
+    }
+    writer.shutdown().await;
+    Ok(length)
+}
+
 async fn start_forward_with_config<
     ClientReader: ForwardReader,
     ClientWriter: ForwardWriter,
     ServerReader: ForwardReader,
     ServerWriter: ForwardWriter,
 >(
-    mut client_reader: ClientReader,
-    mut client_writer: ClientWriter,
-    mut server_reader: ServerReader,
-    mut server_writer: ServerWriter,
+    client_reader: ClientReader,
+    client_writer: ClientWriter,
+    server_reader: ServerReader,
+    server_writer: ServerWriter,
     timeout_config: ForwardTimeoutConfig,
 ) {
     let tunnel_idle_enabled = !timeout_config.tunnel_idle_timeout.is_zero();
@@ -314,10 +343,18 @@ async fn start_forward_with_config<
     tokio::pin!(tunnel_idle_sleep);
     tokio::pin!(half_close_idle_sleep);
 
+    let (client_activity_tx, mut client_activity_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (server_activity_tx, mut server_activity_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Keep each direction as one pinned future. Recreating a combined read/write future in every
+    // `select!` iteration can cancel it after the read consumed bytes but before the write
+    // completed, silently dropping a response tail when the peer direction finishes first.
+    let client_to_server = copy_with_activity(client_reader, server_writer, client_activity_tx);
+    let server_to_client = copy_with_activity(server_reader, client_writer, server_activity_tx);
+    tokio::pin!(client_to_server);
+    tokio::pin!(server_to_client);
+
     let mut client_state = ForwardDirectionState::default();
     let mut server_state = ForwardDirectionState::default();
-    let mut client_writer_shutdown = false;
-    let mut server_writer_shutdown = false;
 
     loop {
         let client_done = client_state.is_done();
@@ -328,9 +365,27 @@ async fn start_forward_with_config<
         }
 
         tokio::select! {
-            result = forward_once(&mut client_reader, &mut server_writer), if !client_done => {
-                let (should_continue, reached_eof) = handle_forward_step(
-                    result,
+            biased;
+
+            result = &mut client_to_server, if !client_done => {
+                let failed = result.is_err();
+                client_state.result = Some(result);
+                reset_sleep(&mut half_close_idle_sleep, timeout_config.half_close_idle_timeout);
+                if failed {
+                    break;
+                }
+            }
+            result = &mut server_to_client, if !server_done => {
+                let failed = result.is_err();
+                server_state.result = Some(result);
+                reset_sleep(&mut half_close_idle_sleep, timeout_config.half_close_idle_timeout);
+                if failed {
+                    break;
+                }
+            }
+            Some(activity) = client_activity_rx.recv(), if !client_done => {
+                record_forward_activity(
+                    activity,
                     &mut client_state,
                     &mut tunnel_idle_sleep,
                     timeout_config.tunnel_idle_timeout,
@@ -338,16 +393,10 @@ async fn start_forward_with_config<
                     timeout_config.half_close_idle_timeout,
                     server_done,
                 );
-                if reached_eof {
-                    server_writer_shutdown = true;
-                }
-                if !should_continue {
-                    break;
-                }
             }
-            result = forward_once(&mut server_reader, &mut client_writer), if !server_done => {
-                let (should_continue, reached_eof) = handle_forward_step(
-                    result,
+            Some(activity) = server_activity_rx.recv(), if !server_done => {
+                record_forward_activity(
+                    activity,
                     &mut server_state,
                     &mut tunnel_idle_sleep,
                     timeout_config.tunnel_idle_timeout,
@@ -355,12 +404,6 @@ async fn start_forward_with_config<
                     timeout_config.half_close_idle_timeout,
                     client_done,
                 );
-                if reached_eof {
-                    client_writer_shutdown = true;
-                }
-                if !should_continue {
-                    break;
-                }
             }
             _ = &mut tunnel_idle_sleep, if tunnel_idle_enabled && !half_closed => {
                 tracing::debug!(
@@ -379,71 +422,41 @@ async fn start_forward_with_config<
         }
     }
 
-    if !client_writer_shutdown {
-        client_writer.shutdown().await;
-    }
-    if !server_writer_shutdown {
-        server_writer.shutdown().await;
-    }
     let client_len = client_state.len;
     let server_len = server_state.len;
     handle_forward_final_result(client_state.result, client_len, "client->server");
     handle_forward_final_result(server_state.result, server_len, "server->client");
 }
 
-enum ForwardStep {
-    Bytes(usize),
-    Eof,
-}
-
-async fn forward_once<R: ForwardReader, W: ForwardWriter>(
-    reader: &mut R,
-    writer: &mut W,
-) -> Result<ForwardStep> {
-    let src = reader.read().await?;
-    let n = src.len();
-    if n == 0 {
-        writer.shutdown().await;
-        Ok(ForwardStep::Eof)
-    } else {
-        writer.write(src).await?;
-        Ok(ForwardStep::Bytes(n))
-    }
-}
-
-fn handle_forward_step(
-    result: Result<ForwardStep>,
+fn record_forward_activity(
+    activity: ForwardActivity,
     state: &mut ForwardDirectionState,
     tunnel_idle_sleep: &mut Pin<&mut tokio::time::Sleep>,
     tunnel_idle_timeout: Duration,
     half_close_idle_sleep: &mut Pin<&mut tokio::time::Sleep>,
     half_close_idle_timeout: Duration,
     peer_done: bool,
-) -> (bool, bool) {
-    match result {
-        Ok(ForwardStep::Bytes(n)) => {
-            state.len += n;
-            reset_sleep(tunnel_idle_sleep, tunnel_idle_timeout);
-            if peer_done {
-                reset_sleep(half_close_idle_sleep, half_close_idle_timeout);
-            }
-            (true, false)
-        }
-        Ok(ForwardStep::Eof) => {
-            state.result = Some(Ok(state.len));
-            reset_sleep(half_close_idle_sleep, half_close_idle_timeout);
-            (true, true)
-        }
-        Err(e) => {
-            state.result = Some(Err(e));
-            (false, false)
-        }
+) {
+    state.len += activity.bytes;
+    reset_sleep_at(tunnel_idle_sleep, tunnel_idle_timeout, activity.at);
+    if peer_done {
+        reset_sleep_at(half_close_idle_sleep, half_close_idle_timeout, activity.at);
     }
 }
 
 fn reset_sleep(sleep: &mut Pin<&mut tokio::time::Sleep>, timeout: Duration) {
     if !timeout.is_zero() {
         sleep.as_mut().reset(Instant::now() + timeout);
+    }
+}
+
+fn reset_sleep_at(
+    sleep: &mut Pin<&mut tokio::time::Sleep>,
+    timeout: Duration,
+    activity_at: Instant,
+) {
+    if !timeout.is_zero() {
+        sleep.as_mut().reset(activity_at + timeout);
     }
 }
 
@@ -743,6 +756,7 @@ mod tests {
     use super::*;
     use crate::common::config::parse_duration;
     use crate::common::error::Error;
+    use tokio::sync::Notify;
 
     enum ReadAction {
         Data(Vec<u8>),
@@ -808,6 +822,67 @@ mod tests {
 
     impl ForwardWriter for ScriptedWriter {
         async fn write(&mut self, src: &[u8]) -> Result<()> {
+            self.state.lock().unwrap().chunks.push(src.to_vec());
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) {
+            self.state.lock().unwrap().shutdowns += 1;
+        }
+    }
+
+    struct EofAfterWriteStartsReader {
+        write_started: Arc<Notify>,
+        returned_eof: bool,
+        empty: Vec<u8>,
+    }
+
+    impl EofAfterWriteStartsReader {
+        fn new(write_started: Arc<Notify>) -> Self {
+            Self {
+                write_started,
+                returned_eof: false,
+                empty: Vec::new(),
+            }
+        }
+    }
+
+    impl ForwardReader for EofAfterWriteStartsReader {
+        async fn read(&mut self) -> Result<&'_ [u8]> {
+            if self.returned_eof {
+                return std::future::pending().await;
+            }
+            self.write_started.notified().await;
+            self.returned_eof = true;
+            Ok(&self.empty)
+        }
+    }
+
+    #[derive(Clone)]
+    struct DelayedWriter {
+        state: Arc<Mutex<WriterState>>,
+        write_started: Arc<Notify>,
+        delay: Duration,
+    }
+
+    impl DelayedWriter {
+        fn new(write_started: Arc<Notify>, delay: Duration) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(WriterState::default())),
+                write_started,
+                delay,
+            }
+        }
+
+        fn chunks(&self) -> Vec<Vec<u8>> {
+            self.state.lock().unwrap().chunks.clone()
+        }
+    }
+
+    impl ForwardWriter for DelayedWriter {
+        async fn write(&mut self, src: &[u8]) -> Result<()> {
+            self.write_started.notify_one();
+            tokio::time::sleep(self.delay).await;
             self.state.lock().unwrap().chunks.push(src.to_vec());
             Ok(())
         }
@@ -908,6 +983,35 @@ mod tests {
 
         assert_eq!(client_writer_state.chunks(), vec![b"response".to_vec()]);
         assert_eq!(client_writer_state.shutdowns(), 1);
+    }
+
+    #[tokio::test]
+    async fn delayed_tail_write_survives_peer_half_close() {
+        let write_started = Arc::new(Notify::new());
+        let client_reader = EofAfterWriteStartsReader::new(write_started.clone());
+        let client_writer = DelayedWriter::new(write_started, Duration::from_millis(20));
+        let client_writer_state = client_writer.clone();
+        let tail = vec![0x5a; 499];
+        let server_reader = ScriptedReader::new([ReadAction::Data(tail.clone()), ReadAction::Eof]);
+        let server_writer = ScriptedWriter::default();
+
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            start_forward_with_config(
+                client_reader,
+                client_writer,
+                server_reader,
+                server_writer,
+                ForwardTimeoutConfig {
+                    tunnel_idle_timeout: Duration::from_secs(60 * 60),
+                    half_close_idle_timeout: Duration::from_millis(200),
+                },
+            ),
+        )
+        .await
+        .expect("delayed response tail was lost after the peer half-closed");
+
+        assert_eq!(client_writer_state.chunks(), vec![tail]);
     }
 
     #[tokio::test]

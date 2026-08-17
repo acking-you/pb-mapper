@@ -15,7 +15,10 @@ use uni_stream::udp::set_custom_timeout;
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
 use self::status::get_status;
 use self::stream::handle_local_stream;
-use crate::common::config::{client_health_check_interval, client_health_check_timeout, StatusOp};
+use crate::common::config::{
+    client_health_check_interval, client_health_check_timeout, client_health_failure_threshold,
+    StatusOp,
+};
 use crate::common::message::command::{PbConnStatusReq, PbConnStatusResp};
 use crate::common::message::forward::StreamForward;
 use crate::snafu_error_get_or_return;
@@ -143,6 +146,8 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
 
         let (stream_failure_tx, mut stream_failure_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut health_interval = tokio::time::interval(client_health_check_interval());
+        let health_failure_threshold = client_health_failure_threshold();
+        let mut consecutive_health_failures = 0usize;
         health_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         health_interval.tick().await;
 
@@ -188,19 +193,36 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
                 }
                 _ = health_interval.tick() => {
                     if let Err(reason) = probe_remote_key(remote_addr, key.as_ref()).await {
+                        consecutive_health_failures = consecutive_health_failures.saturating_add(1);
+                        if consecutive_health_failures < health_failure_threshold {
+                            tracing::warn!(
+                                event = "client_remote_health_check_missed",
+                                key = %key,
+                                local_addr = %local_addr,
+                                remote_addr = %remote_addr,
+                                reason = %reason,
+                                consecutive_failures = consecutive_health_failures,
+                                failure_threshold = health_failure_threshold,
+                                "client remote health check failed; listener remains active"
+                            );
+                            continue;
+                        }
                         tracing::warn!(
                             event = "client_remote_health_check_failed",
                             key = %key,
                             local_addr = %local_addr,
                             remote_addr = %remote_addr,
                             reason = %reason,
-                            "client remote health check failed; listener will restart"
+                            consecutive_failures = consecutive_health_failures,
+                            failure_threshold = health_failure_threshold,
+                            "client remote health checks failed repeatedly; listener will restart"
                         );
                         if let Some(ref callback) = status_callback {
                             callback("retrying");
                         }
                         break;
                     }
+                    consecutive_health_failures = 0;
                     retry_backoff.reset();
                 }
                 Some(stream_failure) = stream_failure_rx.recv() => {
@@ -226,6 +248,8 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
                         }
                         break;
                     }
+                    consecutive_health_failures = 0;
+                    retry_backoff.reset();
                 }
             }
         }

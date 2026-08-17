@@ -171,6 +171,8 @@ pub const PB_MAPPER_REGISTRATION_PROBE_TIMEOUT: &str = "PB_MAPPER_REGISTRATION_P
 pub const PB_MAPPER_SERVER_LEASE_TIMEOUT: &str = "PB_MAPPER_SERVER_LEASE_TIMEOUT";
 pub const PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL: &str = "PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL";
 pub const PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT: &str = "PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT";
+pub const PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD: &str =
+    "PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD";
 pub const PB_MAPPER_LOG_FORMAT: &str = "PB_MAPPER_LOG_FORMAT";
 const DEFAULT_CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_millis(300);
@@ -182,8 +184,9 @@ const DEFAULT_CONTROL_HEARTBEAT_TOLERANCE: Duration = Duration::from_secs(6);
 const DEFAULT_CONTROL_SUSPECT_GRACE: Duration = Duration::from_secs(2);
 const DEFAULT_REGISTRATION_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_SERVER_LEASE_TIMEOUT: Duration = Duration::from_secs(15);
-const DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-const DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+const DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -322,6 +325,15 @@ pub fn client_health_check_timeout() -> Duration {
         PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT,
         DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT,
     )
+}
+
+pub fn client_health_failure_threshold() -> usize {
+    std::env::var(PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|threshold| *threshold > 0)
+        .map(|threshold| threshold.min(100))
+        .unwrap_or(DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD)
 }
 
 /// Whether the environment asks for TCP keep-alive, from `PB_MAPPER_KEEP_ALIVE`.
