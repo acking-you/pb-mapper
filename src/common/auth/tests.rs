@@ -356,3 +356,28 @@ fn timing_wheel_fast_forwards_large_clock_jumps() {
     assert!(wheel.advance(target + 19).is_empty());
     assert_eq!(wheel.advance(target + 20).len(), 1);
 }
+
+#[test]
+fn timing_wheel_returns_already_expired_insert_without_wrapping() {
+    let now = 1_000;
+    let expired = Arc::new(AuthLease::new(make_key_id(1, 0), now - 1));
+    let mut wheel = TimingWheel::new(now);
+    wheel.insert(expired.clone());
+
+    let due = wheel.advance(now);
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].key_id(), expired.key_id());
+}
+
+#[test]
+fn timing_wheel_expires_cascaded_boundary_entry_without_an_extra_tick() {
+    let now = 700;
+    let expires_at = 1_024;
+    let lease = Arc::new(AuthLease::new(make_key_id(1, 0), expires_at));
+    let mut wheel = TimingWheel::new(now);
+    wheel.insert(lease.clone());
+
+    let due = wheel.advance(expires_at);
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].key_id(), lease.key_id());
+}

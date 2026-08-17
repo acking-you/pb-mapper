@@ -5,6 +5,7 @@
 //!          renew ----> version bump ------^ stale bucket entries are ignored
 //!                                       |
 //! large clock jump -> bounded bucket scan + rebuild (never second-by-second catch-up)
+//! overdue insert --> immediate-due queue --> next advance, without a wheel revolution
 //! ```
 //!
 //! The wheel owns strong `Arc<AuthLease>` references. Request-facing structures retain
@@ -22,6 +23,7 @@ struct WheelEntry {
 
 pub(super) struct TimingWheel {
     now: u64,
+    immediate_due: Vec<WheelEntry>,
     level0: Vec<Vec<WheelEntry>>,
     level1: Vec<Vec<WheelEntry>>,
     level2: Vec<Vec<WheelEntry>>,
@@ -32,6 +34,7 @@ impl TimingWheel {
     pub(super) fn new(now: u64) -> Self {
         Self {
             now,
+            immediate_due: Vec::new(),
             level0: empty_buckets(256),
             level1: empty_buckets(64),
             level2: empty_buckets(64),
@@ -48,7 +51,9 @@ impl TimingWheel {
         let expires_at = lease.expires_at();
         let delta = expires_at.saturating_sub(self.now);
         let entry = WheelEntry { lease, version };
-        if delta < 1 << 8 {
+        if expires_at <= self.now {
+            self.immediate_due.push(entry);
+        } else if delta < 1 << 8 {
             self.level0[(expires_at & 0xff) as usize].push(entry);
         } else if delta < 1 << 14 {
             self.level1[((expires_at >> 8) & 0x3f) as usize].push(entry);
@@ -64,7 +69,7 @@ impl TimingWheel {
             return self.fast_forward(target);
         }
 
-        let mut due = Vec::new();
+        let mut due = self.take_immediate_due(target);
         while self.now < target {
             self.now = self.now.saturating_add(1);
             if self.now & 0xff == 0 {
@@ -76,6 +81,7 @@ impl TimingWheel {
                     }
                 }
             }
+            due.extend(self.take_immediate_due(self.now));
             let index = (self.now & 0xff) as usize;
             for entry in std::mem::take(&mut self.level0[index]) {
                 if entry.version == entry.lease.wheel_version.load(Ordering::Acquire) {
@@ -92,7 +98,7 @@ impl TimingWheel {
 
     fn fast_forward(&mut self, target: u64) -> Vec<Arc<AuthLease>> {
         self.now = target;
-        let mut entries = Vec::new();
+        let mut entries = std::mem::take(&mut self.immediate_due);
         take_all_entries(&mut self.level0, &mut entries);
         take_all_entries(&mut self.level1, &mut entries);
         take_all_entries(&mut self.level2, &mut entries);
@@ -100,6 +106,21 @@ impl TimingWheel {
 
         let mut due = Vec::new();
         for entry in entries {
+            if entry.version != entry.lease.wheel_version.load(Ordering::Acquire) {
+                continue;
+            }
+            if entry.lease.expires_at() <= target {
+                due.push(entry.lease);
+            } else {
+                self.insert_with_version(entry.lease, entry.version);
+            }
+        }
+        due
+    }
+
+    fn take_immediate_due(&mut self, target: u64) -> Vec<Arc<AuthLease>> {
+        let mut due = Vec::new();
+        for entry in std::mem::take(&mut self.immediate_due) {
             if entry.version != entry.lease.wheel_version.load(Ordering::Acquire) {
                 continue;
             }
