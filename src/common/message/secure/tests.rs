@@ -269,6 +269,41 @@ async fn reset_temporary_first_flight_returns_a_readable_rotated_error() {
 }
 
 #[tokio::test]
+async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
+    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = temp_config();
+    let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
+    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let issued = auth
+        .issue(&admin_context, std::time::Duration::from_secs(60), None)
+        .await
+        .unwrap();
+    let Credential::Temporary { key_id, mut key } = parse_credential(&issued.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    key[0] ^= 0x01;
+    let client = ClientHeaderSession::new_v2(&Credential::Temporary { key_id, key }).unwrap();
+    let security = ServerSecurity::new(auth);
+    let (mut client_io, mut server_io) = tokio::io::duplex(4096);
+    let client_task = client.write_initial(&mut client_io, b"mistyped");
+    let server_task = security.read_initial(&mut server_io);
+    let (client_result, server_result) = tokio::join!(client_task, server_task);
+    client_result.unwrap();
+    let error = match server_result {
+        Ok(_) => panic!("mistyped temporary credential should fail decryption"),
+        Err(error) => error,
+    };
+    assert_eq!(error.failure.code, "protocol_v2_decrypt_failed");
+    assert!(
+        error.response_session.is_none(),
+        "the presenter cannot open a session derived from the live key"
+    );
+
+    let _ = std::fs::remove_dir_all(config.state_dir);
+}
+
+#[tokio::test]
 async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
     let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
     let session = ClientHeaderSession::new_v2(&credential).unwrap();

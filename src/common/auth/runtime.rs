@@ -149,10 +149,16 @@ impl AuthRuntime {
         while audit_records.len() > AUDIT_RECORD_CAPACITY {
             audit_records.pop_front();
         }
-        let (high_slot_generations, high_slot_entries) = loaded
+        let (high_slot_generations, mut high_slot_entries) = loaded
             .as_ref()
             .map(|state| split_high_slot_state(state, config.max_temporary_keys))
             .unwrap_or_default();
+        for entry in &mut high_slot_entries {
+            if entry.state == SlotState::Active && entry.expires_at <= now {
+                entry.state = SlotState::Expired;
+                entry.tombstoned_at = Some(entry.tombstoned_at.unwrap_or(entry.expires_at));
+            }
+        }
         let inner = Arc::new(AuthStateInner {
             admin: RwLock::new(AdminState {
                 key: admin_key,

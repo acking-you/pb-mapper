@@ -198,6 +198,74 @@ async fn gc_removes_inactive_high_slot_entries_and_keeps_their_generations() {
 }
 
 #[tokio::test]
+async fn admin_lifecycle_covers_high_slot_keys_after_capacity_shrink() {
+    let state_dir = temp_state_dir("high-slot-admin");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config_two = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 2,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config_two.clone())
+        .await
+        .unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let first = runtime
+        .issue(&admin, Duration::from_secs(60), Some("first".to_string()))
+        .await
+        .unwrap();
+    let second = runtime
+        .issue(&admin, Duration::from_secs(60), Some("second".to_string()))
+        .await
+        .unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let config_one = AuthConfig {
+        max_temporary_keys: 1,
+        ..config_two.clone()
+    };
+    let runtime = AuthRuntime::start(admin_key, config_one).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    assert_eq!(runtime.high_slot_entry_count(), 1);
+    let high_id = [first.metadata.key_id, second.metadata.key_id]
+        .into_iter()
+        .find(|key_id| key_slot(*key_id) as usize >= 1)
+        .expect("one issued key should land above the shrunken table");
+    let page = runtime.list(&admin, 0, 100).await.unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert!(page.items.iter().any(|item| item.key_id == high_id));
+    let shown = runtime.show(&admin, high_id, false).await.unwrap();
+    assert_eq!(shown.metadata.key_id, high_id);
+    assert_eq!(shown.metadata.state, "active");
+    assert_eq!(
+        authenticate_for_test(&runtime, high_id).unwrap_err().code,
+        "temporary_key_not_found"
+    );
+    let status = runtime.status(&admin).await.unwrap();
+    assert_eq!(status.active_keys, 2);
+    let renewed = runtime
+        .renew(&admin, high_id, Duration::from_secs(120))
+        .await
+        .unwrap();
+    assert!(renewed.metadata.expires_at > shown.metadata.expires_at);
+    runtime.revoke(&admin, high_id).await.unwrap();
+    let revoked = runtime.show(&admin, high_id, false).await.unwrap();
+    assert_eq!(revoked.metadata.state, "revoked");
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let runtime = AuthRuntime::start(admin_key, config_two).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let restored = runtime.show(&admin, high_id, false).await.unwrap();
+    assert_eq!(restored.metadata.state, "revoked");
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
 async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
     let state_dir = temp_state_dir("safe-mode-legacy");
     let admin_key = *b"0123456789abcdefghijklmnopqrstuv";

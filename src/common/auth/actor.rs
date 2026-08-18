@@ -77,6 +77,32 @@ pub(super) async fn run_auth_actor(
             ))
         })
         .collect::<Vec<_>>();
+    tombstones.extend(
+        inner
+            .high_slot_entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter_map(|entry| {
+                let expired_active = entry.state == SlotState::Active && entry.expires_at <= now;
+                if !matches!(entry.state, SlotState::Expired | SlotState::Revoked)
+                    && !expired_active
+                {
+                    return None;
+                }
+                let tombstoned_at = entry
+                    .tombstoned_at
+                    .or_else(|| {
+                        cold.get(&entry.key_id)
+                            .map(|metadata| metadata.tombstoned_at)
+                    })
+                    .unwrap_or(entry.expires_at.max(now));
+                Some((
+                    tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs()),
+                    entry.key_id,
+                ))
+            }),
+    );
     tombstones.sort_unstable_by_key(|(cleanup_at, _)| *cleanup_at);
     let mut tombstones = VecDeque::from(tombstones);
     let mut last_snapshot_at = unix_seconds();
@@ -115,8 +141,11 @@ pub(super) async fn run_auth_actor(
                                 "temporary key expired and active work was cancelled"
                             );
                         }
+                    } else {
+                        lease.cancellation.cancel();
                     }
                 }
+                expire_due_high_slots(&inner, &mut cold, &mut tombstones, now);
                 while let Some((cleanup_at, key_id)) = tombstones.front().copied() {
                     if cleanup_at > now {
                         break;
@@ -131,6 +160,14 @@ pub(super) async fn run_auth_actor(
                             cold.remove(&key_id);
                             wheel.release(key_id);
                         }
+                    } else {
+                        let mut high = inner
+                            .high_slot_entries
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        high.retain(|entry| entry.key_id != key_id);
+                        cold.remove(&key_id);
+                        wheel.release(key_id);
                     }
                 }
                 prune_expired_admin_replays(
@@ -490,6 +527,15 @@ fn actor_list(
             })
         })
         .collect::<Vec<_>>();
+    all.extend(
+        inner
+            .high_slot_entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|entry| entry.state != SlotState::Free)
+            .map(high_slot_metadata),
+    );
     all.sort_by_key(|item| std::cmp::Reverse(item.issued_at));
     let items = all.iter().skip(start).take(page_size).cloned().collect();
     let next_page = (start.saturating_add(page_size) < all.len()).then_some(page.saturating_add(1));
@@ -540,19 +586,34 @@ fn actor_renew(
             .slots
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let slot = slots.get(index).ok_or_else(|| key_not_found(key_id))?;
-        validate_slot_identity(slot, key_id)?;
-        if slot.state != SlotState::Active || slot.expires_at <= unix_seconds() {
-            return Err(AuthFailure::new(
-                "temporary_key_not_renewable",
-                "only an active, unexpired temporary key can be renewed",
-                false,
-            ));
+        if let Some(slot) = slots.get(index) {
+            validate_slot_identity(slot, key_id)?;
+            if slot.state != SlotState::Active || slot.expires_at <= unix_seconds() {
+                return Err(key_not_renewable());
+            }
+        } else {
+            let high = inner
+                .high_slot_entries
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = high_slot_entry(&high, key_id)?;
+            if entry.state != SlotState::Active || entry.expires_at <= unix_seconds() {
+                return Err(key_not_renewable());
+            }
         }
     }
     let label = cold
         .get(&key_id)
-        .and_then(|metadata| metadata.label.clone());
+        .and_then(|metadata| metadata.label.clone())
+        .or_else(|| {
+            inner
+                .high_slot_entries
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .find(|entry| entry.key_id == key_id)
+                .and_then(|entry| entry.label.clone())
+        });
     append_mutation(
         config,
         inner,
@@ -563,31 +624,50 @@ fn actor_renew(
         .slots
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let slot = slots.get_mut(index).ok_or_else(|| key_not_found(key_id))?;
-    validate_slot_identity(slot, key_id)?;
-    if slot.state != SlotState::Active {
-        return Err(AuthFailure::new(
-            "temporary_key_inactive",
-            "temporary key lease is no longer active",
-            true,
-        ));
+    if let Some(slot) = slots.get_mut(index) {
+        validate_slot_identity(slot, key_id)?;
+        if slot.state != SlotState::Active {
+            return Err(AuthFailure::new(
+                "temporary_key_inactive",
+                "temporary key lease is no longer active",
+                true,
+            ));
+        }
+        slot.expires_at = expires_at;
+        let lease = match slot.lease.upgrade() {
+            Some(lease) if !lease.cancellation_token().is_cancelled() => {
+                lease.expires_at.store(expires_at, Ordering::Release);
+                lease.wheel_version.fetch_add(1, Ordering::AcqRel);
+                lease
+            }
+            _ => {
+                let lease = Arc::new(AuthLease::new(key_id, expires_at));
+                slot.lease = Arc::downgrade(&lease);
+                lease
+            }
+        };
+        wheel.release(key_id);
+        wheel.insert(lease);
+        drop(slots);
+        return metadata_with_credential(inner, cold, key_id, true);
     }
-    slot.expires_at = expires_at;
-    let lease = match slot.lease.upgrade() {
-        Some(lease) if !lease.cancellation_token().is_cancelled() => {
-            lease.expires_at.store(expires_at, Ordering::Release);
-            lease.wheel_version.fetch_add(1, Ordering::AcqRel);
-            lease
-        }
-        _ => {
-            let lease = Arc::new(AuthLease::new(key_id, expires_at));
-            slot.lease = Arc::downgrade(&lease);
-            lease
-        }
-    };
-    wheel.release(key_id);
-    wheel.insert(lease);
     drop(slots);
+    {
+        let mut high = inner
+            .high_slot_entries
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = high_slot_entry_mut(&mut high, key_id)?;
+        if entry.state != SlotState::Active {
+            return Err(AuthFailure::new(
+                "temporary_key_inactive",
+                "temporary key lease is no longer active",
+                true,
+            ));
+        }
+        entry.expires_at = expires_at;
+        entry.tombstoned_at = None;
+    }
     metadata_with_credential(inner, cold, key_id, true)
 }
 
@@ -601,26 +681,30 @@ fn actor_revoke(
     ensure_store_available(inner)?;
     let now = unix_seconds();
     let index = key_slot(key_id) as usize;
-    {
+    let (label, issued_at, expires_at) = {
         let slots = inner
             .slots
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let slot = slots.get(index).ok_or_else(|| key_not_found(key_id))?;
-        validate_slot_identity(slot, key_id)?;
-        if slot.state != SlotState::Active {
-            return Err(AuthFailure::new(
-                "temporary_key_not_active",
-                "temporary key is not active",
-                false,
-            ));
+        if let Some(slot) = slots.get(index) {
+            validate_slot_identity(slot, key_id)?;
+            if slot.state != SlotState::Active {
+                return Err(key_not_active());
+            }
+            let metadata = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
+            (metadata.label.clone(), metadata.issued_at, slot.expires_at)
+        } else {
+            let high = inner
+                .high_slot_entries
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = high_slot_entry(&high, key_id)?;
+            if entry.state != SlotState::Active {
+                return Err(key_not_active());
+            }
+            (entry.label.clone(), entry.issued_at, entry.expires_at)
         }
-    }
-    let label = cold
-        .get(&key_id)
-        .ok_or_else(|| key_not_found(key_id))?
-        .label
-        .clone();
+    };
     append_mutation(
         config,
         inner,
@@ -631,21 +715,44 @@ fn actor_revoke(
         .slots
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let slot = slots.get_mut(index).ok_or_else(|| key_not_found(key_id))?;
-    validate_slot_identity(slot, key_id)?;
-    slot.state = SlotState::Revoked;
-    if let Some(lease) = slot.lease.upgrade() {
-        lease.cancellation.cancel();
+    if let Some(slot) = slots.get_mut(index) {
+        validate_slot_identity(slot, key_id)?;
+        slot.state = SlotState::Revoked;
+        if let Some(lease) = slot.lease.upgrade() {
+            lease.cancellation.cancel();
+        }
+        let cold_metadata = cold.get_mut(&key_id).ok_or_else(|| key_not_found(key_id))?;
+        cold_metadata.tombstoned_at = now;
+        push_tombstone(tombstones, now, key_id);
+        return Ok(TemporaryKeyMetadata {
+            key_id,
+            state: slot_state_name(slot.state).to_string(),
+            issued_at: cold_metadata.issued_at,
+            expires_at: slot.expires_at,
+            label: cold_metadata.label.clone(),
+        });
     }
-    let cold_metadata = cold.get_mut(&key_id).ok_or_else(|| key_not_found(key_id))?;
-    cold_metadata.tombstoned_at = now;
+    drop(slots);
+    let mut high = inner
+        .high_slot_entries
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = high_slot_entry_mut(&mut high, key_id)?;
+    if entry.state != SlotState::Active {
+        return Err(key_not_active());
+    }
+    entry.state = SlotState::Revoked;
+    entry.tombstoned_at = Some(now);
+    if let Some(metadata) = cold.get_mut(&key_id) {
+        metadata.tombstoned_at = now;
+    }
     push_tombstone(tombstones, now, key_id);
     Ok(TemporaryKeyMetadata {
         key_id,
-        state: slot_state_name(slot.state).to_string(),
-        issued_at: cold_metadata.issued_at,
-        expires_at: slot.expires_at,
-        label: cold_metadata.label.clone(),
+        state: slot_state_name(entry.state).to_string(),
+        issued_at,
+        expires_at,
+        label,
     })
 }
 
@@ -892,18 +999,34 @@ fn actor_status(inner: &Arc<AuthStateInner>) -> AuthStatus {
         .slots
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let high = inner
+        .high_slot_entries
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let active_keys = slots
         .iter()
         .filter(|slot| slot.state == SlotState::Active)
-        .count();
+        .count()
+        + high
+            .iter()
+            .filter(|entry| entry.state == SlotState::Active)
+            .count();
     let expired_keys = slots
         .iter()
         .filter(|slot| slot.state == SlotState::Expired)
-        .count();
+        .count()
+        + high
+            .iter()
+            .filter(|entry| entry.state == SlotState::Expired)
+            .count();
     let revoked_keys = slots
         .iter()
         .filter(|slot| slot.state == SlotState::Revoked)
-        .count();
+        .count()
+        + high
+            .iter()
+            .filter(|entry| entry.state == SlotState::Revoked)
+            .count();
     let last_legacy_connection_at = inner.last_legacy_connection_at.load(Ordering::Acquire);
     AuthStatus {
         schema_version: 1,
@@ -995,6 +1118,82 @@ fn key_not_found(key_id: u64) -> AuthFailure {
     )
 }
 
+fn key_not_renewable() -> AuthFailure {
+    AuthFailure::new(
+        "temporary_key_not_renewable",
+        "only an active, unexpired temporary key can be renewed",
+        false,
+    )
+}
+
+fn key_not_active() -> AuthFailure {
+    AuthFailure::new(
+        "temporary_key_not_active",
+        "temporary key is not active",
+        false,
+    )
+}
+
+fn high_slot_entry(high: &[PersistedEntry], key_id: u64) -> Result<&PersistedEntry, AuthFailure> {
+    high.iter()
+        .find(|entry| entry.key_id == key_id)
+        .ok_or_else(|| key_not_found(key_id))
+}
+
+fn high_slot_entry_mut(
+    high: &mut [PersistedEntry],
+    key_id: u64,
+) -> Result<&mut PersistedEntry, AuthFailure> {
+    high.iter_mut()
+        .find(|entry| entry.key_id == key_id)
+        .ok_or_else(|| key_not_found(key_id))
+}
+
+fn high_slot_metadata(entry: &PersistedEntry) -> TemporaryKeyMetadata {
+    TemporaryKeyMetadata {
+        key_id: entry.key_id,
+        state: slot_state_name(entry.state).to_string(),
+        issued_at: entry.issued_at,
+        expires_at: entry.expires_at,
+        label: entry.label.clone(),
+    }
+}
+
+fn expire_due_high_slots(
+    inner: &Arc<AuthStateInner>,
+    cold: &mut HashMap<u64, ColdMetadata>,
+    tombstones: &mut VecDeque<(u64, u64)>,
+    now: u64,
+) {
+    let mut high = inner
+        .high_slot_entries
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut expired = Vec::new();
+    for entry in high.iter_mut() {
+        if entry.state == SlotState::Active && entry.expires_at <= now {
+            entry.state = SlotState::Expired;
+            let tombstoned_at = entry.expires_at;
+            entry.tombstoned_at = Some(tombstoned_at);
+            if let Some(metadata) = cold.get_mut(&entry.key_id) {
+                metadata.tombstoned_at = tombstoned_at;
+            }
+            expired.push((tombstoned_at, entry.key_id, entry.expires_at));
+        }
+    }
+    drop(high);
+    for (tombstoned_at, key_id, expires_at) in expired {
+        push_tombstone(tombstones, tombstoned_at, key_id);
+        tracing::info!(
+            event = "temporary_key_expired",
+            auth_stage = "expiry",
+            key_id,
+            expires_at,
+            "high-slot temporary key expired"
+        );
+    }
+}
+
 fn metadata_with_credential(
     inner: &Arc<AuthStateInner>,
     cold: &HashMap<u64, ColdMetadata>,
@@ -1005,25 +1204,32 @@ fn metadata_with_credential(
         .slots
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let slot = slots
-        .get(key_slot(key_id) as usize)
-        .ok_or_else(|| key_not_found(key_id))?;
-    validate_slot_identity(slot, key_id)?;
-    let cold = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
     let credential = if reveal {
         let key = derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)?;
         encode_temporary_credential(key_id, &key)
     } else {
         String::new()
     };
+    if let Some(slot) = slots.get(key_slot(key_id) as usize) {
+        validate_slot_identity(slot, key_id)?;
+        let cold = cold.get(&key_id).ok_or_else(|| key_not_found(key_id))?;
+        return Ok(IssuedTemporaryKey {
+            metadata: TemporaryKeyMetadata {
+                key_id,
+                state: slot_state_name(slot.state).to_string(),
+                issued_at: cold.issued_at,
+                expires_at: slot.expires_at,
+                label: cold.label.clone(),
+            },
+            credential,
+        });
+    }
+    let high = inner
+        .high_slot_entries
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Ok(IssuedTemporaryKey {
-        metadata: TemporaryKeyMetadata {
-            key_id,
-            state: slot_state_name(slot.state).to_string(),
-            issued_at: cold.issued_at,
-            expires_at: slot.expires_at,
-            label: cold.label.clone(),
-        },
+        metadata: high_slot_metadata(high_slot_entry(&high, key_id)?),
         credential,
     })
 }

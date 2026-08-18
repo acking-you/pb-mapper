@@ -265,6 +265,7 @@ impl PbMapperState {
     }
 
     pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
+        self.service_credentials.remove(&service_key);
         if let Some(handle) = self.service_handles.remove(&service_key) {
             handle.abort();
         }
@@ -289,6 +290,7 @@ impl PbMapperState {
         &mut self,
         service_key: String,
     ) -> Result<(), CtlError> {
+        self.service_credentials.remove(&service_key);
         if let Some(handle) = self.service_handles.remove(&service_key) {
             handle.abort();
         }
@@ -421,6 +423,7 @@ impl PbMapperState {
     pub async fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
         // Aborting the task is the part that matters: it is what stops the
         // retry loop still dialling in the background.
+        self.client_credentials.remove(&service_key);
         let aborted = match self.client_handles.remove(&service_key) {
             Some(handle) => {
                 handle.abort();
@@ -454,6 +457,7 @@ impl PbMapperState {
         &mut self,
         service_key: String,
     ) -> Result<(), CtlError> {
+        self.client_credentials.remove(&service_key);
         if let Some(handle) = self.client_handles.remove(&service_key) {
             handle.abort();
         }

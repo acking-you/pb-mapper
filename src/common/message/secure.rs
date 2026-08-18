@@ -525,7 +525,7 @@ impl ServerSecurity {
                         error.to_string(),
                         false,
                     ),
-                    response_session: Some(session_without_context(&session)),
+                    response_session: None,
                 })?;
         let mut current_ciphertext = ciphertext.clone();
         let payload = match open_v2_payload(
@@ -547,7 +547,7 @@ impl ServerSecurity {
                         error.to_string(),
                         false,
                     ),
-                    response_session: Some(session_without_context(&session)),
+                    response_session: None,
                 });
             }
         };

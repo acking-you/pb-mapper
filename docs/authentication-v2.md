@@ -173,8 +173,13 @@ the bounded audit history, persists `admin.key`, and then switches the key and
 administrator lease as one state transition. It is a global invalidate: every
 temporary credential stops authenticating, including unexpired keys in other
 namespaces, and live connections using those keys are cancelled. A later
-first flight with one of those credentials returns `temporary_key_rotated`,
-not the generic `temporary_key_invalid` used for a mistyped live key. The CLI
+first flight that still decrypts under the previous root returns
+`temporary_key_rotated` using that previous session, so the client can read
+the structured error. A first flight that cannot decrypt — a mistyped,
+foreign, or corrupted credential — fails as `protocol_v2_decrypt_failed`
+without an encrypted error frame, because the relay cannot derive a session
+the presenter can open. `temporary_key_invalid` is the in-process result when
+presented material does not match after derivation. The CLI
 stages the candidate key before the request and verifies the new key with an
 authenticated status call. When `--key-file` is omitted, the recovery copy is
 written below `$XDG_CONFIG_HOME/pb-mapper` (or `$HOME/.config/pb-mapper`)
