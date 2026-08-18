@@ -44,6 +44,9 @@ const FRAME_HEADER_LEN: usize = 12;
 const DIRECTION_CLIENT_TO_SERVER: u8 = 0;
 const DIRECTION_SERVER_TO_CLIENT: u8 = 1;
 const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
+/// Each Bloom generation must outlive the accepted clock-skew interval. A
+/// salt inserted at the end of a window with `ts = now + skew` stays valid
+/// until `insert + 2*skew`, so one generation is `2 * skew`.
 const DEFAULT_REPLAY_WINDOW_SECONDS: u64 = MAX_CONNECTION_CLOCK_SKEW_SECONDS.saturating_mul(2);
 const DEFAULT_REPLAY_FILTER_BYTES: usize = 1024 * 1024;
 const MAX_INITIAL_PLAINTEXT_LEN: u32 = 64 * 1024;
@@ -102,10 +105,7 @@ impl ClientHeaderSession {
     ) -> Result<()> {
         match self.protocol {
             HeaderProtocol::Legacy => {
-                let codec = Aes256GcmEnCodec::try_new(&self.legacy_key)
-                    .map_err(|_| protocol_error("failed to initialize legacy writer"))?;
-                CodecMessageWriter::new(writer, codec)
-                    .with_checksum_key(self.legacy_key)
+                legacy_message_writer(writer, &self.legacy_key, "legacy writer")?
                     .write_msg(message)
                     .await
             }
@@ -129,14 +129,11 @@ impl ClientHeaderSession {
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
         match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(
-                CodecMessageReader::new(
-                    reader,
-                    Aes256GcmDeCodec::try_new(&self.legacy_key)
-                        .map_err(|_| protocol_error("failed to initialize legacy reader"))?,
-                )
-                .with_checksum_key(self.legacy_key),
-            )),
+            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(legacy_message_reader(
+                reader,
+                &self.legacy_key,
+                "legacy reader",
+            )?)),
             HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
                 reader,
                 self.v2.as_ref().expect("v2 session material").clone(),
@@ -151,14 +148,11 @@ impl ClientHeaderSession {
         writer: &'a mut T,
     ) -> Result<HeaderMessageWriter<'a, T>> {
         match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(
-                CodecMessageWriter::new(
-                    writer,
-                    Aes256GcmEnCodec::try_new(&self.legacy_key)
-                        .map_err(|_| protocol_error("failed to initialize legacy writer"))?,
-                )
-                .with_checksum_key(self.legacy_key),
-            )),
+            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(legacy_message_writer(
+                writer,
+                &self.legacy_key,
+                "legacy writer",
+            )?)),
             HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
                 writer,
                 self.v2.as_ref().expect("v2 session material").clone(),
@@ -222,15 +216,11 @@ impl ServerHeaderSession {
         writer: &'a mut T,
     ) -> Result<HeaderMessageWriter<'a, T>> {
         match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(
-                CodecMessageWriter::new(
-                    writer,
-                    Aes256GcmEnCodec::try_new(&self.legacy_key).map_err(|_| {
-                        protocol_error("failed to initialize legacy response writer")
-                    })?,
-                )
-                .with_checksum_key(self.legacy_key),
-            )),
+            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(legacy_message_writer(
+                writer,
+                &self.legacy_key,
+                "legacy response writer",
+            )?)),
             HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
                 writer,
                 self.v2.as_ref().expect("v2 session material").clone(),
@@ -245,14 +235,11 @@ impl ServerHeaderSession {
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
         match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(
-                CodecMessageReader::new(
-                    reader,
-                    Aes256GcmDeCodec::try_new(&self.legacy_key)
-                        .map_err(|_| protocol_error("failed to initialize legacy reader"))?,
-                )
-                .with_checksum_key(self.legacy_key),
-            )),
+            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(legacy_message_reader(
+                reader,
+                &self.legacy_key,
+                "legacy reader",
+            )?)),
             HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
                 reader,
                 self.v2.as_ref().expect("v2 session material").clone(),
@@ -626,6 +613,32 @@ use frame::{derive_material, first_prefix, V2Material};
 pub use frame::{V2MessageReader, V2MessageWriter};
 mod replay;
 use replay::{replay_fingerprint, RotatingBloom};
+fn legacy_message_reader<'a, T: AsyncReadExt + Unpin>(
+    reader: &'a mut T,
+    key: &AesKeyType,
+    action: &str,
+) -> Result<CodecMessageReader<'a, T, Aes256GcmDeCodec>> {
+    Ok(CodecMessageReader::for_session_key(
+        reader,
+        Aes256GcmDeCodec::try_new(key)
+            .map_err(|_| protocol_error(format!("failed to initialize {action}")))?,
+        *key,
+    ))
+}
+
+fn legacy_message_writer<'a, T: AsyncWriteExt + Unpin>(
+    writer: &'a mut T,
+    key: &AesKeyType,
+    action: &str,
+) -> Result<CodecMessageWriter<'a, T, Aes256GcmEnCodec>> {
+    Ok(CodecMessageWriter::for_session_key(
+        writer,
+        Aes256GcmEnCodec::try_new(key)
+            .map_err(|_| protocol_error(format!("failed to initialize {action}")))?,
+        *key,
+    ))
+}
+
 fn protocol_error(detail: impl Into<String>) -> Error {
     Error::MsgProtocol {
         detail: detail.into(),

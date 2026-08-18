@@ -12,6 +12,21 @@
 
 use super::*;
 
+pub(super) const AUTH_SNAPSHOT_FILE: &str = "auth.snapshot";
+pub(super) const AUTH_WAL_FILE: &str = "auth.wal";
+
+pub(super) fn auth_snapshot_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(AUTH_SNAPSHOT_FILE)
+}
+
+pub(super) fn auth_wal_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(AUTH_WAL_FILE)
+}
+
+pub fn encrypted_auth_state_exists(state_dir: &Path) -> bool {
+    auth_snapshot_path(state_dir).exists() || auth_wal_path(state_dir).exists()
+}
+
 pub(super) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
     let mut records = inner
         .audit_records
@@ -161,7 +176,7 @@ pub(super) fn try_load_persisted_state(
     admin_key: &AesKeyType,
     instance_id: [u8; INSTANCE_ID_LEN],
 ) -> Result<PersistedSnapshot, AuthFailure> {
-    let snapshot_path = config.state_dir.join("auth.snapshot");
+    let snapshot_path = auth_snapshot_path(&config.state_dir);
     let mut snapshot = if snapshot_path.exists() {
         let bytes = std::fs::read(&snapshot_path).map_err(|error| {
             AuthFailure::new(
@@ -199,7 +214,7 @@ pub(super) fn try_load_persisted_state(
     snapshot.generations.resize(config.max_temporary_keys, 0);
     snapshot.generations.truncate(config.max_temporary_keys);
 
-    let wal_path = config.state_dir.join("auth.wal");
+    let wal_path = auth_wal_path(&config.state_dir);
     if wal_path.exists() {
         for record in read_wal(&wal_path, admin_key)? {
             match record {
@@ -318,7 +333,7 @@ pub(super) fn append_wal(
     let sealed = seal_blob(admin_key, &plain)?;
     let length = u32::try_from(sealed.len())
         .map_err(|_| AuthFailure::internal("auth WAL record is too large"))?;
-    let path = config.state_dir.join("auth.wal");
+    let path = auth_wal_path(&config.state_dir);
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -418,9 +433,9 @@ pub(super) fn write_snapshot_and_truncate_wal(
         AuthFailure::internal(format!("failed to encode auth snapshot: {error}"))
     })?;
     let sealed = seal_blob(admin_key, &plain)?;
-    let snapshot_path = config.state_dir.join("auth.snapshot");
+    let snapshot_path = auth_snapshot_path(&config.state_dir);
     atomic_write(&snapshot_path, &sealed, 0o600)?;
-    let wal_path = config.state_dir.join("auth.wal");
+    let wal_path = auth_wal_path(&config.state_dir);
     let wal = OpenOptions::new()
         .create(true)
         .write(true)
@@ -590,11 +605,11 @@ pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFail
             false,
         ));
     }
+    // Overwriting admin.key alone leaves snapshot/WAL encrypted under the old
+    // key, so the next start fails closed into safe mode. Rotate or reset instead.
     if force {
         if let Some(state_dir) = path.parent() {
-            let snapshot = state_dir.join("auth.snapshot");
-            let wal = state_dir.join("auth.wal");
-            if snapshot.exists() || wal.exists() {
+            if encrypted_auth_state_exists(state_dir) {
                 return Err(AuthFailure::new(
                     "administrator_key_state_exists",
                     format!(

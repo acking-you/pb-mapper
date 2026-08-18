@@ -701,24 +701,15 @@ fn actor_rotate_root(
             false,
         ));
     }
-    let new_key_string = String::from_utf8(new_key.to_vec()).map_err(|_| {
-        AuthFailure::new(
-            "administrator_key_invalid",
-            "administrator key must be 32 UTF-8 bytes for MSG_HEADER_KEY compatibility",
-            false,
-        )
-    })?;
-    if !new_key_string
-        .as_bytes()
-        .iter()
-        .all(|byte| byte.is_ascii_graphic())
-    {
+    if !is_env_safe_admin_key(&new_key) {
         return Err(AuthFailure::new(
             "administrator_key_invalid",
-            "administrator key must be 32 printable ASCII bytes without whitespace or NUL",
+            env_safe_admin_key_error(),
             false,
         ));
     }
+    let new_key_string =
+        String::from_utf8(new_key.to_vec()).expect("printable ASCII is valid UTF-8");
 
     let rotate_audit = audit("administrator_key_rotate", None, None);
     let mut snapshot = empty_snapshot(inner, inner.instance_id(), &VecDeque::new());

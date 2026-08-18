@@ -21,6 +21,19 @@ pub const ENV_MSG_HEADER_KEY: &str = "MSG_HEADER_KEY";
 pub const MACHINE_MSG_HEADER_KEY_PATH: &str = "/var/lib/pb-mapper-server/msg_header_key";
 pub const ADMIN_KEY_PATH: &str = "/var/lib/pb-mapper/auth/admin.key";
 pub const TEMP_CREDENTIAL_PREFIX: &str = "pbmt1_";
+pub const ADMIN_KEY_LEN: usize = 32;
+
+/// Administrator keys are also stored in `MSG_HEADER_KEY`. `std::env::set_var`
+/// panics on interior NUL, so the key must be printable ASCII with no whitespace.
+pub fn is_env_safe_admin_key(bytes: &[u8]) -> bool {
+    bytes.len() == ADMIN_KEY_LEN && bytes.iter().all(|byte| byte.is_ascii_graphic())
+}
+
+pub fn env_safe_admin_key_error() -> String {
+    format!(
+        "`{ENV_MSG_HEADER_KEY}` administrator key must be 32 printable ASCII bytes without whitespace or NUL"
+    )
+}
 
 const DERIVE_MSG_HEADER_KEY_TAG: &str = "pb-mapper-msg-header-key-v1";
 const DERIVE_MSG_HEADER_KEY_CHARSET: &[u8] =
@@ -192,13 +205,11 @@ pub fn parse_credential(raw: &str) -> Result<Credential, String> {
     }
 
     let bytes = raw.as_bytes();
-    if bytes.len() != 32 {
+    if bytes.len() != ADMIN_KEY_LEN {
         return Err(key_len_error(raw));
     }
-    if !bytes.iter().all(|byte| byte.is_ascii_graphic()) {
-        return Err(format!(
-            "`{ENV_MSG_HEADER_KEY}` administrator key must be 32 printable ASCII bytes without whitespace or NUL"
-        ));
+    if !is_env_safe_admin_key(bytes) {
+        return Err(env_safe_admin_key_error());
     }
     Ok(Credential::Admin(
         bytes.try_into().expect("validated admin key width"),
@@ -550,6 +561,16 @@ mod tests {
             checksum,
             b"abcdefghijklmnopqrstuvwxyz012345"
         ));
+    }
+
+    #[test]
+    fn env_safe_admin_key_rejects_nul_and_accepts_printable_ascii() {
+        use super::*;
+        assert!(is_env_safe_admin_key(b"0123456789abcdefghijklmnopqrstuv"));
+        let mut with_nul = *b"0123456789abcdefghijklmnopqrstuv";
+        with_nul[8] = 0;
+        assert!(!is_env_safe_admin_key(&with_nul));
+        assert!(!is_env_safe_admin_key(b"short"));
     }
 
     #[test]

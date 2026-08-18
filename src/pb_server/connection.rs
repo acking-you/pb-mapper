@@ -10,9 +10,9 @@
 //!                                              +-> status / administrator request
 //! ```
 //!
-//! Long-lived register and subscribe futures are raced against the credential's
-//! cancellation token here. This outer guard closes a subscriber even when the paired
-//! service stream belongs to a different credential.
+//! Long-lived register, subscribe, and status futures are raced against the
+//! credential's cancellation token here. This outer guard closes a subscriber even
+//! when the paired service stream belongs to a different credential.
 
 use super::*;
 
@@ -223,37 +223,39 @@ pub(super) async fn handle_conn(
                 is_datagram,
                 "received pb init request"
             );
-            let key = match scoped_service_key(&auth_context, effective_namespace, &key) {
-                Ok(key) => key,
-                Err(failure) => {
-                    write_protocol_error(&mut conn, &session, &failure).await;
-                    return Ok(());
-                }
+            let Some(key) = scope_service_or_reject(
+                &mut conn,
+                &session,
+                &auth_context,
+                effective_namespace,
+                &key,
+            )
+            .await?
+            else {
+                return Ok(());
             };
-            let cancellation = match auth_context.cancellation_token() {
-                Ok(token) => token,
-                Err(failure) => {
-                    write_protocol_error(&mut conn, &session, &failure).await;
-                    return Ok(());
-                }
-            };
-            tokio::select! {
-                result = handle_server_conn(
-                ServerRegistration {
-                    key,
-                    need_codec,
-                    is_datagram,
-                    protocol_version,
-                    conn_id,
-                },
-                manager_task_sender,
+            run_while_credential_active(
                 conn,
                 session,
-                ) => result?,
-                _ = cancellation.cancelled() => {
-                    tracing::info!(event = "connection_auth_expired", key_id = auth_context.key_id, conn_id = %conn_id, "closing registered service connection");
-                }
-            }
+                &auth_context,
+                conn_id,
+                "registered service connection",
+                |conn, session| {
+                    handle_server_conn(
+                        ServerRegistration {
+                            key,
+                            need_codec,
+                            is_datagram,
+                            protocol_version,
+                            conn_id,
+                        },
+                        manager_task_sender,
+                        conn,
+                        session,
+                    )
+                },
+            )
+            .await?;
         }
         PbConnRequest::Subcribe { key } => {
             tracing::info!(
@@ -264,26 +266,28 @@ pub(super) async fn handle_conn(
                 key = %key,
                 "received pb init request"
             );
-            let key = match scoped_service_key(&auth_context, effective_namespace, &key) {
-                Ok(key) => key,
-                Err(failure) => {
-                    write_protocol_error(&mut conn, &session, &failure).await;
-                    return Ok(());
-                }
+            let Some(key) = scope_service_or_reject(
+                &mut conn,
+                &session,
+                &auth_context,
+                effective_namespace,
+                &key,
+            )
+            .await?
+            else {
+                return Ok(());
             };
-            let cancellation = match auth_context.cancellation_token() {
-                Ok(token) => token,
-                Err(failure) => {
-                    write_protocol_error(&mut conn, &session, &failure).await;
-                    return Ok(());
-                }
-            };
-            tokio::select! {
-                result = handle_client_conn(key, conn_id, manager_task_sender, conn, session) => result?,
-                _ = cancellation.cancelled() => {
-                    tracing::info!(event = "connection_auth_expired", key_id = auth_context.key_id, conn_id = %conn_id, "closing subscribed data connection");
-                }
-            }
+            run_while_credential_active(
+                conn,
+                session,
+                &auth_context,
+                conn_id,
+                "subscribed data connection",
+                |conn, session| {
+                    handle_client_conn(key, conn_id, manager_task_sender, conn, session)
+                },
+            )
+            .await?;
         }
         PbConnRequest::Stream {
             key,
@@ -300,12 +304,16 @@ pub(super) async fn handle_conn(
                 server_generation,
                 "received pb init request"
             );
-            let key = match scoped_service_key(&auth_context, effective_namespace, &key) {
-                Ok(key) => key,
-                Err(failure) => {
-                    write_protocol_error(&mut conn, &session, &failure).await;
-                    return Ok(());
-                }
+            let Some(key) = scope_service_or_reject(
+                &mut conn,
+                &session,
+                &auth_context,
+                effective_namespace,
+                &key,
+            )
+            .await?
+            else {
+                return Ok(());
             };
             manager_task_sender
                 .send(ManagerTask::Stream {
@@ -329,26 +337,24 @@ pub(super) async fn handle_conn(
                 status = ?status,
                 "received pb init request"
             );
-            let cancellation = match auth_context.cancellation_token() {
-                Ok(token) => token,
-                Err(failure) => {
-                    write_protocol_error(&mut conn, &session, &failure).await;
-                    return Ok(());
-                }
-            };
-            tokio::select! {
-                result = handle_show_status(
-                    status,
-                    effective_namespace,
-                    manager_task_sender,
-                    conn_id,
-                    conn,
-                    session,
-                ) => result?,
-                _ = cancellation.cancelled() => {
-                    tracing::info!(event = "connection_auth_expired", key_id = auth_context.key_id, conn_id = %conn_id, "closing status request");
-                }
-            }
+            run_while_credential_active(
+                conn,
+                session,
+                &auth_context,
+                conn_id,
+                "status request",
+                |conn, session| {
+                    handle_show_status(
+                        status,
+                        effective_namespace,
+                        manager_task_sender,
+                        conn_id,
+                        conn,
+                        session,
+                    )
+                },
+            )
+            .await?;
         }
         PbConnRequest::Admin(request) => {
             if !auth_context.is_admin {
@@ -408,6 +414,55 @@ pub(super) async fn handle_conn(
         | PbConnRequest::SubcribeScoped { .. }
         | PbConnRequest::StatusScoped { .. }
         | PbConnRequest::StreamScoped { .. } => unreachable!("scoped request was normalized"),
+    }
+    Ok(())
+}
+
+async fn scope_service_or_reject(
+    conn: &mut TcpStream,
+    session: &ServerHeaderSession,
+    auth_context: &AuthContext,
+    namespace: u64,
+    service_name: &str,
+) -> Result<Option<ImutableKey>> {
+    match scoped_service_key(auth_context, namespace, service_name) {
+        Ok(key) => Ok(Some(key)),
+        Err(failure) => {
+            write_protocol_error(conn, session, &failure).await;
+            Ok(None)
+        }
+    }
+}
+
+async fn run_while_credential_active<F, Fut>(
+    mut conn: TcpStream,
+    session: ServerHeaderSession,
+    auth_context: &AuthContext,
+    conn_id: RemoteConnId,
+    closed_what: &'static str,
+    work: F,
+) -> Result<()>
+where
+    F: FnOnce(TcpStream, ServerHeaderSession) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let cancellation = match auth_context.cancellation_token() {
+        Ok(token) => token,
+        Err(failure) => {
+            write_protocol_error(&mut conn, &session, &failure).await;
+            return Ok(());
+        }
+    };
+    tokio::select! {
+        result = work(conn, session) => result?,
+        _ = cancellation.cancelled() => {
+            tracing::info!(
+                event = "connection_auth_expired",
+                key_id = auth_context.key_id,
+                conn_id = %conn_id,
+                "closing {closed_what}"
+            );
+        }
     }
     Ok(())
 }

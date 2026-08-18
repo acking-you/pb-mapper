@@ -37,9 +37,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::checksum::{
-    encode_temporary_credential, get_process_credential, parse_credential,
-    set_process_msg_header_key, AesKeyType, Credential, ENV_MSG_HEADER_KEY,
-    MACHINE_MSG_HEADER_KEY_PATH,
+    encode_temporary_credential, env_safe_admin_key_error, get_process_credential,
+    is_env_safe_admin_key, parse_credential, set_process_msg_header_key, AesKeyType, Credential,
+    ENV_MSG_HEADER_KEY, MACHINE_MSG_HEADER_KEY_PATH,
 };
 
 pub const ADMIN_NAMESPACE: u64 = 0;
@@ -88,6 +88,9 @@ pub fn default_auth_state_dir() -> PathBuf {
         .unwrap_or_else(platform_default_auth_state_dir)
 }
 
+/// Linux systemd/Docker keep `/var/lib/pb-mapper/auth`. Desktop macOS and
+/// Windows binaries run as a normal user, so they need an application data
+/// directory instead of a root-owned system path.
 pub(crate) fn platform_default_auth_state_dir() -> PathBuf {
     #[cfg(windows)]
     {

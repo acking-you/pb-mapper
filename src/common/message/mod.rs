@@ -133,6 +133,10 @@ gen_write_network_with_error!(
     &[u8]
 );
 
+fn checksum_key_bytes(key: &Option<AesKeyType>) -> Option<&[u8]> {
+    key.as_ref().map(|key| key.as_slice())
+}
+
 #[inline]
 fn checksum_matches(datalen: DataLenType, checksum: u32, key: Option<&[u8]>) -> bool {
     match key {
@@ -201,11 +205,7 @@ impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
     }
 
     async fn read_msg_inner(&mut self) -> Result<&'_ [u8]> {
-        let datalen = get_msg_len(
-            &mut self.reader,
-            self.checksum_key.as_ref().map(|key| key.as_slice()),
-        )
-        .await?;
+        let datalen = get_msg_len(&mut self.reader, checksum_key_bytes(&self.checksum_key)).await?;
         self.buffer.fixed_resize(datalen as usize);
         let n = read_msg_body(&mut self.reader, self.buffer.buffer_mut()).await?;
         Ok(&self.buffer.buffer()[0..n])
@@ -235,7 +235,7 @@ impl<'a, T: AsyncWriteExt + Unpin> NormalMessageWriter<'a, T> {
         set_msg_len(
             &mut self.writer,
             msg.len() as u32,
-            self.checksum_key.as_ref().map(|key| key.as_slice()),
+            checksum_key_bytes(&self.checksum_key),
         )
         .await?;
 
@@ -260,6 +260,13 @@ impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecMessageReader<'a, T, D> {
             reader: NormalMessageReader::new(reader),
             decryptor,
         }
+    }
+
+    /// Bind the length checksum to `key` instead of the process credential.
+    /// Isolated relays keep a remote `MSG_HEADER_KEY` while speaking with a
+    /// different local administrator key.
+    pub fn for_session_key(reader: &'a mut T, decryptor: D, key: AesKeyType) -> Self {
+        Self::new(reader, decryptor).with_checksum_key(key)
     }
 
     pub fn with_checksum_key(mut self, key: AesKeyType) -> Self {
@@ -287,6 +294,8 @@ impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageRe
 pub struct CodecMessageWriter<'a, T: AsyncWriteExt + Unpin, E: Encryptor> {
     writer: &'a mut T,
     encryptor: E,
+    /// `None` uses the process `MSG_HEADER_KEY` hash. Isolated relays must set
+    /// this to the session key so continuation frames stay decryptable.
     checksum_key: Option<AesKeyType>,
 }
 
@@ -297,6 +306,10 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecMessageWriter<'a, T, E> {
             encryptor,
             checksum_key: None,
         }
+    }
+
+    pub fn for_session_key(writer: &'a mut T, encryptor: E, key: AesKeyType) -> Self {
+        Self::new(writer, encryptor).with_checksum_key(key)
     }
 
     pub fn with_checksum_key(mut self, key: AesKeyType) -> Self {
@@ -321,12 +334,7 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> MessageWriter for CodecMessageW
             })?;
         let msg_len = (buf.len() + tag.as_ref().len()) as DataLenType;
 
-        set_msg_len(
-            self.writer,
-            msg_len,
-            self.checksum_key.as_ref().map(|key| key.as_slice()),
-        )
-        .await?;
+        set_msg_len(self.writer, msg_len, checksum_key_bytes(&self.checksum_key)).await?;
         write_codec_msg(self.writer, &buf).await?;
         write_codec_tag(self.writer, tag.as_ref()).await
     }

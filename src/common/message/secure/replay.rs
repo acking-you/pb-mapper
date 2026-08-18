@@ -8,6 +8,9 @@
 //! `check_and_insert` is called while one mutex is held, making concurrent admission
 //! atomic. This Bloom filter protects all connection types from immediate duplicates;
 //! administrator mutations additionally use the exact durable replay set in `auth`.
+//!
+//! Each generation lasts `2 *` the accepted clock-skew so a salt inserted at the
+//! end of a window with a max-future timestamp cannot be replayed after rotation.
 
 use super::*;
 
