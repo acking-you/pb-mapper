@@ -1,7 +1,7 @@
 //! Durable, encrypted authentication state and audit/replay retention.
 //!
 //! ```text
-//! startup:   admin.key -> decrypt snapshot -> replay WAL -> normalize -> in-memory state
+//! startup:   lock -> admin.key -> recover instance id -> decrypt snapshot -> replay WAL
 //! mutation:  command   -> fsync encrypted WAL -> publish hot-state change
 //! compact:   hot state + audit + replay set -> snapshot -> truncate WAL
 //! ```
@@ -25,6 +25,13 @@ pub(super) fn auth_wal_path(state_dir: &Path) -> PathBuf {
 
 pub fn encrypted_auth_state_exists(state_dir: &Path) -> bool {
     auth_snapshot_path(state_dir).exists() || auth_wal_path(state_dir).exists()
+}
+
+/// Create the state directory and take `auth.lock` before any credential or
+/// snapshot file is read or written.
+pub(super) fn prepare_state_dir_and_lock(state_dir: &Path) -> Result<Arc<File>, AuthFailure> {
+    prepare_state_dir(state_dir)?;
+    Ok(Arc::new(acquire_state_dir_lock(state_dir)?))
 }
 
 pub fn acquire_state_dir_lock(state_dir: &Path) -> Result<File, AuthFailure> {
@@ -807,25 +814,78 @@ pub(super) fn load_or_create_instance_id(
     path: &Path,
 ) -> Result<[u8; INSTANCE_ID_LEN], AuthFailure> {
     let instance_path = path.join("server-instance-id");
-    if instance_path.exists() {
-        let bytes = std::fs::read(&instance_path).map_err(|error| {
-            AuthFailure::new(
-                "auth_state_unavailable",
-                format!("failed to read `{}`: {error}", instance_path.display()),
-                false,
-            )
-        })?;
-        return bytes.try_into().map_err(|_| {
-            AuthFailure::new(
-                "auth_state_unavailable",
-                "server instance id must be exactly 16 bytes",
-                false,
-            )
-        });
+    if let Some(instance_id) = read_instance_id_file(&instance_path)? {
+        return Ok(instance_id);
     }
     let instance_id = random_instance_id();
     atomic_write(&instance_path, &instance_id, 0o600)?;
     Ok(instance_id)
+}
+
+pub(super) fn read_instance_id_file(
+    path: &Path,
+) -> Result<Option<[u8; INSTANCE_ID_LEN]>, AuthFailure> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path).map_err(|error| {
+        AuthFailure::new(
+            "auth_state_unavailable",
+            format!("failed to read `{}`: {error}", path.display()),
+            false,
+        )
+    })?;
+    bytes.try_into().map(Some).map_err(|_| {
+        AuthFailure::new(
+            "auth_state_unavailable",
+            "server instance id must be exactly 16 bytes",
+            false,
+        )
+    })
+}
+
+/// Promote `server-instance-id.next` when the snapshot already belongs to it.
+///
+/// Reset writes that staged file, then the empty snapshot, then the live
+/// instance-id file. A crash after the snapshot lands would otherwise fail
+/// closed on the next start because the live file still has the old id.
+pub(super) fn recover_instance_id_after_reset(
+    state_dir: &Path,
+    admin_key: &AesKeyType,
+    current: [u8; INSTANCE_ID_LEN],
+) -> Result<[u8; INSTANCE_ID_LEN], AuthFailure> {
+    let next_path = state_dir.join("server-instance-id.next");
+    let Some(next) = read_instance_id_file(&next_path)? else {
+        return Ok(current);
+    };
+    let snapshot_path = auth_snapshot_path(state_dir);
+    if !snapshot_path.exists() {
+        let _ = std::fs::remove_file(&next_path);
+        return Ok(current);
+    }
+    let bytes = std::fs::read(&snapshot_path).map_err(|error| {
+        AuthFailure::new(
+            "temporary_key_store_unavailable",
+            format!("failed to read `{}`: {error}", snapshot_path.display()),
+            false,
+        )
+    })?;
+    let Ok(plain) = open_blob(admin_key, &bytes) else {
+        return Ok(current);
+    };
+    let Ok(snapshot) = serde_json::from_slice::<PersistedSnapshot>(&plain) else {
+        return Ok(current);
+    };
+    if snapshot.instance_id == current {
+        let _ = std::fs::remove_file(&next_path);
+        return Ok(current);
+    }
+    if snapshot.instance_id != next {
+        return Ok(current);
+    }
+    atomic_write(&state_dir.join("server-instance-id"), &next, 0o600)?;
+    let _ = std::fs::remove_file(&next_path);
+    Ok(next)
 }
 
 pub(super) fn random_instance_id() -> [u8; INSTANCE_ID_LEN] {

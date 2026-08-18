@@ -153,13 +153,16 @@ tombstone 以给出稳定错误后，槽位可以复用。显式 `key gc` 可立
 
 ## 持久化与安全模式
 
-Linux 系统服务默认目录是 `/var/lib/pb-mapper/auth`，权限为 `0700`。macOS 与
-Windows 桌面二进制默认写到用户可写的应用目录，而不是 `/var/lib`：
+Linux 系统服务默认目录是 `/var/lib/pb-mapper/auth`，权限为 `0700`。无特权
+Linux、macOS 与 Windows 桌面二进制默认写到用户可写的应用目录，而不是
+`/var/lib`：
 
 | 文件 | 用途 |
 | --- | --- |
 | `admin.key` | 根凭据，权限 `0600` |
+| `admin.key.next` | 轮换进行中的暂存根密钥 |
 | `server-instance-id` | 16 字节持久派生身份 |
+| `server-instance-id.next` | reset 进行中的暂存实例 ID |
 | `auth.snapshot` | AES-256-GCM 加密的紧凑槽位快照 |
 | `auth.wal` | 带长度前缀、逐条加密的 mutation 与 audit |
 

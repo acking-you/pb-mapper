@@ -112,7 +112,7 @@ pb-mapper server --port 7666
 
 - `--ipv6`：开启 IPv6 监听
 - `--keep-alive`：开启 TCP keep-alive
-- `--auth-state-dir`：认证状态目录（Linux 系统服务默认 `/var/lib/pb-mapper/auth`；macOS 与 Windows 使用当前用户可写的应用目录）
+- `--auth-state-dir`：认证状态目录（Linux 系统服务默认 `/var/lib/pb-mapper/auth`；无特权 Linux、macOS 与 Windows 使用当前用户可写的应用目录）
 - `--max-temporary-keys`：临时 key 固定槽位容量，默认 `65536`
 - `--max-temporary-key-ttl`：临时 key 最大 TTL，默认 `30d`
 - `--legacy-protocol allow|deny`：旧协议初始接入策略
@@ -121,9 +121,9 @@ pb-mapper server --port 7666
 ### 管理员密钥与临时凭据
 
 中继首次启动时会在认证状态目录生成随机管理员密钥（`admin.key`）。Linux 系统服务
-默认写到 `/var/lib/pb-mapper/auth/admin.key`；macOS 与 Windows 桌面构建则使用当前
-用户可写的应用目录。系统不再提供内置默认 key。管理员密钥留在中继机器上，用它为
-业务签发临时凭据：
+默认写到 `/var/lib/pb-mapper/auth/admin.key`；无特权 Linux、macOS 与 Windows
+桌面构建则使用当前用户可写的应用目录。系统不再提供内置默认 key。管理员密钥留在
+中继机器上，用它为业务签发临时凭据：
 
 ```bash
 export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
@@ -228,7 +228,7 @@ flutter run
 
 - `PB_MAPPER_SERVER`：CLI 默认服务器地址
 - `MSG_HEADER_KEY`：32 字符管理员密钥或 `pbmt1_` 临时凭据
-- `PB_MAPPER_AUTH_STATE_DIR`：中继认证状态目录（Linux 系统服务默认 `/var/lib/pb-mapper/auth`；macOS 与 Windows 使用当前用户可写的应用目录）
+- `PB_MAPPER_AUTH_STATE_DIR`：中继认证状态目录（Linux 系统服务默认 `/var/lib/pb-mapper/auth`；无特权 Linux、macOS 与 Windows 使用当前用户可写的应用目录）
 - `PB_MAPPER_AUTH_MAX_TEMP_KEYS`：临时 key 固定容量，默认 `65536`
 - `PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS`：临时 key 最大 TTL，默认 30 天
 - `PB_MAPPER_LEGACY_PROTOCOL`：`allow` 或 `deny`，默认 `allow`

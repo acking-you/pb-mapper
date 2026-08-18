@@ -17,7 +17,7 @@ use super::*;
 
 impl AuthRuntime {
     pub async fn from_process(config: AuthConfig) -> Result<Self, AuthFailure> {
-        prepare_state_dir(&config.state_dir)?;
+        let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
         let credential = load_server_admin_credential(&config.state_dir)?;
         let Credential::Admin(admin_key) = credential else {
             return Err(AuthFailure::new(
@@ -26,7 +26,7 @@ impl AuthRuntime {
                 false,
             ));
         };
-        Self::start_with_process_sync(admin_key, config, true).await
+        Self::start_locked(admin_key, config, true, state_lock).await
     }
 
     /// Start an embedded relay with an administrator key owned only by its state directory.
@@ -34,7 +34,7 @@ impl AuthRuntime {
     /// This deliberately leaves the process credential untouched because the containing UI uses
     /// that credential for its outbound register, connect, status, and stream connections.
     pub async fn from_isolated_state(config: AuthConfig) -> Result<Self, AuthFailure> {
-        prepare_state_dir(&config.state_dir)?;
+        let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
         let credential = load_isolated_server_admin_credential(&config.state_dir)?;
         let Credential::Admin(admin_key) = credential else {
             return Err(AuthFailure::new(
@@ -43,21 +43,23 @@ impl AuthRuntime {
                 false,
             ));
         };
-        Self::start_with_process_sync(admin_key, config, false).await
+        Self::start_locked(admin_key, config, false, state_lock).await
     }
 
     pub async fn start(admin_key: AesKeyType, config: AuthConfig) -> Result<Self, AuthFailure> {
-        Self::start_with_process_sync(admin_key, config, true).await
+        let state_lock = prepare_state_dir_and_lock(&config.state_dir)?;
+        Self::start_locked(admin_key, config, true, state_lock).await
     }
 
-    async fn start_with_process_sync(
+    async fn start_locked(
         admin_key: AesKeyType,
         config: AuthConfig,
         sync_process_credential: bool,
+        state_lock: Arc<File>,
     ) -> Result<Self, AuthFailure> {
-        prepare_state_dir(&config.state_dir)?;
-        let state_lock = Arc::new(acquire_state_dir_lock(&config.state_dir)?);
         let instance_id = load_or_create_instance_id(&config.state_dir)?;
+        let instance_id =
+            recover_instance_id_after_reset(&config.state_dir, &admin_key, instance_id)?;
         let (mut loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
         let now = unix_seconds();
         if let Some(state) = loaded.as_mut() {

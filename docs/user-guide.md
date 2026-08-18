@@ -112,7 +112,7 @@ Optional flags:
 
 - `--ipv6`: enable IPv6 listening
 - `--keep-alive`: enable TCP keep-alive
-- `--auth-state-dir`: authentication state directory (Linux system default `/var/lib/pb-mapper/auth`; macOS and Windows use a user-writable application directory)
+- `--auth-state-dir`: authentication state directory (Linux services default `/var/lib/pb-mapper/auth`; unprivileged Linux, macOS, and Windows use a user-writable application directory)
 - `--max-temporary-keys`: fixed temporary-key slot capacity (default `65536`)
 - `--max-temporary-key-ttl`: maximum issued TTL (default `30d`)
 - `--legacy-protocol allow|deny`: initial legacy-client policy
@@ -122,9 +122,9 @@ Optional flags:
 
 On first start, the relay creates a random administrator key in its
 authentication state directory (`admin.key`). On Linux system services that
-is `/var/lib/pb-mapper/auth/admin.key`. Desktop macOS and Windows builds use
-a user-writable application directory instead. There is no built-in default
-credential.
+is `/var/lib/pb-mapper/auth/admin.key`. Unprivileged Linux, macOS, and
+Windows builds use a user-writable application directory instead. There is
+no built-in default credential.
 Keep the administrator key on the relay host and use it to issue a temporary
 credential for a workload:
 
@@ -235,7 +235,7 @@ flutter run
 
 - `PB_MAPPER_SERVER`: default server address for the CLI
 - `MSG_HEADER_KEY`: 32-character administrator key or a `pbmt1_` temporary credential
-- `PB_MAPPER_AUTH_STATE_DIR`: relay auth-state directory (Linux system default `/var/lib/pb-mapper/auth`; macOS and Windows use a user-writable application directory)
+- `PB_MAPPER_AUTH_STATE_DIR`: relay auth-state directory (Linux services default `/var/lib/pb-mapper/auth`; unprivileged Linux, macOS, and Windows use a user-writable application directory)
 - `PB_MAPPER_AUTH_MAX_TEMP_KEYS`: fixed temporary-key capacity, default `65536`
 - `PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS`: maximum temporary-key TTL, default 30 days
 - `PB_MAPPER_LEGACY_PROTOCOL`: `allow` or `deny`, default `allow`

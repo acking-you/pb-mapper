@@ -90,9 +90,9 @@ pub fn default_auth_state_dir() -> PathBuf {
         .unwrap_or_else(platform_default_auth_state_dir)
 }
 
-/// Linux systemd/Docker keep `/var/lib/pb-mapper/auth`. Desktop macOS and
-/// Windows binaries run as a normal user, so they need an application data
-/// directory instead of a root-owned system path.
+/// Linux systemd/Docker keep `/var/lib/pb-mapper/auth` when that path is usable
+/// (root, or an already-writable service directory). Unprivileged Linux,
+/// macOS, and Windows binaries need an application data directory instead.
 pub(crate) fn platform_default_auth_state_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -115,8 +115,66 @@ pub(crate) fn platform_default_auth_state_dir() -> PathBuf {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        PathBuf::from(DEFAULT_AUTH_STATE_DIR)
+        linux_default_auth_state_dir(
+            unix_effective_uid(),
+            linux_system_auth_dir_usable(),
+            std::env::var_os("XDG_DATA_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
     }
+}
+
+pub(crate) fn linux_default_auth_state_dir(
+    euid: u32,
+    system_dir_usable: bool,
+    xdg_data_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    if euid == 0 || system_dir_usable {
+        return PathBuf::from(DEFAULT_AUTH_STATE_DIR);
+    }
+    if let Some(xdg) = xdg_data_home {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("pb-mapper").join("auth");
+        }
+    }
+    if let Some(home) = home {
+        if !home.is_empty() {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("pb-mapper")
+                .join("auth");
+        }
+    }
+    PathBuf::from(DEFAULT_AUTH_STATE_DIR)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn unix_effective_uid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    unsafe { geteuid() }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn linux_system_auth_dir_usable() -> bool {
+    let path = Path::new(DEFAULT_AUTH_STATE_DIR);
+    path.is_dir() && unix_path_is_writable(path)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn unix_path_is_writable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    extern "C" {
+        fn access(pathname: *const std::os::raw::c_char, mode: i32) -> i32;
+    }
+    const W_OK: i32 = 2;
+    unsafe { access(c_path.as_ptr(), W_OK) == 0 }
 }
 
 impl Default for AuthConfig {

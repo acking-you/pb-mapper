@@ -697,21 +697,23 @@ fn actor_reset(
     let mut snapshot = empty_snapshot(inner, new_instance_id, admin_replays);
     push_persisted_audit(&mut snapshot.audit_records, reset_audit.clone());
     let admin_key = inner.admin_key();
-    if let Err(error) = write_snapshot_and_truncate_wal(config, &admin_key, &snapshot) {
+    let next_instance_path = config.state_dir.join("server-instance-id.next");
+    if let Err(error) = atomic_write(&next_instance_path, &new_instance_id, 0o600)
+        .and_then(|()| write_snapshot_and_truncate_wal(config, &admin_key, &snapshot))
+        .and_then(|()| {
+            atomic_write(
+                &config.state_dir.join("server-instance-id"),
+                &new_instance_id,
+                0o600,
+            )
+        })
+    {
         inner.safe_mode.store(true, Ordering::Release);
         cancel_all_temporary_leases(inner);
         return Err(error);
     }
+    let _ = std::fs::remove_file(&next_instance_path);
     push_audit_record(inner, reset_audit);
-    if let Err(error) = atomic_write(
-        &config.state_dir.join("server-instance-id"),
-        &new_instance_id,
-        0o600,
-    ) {
-        inner.safe_mode.store(true, Ordering::Release);
-        cancel_all_temporary_leases(inner);
-        return Err(error);
-    }
 
     cancel_all_temporary_leases(inner);
     {

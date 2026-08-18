@@ -90,8 +90,8 @@ struct ServerArgs {
     #[arg(long, default_value_t = false)]
     use_machine_msg_header_key: bool,
     /// Directory containing encrypted authentication state and the administrator key file.
-    /// Defaults to /var/lib/pb-mapper/auth on Linux, or a user-writable application
-    /// directory on macOS and Windows.
+    /// Defaults to /var/lib/pb-mapper/auth for Linux services or a writable system
+    /// directory; otherwise a user-writable application directory.
     #[arg(long)]
     auth_state_dir: Option<PathBuf>,
     /// Create a random administrator key before starting the relay.

@@ -168,6 +168,31 @@ async fn overlapping_runtimes_cannot_share_an_auth_state_directory() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+#[tokio::test]
+async fn from_isolated_state_takes_the_state_lock_before_creating_admin_key() {
+    let state_dir = temp_state_dir("lock-before-key");
+    prepare_state_dir(&state_dir).unwrap();
+    let _lock = acquire_state_dir_lock(&state_dir).unwrap();
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let error = match AuthRuntime::from_isolated_state(config).await {
+        Ok(_) => panic!("a locked start should not create a second runtime"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "auth_state_locked");
+    assert!(
+        !state_dir.join("admin.key").exists(),
+        "a locked start must not create a competing administrator key"
+    );
+    drop(_lock);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
 #[test]
 fn safe_mode_startup_does_not_allow_compaction() {
     assert!(!compaction_is_allowed(true));
@@ -264,8 +289,51 @@ fn platform_default_auth_state_dir_is_writable_outside_linux_system_paths() {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        assert_eq!(dir, PathBuf::from(DEFAULT_AUTH_STATE_DIR));
+        let expected = linux_default_auth_state_dir(
+            unix_effective_uid(),
+            linux_system_auth_dir_usable(),
+            std::env::var_os("XDG_DATA_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        );
+        assert_eq!(dir, expected);
+        if unix_effective_uid() != 0 && !linux_system_auth_dir_usable() {
+            assert_ne!(
+                dir,
+                PathBuf::from(DEFAULT_AUTH_STATE_DIR),
+                "unprivileged Linux should not default to the system auth directory: {}",
+                dir.display()
+            );
+        }
     }
+}
+
+#[test]
+fn linux_default_auth_state_dir_prefers_user_data_when_system_dir_is_unusable() {
+    assert_eq!(
+        linux_default_auth_state_dir(0, false, None, Some(std::ffi::OsStr::new("/home/op"))),
+        PathBuf::from(DEFAULT_AUTH_STATE_DIR)
+    );
+    assert_eq!(
+        linux_default_auth_state_dir(1000, true, None, Some(std::ffi::OsStr::new("/home/op"))),
+        PathBuf::from(DEFAULT_AUTH_STATE_DIR)
+    );
+    assert_eq!(
+        linux_default_auth_state_dir(
+            1000,
+            false,
+            Some(std::ffi::OsStr::new("/xdg")),
+            Some(std::ffi::OsStr::new("/home/op"))
+        ),
+        PathBuf::from("/xdg/pb-mapper/auth")
+    );
+    assert_eq!(
+        linux_default_auth_state_dir(1000, false, None, Some(std::ffi::OsStr::new("/home/op"))),
+        PathBuf::from("/home/op/.local/share/pb-mapper/auth")
+    );
+    assert_eq!(
+        linux_default_auth_state_dir(1000, false, None, None),
+        PathBuf::from(DEFAULT_AUTH_STATE_DIR)
+    );
 }
 
 #[test]
@@ -463,6 +531,129 @@ async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
     assert_ne!(replacement.credential, old.credential);
 
     drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
+fn recover_instance_id_promotes_next_when_snapshot_matches() {
+    let state_dir = temp_state_dir("instance-next-promote");
+    prepare_state_dir(&state_dir).unwrap();
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let current = [1_u8; INSTANCE_ID_LEN];
+    let next = [2_u8; INSTANCE_ID_LEN];
+    atomic_write(&state_dir.join("server-instance-id"), &current, 0o600).unwrap();
+    atomic_write(&state_dir.join("server-instance-id.next"), &next, 0o600).unwrap();
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 1,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let snapshot = PersistedSnapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        instance_id: next,
+        generations: vec![0; 1],
+        entries: Vec::new(),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+        admin_replays: Vec::new(),
+        audit_records: VecDeque::new(),
+    };
+    write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
+
+    let recovered = recover_instance_id_after_reset(&state_dir, &admin_key, current).unwrap();
+    assert_eq!(recovered, next);
+    assert_eq!(
+        read_instance_id_file(&state_dir.join("server-instance-id")).unwrap(),
+        Some(next)
+    );
+    assert!(!state_dir.join("server-instance-id.next").exists());
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
+fn recover_instance_id_discards_stale_next_when_snapshot_still_matches_current() {
+    let state_dir = temp_state_dir("instance-next-stale");
+    prepare_state_dir(&state_dir).unwrap();
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let current = [3_u8; INSTANCE_ID_LEN];
+    let next = [4_u8; INSTANCE_ID_LEN];
+    atomic_write(&state_dir.join("server-instance-id"), &current, 0o600).unwrap();
+    atomic_write(&state_dir.join("server-instance-id.next"), &next, 0o600).unwrap();
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 1,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let snapshot = PersistedSnapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        instance_id: current,
+        generations: vec![0; 1],
+        entries: Vec::new(),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+        admin_replays: Vec::new(),
+        audit_records: VecDeque::new(),
+    };
+    write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
+
+    let recovered = recover_instance_id_after_reset(&state_dir, &admin_key, current).unwrap();
+    assert_eq!(recovered, current);
+    assert!(!state_dir.join("server-instance-id.next").exists());
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
+async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
+    let state_dir = temp_state_dir("reset-recover");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let issued = runtime
+        .issue(
+            &admin,
+            Duration::from_secs(60),
+            Some("before-interrupted-reset".to_string()),
+        )
+        .await
+        .unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let old_instance_id = load_or_create_instance_id(&state_dir).unwrap();
+    let next = random_instance_id();
+    atomic_write(&state_dir.join("server-instance-id.next"), &next, 0o600).unwrap();
+    let snapshot = PersistedSnapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        instance_id: next,
+        generations: vec![0; 4],
+        entries: Vec::new(),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+        admin_replays: Vec::new(),
+        audit_records: VecDeque::new(),
+    };
+    write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
+    atomic_write(
+        &state_dir.join("server-instance-id"),
+        &old_instance_id,
+        0o600,
+    )
+    .unwrap();
+
+    let restored = AuthRuntime::start(admin_key, config).await.unwrap();
+    let restored_admin = authenticate_for_test(&restored, 0).unwrap();
+    let status = restored.status(&restored_admin).await.unwrap();
+    assert!(!status.safe_mode);
+    assert_eq!(status.server_instance_id, hex(&next));
+    assert!(authenticate_for_test(&restored, issued.metadata.key_id).is_err());
+    assert!(!state_dir.join("server-instance-id.next").exists());
+    drop(restored);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = std::fs::remove_dir_all(state_dir);
 }

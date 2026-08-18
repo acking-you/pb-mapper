@@ -199,14 +199,16 @@ revocation and hard connection closure deterministic.
 
 ## Persistence and safe mode
 
-The Linux system-service state directory is `/var/lib/pb-mapper/auth`. macOS
-and Windows desktop binaries default to a user-writable application directory
-instead of `/var/lib`:
+The Linux system-service state directory is `/var/lib/pb-mapper/auth`.
+Unprivileged Linux, macOS, and Windows desktop binaries default to a
+user-writable application directory instead of `/var/lib`:
 
 | File | Purpose |
 | --- | --- |
 | `admin.key` | Root credential, mode `0600` |
+| `admin.key.next` | Staged root key for an in-flight rotation |
 | `server-instance-id` | 16-byte persistent derivation identity |
+| `server-instance-id.next` | Staged instance id for an in-flight reset |
 | `auth.snapshot` | AES-256-GCM encrypted compact slot state |
 | `auth.wal` | Length-prefixed, individually encrypted mutations and audit records |
 
