@@ -751,7 +751,9 @@ fn actor_rotate_root(
         key: new_key,
         lease: Arc::downgrade(&new_admin_lease),
     };
-    set_process_msg_header_key(Some(&new_key_string)).map_err(AuthFailure::internal)?;
+    if inner.sync_process_credential {
+        set_process_msg_header_key(Some(&new_key_string)).map_err(AuthFailure::internal)?;
+    }
     inner.safe_mode.store(false, Ordering::Release);
     old_admin_lease.cancellation.cancel();
     *admin_lease = new_admin_lease;

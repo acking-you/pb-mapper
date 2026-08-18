@@ -32,7 +32,7 @@ impl PbMapperState {
             state_dir: self.config_dir.join("auth"),
             ..AuthConfig::default()
         };
-        let auth = AuthRuntime::from_process(auth_config)
+        let auth = AuthRuntime::from_isolated_state(auth_config)
             .await
             .map_err(|error| {
                 CtlError::io(format!(

@@ -19,13 +19,14 @@ use std::time::Duration;
 use better_mimalloc_rs::MiMalloc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use pb_mapper::common::auth::{
-    generate_admin_key, initialize_admin_key, write_admin_key_file, KeyPage, LegacyProtocolPolicy,
-    DEFAULT_AUTH_STATE_DIR,
+    generate_admin_key, initialize_admin_key, write_admin_key_file, AuthConfig, KeyPage,
+    LegacyProtocolPolicy,
 };
 use pb_mapper::common::checksum::set_process_msg_header_key;
 use pb_mapper::common::checksum::{setup_machine_msg_header_key, MACHINE_MSG_HEADER_KEY_PATH};
 use pb_mapper::common::config::{
-    get_pb_mapper_server_async, get_sockaddr_async, init_tracing, keep_alive_from_env, StatusOp,
+    control_io_timeout, get_pb_mapper_server_async, get_sockaddr_async, init_tracing,
+    keep_alive_from_env, StatusOp,
 };
 use pb_mapper::common::message::command::{
     AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage, MessageSerializer,
@@ -88,8 +89,8 @@ struct ServerArgs {
     #[arg(long, default_value_t = false)]
     use_machine_msg_header_key: bool,
     /// Directory containing encrypted authentication state and the administrator key file.
-    #[arg(long, default_value = DEFAULT_AUTH_STATE_DIR)]
-    auth_state_dir: PathBuf,
+    #[arg(long)]
+    auth_state_dir: Option<PathBuf>,
     /// Create a random administrator key before starting the relay.
     #[arg(
         long,
@@ -101,14 +102,14 @@ struct ServerArgs {
     #[arg(long, requires = "init_admin_key", default_value_t = false)]
     force_init_admin_key: bool,
     /// Maximum temporary-key slots allocated by the relay.
-    #[arg(long, default_value_t = 65_536)]
-    max_temporary_keys: usize,
+    #[arg(long)]
+    max_temporary_keys: Option<usize>,
     /// Maximum accepted temporary-key TTL.
-    #[arg(long, default_value = "30d", value_parser = parse_duration)]
-    max_temporary_key_ttl: Duration,
+    #[arg(long, value_parser = parse_duration)]
+    max_temporary_key_ttl: Option<Duration>,
     /// Allow or deny the legacy encrypted framing protocol.
-    #[arg(long, value_enum, default_value_t = LegacyProtocolArg::Allow)]
-    legacy_protocol: LegacyProtocolArg,
+    #[arg(long, value_enum)]
+    legacy_protocol: Option<LegacyProtocolArg>,
 }
 
 #[path = "pb-mapper/admin.rs"]
@@ -224,24 +225,33 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
-    std::env::set_var("PB_MAPPER_AUTH_STATE_DIR", &args.auth_state_dir);
-    std::env::set_var(
-        "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
-        args.max_temporary_keys.to_string(),
-    );
-    std::env::set_var(
-        "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
-        args.max_temporary_key_ttl.as_secs().to_string(),
-    );
-    std::env::set_var(
-        "PB_MAPPER_LEGACY_PROTOCOL",
-        match args.legacy_protocol {
-            LegacyProtocolArg::Allow => "allow",
-            LegacyProtocolArg::Deny => "deny",
-        },
-    );
+    if let Some(auth_state_dir) = &args.auth_state_dir {
+        std::env::set_var("PB_MAPPER_AUTH_STATE_DIR", auth_state_dir);
+    }
+    if let Some(max_temporary_keys) = args.max_temporary_keys {
+        std::env::set_var(
+            "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
+            max_temporary_keys.to_string(),
+        );
+    }
+    if let Some(max_temporary_key_ttl) = args.max_temporary_key_ttl {
+        std::env::set_var(
+            "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
+            max_temporary_key_ttl.as_secs().to_string(),
+        );
+    }
+    if let Some(legacy_protocol) = args.legacy_protocol {
+        std::env::set_var(
+            "PB_MAPPER_LEGACY_PROTOCOL",
+            match legacy_protocol {
+                LegacyProtocolArg::Allow => "allow",
+                LegacyProtocolArg::Deny => "deny",
+            },
+        );
+    }
+    let auth_config = AuthConfig::default();
     if args.init_admin_key {
-        let key_path = args.auth_state_dir.join("admin.key");
+        let key_path = auth_config.state_dir.join("admin.key");
         let key = initialize_admin_key(&key_path, args.force_init_admin_key)?;
         set_process_msg_header_key(Some(&key))?;
         eprintln!("administrator key initialized at {}", key_path.display());
@@ -494,5 +504,45 @@ mod tests {
             "--use-machine-msg-header-key",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn server_auth_options_only_override_environment_when_explicit() {
+        let cli =
+            Cli::try_parse_from(["pb-mapper", "server"]).expect("server defaults should parse");
+        let Command::Server(defaults) = cli.command else {
+            panic!("expected server command");
+        };
+        assert_eq!(defaults.auth_state_dir, None);
+        assert_eq!(defaults.max_temporary_keys, None);
+        assert_eq!(defaults.max_temporary_key_ttl, None);
+        assert_eq!(defaults.legacy_protocol, None);
+
+        let cli = Cli::try_parse_from([
+            "pb-mapper",
+            "server",
+            "--auth-state-dir",
+            "/tmp/pb-mapper-auth",
+            "--max-temporary-keys",
+            "1024",
+            "--max-temporary-key-ttl",
+            "2h",
+            "--legacy-protocol",
+            "deny",
+        ])
+        .expect("explicit server authentication options should parse");
+        let Command::Server(explicit) = cli.command else {
+            panic!("expected server command");
+        };
+        assert_eq!(
+            explicit.auth_state_dir,
+            Some(PathBuf::from("/tmp/pb-mapper-auth"))
+        );
+        assert_eq!(explicit.max_temporary_keys, Some(1024));
+        assert_eq!(
+            explicit.max_temporary_key_ttl,
+            Some(Duration::from_secs(2 * 60 * 60))
+        );
+        assert_eq!(explicit.legacy_protocol, Some(LegacyProtocolArg::Deny));
     }
 }

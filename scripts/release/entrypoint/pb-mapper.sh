@@ -15,7 +15,7 @@ ADMIN_KEY_PATH="$AUTH_DIR/admin.key"
 LEGACY_KEY_PATH="/var/lib/pb-mapper-server/msg_header_key"
 
 install -d -m 0700 "$AUTH_DIR"
-if [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
+if [ -z "${MSG_HEADER_KEY:-}" ] && [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
   install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
   echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
 fi

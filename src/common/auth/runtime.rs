@@ -26,10 +26,35 @@ impl AuthRuntime {
                 false,
             ));
         };
-        Self::start(admin_key, config).await
+        Self::start_with_process_sync(admin_key, config, true).await
+    }
+
+    /// Start an embedded relay with an administrator key owned only by its state directory.
+    ///
+    /// This deliberately leaves the process credential untouched because the containing UI uses
+    /// that credential for its outbound register, connect, status, and stream connections.
+    pub async fn from_isolated_state(config: AuthConfig) -> Result<Self, AuthFailure> {
+        prepare_state_dir(&config.state_dir)?;
+        let credential = load_isolated_server_admin_credential(&config.state_dir)?;
+        let Credential::Admin(admin_key) = credential else {
+            return Err(AuthFailure::new(
+                "administrator_key_required",
+                "the embedded relay must start with an administrator credential",
+                false,
+            ));
+        };
+        Self::start_with_process_sync(admin_key, config, false).await
     }
 
     pub async fn start(admin_key: AesKeyType, config: AuthConfig) -> Result<Self, AuthFailure> {
+        Self::start_with_process_sync(admin_key, config, true).await
+    }
+
+    async fn start_with_process_sync(
+        admin_key: AesKeyType,
+        config: AuthConfig,
+        sync_process_credential: bool,
+    ) -> Result<Self, AuthFailure> {
         prepare_state_dir(&config.state_dir)?;
         let instance_id = load_or_create_instance_id(&config.state_dir)?;
         let (mut loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
@@ -125,6 +150,7 @@ impl AuthRuntime {
                 key: admin_key,
                 lease: Arc::downgrade(&admin_lease),
             }),
+            sync_process_credential,
             instance_id: RwLock::new(instance_id),
             slots: RwLock::new(slots),
             safe_mode: AtomicBool::new(safe_mode),

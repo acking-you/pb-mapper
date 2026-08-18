@@ -387,16 +387,30 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
         assert_eq!(connections[0].conn_id, expected_conn_id);
     }
 
-    let (_, _, denied) = send_v2_request(
-        server_addr,
-        &first_credential,
-        PbConnRequest::Admin(AdminRequest::AuthStatus),
-    )
-    .await;
-    let PbConnResponse::Error(denied) = denied else {
-        panic!("temporary credential unexpectedly received an admin response");
-    };
-    assert_eq!(denied.code, "admin_permission_required");
+    for admin_request in [
+        AdminRequest::AuthStatus,
+        AdminRequest::ServiceList {
+            key_id: None,
+            page: 0,
+            page_size: 100,
+        },
+        AdminRequest::ConnectionList {
+            key_id: None,
+            page: 0,
+            page_size: 100,
+        },
+    ] {
+        let (_, _, denied) = send_v2_request(
+            server_addr,
+            &first_credential,
+            PbConnRequest::Admin(admin_request),
+        )
+        .await;
+        let PbConnResponse::Error(denied) = denied else {
+            panic!("temporary credential unexpectedly received an admin response");
+        };
+        assert_eq!(denied.code, "admin_permission_required");
+    }
 
     let admin_credential =
         Credential::Admin(*TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap());

@@ -57,6 +57,10 @@ const ADMIN_REPLAY_RETENTION: Duration = Duration::from_secs(10 * 60);
 const ADMIN_REPLAY_CAPACITY: usize = 65_536;
 const AUDIT_RECORD_CAPACITY: usize = 4096;
 
+#[cfg(test)]
+pub(crate) static PROCESS_CREDENTIAL_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LegacyProtocolPolicy {
@@ -289,6 +293,17 @@ impl AuthContext {
         Ok(self.ensure_active()?.cancellation_token())
     }
 
+    pub(crate) fn admin_cancellation_token(&self) -> Result<CancellationToken, AuthFailure> {
+        if !self.is_admin {
+            return Err(AuthFailure::new(
+                "admin_permission_required",
+                "administrator credential is required for this operation",
+                false,
+            ));
+        }
+        self.cancellation_token()
+    }
+
     fn admin_authority(&self) -> Result<Weak<AuthLease>, AuthFailure> {
         if !self.is_admin {
             return Err(AuthFailure::new(
@@ -339,6 +354,7 @@ struct AdminState {
 #[derive(Debug)]
 struct AuthStateInner {
     admin: RwLock<AdminState>,
+    sync_process_credential: bool,
     instance_id: RwLock<[u8; INSTANCE_ID_LEN]>,
     slots: RwLock<Box<[SlotHot]>>,
     safe_mode: AtomicBool,
@@ -502,51 +518,71 @@ impl Drop for LegacyConnectionGuard {
     }
 }
 
-fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFailure> {
-    let path = state_dir.join("admin.key");
-    let raw = if path.exists() {
-        #[cfg(unix)]
-        {
-            let metadata = std::fs::metadata(&path).map_err(|error| {
-                AuthFailure::new(
-                    "administrator_key_required",
-                    format!(
-                        "administrator key file `{}` metadata could not be read: {error}",
-                        path.display()
-                    ),
-                    false,
-                )
-            })?;
-            if metadata.permissions().mode() & 0o077 != 0 {
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
-                    |error| {
-                        AuthFailure::new(
-                            "administrator_key_required",
-                            format!(
-                                "administrator key file `{}` permissions could not be secured: {error}",
-                                path.display()
-                            ),
-                            false,
-                        )
-                    },
-                )?;
-                tracing::warn!(
-                    event = "administrator_key_permissions_repaired",
-                    path = %path.display(),
-                    "restricted administrator key file permissions to 0600"
-                );
-            }
-        }
-        std::fs::read_to_string(&path).map_err(|error| {
+fn read_admin_key(path: &Path) -> Result<Option<String>, AuthFailure> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::metadata(path).map_err(|error| {
             AuthFailure::new(
                 "administrator_key_required",
                 format!(
-                    "administrator key file `{}` could not be read: {error}",
+                    "administrator key file `{}` metadata could not be read: {error}",
                     path.display()
                 ),
                 false,
             )
-        })?
+        })?;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |error| {
+                    AuthFailure::new(
+                        "administrator_key_required",
+                        format!(
+                            "administrator key file `{}` permissions could not be secured: {error}",
+                            path.display()
+                        ),
+                        false,
+                    )
+                },
+            )?;
+            tracing::warn!(
+                event = "administrator_key_permissions_repaired",
+                path = %path.display(),
+                "restricted administrator key file permissions to 0600"
+            );
+        }
+    }
+    std::fs::read_to_string(path).map(Some).map_err(|error| {
+        AuthFailure::new(
+            "administrator_key_required",
+            format!(
+                "administrator key file `{}` could not be read: {error}",
+                path.display()
+            ),
+            false,
+        )
+    })
+}
+
+fn validate_admin_credential(raw: &str) -> Result<Credential, AuthFailure> {
+    let credential = parse_credential(raw.trim())
+        .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
+    if !credential.is_admin() {
+        return Err(AuthFailure::new(
+            "administrator_key_required",
+            "the server key file contains a temporary credential",
+            false,
+        ));
+    }
+    Ok(credential)
+}
+
+fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFailure> {
+    let path = state_dir.join("admin.key");
+    let raw = if let Some(raw) = read_admin_key(&path)? {
+        raw
     } else if std::env::var_os(ENV_MSG_HEADER_KEY).is_some() {
         let credential = get_process_credential()
             .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
@@ -576,15 +612,7 @@ fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFail
                 false,
             )
         })?;
-        let Credential::Admin(_) = parse_credential(key.trim())
-            .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?
-        else {
-            return Err(AuthFailure::new(
-                "administrator_key_required",
-                "the legacy server key file contains a temporary credential",
-                false,
-            ));
-        };
+        validate_admin_credential(&key)?;
         write_admin_key(state_dir, key.trim())?;
         tracing::warn!(
             event = "administrator_key_migrated",
@@ -602,17 +630,30 @@ fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFail
         );
         key
     };
-    let credential = parse_credential(raw.trim())
-        .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
-    if !credential.is_admin() {
-        return Err(AuthFailure::new(
-            "administrator_key_required",
-            "the server key file contains a temporary credential",
-            false,
-        ));
-    }
+    let credential = validate_admin_credential(&raw)?;
     set_process_msg_header_key(Some(raw.trim())).map_err(AuthFailure::internal)?;
     Ok(credential)
+}
+
+/// Load or create an app-local relay root without reading or mutating the process credential.
+///
+/// The Flutter process uses its configured process credential for the remote relay, while its
+/// optional embedded relay owns an independent administrator key under the app data directory.
+fn load_isolated_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFailure> {
+    let path = state_dir.join("admin.key");
+    let raw = match read_admin_key(&path)? {
+        Some(raw) => raw,
+        None => {
+            let key = initialize_admin_key(&path, false)?;
+            tracing::warn!(
+                event = "isolated_administrator_key_initialized",
+                path = %path.display(),
+                "generated an administrator key for an embedded relay"
+            );
+            key
+        }
+    };
+    validate_admin_credential(&raw)
 }
 
 pub fn make_key_id(generation: u32, slot: u32) -> u64 {

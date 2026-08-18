@@ -68,6 +68,54 @@ fn derived_key_is_bound_to_instance_and_key_id() {
 }
 
 #[tokio::test]
+async fn isolated_runtime_preserves_remote_temporary_process_credential() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let state_dir = temp_state_dir("isolated-relay");
+    let temporary_key_id = make_key_id(1, 0);
+    let temporary_key = *b"temporary-remote-key-0123456789a";
+    let temporary_credential = encode_temporary_credential(temporary_key_id, &temporary_key);
+    set_process_msg_header_key(Some(&temporary_credential)).unwrap();
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+
+    let runtime = AuthRuntime::from_isolated_state(config).await.unwrap();
+    assert_eq!(
+        get_process_credential().unwrap(),
+        Credential::Temporary {
+            key_id: temporary_key_id,
+            key: temporary_key,
+        }
+    );
+
+    let local_admin_raw = std::fs::read_to_string(state_dir.join("admin.key")).unwrap();
+    let Credential::Admin(local_admin_key) = parse_credential(local_admin_raw.trim()).unwrap()
+    else {
+        panic!("isolated relay key should be an administrator credential");
+    };
+    let local_admin = runtime.authenticate_presented(0, &local_admin_key).unwrap();
+    runtime
+        .rotate_root(&local_admin, *b"isolated-new-admin-key-012345678")
+        .await
+        .unwrap();
+    assert_eq!(
+        get_process_credential().unwrap(),
+        Credential::Temporary {
+            key_id: temporary_key_id,
+            key: temporary_key,
+        }
+    );
+
+    set_process_msg_header_key(None).unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
 async fn issue_renew_revoke_and_persist() {
     let state_dir = temp_state_dir("auth-lifecycle");
     let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
@@ -220,6 +268,7 @@ async fn corrupt_wal_fails_temporary_keys_closed_until_admin_reset() {
 
 #[tokio::test]
 async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
     let state_dir = temp_state_dir("auth-root-rotation");
     let old_key = *b"0123456789abcdefghijklmnopqrstuv";
     let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";

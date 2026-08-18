@@ -314,14 +314,37 @@ async fn send_admin_request(
     remote_addr: std::net::SocketAddr,
     request: AdminRequest,
 ) -> Result<AdminResponse, Box<dyn Error>> {
+    send_admin_request_with_timeout(remote_addr, request, control_io_timeout()).await
+}
+
+async fn send_admin_request_with_timeout(
+    remote_addr: std::net::SocketAddr,
+    request: AdminRequest,
+    io_timeout: Duration,
+) -> Result<AdminResponse, Box<dyn Error>> {
     let encoded = PbConnRequest::Admin(request).encode()?;
     for attempt in 0..2 {
-        let mut stream = TcpStream::connect(remote_addr).await?;
-        let session = ClientHeaderSession::from_process()?;
-        session.write_initial(&mut stream, &encoded).await?;
-        let mut reader = session.response_reader(&mut stream)?;
-        let message = reader.read_msg().await?;
-        match PbConnResponse::decode(message)? {
+        let response = tokio::time::timeout(io_timeout, async {
+            let mut stream = TcpStream::connect(remote_addr)
+                .await
+                .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
+            let session = ClientHeaderSession::from_process()?;
+            session.write_initial(&mut stream, &encoded).await?;
+            let mut reader = session.response_reader(&mut stream)?;
+            let message = reader.read_msg().await?;
+            Ok::<_, Box<dyn Error>>(PbConnResponse::decode(message)?)
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "administrator request attempt timed out after {} ms",
+                    io_timeout.as_millis()
+                ),
+            )
+        })??;
+        match response {
             PbConnResponse::Admin(response) => return Ok(response),
             PbConnResponse::Error(error)
                 if error.code == "connection_salt_replayed" && error.retryable && attempt == 0 =>
@@ -611,4 +634,39 @@ fn default_admin_recovery_key_file() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("pb-mapper")
         .join("admin.key")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn administrator_request_times_out_when_peer_stalls() {
+        set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv"))
+            .expect("test administrator credential should be valid");
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("test listener should bind");
+        let remote_addr = listener
+            .local_addr()
+            .expect("listener should have an address");
+        let stalled_peer = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("test peer should connect");
+            std::future::pending::<()>().await;
+        });
+
+        let error = send_admin_request_with_timeout(
+            remote_addr,
+            AdminRequest::AuthStatus,
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("a stalled administrator request should time out");
+
+        let io_error = error
+            .downcast_ref::<std::io::Error>()
+            .expect("timeout should be reported as an I/O error");
+        assert_eq!(io_error.kind(), std::io::ErrorKind::TimedOut);
+        stalled_peer.abort();
+    }
 }
