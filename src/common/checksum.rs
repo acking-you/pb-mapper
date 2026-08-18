@@ -45,7 +45,7 @@ struct MsgHeaderKeyState {
     hash: AtomicU32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Credential {
     Admin(AesKeyType),
     Temporary { key_id: u64, key: AesKeyType },
@@ -141,7 +141,6 @@ pub fn get_process_credential() -> Result<Credential, String> {
         .credential
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
         .ok_or_else(|| {
             format!(
                 "`{ENV_MSG_HEADER_KEY}` is required; no insecure default credential is available"

@@ -390,6 +390,10 @@ struct AuthStateInner {
     sync_process_credential: bool,
     instance_id: RwLock<[u8; INSTANCE_ID_LEN]>,
     slots: RwLock<Box<[SlotHot]>>,
+    /// Generations and entries for slots above the current capacity. Kept so a
+    /// later capacity increase cannot reuse a discarded slot's key id.
+    high_slot_generations: RwLock<Vec<u32>>,
+    high_slot_entries: RwLock<Vec<PersistedEntry>>,
     safe_mode: AtomicBool,
     legacy_protocol_allowed: AtomicBool,
     active_legacy_connections: AtomicU64,

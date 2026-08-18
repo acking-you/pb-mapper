@@ -11,7 +11,9 @@
 
 use super::*;
 use crate::common::auth::{AuthConfig, LegacyProtocolPolicy, PROCESS_CREDENTIAL_TEST_LOCK};
-use crate::common::checksum::{encode_temporary_credential, set_process_msg_header_key};
+use crate::common::checksum::{
+    encode_temporary_credential, parse_credential, set_process_msg_header_key,
+};
 
 fn temp_config() -> AuthConfig {
     let mut random = [0_u8; 8];
@@ -130,6 +132,45 @@ async fn identical_initial_frames_are_admitted_only_once() {
             .code,
         "connection_salt_replayed"
     );
+
+    let _ = std::fs::remove_dir_all(config.state_dir);
+}
+
+#[tokio::test]
+async fn revoked_first_flights_do_not_consume_the_replay_filter() {
+    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = temp_config();
+    let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
+    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let issued = auth
+        .issue(&admin_context, std::time::Duration::from_secs(60), None)
+        .await
+        .unwrap();
+    let Credential::Temporary { key_id, key } = parse_credential(&issued.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    let client = ClientHeaderSession::new_v2(&Credential::Temporary { key_id, key }).unwrap();
+    let bytes = encode_initial(&client, b"revoked").await;
+    auth.revoke(&admin_context, key_id).await.unwrap();
+    let security = ServerSecurity::new(auth);
+
+    let first = match security
+        .read_initial(&mut std::io::Cursor::new(bytes.clone()))
+        .await
+    {
+        Ok(_) => panic!("revoked credential should fail"),
+        Err(error) => error,
+    };
+    let second = match security
+        .read_initial(&mut std::io::Cursor::new(bytes))
+        .await
+    {
+        Ok(_) => panic!("revoked credential should fail again"),
+        Err(error) => error,
+    };
+    assert_eq!(first.failure.code, "temporary_key_revoked");
+    assert_eq!(second.failure.code, "temporary_key_revoked");
 
     let _ = std::fs::remove_dir_all(config.state_dir);
 }

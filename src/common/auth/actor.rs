@@ -300,10 +300,13 @@ fn actor_claim_admin_mutation(
         fingerprint,
         client_timestamp,
     };
-    append_wal(
-        config,
-        &inner.admin_key(),
-        &WalRecord::AdminReplay(record.clone()),
+    fail_closed_on_uncertain_wal(
+        inner,
+        append_wal(
+            config,
+            &inner.admin_key(),
+            &WalRecord::AdminReplay(record.clone()),
+        ),
     )?;
     admin_replays.insert(fingerprint);
     admin_replay_order.push_back(record);

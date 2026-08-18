@@ -145,6 +145,10 @@ impl AuthRuntime {
         while audit_records.len() > AUDIT_RECORD_CAPACITY {
             audit_records.pop_front();
         }
+        let (high_slot_generations, high_slot_entries) = loaded
+            .as_ref()
+            .map(|state| split_high_slot_state(state, config.max_temporary_keys))
+            .unwrap_or_default();
         let inner = Arc::new(AuthStateInner {
             admin: RwLock::new(AdminState {
                 key: admin_key,
@@ -153,6 +157,8 @@ impl AuthRuntime {
             sync_process_credential,
             instance_id: RwLock::new(instance_id),
             slots: RwLock::new(slots),
+            high_slot_generations: RwLock::new(high_slot_generations),
+            high_slot_entries: RwLock::new(high_slot_entries),
             safe_mode: AtomicBool::new(safe_mode),
             legacy_protocol_allowed: AtomicBool::new(legacy_protocol.is_allowed()),
             active_legacy_connections: AtomicU64::new(0),

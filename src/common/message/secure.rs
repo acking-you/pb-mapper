@@ -533,6 +533,13 @@ impl ServerSecurity {
             })?
             .to_vec();
 
+        let context = self
+            .auth
+            .authenticate_presented(key_id, &key)
+            .map_err(|failure| ServerInitialError {
+                failure,
+                response_session: Some(session_without_context(&session)),
+            })?;
         let fingerprint = replay_fingerprint(key_id, &salt);
         let replayed = self
             .replay
@@ -549,14 +556,6 @@ impl ServerSecurity {
                 response_session: Some(session),
             });
         }
-
-        let context = self
-            .auth
-            .authenticate_presented(key_id, &key)
-            .map_err(|failure| ServerInitialError {
-                failure,
-                response_session: Some(session_without_context(&session)),
-            })?;
         session.context = Some(context);
         Ok(ServerInitialMessage {
             payload,

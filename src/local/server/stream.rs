@@ -10,6 +10,7 @@ use super::error::{
     DecodePbConnStreamRespSnafu, EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu,
     ReadPbConnStreamRespSnafu, Result, WritePbConnStreamReqSnafu,
 };
+use crate::common::checksum::Credential;
 use crate::common::config::control_io_timeout;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
@@ -20,6 +21,14 @@ use crate::snafu_error_handle;
 use uni_stream::addr::{each_addr, ToSocketAddrs};
 use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay, StreamProvider, StreamSplit};
 
+pub struct StreamConnect<A> {
+    pub local_addr: A,
+    pub remote_addr: A,
+    pub keep_alive: bool,
+    pub namespace: Option<u64>,
+    pub credential: Credential,
+}
+
 /// Handle a stream connection and establish a forward network traffic forwarding.
 /// This function handles both local and remote streams, sets up message writers and readers,
 /// and starts forwarding network traffic between the two endpoints.
@@ -27,17 +36,21 @@ pub async fn handle_stream<
     LocalStream: StreamProvider,
     A: ToSocketAddrs + Debug + Copy + Clone + Send,
 >(
-    local_addr: A,
-    remote_addr: A,
     key: Arc<str>,
     client_id: u32,
     server_generation: u64,
-    keep_alive: bool,
-    namespace: Option<u64>,
+    connect: StreamConnect<A>,
 ) -> Result<()>
 where
     LocalStream::Item: StreamForward,
 {
+    let StreamConnect {
+        local_addr,
+        remote_addr,
+        keep_alive,
+        namespace,
+        credential,
+    } = connect;
     let key_ref = key.as_ref();
     let client_id_span = info_span!("client_id", key_ref, client_id);
     let _enter = client_id_span.enter();
@@ -75,9 +88,10 @@ where
     }
     snafu_error_handle!(set_tcp_nodelay(&remote_stream), "remote stream set nodelay");
 
-    // write stream request and read response
+    // Use the credential captured at registration. A later UI/process key
+    // change must not move these streams into another namespace.
     let codec_key = {
-        let session = ClientHeaderSession::from_process()
+        let session = ClientHeaderSession::new_v2(&credential)
             .context(CreateHeaderToolSnafu { action: "session" })?;
         match tokio::time::timeout(timeout, session.write_initial(&mut remote_stream, &msg)).await {
             Ok(result) => result.context(WritePbConnStreamReqSnafu)?,

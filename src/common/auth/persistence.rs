@@ -48,6 +48,34 @@ pub(super) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
     }
 }
 
+fn snapshot_generations(inner: &AuthStateInner) -> Vec<u32> {
+    let slots = inner
+        .slots
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let extra = inner
+        .high_slot_generations
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut generations = slots.iter().map(|slot| slot.generation).collect::<Vec<_>>();
+    generations.extend_from_slice(&extra);
+    generations
+}
+
+pub(super) fn split_high_slot_state(
+    snapshot: &PersistedSnapshot,
+    capacity: usize,
+) -> (Vec<u32>, Vec<PersistedEntry>) {
+    let high_generations = snapshot.generations.get(capacity..).unwrap_or(&[]).to_vec();
+    let high_entries = snapshot
+        .entries
+        .iter()
+        .filter(|entry| key_slot(entry.key_id) as usize >= capacity)
+        .cloned()
+        .collect();
+    (high_generations, high_entries)
+}
+
 pub(super) fn build_snapshot(
     inner: &AuthStateInner,
     cold: &HashMap<u64, ColdMetadata>,
@@ -57,8 +85,8 @@ pub(super) fn build_snapshot(
         .slots
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let generations = slots.iter().map(|slot| slot.generation).collect();
-    let entries = slots
+    let generations = snapshot_generations(inner);
+    let mut entries = slots
         .iter()
         .enumerate()
         .filter_map(|(index, slot)| {
@@ -76,7 +104,15 @@ pub(super) fn build_snapshot(
                 tombstoned_at: (cold.tombstoned_at != 0).then_some(cold.tombstoned_at),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+    entries.extend(
+        inner
+            .high_slot_entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned(),
+    );
     PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: inner.instance_id(),
@@ -128,14 +164,10 @@ pub(super) fn empty_snapshot(
     instance_id: [u8; INSTANCE_ID_LEN],
     admin_replays: &VecDeque<AdminReplayRecord>,
 ) -> PersistedSnapshot {
-    let slots = inner
-        .slots
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id,
-        generations: slots.iter().map(|slot| slot.generation).collect(),
+        generations: snapshot_generations(inner),
         entries: Vec::new(),
         legacy_protocol: if inner.legacy_protocol_allowed.load(Ordering::Acquire) {
             LegacyProtocolPolicy::Allow
@@ -211,8 +243,9 @@ pub(super) fn try_load_persisted_state(
             false,
         ));
     }
-    snapshot.generations.resize(config.max_temporary_keys, 0);
-    snapshot.generations.truncate(config.max_temporary_keys);
+    if snapshot.generations.len() < config.max_temporary_keys {
+        snapshot.generations.resize(config.max_temporary_keys, 0);
+    }
 
     let wal_path = auth_wal_path(&config.state_dir);
     if wal_path.exists() {
@@ -238,14 +271,17 @@ pub(super) fn apply_persisted_mutation(
     match mutation {
         StateMutation::Issue(entry) => {
             let index = key_slot(entry.key_id) as usize;
-            if index >= capacity {
-                return Err(AuthFailure::new(
-                    "temporary_key_store_unavailable",
-                    "WAL issue record references a slot outside the configured capacity",
-                    false,
-                ));
+            if snapshot.generations.len() <= index {
+                snapshot.generations.resize(index + 1, 0);
             }
             snapshot.generations[index] = key_generation(entry.key_id);
+            if index >= capacity {
+                snapshot
+                    .entries
+                    .retain(|current| key_slot(current.key_id) as usize != index);
+                snapshot.entries.push(entry);
+                return Ok(());
+            }
             snapshot
                 .entries
                 .retain(|current| key_slot(current.key_id) as usize != index);
@@ -287,19 +323,35 @@ pub(super) fn apply_persisted_mutation(
     Ok(())
 }
 
+pub(super) fn fail_closed_on_uncertain_wal(
+    inner: &AuthStateInner,
+    result: Result<(), AuthFailure>,
+) -> Result<(), AuthFailure> {
+    if let Err(error) = &result {
+        if !error.retryable {
+            inner.safe_mode.store(true, Ordering::Release);
+            cancel_all_temporary_leases(inner);
+        }
+    }
+    result
+}
+
 pub(super) fn append_mutation(
     config: &AuthConfig,
     inner: &AuthStateInner,
     mutation: StateMutation,
     audit: AuditRecord,
 ) -> Result<(), AuthFailure> {
-    append_wal(
-        config,
-        &inner.admin_key(),
-        &WalRecord::Mutation {
-            mutation,
-            audit: audit.clone(),
-        },
+    fail_closed_on_uncertain_wal(
+        inner,
+        append_wal(
+            config,
+            &inner.admin_key(),
+            &WalRecord::Mutation {
+                mutation,
+                audit: audit.clone(),
+            },
+        ),
     )?;
     push_audit_record(inner, audit);
     Ok(())
@@ -310,7 +362,10 @@ pub(super) fn append_audit(
     inner: &AuthStateInner,
     audit: AuditRecord,
 ) -> Result<(), AuthFailure> {
-    append_wal(config, &inner.admin_key(), &WalRecord::Audit(audit.clone()))?;
+    fail_closed_on_uncertain_wal(
+        inner,
+        append_wal(config, &inner.admin_key(), &WalRecord::Audit(audit.clone())),
+    )?;
     push_audit_record(inner, audit);
     Ok(())
 }
@@ -354,16 +409,39 @@ pub(super) fn append_wal(
                 false,
             )
         })?;
-    file.write_all(&length.to_be_bytes())
-        .and_then(|()| file.write_all(&sealed))
-        .and_then(|()| file.sync_data())
+    let start_len = file
+        .metadata()
+        .map(|metadata| metadata.len())
         .map_err(|error| {
             AuthFailure::new(
                 "temporary_key_store_unavailable",
-                format!("failed to durably append `{}`: {error}", path.display()),
+                format!("failed to inspect `{}`: {error}", path.display()),
                 true,
             )
-        })
+        })?;
+    if let Err(error) = file
+        .write_all(&length.to_be_bytes())
+        .and_then(|()| file.write_all(&sealed))
+        .and_then(|()| file.sync_data())
+    {
+        let rolled_back = file
+            .set_len(start_len)
+            .and_then(|()| file.sync_data())
+            .is_ok();
+        return Err(AuthFailure::new(
+            "temporary_key_store_unavailable",
+            if rolled_back {
+                format!("failed to durably append `{}`: {error}", path.display())
+            } else {
+                format!(
+                    "failed to durably append `{}` and could not restore the previous WAL length: {error}",
+                    path.display()
+                )
+            },
+            rolled_back,
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRecord>, AuthFailure> {
@@ -605,20 +683,20 @@ pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFail
             false,
         ));
     }
-    // Overwriting admin.key alone leaves snapshot/WAL encrypted under the old
-    // key, so the next start fails closed into safe mode. Rotate or reset instead.
-    if force {
-        if let Some(state_dir) = path.parent() {
-            if encrypted_auth_state_exists(state_dir) {
-                return Err(AuthFailure::new(
-                    "administrator_key_state_exists",
-                    format!(
-                        "refusing to replace `{}` while encrypted auth state exists; use `pb-mapper admin root-key rotate` or `pb-mapper admin auth-state reset --confirm`",
-                        path.display()
-                    ),
-                    false,
-                ));
-            }
+    // Creating or replacing admin.key while snapshot/WAL remain leaves those
+    // files encrypted under the previous key. The next start would drop into
+    // safe mode instead of pointing the operator at rotate/reset.
+    if let Some(state_dir) = path.parent() {
+        if encrypted_auth_state_exists(state_dir) {
+            return Err(AuthFailure::new(
+                "administrator_key_state_exists",
+                format!(
+                    "refusing to {} `{}` while encrypted auth state exists; use `pb-mapper admin root-key rotate` or `pb-mapper admin auth-state reset --confirm`",
+                    if force { "replace" } else { "create" },
+                    path.display()
+                ),
+                false,
+            ));
         }
     }
     let key = generate_admin_key();

@@ -16,7 +16,8 @@ use self::error::{
     EncodeRegisterReqSnafu, EncodeStreamAckMsgSnafu, ReadRegisterRespSnafu, ReadStreamReqSnafu,
     RegisterRespNotMatchSnafu, SendRegisterReqSnafu, WritePingMsgSnafu, WriteStreamAckMsgSnafu,
 };
-use self::stream::handle_stream;
+use self::stream::{handle_stream, StreamConnect};
+use crate::common::checksum::{get_process_credential, Credential};
 use crate::common::config::{
     control_conn_pool_size, control_heartbeat_interval, control_heartbeat_tolerance,
     control_io_timeout, control_suspect_grace, registration_probe_timeout,
@@ -150,6 +151,7 @@ struct StreamTarget<A> {
     remote_addr: A,
     keep_alive: bool,
     namespace: Option<u64>,
+    credential: Credential,
 }
 
 fn duration_to_millis(duration: Duration) -> u64 {
@@ -445,7 +447,14 @@ where
 
     // Start registration with a protocol-v2 first frame. The session is reused for all
     // subsequent control messages on this TCP connection.
-    let session = match ClientHeaderSession::from_process() {
+    let credential = match get_process_credential() {
+        Ok(credential) => credential,
+        Err(error) => {
+            tracing::error!("load registration credential failed: {error}");
+            return Err(Status::ConnectRemote);
+        }
+    };
+    let session = match ClientHeaderSession::new_v2(&credential) {
         Ok(session) => session,
         Err(error) => {
             tracing::error!("create manager protocol-v2 session failed: {error}");
@@ -649,6 +658,7 @@ where
                             remote_addr,
                             keep_alive,
                             namespace,
+                            credential,
                         },
                         key.clone(),
                         registration.conn_id,
@@ -846,13 +856,16 @@ where
             tokio::spawn(async move {
                 snafu_error_handle!(
                     handle_stream::<LocalStream, _>(
-                        target.local_addr,
-                        target.remote_addr,
                         key,
                         client_id,
                         server_generation,
-                        target.keep_alive,
-                        target.namespace,
+                        StreamConnect {
+                            local_addr: target.local_addr,
+                            remote_addr: target.remote_addr,
+                            keep_alive: target.keep_alive,
+                            namespace: target.namespace,
+                            credential: target.credential,
+                        },
                     )
                     .await
                 )

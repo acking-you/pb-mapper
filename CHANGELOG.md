@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Fixed remaining review findings: installer migration now honors `MSG_HEADER_KEY` from `/etc/pb-mapper/server.env`, isolated relays validate legacy frames with their own administrator key, first-flight replay retention covers the full clock-skew window, and desktop macOS/Windows servers use a user-writable auth directory.
 - Rejected NUL/non-printable rotated administrator keys, cancelled in-flight status reads on credential revocation, refused `--force-init-admin-key` when encrypted auth state already exists, bound isolated-relay legacy continuation checksums to the relay key, and doubled first-flight Bloom retention so a max-future timestamp cannot outlive the filter.
 - Centralized env-safe administrator-key checks, isolated-relay legacy codec construction, credential-cancellation races, and auth snapshot/WAL paths so later protocol and lifecycle changes reuse one implementation.
+- Refused administrator-key initialization whenever encrypted auth state is present, preserved discarded slot generations across capacity changes, rolled back or fail-closed uncertain WAL appends, authenticated first flights before consuming the replay filter, and reused the registration credential for provider streams.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

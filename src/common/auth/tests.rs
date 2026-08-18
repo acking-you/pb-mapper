@@ -35,6 +35,82 @@ fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
     std::fs::write(state_dir.join("auth.snapshot"), b"encrypted").unwrap();
     let error = initialize_admin_key(&key_path, true).unwrap_err();
     assert_eq!(error.code, "administrator_key_state_exists");
+    let missing = state_dir.join("missing-admin.key");
+    let error = initialize_admin_key(&missing, false).unwrap_err();
+    assert_eq!(error.code, "administrator_key_state_exists");
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
+async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
+    let state_dir = temp_state_dir("capacity-shrink");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config_two = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 2,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config_two.clone())
+        .await
+        .unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let first = runtime
+        .issue(&admin, Duration::from_secs(60), Some("first".to_string()))
+        .await
+        .unwrap();
+    let second = runtime
+        .issue(&admin, Duration::from_secs(60), Some("second".to_string()))
+        .await
+        .unwrap();
+    let Credential::Temporary {
+        key_id: first_id, ..
+    } = parse_credential(&first.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    let Credential::Temporary {
+        key_id: second_id, ..
+    } = parse_credential(&second.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    runtime.revoke(&admin, first_id).await.unwrap();
+    runtime.revoke(&admin, second_id).await.unwrap();
+    runtime.gc(&admin).await.unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let config_one = AuthConfig {
+        max_temporary_keys: 1,
+        ..config_two.clone()
+    };
+    let runtime = AuthRuntime::start(admin_key, config_one).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    assert!(!runtime.status(&admin).await.unwrap().safe_mode);
+    let _third = runtime
+        .issue(&admin, Duration::from_secs(60), Some("third".to_string()))
+        .await
+        .unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let runtime = AuthRuntime::start(admin_key, config_two).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    assert!(!runtime.status(&admin).await.unwrap().safe_mode);
+    let fourth = runtime
+        .issue(&admin, Duration::from_secs(60), Some("fourth".to_string()))
+        .await
+        .unwrap();
+    let Credential::Temporary {
+        key_id: fourth_id, ..
+    } = parse_credential(&fourth.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    assert_ne!(fourth_id, second_id);
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
