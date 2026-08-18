@@ -14,12 +14,8 @@ use super::{
 };
 use crate::common::checksum::AesKeyType;
 use crate::common::config::duration_from_env;
-use crate::common::message::{get_decodec, get_encodec};
+use crate::snafu_error_get_or_return_ok;
 use crate::utils::codec::{Decryptor, Encryptor};
-use crate::{
-    create_component, snafu_error_get_or_return_ok, start_datagram_forward_with_codec_key,
-    start_forward_with_codec_key,
-};
 use uni_stream::stream::{StreamSplit, TcpStreamImpl, UdpStreamImpl};
 use uni_stream::udp::{UdpStreamReadHalf, UdpStreamWriteHalf};
 
@@ -558,6 +554,7 @@ impl DatagramWriter for UdpStreamWriteHalf<'_> {
 pub trait StreamForward: StreamSplit + Sized {
     fn forward_local_to_remote<'a, R, W>(
         codec_key: Option<AesKeyType>,
+        framing_key: AesKeyType,
         local_reader: Self::ReaderRef<'a>,
         local_writer: Self::WriterRef<'a>,
         remote_reader: R,
@@ -571,6 +568,7 @@ pub trait StreamForward: StreamSplit + Sized {
 impl StreamForward for TcpStreamImpl {
     fn forward_local_to_remote<'a, R, W>(
         codec_key: Option<AesKeyType>,
+        framing_key: AesKeyType,
         local_reader: Self::ReaderRef<'a>,
         local_writer: Self::WriterRef<'a>,
         remote_reader: R,
@@ -585,17 +583,40 @@ impl StreamForward for TcpStreamImpl {
             let mut local_writer = local_writer;
             let mut remote_reader = remote_reader;
             let mut remote_writer = remote_writer;
-            start_forward_with_codec_key!(
-                codec_key,
-                &mut local_reader,
-                &mut local_writer,
-                &mut remote_reader,
-                &mut remote_writer,
-                false,
-                false,
-                true,
-                true
-            );
+            match codec_key {
+                Some(key) => {
+                    start_forward(
+                        NormalForwardReader::new(&mut local_reader),
+                        NormalForwardWriter::new(&mut local_writer),
+                        CodecForwardReader::new(
+                            &mut remote_reader,
+                            snafu_error_get_or_return_ok!(
+                                super::get_decodec(&key),
+                                "failed to create decoder when remote forward"
+                            ),
+                        )
+                        .with_checksum_key(framing_key),
+                        CodecForwardWriter::new(
+                            &mut remote_writer,
+                            snafu_error_get_or_return_ok!(
+                                super::get_encodec(&key),
+                                "failed to create encoder when remote forward"
+                            ),
+                        )
+                        .with_checksum_key(framing_key),
+                    )
+                    .await;
+                }
+                None => {
+                    start_forward(
+                        NormalForwardReader::new(&mut local_reader),
+                        NormalForwardWriter::new(&mut local_writer),
+                        NormalForwardReader::new(&mut remote_reader),
+                        NormalForwardWriter::new(&mut remote_writer),
+                    )
+                    .await;
+                }
+            }
             Ok(())
         })
     }
@@ -604,6 +625,7 @@ impl StreamForward for TcpStreamImpl {
 impl StreamForward for UdpStreamImpl {
     fn forward_local_to_remote<'a, R, W>(
         codec_key: Option<AesKeyType>,
+        framing_key: AesKeyType,
         local_reader: Self::ReaderRef<'a>,
         local_writer: Self::WriterRef<'a>,
         remote_reader: R,
@@ -616,13 +638,42 @@ impl StreamForward for UdpStreamImpl {
         Box::pin(async move {
             let mut remote_reader = remote_reader;
             let mut remote_writer = remote_writer;
-            start_datagram_forward_with_codec_key!(
-                codec_key,
-                local_reader,
-                local_writer,
-                &mut remote_reader,
-                &mut remote_writer
-            );
+            match codec_key {
+                Some(key) => {
+                    start_datagram_forward(
+                        local_reader,
+                        local_writer,
+                        CodecDatagramReader::new(
+                            &mut remote_reader,
+                            snafu_error_get_or_return_ok!(
+                                super::get_decodec(&key),
+                                "failed to create decoder when datagram forward"
+                            ),
+                        )
+                        .with_checksum_key(framing_key),
+                        CodecDatagramWriter::new(
+                            &mut remote_writer,
+                            snafu_error_get_or_return_ok!(
+                                super::get_encodec(&key),
+                                "failed to create encoder when datagram forward"
+                            ),
+                        )
+                        .with_checksum_key(framing_key),
+                    )
+                    .await;
+                }
+                None => {
+                    start_datagram_forward(
+                        local_reader,
+                        local_writer,
+                        NormalDatagramReader::new(&mut remote_reader)
+                            .with_checksum_key(framing_key),
+                        NormalDatagramWriter::new(&mut remote_writer)
+                            .with_checksum_key(framing_key),
+                    )
+                    .await;
+                }
+            }
             Ok(())
         })
     }

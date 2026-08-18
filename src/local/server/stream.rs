@@ -137,6 +137,7 @@ where
     snafu_error_handle!(
         <LocalStream::Item as StreamForward>::forward_local_to_remote(
             codec_key,
+            *credential.key(),
             server_reader,
             server_writer,
             client_reader,

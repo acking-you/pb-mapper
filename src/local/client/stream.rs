@@ -107,6 +107,7 @@ pub async fn handle_local_stream<
     snafu_error_handle!(
         <LocalStream as StreamForward>::forward_local_to_remote(
             codec_key,
+            *credential.key(),
             client_reader,
             client_writer,
             server_reader,
