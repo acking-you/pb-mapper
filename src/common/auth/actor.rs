@@ -269,6 +269,12 @@ pub(super) async fn run_auth_actor(
                         });
                         let _ = response.send(result);
                     }
+                    AuthCommand::Shutdown { response } => {
+                        admin_lease.cancellation.cancel();
+                        cancel_all_temporary_leases(&inner);
+                        let _ = response.send(());
+                        break;
+                    }
                 }
             }
         }
@@ -815,9 +821,16 @@ fn actor_rotate_root(
         .and_then(|()| write_snapshot_and_truncate_wal(config, &new_key, &snapshot))
         .and_then(|()| write_admin_key(&config.state_dir, &new_key_string))
     {
-        inner.safe_mode.store(true, Ordering::Release);
-        cancel_all_temporary_leases(inner);
-        return Err(error);
+        if !key_matches_existing_snapshot(Some(&config.state_dir), &new_key_string) {
+            inner.safe_mode.store(true, Ordering::Release);
+            cancel_all_temporary_leases(inner);
+            return Err(error);
+        }
+        tracing::warn!(
+            event = "administrator_key_rotate_finalized_after_sync_error",
+            error = %error,
+            "admin.key replacement reported an error, but the new snapshot already decrypts with the new key; finishing in-memory rotation"
+        );
     }
     let _ = std::fs::remove_file(&next_key_path);
     push_audit_record(inner, rotate_audit);

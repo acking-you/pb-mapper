@@ -65,6 +65,7 @@ pub async fn run_client_side_cli_scoped<LocalListener: ListenerProvider, A: ToSo
         keep_alive,
         namespace,
         None,
+        None,
     )
     .await
 }
@@ -85,6 +86,32 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         keep_alive,
         None,
         status_callback,
+        None,
+    )
+    .await
+}
+
+pub async fn run_client_side_cli_with_pinned_credential<
+    LocalListener: ListenerProvider,
+    A: ToSocketAddrs,
+>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    keep_alive: bool,
+    status_callback: Option<ClientStatusCallback>,
+    credential: crate::common::checksum::Credential,
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
+    run_client_side_cli_with_callback_scoped::<LocalListener, A>(
+        local_addr,
+        remote_addr,
+        key,
+        keep_alive,
+        None,
+        status_callback,
+        Some(credential),
     )
     .await
 }
@@ -99,6 +126,7 @@ pub async fn run_client_side_cli_with_callback_scoped<
     keep_alive: bool,
     namespace: Option<u64>,
     status_callback: Option<ClientStatusCallback>,
+    pinned_credential: Option<crate::common::checksum::Credential>,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
@@ -124,15 +152,18 @@ pub async fn run_client_side_cli_with_callback_scoped<
             return;
         }
     };
-    let credential = match get_process_credential() {
-        Ok(credential) => credential,
-        Err(e) => {
-            tracing::error!("load client credential failed: {e}");
-            if let Some(ref callback) = status_callback {
-                callback("failed");
+    let credential = match pinned_credential {
+        Some(credential) => credential,
+        None => match get_process_credential() {
+            Ok(credential) => credential,
+            Err(e) => {
+                tracing::error!("load client credential failed: {e}");
+                if let Some(ref callback) = status_callback {
+                    callback("failed");
+                }
+                return;
             }
-            return;
-        }
+        },
     };
 
     let mut retry_backoff = RetryBackoff::default();

@@ -38,6 +38,8 @@ All notable changes to this project will be documented in this file.
 - Garbage-collected expired and revoked high-slot entries while keeping their generations so shrinking capacity and running `key gc` can reclaim them.
 - Pinned local registration workers to the credential captured at start, matching the client listener.
 - Replaced a lease that was canceled while a renewal WAL record was syncing, so a successful renew does not keep a dead cancellation token.
+- Awaited the authentication actor on relay shutdown, used pinned credentials for registration probes and UI tunnel workers/status checks, and finished in-memory root rotation when `admin.key` already matched the new snapshot.
+- Bound relay tunneled-frame checksums to each hop's authenticated session key instead of the process administrator key.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

@@ -28,7 +28,7 @@ use crate::pb_server::error::{
     ClientConnCreateHeaderToolSnafu, ClientConnEncodeStreamRespSnafu,
     ClientConnWriteStreamRespSnafu,
 };
-use crate::{create_component, snafu_error_get_or_return_ok, start_forward_with_codec_key};
+use crate::snafu_error_get_or_return_ok;
 
 /// Ensure that client-side connections are properly deregistered before a normal connection is
 /// disconnected or an exception occurs
@@ -220,6 +220,8 @@ pub async fn handle_client_conn(
                 })?;
         }
 
+        let client_framing = session.framing_key();
+        let server_framing = server_session.framing_key();
         if is_datagram {
             match codec_key {
                 Some(key) => {
@@ -227,44 +229,77 @@ pub async fn handle_client_conn(
                         CodecDatagramReader::new(
                             &mut client_reader,
                             snafu_error_get_or_return_ok!(get_decodec(&key)),
-                        ),
+                        )
+                        .with_checksum_key(client_framing),
                         CodecDatagramWriter::new(
                             &mut client_writer,
                             snafu_error_get_or_return_ok!(get_encodec(&key)),
-                        ),
+                        )
+                        .with_checksum_key(client_framing),
                         CodecDatagramReader::new(
                             &mut server_reader,
                             snafu_error_get_or_return_ok!(get_decodec(&key)),
-                        ),
+                        )
+                        .with_checksum_key(server_framing),
                         CodecDatagramWriter::new(
                             &mut server_writer,
                             snafu_error_get_or_return_ok!(get_encodec(&key)),
-                        ),
+                        )
+                        .with_checksum_key(server_framing),
                     )
                     .await;
                 }
                 None => {
                     start_datagram_forward(
-                        NormalDatagramReader::new(&mut client_reader),
-                        NormalDatagramWriter::new(&mut client_writer),
-                        NormalDatagramReader::new(&mut server_reader),
-                        NormalDatagramWriter::new(&mut server_writer),
+                        NormalDatagramReader::new(&mut client_reader)
+                            .with_checksum_key(client_framing),
+                        NormalDatagramWriter::new(&mut client_writer)
+                            .with_checksum_key(client_framing),
+                        NormalDatagramReader::new(&mut server_reader)
+                            .with_checksum_key(server_framing),
+                        NormalDatagramWriter::new(&mut server_writer)
+                            .with_checksum_key(server_framing),
                     )
                     .await;
                 }
             }
         } else {
-            start_forward_with_codec_key!(
-                codec_key,
-                &mut client_reader,
-                &mut client_writer,
-                &mut server_reader,
-                &mut server_writer,
-                true,
-                true,
-                true,
-                true
-            );
+            match codec_key {
+                Some(key) => {
+                    start_forward(
+                        CodecForwardReader::new(
+                            &mut client_reader,
+                            snafu_error_get_or_return_ok!(get_decodec(&key)),
+                        )
+                        .with_checksum_key(client_framing),
+                        CodecForwardWriter::new(
+                            &mut client_writer,
+                            snafu_error_get_or_return_ok!(get_encodec(&key)),
+                        )
+                        .with_checksum_key(client_framing),
+                        CodecForwardReader::new(
+                            &mut server_reader,
+                            snafu_error_get_or_return_ok!(get_decodec(&key)),
+                        )
+                        .with_checksum_key(server_framing),
+                        CodecForwardWriter::new(
+                            &mut server_writer,
+                            snafu_error_get_or_return_ok!(get_encodec(&key)),
+                        )
+                        .with_checksum_key(server_framing),
+                    )
+                    .await;
+                }
+                None => {
+                    start_forward(
+                        NormalForwardReader::new(&mut client_reader),
+                        NormalForwardWriter::new(&mut client_writer),
+                        NormalForwardReader::new(&mut server_reader),
+                        NormalForwardWriter::new(&mut server_writer),
+                    )
+                    .await;
+                }
+            }
         }
 
         Ok(())

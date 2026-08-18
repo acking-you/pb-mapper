@@ -186,18 +186,20 @@ async fn probe_remote_registration(
     key: Arc<str>,
     registration: ControlRegistration,
     namespace: Option<u64>,
+    credential: Credential,
 ) -> RegistrationProbeResult {
     let timeout = registration_probe_timeout();
     let result = tokio::time::timeout(timeout, async {
         let mut stream = each_addr(remote_addr, TcpStream::connect)
             .await
             .map_err(|e| format!("connect remote status stream failed: {e}"))?;
-        crate::local::client::status::get_status_scoped(
+        crate::local::client::status::get_status_with_credential(
             &mut stream,
             PbConnStatusReq::Service {
                 key: key.to_string(),
             },
             namespace,
+            &credential,
         )
         .await
         .map_err(|e| {
@@ -259,12 +261,58 @@ pub async fn run_server_side_cli<LocalStream, A>(
         .await
 }
 
+pub async fn run_server_side_cli_with_pinned_credential<LocalStream, A>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    options: ServerTunnelOptions,
+    status_callback: Option<StatusCallback>,
+    credential: Credential,
+) where
+    LocalStream: StreamProvider + Send + 'static,
+    LocalStream::Item: StreamForward,
+    A: ToSocketAddrs + Debug + Copy,
+{
+    run_server_side_cli_pool::<LocalStream, A>(
+        local_addr,
+        remote_addr,
+        key,
+        options,
+        status_callback,
+        Some(credential),
+    )
+    .await;
+}
+
 pub async fn run_server_side_cli_with_callback<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     options: ServerTunnelOptions,
     status_callback: Option<StatusCallback>,
+) where
+    LocalStream: StreamProvider + Send + 'static,
+    LocalStream::Item: StreamForward,
+    A: ToSocketAddrs + Debug + Copy,
+{
+    run_server_side_cli_pool::<LocalStream, A>(
+        local_addr,
+        remote_addr,
+        key,
+        options,
+        status_callback,
+        None,
+    )
+    .await;
+}
+
+async fn run_server_side_cli_pool<LocalStream, A>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    options: ServerTunnelOptions,
+    status_callback: Option<StatusCallback>,
+    pinned_credential: Option<Credential>,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -296,25 +344,27 @@ pub async fn run_server_side_cli_with_callback<LocalStream, A>(
         for worker_index in 1..pool_size {
             let worker_key = key.clone();
             worker_handles.push(tokio::spawn(async move {
-                run_server_side_cli_worker::<LocalStream, _>(
+                run_server_side_cli_worker_with_credential::<LocalStream, _>(
                     local_addr,
                     remote_addr,
                     worker_key,
                     options,
                     None,
                     worker_index,
+                    pinned_credential,
                 )
                 .await;
             }));
         }
     }
-    run_server_side_cli_worker::<LocalStream, _>(
+    run_server_side_cli_worker_with_credential::<LocalStream, _>(
         local_addr,
         remote_addr,
         key,
         options,
         status_callback,
         0,
+        pinned_credential,
     )
     .await;
     for handle in worker_handles {
@@ -328,27 +378,31 @@ pub async fn run_server_side_cli_with_callback<LocalStream, A>(
     }
 }
 
-async fn run_server_side_cli_worker<LocalStream, A>(
+async fn run_server_side_cli_worker_with_credential<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     options: ServerTunnelOptions,
     status_callback: Option<StatusCallback>,
     worker_index: usize,
+    pinned_credential: Option<Credential>,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
     A: ToSocketAddrs + Debug + Copy + Send + 'static,
 {
     let mut retry_backoff = RetryBackoff::default();
-    let credential = loop {
-        match get_process_credential() {
-            Ok(credential) => break credential,
-            Err(error) => {
-                tracing::error!("load registration credential failed: {error}");
-                tokio::time::sleep(retry_backoff.next_delay()).await;
+    let credential = match pinned_credential {
+        Some(credential) => credential,
+        None => loop {
+            match get_process_credential() {
+                Ok(credential) => break credential,
+                Err(error) => {
+                    tracing::error!("load registration credential failed: {error}");
+                    tokio::time::sleep(retry_backoff.next_delay()).await;
+                }
             }
-        }
+        },
     };
     let run_config = ServerCliRunConfig {
         local_addr,
@@ -734,6 +788,7 @@ where
                             probe_key,
                             registration,
                             namespace,
+                            credential,
                         )
                         .await;
                         let _ = probe_tx.send(result);

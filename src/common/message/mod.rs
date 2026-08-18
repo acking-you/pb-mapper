@@ -241,6 +241,11 @@ impl<'a, T: AsyncWriteExt + Unpin> NormalMessageWriter<'a, T> {
         }
     }
 
+    pub fn with_checksum_key(mut self, key: AesKeyType) -> Self {
+        self.checksum_key = Some(key);
+        self
+    }
+
     async fn write_msg_inner(&mut self, msg: &[u8]) -> Result<()> {
         set_msg_len(
             &mut self.writer,

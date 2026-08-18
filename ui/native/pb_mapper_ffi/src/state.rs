@@ -24,13 +24,15 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use pb_mapper::common::auth::{AuthConfig, AuthRuntime};
-use pb_mapper::common::checksum::{parse_credential, set_process_msg_header_key};
+use pb_mapper::common::checksum::{
+    get_process_credential, parse_credential, set_process_msg_header_key, Credential,
+};
 use pb_mapper::common::config::{get_pb_mapper_server_async, get_sockaddr_async};
 use pb_mapper::common::message::command::{PbConnStatusReq, PbConnStatusResp};
-use pb_mapper::local::client::status::get_status;
-use pb_mapper::local::client::{run_client_side_cli_with_callback, ClientStatusCallback};
+use pb_mapper::local::client::status::{get_status, get_status_with_credential};
+use pb_mapper::local::client::{run_client_side_cli_with_pinned_credential, ClientStatusCallback};
 use pb_mapper::local::server::{
-    run_server_side_cli_with_callback, ServerTunnelOptions, StatusCallback,
+    run_server_side_cli_with_pinned_credential, ServerTunnelOptions, StatusCallback,
 };
 use pb_mapper::pb_server::{run_server_on_listener, ServerStatusInfo};
 use pb_mapper::utils::addr::each_addr;
@@ -58,6 +60,7 @@ struct StatusCacheEntry {
 async fn check_service_with_get_status(
     server_addr: &str,
     service_key: &str,
+    credential: Option<Credential>,
 ) -> Result<bool, CtlError> {
     let addr = get_sockaddr_async(server_addr)
         .await
@@ -66,7 +69,13 @@ async fn check_service_with_get_status(
     match TcpStreamProvider::from_addr(addr).await {
         Ok(mut stream) => {
             let status_req = PbConnStatusReq::Keys;
-            match get_status(&mut stream, status_req).await {
+            let status = match credential {
+                Some(credential) => {
+                    get_status_with_credential(&mut stream, status_req, None, &credential).await
+                }
+                None => get_status(&mut stream, status_req).await,
+            };
+            match status {
                 Ok(status_resp) => match status_resp {
                     PbConnStatusResp::Keys(keys) => {
                         if keys.contains(&service_key.to_string()) {
@@ -445,6 +454,8 @@ pub struct PbMapperState {
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_handles: HashMap<String, JoinHandle<()>>,
     client_handles: HashMap<String, JoinHandle<()>>,
+    service_credentials: HashMap<String, Credential>,
+    client_credentials: HashMap<String, Credential>,
     config: AppConfig,
     config_dir: PathBuf,
     app_directory_path: Option<String>,

@@ -364,11 +364,12 @@ impl PbMapperState {
         let cache = self.service_status_cache.clone();
         let refreshing = self.service_status_refreshing.clone();
         let key = service_key.to_string();
+        let credential = self.service_credentials.get(service_key).copied();
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 STATUS_REFRESH_TIMEOUT,
-                check_service_with_get_status(&server_addr, &key),
+                check_service_with_get_status(&server_addr, &key, credential),
             )
             .await;
 
@@ -427,11 +428,12 @@ impl PbMapperState {
         let cache = self.client_status_cache.clone();
         let refreshing = self.client_status_refreshing.clone();
         let key = service_key.to_string();
+        let credential = self.client_credentials.get(service_key).copied();
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 STATUS_REFRESH_TIMEOUT,
-                check_service_with_get_status(&server_addr, &key),
+                check_service_with_get_status(&server_addr, &key, credential),
             )
             .await;
 

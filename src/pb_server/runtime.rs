@@ -941,6 +941,7 @@ pub async fn run_server_on_listener(
             .chain(status_forward_handle),
     )
     .await;
+    security.auth().shutdown_actor().await;
     tracing::info!("Server shutdown completed");
     Ok(())
 }

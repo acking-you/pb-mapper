@@ -125,10 +125,12 @@ impl PbMapperState {
             for (_, handle) in self.service_handles.drain() {
                 handle.abort();
             }
+            self.service_credentials.clear();
 
             for (_, handle) in self.client_handles.drain() {
                 handle.abort();
             }
+            self.client_credentials.clear();
 
             self.registered_services.write().await.clear();
             self.active_connections.write().await.clear();
@@ -151,6 +153,7 @@ impl PbMapperState {
             remote_sock_addr,
         } = commit;
 
+        self.service_credentials.remove(&service_key);
         if let Some(previous) = self.service_handles.remove(&service_key) {
             tracing::warn!(
                 "Service '{service_key}' is already registered, replacing existing handle"
@@ -189,9 +192,12 @@ impl PbMapperState {
             );
         });
 
+        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
+        self.service_credentials
+            .insert(service_key.clone(), credential);
         let handle = if protocol.to_uppercase() == "TCP" {
             tokio::spawn(async move {
-                let _ = run_server_side_cli_with_callback::<TcpStreamProvider, _>(
+                let _ = run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
@@ -203,12 +209,13 @@ impl PbMapperState {
                         force_namespace: false,
                     },
                     Some(callback),
+                    credential,
                 )
                 .await;
             })
         } else {
             tokio::spawn(async move {
-                let _ = run_server_side_cli_with_callback::<UdpStreamProvider, _>(
+                let _ = run_server_side_cli_with_pinned_credential::<UdpStreamProvider, _>(
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
@@ -220,6 +227,7 @@ impl PbMapperState {
                         force_namespace: false,
                     },
                     Some(callback),
+                    credential,
                 )
                 .await;
             })
@@ -300,6 +308,7 @@ impl PbMapperState {
             remote_sock_addr,
         } = commit;
 
+        self.client_credentials.remove(&service_key);
         if let Some(previous) = self.client_handles.remove(&service_key) {
             tracing::warn!(
                 "Client for service '{service_key}' is already connected, replacing handle"
@@ -328,25 +337,30 @@ impl PbMapperState {
             })
         };
 
+        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
+        self.client_credentials
+            .insert(service_key.clone(), credential);
         let handle = if protocol_upper == "TCP" {
             tokio::spawn(async move {
-                run_client_side_cli_with_callback::<TcpListenerProvider, _>(
+                run_client_side_cli_with_pinned_credential::<TcpListenerProvider, _>(
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
                     enable_keep_alive,
                     Some(status_callback),
+                    credential,
                 )
                 .await;
             })
         } else {
             tokio::spawn(async move {
-                run_client_side_cli_with_callback::<UdpListenerProvider, _>(
+                run_client_side_cli_with_pinned_credential::<UdpListenerProvider, _>(
                     local_sock_addr,
                     remote_sock_addr,
                     key_clone.into(),
                     enable_keep_alive,
                     Some(status_callback),
+                    credential,
                 )
                 .await;
             })

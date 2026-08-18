@@ -174,22 +174,39 @@ impl AuthRuntime {
             audit_records: RwLock::new(audit_records),
         });
         let (command_tx, command_rx) = mpsc::channel(256);
+        let actor = tokio::spawn(run_auth_actor(
+            inner.clone(),
+            admin_lease,
+            command_rx,
+            config.clone(),
+            AuthActorState::new(cold, wheel, admin_replays, admin_replay_order),
+            state_lock.clone(),
+        ));
         let runtime = Self {
             inner: Arc::downgrade(&inner),
             command_tx,
             config: config.clone(),
             _state_lock: state_lock.clone(),
+            actor: Arc::new(std::sync::Mutex::new(Some(actor))),
         };
-
-        tokio::spawn(run_auth_actor(
-            inner,
-            admin_lease,
-            command_rx,
-            config,
-            AuthActorState::new(cold, wheel, admin_replays, admin_replay_order),
-            state_lock,
-        ));
         Ok(runtime)
+    }
+
+    pub async fn shutdown_actor(&self) {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .command_tx
+            .send(AuthCommand::Shutdown { response })
+            .await;
+        let _ = receiver.await;
+        let handle = self
+            .actor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     pub fn config(&self) -> &AuthConfig {

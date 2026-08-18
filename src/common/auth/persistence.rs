@@ -979,7 +979,7 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
     atomic_write(path, format!("{key}\n").as_bytes(), 0o600)
 }
 
-fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str) -> bool {
+pub(super) fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str) -> bool {
     let Some(state_dir) = state_dir else {
         return false;
     };

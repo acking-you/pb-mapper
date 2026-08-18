@@ -188,6 +188,10 @@ impl ServerHeaderSession {
         self.protocol
     }
 
+    pub fn framing_key(&self) -> AesKeyType {
+        self.legacy_key
+    }
+
     pub fn key_id(&self) -> u64 {
         self.context
             .as_ref()

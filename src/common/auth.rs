@@ -495,6 +495,7 @@ pub struct AuthRuntime {
     command_tx: mpsc::Sender<AuthCommand>,
     config: AuthConfig,
     _state_lock: Arc<File>,
+    actor: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -607,6 +608,9 @@ enum AuthCommand {
         key_id: Option<u64>,
         detail: Option<String>,
         response: oneshot::Sender<Result<(), AuthFailure>>,
+    },
+    Shutdown {
+        response: oneshot::Sender<()>,
     },
 }
 

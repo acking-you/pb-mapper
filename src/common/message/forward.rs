@@ -96,6 +96,12 @@ impl<'a, T: AsyncReadExt + Unpin + Send> NormalDatagramReader<'a, T> {
             reader: NormalMessageReader::new(reader),
         }
     }
+
+    pub fn with_checksum_key(self, key: AesKeyType) -> Self {
+        Self {
+            reader: self.reader.with_checksum_key(key),
+        }
+    }
 }
 
 impl<'a, T: AsyncReadExt + Unpin + Send> DatagramReader for NormalDatagramReader<'a, T> {
@@ -142,6 +148,12 @@ impl<'a, T: AsyncWriteExt + Unpin + Send> NormalDatagramWriter<'a, T> {
             writer: NormalMessageWriter::new(writer),
         }
     }
+
+    pub fn with_checksum_key(self, key: AesKeyType) -> Self {
+        Self {
+            writer: self.writer.with_checksum_key(key),
+        }
+    }
 }
 
 impl<'a, T: AsyncWriteExt + Unpin + Send> DatagramWriter for NormalDatagramWriter<'a, T> {
@@ -157,6 +169,10 @@ pub struct CodecForwardReader<'a, T: AsyncReadExt + Unpin + Send, D: Decryptor>(
 impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecForwardReader<'a, T, D> {
     pub fn new(reader: &'a mut T, decryptor: D) -> Self {
         Self(CodecMessageReader::new(reader, decryptor))
+    }
+
+    pub fn with_checksum_key(self, key: AesKeyType) -> Self {
+        Self(self.0.with_checksum_key(key))
     }
 }
 
@@ -176,6 +192,10 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> CodecDatagramReader<'a, T
     pub fn new(reader: &'a mut T, decryptor: D) -> Self {
         Self(CodecMessageReader::new(reader, decryptor))
     }
+
+    pub fn with_checksum_key(self, key: AesKeyType) -> Self {
+        Self(self.0.with_checksum_key(key))
+    }
 }
 
 impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> DatagramReader
@@ -194,6 +214,10 @@ pub struct CodecForwardWriter<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor>
 impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecForwardWriter<'a, T, E> {
     pub fn new(writer: &'a mut T, encryptor: E) -> Self {
         Self(CodecMessageWriter::new(writer, encryptor))
+    }
+
+    pub fn with_checksum_key(self, key: AesKeyType) -> Self {
+        Self(self.0.with_checksum_key(key))
     }
 }
 
@@ -217,6 +241,10 @@ pub struct CodecDatagramWriter<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor
 impl<'a, T: AsyncWriteExt + Send + Unpin, E: Encryptor> CodecDatagramWriter<'a, T, E> {
     pub fn new(writer: &'a mut T, encryptor: E) -> Self {
         Self(CodecMessageWriter::new(writer, encryptor))
+    }
+
+    pub fn with_checksum_key(self, key: AesKeyType) -> Self {
+        Self(self.0.with_checksum_key(key))
     }
 }
 
