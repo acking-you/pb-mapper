@@ -590,6 +590,22 @@ pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFail
             false,
         ));
     }
+    if force {
+        if let Some(state_dir) = path.parent() {
+            let snapshot = state_dir.join("auth.snapshot");
+            let wal = state_dir.join("auth.wal");
+            if snapshot.exists() || wal.exists() {
+                return Err(AuthFailure::new(
+                    "administrator_key_state_exists",
+                    format!(
+                        "refusing to replace `{}` while encrypted auth state exists; use `pb-mapper admin root-key rotate` or `pb-mapper admin auth-state reset --confirm`",
+                        path.display()
+                    ),
+                    false,
+                ));
+            }
+        }
+    }
     let key = generate_admin_key();
     atomic_write(path, format!("{key}\n").as_bytes(), 0o600)?;
     Ok(key)

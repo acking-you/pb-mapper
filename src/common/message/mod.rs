@@ -7,7 +7,10 @@ use snafu::{ensure, ResultExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
-use super::checksum::{get_checksum, get_msg_header_key, valid_checksum};
+use super::checksum::{
+    get_checksum, get_checksum_for_key, get_msg_header_key, valid_checksum, valid_checksum_for_key,
+    AesKeyType,
+};
 use super::error::{
     self, MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,
     MsgNetworkReadDatalenSnafu, MsgNetworkWriteBodySnafu, MsgNetworkWriteCheckSumSnafu,
@@ -131,10 +134,29 @@ gen_write_network_with_error!(
 );
 
 #[inline]
-async fn get_msg_len<T: AsyncReadExt + Unpin>(reader: &mut T) -> Result<DataLenType> {
+fn checksum_matches(datalen: DataLenType, checksum: u32, key: Option<&[u8]>) -> bool {
+    match key {
+        Some(key) => valid_checksum_for_key(datalen, checksum, key),
+        None => valid_checksum(datalen, checksum),
+    }
+}
+
+#[inline]
+fn checksum_for(len: DataLenType, key: Option<&[u8]>) -> u32 {
+    match key {
+        Some(key) => get_checksum_for_key(len, key),
+        None => get_checksum(len),
+    }
+}
+
+#[inline]
+async fn get_msg_len<T: AsyncReadExt + Unpin>(
+    reader: &mut T,
+    checksum_key: Option<&[u8]>,
+) -> Result<DataLenType> {
     let checksum = read_checksum(reader).await?;
     let datalen = read_datalen(reader).await?;
-    if valid_checksum(datalen, checksum) {
+    if checksum_matches(datalen, checksum, checksum_key) {
         ensure!(
             datalen <= MAX_MSG_LEN,
             MsgDatalenExceededSnafu {
@@ -149,14 +171,19 @@ async fn get_msg_len<T: AsyncReadExt + Unpin>(reader: &mut T) -> Result<DataLenT
 }
 
 #[inline]
-async fn set_msg_len<T: AsyncWriteExt + Unpin>(writer: &mut T, len: DataLenType) -> Result<()> {
-    write_checksum(writer, get_checksum(len)).await?;
+async fn set_msg_len<T: AsyncWriteExt + Unpin>(
+    writer: &mut T,
+    len: DataLenType,
+    checksum_key: Option<&[u8]>,
+) -> Result<()> {
+    write_checksum(writer, checksum_for(len, checksum_key)).await?;
     write_datalen(writer, len).await
 }
 
 pub struct NormalMessageReader<'a, T: AsyncReadExt + Unpin> {
     reader: &'a mut T,
     buffer: CommonBuffer,
+    checksum_key: Option<AesKeyType>,
 }
 
 impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
@@ -164,11 +191,21 @@ impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
         Self {
             reader,
             buffer: CommonBuffer::new(),
+            checksum_key: None,
         }
     }
 
+    pub fn with_checksum_key(mut self, key: AesKeyType) -> Self {
+        self.checksum_key = Some(key);
+        self
+    }
+
     async fn read_msg_inner(&mut self) -> Result<&'_ [u8]> {
-        let datalen = get_msg_len(&mut self.reader).await?;
+        let datalen = get_msg_len(
+            &mut self.reader,
+            self.checksum_key.as_ref().map(|key| key.as_slice()),
+        )
+        .await?;
         self.buffer.fixed_resize(datalen as usize);
         let n = read_msg_body(&mut self.reader, self.buffer.buffer_mut()).await?;
         Ok(&self.buffer.buffer()[0..n])
@@ -183,15 +220,24 @@ impl<'a, T: AsyncReadExt + Unpin> MessageReader for NormalMessageReader<'a, T> {
 
 pub struct NormalMessageWriter<'a, T: AsyncWriteExt> {
     writer: &'a mut T,
+    checksum_key: Option<AesKeyType>,
 }
 
 impl<'a, T: AsyncWriteExt + Unpin> NormalMessageWriter<'a, T> {
     pub fn new(writer: &'a mut T) -> Self {
-        Self { writer }
+        Self {
+            writer,
+            checksum_key: None,
+        }
     }
 
     async fn write_msg_inner(&mut self, msg: &[u8]) -> Result<()> {
-        set_msg_len(&mut self.writer, msg.len() as u32).await?;
+        set_msg_len(
+            &mut self.writer,
+            msg.len() as u32,
+            self.checksum_key.as_ref().map(|key| key.as_slice()),
+        )
+        .await?;
 
         write_msg_body(&mut self.writer, msg).await
     }
@@ -215,6 +261,11 @@ impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecMessageReader<'a, T, D> {
             decryptor,
         }
     }
+
+    pub fn with_checksum_key(mut self, key: AesKeyType) -> Self {
+        self.reader.checksum_key = Some(key);
+        self
+    }
 }
 
 impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageReader<'a, T, D> {
@@ -236,11 +287,21 @@ impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageRe
 pub struct CodecMessageWriter<'a, T: AsyncWriteExt + Unpin, E: Encryptor> {
     writer: &'a mut T,
     encryptor: E,
+    checksum_key: Option<AesKeyType>,
 }
 
 impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> CodecMessageWriter<'a, T, E> {
     pub fn new(writer: &'a mut T, encryptor: E) -> Self {
-        Self { writer, encryptor }
+        Self {
+            writer,
+            encryptor,
+            checksum_key: None,
+        }
+    }
+
+    pub fn with_checksum_key(mut self, key: AesKeyType) -> Self {
+        self.checksum_key = Some(key);
+        self
     }
 
     pub async fn shutdown(&mut self) -> std::io::Result<()> {
@@ -260,7 +321,12 @@ impl<'a, T: AsyncWriteExt + Unpin, E: Encryptor> MessageWriter for CodecMessageW
             })?;
         let msg_len = (buf.len() + tag.as_ref().len()) as DataLenType;
 
-        set_msg_len(self.writer, msg_len).await?;
+        set_msg_len(
+            self.writer,
+            msg_len,
+            self.checksum_key.as_ref().map(|key| key.as_slice()),
+        )
+        .await?;
         write_codec_msg(self.writer, &buf).await?;
         write_codec_tag(self.writer, tag.as_ref()).await
     }

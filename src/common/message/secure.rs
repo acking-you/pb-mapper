@@ -44,7 +44,7 @@ const FRAME_HEADER_LEN: usize = 12;
 const DIRECTION_CLIENT_TO_SERVER: u8 = 0;
 const DIRECTION_SERVER_TO_CLIENT: u8 = 1;
 const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
-const DEFAULT_REPLAY_WINDOW_SECONDS: u64 = MAX_CONNECTION_CLOCK_SKEW_SECONDS;
+const DEFAULT_REPLAY_WINDOW_SECONDS: u64 = MAX_CONNECTION_CLOCK_SKEW_SECONDS.saturating_mul(2);
 const DEFAULT_REPLAY_FILTER_BYTES: usize = 1024 * 1024;
 const MAX_INITIAL_PLAINTEXT_LEN: u32 = 64 * 1024;
 
@@ -105,6 +105,7 @@ impl ClientHeaderSession {
                 let codec = Aes256GcmEnCodec::try_new(&self.legacy_key)
                     .map_err(|_| protocol_error("failed to initialize legacy writer"))?;
                 CodecMessageWriter::new(writer, codec)
+                    .with_checksum_key(self.legacy_key)
                     .write_msg(message)
                     .await
             }
@@ -128,11 +129,14 @@ impl ClientHeaderSession {
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
         match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(CodecMessageReader::new(
-                reader,
-                Aes256GcmDeCodec::try_new(&self.legacy_key)
-                    .map_err(|_| protocol_error("failed to initialize legacy reader"))?,
-            ))),
+            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(
+                CodecMessageReader::new(
+                    reader,
+                    Aes256GcmDeCodec::try_new(&self.legacy_key)
+                        .map_err(|_| protocol_error("failed to initialize legacy reader"))?,
+                )
+                .with_checksum_key(self.legacy_key),
+            )),
             HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
                 reader,
                 self.v2.as_ref().expect("v2 session material").clone(),
@@ -147,11 +151,14 @@ impl ClientHeaderSession {
         writer: &'a mut T,
     ) -> Result<HeaderMessageWriter<'a, T>> {
         match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(CodecMessageWriter::new(
-                writer,
-                Aes256GcmEnCodec::try_new(&self.legacy_key)
-                    .map_err(|_| protocol_error("failed to initialize legacy writer"))?,
-            ))),
+            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(
+                CodecMessageWriter::new(
+                    writer,
+                    Aes256GcmEnCodec::try_new(&self.legacy_key)
+                        .map_err(|_| protocol_error("failed to initialize legacy writer"))?,
+                )
+                .with_checksum_key(self.legacy_key),
+            )),
             HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
                 writer,
                 self.v2.as_ref().expect("v2 session material").clone(),
@@ -215,11 +222,15 @@ impl ServerHeaderSession {
         writer: &'a mut T,
     ) -> Result<HeaderMessageWriter<'a, T>> {
         match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(CodecMessageWriter::new(
-                writer,
-                Aes256GcmEnCodec::try_new(&self.legacy_key)
-                    .map_err(|_| protocol_error("failed to initialize legacy response writer"))?,
-            ))),
+            HeaderProtocol::Legacy => Ok(HeaderMessageWriter::Legacy(
+                CodecMessageWriter::new(
+                    writer,
+                    Aes256GcmEnCodec::try_new(&self.legacy_key).map_err(|_| {
+                        protocol_error("failed to initialize legacy response writer")
+                    })?,
+                )
+                .with_checksum_key(self.legacy_key),
+            )),
             HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
                 writer,
                 self.v2.as_ref().expect("v2 session material").clone(),
@@ -234,11 +245,14 @@ impl ServerHeaderSession {
         reader: &'a mut T,
     ) -> Result<HeaderMessageReader<'a, T>> {
         match self.protocol {
-            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(CodecMessageReader::new(
-                reader,
-                Aes256GcmDeCodec::try_new(&self.legacy_key)
-                    .map_err(|_| protocol_error("failed to initialize legacy reader"))?,
-            ))),
+            HeaderProtocol::Legacy => Ok(HeaderMessageReader::Legacy(
+                CodecMessageReader::new(
+                    reader,
+                    Aes256GcmDeCodec::try_new(&self.legacy_key)
+                        .map_err(|_| protocol_error("failed to initialize legacy reader"))?,
+                )
+                .with_checksum_key(self.legacy_key),
+            )),
             HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
                 reader,
                 self.v2.as_ref().expect("v2 session material").clone(),

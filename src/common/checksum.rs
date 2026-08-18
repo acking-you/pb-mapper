@@ -195,6 +195,11 @@ pub fn parse_credential(raw: &str) -> Result<Credential, String> {
     if bytes.len() != 32 {
         return Err(key_len_error(raw));
     }
+    if !bytes.iter().all(|byte| byte.is_ascii_graphic()) {
+        return Err(format!(
+            "`{ENV_MSG_HEADER_KEY}` administrator key must be 32 printable ASCII bytes without whitespace or NUL"
+        ));
+    }
     Ok(Credential::Admin(
         bytes.try_into().expect("validated admin key width"),
     ))
@@ -545,6 +550,15 @@ mod tests {
             checksum,
             b"abcdefghijklmnopqrstuvwxyz012345"
         ));
+    }
+
+    #[test]
+    fn administrator_credentials_reject_nul_and_whitespace() {
+        use super::*;
+        let mut with_nul = *b"0123456789abcdefghijklmnopqrstuv";
+        with_nul[8] = 0;
+        assert!(parse_credential(std::str::from_utf8(&with_nul).unwrap()).is_err());
+        assert!(parse_credential("0123456789abcdefghijklmnopq rstuv").is_err());
     }
 
     #[test]

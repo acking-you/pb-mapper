@@ -183,6 +183,19 @@ fn rotating_bloom_retains_fingerprints_for_the_clock_skew_window() {
     assert!(bloom.contains(&value, start + MAX_CONNECTION_CLOCK_SKEW_SECONDS));
 }
 
+#[test]
+fn rotating_bloom_retains_a_max_future_timestamp_past_the_next_rotation() {
+    let mut bloom = RotatingBloom::new(1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let value = [11_u8; 32];
+    let start = bloom.current_started_at;
+    let insert_at = start + DEFAULT_REPLAY_WINDOW_SECONDS - 1;
+    bloom.insert(&value, insert_at);
+    assert!(bloom.contains(
+        &value,
+        insert_at + MAX_CONNECTION_CLOCK_SKEW_SECONDS.saturating_mul(2) - 1
+    ));
+}
+
 #[tokio::test]
 async fn legacy_initial_frame_validates_against_isolated_relay_key() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
@@ -194,13 +207,6 @@ async fn legacy_initial_frame_validates_against_isolated_relay_key() {
         .await
         .unwrap();
 
-    set_process_msg_header_key(Some(
-        std::str::from_utf8(&isolated_admin).expect("printable isolated key"),
-    ))
-    .unwrap();
-    let client = ClientHeaderSession::new_legacy(isolated_admin);
-    let bytes = encode_initial(&client, b"legacy-isolated").await;
-
     let temporary_key_id = 1;
     let temporary_key = *b"temporary-remote-key-0123456789a";
     set_process_msg_header_key(Some(&encode_temporary_credential(
@@ -210,10 +216,25 @@ async fn legacy_initial_frame_validates_against_isolated_relay_key() {
     .unwrap();
 
     let security = ServerSecurity::new(auth);
-    let mut input = std::io::Cursor::new(bytes);
-    let initial = security.read_initial(&mut input).await.unwrap();
-    assert_eq!(initial.payload, b"legacy-isolated");
-    assert_eq!(initial.session.protocol(), HeaderProtocol::Legacy);
+    let (mut client_io, mut server_io) = tokio::io::duplex(4096);
+    let client = ClientHeaderSession::new_legacy(isolated_admin);
+    let client_task = async {
+        client
+            .write_initial(&mut client_io, b"legacy-isolated")
+            .await
+            .unwrap();
+        let mut reader = client.response_reader(&mut client_io).unwrap();
+        reader.read_msg().await.unwrap().to_vec()
+    };
+    let server_task = async {
+        let initial = security.read_initial(&mut server_io).await.unwrap();
+        assert_eq!(initial.payload, b"legacy-isolated");
+        assert_eq!(initial.session.protocol(), HeaderProtocol::Legacy);
+        let mut writer = initial.session.response_writer(&mut server_io).unwrap();
+        writer.write_msg(b"legacy-response").await.unwrap();
+    };
+    let (response, _) = tokio::join!(client_task, server_task);
+    assert_eq!(response, b"legacy-response");
 
     set_process_msg_header_key(None).unwrap();
     let _ = std::fs::remove_dir_all(config.state_dir);

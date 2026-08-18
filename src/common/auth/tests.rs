@@ -27,6 +27,39 @@ fn authenticate_for_test(runtime: &AuthRuntime, key_id: u64) -> Result<AuthConte
 }
 
 #[test]
+fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
+    let state_dir = temp_state_dir("force-init-state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let key_path = state_dir.join("admin.key");
+    std::fs::write(&key_path, b"0123456789abcdefghijklmnopqrstuv\n").unwrap();
+    std::fs::write(state_dir.join("auth.snapshot"), b"encrypted").unwrap();
+    let error = initialize_admin_key(&key_path, true).unwrap_err();
+    assert_eq!(error.code, "administrator_key_state_exists");
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
+async fn rotate_root_rejects_a_nul_containing_key() {
+    let state_dir = temp_state_dir("rotate-nul");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let mut bad = *b"0123456789abcdefghijklmnopqrstuv";
+    bad[4] = 0;
+    let error = runtime.rotate_root(&admin, bad).await.unwrap_err();
+    assert_eq!(error.code, "administrator_key_invalid");
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
 fn platform_default_auth_state_dir_is_writable_outside_linux_system_paths() {
     let dir = platform_default_auth_state_dir();
     #[cfg(windows)]

@@ -329,15 +329,26 @@ pub(super) async fn handle_conn(
                 status = ?status,
                 "received pb init request"
             );
-            handle_show_status(
-                status,
-                effective_namespace,
-                manager_task_sender,
-                conn_id,
-                conn,
-                session,
-            )
-            .await?;
+            let cancellation = match auth_context.cancellation_token() {
+                Ok(token) => token,
+                Err(failure) => {
+                    write_protocol_error(&mut conn, &session, &failure).await;
+                    return Ok(());
+                }
+            };
+            tokio::select! {
+                result = handle_show_status(
+                    status,
+                    effective_namespace,
+                    manager_task_sender,
+                    conn_id,
+                    conn,
+                    session,
+                ) => result?,
+                _ = cancellation.cancelled() => {
+                    tracing::info!(event = "connection_auth_expired", key_id = auth_context.key_id, conn_id = %conn_id, "closing status request");
+                }
+            }
         }
         PbConnRequest::Admin(request) => {
             if !auth_context.is_admin {

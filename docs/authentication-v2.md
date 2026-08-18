@@ -114,7 +114,8 @@ uses server-to-client counter `0`. Later control frames continue from counter
 
 The relay fingerprints `(key_id, connection_salt)` and atomically checks and
 inserts it in two rotating 1 MiB Bloom filters covering the current and previous
-300-second windows, matching the accepted first-flight clock-skew interval. A probable duplicate returns the stable retryable error
+600-second windows, so a max-future first-flight timestamp cannot outlive replay
+retention. A probable duplicate returns the stable retryable error
 `connection_salt_replayed`; one-shot administrator CLI operations retry once
 with a fresh salt. Mutating administrator requests additionally claim their
 exact fingerprint in the encrypted WAL before dispatch. Those claims survive

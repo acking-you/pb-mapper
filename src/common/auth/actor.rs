@@ -708,10 +708,14 @@ fn actor_rotate_root(
             false,
         )
     })?;
-    if new_key_string.chars().any(char::is_whitespace) {
+    if !new_key_string
+        .as_bytes()
+        .iter()
+        .all(|byte| byte.is_ascii_graphic())
+    {
         return Err(AuthFailure::new(
             "administrator_key_invalid",
-            "administrator key must not contain whitespace",
+            "administrator key must be 32 printable ASCII bytes without whitespace or NUL",
             false,
         ));
     }
