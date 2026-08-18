@@ -307,6 +307,7 @@ fn actor_claim_admin_mutation(
     let record = AdminReplayRecord {
         fingerprint,
         client_timestamp,
+        accepted_at: now,
     };
     fail_closed_on_uncertain_wal(
         inner,
@@ -327,7 +328,7 @@ pub(super) fn prune_expired_admin_replays(
     admin_replay_order: &mut VecDeque<AdminReplayRecord>,
 ) {
     admin_replay_order.retain(|record| {
-        let keep = now.saturating_sub(record.client_timestamp) <= ADMIN_REPLAY_RETENTION.as_secs();
+        let keep = record.within_retention(now);
         if !keep {
             admin_replays.remove(&record.fingerprint);
         }

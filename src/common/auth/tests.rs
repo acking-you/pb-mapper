@@ -1011,10 +1011,12 @@ fn replay_pruning_removes_only_records_outside_the_retention_window() {
     let expired = AdminReplayRecord {
         fingerprint: [1; 32],
         client_timestamp: now - ADMIN_REPLAY_RETENTION.as_secs() - 1,
+        accepted_at: now - ADMIN_REPLAY_RETENTION.as_secs() - 1,
     };
     let current = AdminReplayRecord {
         fingerprint: [2; 32],
         client_timestamp: now,
+        accepted_at: now,
     };
     let mut replay_set = HashSet::from([expired.fingerprint, current.fingerprint]);
     let mut replay_order = VecDeque::from([expired, current.clone()]);
@@ -1024,6 +1026,54 @@ fn replay_pruning_removes_only_records_outside_the_retention_window() {
     assert_eq!(replay_set, HashSet::from([current.fingerprint]));
     assert_eq!(replay_order.len(), 1);
     assert_eq!(replay_order[0].fingerprint, current.fingerprint);
+}
+
+#[test]
+fn replay_pruning_uses_server_acceptance_not_client_timestamp() {
+    let now = 10_000;
+    let retention = ADMIN_REPLAY_RETENTION.as_secs();
+    let backdated = AdminReplayRecord {
+        fingerprint: [3; 32],
+        client_timestamp: now - retention - 1,
+        accepted_at: now - 1,
+    };
+    let future_dated_but_expired = AdminReplayRecord {
+        fingerprint: [4; 32],
+        client_timestamp: now + retention / 2,
+        accepted_at: now - retention - 1,
+    };
+    let mut replay_set =
+        HashSet::from([backdated.fingerprint, future_dated_but_expired.fingerprint]);
+    let mut replay_order = VecDeque::from([backdated.clone(), future_dated_but_expired]);
+
+    super::actor::prune_expired_admin_replays(now, &mut replay_set, &mut replay_order);
+
+    assert_eq!(replay_set, HashSet::from([backdated.fingerprint]));
+    assert_eq!(replay_order.len(), 1);
+    assert_eq!(replay_order[0].fingerprint, backdated.fingerprint);
+}
+
+#[test]
+fn replay_pruning_falls_back_to_client_timestamp_for_legacy_records() {
+    let now = 10_000;
+    let legacy_expired = AdminReplayRecord {
+        fingerprint: [5; 32],
+        client_timestamp: now - ADMIN_REPLAY_RETENTION.as_secs() - 1,
+        accepted_at: 0,
+    };
+    let legacy_current = AdminReplayRecord {
+        fingerprint: [6; 32],
+        client_timestamp: now,
+        accepted_at: 0,
+    };
+    let mut replay_set = HashSet::from([legacy_expired.fingerprint, legacy_current.fingerprint]);
+    let mut replay_order = VecDeque::from([legacy_expired, legacy_current.clone()]);
+
+    super::actor::prune_expired_admin_replays(now, &mut replay_set, &mut replay_order);
+
+    assert_eq!(replay_set, HashSet::from([legacy_current.fingerprint]));
+    assert_eq!(replay_order.len(), 1);
+    assert_eq!(replay_order[0].fingerprint, legacy_current.fingerprint);
 }
 
 #[test]

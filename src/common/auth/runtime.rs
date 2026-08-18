@@ -130,10 +130,7 @@ impl AuthRuntime {
                 state
                     .admin_replays
                     .iter()
-                    .filter(|record| {
-                        now.saturating_sub(record.client_timestamp)
-                            <= ADMIN_REPLAY_RETENTION.as_secs()
-                    })
+                    .filter(|record| record.within_retention(now))
                     .cloned()
                     .collect::<VecDeque<_>>()
             })

@@ -865,6 +865,21 @@ struct PersistedSnapshot {
 struct AdminReplayRecord {
     fingerprint: [u8; 32],
     client_timestamp: u64,
+    /// Server receipt time used for retention. Older snapshots omit this field
+    /// (`0` after serde default) and fall back to `client_timestamp`.
+    #[serde(default)]
+    accepted_at: u64,
+}
+
+impl AdminReplayRecord {
+    fn within_retention(&self, now: u64) -> bool {
+        let anchor = if self.accepted_at == 0 {
+            self.client_timestamp
+        } else {
+            self.accepted_at
+        };
+        now.saturating_sub(anchor) <= ADMIN_REPLAY_RETENTION.as_secs()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

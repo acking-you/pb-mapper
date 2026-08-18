@@ -119,8 +119,10 @@ retention. A probable duplicate returns the stable retryable error
 `connection_salt_replayed`; one-shot administrator CLI operations retry once
 with a fresh salt. Mutating administrator requests additionally claim their
 exact fingerprint in the encrypted WAL before dispatch. Those claims survive
-restart and compaction for ten minutes, so an old captured mutation cannot be
-replayed after the Bloom window or a process restart.
+restart and compaction for ten minutes after the server accepted them, so an
+old captured mutation cannot be replayed after the Bloom window or a process
+restart. The client-supplied first-flight timestamp is still checked for
+freshness, but it does not control how long the claim is retained.
 
 ## Credential lifecycle
 
