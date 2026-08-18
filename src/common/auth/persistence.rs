@@ -945,22 +945,7 @@ pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFail
             false,
         ));
     }
-    // Creating or replacing admin.key while snapshot/WAL remain leaves those
-    // files encrypted under the previous key. The next start would drop into
-    // safe mode instead of pointing the operator at rotate/reset.
-    if let Some(state_dir) = path.parent() {
-        if encrypted_auth_state_exists(state_dir) {
-            return Err(AuthFailure::new(
-                "administrator_key_state_exists",
-                format!(
-                    "refusing to {} `{}` while encrypted auth state exists; use `pb-mapper admin root-key rotate` or `pb-mapper admin auth-state reset --confirm`",
-                    if force { "replace" } else { "create" },
-                    path.display()
-                ),
-                false,
-            ));
-        }
-    }
+    refuse_write_if_encrypted_state(path, force)?;
     let key = generate_admin_key();
     atomic_write(path, format!("{key}\n").as_bytes(), 0o600)?;
     Ok(key)
@@ -986,7 +971,31 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
             false,
         ));
     }
+    if path.file_name() == Some(std::ffi::OsStr::new("admin.key")) {
+        refuse_write_if_encrypted_state(path, force)?;
+    }
     atomic_write(path, format!("{key}\n").as_bytes(), 0o600)
+}
+
+fn refuse_write_if_encrypted_state(path: &Path, force: bool) -> Result<(), AuthFailure> {
+    // Creating or replacing the live root while snapshot/WAL remain leaves
+    // those files encrypted under the previous key. Staging `admin.key.next`
+    // is the rotate path and must stay allowed.
+    let Some(state_dir) = path.parent() else {
+        return Ok(());
+    };
+    if !encrypted_auth_state_exists(state_dir) {
+        return Ok(());
+    }
+    Err(AuthFailure::new(
+        "administrator_key_state_exists",
+        format!(
+            "refusing to {} `{}` while encrypted auth state exists; use `pb-mapper admin root-key rotate` or `pb-mapper admin auth-state reset --confirm`",
+            if force { "replace" } else { "create" },
+            path.display()
+        ),
+        false,
+    ))
 }
 
 pub(super) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), AuthFailure> {

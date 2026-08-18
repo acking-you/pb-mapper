@@ -38,6 +38,15 @@ fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
     let missing = state_dir.join("missing-admin.key");
     let error = initialize_admin_key(&missing, false).unwrap_err();
     assert_eq!(error.code, "administrator_key_state_exists");
+    let error =
+        write_admin_key_file(&key_path, "abcdefghijklmnopqrstuvwxyz012345", true).unwrap_err();
+    assert_eq!(error.code, "administrator_key_state_exists");
+    write_admin_key_file(
+        &state_dir.join("admin.key.next"),
+        "abcdefghijklmnopqrstuvwxyz012345",
+        true,
+    )
+    .unwrap();
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
