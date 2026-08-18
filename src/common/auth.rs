@@ -426,6 +426,7 @@ pub struct AuthRuntime {
     inner: Weak<AuthStateInner>,
     command_tx: mpsc::Sender<AuthCommand>,
     config: AuthConfig,
+    _state_lock: Arc<File>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -144,6 +144,30 @@ async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+#[tokio::test]
+async fn overlapping_runtimes_cannot_share_an_auth_state_directory() {
+    let state_dir = temp_state_dir("auth-dir-lock");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let first = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
+    let error = match AuthRuntime::start(admin_key, config.clone()).await {
+        Ok(_) => panic!("second runtime should not share the auth directory"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "auth_state_locked");
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let recovered = AuthRuntime::start(admin_key, config).await.unwrap();
+    drop(recovered);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
 #[test]
 fn safe_mode_startup_does_not_allow_compaction() {
     assert!(!compaction_is_allowed(true));

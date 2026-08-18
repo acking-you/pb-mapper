@@ -56,6 +56,7 @@ impl AuthRuntime {
         sync_process_credential: bool,
     ) -> Result<Self, AuthFailure> {
         prepare_state_dir(&config.state_dir)?;
+        let state_lock = Arc::new(acquire_state_dir_lock(&config.state_dir)?);
         let instance_id = load_or_create_instance_id(&config.state_dir)?;
         let (mut loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
         let now = unix_seconds();
@@ -176,6 +177,7 @@ impl AuthRuntime {
             inner: Arc::downgrade(&inner),
             command_tx,
             config: config.clone(),
+            _state_lock: state_lock,
         };
 
         tokio::spawn(run_auth_actor(

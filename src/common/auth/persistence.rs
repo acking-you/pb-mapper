@@ -27,6 +27,101 @@ pub fn encrypted_auth_state_exists(state_dir: &Path) -> bool {
     auth_snapshot_path(state_dir).exists() || auth_wal_path(state_dir).exists()
 }
 
+pub fn acquire_state_dir_lock(state_dir: &Path) -> Result<File, AuthFailure> {
+    let path = state_dir.join("auth.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| {
+            AuthFailure::new(
+                "auth_state_unavailable",
+                format!("failed to open `{}`: {error}", path.display()),
+                false,
+            )
+        })?;
+    lock_exclusive_nonblock(&file).map_err(|error| {
+        AuthFailure::new(
+            "auth_state_locked",
+            format!(
+                "authentication state directory `{}` is already in use: {error}",
+                state_dir.display()
+            ),
+            false,
+        )
+    })?;
+    Ok(file)
+}
+
+fn lock_exclusive_nonblock(file: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn flock(fd: i32, operation: i32) -> i32;
+        }
+        const LOCK_EX: i32 = 2;
+        const LOCK_NB: i32 = 4;
+        use std::os::unix::io::AsRawFd;
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
+        const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
+        #[repr(C)]
+        struct Overlapped {
+            internal: usize,
+            internal_high: usize,
+            offset: u32,
+            offset_high: u32,
+            event: *mut core::ffi::c_void,
+        }
+        extern "system" {
+            fn LockFileEx(
+                file: *mut core::ffi::c_void,
+                flags: u32,
+                reserved: u32,
+                bytes_low: u32,
+                bytes_high: u32,
+                overlapped: *mut Overlapped,
+            ) -> i32;
+        }
+        let mut overlapped = Overlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            event: core::ptr::null_mut(),
+        };
+        let ok = unsafe {
+            LockFileEx(
+                file.as_raw_handle(),
+                LOCKFILE_FAIL_IMMEDIATELY | LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Ok(())
+    }
+}
+
 pub(super) fn compaction_is_allowed(safe_mode: bool) -> bool {
     !safe_mode
 }
@@ -39,7 +134,7 @@ pub(super) fn clear_retained_high_slot_entries(inner: &AuthStateInner) {
         .clear();
 }
 
-fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;

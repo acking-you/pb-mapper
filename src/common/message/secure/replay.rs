@@ -22,8 +22,23 @@ use std::path::PathBuf;
 
 use super::*;
 
-pub(super) const MAX_FIRST_FLIGHTS_PER_KEY: u32 = 8_192;
+const DEFAULT_NEW_STREAMS_PER_SECOND: u32 = 100;
 const REPLAY_RECORD_LEN: usize = 40;
+const REPLAY_COMPACT_INTERVAL_SECONDS: u64 = 60;
+
+fn first_flight_budget(window_seconds: u64) -> u32 {
+    let streams_per_sec = std::env::var("PB_MAPPER_NEW_STREAMS_PER_SECOND")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_NEW_STREAMS_PER_SECOND)
+        .clamp(1, 1_000_000);
+    let window = u32::try_from(window_seconds).unwrap_or(u32::MAX);
+    streams_per_sec
+        .saturating_mul(2)
+        .saturating_mul(window)
+        .saturating_mul(2)
+        .max(8_192)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FirstFlightAdmit {
@@ -93,17 +108,20 @@ pub(super) struct ReplayGuard {
     window_seconds: u64,
     max_per_key: u32,
     log_path: Option<PathBuf>,
+    last_compact_at: u64,
 }
 
 impl ReplayGuard {
     pub(super) fn open(log_path: Option<PathBuf>, bytes: usize, window_seconds: u64) -> Self {
+        let now = unix_seconds();
         let mut guard = Self {
             bloom: RotatingBloom::new(bytes, window_seconds),
             counts: HashMap::new(),
-            counts_started_at: unix_seconds(),
+            counts_started_at: now,
             window_seconds,
-            max_per_key: MAX_FIRST_FLIGHTS_PER_KEY,
+            max_per_key: first_flight_budget(window_seconds),
             log_path,
+            last_compact_at: now,
         };
         guard.load_persisted();
         guard
@@ -133,6 +151,9 @@ impl ReplayGuard {
         }
         self.bloom.insert(fingerprint, now);
         *self.counts.entry(key_id).or_insert(0) += 1;
+        if now.saturating_sub(self.last_compact_at) >= REPLAY_COMPACT_INTERVAL_SECONDS {
+            self.compact(now);
+        }
         FirstFlightAdmit::Fresh
     }
 
@@ -152,11 +173,16 @@ impl ReplayGuard {
             std::fs::create_dir_all(parent)?;
         }
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let start_len = file.metadata()?.len();
         let mut record = [0_u8; REPLAY_RECORD_LEN];
         record[..32].copy_from_slice(fingerprint);
         record[32..].copy_from_slice(&now.to_be_bytes());
-        file.write_all(&record)?;
-        file.sync_data()
+        if let Err(error) = file.write_all(&record).and_then(|()| file.sync_data()) {
+            let _ = file.set_len(start_len);
+            let _ = file.sync_data();
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn load_persisted(&mut self) {
@@ -183,15 +209,63 @@ impl ReplayGuard {
             self.bloom.insert(&fingerprint, timestamp);
             live.push(record);
         }
-        if let Ok(mut rewritten) = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-        {
-            let _ = rewritten.write_all(&live.concat());
-            let _ = rewritten.sync_data();
+        if self.rewrite_live(&live).is_ok() {
+            self.last_compact_at = now;
         }
+    }
+
+    fn compact(&mut self, now: u64) {
+        let Some(path) = &self.log_path else {
+            self.last_compact_at = now;
+            return;
+        };
+        let Ok(mut file) = File::open(path) else {
+            self.last_compact_at = now;
+            return;
+        };
+        let mut live = Vec::new();
+        let mut record = [0_u8; REPLAY_RECORD_LEN];
+        loop {
+            match file.read(&mut record) {
+                Ok(0) => break,
+                Ok(n) if n == REPLAY_RECORD_LEN => {}
+                _ => break,
+            }
+            let timestamp = u64::from_be_bytes(record[32..].try_into().expect("timestamp width"));
+            if now.saturating_sub(timestamp) <= self.window_seconds {
+                live.push(record);
+            }
+        }
+        if self.rewrite_live(&live).is_ok() {
+            self.last_compact_at = now;
+        }
+    }
+
+    fn rewrite_live(&self, live: &[[u8; REPLAY_RECORD_LEN]]) -> std::io::Result<()> {
+        let Some(path) = &self.log_path else {
+            return Ok(());
+        };
+        let temporary = path.with_file_name(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("connection.replay"),
+            std::process::id()
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)?;
+            file.write_all(&live.concat())?;
+            file.sync_all()?;
+            drop(file);
+            crate::common::auth::replace_file(&temporary, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     }
 }
 
