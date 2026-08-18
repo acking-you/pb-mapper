@@ -3,16 +3,30 @@
 //! ```text
 //! key id + salt -> SHA-256 fingerprint -> current Bloom window
 //!                                      -> previous Bloom window
+//! key id ---------> per-credential first-flight count (before Bloom insert)
 //! ```
 //!
-//! `check_and_insert` is called while one mutex is held, making concurrent admission
+//! `admit` is called while one mutex is held, making concurrent admission
 //! atomic. This Bloom filter protects all connection types from immediate duplicates;
 //! administrator mutations additionally use the exact durable replay set in `auth`.
 //!
 //! Each generation lasts `2 *` the accepted clock-skew so a salt inserted at the
 //! end of a window with a max-future timestamp cannot be replayed after rotation.
+//! Per-credential counts stop one tenant from filling the shared filter with
+//! unique salts before the request payload is decoded.
+
+use std::collections::HashMap;
 
 use super::*;
+
+pub(super) const MAX_FIRST_FLIGHTS_PER_KEY: u32 = 8_192;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FirstFlightAdmit {
+    Fresh,
+    Replayed,
+    Limited,
+}
 
 pub(super) fn replay_fingerprint(key_id: u64, salt: &[u8; CONNECTION_SALT_LEN]) -> [u8; 32] {
     let mut input = [0_u8; 8 + CONNECTION_SALT_LEN];
@@ -51,14 +65,6 @@ impl RotatingBloom {
         bloom_insert(&mut self.current, fingerprint);
     }
 
-    pub(super) fn check_and_insert(&mut self, fingerprint: &[u8; 32], now: u64) -> bool {
-        if self.contains(fingerprint, now) {
-            return true;
-        }
-        self.insert(fingerprint, now);
-        false
-    }
-
     fn rotate(&mut self, now: u64) {
         let elapsed = now.saturating_sub(self.current_started_at);
         if elapsed < self.window_seconds {
@@ -72,6 +78,59 @@ impl RotatingBloom {
             self.current.fill(0);
         }
         self.current_started_at = now;
+    }
+}
+
+pub(super) struct ReplayGuard {
+    bloom: RotatingBloom,
+    counts: HashMap<u64, u32>,
+    counts_started_at: u64,
+    window_seconds: u64,
+    max_per_key: u32,
+}
+
+impl ReplayGuard {
+    pub(super) fn new(bytes: usize, window_seconds: u64) -> Self {
+        Self {
+            bloom: RotatingBloom::new(bytes, window_seconds),
+            counts: HashMap::new(),
+            counts_started_at: unix_seconds(),
+            window_seconds,
+            max_per_key: MAX_FIRST_FLIGHTS_PER_KEY,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_max_per_key(mut self, max_per_key: u32) -> Self {
+        self.max_per_key = max_per_key;
+        self
+    }
+
+    pub(super) fn admit(
+        &mut self,
+        key_id: u64,
+        fingerprint: &[u8; 32],
+        now: u64,
+    ) -> FirstFlightAdmit {
+        self.rotate_counts(now);
+        if self.bloom.contains(fingerprint, now) {
+            return FirstFlightAdmit::Replayed;
+        }
+        let count = self.counts.entry(key_id).or_insert(0);
+        if *count >= self.max_per_key {
+            return FirstFlightAdmit::Limited;
+        }
+        self.bloom.insert(fingerprint, now);
+        *count = count.saturating_add(1);
+        FirstFlightAdmit::Fresh
+    }
+
+    fn rotate_counts(&mut self, now: u64) {
+        if now.saturating_sub(self.counts_started_at) < self.window_seconds {
+            return;
+        }
+        self.counts.clear();
+        self.counts_started_at = now;
     }
 }
 

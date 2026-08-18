@@ -27,6 +27,35 @@ pub fn encrypted_auth_state_exists(state_dir: &Path) -> bool {
     auth_snapshot_path(state_dir).exists() || auth_wal_path(state_dir).exists()
 }
 
+pub(super) fn compaction_is_allowed(safe_mode: bool) -> bool {
+    !safe_mode
+}
+
+pub(super) fn clear_retained_high_slot_entries(inner: &AuthStateInner) {
+    inner
+        .high_slot_entries
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), AuthFailure> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                AuthFailure::new(
+                    "temporary_key_store_unavailable",
+                    format!("failed to sync `{}`: {error}", parent.display()),
+                    false,
+                )
+            })?;
+    }
+    let _ = path;
+    Ok(())
+}
+
 pub(super) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
     let mut records = inner
         .audit_records
@@ -393,6 +422,7 @@ pub(super) fn append_wal(
     let length = u32::try_from(sealed.len())
         .map_err(|_| AuthFailure::internal("auth WAL record is too large"))?;
     let path = auth_wal_path(&config.state_dir);
+    let created = !path.exists();
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -446,6 +476,9 @@ pub(super) fn append_wal(
             },
             rolled_back,
         ));
+    }
+    if created {
+        sync_parent_directory(&path)?;
     }
     Ok(())
 }
@@ -520,6 +553,7 @@ pub(super) fn write_snapshot_and_truncate_wal(
     let snapshot_path = auth_snapshot_path(&config.state_dir);
     atomic_write(&snapshot_path, &sealed, 0o600)?;
     let wal_path = auth_wal_path(&config.state_dir);
+    let created = !wal_path.exists();
     let wal = OpenOptions::new()
         .create(true)
         .write(true)
@@ -538,7 +572,11 @@ pub(super) fn write_snapshot_and_truncate_wal(
             format!("failed to sync `{}`: {error}", wal_path.display()),
             true,
         )
-    })
+    })?;
+    if created {
+        sync_parent_directory(&wal_path)?;
+    }
+    Ok(())
 }
 
 pub(super) fn seal_blob(admin_key: &AesKeyType, plain: &[u8]) -> Result<Vec<u8>, AuthFailure> {
@@ -793,18 +831,7 @@ pub(super) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), Au
                 false,
             )
         })?;
-        #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|error| {
-                    AuthFailure::new(
-                        "auth_state_unavailable",
-                        format!("failed to sync `{}`: {error}", parent.display()),
-                        false,
-                    )
-                })?;
-        }
+        sync_parent_directory(path)?;
         Ok(())
     })();
     if result.is_err() {

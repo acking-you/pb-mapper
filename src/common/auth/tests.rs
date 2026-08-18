@@ -144,6 +144,58 @@ async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+#[test]
+fn safe_mode_startup_does_not_allow_compaction() {
+    assert!(!compaction_is_allowed(true));
+    assert!(compaction_is_allowed(false));
+}
+
+#[tokio::test]
+async fn reset_clears_retained_high_slot_entries() {
+    let state_dir = temp_state_dir("reset-high-slots");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config_two = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 2,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config_two.clone())
+        .await
+        .unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let first = runtime
+        .issue(&admin, Duration::from_secs(60), Some("first".to_string()))
+        .await
+        .unwrap();
+    let second = runtime
+        .issue(&admin, Duration::from_secs(60), Some("second".to_string()))
+        .await
+        .unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let config_one = AuthConfig {
+        max_temporary_keys: 1,
+        ..config_two.clone()
+    };
+    let runtime = AuthRuntime::start(admin_key, config_one).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    runtime.reset(&admin).await.unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let runtime = AuthRuntime::start(admin_key, config_two).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let page = runtime.list(&admin, 0, 100).await.unwrap();
+    assert!(page.items.is_empty());
+    assert!(authenticate_for_test(&runtime, first.metadata.key_id).is_err());
+    assert!(authenticate_for_test(&runtime, second.metadata.key_id).is_err());
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
 #[tokio::test]
 async fn rotate_root_rejects_a_nul_containing_key() {
     let state_dir = temp_state_dir("rotate-nul");

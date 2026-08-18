@@ -8,8 +8,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
 use super::checksum::{
-    get_checksum, get_checksum_for_key, get_msg_header_key, valid_checksum, valid_checksum_for_key,
-    AesKeyType,
+    get_checksum, get_checksum_for_key, get_msg_header_key, process_checksum_is_ready,
+    valid_checksum, valid_checksum_for_key, AesKeyType,
 };
 use super::error::{
     self, MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,
@@ -146,10 +146,20 @@ fn checksum_matches(datalen: DataLenType, checksum: u32, key: Option<&[u8]>) -> 
 }
 
 #[inline]
-fn checksum_for(len: DataLenType, key: Option<&[u8]>) -> u32 {
+fn checksum_for(len: DataLenType, key: Option<&[u8]>) -> Result<u32> {
     match key {
-        Some(key) => get_checksum_for_key(len, key),
-        None => get_checksum(len),
+        Some(key) => Ok(get_checksum_for_key(len, key)),
+        None => {
+            if !process_checksum_is_ready() {
+                return Err(error::Error::MsgCodec {
+                    action: "load configured credential",
+                    detail:
+                        "`MSG_HEADER_KEY` is required; no insecure default checksum is available"
+                            .to_string(),
+                });
+            }
+            Ok(get_checksum(len))
+        }
     }
 }
 
@@ -180,7 +190,7 @@ async fn set_msg_len<T: AsyncWriteExt + Unpin>(
     len: DataLenType,
     checksum_key: Option<&[u8]>,
 ) -> Result<()> {
-    write_checksum(writer, checksum_for(len, checksum_key)).await?;
+    write_checksum(writer, checksum_for(len, checksum_key)?).await?;
     write_datalen(writer, len).await
 }
 

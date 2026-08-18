@@ -286,7 +286,7 @@ use std::fmt;
 #[derive(Clone)]
 pub struct ServerSecurity {
     auth: AuthRuntime,
-    replay: Arc<Mutex<RotatingBloom>>,
+    replay: Arc<Mutex<ReplayGuard>>,
     failure_logs: Arc<Mutex<FailureLogLimiter>>,
 }
 
@@ -294,7 +294,7 @@ impl ServerSecurity {
     pub fn new(auth: AuthRuntime) -> Self {
         Self {
             auth,
-            replay: Arc::new(Mutex::new(RotatingBloom::new(
+            replay: Arc::new(Mutex::new(ReplayGuard::new(
                 DEFAULT_REPLAY_FILTER_BYTES,
                 DEFAULT_REPLAY_WINDOW_SECONDS,
             ))),
@@ -543,20 +543,33 @@ impl ServerSecurity {
                 response_session: Some(session_without_context(&session)),
             })?;
         let fingerprint = replay_fingerprint(key_id, &salt);
-        let replayed = self
+        match self
             .replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .check_and_insert(&fingerprint, unix_seconds());
-        if replayed {
-            return Err(ServerInitialError {
-                failure: AuthFailure::new(
-                    "connection_salt_replayed",
-                    "protocol-v2 connection salt was already accepted",
-                    true,
-                ),
-                response_session: Some(session),
-            });
+            .admit(key_id, &fingerprint, unix_seconds())
+        {
+            FirstFlightAdmit::Replayed => {
+                return Err(ServerInitialError {
+                    failure: AuthFailure::new(
+                        "connection_salt_replayed",
+                        "protocol-v2 connection salt was already accepted",
+                        true,
+                    ),
+                    response_session: Some(session),
+                });
+            }
+            FirstFlightAdmit::Limited => {
+                return Err(ServerInitialError {
+                    failure: AuthFailure::new(
+                        "connection_admission_limited",
+                        "this credential has opened too many new connections in the current window",
+                        true,
+                    ),
+                    response_session: Some(session),
+                });
+            }
+            FirstFlightAdmit::Fresh => {}
         }
         session.context = Some(context);
         Ok(ServerInitialMessage {
@@ -613,7 +626,9 @@ mod frame;
 use frame::{derive_material, first_prefix, V2Material};
 pub use frame::{V2MessageReader, V2MessageWriter};
 mod replay;
-use replay::{replay_fingerprint, RotatingBloom};
+#[cfg(test)]
+use replay::RotatingBloom;
+use replay::{replay_fingerprint, FirstFlightAdmit, ReplayGuard};
 fn legacy_message_reader<'a, T: AsyncReadExt + Unpin>(
     reader: &'a mut T,
     key: &AesKeyType,

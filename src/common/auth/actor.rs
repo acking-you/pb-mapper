@@ -136,7 +136,14 @@ pub(super) async fn run_auth_actor(
                     &mut admin_replays,
                     &mut admin_replay_order,
                 );
-                if now.saturating_sub(last_snapshot_at) >= SNAPSHOT_COMPACTION_INTERVAL.as_secs() {
+                // WHY: A failed load starts safe mode with empty in-memory
+                // generations. Compacting that reconstruction would replace the
+                // damaged snapshot, truncate the WAL, and let the next start
+                // exit safe mode without rotating the instance id.
+                if compaction_is_allowed(inner.safe_mode.load(Ordering::Acquire))
+                    && now.saturating_sub(last_snapshot_at)
+                        >= SNAPSHOT_COMPACTION_INTERVAL.as_secs()
+                {
                     let snapshot = build_snapshot(&inner, &cold, &admin_replay_order);
                     if let Err(error) = write_snapshot_and_truncate_wal(
                         &config,
@@ -377,37 +384,53 @@ fn actor_issue(
     let expires_at = validate_ttl(config, ttl)?;
     let label = validate_label(label)?;
     let issued_at = unix_seconds();
+    let (index, generation, key_id, entry) = {
+        let slots = inner
+            .slots
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some((index, slot)) = slots
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| slot.state == SlotState::Free && slot.generation < u32::MAX)
+        else {
+            return Err(AuthFailure::new(
+                "temporary_key_capacity_exhausted",
+                "temporary key slot table is full",
+                true,
+            ));
+        };
+        let generation = slot.generation + 1;
+        let key_id = make_key_id(generation, index as u32);
+        (
+            index,
+            generation,
+            key_id,
+            PersistedEntry {
+                key_id,
+                state: SlotState::Active,
+                issued_at,
+                expires_at,
+                label: label.clone(),
+                tombstoned_at: None,
+            },
+        )
+    };
+    // Persist before taking the slot write lock. A fail-closed WAL error
+    // cancels leases via slots.read() and must not nest under slots.write().
+    append_mutation(
+        config,
+        inner,
+        StateMutation::Issue(entry),
+        audit("temporary_key_issue", Some(key_id), label.clone()),
+    )?;
     let mut slots = inner
         .slots
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some((index, slot)) = slots
-        .iter_mut()
-        .enumerate()
-        .find(|(_, slot)| slot.state == SlotState::Free && slot.generation < u32::MAX)
-    else {
-        return Err(AuthFailure::new(
-            "temporary_key_capacity_exhausted",
-            "temporary key slot table is full",
-            true,
-        ));
-    };
-    let generation = slot.generation + 1;
-    let key_id = make_key_id(generation, index as u32);
-    let entry = PersistedEntry {
-        key_id,
-        state: SlotState::Active,
-        issued_at,
-        expires_at,
-        label: label.clone(),
-        tombstoned_at: None,
-    };
-    append_mutation(
-        config,
-        inner,
-        StateMutation::Issue(entry.clone()),
-        audit("temporary_key_issue", Some(key_id), label.clone()),
-    )?;
+    let slot = slots
+        .get_mut(index)
+        .ok_or_else(|| AuthFailure::internal("issued slot disappeared"))?;
     let lease = Arc::new(AuthLease::new(key_id, expires_at));
     slot.generation = generation;
     slot.state = SlotState::Active;
@@ -501,18 +524,20 @@ fn actor_renew(
     ensure_store_available(inner)?;
     let expires_at = validate_ttl(config, ttl)?;
     let index = key_slot(key_id) as usize;
-    let mut slots = inner
-        .slots
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let slot = slots.get_mut(index).ok_or_else(|| key_not_found(key_id))?;
-    validate_slot_identity(slot, key_id)?;
-    if slot.state != SlotState::Active || slot.expires_at <= unix_seconds() {
-        return Err(AuthFailure::new(
-            "temporary_key_not_renewable",
-            "only an active, unexpired temporary key can be renewed",
-            false,
-        ));
+    {
+        let slots = inner
+            .slots
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = slots.get(index).ok_or_else(|| key_not_found(key_id))?;
+        validate_slot_identity(slot, key_id)?;
+        if slot.state != SlotState::Active || slot.expires_at <= unix_seconds() {
+            return Err(AuthFailure::new(
+                "temporary_key_not_renewable",
+                "only an active, unexpired temporary key can be renewed",
+                false,
+            ));
+        }
     }
     let label = cold
         .get(&key_id)
@@ -523,6 +548,19 @@ fn actor_renew(
         StateMutation::Renew { key_id, expires_at },
         audit("temporary_key_renew", Some(key_id), label),
     )?;
+    let mut slots = inner
+        .slots
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot = slots.get_mut(index).ok_or_else(|| key_not_found(key_id))?;
+    validate_slot_identity(slot, key_id)?;
+    if slot.state != SlotState::Active {
+        return Err(AuthFailure::new(
+            "temporary_key_inactive",
+            "temporary key lease is no longer active",
+            true,
+        ));
+    }
     let lease = slot.lease.upgrade().ok_or_else(|| {
         AuthFailure::new(
             "temporary_key_inactive",
@@ -548,18 +586,20 @@ fn actor_revoke(
     ensure_store_available(inner)?;
     let now = unix_seconds();
     let index = key_slot(key_id) as usize;
-    let mut slots = inner
-        .slots
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let slot = slots.get_mut(index).ok_or_else(|| key_not_found(key_id))?;
-    validate_slot_identity(slot, key_id)?;
-    if slot.state != SlotState::Active {
-        return Err(AuthFailure::new(
-            "temporary_key_not_active",
-            "temporary key is not active",
-            false,
-        ));
+    {
+        let slots = inner
+            .slots
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = slots.get(index).ok_or_else(|| key_not_found(key_id))?;
+        validate_slot_identity(slot, key_id)?;
+        if slot.state != SlotState::Active {
+            return Err(AuthFailure::new(
+                "temporary_key_not_active",
+                "temporary key is not active",
+                false,
+            ));
+        }
     }
     let label = cold
         .get(&key_id)
@@ -572,6 +612,12 @@ fn actor_revoke(
         StateMutation::Revoke { key_id, at: now },
         audit("temporary_key_revoke", Some(key_id), label.clone()),
     )?;
+    let mut slots = inner
+        .slots
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slot = slots.get_mut(index).ok_or_else(|| key_not_found(key_id))?;
+    validate_slot_identity(slot, key_id)?;
     slot.state = SlotState::Revoked;
     if let Some(lease) = slot.lease.upgrade() {
         lease.cancellation.cancel();
@@ -685,6 +731,7 @@ fn actor_reset(
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = new_instance_id;
     cold.clear();
     wheel.clear(unix_seconds());
+    clear_retained_high_slot_entries(inner);
     inner.safe_mode.store(false, Ordering::Release);
     Ok(())
 }
@@ -741,6 +788,7 @@ fn actor_rotate_root(
     }
     cold.clear();
     wheel.clear(unix_seconds());
+    clear_retained_high_slot_entries(inner);
     let new_admin_lease = Arc::new(AuthLease::new(0, u64::MAX));
     *inner
         .admin

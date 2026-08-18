@@ -261,6 +261,17 @@ fn rotating_bloom_retains_a_max_future_timestamp_past_the_next_rotation() {
     ));
 }
 
+#[test]
+fn per_credential_admission_limit_does_not_consume_other_keys() {
+    let now = unix_seconds();
+    let mut guard = ReplayGuard::new(1024, DEFAULT_REPLAY_WINDOW_SECONDS).with_max_per_key(2);
+    assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
+    assert_eq!(guard.admit(1, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
+    assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
+    assert_eq!(guard.admit(2, &[3_u8; 32], now), FirstFlightAdmit::Fresh);
+    assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Replayed);
+}
+
 #[tokio::test]
 async fn legacy_initial_frame_validates_against_isolated_relay_key() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
