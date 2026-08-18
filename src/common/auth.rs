@@ -706,6 +706,9 @@ fn recover_admin_key_after_rotation(
     if open_blob(&next_key, &bytes).is_err() {
         return Ok(current.to_string());
     }
+    // The rotation snapshot is complete under the staged key. Leftover WAL
+    // records are still encrypted with the previous key.
+    truncate_auth_wal(state_dir)?;
     write_admin_key(state_dir, next.trim())?;
     let _ = std::fs::remove_file(state_dir.join("admin.key.next"));
     Ok(next)

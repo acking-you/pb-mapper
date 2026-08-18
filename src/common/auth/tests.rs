@@ -615,6 +615,41 @@ fn recover_instance_id_discards_stale_next_when_snapshot_still_matches_current()
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+#[test]
+fn recover_admin_key_discards_leftover_wal_from_the_old_key() {
+    let state_dir = temp_state_dir("admin-next-wal");
+    prepare_state_dir(&state_dir).unwrap();
+    let old_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
+    let old_key_str = std::str::from_utf8(&old_key).unwrap();
+    let new_key_str = std::str::from_utf8(&new_key).unwrap();
+    write_admin_key(&state_dir, old_key_str).unwrap();
+    write_admin_key_file(&state_dir.join("admin.key.next"), new_key_str, true).unwrap();
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 1,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let snapshot = PersistedSnapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        instance_id: [9_u8; INSTANCE_ID_LEN],
+        generations: vec![0; 1],
+        entries: Vec::new(),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+        admin_replays: Vec::new(),
+        audit_records: VecDeque::new(),
+    };
+    write_snapshot_and_truncate_wal(&config, &new_key, &snapshot).unwrap();
+    std::fs::write(state_dir.join("auth.wal"), b"old-key-wal").unwrap();
+
+    let recovered = recover_admin_key_after_rotation(&state_dir, old_key_str).unwrap();
+    assert_eq!(recovered.trim(), new_key_str);
+    assert_eq!(std::fs::read(state_dir.join("auth.wal")).unwrap(), b"");
+    assert!(!state_dir.join("admin.key.next").exists());
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
 #[tokio::test]
 async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
     let state_dir = temp_state_dir("reset-recover");
