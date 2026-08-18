@@ -566,16 +566,19 @@ fn actor_renew(
             true,
         ));
     }
-    let lease = slot.lease.upgrade().ok_or_else(|| {
-        AuthFailure::new(
-            "temporary_key_inactive",
-            "temporary key lease is no longer active",
-            true,
-        )
-    })?;
     slot.expires_at = expires_at;
-    lease.expires_at.store(expires_at, Ordering::Release);
-    lease.wheel_version.fetch_add(1, Ordering::AcqRel);
+    let lease = match slot.lease.upgrade() {
+        Some(lease) if !lease.cancellation_token().is_cancelled() => {
+            lease.expires_at.store(expires_at, Ordering::Release);
+            lease.wheel_version.fetch_add(1, Ordering::AcqRel);
+            lease
+        }
+        _ => {
+            let lease = Arc::new(AuthLease::new(key_id, expires_at));
+            slot.lease = Arc::downgrade(&lease);
+            lease
+        }
+    };
     wheel.release(key_id);
     wheel.insert(lease);
     drop(slots);

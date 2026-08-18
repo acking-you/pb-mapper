@@ -135,13 +135,28 @@ pub struct ServerTunnelOptions {
     pub force_namespace: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ServerCliRunConfig<A> {
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     options: ServerTunnelOptions,
     worker_index: usize,
+    credential: Credential,
+}
+
+impl<A: Debug> Debug for ServerCliRunConfig<A> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerCliRunConfig")
+            .field("local_addr", &self.local_addr)
+            .field("remote_addr", &self.remote_addr)
+            .field("key", &self.key)
+            .field("options", &self.options)
+            .field("worker_index", &self.worker_index)
+            .field("credential_key_id", &self.credential.key_id())
+            .finish()
+    }
 }
 
 /// Where a stream request should connect, and how.
@@ -325,14 +340,24 @@ async fn run_server_side_cli_worker<LocalStream, A>(
     LocalStream::Item: StreamForward,
     A: ToSocketAddrs + Debug + Copy + Send + 'static,
 {
+    let mut retry_backoff = RetryBackoff::default();
+    let credential = loop {
+        match get_process_credential() {
+            Ok(credential) => break credential,
+            Err(error) => {
+                tracing::error!("load registration credential failed: {error}");
+                tokio::time::sleep(retry_backoff.next_delay()).await;
+            }
+        }
+    };
     let run_config = ServerCliRunConfig {
         local_addr,
         remote_addr,
         key: key.clone(),
         options,
         worker_index,
+        credential,
     };
-    let mut retry_backoff = RetryBackoff::default();
     loop {
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
             &mut retry_backoff,
@@ -402,6 +427,7 @@ where
                 force_namespace,
             },
         worker_index,
+        credential,
     } = config;
     let local_addr = match got_one_socket_addr(local_addr).await {
         Ok(addr) => addr,
@@ -446,14 +472,8 @@ where
     );
 
     // Start registration with a protocol-v2 first frame. The session is reused for all
-    // subsequent control messages on this TCP connection.
-    let credential = match get_process_credential() {
-        Ok(credential) => credential,
-        Err(error) => {
-            tracing::error!("load registration credential failed: {error}");
-            return Err(Status::ConnectRemote);
-        }
-    };
+    // subsequent control messages on this TCP connection. The credential is pinned
+    // when the worker starts so a later process-key change cannot retarget reconnects.
     let session = match ClientHeaderSession::new_v2(&credential) {
         Ok(session) => session,
         Err(error) => {

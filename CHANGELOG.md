@@ -36,6 +36,8 @@ All notable changes to this project will be documented in this file.
 - Passed `--use-machine-msg-header-key` only when `admin.key` is missing, so a container restart with a persistent auth volume does not fail after first boot.
 - Pinned each local client listener to the credential captured at start, so a later Flutter config change cannot switch an existing port onto another tenant.
 - Garbage-collected expired and revoked high-slot entries while keeping their generations so shrinking capacity and running `key gc` can reclaim them.
+- Pinned local registration workers to the credential captured at start, matching the client listener.
+- Replaced a lease that was canceled while a renewal WAL record was syncing, so a successful renew does not keep a dead cancellation token.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

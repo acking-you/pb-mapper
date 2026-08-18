@@ -593,6 +593,41 @@ async fn issue_renew_revoke_and_persist() {
 }
 
 #[tokio::test]
+async fn renew_replaces_a_lease_canceled_during_persistence() {
+    let state_dir = temp_state_dir("renew-canceled-lease");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let issued = runtime
+        .issue(&admin, Duration::from_secs(60), Some("renew".to_string()))
+        .await
+        .unwrap();
+    let context = authenticate_for_test(&runtime, issued.metadata.key_id).unwrap();
+    let canceled = context.cancellation_token().unwrap();
+    canceled.cancel();
+    assert!(canceled.is_cancelled());
+
+    let renewed = runtime
+        .renew(&admin, issued.metadata.key_id, Duration::from_secs(120))
+        .await
+        .unwrap();
+    assert_eq!(renewed.metadata.key_id, issued.metadata.key_id);
+    let restored = authenticate_for_test(&runtime, issued.metadata.key_id).unwrap();
+    assert!(!restored.cancellation_token().unwrap().is_cancelled());
+    assert!(canceled.is_cancelled());
+
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
 async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
     let state_dir = temp_state_dir("auth-reset");
     let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
