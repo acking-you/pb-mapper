@@ -50,6 +50,7 @@ const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
 const DEFAULT_REPLAY_WINDOW_SECONDS: u64 = MAX_CONNECTION_CLOCK_SKEW_SECONDS.saturating_mul(2);
 const DEFAULT_REPLAY_FILTER_BYTES: usize = 1024 * 1024;
 const MAX_INITIAL_PLAINTEXT_LEN: u32 = 64 * 1024;
+const MAX_INITIAL_CIPHERTEXT_LEN: u32 = MAX_INITIAL_PLAINTEXT_LEN + 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderProtocol {
@@ -374,7 +375,8 @@ impl ServerSecurity {
                 ),
                 response_session: None,
             })?;
-        if !valid_checksum_for_key(datalen, checksum, &key) || datalen > MAX_MSG_LEN {
+        if !valid_checksum_for_key(datalen, checksum, &key) || datalen > MAX_INITIAL_CIPHERTEXT_LEN
+        {
             return Err(ServerInitialError {
                 failure: AuthFailure::new(
                     "legacy_frame_invalid",

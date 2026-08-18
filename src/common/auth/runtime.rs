@@ -113,10 +113,14 @@ impl AuthRuntime {
             }
         }
 
-        let legacy_protocol = loaded
-            .as_ref()
-            .map(|state| state.legacy_protocol)
-            .unwrap_or(config.legacy_protocol);
+        let legacy_protocol = if safe_mode {
+            LegacyProtocolPolicy::Deny
+        } else {
+            loaded
+                .as_ref()
+                .map(|state| state.legacy_protocol)
+                .unwrap_or(config.legacy_protocol)
+        };
         let mut admin_replay_order = loaded
             .as_ref()
             .map(|state| {

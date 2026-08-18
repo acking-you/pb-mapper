@@ -200,6 +200,30 @@ async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
     let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
+#[tokio::test]
+async fn oversized_legacy_initial_frame_is_rejected_before_reading_its_body() {
+    use crate::common::checksum::get_checksum_for_key;
+
+    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = temp_config();
+    let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
+    let datalen = MAX_INITIAL_CIPHERTEXT_LEN + 1;
+    let checksum = get_checksum_for_key(datalen, &admin);
+    let mut bytes = checksum.to_be_bytes().to_vec();
+    bytes.extend_from_slice(&datalen.to_be_bytes());
+    let security = ServerSecurity::new(auth);
+    let error = match security
+        .read_initial(&mut std::io::Cursor::new(bytes))
+        .await
+    {
+        Ok(_) => panic!("oversized legacy frame was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.failure.code, "legacy_frame_invalid");
+
+    let _ = std::fs::remove_dir_all(config.state_dir);
+}
+
 #[test]
 fn rotating_bloom_covers_current_and_previous_window() {
     let mut bloom = RotatingBloom::new(1024, DEFAULT_REPLAY_WINDOW_SECONDS);

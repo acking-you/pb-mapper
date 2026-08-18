@@ -115,6 +115,36 @@ async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
 }
 
 #[tokio::test]
+async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
+    let state_dir = temp_state_dir("safe-mode-legacy");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    runtime
+        .set_legacy_protocol(&admin, LegacyProtocolPolicy::Deny)
+        .await
+        .unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    std::fs::write(state_dir.join("auth.wal"), b"broken-wal").unwrap();
+
+    let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let status = runtime.status(&admin).await.unwrap();
+    assert!(status.safe_mode);
+    assert_eq!(status.legacy_protocol, LegacyProtocolPolicy::Deny);
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
 async fn rotate_root_rejects_a_nul_containing_key() {
     let state_dir = temp_state_dir("rotate-nul");
     let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
