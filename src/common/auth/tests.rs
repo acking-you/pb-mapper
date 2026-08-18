@@ -994,6 +994,19 @@ fn timing_wheel_expires_cascaded_boundary_entry_without_an_extra_tick() {
 }
 
 #[test]
+fn timing_wheel_release_drops_the_current_owner() {
+    let now = 1_000;
+    let lease = Arc::new(AuthLease::new(make_key_id(1, 0), now + 60));
+    let mut wheel = TimingWheel::new(now);
+    wheel.insert(lease.clone());
+    assert!(wheel.owns(lease.key_id()));
+
+    wheel.release(lease.key_id());
+    assert!(!wheel.owns(lease.key_id()));
+    assert!(!lease.cancellation_token().is_cancelled());
+}
+
+#[test]
 fn timing_wheel_clear_cancels_owned_leases() {
     let now = 1_000;
     let lease = Arc::new(AuthLease::new(make_key_id(1, 0), now + 60));

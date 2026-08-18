@@ -511,31 +511,42 @@ impl ServerSecurity {
             ),
             response_session: None,
         })?;
-        let mut session = ServerHeaderSession {
-            protocol: HeaderProtocol::V2,
-            legacy_key: key,
-            v2: Some(material.clone()),
-            context: None,
-            _legacy_guard: None,
-        };
-        let mut message_reader = V2MessageReader::new(
-            reader,
-            material,
+        let mut session = v2_session(key, material.clone());
+        let (counter, ciphertext) =
+            read_initial_v2_ciphertext(reader)
+                .await
+                .map_err(|error| ServerInitialError {
+                    failure: AuthFailure::new(
+                        "protocol_v2_decrypt_failed",
+                        error.to_string(),
+                        false,
+                    ),
+                    response_session: Some(session_without_context(&session)),
+                })?;
+        let mut current_ciphertext = ciphertext.clone();
+        let payload = match open_v2_payload(
+            &material,
             DIRECTION_CLIENT_TO_SERVER,
-            0,
-        )
-        .map_err(|error| ServerInitialError {
-            failure: AuthFailure::new("protocol_v2_decrypt_failed", error.to_string(), false),
-            response_session: Some(session_without_context(&session)),
-        })?;
-        let payload = message_reader
-            .read_msg_with_limit(MAX_INITIAL_PLAINTEXT_LEN)
-            .await
-            .map_err(|error| ServerInitialError {
-                failure: AuthFailure::new("protocol_v2_decrypt_failed", error.to_string(), false),
-                response_session: Some(session_without_context(&session)),
-            })?
-            .to_vec();
+            counter,
+            &mut current_ciphertext,
+        ) {
+            Ok(payload) => payload,
+            Err(error) => {
+                if let Some(stale) =
+                    stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext)
+                {
+                    return Err(stale);
+                }
+                return Err(ServerInitialError {
+                    failure: AuthFailure::new(
+                        "protocol_v2_decrypt_failed",
+                        error.to_string(),
+                        false,
+                    ),
+                    response_session: Some(session_without_context(&session)),
+                });
+            }
+        };
 
         let context = self
             .auth
@@ -596,6 +607,80 @@ impl ServerSecurity {
 mod limiter;
 pub use limiter::FailureLogDecision;
 use limiter::FailureLogLimiter;
+async fn read_initial_v2_ciphertext<T: AsyncReadExt + Unpin>(
+    reader: &mut T,
+) -> Result<(u64, Vec<u8>)> {
+    let counter = reader
+        .read_u64()
+        .await
+        .map_err(|error| protocol_error(format!("failed to read v2 counter: {error}")))?;
+    if counter != 0 {
+        return Err(protocol_error(format!(
+            "protocol-v2 counter mismatch: expected 0, got {counter}"
+        )));
+    }
+    let datalen = reader
+        .read_u32()
+        .await
+        .map_err(|error| protocol_error(format!("failed to read v2 length: {error}")))?;
+    let max_encrypted_len = MAX_INITIAL_PLAINTEXT_LEN.saturating_add(AES_256_GCM.tag_len() as u32);
+    if datalen < AES_256_GCM.tag_len() as u32 || datalen > max_encrypted_len {
+        return Err(protocol_error(format!(
+            "protocol-v2 payload length {datalen} exceeds the {MAX_INITIAL_PLAINTEXT_LEN}-byte limit"
+        )));
+    }
+    let mut ciphertext = vec![0_u8; datalen as usize];
+    reader
+        .read_exact(&mut ciphertext)
+        .await
+        .map_err(|error| protocol_error(format!("failed to read v2 payload: {error}")))?;
+    Ok((counter, ciphertext))
+}
+
+fn stale_root_first_flight(
+    auth: &AuthRuntime,
+    key_id: u64,
+    salt: [u8; CONNECTION_SALT_LEN],
+    counter: u64,
+    ciphertext: &[u8],
+) -> Option<ServerInitialError> {
+    let previous_key = auth.derive_previous_key(key_id)?;
+    let previous_material = derive_material(key_id, &previous_key, salt).ok()?;
+    let mut previous_ciphertext = ciphertext.to_vec();
+    open_v2_payload(
+        &previous_material,
+        DIRECTION_CLIENT_TO_SERVER,
+        counter,
+        &mut previous_ciphertext,
+    )
+    .ok()?;
+    let (code, message) = if key_id == 0 {
+        (
+            "administrator_key_invalid",
+            "administrator credential does not match the active root key",
+        )
+    } else {
+        (
+            "temporary_key_rotated",
+            "temporary credential was invalidated by administrator root rotation or auth-state reset",
+        )
+    };
+    Some(ServerInitialError {
+        failure: AuthFailure::new(code, message, false),
+        response_session: Some(v2_session(previous_key, previous_material)),
+    })
+}
+
+fn v2_session(key: AesKeyType, material: V2Material) -> ServerHeaderSession {
+    ServerHeaderSession {
+        protocol: HeaderProtocol::V2,
+        legacy_key: key,
+        v2: Some(material),
+        context: None,
+        _legacy_guard: None,
+    }
+}
+
 fn session_without_context(session: &ServerHeaderSession) -> ServerHeaderSession {
     ServerHeaderSession {
         protocol: session.protocol,
@@ -635,7 +720,7 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for HeaderMessageWriter<'_, T> {
 }
 
 mod frame;
-use frame::{derive_material, first_prefix, V2Material};
+use frame::{derive_material, first_prefix, open_v2_payload, V2Material};
 pub use frame::{V2MessageReader, V2MessageWriter};
 mod replay;
 #[cfg(test)]

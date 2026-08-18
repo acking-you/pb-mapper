@@ -446,6 +446,12 @@ struct AdminState {
     lease: Weak<AuthLease>,
 }
 
+#[derive(Clone, Debug)]
+struct PreviousRoot {
+    admin_key: AesKeyType,
+    instance_id: [u8; INSTANCE_ID_LEN],
+}
+
 #[derive(Debug)]
 struct AuthStateInner {
     admin: RwLock<AdminState>,
@@ -463,6 +469,7 @@ struct AuthStateInner {
     auth_successes: AtomicU64,
     auth_failures: AtomicU64,
     root_epoch: AtomicU64,
+    previous_root: RwLock<Option<PreviousRoot>>,
     audit_records: RwLock<VecDeque<AuditRecord>>,
 }
 

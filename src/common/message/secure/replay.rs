@@ -17,8 +17,10 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
+
+use rand::RngExt;
 
 use super::*;
 
@@ -220,14 +222,15 @@ impl ReplayGuard {
             }
         };
         let now = unix_seconds();
-        let mut live = Vec::new();
-        let mut record = [0_u8; REPLAY_RECORD_LEN];
-        loop {
-            match file.read(&mut record) {
-                Ok(0) => break,
-                Ok(n) if n == REPLAY_RECORD_LEN => {}
-                _ => break,
+        let records = match read_complete_replay_records(&mut file) {
+            Ok(records) => records,
+            Err(_) => {
+                self.log_failed = true;
+                return;
             }
+        };
+        let mut live = Vec::new();
+        for record in records {
             let timestamp = u64::from_be_bytes(record[32..].try_into().expect("timestamp width"));
             if now.saturating_sub(timestamp) > self.window_seconds {
                 continue;
@@ -236,9 +239,11 @@ impl ReplayGuard {
             self.bloom.insert(&fingerprint, timestamp);
             live.push(record);
         }
-        if self.rewrite_live(&live).is_ok() {
-            self.last_compact_at = now;
+        if self.rewrite_live(&live).is_err() {
+            self.log_failed = true;
+            return;
         }
+        self.last_compact_at = now;
     }
 
     fn compact(&mut self, now: u64) {
@@ -246,38 +251,51 @@ impl ReplayGuard {
             self.last_compact_at = now;
             return;
         };
-        let Ok(mut file) = File::open(path) else {
-            self.last_compact_at = now;
-            return;
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(_) => {
+                self.log_failed = true;
+                return;
+            }
         };
-        let mut live = Vec::new();
-        let mut record = [0_u8; REPLAY_RECORD_LEN];
-        loop {
-            match file.read(&mut record) {
-                Ok(0) => break,
-                Ok(n) if n == REPLAY_RECORD_LEN => {}
-                _ => break,
+        let records = match read_complete_replay_records(&mut file) {
+            Ok(records) => records,
+            Err(_) => {
+                self.log_failed = true;
+                return;
             }
-            let timestamp = u64::from_be_bytes(record[32..].try_into().expect("timestamp width"));
-            if now.saturating_sub(timestamp) <= self.window_seconds {
-                live.push(record);
-            }
+        };
+        let live = records
+            .into_iter()
+            .filter(|record| {
+                let timestamp =
+                    u64::from_be_bytes(record[32..].try_into().expect("timestamp width"));
+                now.saturating_sub(timestamp) <= self.window_seconds
+            })
+            .collect::<Vec<_>>();
+        if self.rewrite_live(&live).is_err() {
+            self.log_failed = true;
+            return;
         }
-        if self.rewrite_live(&live).is_ok() {
-            self.last_compact_at = now;
-        }
+        self.last_compact_at = now;
     }
 
     fn rewrite_live(&self, live: &[[u8; REPLAY_RECORD_LEN]]) -> std::io::Result<()> {
         let Some(path) = &self.log_path else {
             return Ok(());
         };
+        let mut random_suffix = [0_u8; 8];
+        let mut rng = rand::rng();
+        for byte in &mut random_suffix {
+            *byte = rng.random();
+        }
         let temporary = path.with_file_name(format!(
-            ".{}.tmp-{}",
+            ".{}.tmp-{}-{:016x}",
             path.file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("connection.replay"),
-            std::process::id()
+            std::process::id(),
+            u64::from_be_bytes(random_suffix)
         ));
         let result = (|| {
             let mut file = OpenOptions::new()
@@ -295,6 +313,18 @@ impl ReplayGuard {
             let _ = std::fs::remove_file(&temporary);
         }
         result
+    }
+}
+
+fn read_complete_replay_records(file: &mut File) -> std::io::Result<Vec<[u8; REPLAY_RECORD_LEN]>> {
+    let mut records = Vec::new();
+    loop {
+        let mut record = [0_u8; REPLAY_RECORD_LEN];
+        match file.read_exact(&mut record) {
+            Ok(()) => records.push(record),
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(records),
+            Err(error) => return Err(error),
+        }
     }
 }
 

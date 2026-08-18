@@ -129,6 +129,7 @@ pub(super) async fn run_auth_actor(
                             slot.expires_at = 0;
                             slot.lease = Weak::new();
                             cold.remove(&key_id);
+                            wheel.release(key_id);
                         }
                     }
                 }
@@ -221,6 +222,7 @@ pub(super) async fn run_auth_actor(
                                 &inner,
                                 &config,
                                 &mut cold,
+                                &mut wheel,
                                 &mut tombstones,
                                 &admin_replay_order,
                             ));
@@ -638,6 +640,16 @@ fn actor_revoke(
     })
 }
 
+fn remember_previous_root(inner: &AuthStateInner) {
+    *inner
+        .previous_root
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PreviousRoot {
+        admin_key: inner.admin_key(),
+        instance_id: inner.instance_id(),
+    });
+}
+
 fn push_tombstone(tombstones: &mut VecDeque<(u64, u64)>, tombstoned_at: u64, key_id: u64) {
     let cleanup_at = tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs());
     let index = tombstones.partition_point(|(current, _)| *current <= cleanup_at);
@@ -648,6 +660,7 @@ fn actor_gc(
     inner: &Arc<AuthStateInner>,
     config: &AuthConfig,
     cold: &mut HashMap<u64, ColdMetadata>,
+    wheel: &mut TimingWheel,
     tombstones: &mut VecDeque<(u64, u64)>,
     admin_replays: &VecDeque<AdminReplayRecord>,
 ) -> Result<u64, AuthFailure> {
@@ -670,6 +683,7 @@ fn actor_gc(
             slot.expires_at = 0;
             slot.lease = Weak::new();
             cold.remove(&key_id);
+            wheel.release(key_id);
             removed = removed.saturating_add(1);
         }
     }
@@ -719,6 +733,7 @@ fn actor_reset(
     }
     let _ = std::fs::remove_file(&next_instance_path);
     push_audit_record(inner, reset_audit);
+    remember_previous_root(inner);
 
     cancel_all_temporary_leases(inner);
     {
@@ -783,6 +798,7 @@ fn actor_rotate_root(
     }
     let _ = std::fs::remove_file(&next_key_path);
     push_audit_record(inner, rotate_audit);
+    remember_previous_root(inner);
 
     cancel_all_temporary_leases(inner);
     let old_admin_lease = admin_lease.clone();

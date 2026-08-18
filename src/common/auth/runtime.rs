@@ -170,6 +170,7 @@ impl AuthRuntime {
             auth_successes: AtomicU64::new(0),
             auth_failures: AtomicU64::new(0),
             root_epoch: AtomicU64::new(loaded.as_ref().map(|state| state.root_epoch).unwrap_or(0)),
+            previous_root: RwLock::new(None),
             audit_records: RwLock::new(audit_records),
         });
         let (command_tx, command_rx) = mpsc::channel(256);
@@ -215,6 +216,20 @@ impl AuthRuntime {
             return Ok(inner.admin_key());
         }
         derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)
+    }
+
+    pub(crate) fn derive_previous_key(&self, key_id: u64) -> Option<AesKeyType> {
+        let inner = self.inner().ok()?;
+        let previous = inner
+            .previous_root
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        if key_id == 0 {
+            Some(previous.admin_key)
+        } else {
+            derive_temporary_key(&previous.admin_key, &previous.instance_id, key_id).ok()
+        }
     }
 
     pub fn authenticate_presented(

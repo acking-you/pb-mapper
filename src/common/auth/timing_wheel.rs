@@ -55,6 +55,11 @@ impl TimingWheel {
         self.owners.remove(&key_id);
     }
 
+    #[cfg(test)]
+    pub(super) fn owns(&self, key_id: u64) -> bool {
+        self.owners.contains_key(&key_id)
+    }
+
     pub(super) fn insert_with_version(&mut self, lease: Arc<AuthLease>, version: u64) {
         self.owners.insert(lease.key_id(), lease.clone());
         let expires_at = lease.expires_at();

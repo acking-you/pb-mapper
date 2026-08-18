@@ -170,6 +170,26 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for V2MessageWriter<'_, T> {
     }
 }
 
+pub(super) fn open_v2_payload(
+    material: &V2Material,
+    direction: u8,
+    counter: u64,
+    ciphertext: &mut [u8],
+) -> Result<Vec<u8>> {
+    let key_bytes = direction_key(material, direction);
+    let key = LessSafeKey::new(
+        UnboundKey::new(&AES_256_GCM, key_bytes)
+            .map_err(|_| protocol_error("invalid protocol-v2 read key"))?,
+    );
+    let datalen = u32::try_from(ciphertext.len())
+        .map_err(|_| protocol_error("protocol-v2 payload length is invalid"))?;
+    let aad = frame_aad(material, direction, counter, datalen);
+    let plain = key
+        .open_in_place(nonce(counter), Aad::from(aad.as_slice()), ciphertext)
+        .map_err(|_| protocol_error("protocol-v2 payload authentication failed"))?;
+    Ok(plain.to_vec())
+}
+
 pub(super) fn derive_material(
     key_id: u64,
     credential_key: &AesKeyType,

@@ -176,6 +176,99 @@ async fn revoked_first_flights_do_not_consume_the_replay_filter() {
 }
 
 #[tokio::test]
+async fn rotated_temporary_first_flight_returns_a_readable_rotated_error() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let new_admin = *b"abcdefghijklmnopqrstuvwxyz012345";
+    let config = temp_config();
+    let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
+    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let issued = auth
+        .issue(&admin_context, std::time::Duration::from_secs(60), None)
+        .await
+        .unwrap();
+    let Credential::Temporary { key_id, key } = parse_credential(&issued.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    let client = ClientHeaderSession::new_v2(&Credential::Temporary { key_id, key }).unwrap();
+    auth.rotate_root(&admin_context, new_admin).await.unwrap();
+
+    let security = ServerSecurity::new(auth);
+    let (mut client_io, mut server_io) = tokio::io::duplex(4096);
+    let client_task = async {
+        client
+            .write_initial(&mut client_io, b"stale-after-rotate")
+            .await
+            .unwrap();
+        let mut reader = client.response_reader(&mut client_io).unwrap();
+        reader.read_msg().await.unwrap().to_vec()
+    };
+    let server_task = async {
+        let error = match security.read_initial(&mut server_io).await {
+            Ok(_) => panic!("rotated credential should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.failure.code, "temporary_key_rotated");
+        let session = error.response_session.expect("readable error session");
+        let mut writer = session.response_writer(&mut server_io).unwrap();
+        writer.write_msg(b"temporary_key_rotated").await.unwrap();
+        error.failure.code
+    };
+    let (plaintext, code) = tokio::join!(client_task, server_task);
+    assert_eq!(code, "temporary_key_rotated");
+    assert_eq!(plaintext, b"temporary_key_rotated");
+
+    let _ = std::fs::remove_dir_all(config.state_dir);
+}
+
+#[tokio::test]
+async fn reset_temporary_first_flight_returns_a_readable_rotated_error() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = temp_config();
+    let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
+    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let issued = auth
+        .issue(&admin_context, std::time::Duration::from_secs(60), None)
+        .await
+        .unwrap();
+    let Credential::Temporary { key_id, key } = parse_credential(&issued.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    let client = ClientHeaderSession::new_v2(&Credential::Temporary { key_id, key }).unwrap();
+    auth.reset(&admin_context).await.unwrap();
+
+    let security = ServerSecurity::new(auth);
+    let (mut client_io, mut server_io) = tokio::io::duplex(4096);
+    let client_task = async {
+        client
+            .write_initial(&mut client_io, b"stale-after-reset")
+            .await
+            .unwrap();
+        let mut reader = client.response_reader(&mut client_io).unwrap();
+        reader.read_msg().await.unwrap().to_vec()
+    };
+    let server_task = async {
+        let error = match security.read_initial(&mut server_io).await {
+            Ok(_) => panic!("reset credential should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.failure.code, "temporary_key_rotated");
+        let session = error.response_session.expect("readable error session");
+        let mut writer = session.response_writer(&mut server_io).unwrap();
+        writer.write_msg(b"temporary_key_rotated").await.unwrap();
+        error.failure.code
+    };
+    let (plaintext, code) = tokio::join!(client_task, server_task);
+    assert_eq!(code, "temporary_key_rotated");
+    assert_eq!(plaintext, b"temporary_key_rotated");
+
+    let _ = std::fs::remove_dir_all(config.state_dir);
+}
+
+#[tokio::test]
 async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
     let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
     let session = ClientHeaderSession::new_v2(&credential).unwrap();
@@ -271,6 +364,66 @@ fn per_credential_admission_limit_does_not_consume_other_keys() {
     assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
     assert_eq!(guard.admit(2, &[3_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Replayed);
+}
+
+#[test]
+fn persisted_first_flights_survive_a_torn_trailing_record() {
+    let mut random = [0_u8; 8];
+    let mut rng = rand::rng();
+    for byte in &mut random {
+        *byte = rng.random();
+    }
+    let path = std::env::temp_dir().join(format!(
+        "pb-mapper-replay-torn-{}",
+        u64::from_be_bytes(random)
+    ));
+    let now = unix_seconds();
+    let fingerprint = [17_u8; 32];
+    {
+        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        assert_eq!(guard.admit(7, &fingerprint, now), FirstFlightAdmit::Fresh);
+    }
+    let mut torn = std::fs::read(&path).unwrap();
+    torn.extend_from_slice(&[0_u8; 10]);
+    std::fs::write(&path, torn).unwrap();
+    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        restored.admit(7, &fingerprint, now),
+        FirstFlightAdmit::Replayed
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn replay_rewrite_succeeds_when_a_pid_temporary_file_already_exists() {
+    let mut random = [0_u8; 8];
+    let mut rng = rand::rng();
+    for byte in &mut random {
+        *byte = rng.random();
+    }
+    let path = std::env::temp_dir().join(format!(
+        "pb-mapper-replay-tmp-{}",
+        u64::from_be_bytes(random)
+    ));
+    let now = unix_seconds();
+    let fingerprint = [19_u8; 32];
+    {
+        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        assert_eq!(guard.admit(9, &fingerprint, now), FirstFlightAdmit::Fresh);
+    }
+    let leftover = path.with_file_name(format!(
+        ".{}.tmp-{}",
+        path.file_name().unwrap().to_str().unwrap(),
+        std::process::id()
+    ));
+    std::fs::write(&leftover, b"stale").unwrap();
+    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        restored.admit(9, &fingerprint, now),
+        FirstFlightAdmit::Replayed
+    );
+    let _ = std::fs::remove_file(leftover);
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

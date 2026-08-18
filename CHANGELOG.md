@@ -29,6 +29,10 @@ All notable changes to this project will be documented in this file.
 - Kept `temporary_key_rotated` after a later issue in the same slot, aborted a timed-out embedded-relay shutdown, fail-closed replay logs whose directory sync failed, allowed a post-rotation write of the live key that already decrypts the snapshot, and treated `PB_MAPPER_NEW_STREAMS_PER_SECOND=0` as the default 100.
 - Fsynced the replay-log directory after compacting replacements, treated an unreadable existing replay log as unavailable, and made timing-wheel buckets hold `Weak` leases so renewals no longer accumulate day-long strong references.
 - Retained administrator mutation replay claims from the server acceptance time, so a backdated client timestamp cannot shrink the ten-minute replay window.
+- Read first-flight replay logs with exact-record I/O and fail closed after an incomplete read or a rewrite that may have already replaced the log; compaction temporary files now use a random suffix.
+- Released revoked timing-wheel owners when the tombstone is recycled or GC frees the slot, instead of keeping them until the original TTL.
+- Kept the previous root key and instance id in memory so a stale first flight after rotation or reset can decrypt and return `temporary_key_rotated`.
+- Validated installer `MSG_HEADER_KEY` values as 32 printable ASCII bytes before writing `admin.key`.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

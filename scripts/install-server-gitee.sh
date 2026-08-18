@@ -15,6 +15,14 @@ ADMIN_KEY_PATH="${AUTH_DIR}/admin.key"
 LEGACY_KEY_PATH="/var/lib/pb-mapper-server/msg_header_key"
 SERVER_ENV_FILE="/etc/pb-mapper/server.env"
 
+admin_key_is_env_safe() {
+  local key="$1"
+  local bytes
+  bytes=$(printf '%s' "$key" | wc -c)
+  [ "$bytes" -eq 32 ] || return 1
+  printf '%s' "$key" | LC_ALL=C grep -qx '[[:graph:]]\{32\}'
+}
+
 configured_msg_header_key() {
   if [ -n "${MSG_HEADER_KEY:-}" ]; then
     printf '%s' "$MSG_HEADER_KEY"
@@ -102,8 +110,8 @@ if [ -n "${MSG_HEADER_KEY:-}" ] && [ ! -s "$ADMIN_KEY_PATH" ]; then
       exit 1
       ;;
   esac
-  if [ "${#MSG_HEADER_KEY}" -ne 32 ]; then
-    echo "MSG_HEADER_KEY must be a 32-character administrator key" >&2
+  if ! admin_key_is_env_safe "$MSG_HEADER_KEY"; then
+    echo "MSG_HEADER_KEY must be exactly 32 printable ASCII bytes without whitespace or NUL" >&2
     exit 1
   fi
   printf '%s\n' "$MSG_HEADER_KEY" > "$ADMIN_KEY_PATH"

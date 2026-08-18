@@ -124,6 +124,12 @@ old captured mutation cannot be replayed after the Bloom window or a process
 restart. The client-supplied first-flight timestamp is still checked for
 freshness, but it does not control how long the claim is retained.
 
+After a live root rotation or auth-state reset, the relay keeps the immediately
+previous root key and instance id in memory. A first flight still encrypted with
+the old temporary credential is decrypted with that previous material so the
+client can read the stable `temporary_key_rotated` error instead of a decrypt
+failure.
+
 ## Credential lifecycle
 
 ### Issuance and renewal
