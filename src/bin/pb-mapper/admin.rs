@@ -289,6 +289,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
             }
             if args.output == OutputFormat::Human {
                 println!("administrator key rotated and verified");
+                println!("all temporary credentials are now invalid (temporary_key_rotated)");
                 println!("key file: {}", key_file.display());
             } else {
                 print_admin_response(args.output, &response)?;

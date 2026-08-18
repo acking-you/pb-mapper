@@ -259,11 +259,7 @@ impl AuthRuntime {
         let expected_key = derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)?;
         if !bool::from(presented_key.ct_eq(&expected_key)) {
             inner.auth_failures.fetch_add(1, Ordering::Relaxed);
-            return Err(AuthFailure::new(
-                "temporary_key_invalid",
-                "temporary credential does not match the active relay key material",
-                false,
-            ));
+            return Err(temporary_key_material_mismatch(&inner, key_id));
         }
 
         let index = key_slot(key_id) as usize;
@@ -540,4 +536,42 @@ impl AuthRuntime {
         })
         .await
     }
+}
+
+fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: u64) -> AuthFailure {
+    let index = key_slot(key_id) as usize;
+    let generation = key_generation(key_id);
+    let slots = inner
+        .slots
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let generation_was_issued = match slots.get(index) {
+        Some(slot) => slot.generation == generation && slot.generation > 0,
+        None => {
+            let high = inner
+                .high_slot_generations
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            index
+                .checked_sub(slots.len())
+                .and_then(|offset| high.get(offset).copied())
+                == Some(generation)
+                && generation > 0
+        }
+    };
+    let slot_is_active = slots
+        .get(index)
+        .is_some_and(|slot| slot.state == SlotState::Active && slot.generation == generation);
+    if generation_was_issued && !slot_is_active {
+        return AuthFailure::new(
+            "temporary_key_rotated",
+            "temporary credential was invalidated by administrator root rotation or auth-state reset",
+            false,
+        );
+    }
+    AuthFailure::new(
+        "temporary_key_invalid",
+        "temporary credential does not match the active relay key material",
+        false,
+    )
 }

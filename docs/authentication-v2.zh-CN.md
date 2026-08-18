@@ -121,9 +121,11 @@ tombstone 以给出稳定错误后，槽位可以复用。显式 `key gc` 可立
 ### 根密钥轮换与状态重置
 
 根密钥轮换先用新密钥写空 snapshot，同时保留有上限的审计历史，持久化
-`admin.key`，再把密钥与管理员 lease 作为一次状态变更切换。它会使全部临时凭据失效，
-并关闭旧管理员或临时凭据建立的连接。CLI 在发请求前保存候选 key，完成后再用新 key
-执行一次 `admin status` 验证。未指定 `--key-file` 时，恢复副本默认写到
+`admin.key`，再把密钥与管理员 lease 作为一次状态变更切换。这是全局作废：所有临时
+凭据都会立刻失效，包括其他命名空间里尚未过期的 key，并用这些 key 建立的活动连接
+会被取消。之后再用这些凭据做 first flight 会得到 `temporary_key_rotated`，而不是
+活 key 输错时的 `temporary_key_invalid`。CLI 在发请求前保存候选 key，完成后再用
+新 key 执行一次 `admin status` 验证。未指定 `--key-file` 时，恢复副本默认写到
 `$XDG_CONFIG_HOME/pb-mapper`（或 `$HOME/.config/pb-mapper`），不要求本机能写
 `/var/lib`。
 

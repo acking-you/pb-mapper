@@ -522,13 +522,20 @@ async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
         .unwrap();
     let old_context = authenticate_for_test(&runtime, old.metadata.key_id).unwrap();
     let old_cancellation = old_context.cancellation_token().unwrap();
+    let old_presented = runtime.derive_key(old.metadata.key_id).unwrap();
 
     runtime.reset(&admin).await.unwrap();
 
     let after = runtime.status(&admin).await.unwrap().server_instance_id;
     assert_ne!(after, before);
     assert!(old_cancellation.is_cancelled());
-    assert!(authenticate_for_test(&runtime, old.metadata.key_id).is_err());
+    assert_eq!(
+        runtime
+            .authenticate_presented(old.metadata.key_id, &old_presented)
+            .unwrap_err()
+            .code,
+        "temporary_key_rotated"
+    );
     let replacement = runtime
         .issue(
             &admin,
@@ -761,6 +768,24 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
     };
     let runtime = AuthRuntime::start(old_key, config).await.unwrap();
     let old_admin = runtime.authenticate_presented(0, &old_key).unwrap();
+    let issued = runtime
+        .issue(
+            &old_admin,
+            Duration::from_secs(60),
+            Some("before-rotate".to_string()),
+        )
+        .await
+        .unwrap();
+    let old_temporary = runtime.derive_key(issued.metadata.key_id).unwrap();
+    let mut mistyped_temporary = old_temporary;
+    mistyped_temporary[0] ^= 0x01;
+    assert_eq!(
+        runtime
+            .authenticate_presented(issued.metadata.key_id, &mistyped_temporary)
+            .unwrap_err()
+            .code,
+        "temporary_key_invalid"
+    );
     let mistyped_key = *b"1123456789abcdefghijklmnopqrstuv";
     assert_eq!(
         runtime
@@ -774,6 +799,13 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
         .rotate_root(&old_admin, new_key)
         .await
         .expect("root rotation should succeed");
+    assert_eq!(
+        runtime
+            .authenticate_presented(issued.metadata.key_id, &old_temporary)
+            .unwrap_err()
+            .code,
+        "temporary_key_rotated"
+    );
 
     assert_eq!(
         runtime

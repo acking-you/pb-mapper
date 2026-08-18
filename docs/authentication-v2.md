@@ -162,12 +162,15 @@ pb-mapper admin --server relay.example.com:7666 key gc
 
 Root rotation writes an empty snapshot encrypted with the new key, preserves
 the bounded audit history, persists `admin.key`, and then switches the key and
-administrator lease as one state transition. It invalidates all temporary
-credentials and closes connections authenticated with the old administrator or
-temporary keys. The CLI stages the candidate key before the request and verifies
-the new key with an authenticated status call. When `--key-file` is omitted,
-the recovery copy is written below `$XDG_CONFIG_HOME/pb-mapper` (or
-`$HOME/.config/pb-mapper`) rather than requiring local `/var/lib` access.
+administrator lease as one state transition. It is a global invalidate: every
+temporary credential stops authenticating, including unexpired keys in other
+namespaces, and live connections using those keys are cancelled. A later
+first flight with one of those credentials returns `temporary_key_rotated`,
+not the generic `temporary_key_invalid` used for a mistyped live key. The CLI
+stages the candidate key before the request and verifies the new key with an
+authenticated status call. When `--key-file` is omitted, the recovery copy is
+written below `$XDG_CONFIG_HOME/pb-mapper` (or `$HOME/.config/pb-mapper`)
+rather than requiring local `/var/lib` access.
 
 An explicit auth-state reset also invalidates all temporary credentials. It
 rotates the server instance ID so credentials from a corrupted or lost slot
