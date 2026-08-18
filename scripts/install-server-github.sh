@@ -13,6 +13,26 @@ PORT="${PB_MAPPER_PORT:-7666}"
 AUTH_DIR="/var/lib/pb-mapper/auth"
 ADMIN_KEY_PATH="${AUTH_DIR}/admin.key"
 LEGACY_KEY_PATH="/var/lib/pb-mapper-server/msg_header_key"
+SERVER_ENV_FILE="/etc/pb-mapper/server.env"
+
+configured_msg_header_key() {
+  if [ -n "${MSG_HEADER_KEY:-}" ]; then
+    printf '%s' "$MSG_HEADER_KEY"
+    return 0
+  fi
+  if [ ! -f "$SERVER_ENV_FILE" ]; then
+    return 0
+  fi
+  awk -F= '
+    $1 ~ /^[[:space:]]*#/ { next }
+    $1 ~ /^[[:space:]]*MSG_HEADER_KEY[[:space:]]*$/ {
+      val = substr($0, index($0, "=") + 1)
+      sub(/\r$/, "", val)
+      key = val
+    }
+    END { printf "%s", key }
+  ' "$SERVER_ENV_FILE"
+}
 
 # Re-run with sudo if needed
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
@@ -70,10 +90,12 @@ fi
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$BIN_PATH" "${INSTALL_DIR}/pb-mapper"
 
-# Preserve the former machine-derived credential on upgrade. New installations let
-# pb-mapper create a random administrator key on first start.
+# Preserve the former machine-derived credential on upgrade only when neither
+# admin.key nor an explicit MSG_HEADER_KEY is already configured. An explicit
+# key in the environment or /etc/pb-mapper/server.env must win; otherwise the
+# runtime would prefer the newly copied admin.key and lock operators out.
 install -d -m 0700 "$AUTH_DIR"
-if [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
+if [ -z "$(configured_msg_header_key)" ] && [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
   install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
   echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
 fi
@@ -99,6 +121,7 @@ After=network.target
 Type=simple
 ExecStart=${INSTALL_DIR}/pb-mapper server --port ${PORT}
 Environment=RUST_LOG=info
+EnvironmentFile=-/etc/pb-mapper/server.env
 StateDirectory=pb-mapper
 StateDirectoryMode=0700
 Restart=on-failure

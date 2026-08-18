@@ -82,12 +82,42 @@ pub struct AuthConfig {
     pub legacy_protocol: LegacyProtocolPolicy,
 }
 
+pub fn default_auth_state_dir() -> PathBuf {
+    std::env::var_os("PB_MAPPER_AUTH_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(platform_default_auth_state_dir)
+}
+
+pub(crate) fn platform_default_auth_state_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("APPDATA"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        base.join("pb-mapper").join("auth")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("pb-mapper")
+                .join("auth"),
+            None => PathBuf::from("/Library/Application Support/pb-mapper/auth"),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        PathBuf::from(DEFAULT_AUTH_STATE_DIR)
+    }
+}
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            state_dir: std::env::var_os("PB_MAPPER_AUTH_STATE_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_AUTH_STATE_DIR)),
+            state_dir: default_auth_state_dir(),
             max_temporary_keys: env_usize(
                 "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
                 DEFAULT_TEMP_KEY_CAPACITY,

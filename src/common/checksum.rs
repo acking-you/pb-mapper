@@ -481,9 +481,21 @@ fn gen_checksum_by_key(key: &[u8]) -> ChecksumType {
 }
 
 #[inline]
+/// Compute frame checksum from payload length and an explicit header key.
+pub fn get_checksum_for_key(datalen: DataLenType, key: &[u8]) -> ChecksumType {
+    datalen ^ gen_checksum_by_key(key)
+}
+
+#[inline]
 /// Compute frame checksum from payload length and the current header key hash.
 pub fn get_checksum(datalen: DataLenType) -> ChecksumType {
     datalen ^ MSG_HEADER_KEY_STATE.hash.load(Ordering::Acquire)
+}
+
+#[inline]
+/// Validate a frame checksum against an explicit header key.
+pub fn valid_checksum_for_key(datalen: DataLenType, checksum: ChecksumType, key: &[u8]) -> bool {
+    checksum == get_checksum_for_key(datalen, key)
 }
 
 #[inline]
@@ -519,6 +531,20 @@ mod tests {
             "{}",
             gen_checksum_by_key(b"0123456789abcdefghijklmnopqrstuv")
         );
+    }
+
+    #[test]
+    fn checksum_for_an_explicit_key_is_independent_of_process_state() {
+        use super::*;
+        let key = b"0123456789abcdefghijklmnopqrstuv";
+        let datalen = 32;
+        let checksum = get_checksum_for_key(datalen, key);
+        assert!(valid_checksum_for_key(datalen, checksum, key));
+        assert!(!valid_checksum_for_key(
+            datalen,
+            checksum,
+            b"abcdefghijklmnopqrstuvwxyz012345"
+        ));
     }
 
     #[test]

@@ -88,7 +88,8 @@ HKDF-SHA256 使用 connection salt 作为 salt，凭据的 32 字节 secret 作�
 ### 重放检测
 
 服务端对 `(key_id, connection_salt)` 做指纹，并在同一个临界区内完成两个轮换的
-1 MiB Bloom filter 的检查与写入，覆盖当前与上一个 60 秒窗口。疑似重复会返回
+1 MiB Bloom filter 的检查与写入，覆盖当前与上一个 300 秒窗口，与首帧可接受的
+时钟偏差窗口一致。疑似重复会返回
 可重试错误 `connection_salt_replayed`；一次性 admin CLI 会自动换 salt 重试一次。
 会修改状态的管理员请求还会在分发前把精确指纹写入加密 WAL；该记录在十分钟内跨
 重启、跨 compact 保留，不能通过等待 Bloom 窗口结束或重启进程来重放旧操作。
@@ -152,7 +153,8 @@ tombstone 以给出稳定错误后，槽位可以复用。显式 `key gc` 可立
 
 ## 持久化与安全模式
 
-默认目录 `/var/lib/pb-mapper/auth` 权限为 `0700`：
+Linux 系统服务默认目录是 `/var/lib/pb-mapper/auth`，权限为 `0700`。macOS 与
+Windows 桌面二进制默认写到用户可写的应用目录，而不是 `/var/lib`：
 
 | 文件 | 用途 |
 | --- | --- |

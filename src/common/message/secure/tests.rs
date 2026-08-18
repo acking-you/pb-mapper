@@ -10,8 +10,8 @@
 //! credentials, while lifecycle persistence remains covered by `common::auth::tests`.
 
 use super::*;
-use crate::common::auth::{AuthConfig, LegacyProtocolPolicy};
-use crate::common::checksum::encode_temporary_credential;
+use crate::common::auth::{AuthConfig, LegacyProtocolPolicy, PROCESS_CREDENTIAL_TEST_LOCK};
+use crate::common::checksum::{encode_temporary_credential, set_process_msg_header_key};
 
 fn temp_config() -> AuthConfig {
     let mut random = [0_u8; 8];
@@ -161,13 +161,62 @@ async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
 
 #[test]
 fn rotating_bloom_covers_current_and_previous_window() {
-    let mut bloom = RotatingBloom::new(1024, 60);
+    let mut bloom = RotatingBloom::new(1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     let value = [7_u8; 32];
     let start = bloom.current_started_at;
     assert!(!bloom.contains(&value, start));
     bloom.insert(&value, start);
-    assert!(bloom.contains(&value, start + 60));
-    assert!(!bloom.contains(&value, start + 121));
+    assert!(bloom.contains(&value, start + DEFAULT_REPLAY_WINDOW_SECONDS));
+    assert!(!bloom.contains(
+        &value,
+        start + DEFAULT_REPLAY_WINDOW_SECONDS.saturating_mul(2) + 1
+    ));
+}
+
+#[test]
+fn rotating_bloom_retains_fingerprints_for_the_clock_skew_window() {
+    let mut bloom = RotatingBloom::new(1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    let value = [9_u8; 32];
+    let start = bloom.current_started_at;
+    bloom.insert(&value, start);
+    assert!(bloom.contains(&value, start + 120));
+    assert!(bloom.contains(&value, start + MAX_CONNECTION_CLOCK_SKEW_SECONDS));
+}
+
+#[tokio::test]
+async fn legacy_initial_frame_validates_against_isolated_relay_key() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let config = temp_config();
+    let isolated_admin = *b"isolated-admin-key-0123456789abc";
+    std::fs::create_dir_all(&config.state_dir).unwrap();
+    std::fs::write(config.state_dir.join("admin.key"), isolated_admin).unwrap();
+    let auth = AuthRuntime::from_isolated_state(config.clone())
+        .await
+        .unwrap();
+
+    set_process_msg_header_key(Some(
+        std::str::from_utf8(&isolated_admin).expect("printable isolated key"),
+    ))
+    .unwrap();
+    let client = ClientHeaderSession::new_legacy(isolated_admin);
+    let bytes = encode_initial(&client, b"legacy-isolated").await;
+
+    let temporary_key_id = 1;
+    let temporary_key = *b"temporary-remote-key-0123456789a";
+    set_process_msg_header_key(Some(&encode_temporary_credential(
+        temporary_key_id,
+        &temporary_key,
+    )))
+    .unwrap();
+
+    let security = ServerSecurity::new(auth);
+    let mut input = std::io::Cursor::new(bytes);
+    let initial = security.read_initial(&mut input).await.unwrap();
+    assert_eq!(initial.payload, b"legacy-isolated");
+    assert_eq!(initial.session.protocol(), HeaderProtocol::Legacy);
+
+    set_process_msg_header_key(None).unwrap();
+    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[test]

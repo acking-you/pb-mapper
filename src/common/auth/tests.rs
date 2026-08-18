@@ -27,6 +27,33 @@ fn authenticate_for_test(runtime: &AuthRuntime, key_id: u64) -> Result<AuthConte
 }
 
 #[test]
+fn platform_default_auth_state_dir_is_writable_outside_linux_system_paths() {
+    let dir = platform_default_auth_state_dir();
+    #[cfg(windows)]
+    {
+        assert!(
+            dir.ends_with(std::path::Path::new("pb-mapper").join("auth")),
+            "windows default auth dir should be under a user-writable pb-mapper path: {}",
+            dir.display()
+        );
+        assert_ne!(dir, PathBuf::from(r"\var\lib\pb-mapper\auth"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        assert!(
+            dir.ends_with("Library/Application Support/pb-mapper/auth")
+                || dir == PathBuf::from("/Library/Application Support/pb-mapper/auth"),
+            "macos default auth dir should be under Application Support: {}",
+            dir.display()
+        );
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        assert_eq!(dir, PathBuf::from(DEFAULT_AUTH_STATE_DIR));
+    }
+}
+
+#[test]
 fn legacy_protocol_policy_trims_valid_values_and_rejects_unknown_values() {
     assert_eq!(
         parse_legacy_protocol_policy(" allow\n"),

@@ -114,7 +114,7 @@ uses server-to-client counter `0`. Later control frames continue from counter
 
 The relay fingerprints `(key_id, connection_salt)` and atomically checks and
 inserts it in two rotating 1 MiB Bloom filters covering the current and previous
-60-second windows. A probable duplicate returns the stable retryable error
+300-second windows, matching the accepted first-flight clock-skew interval. A probable duplicate returns the stable retryable error
 `connection_salt_replayed`; one-shot administrator CLI operations retry once
 with a fresh salt. Mutating administrator requests additionally claim their
 exact fingerprint in the encrypted WAL before dispatch. Those claims survive
@@ -198,7 +198,9 @@ revocation and hard connection closure deterministic.
 
 ## Persistence and safe mode
 
-The default state directory is `/var/lib/pb-mapper/auth`:
+The Linux system-service state directory is `/var/lib/pb-mapper/auth`. macOS
+and Windows desktop binaries default to a user-writable application directory
+instead of `/var/lib`:
 
 | File | Purpose |
 | --- | --- |

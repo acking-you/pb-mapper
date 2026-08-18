@@ -30,7 +30,9 @@ use super::{
     CodecMessageReader, CodecMessageWriter, DataLenType, MessageReader, MessageWriter, MAX_MSG_LEN,
 };
 use crate::common::auth::{AuthContext, AuthFailure, AuthRuntime, LegacyConnectionGuard};
-use crate::common::checksum::{get_process_credential, valid_checksum, AesKeyType, Credential};
+use crate::common::checksum::{
+    get_process_credential, valid_checksum_for_key, AesKeyType, Credential,
+};
 use crate::common::error::{Error, Result};
 use crate::utils::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor};
 
@@ -41,10 +43,10 @@ const FIRST_PREFIX_REMAINDER_LEN: usize = 28;
 const FRAME_HEADER_LEN: usize = 12;
 const DIRECTION_CLIENT_TO_SERVER: u8 = 0;
 const DIRECTION_SERVER_TO_CLIENT: u8 = 1;
-const DEFAULT_REPLAY_WINDOW_SECONDS: u64 = 60;
+const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
+const DEFAULT_REPLAY_WINDOW_SECONDS: u64 = MAX_CONNECTION_CLOCK_SKEW_SECONDS;
 const DEFAULT_REPLAY_FILTER_BYTES: usize = 1024 * 1024;
 const MAX_INITIAL_PLAINTEXT_LEN: u32 = 64 * 1024;
-const MAX_CONNECTION_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderProtocol {
@@ -371,7 +373,7 @@ impl ServerSecurity {
                 ),
                 response_session: None,
             })?;
-        if !valid_checksum(datalen, checksum) || datalen > MAX_MSG_LEN {
+        if !valid_checksum_for_key(datalen, checksum, &key) || datalen > MAX_MSG_LEN {
             return Err(ServerInitialError {
                 failure: AuthFailure::new(
                     "legacy_frame_invalid",
