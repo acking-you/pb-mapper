@@ -9,7 +9,6 @@ use crate::ctl::Origin;
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
-use crate::state::AppConfig;
 
 /// Get current app config.
 #[no_mangle]
@@ -20,15 +19,16 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
 
     let handle = unsafe { &mut *handle };
     let state = handle.state.clone();
-    let config: AppConfig = handle.runtime.block_on(async move {
+    let (config, isolated_admin_key) = handle.runtime.block_on(async move {
         let state = state.lock().await;
-        state.get_config_status().await
+        (state.get_config_status().await, state.isolated_admin_key())
     });
 
     ok_data(json!({
         "serverAddress": config.server_address,
         "keepAliveEnabled": config.keep_alive_enabled,
-        "msgHeaderKey": config.msg_header_key
+        "msgHeaderKey": config.msg_header_key,
+        "isolatedRelayAdminKey": isolated_admin_key.unwrap_or_default(),
     }))
 }
 

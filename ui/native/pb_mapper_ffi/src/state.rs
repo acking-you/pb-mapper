@@ -611,6 +611,12 @@ mod tests {
         };
 
         assert!(auth_dir.join("admin.key").is_file());
+        let isolated = state
+            .lock()
+            .await
+            .isolated_admin_key()
+            .expect("embedded relay should expose its administrator key");
+        assert_eq!(isolated.len(), 32);
         state
             .lock()
             .await

@@ -365,6 +365,20 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         helperText: context.l10n.msgHeaderKeyHelp,
                       ),
                     ),
+                    if (_currentConfig?.isolatedRelayAdminKey.isNotEmpty ==
+                        true) ...[
+                      const SizedBox(height: 16),
+                      InputDecorator(
+                        decoration: InputDecoration(
+                          labelText: context.l10n.isolatedRelayAdminKey,
+                          border: const OutlineInputBorder(),
+                          helperText: context.l10n.isolatedRelayAdminKeyHelp,
+                        ),
+                        child: SelectableText(
+                          _currentConfig!.isolatedRelayAdminKey,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 16),
                     SwitchListTile(
                       title: const Text('PB_MAPPER_KEEP_ALIVE'),

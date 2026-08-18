@@ -18,6 +18,14 @@ impl PbMapperState {
         self.config.clone()
     }
 
+    pub fn isolated_admin_key(&self) -> Option<String> {
+        let path = self.config_dir.join("auth").join("admin.key");
+        std::fs::read_to_string(path).ok().and_then(|raw| {
+            let key = raw.trim().to_string();
+            (!key.is_empty()).then_some(key)
+        })
+    }
+
     pub async fn update_config(
         &mut self,
         server_address: String,

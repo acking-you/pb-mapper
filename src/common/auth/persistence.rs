@@ -39,6 +39,45 @@ pub(super) fn clear_retained_high_slot_entries(inner: &AuthStateInner) {
         .clear();
 }
 
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+        extern "system" {
+            fn MoveFileExW(
+                lp_existing_file_name: *const u16,
+                lp_new_file_name: *const u16,
+                dw_flags: u32,
+            ) -> i32;
+        }
+        fn wide(path: &Path) -> Vec<u16> {
+            path.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        }
+        let from_w = wide(from);
+        let to_w = wide(to);
+        let ok = unsafe {
+            MoveFileExW(
+                from_w.as_ptr(),
+                to_w.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(from, to)
+}
+
 fn sync_parent_directory(path: &Path) -> Result<(), AuthFailure> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
@@ -824,7 +863,7 @@ pub(super) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), Au
                 )
             })?;
         drop(file);
-        std::fs::rename(&temporary, path).map_err(|error| {
+        replace_file(&temporary, path).map_err(|error| {
             AuthFailure::new(
                 "auth_state_unavailable",
                 format!("failed to replace `{}`: {error}", path.display()),

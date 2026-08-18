@@ -264,12 +264,36 @@ fn rotating_bloom_retains_a_max_future_timestamp_past_the_next_rotation() {
 #[test]
 fn per_credential_admission_limit_does_not_consume_other_keys() {
     let now = unix_seconds();
-    let mut guard = ReplayGuard::new(1024, DEFAULT_REPLAY_WINDOW_SECONDS).with_max_per_key(2);
+    let mut guard =
+        ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS).with_max_per_key(2);
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
     assert_eq!(guard.admit(2, &[3_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Replayed);
+}
+
+#[test]
+fn persisted_first_flights_survive_replay_guard_restart() {
+    let mut random = [0_u8; 8];
+    let mut rng = rand::rng();
+    for byte in &mut random {
+        *byte = rng.random();
+    }
+    let path =
+        std::env::temp_dir().join(format!("pb-mapper-replay-{}", u64::from_be_bytes(random)));
+    let now = unix_seconds();
+    let fingerprint = [13_u8; 32];
+    {
+        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        assert_eq!(guard.admit(7, &fingerprint, now), FirstFlightAdmit::Fresh);
+    }
+    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        restored.admit(7, &fingerprint, now),
+        FirstFlightAdmit::Replayed
+    );
+    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]

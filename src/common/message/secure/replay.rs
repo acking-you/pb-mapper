@@ -16,16 +16,21 @@
 //! unique salts before the request payload is decoded.
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use super::*;
 
 pub(super) const MAX_FIRST_FLIGHTS_PER_KEY: u32 = 8_192;
+const REPLAY_RECORD_LEN: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FirstFlightAdmit {
     Fresh,
     Replayed,
     Limited,
+    Unavailable,
 }
 
 pub(super) fn replay_fingerprint(key_id: u64, salt: &[u8; CONNECTION_SALT_LEN]) -> [u8; 32] {
@@ -87,17 +92,21 @@ pub(super) struct ReplayGuard {
     counts_started_at: u64,
     window_seconds: u64,
     max_per_key: u32,
+    log_path: Option<PathBuf>,
 }
 
 impl ReplayGuard {
-    pub(super) fn new(bytes: usize, window_seconds: u64) -> Self {
-        Self {
+    pub(super) fn open(log_path: Option<PathBuf>, bytes: usize, window_seconds: u64) -> Self {
+        let mut guard = Self {
             bloom: RotatingBloom::new(bytes, window_seconds),
             counts: HashMap::new(),
             counts_started_at: unix_seconds(),
             window_seconds,
             max_per_key: MAX_FIRST_FLIGHTS_PER_KEY,
-        }
+            log_path,
+        };
+        guard.load_persisted();
+        guard
     }
 
     #[cfg(test)]
@@ -116,12 +125,14 @@ impl ReplayGuard {
         if self.bloom.contains(fingerprint, now) {
             return FirstFlightAdmit::Replayed;
         }
-        let count = self.counts.entry(key_id).or_insert(0);
-        if *count >= self.max_per_key {
+        if self.counts.get(&key_id).copied().unwrap_or(0) >= self.max_per_key {
             return FirstFlightAdmit::Limited;
         }
+        if self.persist(fingerprint, now).is_err() {
+            return FirstFlightAdmit::Unavailable;
+        }
         self.bloom.insert(fingerprint, now);
-        *count = count.saturating_add(1);
+        *self.counts.entry(key_id).or_insert(0) += 1;
         FirstFlightAdmit::Fresh
     }
 
@@ -131,6 +142,56 @@ impl ReplayGuard {
         }
         self.counts.clear();
         self.counts_started_at = now;
+    }
+
+    fn persist(&self, fingerprint: &[u8; 32], now: u64) -> std::io::Result<()> {
+        let Some(path) = &self.log_path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut record = [0_u8; REPLAY_RECORD_LEN];
+        record[..32].copy_from_slice(fingerprint);
+        record[32..].copy_from_slice(&now.to_be_bytes());
+        file.write_all(&record)?;
+        file.sync_data()
+    }
+
+    fn load_persisted(&mut self) {
+        let Some(path) = self.log_path.clone() else {
+            return;
+        };
+        let Ok(mut file) = File::open(&path) else {
+            return;
+        };
+        let now = unix_seconds();
+        let mut live = Vec::new();
+        let mut record = [0_u8; REPLAY_RECORD_LEN];
+        loop {
+            match file.read(&mut record) {
+                Ok(0) => break,
+                Ok(n) if n == REPLAY_RECORD_LEN => {}
+                _ => break,
+            }
+            let timestamp = u64::from_be_bytes(record[32..].try_into().expect("timestamp width"));
+            if now.saturating_sub(timestamp) > self.window_seconds {
+                continue;
+            }
+            let fingerprint: [u8; 32] = record[..32].try_into().expect("fingerprint width");
+            self.bloom.insert(&fingerprint, timestamp);
+            live.push(record);
+        }
+        if let Ok(mut rewritten) = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+        {
+            let _ = rewritten.write_all(&live.concat());
+            let _ = rewritten.sync_data();
+        }
     }
 }
 

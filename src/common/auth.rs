@@ -45,8 +45,10 @@ use super::checksum::{
 pub const ADMIN_NAMESPACE: u64 = 0;
 pub const DEFAULT_AUTH_STATE_DIR: &str = "/var/lib/pb-mapper/auth";
 pub const DEFAULT_TEMP_KEY_CAPACITY: usize = 65_536;
+pub const MAX_TEMP_KEY_CAPACITY: usize = 1_048_576;
 pub const DEFAULT_MAX_TEMP_KEY_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 pub const MIN_TEMP_KEY_TTL: Duration = Duration::from_secs(10);
+pub const MAX_TEMP_KEY_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 const TOMBSTONE_RETENTION: Duration = Duration::from_secs(60);
 const SNAPSHOT_COMPACTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SNAPSHOT_SCHEMA_VERSION: u16 = 1;
@@ -125,13 +127,13 @@ impl Default for AuthConfig {
                 "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
                 DEFAULT_TEMP_KEY_CAPACITY,
                 1,
-                1_048_576,
+                MAX_TEMP_KEY_CAPACITY,
             ),
             max_temporary_key_ttl: Duration::from_secs(env_u64(
                 "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
                 DEFAULT_MAX_TEMP_KEY_TTL.as_secs(),
                 MIN_TEMP_KEY_TTL.as_secs(),
-                365 * 24 * 60 * 60,
+                MAX_TEMP_KEY_TTL.as_secs(),
             )),
             legacy_protocol: legacy_protocol_from_env(),
         }

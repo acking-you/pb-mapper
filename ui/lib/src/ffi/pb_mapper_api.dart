@@ -16,11 +16,13 @@ class ConfigStatus {
   final String serverAddress;
   final bool keepAliveEnabled;
   final String msgHeaderKey;
+  final String isolatedRelayAdminKey;
 
   const ConfigStatus({
     required this.serverAddress,
     required this.keepAliveEnabled,
     required this.msgHeaderKey,
+    this.isolatedRelayAdminKey = '',
   });
 
   factory ConfigStatus.fromMap(Map<String, dynamic> map) {
@@ -31,6 +33,7 @@ class ConfigStatus {
       ),
       keepAliveEnabled: _asBool(map['keepAliveEnabled'], fallback: true),
       msgHeaderKey: _asString(map['msgHeaderKey']),
+      isolatedRelayAdminKey: _asString(map['isolatedRelayAdminKey']),
     );
   }
 }

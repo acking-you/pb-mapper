@@ -206,12 +206,16 @@ async fn run(
         }
 
         Command::ConfigGet => {
-            let config = state.lock().await.get_config_status().await;
+            let guard = state.lock().await;
+            let config = guard.get_config_status().await;
+            let isolated_admin_key = guard.isolated_admin_key();
             Ok(proto::Response::ok(
                 Some(json!({
                     "serverAddress": config.server_address,
                     "keepAliveEnabled": config.keep_alive_enabled,
                     "msgHeaderKeySet": !config.msg_header_key.is_empty(),
+                    "isolatedRelayAdminKeySet": isolated_admin_key.is_some(),
+                    "isolatedRelayAdminKey": isolated_admin_key.unwrap_or_default(),
                 })),
                 None,
             ))

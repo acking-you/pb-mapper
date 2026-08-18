@@ -20,7 +20,7 @@ use better_mimalloc_rs::MiMalloc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use pb_mapper::common::auth::{
     generate_admin_key, initialize_admin_key, write_admin_key_file, AuthConfig, KeyPage,
-    LegacyProtocolPolicy,
+    LegacyProtocolPolicy, MAX_TEMP_KEY_CAPACITY, MAX_TEMP_KEY_TTL, MIN_TEMP_KEY_TTL,
 };
 use pb_mapper::common::checksum::set_process_msg_header_key;
 use pb_mapper::common::checksum::{setup_machine_msg_header_key, MACHINE_MSG_HEADER_KEY_PATH};
@@ -226,22 +226,41 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
+fn apply_server_auth_overrides(args: &ServerArgs) -> Result<(), Box<dyn Error>> {
     if let Some(auth_state_dir) = &args.auth_state_dir {
         std::env::set_var("PB_MAPPER_AUTH_STATE_DIR", auth_state_dir);
     }
     if let Some(max_temporary_keys) = args.max_temporary_keys {
+        if !(1..=MAX_TEMP_KEY_CAPACITY).contains(&max_temporary_keys) {
+            return Err(format!(
+                "`--max-temporary-keys` must be between 1 and {MAX_TEMP_KEY_CAPACITY}"
+            )
+            .into());
+        }
         std::env::set_var(
             "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
             max_temporary_keys.to_string(),
         );
     }
     if let Some(max_temporary_key_ttl) = args.max_temporary_key_ttl {
+        if max_temporary_key_ttl < MIN_TEMP_KEY_TTL || max_temporary_key_ttl > MAX_TEMP_KEY_TTL {
+            return Err(format!(
+                "`--max-temporary-key-ttl` must be between {}s and {}d",
+                MIN_TEMP_KEY_TTL.as_secs(),
+                MAX_TEMP_KEY_TTL.as_secs() / 86_400
+            )
+            .into());
+        }
         std::env::set_var(
             "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
             max_temporary_key_ttl.as_secs().to_string(),
         );
     }
+    Ok(())
+}
+
+async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
+    apply_server_auth_overrides(&args)?;
     if let Some(legacy_protocol) = args.legacy_protocol {
         std::env::set_var(
             "PB_MAPPER_LEGACY_PROTOCOL",
@@ -546,5 +565,24 @@ mod tests {
             Some(Duration::from_secs(2 * 60 * 60))
         );
         assert_eq!(explicit.legacy_protocol, Some(LegacyProtocolArg::Deny));
+    }
+
+    #[test]
+    fn explicit_out_of_range_server_auth_flags_are_rejected() {
+        let cli = Cli::try_parse_from(["pb-mapper", "server", "--max-temporary-keys", "0"])
+            .expect("clap should accept the token before bounds checking");
+        let Command::Server(args) = cli.command else {
+            panic!("expected server command");
+        };
+        let error = apply_server_auth_overrides(&args).unwrap_err();
+        assert!(error.to_string().contains("--max-temporary-keys"));
+
+        let cli = Cli::try_parse_from(["pb-mapper", "server", "--max-temporary-key-ttl", "5s"])
+            .expect("clap should accept the token before bounds checking");
+        let Command::Server(args) = cli.command else {
+            panic!("expected server command");
+        };
+        let error = apply_server_auth_overrides(&args).unwrap_err();
+        assert!(error.to_string().contains("--max-temporary-key-ttl"));
     }
 }

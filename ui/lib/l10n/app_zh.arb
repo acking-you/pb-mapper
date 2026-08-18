@@ -162,6 +162,8 @@
   "checkServer": "检测服务器连通性",
   "serverAddressHelp": "要连接的 pb-mapper 服务器地址",
   "msgHeaderKeyHelp": "必填。优先使用中继签发的 pbmt1_ 临时凭据，也可使用 32 字符管理员密钥。",
+  "isolatedRelayAdminKey": "内嵌中继管理员密钥",
+  "isolatedRelayAdminKeyHelp": "仅用于本应用内嵌中继。用它向本地中继注册或连接，不要把它当成对外的 MSG_HEADER_KEY。",
   "keepAliveHelp": "为连接启用 TCP keep-alive",
   "configServerAddress": "服务器地址：{value}",
   "@configServerAddress": {

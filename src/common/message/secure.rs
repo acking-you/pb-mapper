@@ -292,9 +292,11 @@ pub struct ServerSecurity {
 
 impl ServerSecurity {
     pub fn new(auth: AuthRuntime) -> Self {
+        let replay_path = auth.config().state_dir.join("connection.replay");
         Self {
             auth,
-            replay: Arc::new(Mutex::new(ReplayGuard::new(
+            replay: Arc::new(Mutex::new(ReplayGuard::open(
+                Some(replay_path),
                 DEFAULT_REPLAY_FILTER_BYTES,
                 DEFAULT_REPLAY_WINDOW_SECONDS,
             ))),
@@ -564,6 +566,16 @@ impl ServerSecurity {
                     failure: AuthFailure::new(
                         "connection_admission_limited",
                         "this credential has opened too many new connections in the current window",
+                        true,
+                    ),
+                    response_session: Some(session),
+                });
+            }
+            FirstFlightAdmit::Unavailable => {
+                return Err(ServerInitialError {
+                    failure: AuthFailure::new(
+                        "connection_replay_store_unavailable",
+                        "failed to persist first-flight replay admission",
                         true,
                     ),
                     response_session: Some(session),
