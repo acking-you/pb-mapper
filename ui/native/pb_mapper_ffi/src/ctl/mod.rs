@@ -215,7 +215,6 @@ async fn run(
                     "keepAliveEnabled": config.keep_alive_enabled,
                     "msgHeaderKeySet": !config.msg_header_key.is_empty(),
                     "isolatedRelayAdminKeySet": isolated_admin_key.is_some(),
-                    "isolatedRelayAdminKey": isolated_admin_key.unwrap_or_default(),
                 })),
                 None,
             ))

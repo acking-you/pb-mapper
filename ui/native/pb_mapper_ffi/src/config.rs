@@ -19,16 +19,41 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
 
     let handle = unsafe { &mut *handle };
     let state = handle.state.clone();
-    let (config, isolated_admin_key) = handle.runtime.block_on(async move {
+    let (config, isolated_admin_key_set) = handle.runtime.block_on(async move {
         let state = state.lock().await;
-        (state.get_config_status().await, state.isolated_admin_key())
+        (
+            state.get_config_status().await,
+            state.isolated_admin_key().is_some(),
+        )
     });
 
     ok_data(json!({
         "serverAddress": config.server_address,
         "keepAliveEnabled": config.keep_alive_enabled,
         "msgHeaderKey": config.msg_header_key,
-        "isolatedRelayAdminKey": isolated_admin_key.unwrap_or_default(),
+        "isolatedRelayAdminKeySet": isolated_admin_key_set,
+    }))
+}
+
+/// Reveal the embedded relay administrator key. This is a separate call so
+/// routine config fetches cannot leak the root secret.
+#[no_mangle]
+pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
+    handle: *mut PbMapperHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return err_null_handle();
+    }
+
+    let handle = unsafe { &mut *handle };
+    let state = handle.state.clone();
+    let key = handle.runtime.block_on(async move {
+        let state = state.lock().await;
+        state.isolated_admin_key()
+    });
+
+    ok_data(json!({
+        "isolatedRelayAdminKey": key.unwrap_or_default(),
     }))
 }
 

@@ -164,6 +164,7 @@
   "msgHeaderKeyHelp": "Required. Prefer a pbmt1_ temporary credential issued by the relay; the 32-character administrator key also works.",
   "isolatedRelayAdminKey": "Embedded relay administrator key",
   "isolatedRelayAdminKeyHelp": "Generated for this app's local relay only. Use it to register or connect to that relay; it is not the outbound MSG_HEADER_KEY.",
+  "isolatedRelayReveal": "Reveal embedded relay key",
   "keepAliveHelp": "Enable TCP keep-alive for connections",
   "configServerAddress": "Server Address: {value}",
   "@configServerAddress": {

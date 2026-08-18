@@ -37,6 +37,12 @@ class FakePbMapperApi implements PbMapperApiClient {
   Future<ConfigStatus> fetchConfig() async => config;
 
   @override
+  Future<String> revealIsolatedRelayAdminKey() async {
+    calls.add('revealIsolatedRelayAdminKey');
+    return config.isolatedRelayAdminKey;
+  }
+
+  @override
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,

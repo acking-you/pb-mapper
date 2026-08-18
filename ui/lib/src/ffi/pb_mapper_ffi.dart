@@ -296,6 +296,11 @@ class PbMapperFFI {
         'pb_mapper_get_config_json',
       );
 
+  late final pbMapperRevealIsolatedAdminKey = lib
+      .lookupFunction<_PbMapperGetConfigNative, _PbMapperGetConfigDart>(
+        'pb_mapper_reveal_isolated_admin_key',
+      );
+
   late final pbMapperUpdateConfig = lib
       .lookupFunction<_PbMapperUpdateConfigNative, _PbMapperUpdateConfigDart>(
         'pb_mapper_update_config',

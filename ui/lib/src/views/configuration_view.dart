@@ -32,6 +32,7 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   bool? _serverReachable;
   String _serverCheckMessage = '';
   ConfigStatus? _currentConfig;
+  String _revealedIsolatedRelayAdminKey = '';
 
   ChangeSubscription? _changes;
 
@@ -121,6 +122,14 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       });
       showToast(context, context.l10n.saveFailed, kind: ToastKind.error);
     }
+  }
+
+  Future<void> _revealIsolatedRelayAdminKey() async {
+    final key = await _api.revealIsolatedRelayAdminKey();
+    if (!mounted) return;
+    setState(() {
+      _revealedIsolatedRelayAdminKey = key;
+    });
   }
 
   Future<void> _checkServerConnection() async {
@@ -365,19 +374,22 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                         helperText: context.l10n.msgHeaderKeyHelp,
                       ),
                     ),
-                    if (_currentConfig?.isolatedRelayAdminKey.isNotEmpty ==
-                        true) ...[
+                    if (_currentConfig?.isolatedRelayAdminKeySet == true) ...[
                       const SizedBox(height: 16),
-                      InputDecorator(
-                        decoration: InputDecoration(
-                          labelText: context.l10n.isolatedRelayAdminKey,
-                          border: const OutlineInputBorder(),
-                          helperText: context.l10n.isolatedRelayAdminKeyHelp,
+                      if (_revealedIsolatedRelayAdminKey.isEmpty)
+                        OutlinedButton(
+                          onPressed: _revealIsolatedRelayAdminKey,
+                          child: Text(context.l10n.isolatedRelayReveal),
+                        )
+                      else
+                        InputDecorator(
+                          decoration: InputDecoration(
+                            labelText: context.l10n.isolatedRelayAdminKey,
+                            border: const OutlineInputBorder(),
+                            helperText: context.l10n.isolatedRelayAdminKeyHelp,
+                          ),
+                          child: SelectableText(_revealedIsolatedRelayAdminKey),
                         ),
-                        child: SelectableText(
-                          _currentConfig!.isolatedRelayAdminKey,
-                        ),
-                      ),
                     ],
                     const SizedBox(height: 16),
                     SwitchListTile(
