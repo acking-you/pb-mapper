@@ -573,6 +573,7 @@ fn actor_renew(
     slot.expires_at = expires_at;
     lease.expires_at.store(expires_at, Ordering::Release);
     lease.wheel_version.fetch_add(1, Ordering::AcqRel);
+    wheel.release(key_id);
     wheel.insert(lease);
     drop(slots);
     metadata_with_credential(inner, cold, key_id, true)

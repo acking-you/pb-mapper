@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - Failed closed when first-flight replay-log rollback cannot restore the previous length, kept `auth.lock` in the actor until it exits, reserved `temporary_key_rotated` for a real root-epoch change, refused `--use-machine-msg-header-key` when `admin.key` already exists, and persisted installer `MSG_HEADER_KEY` into `admin.key`.
 - Refused `write_admin_key_file` of the live `admin.key` while encrypted auth state exists, matching `initialize_admin_key`; `admin.key.next` remains allowed.
 - Kept `temporary_key_rotated` after a later issue in the same slot, aborted a timed-out embedded-relay shutdown, fail-closed replay logs whose directory sync failed, allowed a post-rotation write of the live key that already decrypts the snapshot, and treated `PB_MAPPER_NEW_STREAMS_PER_SECOND=0` as the default 100.
+- Fsynced the replay-log directory after compacting replacements, treated an unreadable existing replay log as unavailable, and made timing-wheel buckets hold `Weak` leases so renewals no longer accumulate day-long strong references.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

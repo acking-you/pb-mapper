@@ -9,21 +9,23 @@
 //! reset/rotation -> cancel every wheel-owned lease -> clear all buckets
 //! ```
 //!
-//! The wheel owns strong `Arc<AuthLease>` references. Request-facing structures retain
-//! only `Weak` references, so expiry, revoke, reset, and root rotation have one clear
-//! cancellation owner without keeping dead credentials alive indefinitely.
+//! The wheel's current-owner map holds the strong `Arc<AuthLease>` for each key.
+//! Bucket entries are `Weak`, so a renew replaces the previous owner instead of
+//! accumulating day-long stale strong references. Request-facing structures also
+//! retain only `Weak` references.
 
 use super::*;
 
 const MAX_INCREMENTAL_ADVANCE_SECONDS: u64 = 256;
 
 struct WheelEntry {
-    lease: Arc<AuthLease>,
+    lease: Weak<AuthLease>,
     version: u64,
 }
 
 pub(super) struct TimingWheel {
     now: u64,
+    owners: HashMap<u64, Arc<AuthLease>>,
     immediate_due: Vec<WheelEntry>,
     level0: Vec<Vec<WheelEntry>>,
     level1: Vec<Vec<WheelEntry>>,
@@ -35,6 +37,7 @@ impl TimingWheel {
     pub(super) fn new(now: u64) -> Self {
         Self {
             now,
+            owners: HashMap::new(),
             immediate_due: Vec::new(),
             level0: empty_buckets(256),
             level1: empty_buckets(64),
@@ -48,10 +51,18 @@ impl TimingWheel {
         self.insert_with_version(lease, version);
     }
 
+    pub(super) fn release(&mut self, key_id: u64) {
+        self.owners.remove(&key_id);
+    }
+
     pub(super) fn insert_with_version(&mut self, lease: Arc<AuthLease>, version: u64) {
+        self.owners.insert(lease.key_id(), lease.clone());
         let expires_at = lease.expires_at();
         let delta = expires_at.saturating_sub(self.now);
-        let entry = WheelEntry { lease, version };
+        let entry = WheelEntry {
+            lease: Arc::downgrade(&lease),
+            version,
+        };
         if expires_at <= self.now {
             self.immediate_due.push(entry);
         } else if delta < 1 << 8 {
@@ -85,12 +96,14 @@ impl TimingWheel {
             due.extend(self.take_immediate_due(self.now));
             let index = (self.now & 0xff) as usize;
             for entry in std::mem::take(&mut self.level0[index]) {
-                if entry.version == entry.lease.wheel_version.load(Ordering::Acquire) {
-                    if entry.lease.expires_at() <= self.now {
-                        due.push(entry.lease);
-                    } else {
-                        self.insert(entry.lease);
-                    }
+                let Some(lease) = live_lease(&entry) else {
+                    continue;
+                };
+                if lease.expires_at() <= self.now {
+                    self.owners.remove(&lease.key_id());
+                    due.push(lease);
+                } else {
+                    self.insert_with_version(lease, entry.version);
                 }
             }
         }
@@ -107,13 +120,14 @@ impl TimingWheel {
 
         let mut due = Vec::new();
         for entry in entries {
-            if entry.version != entry.lease.wheel_version.load(Ordering::Acquire) {
+            let Some(lease) = live_lease(&entry) else {
                 continue;
-            }
-            if entry.lease.expires_at() <= target {
-                due.push(entry.lease);
+            };
+            if lease.expires_at() <= target {
+                self.owners.remove(&lease.key_id());
+                due.push(lease);
             } else {
-                self.insert_with_version(entry.lease, entry.version);
+                self.insert_with_version(lease, entry.version);
             }
         }
         due
@@ -122,13 +136,14 @@ impl TimingWheel {
     fn take_immediate_due(&mut self, target: u64) -> Vec<Arc<AuthLease>> {
         let mut due = Vec::new();
         for entry in std::mem::take(&mut self.immediate_due) {
-            if entry.version != entry.lease.wheel_version.load(Ordering::Acquire) {
+            let Some(lease) = live_lease(&entry) else {
                 continue;
-            }
-            if entry.lease.expires_at() <= target {
-                due.push(entry.lease);
+            };
+            if lease.expires_at() <= target {
+                self.owners.remove(&lease.key_id());
+                due.push(lease);
             } else {
-                self.insert_with_version(entry.lease, entry.version);
+                self.insert_with_version(lease, entry.version);
             }
         }
         due
@@ -151,8 +166,8 @@ impl TimingWheel {
             _ => Vec::new(),
         };
         for entry in entries {
-            if entry.version == entry.lease.wheel_version.load(Ordering::Acquire) {
-                self.insert_with_version(entry.lease, entry.version);
+            if let Some(lease) = live_lease(&entry) {
+                self.insert_with_version(lease, entry.version);
             }
         }
     }
@@ -163,11 +178,16 @@ impl TimingWheel {
         take_all_entries(&mut self.level1, &mut entries);
         take_all_entries(&mut self.level2, &mut entries);
         take_all_entries(&mut self.level3, &mut entries);
-        for entry in entries {
-            entry.lease.cancellation.cancel();
+        for lease in self.owners.values() {
+            lease.cancellation.cancel();
         }
         *self = Self::new(now);
     }
+}
+
+fn live_lease(entry: &WheelEntry) -> Option<Arc<AuthLease>> {
+    let lease = entry.lease.upgrade()?;
+    (entry.version == lease.wheel_version.load(Ordering::Acquire)).then_some(lease)
 }
 
 fn empty_buckets(count: usize) -> Vec<Vec<WheelEntry>> {

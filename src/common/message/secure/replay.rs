@@ -209,8 +209,15 @@ impl ReplayGuard {
         let Some(path) = self.log_path.clone() else {
             return;
         };
-        let Ok(mut file) = File::open(&path) else {
+        if !path.exists() {
             return;
+        }
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(_) => {
+                self.log_failed = true;
+                return;
+            }
         };
         let now = unix_seconds();
         let mut live = Vec::new();
@@ -280,7 +287,9 @@ impl ReplayGuard {
             file.write_all(&live.concat())?;
             file.sync_all()?;
             drop(file);
-            crate::common::auth::replace_file(&temporary, path)
+            crate::common::auth::replace_file(&temporary, path)?;
+            crate::common::auth::sync_parent_directory(path)
+                .map_err(|error| std::io::Error::other(error.to_string()))
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary);
