@@ -547,8 +547,8 @@ fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: u64) -> AuthF
         .slots
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let generation_was_issued = match slots.get(index) {
-        Some(slot) => slot.generation == generation && slot.generation > 0,
+    let current_generation = match slots.get(index) {
+        Some(slot) => Some(slot.generation),
         None => {
             let high = inner
                 .high_slot_generations
@@ -557,16 +557,23 @@ fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: u64) -> AuthF
             index
                 .checked_sub(slots.len())
                 .and_then(|offset| high.get(offset).copied())
-                == Some(generation)
-                && generation > 0
         }
     };
     let slot_is_active = slots
         .get(index)
         .is_some_and(|slot| slot.state == SlotState::Active && slot.generation == generation);
-    let issued_epoch = slots.get(index).map(|slot| slot.issued_epoch).unwrap_or(0);
+    if slot_is_active {
+        return AuthFailure::new(
+            "temporary_key_invalid",
+            "temporary credential does not match the active relay key material",
+            false,
+        );
+    }
     let current_epoch = inner.root_epoch.load(Ordering::Acquire);
-    if generation_was_issued && !slot_is_active && issued_epoch < current_epoch {
+    if current_epoch > 0
+        && generation > 0
+        && current_generation.is_some_and(|issued| generation <= issued)
+    {
         return AuthFailure::new(
             "temporary_key_rotated",
             "temporary credential was invalidated by administrator root rotation or auth-state reset",

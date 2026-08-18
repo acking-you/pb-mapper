@@ -971,10 +971,29 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
             false,
         ));
     }
-    if path.file_name() == Some(std::ffi::OsStr::new("admin.key")) {
+    if path.file_name() == Some(std::ffi::OsStr::new("admin.key"))
+        && !key_matches_existing_snapshot(path.parent(), key)
+    {
         refuse_write_if_encrypted_state(path, force)?;
     }
     atomic_write(path, format!("{key}\n").as_bytes(), 0o600)
+}
+
+fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str) -> bool {
+    let Some(state_dir) = state_dir else {
+        return false;
+    };
+    let snapshot_path = auth_snapshot_path(state_dir);
+    if !snapshot_path.exists() {
+        return false;
+    }
+    let Ok(Credential::Admin(admin_key)) = parse_credential(key) else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(&snapshot_path) else {
+        return false;
+    };
+    open_blob(&admin_key, &bytes).is_ok()
 }
 
 fn refuse_write_if_encrypted_state(path: &Path, force: bool) -> Result<(), AuthFailure> {

@@ -829,6 +829,22 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
             .code,
         "temporary_key_rotated"
     );
+    let new_admin = runtime.authenticate_presented(0, &new_key).unwrap();
+    let _replacement = runtime
+        .issue(
+            &new_admin,
+            Duration::from_secs(60),
+            Some("after-rotate".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .authenticate_presented(issued.metadata.key_id, &old_temporary)
+            .unwrap_err()
+            .code,
+        "temporary_key_rotated"
+    );
 
     assert_eq!(
         runtime
@@ -845,7 +861,6 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
             .code,
         "administrator_key_rotated"
     );
-    let new_admin = runtime.authenticate_presented(0, &new_key).unwrap();
     assert!(runtime.status(&new_admin).await.is_ok());
 
     drop(runtime);

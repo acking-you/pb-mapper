@@ -94,12 +94,15 @@ impl PbMapperState {
 
             let shutdown_timeout = tokio::time::Duration::from_secs(5);
 
-            match tokio::time::timeout(shutdown_timeout, handle).await {
+            let mut handle = handle;
+            match tokio::time::timeout(shutdown_timeout, &mut handle).await {
                 Ok(_) => {
                     tracing::info!("Server shutdown gracefully");
                 }
                 Err(_) => {
-                    tracing::warn!("Server shutdown timed out, may not have closed gracefully");
+                    handle.abort();
+                    let _ = handle.await;
+                    tracing::warn!("Server shutdown timed out; aborted the relay task");
                 }
             }
 

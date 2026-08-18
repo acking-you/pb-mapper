@@ -30,8 +30,9 @@ fn first_flight_budget(window_seconds: u64) -> u32 {
     let streams_per_sec = std::env::var("PB_MAPPER_NEW_STREAMS_PER_SECOND")
         .ok()
         .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_NEW_STREAMS_PER_SECOND)
-        .clamp(1, 1_000_000);
+        .min(1_000_000);
     let window = u32::try_from(window_seconds).unwrap_or(u32::MAX);
     streams_per_sec
         .saturating_mul(2)
@@ -196,8 +197,10 @@ impl ReplayGuard {
             return Err(error);
         }
         if created {
-            crate::common::auth::sync_parent_directory(path)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if let Err(error) = crate::common::auth::sync_parent_directory(path) {
+                self.log_failed = true;
+                return Err(std::io::Error::other(error.to_string()));
+            }
         }
         Ok(())
     }
