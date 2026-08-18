@@ -687,8 +687,28 @@ fn actor_gc(
             removed = removed.saturating_add(1);
         }
     }
-    tombstones.clear();
     drop(slots);
+    {
+        let mut high = inner
+            .high_slot_entries
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        high.retain(|entry| {
+            let keep = match entry.state {
+                SlotState::Active if entry.expires_at > now => true,
+                SlotState::Active | SlotState::Expired | SlotState::Revoked | SlotState::Free => {
+                    false
+                }
+            };
+            if !keep {
+                cold.remove(&entry.key_id);
+                wheel.release(entry.key_id);
+                removed = removed.saturating_add(1);
+            }
+            keep
+        });
+    }
+    tombstones.clear();
     let gc_audit = audit("temporary_key_gc", None, Some(format!("removed={removed}")));
     let mut snapshot = build_snapshot(inner, cold, admin_replays);
     push_persisted_audit(&mut snapshot.audit_records, gc_audit.clone());

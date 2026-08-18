@@ -13,8 +13,9 @@ use tokio::time::MissedTickBehavior;
 use uni_stream::udp::set_custom_timeout;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
-use self::status::{get_status, get_status_scoped};
+use self::status::{get_status, get_status_scoped, get_status_with_credential};
 use self::stream::handle_local_stream;
+use crate::common::checksum::{get_process_credential, Credential};
 use crate::common::config::{
     client_health_check_interval, client_health_check_timeout, client_health_failure_threshold,
     StatusOp,
@@ -123,6 +124,16 @@ pub async fn run_client_side_cli_with_callback_scoped<
             return;
         }
     };
+    let credential = match get_process_credential() {
+        Ok(credential) => credential,
+        Err(e) => {
+            tracing::error!("load client credential failed: {e}");
+            if let Some(ref callback) = status_callback {
+                callback("failed");
+            }
+            return;
+        }
+    };
 
     let mut retry_backoff = RetryBackoff::default();
 
@@ -136,7 +147,9 @@ pub async fn run_client_side_cli_with_callback_scoped<
             "client probing remote server"
         );
 
-        if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace).await {
+        if let Err(reason) =
+            probe_remote_key(remote_addr, key.as_ref(), namespace, credential).await
+        {
             let retry_delay = retry_backoff.next_delay();
             tracing::warn!(
                 event = "client_remote_probe_failed",
@@ -222,7 +235,7 @@ pub async fn run_client_side_cli_with_callback_scoped<
                     let failure_tx = stream_failure_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_local_stream(stream, key, remote_addr, keep_alive, namespace).await
+                            handle_local_stream(stream, key, remote_addr, keep_alive, namespace, credential).await
                         {
                             let reason = snafu::Report::from_error(e).to_string();
                             tracing::warn!(
@@ -236,7 +249,7 @@ pub async fn run_client_side_cli_with_callback_scoped<
                     });
                 }
                 _ = health_interval.tick() => {
-                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace).await {
+                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace, credential).await {
                         consecutive_health_failures = consecutive_health_failures.saturating_add(1);
                         if consecutive_health_failures < health_failure_threshold {
                             tracing::warn!(
@@ -278,7 +291,7 @@ pub async fn run_client_side_cli_with_callback_scoped<
                         stream_failure = %stream_failure,
                         "local stream failure reported; probing remote key"
                     );
-                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace).await {
+                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace, credential).await {
                         tracing::warn!(
                             event = "client_remote_probe_failed_after_stream_error",
                             key = %key,
@@ -316,9 +329,15 @@ async fn probe_remote_key(
     remote_addr: SocketAddr,
     key: &str,
     namespace: Option<u64>,
+    credential: Credential,
 ) -> std::result::Result<(), String> {
     let timeout = client_health_check_timeout();
-    match tokio::time::timeout(timeout, probe_remote_key_once(remote_addr, key, namespace)).await {
+    match tokio::time::timeout(
+        timeout,
+        probe_remote_key_once(remote_addr, key, namespace, credential),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(_) => Err(format!("remote key probe timed out after {timeout:?}")),
     }
@@ -328,6 +347,7 @@ async fn probe_remote_key_once(
     remote_addr: SocketAddr,
     key: &str,
     namespace: Option<u64>,
+    credential: Credential,
 ) -> std::result::Result<(), String> {
     match fetch_remote_status(
         remote_addr,
@@ -335,6 +355,7 @@ async fn probe_remote_key_once(
             key: key.to_string(),
         },
         namespace,
+        credential,
     )
     .await
     {
@@ -362,7 +383,8 @@ async fn probe_remote_key_once(
         }
     }
 
-    let status_resp = fetch_remote_status(remote_addr, PbConnStatusReq::Keys, namespace).await?;
+    let status_resp =
+        fetch_remote_status(remote_addr, PbConnStatusReq::Keys, namespace, credential).await?;
     let PbConnStatusResp::Keys(keys) = status_resp else {
         return Err(format!(
             "expected keys status response, got {status_resp:?}"
@@ -381,11 +403,12 @@ async fn fetch_remote_status(
     remote_addr: SocketAddr,
     req: PbConnStatusReq,
     namespace: Option<u64>,
+    credential: Credential,
 ) -> std::result::Result<PbConnStatusResp, String> {
     let mut stream = each_addr(remote_addr, TcpStream::connect)
         .await
         .map_err(|e| format!("connect remote stream failed: {e}"))?;
-    get_status_scoped(&mut stream, req, namespace)
+    get_status_with_credential(&mut stream, req, namespace, &credential)
         .await
         .map_err(|e| format!("get status failed: {}", snafu::Report::from_error(e)))
 }

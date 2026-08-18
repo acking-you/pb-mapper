@@ -218,6 +218,19 @@ impl AuthRuntime {
         derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn high_slot_entry_count(&self) -> usize {
+        self.inner()
+            .map(|inner| {
+                inner
+                    .high_slot_entries
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .len()
+            })
+            .unwrap_or(0)
+    }
+
     pub(crate) fn derive_previous_key(&self, key_id: u64) -> Option<AesKeyType> {
         let inner = self.inner().ok()?;
         let previous = inner

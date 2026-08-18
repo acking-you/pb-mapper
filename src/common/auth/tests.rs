@@ -124,6 +124,80 @@ async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
 }
 
 #[tokio::test]
+async fn gc_removes_inactive_high_slot_entries_and_keeps_their_generations() {
+    let state_dir = temp_state_dir("gc-high-slots");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config_two = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 2,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config_two.clone())
+        .await
+        .unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let first = runtime
+        .issue(&admin, Duration::from_secs(60), Some("first".to_string()))
+        .await
+        .unwrap();
+    let second = runtime
+        .issue(&admin, Duration::from_secs(60), Some("second".to_string()))
+        .await
+        .unwrap();
+    let Credential::Temporary {
+        key_id: first_id, ..
+    } = parse_credential(&first.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    let Credential::Temporary {
+        key_id: second_id, ..
+    } = parse_credential(&second.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    runtime.revoke(&admin, first_id).await.unwrap();
+    runtime.revoke(&admin, second_id).await.unwrap();
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let config_one = AuthConfig {
+        max_temporary_keys: 1,
+        ..config_two.clone()
+    };
+    let runtime = AuthRuntime::start(admin_key, config_one).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    assert_eq!(runtime.high_slot_entry_count(), 1);
+    let removed = runtime.gc(&admin).await.unwrap();
+    assert!(removed >= 1);
+    assert_eq!(runtime.high_slot_entry_count(), 0);
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let runtime = AuthRuntime::start(admin_key, config_two).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let _low = runtime
+        .issue(&admin, Duration::from_secs(60), Some("low".to_string()))
+        .await
+        .unwrap();
+    let high = runtime
+        .issue(&admin, Duration::from_secs(60), Some("high".to_string()))
+        .await
+        .unwrap();
+    let Credential::Temporary {
+        key_id: reused_id, ..
+    } = parse_credential(&high.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    assert_ne!(reused_id, second_id);
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
 async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
     let state_dir = temp_state_dir("safe-mode-legacy");
     let admin_key = *b"0123456789abcdefghijklmnopqrstuv";

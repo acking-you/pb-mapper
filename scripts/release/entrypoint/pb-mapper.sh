@@ -28,8 +28,12 @@ else
 fi
 
 if [ "$USE_MACHINE_MSG_HEADER_KEY" = "true" ]; then
-  echo "WARNING: USE_MACHINE_MSG_HEADER_KEY is a legacy compatibility mode"
-  ARGS+=(--use-machine-msg-header-key)
+  if [ -s "$ADMIN_KEY_PATH" ]; then
+    echo "admin.key already exists; skipping --use-machine-msg-header-key"
+  else
+    echo "WARNING: USE_MACHINE_MSG_HEADER_KEY is a legacy compatibility mode"
+    ARGS+=(--use-machine-msg-header-key)
+  fi
 else
   echo "USE_MACHINE_MSG_HEADER_KEY is set to false"
 fi

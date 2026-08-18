@@ -5,6 +5,7 @@ use super::error::{
     ControlIoTimeoutSnafu, CreateHeaderToolSnafu, DecodeStatusRespSnafu, EncodeStatusReqSnafu,
     ReadStatusRespSnafu, StatusRespNotMatchSnafu, WriteStatusReqSnafu,
 };
+use crate::common::checksum::Credential;
 use crate::common::config::control_io_timeout;
 use crate::common::message::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
@@ -24,6 +25,28 @@ pub async fn get_status_scoped<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
     req: PbConnStatusReq,
     namespace: Option<u64>,
 ) -> super::error::Result<PbConnStatusResp> {
+    let session =
+        ClientHeaderSession::from_process().context(CreateHeaderToolSnafu { action: "session" })?;
+    get_status_with_session(remote_stream, req, namespace, session).await
+}
+
+pub async fn get_status_with_credential<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
+    remote_stream: &mut S,
+    req: PbConnStatusReq,
+    namespace: Option<u64>,
+    credential: &Credential,
+) -> super::error::Result<PbConnStatusResp> {
+    let session = ClientHeaderSession::new_v2(credential)
+        .context(CreateHeaderToolSnafu { action: "session" })?;
+    get_status_with_session(remote_stream, req, namespace, session).await
+}
+
+async fn get_status_with_session<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
+    remote_stream: &mut S,
+    req: PbConnStatusReq,
+    namespace: Option<u64>,
+    session: ClientHeaderSession,
+) -> super::error::Result<PbConnStatusResp> {
     let timeout = control_io_timeout();
     let request = match namespace {
         Some(namespace) => PbConnRequest::StatusScoped {
@@ -33,9 +56,6 @@ pub async fn get_status_scoped<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
         None => PbConnRequest::Status(req),
     };
     let msg = request.encode().context(EncodeStatusReqSnafu)?;
-
-    let session =
-        ClientHeaderSession::from_process().context(CreateHeaderToolSnafu { action: "session" })?;
     match tokio::time::timeout(timeout, session.write_initial(remote_stream, &msg)).await {
         Ok(result) => result.context(WriteStatusReqSnafu)?,
         Err(_) => ControlIoTimeoutSnafu {

@@ -33,6 +33,9 @@ All notable changes to this project will be documented in this file.
 - Released revoked timing-wheel owners when the tombstone is recycled or GC frees the slot, instead of keeping them until the original TTL.
 - Kept the previous root key and instance id in memory so a stale first flight after rotation or reset can decrypt and return `temporary_key_rotated`.
 - Validated installer `MSG_HEADER_KEY` values as 32 printable ASCII bytes before writing `admin.key`.
+- Passed `--use-machine-msg-header-key` only when `admin.key` is missing, so a container restart with a persistent auth volume does not fail after first boot.
+- Pinned each local client listener to the credential captured at start, so a later Flutter config change cannot switch an existing port onto another tenant.
+- Garbage-collected expired and revoked high-slot entries while keeping their generations so shrinking capacity and running `key gc` can reclaim them.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

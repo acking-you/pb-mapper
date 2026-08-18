@@ -10,6 +10,7 @@ use super::error::{
     EncodeSubcribeReqSnafu, ReadSubcribeRespSnafu, Result, SubcribeRespNotMatchSnafu,
     WriteSubcribeReqSnafu,
 };
+use crate::common::checksum::Credential;
 use crate::common::config::control_io_timeout;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
@@ -30,6 +31,7 @@ pub async fn handle_local_stream<
     remote_addr: A,
     keep_alive: bool,
     namespace: Option<u64>,
+    credential: Credential,
 ) -> Result<()> {
     let mut remote_stream = each_addr(remote_addr, TcpStream::connect)
         .await
@@ -57,7 +59,7 @@ pub async fn handle_local_stream<
             },
         };
         let msg = request.encode().context(EncodeSubcribeReqSnafu)?;
-        let session = ClientHeaderSession::from_process()
+        let session = ClientHeaderSession::new_v2(&credential)
             .context(CreateHeaderToolSnafu { action: "session" })?;
         match tokio::time::timeout(timeout, session.write_initial(&mut remote_stream, &msg)).await {
             Ok(result) => result.context(WriteSubcribeReqSnafu)?,
