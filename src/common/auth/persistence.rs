@@ -693,7 +693,11 @@ pub(super) fn write_snapshot_and_truncate_wal(
     let sealed = seal_blob(admin_key, &plain)?;
     let snapshot_path = auth_snapshot_path(&config.state_dir);
     atomic_write(&snapshot_path, &sealed, 0o600)?;
-    let wal_path = auth_wal_path(&config.state_dir);
+    truncate_auth_wal(&config.state_dir)
+}
+
+pub(super) fn truncate_auth_wal(state_dir: &Path) -> Result<(), AuthFailure> {
+    let wal_path = auth_wal_path(state_dir);
     let created = !wal_path.exists();
     let wal = OpenOptions::new()
         .create(true)
@@ -883,6 +887,9 @@ pub(super) fn recover_instance_id_after_reset(
     if snapshot.instance_id != next {
         return Ok(current);
     }
+    // The reset snapshot is complete. Any leftover WAL still belongs to the
+    // previous instance and must not be replayed onto the new derivation id.
+    truncate_auth_wal(state_dir)?;
     atomic_write(&state_dir.join("server-instance-id"), &next, 0o600)?;
     let _ = std::fs::remove_file(&next_path);
     Ok(next)

@@ -560,6 +560,7 @@ fn recover_instance_id_promotes_next_when_snapshot_matches() {
         audit_records: VecDeque::new(),
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
+    std::fs::write(state_dir.join("auth.wal"), b"old-instance-wal").unwrap();
 
     let recovered = recover_instance_id_after_reset(&state_dir, &admin_key, current).unwrap();
     assert_eq!(recovered, next);
@@ -568,6 +569,7 @@ fn recover_instance_id_promotes_next_when_snapshot_matches() {
         Some(next)
     );
     assert!(!state_dir.join("server-instance-id.next").exists());
+    assert_eq!(std::fs::read(state_dir.join("auth.wal")).unwrap(), b"");
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
@@ -639,6 +641,7 @@ async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
         audit_records: VecDeque::new(),
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
+    std::fs::write(state_dir.join("auth.wal"), b"old-instance-wal").unwrap();
     atomic_write(
         &state_dir.join("server-instance-id"),
         &old_instance_id,
