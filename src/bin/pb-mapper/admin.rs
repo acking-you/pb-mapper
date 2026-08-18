@@ -347,9 +347,11 @@ async fn send_admin_request_with_timeout(
         match response {
             PbConnResponse::Admin(response) => return Ok(response),
             PbConnResponse::Error(error)
-                if error.code == "connection_salt_replayed" && error.retryable && attempt == 0 =>
+                if error.code == "connection_salt_replayed" && error.retryable =>
             {
-                continue;
+                if attempt == 0 {
+                    continue;
+                }
             }
             PbConnResponse::Error(error) => {
                 return Err(std::io::Error::other(format!(
