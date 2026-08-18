@@ -55,7 +55,7 @@ export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
 
 ## 架构
 
-![pb-mapper architecture](docs/assets/architecture.svg)
+![pb-mapper architecture](docs/assets/architecture-flow.svg)
 
 - **本地服务侧**（绿色）：`pb-mapper register` 注册本地 TCP/UDP 服务。
 - **公网侧**（蓝色）：`pb-mapper server` 维护注册表并执行双向数据转发。

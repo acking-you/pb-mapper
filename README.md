@@ -55,7 +55,7 @@ export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
 
 ## Architecture
 
-![pb-mapper architecture](docs/assets/architecture.svg)
+![pb-mapper architecture](docs/assets/architecture-flow.svg)
 
 - **Local service side** (green) — `pb-mapper register` registers a local TCP/UDP service.
 - **Public network** (blue) — `pb-mapper server` keeps the registry and forwards data bidirectionally.
