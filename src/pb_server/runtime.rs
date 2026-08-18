@@ -925,23 +925,91 @@ pub async fn run_server_on_listener(
             }
             ManagerTask::Shutdown => {
                 tracing::info!("Server shutdown requested, stopping main loop");
-                for handle in connection_tasks.drain(..) {
-                    handle.abort();
-                }
                 break;
             }
         }
     }
 
-    // Gracefully shutdown the listener
-    listener_handle.abort();
-    shutdown_handle.abort();
-    if let Some(handle) = status_forward_handle {
-        handle.abort();
-    }
-    for handle in connection_tasks {
-        handle.abort();
-    }
+    // Abort first, then wait. Dropping a JoinHandle after abort() does not
+    // wait for the task to drop its AuthRuntime clone, so a UI restart can
+    // still see auth.lock held.
+    abort_and_wait(
+        connection_tasks
+            .into_iter()
+            .chain(std::iter::once(listener_handle))
+            .chain(std::iter::once(shutdown_handle))
+            .chain(status_forward_handle),
+    )
+    .await;
     tracing::info!("Server shutdown completed");
     Ok(())
+}
+
+async fn abort_and_wait(handles: impl IntoIterator<Item = tokio::task::JoinHandle<()>>) {
+    let handles: Vec<_> = handles.into_iter().collect();
+    for handle in &handles {
+        handle.abort();
+    }
+    for handle in handles {
+        let _ = handle.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::auth::{
+        AuthConfig, AuthRuntime, LegacyProtocolPolicy, PROCESS_CREDENTIAL_TEST_LOCK,
+    };
+    use rand::RngExt;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn temp_state_dir(name: &str) -> PathBuf {
+        let mut suffix = [0_u8; 8];
+        let mut rng = rand::rng();
+        for byte in &mut suffix {
+            *byte = rng.random();
+        }
+        std::env::temp_dir().join(format!(
+            "pb-mapper-{name}-{}",
+            suffix
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ))
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_auth_lock_while_a_connection_is_open() {
+        let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+        let state_dir = temp_state_dir("shutdown-lock");
+        let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+        let config = AuthConfig {
+            state_dir: state_dir.clone(),
+            max_temporary_keys: 4,
+            max_temporary_key_ttl: Duration::from_secs(3600),
+            legacy_protocol: LegacyProtocolPolicy::Allow,
+        };
+        let auth = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown_token = CancellationToken::new();
+        let server = tokio::spawn({
+            let shutdown_token = shutdown_token.clone();
+            async move { run_server_on_listener(listener, shutdown_token, None, false, auth).await }
+        });
+        let _client = TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        shutdown_token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server shutdown should finish after aborting connections")
+            .unwrap()
+            .unwrap();
+        let restarted = AuthRuntime::start(admin_key, config).await.unwrap();
+        drop(restarted);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
 }

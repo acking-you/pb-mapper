@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - Took `auth.lock` before loading or creating `admin.key`, staged `server-instance-id.next` so an interrupted reset can recover a matching snapshot, discarded leftover WAL from the previous instance during that recovery, and used a user-writable Linux auth directory when `/var/lib/pb-mapper/auth` is not usable.
 - Flushed the parent directory after Windows auth-state replacements, matching the Unix `fsync` after rename.
 - Discarded leftover WAL encrypted under the previous administrator key when promoting `admin.key.next`.
+- Opened Windows parent directories with write access before `FlushFileBuffers`, and waited for aborted connection tasks to finish so `auth.lock` is released before shutdown returns.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

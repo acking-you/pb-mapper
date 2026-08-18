@@ -199,9 +199,11 @@ fn open_directory_for_sync(path: &Path) -> std::io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         OpenOptions::new()
-            .read(true)
+            .access_mode(GENERIC_READ | GENERIC_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)
     }
