@@ -313,6 +313,7 @@ pub(super) fn build_snapshot(
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone(),
+        root_epoch: inner.root_epoch.load(Ordering::Acquire),
     }
 }
 
@@ -364,6 +365,7 @@ pub(super) fn empty_snapshot(
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone(),
+        root_epoch: inner.root_epoch.load(Ordering::Acquire),
     }
 }
 
@@ -418,6 +420,7 @@ pub(super) fn try_load_persisted_state(
             legacy_protocol: config.legacy_protocol,
             admin_replays: Vec::new(),
             audit_records: VecDeque::new(),
+            root_epoch: 0,
         }
     };
     if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION || snapshot.instance_id != instance_id {

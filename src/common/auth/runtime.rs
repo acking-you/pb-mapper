@@ -172,6 +172,7 @@ impl AuthRuntime {
             last_legacy_connection_at: AtomicU64::new(0),
             auth_successes: AtomicU64::new(0),
             auth_failures: AtomicU64::new(0),
+            root_epoch: AtomicU64::new(loaded.as_ref().map(|state| state.root_epoch).unwrap_or(0)),
             audit_records: RwLock::new(audit_records),
         });
         let (command_tx, command_rx) = mpsc::channel(256);
@@ -179,7 +180,7 @@ impl AuthRuntime {
             inner: Arc::downgrade(&inner),
             command_tx,
             config: config.clone(),
-            _state_lock: state_lock,
+            _state_lock: state_lock.clone(),
         };
 
         tokio::spawn(run_auth_actor(
@@ -188,6 +189,7 @@ impl AuthRuntime {
             command_rx,
             config,
             AuthActorState::new(cold, wheel, admin_replays, admin_replay_order),
+            state_lock,
         ));
         Ok(runtime)
     }
@@ -562,7 +564,9 @@ fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: u64) -> AuthF
     let slot_is_active = slots
         .get(index)
         .is_some_and(|slot| slot.state == SlotState::Active && slot.generation == generation);
-    if generation_was_issued && !slot_is_active {
+    let issued_epoch = slots.get(index).map(|slot| slot.issued_epoch).unwrap_or(0);
+    let current_epoch = inner.root_epoch.load(Ordering::Acquire);
+    if generation_was_issued && !slot_is_active && issued_epoch < current_epoch {
         return AuthFailure::new(
             "temporary_key_rotated",
             "temporary credential was invalidated by administrator root rotation or auth-state reset",

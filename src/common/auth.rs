@@ -424,6 +424,7 @@ struct SlotHot {
     generation: u32,
     state: SlotState,
     expires_at: u64,
+    issued_epoch: u64,
     lease: Weak<AuthLease>,
 }
 
@@ -433,6 +434,7 @@ impl Default for SlotHot {
             generation: 0,
             state: SlotState::Free,
             expires_at: 0,
+            issued_epoch: 0,
             lease: Weak::new(),
         }
     }
@@ -460,6 +462,7 @@ struct AuthStateInner {
     last_legacy_connection_at: AtomicU64,
     auth_successes: AtomicU64,
     auth_failures: AtomicU64,
+    root_epoch: AtomicU64,
     audit_records: RwLock<VecDeque<AuditRecord>>,
 }
 
@@ -854,6 +857,8 @@ struct PersistedSnapshot {
     admin_replays: Vec<AdminReplayRecord>,
     #[serde(default)]
     audit_records: VecDeque<AuditRecord>,
+    #[serde(default)]
+    root_epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

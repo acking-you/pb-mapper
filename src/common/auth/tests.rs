@@ -462,10 +462,20 @@ async fn issue_renew_revoke_and_persist() {
     assert_eq!(renewed.metadata.key_id, issued.metadata.key_id);
     assert_eq!(renewed.credential, issued.credential);
     assert!(renewed.metadata.expires_at > issued.metadata.expires_at);
+    let presented = runtime.derive_key(issued.metadata.key_id).unwrap();
     runtime
         .revoke(&admin, issued.metadata.key_id)
         .await
         .unwrap();
+    let mut mistyped = presented;
+    mistyped[0] ^= 0x01;
+    assert_eq!(
+        runtime
+            .authenticate_presented(issued.metadata.key_id, &mistyped)
+            .unwrap_err()
+            .code,
+        "temporary_key_invalid"
+    );
     assert!(cancellation.is_cancelled());
     assert_eq!(
         context.ensure_active().unwrap_err().code,
@@ -575,6 +585,7 @@ fn recover_instance_id_promotes_next_when_snapshot_matches() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
+        root_epoch: 0,
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
     std::fs::write(state_dir.join("auth.wal"), b"old-instance-wal").unwrap();
@@ -613,6 +624,7 @@ fn recover_instance_id_discards_stale_next_when_snapshot_still_matches_current()
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
+        root_epoch: 0,
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
 
@@ -646,6 +658,7 @@ fn recover_admin_key_discards_leftover_wal_from_the_old_key() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
+        root_epoch: 0,
     };
     write_snapshot_and_truncate_wal(&config, &new_key, &snapshot).unwrap();
     std::fs::write(state_dir.join("auth.wal"), b"old-key-wal").unwrap();
@@ -691,6 +704,7 @@ async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
+        root_epoch: 0,
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
     std::fs::write(state_dir.join("auth.wal"), b"old-instance-wal").unwrap();
@@ -1021,6 +1035,7 @@ fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
             key_id: Some(make_key_id(1, 0)),
             label: None,
         }]),
+        root_epoch: 0,
     };
 
     assert!(normalize_tombstone_times(&mut snapshot, now));

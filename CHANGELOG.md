@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - Discarded leftover WAL encrypted under the previous administrator key when promoting `admin.key.next`.
 - Opened Windows parent directories with write access before `FlushFileBuffers`, and waited for aborted connection tasks to finish so `auth.lock` is released before shutdown returns.
 - Distinguished a post-rotation or post-reset temporary credential as `temporary_key_rotated` instead of the generic `temporary_key_invalid` used for a mistyped live key.
+- Failed closed when first-flight replay-log rollback cannot restore the previous length, kept `auth.lock` in the actor until it exits, reserved `temporary_key_rotated` for a real root-epoch change, refused `--use-machine-msg-header-key` when `admin.key` already exists, and persisted installer `MSG_HEADER_KEY` into `admin.key`.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

@@ -281,6 +281,14 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
         set_process_msg_header_key(Some(&key))?;
         eprintln!("administrator key initialized at {}", key_path.display());
     } else if args.use_machine_msg_header_key {
+        let admin_key_path = auth_config.state_dir.join("admin.key");
+        if admin_key_path.exists() {
+            return Err(format!(
+                "--use-machine-msg-header-key cannot replace `{}`; use `pb-mapper admin root-key rotate` to change the root key",
+                admin_key_path.display()
+            )
+            .into());
+        }
         tracing::warn!(
             "--use-machine-msg-header-key is a legacy compatibility option; prefer a random administrator key"
         );

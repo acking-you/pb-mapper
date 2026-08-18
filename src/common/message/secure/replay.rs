@@ -109,6 +109,7 @@ pub(super) struct ReplayGuard {
     max_per_key: u32,
     log_path: Option<PathBuf>,
     last_compact_at: u64,
+    log_failed: bool,
 }
 
 impl ReplayGuard {
@@ -122,6 +123,7 @@ impl ReplayGuard {
             max_per_key: first_flight_budget(window_seconds),
             log_path,
             last_compact_at: now,
+            log_failed: false,
         };
         guard.load_persisted();
         guard
@@ -165,7 +167,12 @@ impl ReplayGuard {
         self.counts_started_at = now;
     }
 
-    fn persist(&self, fingerprint: &[u8; 32], now: u64) -> std::io::Result<()> {
+    fn persist(&mut self, fingerprint: &[u8; 32], now: u64) -> std::io::Result<()> {
+        if self.log_failed {
+            return Err(std::io::Error::other(
+                "durable first-flight replay log is unavailable after a failed rollback",
+            ));
+        }
         let Some(path) = &self.log_path else {
             return Ok(());
         };
@@ -179,8 +186,13 @@ impl ReplayGuard {
         record[..32].copy_from_slice(fingerprint);
         record[32..].copy_from_slice(&now.to_be_bytes());
         if let Err(error) = file.write_all(&record).and_then(|()| file.sync_data()) {
-            let _ = file.set_len(start_len);
-            let _ = file.sync_data();
+            if file
+                .set_len(start_len)
+                .and_then(|()| file.sync_data())
+                .is_err()
+            {
+                self.log_failed = true;
+            }
             return Err(error);
         }
         if created {

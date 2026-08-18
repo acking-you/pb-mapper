@@ -47,6 +47,7 @@ pub(super) async fn run_auth_actor(
     mut command_rx: mpsc::Receiver<AuthCommand>,
     config: AuthConfig,
     state: AuthActorState,
+    _state_lock: Arc<File>,
 ) {
     let AuthActorState {
         mut cold,
@@ -435,6 +436,7 @@ fn actor_issue(
     slot.generation = generation;
     slot.state = SlotState::Active;
     slot.expires_at = expires_at;
+    slot.issued_epoch = inner.root_epoch.load(Ordering::Acquire);
     slot.lease = Arc::downgrade(&lease);
     cold.insert(
         key_id,
@@ -693,6 +695,7 @@ fn actor_reset(
     action: &str,
 ) -> Result<(), AuthFailure> {
     let new_instance_id = random_instance_id();
+    inner.root_epoch.fetch_add(1, Ordering::AcqRel);
     let reset_audit = audit(action, None, None);
     let mut snapshot = empty_snapshot(inner, new_instance_id, admin_replays);
     push_persisted_audit(&mut snapshot.audit_records, reset_audit.clone());
@@ -763,6 +766,7 @@ fn actor_rotate_root(
     let new_key_string =
         String::from_utf8(new_key.to_vec()).expect("printable ASCII is valid UTF-8");
 
+    inner.root_epoch.fetch_add(1, Ordering::AcqRel);
     let rotate_audit = audit("administrator_key_rotate", None, None);
     let mut snapshot = empty_snapshot(inner, inner.instance_id(), &VecDeque::new());
     push_persisted_audit(&mut snapshot.audit_records, rotate_audit.clone());
