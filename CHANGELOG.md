@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - Persisted first-flight replay admissions across restarts, replaced existing auth files atomically on Windows, rejected explicit out-of-range server auth flags, and exposed the embedded relay's isolated administrator key through FFI/UI.
 - Made a second administrator first-flight salt replay surface the dedicated retry-exhausted error instead of leaving that path unreachable.
 - Compacted the durable first-flight replay log while the relay is running, rolled back torn replay-log appends, rewrote that log atomically, sized first-flight admission from `PB_MAPPER_NEW_STREAMS_PER_SECOND`, and took an exclusive lock on the authentication state directory.
+- Fsynced the replay-log directory on first creation, took the state lock before `--init-admin-key`, aborted accepted connection tasks on relay shutdown, and staged `admin.key.next` so an interrupted root rotation can recover a matching key and snapshot.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

@@ -173,7 +173,7 @@ pub(crate) fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-fn sync_parent_directory(path: &Path) -> Result<(), AuthFailure> {
+pub(crate) fn sync_parent_directory(path: &Path) -> Result<(), AuthFailure> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         File::open(parent)

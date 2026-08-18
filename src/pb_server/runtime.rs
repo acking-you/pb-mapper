@@ -104,6 +104,7 @@ pub async fn run_server_on_listener(
     let new_streams_per_second = env_limit("PB_MAPPER_NEW_STREAMS_PER_SECOND", 100);
     let new_streams_burst = env_limit("PB_MAPPER_NEW_STREAMS_BURST", 200);
     let mut next_server_generation = 1_u64;
+    let mut connection_tasks = Vec::new();
 
     let listen_addr = listener.local_addr()?;
     tracing::info!(
@@ -358,12 +359,14 @@ pub async fn run_server_on_listener(
                 );
                 let manager_task_sender = manager.get_task_sender();
                 let security = security.clone();
-                tokio::spawn(async move {
+                connection_tasks
+                    .retain(|handle: &tokio::task::JoinHandle<()>| !handle.is_finished());
+                connection_tasks.push(tokio::spawn(async move {
                     snafu_error_handle!(
                         handle_conn(conn_id, peer_addr, manager_task_sender, stream, security)
                             .await
                     );
-                });
+                }));
             }
             ManagerTask::DeRegisterServerConn { key, conn_id } => {
                 let removed_from_service_map =
@@ -922,6 +925,9 @@ pub async fn run_server_on_listener(
             }
             ManagerTask::Shutdown => {
                 tracing::info!("Server shutdown requested, stopping main loop");
+                for handle in connection_tasks.drain(..) {
+                    handle.abort();
+                }
                 break;
             }
         }
@@ -931,6 +937,9 @@ pub async fn run_server_on_listener(
     listener_handle.abort();
     shutdown_handle.abort();
     if let Some(handle) = status_forward_handle {
+        handle.abort();
+    }
+    for handle in connection_tasks {
         handle.abort();
     }
     tracing::info!("Server shutdown completed");

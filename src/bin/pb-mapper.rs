@@ -19,8 +19,9 @@ use std::time::Duration;
 use better_mimalloc_rs::MiMalloc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use pb_mapper::common::auth::{
-    generate_admin_key, initialize_admin_key, write_admin_key_file, AuthConfig, KeyPage,
-    LegacyProtocolPolicy, MAX_TEMP_KEY_CAPACITY, MAX_TEMP_KEY_TTL, MIN_TEMP_KEY_TTL,
+    acquire_state_dir_lock, generate_admin_key, initialize_admin_key, write_admin_key_file,
+    AuthConfig, KeyPage, LegacyProtocolPolicy, MAX_TEMP_KEY_CAPACITY, MAX_TEMP_KEY_TTL,
+    MIN_TEMP_KEY_TTL,
 };
 use pb_mapper::common::checksum::set_process_msg_header_key;
 use pb_mapper::common::checksum::{setup_machine_msg_header_key, MACHINE_MSG_HEADER_KEY_PATH};
@@ -272,8 +273,11 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     }
     let auth_config = AuthConfig::default();
     if args.init_admin_key {
+        std::fs::create_dir_all(&auth_config.state_dir)?;
+        let _lock = acquire_state_dir_lock(&auth_config.state_dir)?;
         let key_path = auth_config.state_dir.join("admin.key");
         let key = initialize_admin_key(&key_path, args.force_init_admin_key)?;
+        drop(_lock);
         set_process_msg_header_key(Some(&key))?;
         eprintln!("administrator key initialized at {}", key_path.display());
     } else if args.use_machine_msg_header_key {

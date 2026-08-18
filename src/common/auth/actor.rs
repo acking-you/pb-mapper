@@ -764,13 +764,16 @@ fn actor_rotate_root(
     let rotate_audit = audit("administrator_key_rotate", None, None);
     let mut snapshot = empty_snapshot(inner, inner.instance_id(), &VecDeque::new());
     push_persisted_audit(&mut snapshot.audit_records, rotate_audit.clone());
-    if let Err(error) = write_snapshot_and_truncate_wal(config, &new_key, &snapshot)
+    let next_key_path = config.state_dir.join("admin.key.next");
+    if let Err(error) = write_admin_key_file(&next_key_path, &new_key_string, true)
+        .and_then(|()| write_snapshot_and_truncate_wal(config, &new_key, &snapshot))
         .and_then(|()| write_admin_key(&config.state_dir, &new_key_string))
     {
         inner.safe_mode.store(true, Ordering::Release);
         cancel_all_temporary_leases(inner);
         return Err(error);
     }
+    let _ = std::fs::remove_file(&next_key_path);
     push_audit_record(inner, rotate_audit);
 
     cancel_all_temporary_leases(inner);

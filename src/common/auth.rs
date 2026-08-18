@@ -619,6 +619,40 @@ fn validate_admin_credential(raw: &str) -> Result<Credential, AuthFailure> {
     Ok(credential)
 }
 
+fn recover_admin_key_after_rotation(
+    state_dir: &Path,
+    current: &str,
+) -> Result<String, AuthFailure> {
+    let snapshot_path = auth_snapshot_path(state_dir);
+    if !snapshot_path.exists() {
+        return Ok(current.to_string());
+    }
+    let bytes = std::fs::read(&snapshot_path).map_err(|error| {
+        AuthFailure::new(
+            "temporary_key_store_unavailable",
+            format!("failed to read `{}`: {error}", snapshot_path.display()),
+            false,
+        )
+    })?;
+    if let Ok(Credential::Admin(current_key)) = parse_credential(current.trim()) {
+        if open_blob(&current_key, &bytes).is_ok() {
+            return Ok(current.to_string());
+        }
+    }
+    let Some(next) = read_admin_key(&state_dir.join("admin.key.next"))? else {
+        return Ok(current.to_string());
+    };
+    let Ok(Credential::Admin(next_key)) = parse_credential(next.trim()) else {
+        return Ok(current.to_string());
+    };
+    if open_blob(&next_key, &bytes).is_err() {
+        return Ok(current.to_string());
+    }
+    write_admin_key(state_dir, next.trim())?;
+    let _ = std::fs::remove_file(state_dir.join("admin.key.next"));
+    Ok(next)
+}
+
 fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFailure> {
     let path = state_dir.join("admin.key");
     let raw = if let Some(raw) = read_admin_key(&path)? {
@@ -670,6 +704,7 @@ fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFail
         );
         key
     };
+    let raw = recover_admin_key_after_rotation(state_dir, &raw)?;
     let credential = validate_admin_credential(&raw)?;
     set_process_msg_header_key(Some(raw.trim())).map_err(AuthFailure::internal)?;
     Ok(credential)
@@ -693,6 +728,7 @@ fn load_isolated_server_admin_credential(state_dir: &Path) -> Result<Credential,
             key
         }
     };
+    let raw = recover_admin_key_after_rotation(state_dir, &raw)?;
     validate_admin_credential(&raw)
 }
 

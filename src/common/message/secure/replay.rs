@@ -172,6 +172,7 @@ impl ReplayGuard {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let created = !path.exists();
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         let start_len = file.metadata()?.len();
         let mut record = [0_u8; REPLAY_RECORD_LEN];
@@ -181,6 +182,10 @@ impl ReplayGuard {
             let _ = file.set_len(start_len);
             let _ = file.sync_data();
             return Err(error);
+        }
+        if created {
+            crate::common::auth::sync_parent_directory(path)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
         }
         Ok(())
     }
