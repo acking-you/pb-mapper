@@ -323,6 +323,10 @@ pub(super) fn apply_persisted_mutation(
     Ok(())
 }
 
+// WHY: `append_wal` sets `retryable` only after it restores the file to the
+// pre-append length. Callers persist first and publish hot state only after
+// that returns, so a retryable error is a clean no-op. Fail closed only when
+// that rollback itself failed and the WAL length is unknown.
 pub(super) fn fail_closed_on_uncertain_wal(
     inner: &AuthStateInner,
     result: Result<(), AuthFailure>,
@@ -424,6 +428,8 @@ pub(super) fn append_wal(
         .and_then(|()| file.write_all(&sealed))
         .and_then(|()| file.sync_data())
     {
+        // retryable == rolled_back. A later append can then start at a known
+        // good offset. If truncation fails, the next record would be unreadable.
         let rolled_back = file
             .set_len(start_len)
             .and_then(|()| file.sync_data())
