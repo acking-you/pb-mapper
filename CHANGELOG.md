@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - Fsynced the replay-log directory on first creation, took the state lock before `--init-admin-key`, aborted accepted connection tasks on relay shutdown, and staged `admin.key.next` so an interrupted root rotation can recover a matching key and snapshot.
 - Stopped returning the embedded relay administrator key from routine config fetches; revealing it now requires an explicit FFI/UI action.
 - Took `auth.lock` before loading or creating `admin.key`, staged `server-instance-id.next` so an interrupted reset can recover a matching snapshot, discarded leftover WAL from the previous instance during that recovery, and used a user-writable Linux auth directory when `/var/lib/pb-mapper/auth` is not usable.
+- Flushed the parent directory after Windows auth-state replacements, matching the Unix `fsync` after rename.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

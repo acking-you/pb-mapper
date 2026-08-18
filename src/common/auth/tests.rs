@@ -308,6 +308,16 @@ fn platform_default_auth_state_dir_is_writable_outside_linux_system_paths() {
 }
 
 #[test]
+fn sync_parent_directory_succeeds_for_a_local_file() {
+    let state_dir = temp_state_dir("dirsync");
+    prepare_state_dir(&state_dir).unwrap();
+    let path = state_dir.join("probe");
+    std::fs::write(&path, b"x").unwrap();
+    sync_parent_directory(&path).unwrap();
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
 fn linux_default_auth_state_dir_prefers_user_data_when_system_dir_is_unusable() {
     assert_eq!(
         linux_default_auth_state_dir(0, false, None, Some(std::ffi::OsStr::new("/home/op"))),

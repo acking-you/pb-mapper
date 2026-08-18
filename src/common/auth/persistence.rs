@@ -181,20 +181,32 @@ pub(crate) fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 pub(crate) fn sync_parent_directory(path: &Path) -> Result<(), AuthFailure> {
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                AuthFailure::new(
-                    "temporary_key_store_unavailable",
-                    format!("failed to sync `{}`: {error}", parent.display()),
-                    false,
-                )
-            })?;
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    open_directory_for_sync(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            AuthFailure::new(
+                "temporary_key_store_unavailable",
+                format!("failed to sync `{}`: {error}", parent.display()),
+                false,
+            )
+        })
+}
+
+fn open_directory_for_sync(path: &Path) -> std::io::Result<File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
     }
-    let _ = path;
-    Ok(())
+    #[cfg(not(windows))]
+    File::open(path)
 }
 
 pub(super) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
