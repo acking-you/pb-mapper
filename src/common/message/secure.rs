@@ -551,6 +551,12 @@ impl ServerSecurity {
                     presented_key_id: Some(key_id),
                 })?;
         let mut current_ciphertext = ciphertext.clone();
+        let fingerprint = replay_fingerprint(key_id, &salt);
+        let already_admitted = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .already_admitted(&fingerprint, unix_seconds());
         let payload = match open_v2_payload(
             &material,
             DIRECTION_CLIENT_TO_SERVER,
@@ -559,9 +565,12 @@ impl ServerSecurity {
         ) {
             Ok(payload) => payload,
             Err(error) => {
-                if let Some(stale) =
+                if let Some(mut stale) =
                     stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext)
                 {
+                    if already_admitted {
+                        stale.response_session = None;
+                    }
                     return Err(stale);
                 }
                 return Err(ServerInitialError {
@@ -581,10 +590,13 @@ impl ServerSecurity {
             .authenticate_presented(key_id, &key)
             .map_err(|failure| ServerInitialError {
                 failure,
-                response_session: Some(session_without_context(&session)),
+                response_session: if already_admitted {
+                    None
+                } else {
+                    Some(session_without_context(&session))
+                },
                 presented_key_id: Some(key_id),
             })?;
-        let fingerprint = replay_fingerprint(key_id, &salt);
         match self
             .replay
             .lock()

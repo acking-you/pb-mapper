@@ -372,11 +372,6 @@ pub async fn run_server_on_listener(
                 let removed_from_service_map =
                     remove_server_conn(&mut server_conn_map, &key, conn_id);
                 let removed_from_active_map = manager.deregister_conn(conn_id);
-                let removed_pending_streams = remove_pending_streams_for_server(
-                    &mut pending_streams,
-                    &mut namespace_stream_counts,
-                    conn_id,
-                );
                 release_namespace_rate_limit_if_idle(
                     split_scoped_service_key(&key).0,
                     &server_conn_map,
@@ -389,7 +384,6 @@ pub async fn run_server_on_listener(
                     conn_id = %conn_id,
                     removed_from_service_map,
                     removed_from_active_map,
-                    removed_pending_streams,
                     registered_services = server_conn_map.len(),
                     server_connections = registered_server_conn_count(&server_conn_map),
                     active_connections = manager.active_conn_count(),
@@ -416,11 +410,6 @@ pub async fn run_server_on_listener(
                 let removed_from_service_map =
                     remove_server_conn(&mut server_conn_map, &key, conn_id);
                 let removed_from_active_map = manager.deregister_conn(conn_id);
-                let removed_pending_streams = remove_pending_streams_for_server(
-                    &mut pending_streams,
-                    &mut namespace_stream_counts,
-                    conn_id,
-                );
                 release_namespace_rate_limit_if_idle(
                     split_scoped_service_key(&key).0,
                     &server_conn_map,
@@ -444,7 +433,6 @@ pub async fn run_server_on_listener(
                     reason = %reason,
                     removed_from_service_map,
                     removed_from_active_map,
-                    removed_pending_streams,
                     retire_notified,
                     registered_services = server_conn_map.len(),
                     server_connections = registered_server_conn_count(&server_conn_map),

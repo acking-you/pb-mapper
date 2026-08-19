@@ -156,6 +156,10 @@ impl ReplayGuard {
         self
     }
 
+    pub(super) fn already_admitted(&mut self, fingerprint: &[u8; 32], now: u64) -> bool {
+        self.bloom.contains(fingerprint, now)
+    }
+
     pub(super) fn admit(
         &mut self,
         key_id: u64,

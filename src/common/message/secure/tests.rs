@@ -183,6 +183,48 @@ async fn revoked_first_flights_do_not_consume_the_replay_filter() {
 }
 
 #[tokio::test]
+async fn accepted_then_revoked_replay_does_not_reuse_the_session_nonce() {
+    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = temp_config();
+    let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
+    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let issued = auth
+        .issue(&admin_context, std::time::Duration::from_secs(60), None)
+        .await
+        .unwrap();
+    let Credential::Temporary { key_id, key } = parse_credential(&issued.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    let client = ClientHeaderSession::new_v2(&Credential::Temporary { key_id, key }).unwrap();
+    let bytes = encode_initial(&client, b"accepted-then-revoked").await;
+    let security = ServerSecurity::new(auth);
+    security
+        .read_initial(&mut std::io::Cursor::new(bytes.clone()))
+        .await
+        .expect("first flight should be accepted");
+    security
+        .auth()
+        .revoke(&admin_context, key_id)
+        .await
+        .unwrap();
+    let replayed = match security
+        .read_initial(&mut std::io::Cursor::new(bytes))
+        .await
+    {
+        Ok(_) => panic!("replay after revoke should fail"),
+        Err(error) => error,
+    };
+    assert_eq!(replayed.failure.code, "temporary_key_revoked");
+    assert!(
+        replayed.response_session.is_none(),
+        "a previously accepted salt must not reuse nonce 0 for the revoke error"
+    );
+
+    let _ = std::fs::remove_dir_all(config.state_dir);
+}
+
+#[tokio::test]
 async fn rotated_temporary_first_flight_returns_a_readable_rotated_error() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
     let admin = *b"0123456789abcdefghijklmnopqrstuv";

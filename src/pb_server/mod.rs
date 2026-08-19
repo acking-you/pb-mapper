@@ -381,8 +381,7 @@ pub use runtime::{
 mod connection;
 use connection::{
     decrement_namespace_stream_count, handle_conn, handle_listener,
-    release_namespace_rate_limit_if_idle, remove_pending_streams_for_server,
-    split_scoped_service_key,
+    release_namespace_rate_limit_if_idle, split_scoped_service_key,
 };
 pub async fn get_init_request(
     conn: &mut TcpStream,

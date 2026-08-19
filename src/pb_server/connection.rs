@@ -586,20 +586,3 @@ pub(super) fn release_namespace_rate_limit_if_idle(
         namespace_rate_limits.remove(&namespace);
     }
 }
-
-pub(super) fn remove_pending_streams_for_server(
-    pending_streams: &mut hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>,
-    namespace_stream_counts: &mut hashbrown::HashMap<u64, usize>,
-    server_id_to_remove: RemoteConnId,
-) -> usize {
-    let mut removed = 0;
-    pending_streams.retain(|_, (server_id, _, key)| {
-        if *server_id != server_id_to_remove {
-            return true;
-        }
-        decrement_namespace_stream_count(namespace_stream_counts, split_scoped_service_key(key).0);
-        removed += 1;
-        false
-    });
-    removed
-}
