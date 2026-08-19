@@ -46,6 +46,7 @@ All notable changes to this project will be documented in this file.
 - Waited for the auth actor to drop before `abort_actor` returns, omitted a reused GCM nonce on salt-replay errors, restored the aggregate replay count from the durable log, and finalized root rotation only when the live `admin.key` already matches the new snapshot.
 - Restricted administrator CLI retries to pre-send failures and a readable `connection_salt_replayed`, so a dropped response cannot issue a second credential.
 - Omitted a response session for already-admitted first flights that later fail authentication, and kept namespace stream accounting until the client stream deregisters even if the registration control socket drops.
+- Evaluated first-flight admission on a blocking thread under one replay lock, omitted a session when durable admission is unavailable, aged restored Bloom generations from loaded record timestamps, validated installer keys from `server.env`, refused to persist a recovery `MSG_HEADER_KEY` that cannot decrypt existing state, batched high-slot tombstone cleanup, and captured the UI credential together with the relay address before DNS.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

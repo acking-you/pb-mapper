@@ -146,6 +146,7 @@ pub(super) async fn run_auth_actor(
                     }
                 }
                 expire_due_high_slots(&inner, &mut cold, &mut tombstones, now);
+                let mut due_high = Vec::new();
                 while let Some((cleanup_at, key_id)) = tombstones.front().copied() {
                     if cleanup_at > now {
                         break;
@@ -161,11 +162,17 @@ pub(super) async fn run_auth_actor(
                             wheel.release(key_id);
                         }
                     } else {
-                        let mut high = inner
-                            .high_slot_entries
-                            .write()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        high.retain(|entry| entry.key_id != key_id);
+                        due_high.push(key_id);
+                    }
+                }
+                if !due_high.is_empty() {
+                    let due = due_high.iter().copied().collect::<HashSet<_>>();
+                    inner
+                        .high_slot_entries
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .retain(|entry| !due.contains(&entry.key_id));
+                    for key_id in due_high {
                         cold.remove(&key_id);
                         wheel.release(key_id);
                     }

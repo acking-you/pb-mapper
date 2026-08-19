@@ -103,21 +103,22 @@ install -m 0755 "$BIN_PATH" "${INSTALL_DIR}/pb-mapper"
 # key in the environment or /etc/pb-mapper/server.env must win; otherwise the
 # runtime would prefer the newly copied admin.key and lock operators out.
 install -d -m 0700 "$AUTH_DIR"
-if [ -n "${MSG_HEADER_KEY:-}" ] && [ ! -s "$ADMIN_KEY_PATH" ]; then
-  case "$MSG_HEADER_KEY" in
+INSTALLER_KEY="$(configured_msg_header_key)"
+if [ -n "$INSTALLER_KEY" ] && [ ! -s "$ADMIN_KEY_PATH" ]; then
+  case "$INSTALLER_KEY" in
     pbmt1_*)
       echo "MSG_HEADER_KEY is a temporary credential; write a 32-character administrator key to $ADMIN_KEY_PATH" >&2
       exit 1
       ;;
   esac
-  if ! admin_key_is_env_safe "$MSG_HEADER_KEY"; then
+  if ! admin_key_is_env_safe "$INSTALLER_KEY"; then
     echo "MSG_HEADER_KEY must be exactly 32 printable ASCII bytes without whitespace or NUL" >&2
     exit 1
   fi
-  printf '%s\n' "$MSG_HEADER_KEY" > "$ADMIN_KEY_PATH"
+  printf '%s\n' "$INSTALLER_KEY" > "$ADMIN_KEY_PATH"
   chmod 0600 "$ADMIN_KEY_PATH"
   echo "Persisted installer MSG_HEADER_KEY to $ADMIN_KEY_PATH"
-elif [ -z "$(configured_msg_header_key)" ] && [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
+elif [ -z "$INSTALLER_KEY" ] && [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
   install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
   echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
 fi

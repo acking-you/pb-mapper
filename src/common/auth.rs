@@ -808,6 +808,15 @@ fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFail
                 false,
             )
         })?;
+        if encrypted_auth_state_exists(state_dir)
+            && !key_matches_existing_snapshot(Some(state_dir), &key)
+        {
+            return Err(AuthFailure::new(
+                "administrator_key_invalid",
+                "MSG_HEADER_KEY does not decrypt the existing authentication state; refusing to write admin.key",
+                false,
+            ));
+        }
         write_admin_key(state_dir, &key)?;
         key
     } else if Path::new(MACHINE_MSG_HEADER_KEY_PATH).is_file() {

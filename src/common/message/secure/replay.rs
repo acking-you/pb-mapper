@@ -157,7 +157,12 @@ impl ReplayGuard {
     }
 
     pub(super) fn already_admitted(&mut self, fingerprint: &[u8; 32], now: u64) -> bool {
-        self.bloom.contains(fingerprint, now)
+        let present = self.bloom.contains(fingerprint, now);
+        if self.bloom.current_started_at != self.total_started_at {
+            self.total = 0;
+            self.total_started_at = self.bloom.current_started_at;
+        }
+        present
     }
 
     pub(super) fn admit(
@@ -268,6 +273,13 @@ impl ReplayGuard {
             let fingerprint: [u8; 32] = record[..32].try_into().expect("fingerprint width");
             self.bloom.insert(&fingerprint, timestamp);
             live.push(record);
+        }
+        if let Some(oldest) = live
+            .iter()
+            .map(|record| u64::from_be_bytes(record[32..].try_into().expect("timestamp width")))
+            .min()
+        {
+            self.bloom.current_started_at = oldest;
         }
         self.total = u32::try_from(live.len())
             .unwrap_or(u32::MAX)

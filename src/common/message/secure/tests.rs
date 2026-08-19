@@ -574,6 +574,39 @@ fn restored_replay_log_consumes_the_aggregate_budget() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn restored_replay_generation_ages_with_loaded_records() {
+    let mut random = [0_u8; 8];
+    let mut rng = rand::rng();
+    for byte in &mut random {
+        *byte = rng.random();
+    }
+    let path = std::env::temp_dir().join(format!(
+        "pb-mapper-replay-age-{}",
+        u64::from_be_bytes(random)
+    ));
+    let start = unix_seconds().saturating_sub(DEFAULT_REPLAY_WINDOW_SECONDS / 2);
+    {
+        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+            .with_max_per_key(100)
+            .with_max_total(2);
+        assert_eq!(guard.admit(1, &[1_u8; 32], start), FirstFlightAdmit::Fresh);
+        assert_eq!(guard.admit(2, &[2_u8; 32], start), FirstFlightAdmit::Fresh);
+    }
+    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+        .with_max_per_key(100)
+        .with_max_total(2);
+    assert_eq!(
+        restored.admit(
+            3,
+            &[3_u8; 32],
+            start.saturating_add(DEFAULT_REPLAY_WINDOW_SECONDS)
+        ),
+        FirstFlightAdmit::Fresh
+    );
+    let _ = std::fs::remove_file(path);
+}
+
 #[tokio::test]
 async fn legacy_initial_frame_validates_against_isolated_relay_key() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;

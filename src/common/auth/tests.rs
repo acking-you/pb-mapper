@@ -320,6 +320,46 @@ async fn overlapping_runtimes_cannot_share_an_auth_state_directory() {
 }
 
 #[tokio::test]
+async fn env_recovery_key_is_not_written_when_it_cannot_decrypt_existing_state() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let state_dir = temp_state_dir("env-key-must-match-snapshot");
+    prepare_state_dir(&state_dir).unwrap();
+    let good = *b"0123456789abcdefghijklmnopqrstuv";
+    let bad = *b"abcdefghijklmnopqrstuvwxyz012345";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 1,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let snapshot = PersistedSnapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        instance_id: [4_u8; INSTANCE_ID_LEN],
+        generations: vec![0; 1],
+        entries: Vec::new(),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+        admin_replays: Vec::new(),
+        audit_records: VecDeque::new(),
+        root_epoch: 0,
+    };
+    write_snapshot_and_truncate_wal(&config, &good, &snapshot).unwrap();
+    set_process_msg_header_key(Some(std::str::from_utf8(&bad).unwrap())).unwrap();
+    std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&bad).unwrap());
+    let error = match AuthRuntime::from_process(config).await {
+        Ok(_) => panic!("a mismatched recovery key must not start the runtime"),
+        Err(error) => error,
+    };
+    std::env::remove_var(ENV_MSG_HEADER_KEY);
+    set_process_msg_header_key(None).unwrap();
+    assert_eq!(error.code, "administrator_key_invalid");
+    assert!(
+        !state_dir.join("admin.key").exists(),
+        "a mismatched MSG_HEADER_KEY must not become the live administrator key"
+    );
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
 async fn from_isolated_state_takes_the_state_lock_before_creating_admin_key() {
     let state_dir = temp_state_dir("lock-before-key");
     prepare_state_dir(&state_dir).unwrap();

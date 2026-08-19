@@ -158,9 +158,9 @@ impl PbMapperState {
             enable_keep_alive,
             local_sock_addr,
             remote_sock_addr,
+            credential,
         } = commit;
 
-        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         self.service_credentials.remove(&service_key);
         if let Some(previous) = self.service_handles.remove(&service_key) {
             tracing::warn!(
@@ -315,9 +315,9 @@ impl PbMapperState {
             enable_keep_alive,
             local_sock_addr,
             remote_sock_addr,
+            credential,
         } = commit;
 
-        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         self.client_credentials.remove(&service_key);
         if let Some(previous) = self.client_handles.remove(&service_key) {
             tracing::warn!(

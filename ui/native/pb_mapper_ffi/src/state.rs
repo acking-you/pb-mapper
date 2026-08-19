@@ -432,6 +432,7 @@ struct RegisterCommit {
     enable_keep_alive: bool,
     local_sock_addr: SocketAddr,
     remote_sock_addr: SocketAddr,
+    credential: Credential,
 }
 
 /// Everything [`PbMapperState::finish_connect`] needs once the slow work is done.
@@ -442,6 +443,7 @@ struct ConnectCommit {
     enable_keep_alive: bool,
     local_sock_addr: SocketAddr,
     remote_sock_addr: SocketAddr,
+    credential: Credential,
 }
 
 pub struct PbMapperState {
@@ -494,10 +496,13 @@ pub async fn register_service(
     // 1. Claim the key and take what the slow work needs. Microseconds.
     //    `_claim` is held to the end of the function on purpose: dropping it
     //    early would release the key while the setup is still running.
-    let (_claim, server_address) = {
+    //    The credential is captured with the relay address so a later config
+    //    change cannot pair a new key with the already-resolved socket.
+    let (_claim, server_address, credential) = {
         let state = state.lock().await;
         let claim = state.claim_registering(&service_key)?;
-        (claim, state.config.server_address.clone())
+        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
+        (claim, state.config.server_address.clone(), credential)
     };
 
     // 2. The slow parts, with the lock released.
@@ -524,6 +529,7 @@ pub async fn register_service(
             enable_keep_alive,
             local_sock_addr,
             remote_sock_addr,
+            credential,
         })
         .await
 }
@@ -537,10 +543,11 @@ pub async fn connect_service(
     protocol: String,
     enable_keep_alive: bool,
 ) -> Result<(), CtlError> {
-    let (_claim, server_address) = {
+    let (_claim, server_address, credential) = {
         let state = state.lock().await;
         let claim = state.claim_connecting(&service_key)?;
-        (claim, state.config.server_address.clone())
+        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
+        (claim, state.config.server_address.clone(), credential)
     };
 
     let local_sock_addr = get_sockaddr_async(&local_address)
@@ -581,6 +588,7 @@ pub async fn connect_service(
             enable_keep_alive,
             local_sock_addr,
             remote_sock_addr,
+            credential,
         })
         .await
 }
@@ -688,6 +696,15 @@ mod tests {
     #[tokio::test]
     async fn a_failed_registration_releases_its_claim() {
         let (state, root) = temp_state("release");
+        struct RestoreProcessKey;
+        impl Drop for RestoreProcessKey {
+            fn drop(&mut self) {
+                let _ = set_process_msg_header_key(None);
+            }
+        }
+        set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv"))
+            .expect("test credential");
+        let _restore_process_key = RestoreProcessKey;
 
         // Fails in phase 2, while the claim is held.
         let first = register_service(
