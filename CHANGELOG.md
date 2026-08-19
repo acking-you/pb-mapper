@@ -50,6 +50,7 @@ All notable changes to this project will be documented in this file.
 - Kept replay-lock waits off Tokio workers, claimed limited and stale-root first flights before sending a nonce-0 error, accepted a recovery key that decrypts WAL-only state, verified legacy and installer keys against existing state, rolled back UI config when persistence failed, and probed tunnels at their pinned relay endpoints.
 - Stopped persisting limited first flights once the Bloom budget is full, omitted their nonce-0 error sessions, and left container `admin.key` unset when encrypted state remains so the runtime can verify a legacy recovery key.
 - Claimed revoked or expired first flights before returning a nonce-0 error, scheduled high-slot expiries instead of scanning every tick, marked administrator requests sent only after the first flight is written, allowed clearing the UI credential, failed `pb-mapper connect` without a credential, and fail-closed truncated replay records.
+- Bounded `abort_actor` so a leaked `AuthStateInner` cannot hang shutdown, and made `register`/`status` fail with a nonzero exit status when the process credential is missing or rejected.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

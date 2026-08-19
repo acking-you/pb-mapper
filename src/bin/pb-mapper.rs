@@ -315,6 +315,9 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
+    pb_mapper::common::checksum::get_process_credential().map_err(|error| {
+        std::io::Error::other(format!("registration credential is required: {error}"))
+    })?;
     let local_addr = get_sockaddr_async(&args.addr).await?;
     let remote_addr = get_pb_mapper_server_async(args.relay.server.as_deref()).await?;
     let options = ServerTunnelOptions {
@@ -383,8 +386,7 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_status(args: StatusArgs) -> Result<(), Box<dyn Error>> {
     let remote_addr = get_pb_mapper_server_async(args.server.as_deref()).await?;
-    handle_status_cli_scoped(args.op, remote_addr, args.namespace).await;
-    Ok(())
+    handle_status_cli_scoped(args.op, remote_addr, args.namespace).await
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, String> {

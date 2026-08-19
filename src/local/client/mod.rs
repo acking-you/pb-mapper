@@ -462,14 +462,16 @@ pub async fn handle_status_cli<A: ToSocketAddrs + Debug + Copy + Send + 'static>
     op: StatusOp,
     addr: A,
 ) {
-    handle_status_cli_scoped(op, addr, None).await
+    if let Err(error) = handle_status_cli_scoped(op, addr, None).await {
+        tracing::error!("{error}");
+    }
 }
 
 pub async fn handle_status_cli_scoped<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
     op: StatusOp,
     addr: A,
     namespace: Option<u64>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     match op {
         StatusOp::RemoteId => show_status_scoped(addr, PbConnStatusReq::RemoteId, namespace).await,
         StatusOp::Keys => show_status_scoped(addr, PbConnStatusReq::Keys, namespace).await,
@@ -480,12 +482,12 @@ pub async fn show_status_scoped<A: ToSocketAddrs + Debug + Copy + Send + 'static
     remote_addr: A,
     req: PbConnStatusReq,
     namespace: Option<u64>,
-) {
-    let mut stream = snafu_error_get_or_return!(
-        each_addr(remote_addr, TcpStream::connect).await,
-        "get status stream"
-    );
-    let status = snafu_error_get_or_return!(get_status_scoped(&mut stream, req, namespace).await);
-    let status = snafu_error_get_or_return!(serde_json::to_string_pretty(&status));
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = each_addr(remote_addr, TcpStream::connect)
+        .await
+        .map_err(|error| format!("get status stream: {error}"))?;
+    let status = get_status_scoped(&mut stream, req, namespace).await?;
+    let status = serde_json::to_string_pretty(&status)?;
     println!("Status:{status}");
+    Ok(())
 }
