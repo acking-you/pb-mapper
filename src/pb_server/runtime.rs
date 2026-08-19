@@ -104,7 +104,7 @@ pub async fn run_server_on_listener(
     let new_streams_per_second = env_limit("PB_MAPPER_NEW_STREAMS_PER_SECOND", 100);
     let new_streams_burst = env_limit("PB_MAPPER_NEW_STREAMS_BURST", 200);
     let mut next_server_generation = 1_u64;
-    let mut connection_tasks = Vec::new();
+    let mut connection_tasks = tokio::task::JoinSet::new();
 
     let listen_addr = listener.local_addr()?;
     tracing::info!(
@@ -359,14 +359,13 @@ pub async fn run_server_on_listener(
                 );
                 let manager_task_sender = manager.get_task_sender();
                 let security = security.clone();
-                connection_tasks
-                    .retain(|handle: &tokio::task::JoinHandle<()>| !handle.is_finished());
-                connection_tasks.push(tokio::spawn(async move {
+                while connection_tasks.try_join_next().is_some() {}
+                connection_tasks.spawn(async move {
                     snafu_error_handle!(
                         handle_conn(conn_id, peer_addr, manager_task_sender, stream, security)
                             .await
                     );
-                }));
+                });
             }
             ManagerTask::DeRegisterServerConn { key, conn_id } => {
                 let removed_from_service_map =
@@ -921,10 +920,10 @@ pub async fn run_server_on_listener(
     // Abort first, then wait. Dropping a JoinHandle after abort() does not
     // wait for the task to drop its AuthRuntime clone, so a UI restart can
     // still see auth.lock held.
+    connection_tasks.abort_all();
+    while connection_tasks.join_next().await.is_some() {}
     abort_and_wait(
-        connection_tasks
-            .into_iter()
-            .chain(std::iter::once(listener_handle))
+        std::iter::once(listener_handle)
             .chain(std::iter::once(shutdown_handle))
             .chain(status_forward_handle),
     )

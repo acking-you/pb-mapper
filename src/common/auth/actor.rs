@@ -128,6 +128,7 @@ pub(super) async fn run_auth_actor(
         tokio::select! {
             _ = tick.tick() => {
                 let now = unix_seconds();
+                let mut due_tombstones = Vec::new();
                 for lease in wheel.advance(now) {
                     let key_id = lease.key_id();
                     let version = lease.wheel_version.load(Ordering::Acquire);
@@ -144,11 +145,7 @@ pub(super) async fn run_auth_actor(
                             if let Some(metadata) = cold.get_mut(&key_id) {
                                 metadata.tombstoned_at = tombstoned_at;
                             }
-                            push_tombstone(
-                                &mut tombstones,
-                                tombstoned_at,
-                                key_id,
-                            );
+                            due_tombstones.push((tombstoned_at, key_id));
                             tracing::info!(
                                 event = "temporary_key_expired",
                                 auth_stage = "expiry",
@@ -161,6 +158,7 @@ pub(super) async fn run_auth_actor(
                         lease.cancel_expired();
                     }
                 }
+                extend_tombstones(&mut tombstones, due_tombstones);
                 expire_due_high_slots(&inner, &mut cold, &mut tombstones, &mut high_expiries, now);
                 let mut due_high = Vec::new();
                 while let Some((cleanup_at, key_id)) = tombstones.front().copied() {
@@ -800,6 +798,57 @@ fn push_tombstone(tombstones: &mut VecDeque<(u64, u64)>, tombstoned_at: u64, key
     let cleanup_at = tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs());
     let index = tombstones.partition_point(|(current, _)| *current <= cleanup_at);
     tombstones.insert(index, (cleanup_at, key_id));
+}
+
+fn extend_tombstones(tombstones: &mut VecDeque<(u64, u64)>, due: Vec<(u64, u64)>) {
+    if due.is_empty() {
+        return;
+    }
+    if due.len() == 1 {
+        let (tombstoned_at, key_id) = due[0];
+        push_tombstone(tombstones, tombstoned_at, key_id);
+        return;
+    }
+    let mut extra = due
+        .into_iter()
+        .map(|(tombstoned_at, key_id)| {
+            (
+                tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs()),
+                key_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    extra.sort_unstable_by_key(|(cleanup_at, _)| *cleanup_at);
+    if tombstones.is_empty() {
+        *tombstones = extra.into();
+        return;
+    }
+    let existing = tombstones.drain(..).collect::<Vec<_>>();
+    *tombstones = merge_sorted_tombstones(existing, extra).into();
+}
+
+fn merge_sorted_tombstones(left: Vec<(u64, u64)>, right: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+    let mut left = left.into_iter().peekable();
+    let mut right = right.into_iter().peekable();
+    loop {
+        match (left.peek(), right.peek()) {
+            (Some((left_at, _)), Some((right_at, _))) if left_at <= right_at => {
+                merged.push(left.next().expect("peeked left tombstone"));
+            }
+            (Some(_), Some(_)) => merged.push(right.next().expect("peeked right tombstone")),
+            (Some(_), None) => {
+                merged.extend(left);
+                break;
+            }
+            (None, Some(_)) => {
+                merged.extend(right);
+                break;
+            }
+            (None, None) => break,
+        }
+    }
+    merged
 }
 
 fn actor_gc(
