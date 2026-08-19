@@ -51,6 +51,7 @@ All notable changes to this project will be documented in this file.
 - Stopped persisting limited first flights once the Bloom budget is full, omitted their nonce-0 error sessions, and left container `admin.key` unset when encrypted state remains so the runtime can verify a legacy recovery key.
 - Claimed revoked or expired first flights before returning a nonce-0 error, scheduled high-slot expiries instead of scanning every tick, marked administrator requests sent only after the first flight is written, allowed clearing the UI credential, failed `pb-mapper connect` without a credential, and fail-closed truncated replay records.
 - Bounded `abort_actor` so a leaked `AuthStateInner` cannot hang shutdown, and made `register`/`status` fail with a nonzero exit status when the process credential is missing or rejected.
+- Aborted pooled registration workers when the outer service task is cancelled, and kept Compose upgrades on the machine-derived key plus a persisted `/var/lib/pb-mapper-server` volume.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use snafu::ResultExt;
 use tokio::net::TcpStream;
+use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::instrument;
 
@@ -343,7 +344,7 @@ async fn run_server_side_cli_pool<LocalStream, A>(
     if pool_size > 1 {
         for worker_index in 1..pool_size {
             let worker_key = key.clone();
-            worker_handles.push(tokio::spawn(async move {
+            worker_handles.push(AbortOnDropHandle(Some(tokio::spawn(async move {
                 run_server_side_cli_worker_with_credential::<LocalStream, _>(
                     local_addr,
                     remote_addr,
@@ -354,7 +355,7 @@ async fn run_server_side_cli_pool<LocalStream, A>(
                     pinned_credential,
                 )
                 .await;
-            }));
+            }))));
         }
     }
     run_server_side_cli_worker_with_credential::<LocalStream, _>(
@@ -368,12 +369,31 @@ async fn run_server_side_cli_pool<LocalStream, A>(
     )
     .await;
     for handle in worker_handles {
-        if let Err(e) = handle.await {
+        if let Err(e) = handle.join().await {
             tracing::warn!(
                 event = "local_server_control_worker_join_failed",
                 error = %e,
                 "local server control worker join failed"
             );
+        }
+    }
+}
+
+struct AbortOnDropHandle(Option<JoinHandle<()>>);
+
+impl AbortOnDropHandle {
+    async fn join(mut self) -> Result<(), tokio::task::JoinError> {
+        match self.0.take() {
+            Some(handle) => handle.await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for AbortOnDropHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
         }
     }
 }
