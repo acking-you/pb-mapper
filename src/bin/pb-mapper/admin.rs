@@ -325,11 +325,13 @@ async fn send_admin_request_with_timeout(
 ) -> Result<AdminResponse, Box<dyn Error>> {
     let encoded = PbConnRequest::Admin(request).encode()?;
     for attempt in 0..2 {
+        let sent = std::sync::atomic::AtomicBool::new(false);
         let attempt_result = tokio::time::timeout(io_timeout, async {
             let mut stream = TcpStream::connect(remote_addr)
                 .await
                 .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
             let session = ClientHeaderSession::from_process()?;
+            sent.store(true, std::sync::atomic::Ordering::Release);
             session.write_initial(&mut stream, &encoded).await?;
             let mut reader = session.response_reader(&mut stream)?;
             let message = reader.read_msg().await?;
@@ -345,10 +347,12 @@ async fn send_admin_request_with_timeout(
                 ),
             )
         });
+        let pre_send = !sent.load(std::sync::atomic::Ordering::Acquire);
         let response = match attempt_result {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) if attempt == 0 => continue,
+            Ok(Err(_)) if attempt == 0 && pre_send => continue,
             Ok(Err(error)) => return Err(error),
+            Err(_) if attempt == 0 && pre_send => continue,
             Err(error) => return Err(error.into()),
         };
         match response {

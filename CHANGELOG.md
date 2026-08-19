@@ -44,6 +44,7 @@ All notable changes to this project will be documented in this file.
 - Looked up high-slot credentials for admin list/show/renew/revoke, counted them in status, scheduled their tombstones across restart, and expired due high-slot entries on the actor tick. UI tunnel stop now drops the pinned credential. First-flight decrypt failures no longer send an error frame the presenter cannot read.
 - Reported cancelled leases by recorded cause, aborted the auth actor on UI shutdown timeout, validated replacement credentials before stopping a live tunnel, preserved presented key IDs on unreadable first flights, finalized reset when the new instance id was already installed, and bounded aggregate first-flight Bloom inserts.
 - Waited for the auth actor to drop before `abort_actor` returns, omitted a reused GCM nonce on salt-replay errors, restored the aggregate replay count from the durable log, and finalized root rotation only when the live `admin.key` already matches the new snapshot.
+- Restricted administrator CLI retries to pre-send failures and a readable `connection_salt_replayed`, so a dropped response cannot issue a second credential.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.
