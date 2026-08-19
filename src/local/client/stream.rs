@@ -6,16 +6,14 @@ use tokio::net::TcpStream;
 use tracing::{info_span, instrument};
 
 use super::error::{
-    ConnectRemoteStreamSnafu, ControlIoTimeoutSnafu, DecodeSubcribeRespSnafu,
-    EncodeSubcribeReqSnafu, ReadSubcribeRespSnafu, Result, SubcribeRespNotMatchSnafu,
-    WriteSubcribeReqSnafu,
+    ConnectRemoteStreamSnafu, DecodeSubcribeRespSnafu, EncodeSubcribeReqSnafu, Result,
+    SubcribeRespNotMatchSnafu, WriteSubcribeReqSnafu,
 };
 use crate::common::checksum::Credential;
 use crate::common::config::control_io_timeout;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
 use crate::common::message::secure::ClientHeaderSession;
-use crate::common::message::MessageReader;
 use crate::local::client::error::CreateHeaderToolSnafu;
 use crate::snafu_error_handle;
 use uni_stream::addr::{each_addr, ToSocketAddrs};
@@ -61,27 +59,11 @@ pub async fn handle_local_stream<
         let msg = request.encode().context(EncodeSubcribeReqSnafu)?;
         let session = ClientHeaderSession::new_v2(&credential)
             .context(CreateHeaderToolSnafu { action: "session" })?;
-        match tokio::time::timeout(timeout, session.write_initial(&mut remote_stream, &msg)).await {
-            Ok(result) => result.context(WriteSubcribeReqSnafu)?,
-            Err(_) => ControlIoTimeoutSnafu {
-                action: "write subcribe request",
-                timeout,
-            }
-            .fail()?,
-        }
-        // handle response
-        let mut msg_reader = session
-            .response_reader(&mut remote_stream)
-            .context(CreateHeaderToolSnafu { action: "reader" })?;
-        let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
-            Ok(result) => result.context(ReadSubcribeRespSnafu)?,
-            Err(_) => ControlIoTimeoutSnafu {
-                action: "read subcribe response",
-                timeout,
-            }
-            .fail()?,
-        };
-        let resp = PbConnResponse::decode(msg).context(DecodeSubcribeRespSnafu)?;
+        let response = session
+            .exchange(&mut remote_stream, &msg, timeout)
+            .await
+            .context(WriteSubcribeReqSnafu)?;
+        let resp = PbConnResponse::decode(&response).context(DecodeSubcribeRespSnafu)?;
         match resp {
             PbConnResponse::Subcribe {
                 codec_key,

@@ -59,7 +59,7 @@ impl PbMapperState {
         sorted_configs.sort_by_key(|config| config.created_at);
 
         for config in sorted_configs {
-            let (status, message) = self.calculate_service_status(&config.service_key).await;
+            let (status, message) = self.get_cached_service_status(&config.service_key).await;
 
             services.push(ServiceConfigInfo {
                 service_key: config.service_key.clone(),
@@ -85,7 +85,7 @@ impl PbMapperState {
     }
 
     pub async fn get_service_status(&self, service_key: String) -> ServiceStatusResponse {
-        let (status, message) = self.calculate_service_status(&service_key).await;
+        let (status, message) = self.get_cached_service_status(&service_key).await;
         ServiceStatusResponse {
             service_key,
             status,
@@ -98,7 +98,7 @@ impl PbMapperState {
         let mut client_infos = Vec::new();
 
         for (service_key, config) in store.clients.iter() {
-            let (status, status_message) = self.calculate_client_status(service_key).await;
+            let (status, status_message) = self.get_cached_client_status(service_key).await;
 
             client_infos.push(ClientConfigInfo {
                 service_key: config.service_key.clone(),
@@ -125,7 +125,7 @@ impl PbMapperState {
     }
 
     pub async fn get_client_status(&self, service_key: String) -> ClientStatusResponse {
-        let (status, message) = self.calculate_client_status(&service_key).await;
+        let (status, message) = self.get_cached_client_status(&service_key).await;
         ClientStatusResponse {
             service_key,
             status,
@@ -285,79 +285,68 @@ impl PbMapperState {
 
     // Cache service status to avoid blocking UI with network checks on every paint.
     async fn get_cached_service_status(&self, service_key: &str) -> (String, String) {
-        if let Some(handle) = self.service_handles.get(service_key) {
-            if handle.is_finished() {
-                return (
-                    "failed".to_string(),
-                    "Service connection terminated".to_string(),
-                );
-            }
-
-            let cached = {
-                let cache = self.service_status_cache.read().await;
-                cache.get(service_key).cloned()
-            };
-
-            let should_refresh = cached
-                .as_ref()
-                .map(|entry| entry.updated_at.elapsed() > STATUS_CACHE_TTL)
-                .unwrap_or(true);
-
-            if should_refresh {
-                self.schedule_service_status_refresh(service_key).await;
-            }
-
-            if let Some(entry) = cached {
-                return (entry.status, entry.message);
-            }
-
+        let Some(runtime) = self.service_runtime.get(service_key) else {
             return (
-                "retrying".to_string(),
-                "Checking service status...".to_string(),
+                "stopped".to_string(),
+                "Service is not registered".to_string(),
+            );
+        };
+        if runtime.handle.is_finished() {
+            return (
+                "failed".to_string(),
+                "Service connection terminated".to_string(),
             );
         }
-
-        (
-            "stopped".to_string(),
-            "Service is not registered".to_string(),
-        )
+        let cached = {
+            let cache = self.service_status_cache.read().await;
+            cache.get(service_key).cloned()
+        };
+        if cached
+            .as_ref()
+            .map(|entry| entry.updated_at.elapsed() > STATUS_CACHE_TTL)
+            .unwrap_or(true)
+        {
+            self.schedule_service_status_refresh(service_key).await;
+        }
+        cached
+            .map(|entry| (entry.status, entry.message))
+            .unwrap_or_else(|| {
+                (
+                    "retrying".to_string(),
+                    "Checking service status...".to_string(),
+                )
+            })
     }
 
-    // Cache client status to avoid blocking UI with network checks on every paint.
     async fn get_cached_client_status(&self, service_key: &str) -> (String, String) {
-        if let Some(handle) = self.client_handles.get(service_key) {
-            if handle.is_finished() {
-                return (
-                    "failed".to_string(),
-                    "Client connection terminated".to_string(),
-                );
-            }
-
-            let cached = {
-                let cache = self.client_status_cache.read().await;
-                cache.get(service_key).cloned()
-            };
-
-            let should_refresh = cached
-                .as_ref()
-                .map(|entry| entry.updated_at.elapsed() > STATUS_CACHE_TTL)
-                .unwrap_or(true);
-
-            if should_refresh {
-                self.schedule_client_status_refresh(service_key).await;
-            }
-
-            if let Some(entry) = cached {
-                return (entry.status, entry.message);
-            }
-
+        let Some(runtime) = self.client_runtime.get(service_key) else {
+            return ("stopped".to_string(), "Client is not connected".to_string());
+        };
+        if runtime.handle.is_finished() {
             return (
-                "retrying".to_string(),
-                "Checking client status...".to_string(),
+                "failed".to_string(),
+                "Client connection terminated".to_string(),
             );
         }
-
-        ("stopped".to_string(), "Client is not connected".to_string())
+        let cached = {
+            let cache = self.client_status_cache.read().await;
+            cache.get(service_key).cloned()
+        };
+        if cached
+            .as_ref()
+            .map(|entry| entry.updated_at.elapsed() > STATUS_CACHE_TTL)
+            .unwrap_or(true)
+        {
+            self.schedule_client_status_refresh(service_key).await;
+        }
+        cached
+            .map(|entry| (entry.status, entry.message))
+            .unwrap_or_else(|| {
+                (
+                    "retrying".to_string(),
+                    "Checking client status...".to_string(),
+                )
+            })
     }
 
     pub(super) async fn schedule_service_status_refresh(&self, service_key: &str) {
@@ -369,7 +358,10 @@ impl PbMapperState {
             refreshing.insert(service_key.to_string());
         }
 
-        let tunnel = self.service_tunnels.get(service_key);
+        let tunnel = self
+            .service_runtime
+            .get(service_key)
+            .map(|runtime| runtime.pin);
         let server_addr = tunnel
             .map(|tunnel| tunnel.endpoint.to_string())
             .unwrap_or_else(|| self.config.server_address.clone());
@@ -436,7 +428,10 @@ impl PbMapperState {
             refreshing.insert(service_key.to_string());
         }
 
-        let tunnel = self.client_tunnels.get(service_key);
+        let tunnel = self
+            .client_runtime
+            .get(service_key)
+            .map(|runtime| runtime.pin);
         let server_addr = tunnel
             .map(|tunnel| tunnel.endpoint.to_string())
             .unwrap_or_else(|| self.config.server_address.clone());
@@ -492,13 +487,5 @@ impl PbMapperState {
             let mut refreshing = refreshing.write().await;
             refreshing.remove(&key);
         });
-    }
-
-    async fn calculate_service_status(&self, service_key: &str) -> (String, String) {
-        self.get_cached_service_status(service_key).await
-    }
-
-    async fn calculate_client_status(&self, service_key: &str) -> (String, String) {
-        self.get_cached_client_status(service_key).await
     }
 }

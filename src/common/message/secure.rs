@@ -18,7 +18,7 @@
 //! log suppression, and protocol tests are isolated in focused child modules.
 
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
@@ -142,6 +142,32 @@ impl ClientHeaderSession {
                 0,
             )?)),
         }
+    }
+
+    pub async fn exchange<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+        &self,
+        stream: &mut T,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        match tokio::time::timeout(timeout, self.write_initial(stream, payload)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(protocol_error(format!(
+                    "timed out writing first-flight request after {timeout:?}"
+                )))
+            }
+        }
+        let mut reader = self.response_reader(stream)?;
+        let message = match tokio::time::timeout(timeout, reader.read_msg()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(protocol_error(format!(
+                    "timed out reading first-flight response after {timeout:?}"
+                )))
+            }
+        };
+        Ok(message.to_vec())
     }
 
     pub fn continuation_writer<'a, T: AsyncWriteExt + Unpin>(
@@ -276,6 +302,31 @@ impl ServerInitialError {
             presented_key_id: None,
         }
     }
+
+    fn fail(code: &'static str, message: impl Into<String>, retryable: bool) -> Self {
+        Self::new(AuthFailure::new(code, message, retryable))
+    }
+
+    fn fail_key(
+        code: &'static str,
+        message: impl Into<String>,
+        retryable: bool,
+        key_id: u64,
+    ) -> Self {
+        Self {
+            failure: AuthFailure::new(code, message, retryable),
+            response_session: None,
+            presented_key_id: Some(key_id),
+        }
+    }
+
+    fn from_failure_key(failure: AuthFailure, key_id: u64) -> Self {
+        Self {
+            failure,
+            response_session: None,
+            presented_key_id: Some(key_id),
+        }
+    }
 }
 
 impl fmt::Debug for ServerInitialError {
@@ -361,98 +412,59 @@ impl ServerSecurity {
         checksum_bytes: [u8; 4],
     ) -> std::result::Result<ServerInitialMessage, ServerInitialError> {
         if !self.auth.legacy_protocol_allowed().unwrap_or(false) {
-            return Err(ServerInitialError {
-                failure: AuthFailure::new(
-                    "legacy_protocol_disabled",
-                    "legacy protocol is disabled by the administrator",
-                    false,
-                ),
-                response_session: None,
-                presented_key_id: None,
-            });
+            return Err(ServerInitialError::fail(
+                "legacy_protocol_disabled",
+                "legacy protocol is disabled by the administrator",
+                false,
+            ));
         }
-        let key = self
-            .auth
-            .admin_key()
-            .map_err(|failure| ServerInitialError {
-                failure,
-                response_session: None,
-                presented_key_id: None,
-            })?;
+        let key = self.auth.admin_key().map_err(ServerInitialError::new)?;
         let checksum = u32::from_be_bytes(checksum_bytes);
-        let datalen = reader
-            .read_u32()
-            .await
-            .map_err(|error| ServerInitialError {
-                failure: AuthFailure::new(
-                    "legacy_frame_invalid",
-                    format!("failed to read legacy frame length: {error}"),
-                    true,
-                ),
-                response_session: None,
-                presented_key_id: None,
-            })?;
+        let datalen = reader.read_u32().await.map_err(|error| {
+            ServerInitialError::fail(
+                "legacy_frame_invalid",
+                format!("failed to read legacy frame length: {error}"),
+                true,
+            )
+        })?;
         if !valid_checksum_for_key(datalen, checksum, &key) || datalen > MAX_INITIAL_CIPHERTEXT_LEN
         {
-            return Err(ServerInitialError {
-                failure: AuthFailure::new(
-                    "legacy_frame_invalid",
-                    "legacy frame checksum or length is invalid",
-                    false,
-                ),
-                response_session: None,
-                presented_key_id: None,
-            });
+            return Err(ServerInitialError::fail(
+                "legacy_frame_invalid",
+                "legacy frame checksum or length is invalid",
+                false,
+            ));
         }
         let mut encrypted = vec![0_u8; datalen as usize];
-        reader
-            .read_exact(&mut encrypted)
-            .await
-            .map_err(|error| ServerInitialError {
-                failure: AuthFailure::new(
-                    "legacy_frame_invalid",
-                    format!("failed to read legacy frame body: {error}"),
-                    true,
-                ),
-                response_session: None,
-                presented_key_id: None,
-            })?;
-        let mut codec = Aes256GcmDeCodec::try_new(&key).map_err(|_| ServerInitialError {
-            failure: AuthFailure::new(
+        reader.read_exact(&mut encrypted).await.map_err(|error| {
+            ServerInitialError::fail(
+                "legacy_frame_invalid",
+                format!("failed to read legacy frame body: {error}"),
+                true,
+            )
+        })?;
+        let mut codec = Aes256GcmDeCodec::try_new(&key).map_err(|_| {
+            ServerInitialError::fail(
                 "legacy_decrypt_failed",
                 "failed to initialize legacy decryption",
                 false,
-            ),
-            response_session: None,
-            presented_key_id: None,
+            )
         })?;
-        let plain = codec
-            .decrypt(&mut encrypted)
-            .map_err(|_| ServerInitialError {
-                failure: AuthFailure::new(
-                    "legacy_decrypt_failed",
-                    "legacy credential or encrypted frame is invalid",
-                    false,
-                ),
-                response_session: None,
-                presented_key_id: None,
-            })?;
+        let plain = codec.decrypt(&mut encrypted).map_err(|_| {
+            ServerInitialError::fail(
+                "legacy_decrypt_failed",
+                "legacy credential or encrypted frame is invalid",
+                false,
+            )
+        })?;
         let context = self
             .auth
             .authenticate_presented(0, &key)
-            .map_err(|failure| ServerInitialError {
-                failure,
-                response_session: None,
-                presented_key_id: None,
-            })?;
-        let legacy_guard =
-            self.auth
-                .record_legacy_connection()
-                .map_err(|failure| ServerInitialError {
-                    failure,
-                    response_session: None,
-                    presented_key_id: None,
-                })?;
+            .map_err(ServerInitialError::new)?;
+        let legacy_guard = self
+            .auth
+            .record_legacy_connection()
+            .map_err(ServerInitialError::new)?;
         Ok(ServerInitialMessage {
             payload: plain.to_vec(),
             session: ServerHeaderSession {
@@ -472,37 +484,28 @@ impl ServerSecurity {
         reader: &mut T,
     ) -> std::result::Result<ServerInitialMessage, ServerInitialError> {
         let mut remainder = [0_u8; FIRST_PREFIX_REMAINDER_LEN];
-        reader
-            .read_exact(&mut remainder)
-            .await
-            .map_err(|error| ServerInitialError {
-                failure: AuthFailure::new(
-                    "protocol_v2_header_invalid",
-                    format!("failed to read protocol-v2 header: {error}"),
-                    true,
-                ),
-                response_session: None,
-                presented_key_id: None,
-            })?;
+        reader.read_exact(&mut remainder).await.map_err(|error| {
+            ServerInitialError::fail(
+                "protocol_v2_header_invalid",
+                format!("failed to read protocol-v2 header: {error}"),
+                true,
+            )
+        })?;
         let version = remainder[0];
         let flags = remainder[1];
         let reserved = u16::from_be_bytes([remainder[2], remainder[3]]);
         if version != PROTOCOL_V2_VERSION || flags != 0 || reserved != 0 {
-            return Err(ServerInitialError {
-                failure: AuthFailure::new(
-                    if version != PROTOCOL_V2_VERSION {
-                        "protocol_version_unsupported"
-                    } else {
-                        "protocol_v2_header_invalid"
-                    },
-                    format!(
-                        "unsupported protocol header version={version} flags={flags} reserved={reserved}"
-                    ),
-                    false,
+            return Err(ServerInitialError::fail(
+                if version != PROTOCOL_V2_VERSION {
+                    "protocol_version_unsupported"
+                } else {
+                    "protocol_v2_header_invalid"
+                },
+                format!(
+                    "unsupported protocol header version={version} flags={flags} reserved={reserved}"
                 ),
-                response_session: None,
-                presented_key_id: None,
-            });
+                false,
+            ));
         }
         let key_id = u64::from_be_bytes(remainder[4..12].try_into().expect("fixed key id"));
         let salt: [u8; CONNECTION_SALT_LEN] =
@@ -510,46 +513,36 @@ impl ServerSecurity {
         let client_timestamp = u64::from_be_bytes(salt[..8].try_into().expect("fixed timestamp"));
         let now = unix_seconds();
         if now.abs_diff(client_timestamp) > MAX_CONNECTION_CLOCK_SKEW_SECONDS {
-            return Err(ServerInitialError {
-                failure: AuthFailure::new(
-                    "connection_timestamp_invalid",
-                    "protocol-v2 connection timestamp is outside the accepted clock-skew window",
-                    false,
-                ),
-                response_session: None,
-                presented_key_id: Some(key_id),
-            });
+            return Err(ServerInitialError::fail_key(
+                "connection_timestamp_invalid",
+                "protocol-v2 connection timestamp is outside the accepted clock-skew window",
+                false,
+                key_id,
+            ));
         }
         let key = self
             .auth
             .derive_key(key_id)
-            .map_err(|failure| ServerInitialError {
-                failure,
-                response_session: None,
-                presented_key_id: Some(key_id),
-            })?;
-        let material = derive_material(key_id, &key, salt).map_err(|error| ServerInitialError {
-            failure: AuthFailure::new(
+            .map_err(|failure| ServerInitialError::from_failure_key(failure, key_id))?;
+        let material = derive_material(key_id, &key, salt).map_err(|error| {
+            ServerInitialError::fail_key(
                 "protocol_v2_key_derivation_failed",
                 error.to_string(),
                 false,
-            ),
-            response_session: None,
-            presented_key_id: Some(key_id),
+                key_id,
+            )
         })?;
         let mut session = v2_session(key, material.clone());
-        let (counter, ciphertext) =
-            read_initial_v2_ciphertext(reader)
-                .await
-                .map_err(|error| ServerInitialError {
-                    failure: AuthFailure::new(
-                        "protocol_v2_decrypt_failed",
-                        error.to_string(),
-                        false,
-                    ),
-                    response_session: None,
-                    presented_key_id: Some(key_id),
-                })?;
+        let (counter, ciphertext) = read_v2_frame(reader, 0, MAX_INITIAL_PLAINTEXT_LEN)
+            .await
+            .map_err(|error| {
+                ServerInitialError::fail_key(
+                    "protocol_v2_decrypt_failed",
+                    error.to_string(),
+                    false,
+                    key_id,
+                )
+            })?;
         let mut current_ciphertext = ciphertext.clone();
         let fingerprint = replay_fingerprint(key_id, &salt);
         let work = match open_v2_payload(
@@ -604,35 +597,6 @@ impl ServerSecurity {
 mod limiter;
 pub use limiter::FailureLogDecision;
 use limiter::FailureLogLimiter;
-async fn read_initial_v2_ciphertext<T: AsyncReadExt + Unpin>(
-    reader: &mut T,
-) -> Result<(u64, Vec<u8>)> {
-    let counter = reader
-        .read_u64()
-        .await
-        .map_err(|error| protocol_error(format!("failed to read v2 counter: {error}")))?;
-    if counter != 0 {
-        return Err(protocol_error(format!(
-            "protocol-v2 counter mismatch: expected 0, got {counter}"
-        )));
-    }
-    let datalen = reader
-        .read_u32()
-        .await
-        .map_err(|error| protocol_error(format!("failed to read v2 length: {error}")))?;
-    let max_encrypted_len = MAX_INITIAL_PLAINTEXT_LEN.saturating_add(AES_256_GCM.tag_len() as u32);
-    if datalen < AES_256_GCM.tag_len() as u32 || datalen > max_encrypted_len {
-        return Err(protocol_error(format!(
-            "protocol-v2 payload length {datalen} exceeds the {MAX_INITIAL_PLAINTEXT_LEN}-byte limit"
-        )));
-    }
-    let mut ciphertext = vec![0_u8; datalen as usize];
-    reader
-        .read_exact(&mut ciphertext)
-        .await
-        .map_err(|error| protocol_error(format!("failed to read v2 payload: {error}")))?;
-    Ok((counter, ciphertext))
-}
 
 pub enum HeaderMessageReader<'a, T: AsyncReadExt + Unpin> {
     Legacy(CodecMessageReader<'a, T, Aes256GcmDeCodec>),
@@ -663,7 +627,7 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for HeaderMessageWriter<'_, T> {
 }
 
 mod frame;
-use frame::{derive_material, first_prefix, open_v2_payload, V2Material};
+use frame::{derive_material, first_prefix, open_v2_payload, read_v2_frame, V2Material};
 pub use frame::{V2MessageReader, V2MessageWriter};
 mod replay;
 #[cfg(test)]

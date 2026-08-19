@@ -160,16 +160,6 @@ impl<A: Debug> Debug for ServerCliRunConfig<A> {
     }
 }
 
-/// Where a stream request should connect, and how.
-#[derive(Clone, Copy, Debug)]
-struct StreamTarget<A> {
-    local_addr: A,
-    remote_addr: A,
-    keep_alive: bool,
-    namespace: Option<u64>,
-    credential: Credential,
-}
-
 fn duration_to_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -307,6 +297,22 @@ pub async fn run_server_side_cli_with_callback<LocalStream, A>(
     .await;
 }
 
+async fn resolve_registration_credential(pinned: Option<Credential>) -> Credential {
+    if let Some(credential) = pinned {
+        return credential;
+    }
+    let mut retry_backoff = RetryBackoff::default();
+    loop {
+        match get_process_credential() {
+            Ok(credential) => return credential,
+            Err(error) => {
+                tracing::error!("load registration credential failed: {error}");
+                tokio::time::sleep(retry_backoff.next_delay()).await;
+            }
+        }
+    }
+}
+
 async fn run_server_side_cli_pool<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
@@ -333,7 +339,8 @@ async fn run_server_side_cli_pool<LocalStream, A>(
             return;
         }
     };
-    let pool_size = control_conn_pool_size();
+    let credential = resolve_registration_credential(pinned_credential).await;
+    let pool_size = control_conn_pool_size().max(1);
     tracing::info!(
         event = "local_server_control_pool_starting",
         key = %key,
@@ -341,33 +348,27 @@ async fn run_server_side_cli_pool<LocalStream, A>(
         "starting local server control connection pool"
     );
     let mut workers = JoinSet::new();
-    if pool_size > 1 {
-        for worker_index in 1..pool_size {
-            let worker_key = key.clone();
-            workers.spawn(async move {
-                run_server_side_cli_worker_with_credential::<LocalStream, _>(
-                    local_addr,
-                    remote_addr,
-                    worker_key,
-                    options,
-                    None,
-                    worker_index,
-                    pinned_credential,
-                )
-                .await;
-            });
-        }
+    let mut status_callback = status_callback;
+    for worker_index in 0..pool_size {
+        let worker_key = key.clone();
+        let callback = if worker_index == 0 {
+            status_callback.take()
+        } else {
+            None
+        };
+        workers.spawn(async move {
+            run_server_side_cli_worker::<LocalStream, _>(
+                local_addr,
+                remote_addr,
+                worker_key,
+                options,
+                callback,
+                worker_index,
+                credential,
+            )
+            .await;
+        });
     }
-    run_server_side_cli_worker_with_credential::<LocalStream, _>(
-        local_addr,
-        remote_addr,
-        key,
-        options,
-        status_callback,
-        0,
-        pinned_credential,
-    )
-    .await;
     while let Some(result) = workers.join_next().await {
         if let Err(e) = result {
             tracing::warn!(
@@ -379,32 +380,20 @@ async fn run_server_side_cli_pool<LocalStream, A>(
     }
 }
 
-async fn run_server_side_cli_worker_with_credential<LocalStream, A>(
+async fn run_server_side_cli_worker<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
     key: Arc<str>,
     options: ServerTunnelOptions,
     status_callback: Option<StatusCallback>,
     worker_index: usize,
-    pinned_credential: Option<Credential>,
+    credential: Credential,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
     A: ToSocketAddrs + Debug + Copy + Send + 'static,
 {
     let mut retry_backoff = RetryBackoff::default();
-    let credential = match pinned_credential {
-        Some(credential) => credential,
-        None => loop {
-            match get_process_credential() {
-                Ok(credential) => break credential,
-                Err(error) => {
-                    tracing::error!("load registration credential failed: {error}");
-                    tokio::time::sleep(retry_backoff.next_delay()).await;
-                }
-            }
-        },
-    };
     let run_config = ServerCliRunConfig {
         local_addr,
         remote_addr,
@@ -728,7 +717,7 @@ where
                 snafu_error_get_or_continue!(
                     handle_request::<LocalStream, _>(
                         msg,
-                        StreamTarget {
+                        StreamConnect {
                             local_addr,
                             remote_addr,
                             keep_alive,
@@ -896,7 +885,7 @@ async fn handle_request<
     A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
 >(
     msg: &[u8],
-    target: StreamTarget<A>,
+    target: StreamConnect<A>,
     key: Arc<str>,
     conn_id: u32,
     write_tx: &tokio::sync::mpsc::UnboundedSender<LocalControlWrite>,
@@ -931,19 +920,8 @@ where
             let key = key.clone();
             tokio::spawn(async move {
                 snafu_error_handle!(
-                    handle_stream::<LocalStream, _>(
-                        key,
-                        client_id,
-                        server_generation,
-                        StreamConnect {
-                            local_addr: target.local_addr,
-                            remote_addr: target.remote_addr,
-                            keep_alive: target.keep_alive,
-                            namespace: target.namespace,
-                            credential: target.credential,
-                        },
-                    )
-                    .await
+                    handle_stream::<LocalStream, _>(key, client_id, server_generation, target,)
+                        .await
                 )
             });
         }

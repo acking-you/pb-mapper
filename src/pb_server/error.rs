@@ -10,23 +10,12 @@ use crate::common::{self};
 pub enum Error {
     #[snafu(display("administrator operation failed: {detail}"))]
     AdminOperation { detail: String },
-    /// server task center error
-    #[snafu(display("read pb conn init request with `conn_id:{conn_id}`"))]
-    TaskCenterReadInitRequest {
-        conn_id: RemoteConnId,
-        source: common::error::Error,
-    },
     #[snafu(display(
         "timed out reading pb conn init request with `conn_id:{conn_id}` after {timeout:?}"
     ))]
     TaskCenterInitRequestTimeout {
         conn_id: RemoteConnId,
         timeout: Duration,
-    },
-    #[snafu(display("decode pb conn init request with `conn_id:{conn_id}`"))]
-    TaskCenterDecodeInitRequest {
-        conn_id: RemoteConnId,
-        source: common::error::Error,
     },
     #[snafu(display("send listener task error, type:{source:?} detail:{source}"))]
     TaskCenterSendListener { source: kanal::SendError<()> },
@@ -179,15 +168,6 @@ pub enum Error {
         source: common::error::Error,
     },
     #[snafu(display(
-        "send deregister server task error with `key:{key}` `conn_id:{conn_id}`, \
-         type:{source:?} detail:{source}"
-    ))]
-    ServerConnSendDeregisterServer {
-        key: Arc<str>,
-        conn_id: RemoteConnId,
-        source: kanal::SendTimeoutError<()>,
-    },
-    #[snafu(display(
         "send register task error with `key:{key}` `conn_id:{conn_id}`, \
          type:{source:?} detail:{source}"
     ))]
@@ -205,16 +185,6 @@ pub enum Error {
     },
     #[snafu(display("client data stream credential is inactive: {detail}"))]
     ClientConnAuthInactive { detail: String },
-    #[snafu(display(
-        "send deregister client task error with `key:{key}` `server:{server_id:?}` <-> \
-         `client:{client_id}`, type:{source:?} detail:{source}"
-    ))]
-    ClientConnSendDeregisterClient {
-        key: Arc<str>,
-        server_id: Option<RemoteConnId>,
-        client_id: RemoteConnId,
-        source: kanal::SendTimeoutError<()>,
-    },
     #[snafu(display(
         "send subcribe task error with `key:{key}` `conn_id:{conn_id}`, type:{source:?} \
          detail:{source}"
@@ -325,14 +295,6 @@ pub enum Error {
     StatusEncodeResp { source: common::error::Error },
     #[snafu(display("write status response error"))]
     StatusWriteResp { source: common::error::Error },
-    #[snafu(display(
-        "send deregister request error with `conn_id:{conn_id}`, type:{source:?} \
-         detail:{source}"
-    ))]
-    StatusSendDeregister {
-        conn_id: RemoteConnId,
-        source: kanal::SendTimeoutError<()>,
-    },
     #[snafu(display("Server listen error"))]
     ServerListen { source: std::io::Error },
 }

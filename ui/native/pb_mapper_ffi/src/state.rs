@@ -429,6 +429,27 @@ struct PinnedTunnel {
     endpoint: SocketAddr,
 }
 
+struct TunnelRuntime {
+    handle: JoinHandle<()>,
+    pin: PinnedTunnel,
+}
+
+fn abort_runtime(map: &mut HashMap<String, TunnelRuntime>, key: &str) -> bool {
+    match map.remove(key) {
+        Some(runtime) => {
+            runtime.handle.abort();
+            true
+        }
+        None => false,
+    }
+}
+
+fn replace_runtime(map: &mut HashMap<String, TunnelRuntime>, key: &str, runtime: TunnelRuntime) {
+    if let Some(previous) = map.insert(key.to_string(), runtime) {
+        previous.handle.abort();
+    }
+}
+
 /// Everything [`PbMapperState::finish_register`] needs once the slow work is done.
 struct RegisterCommit {
     service_key: String,
@@ -461,10 +482,8 @@ pub struct PbMapperState {
     server_start_time: Option<SystemTime>,
     registered_services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
-    service_handles: HashMap<String, JoinHandle<()>>,
-    client_handles: HashMap<String, JoinHandle<()>>,
-    service_tunnels: HashMap<String, PinnedTunnel>,
-    client_tunnels: HashMap<String, PinnedTunnel>,
+    service_runtime: HashMap<String, TunnelRuntime>,
+    client_runtime: HashMap<String, TunnelRuntime>,
     config: AppConfig,
     config_dir: PathBuf,
     app_directory_path: Option<String>,

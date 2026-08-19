@@ -2,8 +2,8 @@ use snafu::ResultExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::error::{
-    ControlIoTimeoutSnafu, CreateHeaderToolSnafu, DecodeStatusRespSnafu, EncodeStatusReqSnafu,
-    ReadStatusRespSnafu, StatusRespNotMatchSnafu, WriteStatusReqSnafu,
+    CreateHeaderToolSnafu, DecodeStatusRespSnafu, EncodeStatusReqSnafu, StatusRespNotMatchSnafu,
+    WriteStatusReqSnafu,
 };
 use crate::common::checksum::Credential;
 use crate::common::config::control_io_timeout;
@@ -11,7 +11,6 @@ use crate::common::message::command::{
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
 };
 use crate::common::message::secure::ClientHeaderSession;
-use crate::common::message::MessageReader;
 
 pub async fn get_status<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>(
     remote_stream: &mut S,
@@ -56,28 +55,11 @@ async fn get_status_with_session<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>
         None => PbConnRequest::Status(req),
     };
     let msg = request.encode().context(EncodeStatusReqSnafu)?;
-    match tokio::time::timeout(timeout, session.write_initial(remote_stream, &msg)).await {
-        Ok(result) => result.context(WriteStatusReqSnafu)?,
-        Err(_) => ControlIoTimeoutSnafu {
-            action: "write status request",
-            timeout,
-        }
-        .fail()?,
-    }
-
-    // get status
-    let mut msg_reader = session
-        .response_reader(remote_stream)
-        .context(CreateHeaderToolSnafu { action: "reader" })?;
-    let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
-        Ok(result) => result.context(ReadStatusRespSnafu)?,
-        Err(_) => ControlIoTimeoutSnafu {
-            action: "read status response",
-            timeout,
-        }
-        .fail()?,
-    };
-    let resp = PbConnResponse::decode(msg).context(DecodeStatusRespSnafu)?;
+    let response = session
+        .exchange(remote_stream, &msg, timeout)
+        .await
+        .context(WriteStatusReqSnafu)?;
+    let resp = PbConnResponse::decode(&response).context(DecodeStatusRespSnafu)?;
     match resp {
         PbConnResponse::Status(status) => Ok(status),
         PbConnResponse::Error(error) => StatusRespNotMatchSnafu {

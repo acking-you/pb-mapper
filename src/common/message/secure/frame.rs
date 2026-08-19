@@ -53,33 +53,11 @@ impl<'a, T: AsyncReadExt + Unpin> V2MessageReader<'a, T> {
     }
 
     pub(super) async fn read_msg_with_limit(&mut self, max_plaintext_len: u32) -> Result<&'_ [u8]> {
-        let counter = self
-            .reader
-            .read_u64()
-            .await
-            .map_err(|error| protocol_error(format!("failed to read v2 counter: {error}")))?;
-        if counter != self.expected_counter {
-            return Err(protocol_error(format!(
-                "protocol-v2 counter mismatch: expected {}, got {counter}",
-                self.expected_counter
-            )));
-        }
-        let datalen = self
-            .reader
-            .read_u32()
-            .await
-            .map_err(|error| protocol_error(format!("failed to read v2 length: {error}")))?;
-        let max_encrypted_len = max_plaintext_len.saturating_add(AES_256_GCM.tag_len() as u32);
-        if datalen < AES_256_GCM.tag_len() as u32 || datalen > max_encrypted_len {
-            return Err(protocol_error(format!(
-                "protocol-v2 payload length {datalen} exceeds the {max_plaintext_len}-byte limit"
-            )));
-        }
-        self.buffer.resize(datalen as usize, 0);
-        self.reader
-            .read_exact(&mut self.buffer)
-            .await
-            .map_err(|error| protocol_error(format!("failed to read v2 payload: {error}")))?;
+        let (counter, ciphertext) =
+            read_v2_frame(self.reader, self.expected_counter, max_plaintext_len).await?;
+        self.buffer = ciphertext;
+        let datalen = u32::try_from(self.buffer.len())
+            .map_err(|_| protocol_error("protocol-v2 payload exceeds u32 length"))?;
         let aad = frame_aad(&self.material, self.direction, counter, datalen);
         let plain = self
             .key
@@ -93,6 +71,38 @@ impl<'a, T: AsyncReadExt + Unpin> V2MessageReader<'a, T> {
             .ok_or_else(|| protocol_error("protocol-v2 receive counter exhausted"))?;
         Ok(&self.buffer)
     }
+}
+
+pub(super) async fn read_v2_frame<T: AsyncReadExt + Unpin>(
+    reader: &mut T,
+    expected_counter: u64,
+    max_plaintext_len: u32,
+) -> Result<(u64, Vec<u8>)> {
+    let counter = reader
+        .read_u64()
+        .await
+        .map_err(|error| protocol_error(format!("failed to read v2 counter: {error}")))?;
+    if counter != expected_counter {
+        return Err(protocol_error(format!(
+            "protocol-v2 counter mismatch: expected {expected_counter}, got {counter}"
+        )));
+    }
+    let datalen = reader
+        .read_u32()
+        .await
+        .map_err(|error| protocol_error(format!("failed to read v2 length: {error}")))?;
+    let max_encrypted_len = max_plaintext_len.saturating_add(AES_256_GCM.tag_len() as u32);
+    if datalen < AES_256_GCM.tag_len() as u32 || datalen > max_encrypted_len {
+        return Err(protocol_error(format!(
+            "protocol-v2 payload length {datalen} exceeds the {max_plaintext_len}-byte limit"
+        )));
+    }
+    let mut ciphertext = vec![0_u8; datalen as usize];
+    reader
+        .read_exact(&mut ciphertext)
+        .await
+        .map_err(|error| protocol_error(format!("failed to read v2 payload: {error}")))?;
+    Ok((counter, ciphertext))
 }
 
 impl<T: AsyncReadExt + Unpin> MessageReader for V2MessageReader<'_, T> {

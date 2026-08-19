@@ -45,7 +45,7 @@ impl PbMapperState {
             uptime_seconds: 0,
         }));
 
-        let temp_state = Self {
+        let mut state = Self {
             server_handle: None,
             server_auth: None,
             server_shutdown_token: None,
@@ -53,49 +53,9 @@ impl PbMapperState {
             server_start_time: None,
             registered_services: Arc::new(RwLock::new(HashMap::new())),
             active_connections: Arc::new(RwLock::new(HashMap::new())),
-            service_handles: HashMap::new(),
-            client_handles: HashMap::new(),
-            service_tunnels: HashMap::new(),
-            client_tunnels: HashMap::new(),
+            service_runtime: HashMap::new(),
+            client_runtime: HashMap::new(),
             config: AppConfig::default(),
-            config_dir: config_dir.clone(),
-            app_directory_path: app_directory_path.clone(),
-            local_server_status_cache: local_server_status_cache.clone(),
-            local_server_status_last_update: Arc::new(RwLock::new(None)),
-            local_server_status_refreshing: Arc::new(AtomicBool::new(false)),
-            service_status_cache: Arc::new(RwLock::new(HashMap::new())),
-            client_status_cache: Arc::new(RwLock::new(HashMap::new())),
-            service_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
-            client_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
-            registering: Arc::new(StdMutex::new(HashSet::new())),
-            connecting: Arc::new(StdMutex::new(HashSet::new())),
-        };
-
-        let config = temp_state.load_config().unwrap_or_else(|e| {
-            tracing::warn!("Could not load config: {}, using defaults", e);
-            AppConfig::default()
-        });
-
-        tracing::info!(
-            "Loaded configuration: server_address={}, keep_alive={}, msg_header_key_set={}",
-            config.server_address,
-            config.keep_alive_enabled,
-            !config.msg_header_key.is_empty()
-        );
-
-        let state = Self {
-            server_handle: None,
-            server_auth: None,
-            server_shutdown_token: None,
-            server_status_sender: None,
-            server_start_time: None,
-            registered_services: Arc::new(RwLock::new(HashMap::new())),
-            active_connections: Arc::new(RwLock::new(HashMap::new())),
-            service_handles: HashMap::new(),
-            client_handles: HashMap::new(),
-            service_tunnels: HashMap::new(),
-            client_tunnels: HashMap::new(),
-            config,
             config_dir,
             app_directory_path,
             local_server_status_cache,
@@ -108,6 +68,16 @@ impl PbMapperState {
             registering: Arc::new(StdMutex::new(HashSet::new())),
             connecting: Arc::new(StdMutex::new(HashSet::new())),
         };
+        state.config = state.load_config().unwrap_or_else(|e| {
+            tracing::warn!("Could not load config: {}, using defaults", e);
+            AppConfig::default()
+        });
+        tracing::info!(
+            "Loaded configuration: server_address={}, keep_alive={}, msg_header_key_set={}",
+            state.config.server_address,
+            state.config.keep_alive_enabled,
+            !state.config.msg_header_key.is_empty()
+        );
         if let Err(e) = state.apply_msg_header_key_env() {
             tracing::error!("Failed to apply MSG_HEADER_KEY during init: {}", e);
         }

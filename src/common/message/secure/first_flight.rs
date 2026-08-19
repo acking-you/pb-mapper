@@ -16,11 +16,7 @@ pub(super) fn first_flight_error(
     retryable: bool,
     key_id: u64,
 ) -> ServerInitialError {
-    ServerInitialError {
-        failure: AuthFailure::new(code, message, retryable),
-        response_session: None,
-        presented_key_id: Some(key_id),
-    }
+    ServerInitialError::fail_key(code, message, retryable, key_id)
 }
 
 fn reserved_error_session(

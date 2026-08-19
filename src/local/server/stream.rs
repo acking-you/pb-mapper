@@ -7,20 +7,20 @@ use tracing::info_span;
 
 use super::error::{
     ConnectLocalStreamSnafu, ConnectRemoteStreamSnafu, ControlIoTimeoutSnafu,
-    DecodePbConnStreamRespSnafu, EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu,
-    ReadPbConnStreamRespSnafu, Result, WritePbConnStreamReqSnafu,
+    DecodePbConnStreamRespSnafu, EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu, Result,
+    WritePbConnStreamReqSnafu,
 };
 use crate::common::checksum::Credential;
 use crate::common::config::control_io_timeout;
 use crate::common::message::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use crate::common::message::forward::StreamForward;
 use crate::common::message::secure::ClientHeaderSession;
-use crate::common::message::MessageReader;
 use crate::local::server::error::CreateHeaderToolSnafu;
 use crate::snafu_error_handle;
 use uni_stream::addr::{each_addr, ToSocketAddrs};
 use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay, StreamProvider, StreamSplit};
 
+#[derive(Clone, Copy, Debug)]
 pub struct StreamConnect<A> {
     pub local_addr: A,
     pub remote_addr: A,
@@ -93,26 +93,11 @@ where
     let codec_key = {
         let session = ClientHeaderSession::new_v2(&credential)
             .context(CreateHeaderToolSnafu { action: "session" })?;
-        match tokio::time::timeout(timeout, session.write_initial(&mut remote_stream, &msg)).await {
-            Ok(result) => result.context(WritePbConnStreamReqSnafu)?,
-            Err(_) => ControlIoTimeoutSnafu {
-                action: "write pb conn stream request",
-                timeout,
-            }
-            .fail()?,
-        }
-        let mut msg_reader = session
-            .response_reader(&mut remote_stream)
-            .context(CreateHeaderToolSnafu { action: "reader" })?;
-        let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
-            Ok(result) => result.context(ReadPbConnStreamRespSnafu)?,
-            Err(_) => ControlIoTimeoutSnafu {
-                action: "read pb conn stream response",
-                timeout,
-            }
-            .fail()?,
-        };
-        let resp = PbConnResponse::decode(msg).context(DecodePbConnStreamRespSnafu)?;
+        let response = session
+            .exchange(&mut remote_stream, &msg, timeout)
+            .await
+            .context(WritePbConnStreamReqSnafu)?;
+        let resp = PbConnResponse::decode(&response).context(DecodePbConnStreamRespSnafu)?;
         match resp {
             PbConnResponse::Stream { codec_key } => codec_key,
             PbConnResponse::Error(error) => PbConnStreamRespNotMatchSnafu {

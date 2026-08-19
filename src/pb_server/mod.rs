@@ -29,8 +29,7 @@ use tracing::instrument;
 use self::admin::handle_admin_request;
 use self::client::handle_client_conn;
 use self::error::{
-    TaskCenterDecodeInitRequestSnafu, TaskCenterInitRequestTimeoutSnafu,
-    TaskCenterReadInitRequestSnafu, TaskCenterSendListenerSnafu, TaskCenterSendStatusRespSnafu,
+    TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu, TaskCenterSendStatusRespSnafu,
     TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
 };
 use self::server::{handle_server_conn, ServerRegistration};
@@ -45,7 +44,7 @@ use crate::common::message::command::{
     PbServiceConnStatus,
 };
 use crate::common::message::secure::{HeaderProtocol, ServerHeaderSession, ServerSecurity};
-use crate::common::message::{get_header_msg_reader, MessageReader, MessageWriter};
+use crate::common::message::MessageWriter;
 use crate::pb_server::error::{
     ServerListenSnafu, TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,
     TaskCenterSendStreamRespToClientSnafu, TaskCenterSendSubcribeRespSnafu,
@@ -383,16 +382,3 @@ use connection::{
     decrement_namespace_stream_count, handle_conn, handle_listener,
     release_namespace_rate_limit_if_idle, split_scoped_service_key,
 };
-pub async fn get_init_request(
-    conn: &mut TcpStream,
-    conn_id: RemoteConnId,
-) -> Result<PbConnRequest> {
-    let mut reader =
-        get_header_msg_reader(conn).context(TaskCenterReadInitRequestSnafu { conn_id })?;
-    let timeout = control_io_timeout();
-    let msg = match tokio::time::timeout(timeout, reader.read_msg()).await {
-        Ok(result) => result.context(TaskCenterReadInitRequestSnafu { conn_id })?,
-        Err(_) => TaskCenterInitRequestTimeoutSnafu { conn_id, timeout }.fail()?,
-    };
-    PbConnRequest::decode(msg).context(TaskCenterDecodeInitRequestSnafu { conn_id })
-}

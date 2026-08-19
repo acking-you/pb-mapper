@@ -36,8 +36,10 @@ use pb_mapper::common::message::command::{
 use pb_mapper::common::message::forward::StreamForward;
 use pb_mapper::common::message::secure::ClientHeaderSession;
 use pb_mapper::common::message::MessageReader;
-use pb_mapper::local::client::{handle_status_cli_scoped, run_client_side_cli_scoped};
-use pb_mapper::local::server::{run_server_side_cli, ServerTunnelOptions};
+use pb_mapper::local::client::{
+    handle_status_cli_scoped, run_client_side_cli_with_callback_scoped,
+};
+use pb_mapper::local::server::{run_server_side_cli_with_pinned_credential, ServerTunnelOptions};
 use pb_mapper::pb_server::run_server_with_shutdown;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -315,7 +317,7 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
-    pb_mapper::common::checksum::get_process_credential().map_err(|error| {
+    let credential = pb_mapper::common::checksum::get_process_credential().map_err(|error| {
         std::io::Error::other(format!("registration credential is required: {error}"))
     })?;
     let local_addr = get_sockaddr_async(&args.addr).await?;
@@ -330,10 +332,12 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
 
     match args.transport {
         Transport::Tcp => {
-            register::<TcpStreamProvider>(local_addr, remote_addr, args.key, options).await
+            register::<TcpStreamProvider>(local_addr, remote_addr, args.key, options, credential)
+                .await
         }
         Transport::Udp => {
-            register::<UdpStreamProvider>(local_addr, remote_addr, args.key, options).await
+            register::<UdpStreamProvider>(local_addr, remote_addr, args.key, options, credential)
+                .await
         }
     }
     Ok(())
@@ -344,14 +348,23 @@ async fn register<LocalStream: StreamProvider + Send + 'static>(
     remote_addr: std::net::SocketAddr,
     key: String,
     options: ServerTunnelOptions,
+    credential: pb_mapper::common::checksum::Credential,
 ) where
     LocalStream::Item: StreamForward,
 {
-    run_server_side_cli::<LocalStream, _>(local_addr, remote_addr, key.into(), options).await;
+    run_server_side_cli_with_pinned_credential::<LocalStream, _>(
+        local_addr,
+        remote_addr,
+        key.into(),
+        options,
+        None,
+        credential,
+    )
+    .await;
 }
 
 async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
-    pb_mapper::common::checksum::get_process_credential().map_err(|error| {
+    let credential = pb_mapper::common::checksum::get_process_credential().map_err(|error| {
         std::io::Error::other(format!("client credential is required: {error}"))
     })?;
     let local_addr = get_sockaddr_async(&args.addr).await?;
@@ -361,22 +374,26 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
 
     match args.transport {
         Transport::Tcp => {
-            run_client_side_cli_scoped::<TcpListenerProvider, _>(
+            run_client_side_cli_with_callback_scoped::<TcpListenerProvider, _>(
                 local_addr,
                 remote_addr,
                 key,
                 keep_alive,
                 args.namespace,
+                None,
+                Some(credential),
             )
             .await;
         }
         Transport::Udp => {
-            run_client_side_cli_scoped::<UdpListenerProvider, _>(
+            run_client_side_cli_with_callback_scoped::<UdpListenerProvider, _>(
                 local_addr,
                 remote_addr,
                 key,
                 keep_alive,
                 args.namespace,
+                None,
+                Some(credential),
             )
             .await;
         }

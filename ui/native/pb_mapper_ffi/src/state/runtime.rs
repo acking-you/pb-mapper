@@ -133,15 +133,12 @@ impl PbMapperState {
                 *last_update = Some(Instant::now());
             }
 
-            for (_, handle) in self.service_handles.drain() {
-                handle.abort();
+            for (_, runtime) in self.service_runtime.drain() {
+                runtime.handle.abort();
             }
-            self.service_tunnels.clear();
-
-            for (_, handle) in self.client_handles.drain() {
-                handle.abort();
+            for (_, runtime) in self.client_runtime.drain() {
+                runtime.handle.abort();
             }
-            self.client_tunnels.clear();
 
             self.registered_services.write().await.clear();
             self.active_connections.write().await.clear();
@@ -165,15 +162,10 @@ impl PbMapperState {
             credential,
         } = commit;
 
-        self.service_tunnels.remove(&service_key);
-        if let Some(previous) = self.service_handles.remove(&service_key) {
+        if abort_runtime(&mut self.service_runtime, &service_key) {
             tracing::warn!(
                 "Service '{service_key}' is already registered, replacing existing handle"
             );
-            // Dropping a `JoinHandle` does not stop the task. Without this the
-            // replaced tunnel kept running and retrying, with nothing left
-            // holding a handle able to abort it.
-            previous.abort();
         }
 
         tracing::info!(
@@ -204,52 +196,32 @@ impl PbMapperState {
             );
         });
 
-        self.service_tunnels.insert(
-            service_key.clone(),
-            PinnedTunnel {
-                credential,
-                endpoint: remote_sock_addr,
+        let handle = spawn_register_tunnel(
+            &protocol,
+            local_sock_addr,
+            remote_sock_addr,
+            key_clone,
+            ServerTunnelOptions {
+                need_codec: enable_encryption,
+                is_datagram: !protocol.eq_ignore_ascii_case("TCP"),
+                keep_alive: enable_keep_alive,
+                namespace: None,
+                force_namespace: false,
+            },
+            callback,
+            credential,
+        );
+        replace_runtime(
+            &mut self.service_runtime,
+            &service_key,
+            TunnelRuntime {
+                handle,
+                pin: PinnedTunnel {
+                    credential,
+                    endpoint: remote_sock_addr,
+                },
             },
         );
-        let handle = if protocol.to_uppercase() == "TCP" {
-            tokio::spawn(async move {
-                let _ = run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
-                    local_sock_addr,
-                    remote_sock_addr,
-                    key_clone.into(),
-                    ServerTunnelOptions {
-                        need_codec: enable_encryption,
-                        is_datagram: false,
-                        keep_alive: enable_keep_alive,
-                        namespace: None,
-                        force_namespace: false,
-                    },
-                    Some(callback),
-                    credential,
-                )
-                .await;
-            })
-        } else {
-            tokio::spawn(async move {
-                let _ = run_server_side_cli_with_pinned_credential::<UdpStreamProvider, _>(
-                    local_sock_addr,
-                    remote_sock_addr,
-                    key_clone.into(),
-                    ServerTunnelOptions {
-                        need_codec: enable_encryption,
-                        is_datagram: true,
-                        keep_alive: enable_keep_alive,
-                        namespace: None,
-                        force_namespace: false,
-                    },
-                    Some(callback),
-                    credential,
-                )
-                .await;
-            })
-        };
-
-        self.service_handles.insert(service_key.clone(), handle);
 
         {
             let mut cache = self.service_status_cache.write().await;
@@ -281,10 +253,7 @@ impl PbMapperState {
     }
 
     pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
-        self.service_tunnels.remove(&service_key);
-        if let Some(handle) = self.service_handles.remove(&service_key) {
-            handle.abort();
-        }
+        abort_runtime(&mut self.service_runtime, &service_key);
 
         if self
             .registered_services
@@ -306,10 +275,7 @@ impl PbMapperState {
         &mut self,
         service_key: String,
     ) -> Result<(), CtlError> {
-        self.service_tunnels.remove(&service_key);
-        if let Some(handle) = self.service_handles.remove(&service_key) {
-            handle.abort();
-        }
+        abort_runtime(&mut self.service_runtime, &service_key);
 
         self.registered_services.write().await.remove(&service_key);
 
@@ -327,14 +293,10 @@ impl PbMapperState {
             credential,
         } = commit;
 
-        self.client_tunnels.remove(&service_key);
-        if let Some(previous) = self.client_handles.remove(&service_key) {
+        if abort_runtime(&mut self.client_runtime, &service_key) {
             tracing::warn!(
                 "Client for service '{service_key}' is already connected, replacing handle"
             );
-            // As in `finish_register`: dropping the handle leaves the old
-            // client's retry loop running with nothing able to stop it.
-            previous.abort();
         }
 
         let protocol_upper = protocol.to_uppercase();
@@ -356,40 +318,26 @@ impl PbMapperState {
             })
         };
 
-        self.client_tunnels.insert(
-            service_key.clone(),
-            PinnedTunnel {
-                credential,
-                endpoint: remote_sock_addr,
+        let handle = spawn_connect_tunnel(
+            &protocol_upper,
+            local_sock_addr,
+            remote_sock_addr,
+            key_clone,
+            enable_keep_alive,
+            status_callback,
+            credential,
+        );
+        replace_runtime(
+            &mut self.client_runtime,
+            &service_key,
+            TunnelRuntime {
+                handle,
+                pin: PinnedTunnel {
+                    credential,
+                    endpoint: remote_sock_addr,
+                },
             },
         );
-        let handle = if protocol_upper == "TCP" {
-            tokio::spawn(async move {
-                run_client_side_cli_with_pinned_credential::<TcpListenerProvider, _>(
-                    local_sock_addr,
-                    remote_sock_addr,
-                    key_clone.into(),
-                    enable_keep_alive,
-                    Some(status_callback),
-                    credential,
-                )
-                .await;
-            })
-        } else {
-            tokio::spawn(async move {
-                run_client_side_cli_with_pinned_credential::<UdpListenerProvider, _>(
-                    local_sock_addr,
-                    remote_sock_addr,
-                    key_clone.into(),
-                    enable_keep_alive,
-                    Some(status_callback),
-                    credential,
-                )
-                .await;
-            })
-        };
-
-        self.client_handles.insert(service_key.clone(), handle);
 
         {
             let mut cache = self.client_status_cache.write().await;
@@ -444,14 +392,7 @@ impl PbMapperState {
     pub async fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
         // Aborting the task is the part that matters: it is what stops the
         // retry loop still dialling in the background.
-        self.client_tunnels.remove(&service_key);
-        let aborted = match self.client_handles.remove(&service_key) {
-            Some(handle) => {
-                handle.abort();
-                true
-            }
-            None => false,
-        };
+        let aborted = abort_runtime(&mut self.client_runtime, &service_key);
 
         let was_listed = self
             .active_connections
@@ -478,13 +419,82 @@ impl PbMapperState {
         &mut self,
         service_key: String,
     ) -> Result<(), CtlError> {
-        self.client_tunnels.remove(&service_key);
-        if let Some(handle) = self.client_handles.remove(&service_key) {
-            handle.abort();
-        }
+        abort_runtime(&mut self.client_runtime, &service_key);
 
         self.active_connections.write().await.remove(&service_key);
 
         self.delete_client_config(&service_key)
+    }
+}
+
+fn spawn_register_tunnel(
+    protocol: &str,
+    local_sock_addr: SocketAddr,
+    remote_sock_addr: SocketAddr,
+    key: String,
+    options: ServerTunnelOptions,
+    callback: StatusCallback,
+    credential: Credential,
+) -> JoinHandle<()> {
+    if protocol.eq_ignore_ascii_case("TCP") {
+        tokio::spawn(async move {
+            let _ = run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
+                local_sock_addr,
+                remote_sock_addr,
+                key.into(),
+                options,
+                Some(callback),
+                credential,
+            )
+            .await;
+        })
+    } else {
+        tokio::spawn(async move {
+            let _ = run_server_side_cli_with_pinned_credential::<UdpStreamProvider, _>(
+                local_sock_addr,
+                remote_sock_addr,
+                key.into(),
+                options,
+                Some(callback),
+                credential,
+            )
+            .await;
+        })
+    }
+}
+
+fn spawn_connect_tunnel(
+    protocol: &str,
+    local_sock_addr: SocketAddr,
+    remote_sock_addr: SocketAddr,
+    key: String,
+    enable_keep_alive: bool,
+    callback: ClientStatusCallback,
+    credential: Credential,
+) -> JoinHandle<()> {
+    if protocol.eq_ignore_ascii_case("TCP") {
+        tokio::spawn(async move {
+            run_client_side_cli_with_pinned_credential::<TcpListenerProvider, _>(
+                local_sock_addr,
+                remote_sock_addr,
+                key.into(),
+                enable_keep_alive,
+                Some(callback),
+                credential,
+            )
+            .await;
+        })
+    } else {
+        tokio::spawn(async move {
+            run_client_side_cli_with_pinned_credential::<UdpListenerProvider, _>(
+                local_sock_addr,
+                remote_sock_addr,
+                key.into(),
+                enable_keep_alive,
+                Some(callback),
+                credential,
+            )
+            .await;
+        })
     }
 }
