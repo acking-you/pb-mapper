@@ -1002,6 +1002,21 @@ pub(super) fn reset_already_installed(
     snapshot.instance_id == *new_instance_id
 }
 
+pub(super) fn rotation_already_installed(state_dir: &Path, new_key: &str) -> bool {
+    key_matches_existing_snapshot(Some(state_dir), new_key)
+        && live_admin_key_matches(state_dir, new_key)
+}
+
+fn live_admin_key_matches(state_dir: &Path, new_key: &str) -> bool {
+    let Ok(raw) = std::fs::read(state_dir.join("admin.key")) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&raw) else {
+        return false;
+    };
+    text.trim().as_bytes() == new_key.trim().as_bytes()
+}
+
 pub(super) fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str) -> bool {
     let Some(state_dir) = state_dir else {
         return false;

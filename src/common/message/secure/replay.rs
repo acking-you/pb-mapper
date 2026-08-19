@@ -265,6 +265,10 @@ impl ReplayGuard {
             self.bloom.insert(&fingerprint, timestamp);
             live.push(record);
         }
+        self.total = u32::try_from(live.len())
+            .unwrap_or(u32::MAX)
+            .min(self.max_total);
+        self.total_started_at = self.bloom.current_started_at;
         if self.rewrite_live(&live).is_err() {
             self.log_failed = true;
             return;

@@ -598,7 +598,7 @@ impl ServerSecurity {
                         "protocol-v2 connection salt was already accepted",
                         true,
                     ),
-                    response_session: Some(session),
+                    response_session: None,
                     presented_key_id: Some(key_id),
                 });
             }

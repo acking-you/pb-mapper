@@ -89,8 +89,10 @@ HKDF-SHA256 使用 connection salt 作为 salt，凭据的 32 字节 secret 作�
 
 服务端对 `(key_id, connection_salt)` 做指纹，并在同一个临界区内完成两个轮换的
 1 MiB Bloom filter 的检查与写入，覆盖当前与上一个 600 秒窗口，使首帧允许的
-最大未来时间戳无法在过滤器遗忘后继续重放。疑似重复会返回
-可重试错误 `connection_salt_replayed`；一次性 admin CLI 会自动换 salt 重试一次。
+最大未来时间戳无法在过滤器遗忘后继续重放。疑似重复是
+`connection_salt_replayed`。中继不会用已经用过的首响 nonce 加密该错误，所以
+对端可能看到解密失败/EOF 而不是可读错误帧。一次性 admin CLI 在这两种情况下
+都会自动换 salt 重试一次。
 会修改状态的管理员请求还会在分发前把精确指纹写入加密 WAL；该记录自服务端接受起
 在十分钟内跨重启、跨 compact 保留，不能通过等待 Bloom 窗口结束或重启进程来重放
 旧操作。客户端首帧时间戳仍用于新鲜度检查，但不决定这条记录保留多久。

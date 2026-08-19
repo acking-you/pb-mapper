@@ -939,7 +939,7 @@ fn actor_rotate_root(
         .and_then(|()| write_snapshot_and_truncate_wal(config, &new_key, &snapshot))
         .and_then(|()| write_admin_key(&config.state_dir, &new_key_string))
     {
-        if !key_matches_existing_snapshot(Some(&config.state_dir), &new_key_string) {
+        if !rotation_already_installed(&config.state_dir, &new_key_string) {
             inner.safe_mode.store(true, Ordering::Release);
             cancel_all_temporary_leases(inner);
             return Err(error);

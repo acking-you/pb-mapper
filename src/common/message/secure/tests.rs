@@ -132,6 +132,13 @@ async fn identical_initial_frames_are_admitted_only_once() {
             .code,
         "connection_salt_replayed"
     );
+    assert!(results
+        .iter()
+        .filter_map(|result| result.as_ref().err())
+        .next()
+        .unwrap()
+        .response_session
+        .is_none());
 
     let _ = std::fs::remove_dir_all(config.state_dir);
 }
@@ -492,6 +499,35 @@ fn persisted_first_flights_survive_replay_guard_restart() {
     assert_eq!(
         restored.admit(7, &fingerprint, now),
         FirstFlightAdmit::Replayed
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn restored_replay_log_consumes_the_aggregate_budget() {
+    let mut random = [0_u8; 8];
+    let mut rng = rand::rng();
+    for byte in &mut random {
+        *byte = rng.random();
+    }
+    let path = std::env::temp_dir().join(format!(
+        "pb-mapper-replay-total-{}",
+        u64::from_be_bytes(random)
+    ));
+    let now = unix_seconds();
+    {
+        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+            .with_max_per_key(100)
+            .with_max_total(2);
+        assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
+        assert_eq!(guard.admit(2, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
+    }
+    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+        .with_max_per_key(100)
+        .with_max_total(2);
+    assert_eq!(
+        restored.admit(3, &[3_u8; 32], now),
+        FirstFlightAdmit::Limited
     );
     let _ = std::fs::remove_file(path);
 }

@@ -325,7 +325,7 @@ async fn send_admin_request_with_timeout(
 ) -> Result<AdminResponse, Box<dyn Error>> {
     let encoded = PbConnRequest::Admin(request).encode()?;
     for attempt in 0..2 {
-        let response = tokio::time::timeout(io_timeout, async {
+        let attempt_result = tokio::time::timeout(io_timeout, async {
             let mut stream = TcpStream::connect(remote_addr)
                 .await
                 .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
@@ -344,7 +344,13 @@ async fn send_admin_request_with_timeout(
                     io_timeout.as_millis()
                 ),
             )
-        })??;
+        });
+        let response = match attempt_result {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) if attempt == 0 => continue,
+            Ok(Err(error)) => return Err(error),
+            Err(error) => return Err(error.into()),
+        };
         match response {
             PbConnResponse::Admin(response) => return Ok(response),
             PbConnResponse::Error(error)

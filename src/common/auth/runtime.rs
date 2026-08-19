@@ -226,12 +226,8 @@ impl AuthRuntime {
             .take();
         if let Some(handle) = handle {
             let _ = handle.await;
-            return;
         }
-        for _ in 0..100 {
-            if self.inner.upgrade().is_none() {
-                break;
-            }
+        while self.inner.upgrade().is_some() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
