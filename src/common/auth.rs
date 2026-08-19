@@ -84,192 +84,6 @@ pub struct AuthConfig {
     pub legacy_protocol: LegacyProtocolPolicy,
 }
 
-pub fn default_auth_state_dir() -> PathBuf {
-    std::env::var_os("PB_MAPPER_AUTH_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(platform_default_auth_state_dir)
-}
-
-/// Linux systemd/Docker keep `/var/lib/pb-mapper/auth` when that path is usable
-/// (root, or an already-writable service directory). Unprivileged Linux,
-/// macOS, and Windows binaries need an application data directory instead.
-pub(crate) fn platform_default_auth_state_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("APPDATA"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-        base.join("pb-mapper").join("auth")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        match std::env::var_os("HOME") {
-            Some(home) => PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("pb-mapper")
-                .join("auth"),
-            None => PathBuf::from("/Library/Application Support/pb-mapper/auth"),
-        }
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        linux_default_auth_state_dir(
-            unix_effective_uid(),
-            linux_system_auth_dir_usable(),
-            std::env::var_os("XDG_DATA_HOME").as_deref(),
-            std::env::var_os("HOME").as_deref(),
-        )
-    }
-}
-
-pub(crate) fn linux_default_auth_state_dir(
-    euid: u32,
-    system_dir_usable: bool,
-    xdg_data_home: Option<&std::ffi::OsStr>,
-    home: Option<&std::ffi::OsStr>,
-) -> PathBuf {
-    if euid == 0 || system_dir_usable {
-        return PathBuf::from(DEFAULT_AUTH_STATE_DIR);
-    }
-    if let Some(xdg) = xdg_data_home {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("pb-mapper").join("auth");
-        }
-    }
-    if let Some(home) = home {
-        if !home.is_empty() {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("pb-mapper")
-                .join("auth");
-        }
-    }
-    PathBuf::from(DEFAULT_AUTH_STATE_DIR)
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn unix_effective_uid() -> u32 {
-    extern "C" {
-        fn geteuid() -> u32;
-    }
-    unsafe { geteuid() }
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn linux_system_auth_dir_usable() -> bool {
-    let path = Path::new(DEFAULT_AUTH_STATE_DIR);
-    path.is_dir() && unix_path_is_writable(path)
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn unix_path_is_writable(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    extern "C" {
-        fn access(pathname: *const std::os::raw::c_char, mode: i32) -> i32;
-    }
-    const W_OK: i32 = 2;
-    unsafe { access(c_path.as_ptr(), W_OK) == 0 }
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            state_dir: default_auth_state_dir(),
-            max_temporary_keys: env_usize(
-                "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
-                DEFAULT_TEMP_KEY_CAPACITY,
-                1,
-                MAX_TEMP_KEY_CAPACITY,
-            ),
-            max_temporary_key_ttl: Duration::from_secs(env_u64(
-                "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
-                DEFAULT_MAX_TEMP_KEY_TTL.as_secs(),
-                MIN_TEMP_KEY_TTL.as_secs(),
-                MAX_TEMP_KEY_TTL.as_secs(),
-            )),
-            legacy_protocol: legacy_protocol_from_env(),
-        }
-    }
-}
-
-fn legacy_protocol_from_env() -> LegacyProtocolPolicy {
-    match std::env::var("PB_MAPPER_LEGACY_PROTOCOL") {
-        Err(std::env::VarError::NotPresent) => LegacyProtocolPolicy::Allow,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            tracing::error!(
-                event = "legacy_protocol_config_invalid",
-                "PB_MAPPER_LEGACY_PROTOCOL is not UTF-8; denying legacy framing"
-            );
-            LegacyProtocolPolicy::Deny
-        }
-        Ok(value) => parse_legacy_protocol_policy(&value).unwrap_or_else(|| {
-            tracing::error!(
-                event = "legacy_protocol_config_invalid",
-                value,
-                "PB_MAPPER_LEGACY_PROTOCOL must be `allow` or `deny`; denying legacy framing"
-            );
-            LegacyProtocolPolicy::Deny
-        }),
-    }
-}
-
-fn parse_legacy_protocol_policy(value: &str) -> Option<LegacyProtocolPolicy> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "allow" => Some(LegacyProtocolPolicy::Allow),
-        "deny" => Some(LegacyProtocolPolicy::Deny),
-        _ => None,
-    }
-}
-
-fn env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
-    env_bounded(name, default, min, max)
-}
-
-fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
-    env_bounded(name, default, min, max)
-}
-
-fn env_bounded<T>(name: &str, default: T, min: T, max: T) -> T
-where
-    T: std::str::FromStr + PartialOrd + Copy + fmt::Display,
-{
-    match std::env::var(name) {
-        Err(std::env::VarError::NotPresent) => default,
-        Ok(raw) => match raw.parse::<T>() {
-            Ok(value) if value >= min && value <= max => value,
-            _ => {
-                tracing::warn!(
-                    event = "auth_config_value_invalid",
-                    variable = name,
-                    value = raw,
-                    min = %min,
-                    max = %max,
-                    fallback = %default,
-                    "invalid authentication configuration value; using the default"
-                );
-                default
-            }
-        },
-        Err(std::env::VarError::NotUnicode(_)) => {
-            tracing::warn!(
-                event = "auth_config_value_invalid",
-                variable = name,
-                min = %min,
-                max = %max,
-                fallback = %default,
-                "authentication configuration value is not UTF-8; using the default"
-            );
-            default
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthFailure {
     pub code: String,
@@ -413,26 +227,26 @@ impl AuthContext {
     }
 
     pub(crate) fn admin_cancellation_token(&self) -> Result<CancellationToken, AuthFailure> {
-        if !self.is_admin {
-            return Err(AuthFailure::new(
-                "admin_permission_required",
-                "administrator credential is required for this operation",
-                false,
-            ));
-        }
+        self.require_admin()?;
         self.cancellation_token()
     }
 
     fn admin_authority(&self) -> Result<Weak<AuthLease>, AuthFailure> {
-        if !self.is_admin {
-            return Err(AuthFailure::new(
+        self.require_admin()?;
+        self.ensure_active()?;
+        Ok(self.lease.clone())
+    }
+
+    fn require_admin(&self) -> Result<(), AuthFailure> {
+        if self.is_admin {
+            Ok(())
+        } else {
+            Err(AuthFailure::new(
                 "admin_permission_required",
                 "administrator credential is required for this operation",
                 false,
-            ));
+            ))
         }
-        self.ensure_active()?;
-        Ok(self.lease.clone())
     }
 }
 
@@ -531,19 +345,17 @@ struct AuthStateInner {
     audit_records: RwLock<VecDeque<AuditRecord>>,
 }
 
+fn recover_lock<T>(result: std::sync::LockResult<T>) -> T {
+    result.unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl AuthStateInner {
     fn admin_key(&self) -> AesKeyType {
-        self.admin
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .key
+        recover_lock(self.admin.read()).key
     }
 
     fn instance_id(&self) -> [u8; INSTANCE_ID_LEN] {
-        *self
-            .instance_id
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        *recover_lock(self.instance_id.read())
     }
 }
 
@@ -673,6 +485,21 @@ enum AuthCommand {
     },
 }
 
+mod config;
+pub use config::default_auth_state_dir;
+#[cfg(test)]
+pub(in crate::common::auth) use config::parse_legacy_protocol_policy;
+#[cfg(test)]
+pub(crate) use config::{linux_default_auth_state_dir, platform_default_auth_state_dir};
+#[cfg(all(test, not(any(windows, target_os = "macos"))))]
+pub(in crate::common::auth) use config::{linux_system_auth_dir_usable, unix_effective_uid};
+mod keys;
+#[cfg(test)]
+pub(in crate::common::auth) use keys::recover_admin_key_after_rotation;
+pub use keys::{derive_temporary_key, key_generation, key_slot, make_key_id};
+pub(in crate::common::auth) use keys::{
+    load_isolated_server_admin_credential, load_server_admin_credential,
+};
 mod runtime;
 
 pub struct LegacyConnectionGuard {
@@ -686,240 +513,6 @@ impl Drop for LegacyConnectionGuard {
                 .active_legacy_connections
                 .fetch_sub(1, Ordering::AcqRel);
         }
-    }
-}
-
-fn read_admin_key(path: &Path) -> Result<Option<String>, AuthFailure> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    #[cfg(unix)]
-    {
-        let metadata = std::fs::metadata(path).map_err(|error| {
-            AuthFailure::new(
-                "administrator_key_required",
-                format!(
-                    "administrator key file `{}` metadata could not be read: {error}",
-                    path.display()
-                ),
-                false,
-            )
-        })?;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
-                |error| {
-                    AuthFailure::new(
-                        "administrator_key_required",
-                        format!(
-                            "administrator key file `{}` permissions could not be secured: {error}",
-                            path.display()
-                        ),
-                        false,
-                    )
-                },
-            )?;
-            tracing::warn!(
-                event = "administrator_key_permissions_repaired",
-                path = %path.display(),
-                "restricted administrator key file permissions to 0600"
-            );
-        }
-    }
-    std::fs::read_to_string(path).map(Some).map_err(|error| {
-        AuthFailure::new(
-            "administrator_key_required",
-            format!(
-                "administrator key file `{}` could not be read: {error}",
-                path.display()
-            ),
-            false,
-        )
-    })
-}
-
-fn validate_admin_credential(raw: &str) -> Result<Credential, AuthFailure> {
-    let credential = parse_credential(raw.trim())
-        .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
-    if !credential.is_admin() {
-        return Err(AuthFailure::new(
-            "administrator_key_required",
-            "the server key file contains a temporary credential",
-            false,
-        ));
-    }
-    Ok(credential)
-}
-
-fn recover_admin_key_after_rotation(
-    state_dir: &Path,
-    current: &str,
-) -> Result<String, AuthFailure> {
-    let snapshot_path = auth_snapshot_path(state_dir);
-    if !snapshot_path.exists() {
-        return Ok(current.to_string());
-    }
-    let bytes = std::fs::read(&snapshot_path).map_err(|error| {
-        AuthFailure::new(
-            "temporary_key_store_unavailable",
-            format!("failed to read `{}`: {error}", snapshot_path.display()),
-            false,
-        )
-    })?;
-    if let Ok(Credential::Admin(current_key)) = parse_credential(current.trim()) {
-        if open_blob(&current_key, &bytes).is_ok() {
-            return Ok(current.to_string());
-        }
-    }
-    let Some(next) = read_admin_key(&state_dir.join("admin.key.next"))? else {
-        return Ok(current.to_string());
-    };
-    let Ok(Credential::Admin(next_key)) = parse_credential(next.trim()) else {
-        return Ok(current.to_string());
-    };
-    if open_blob(&next_key, &bytes).is_err() {
-        return Ok(current.to_string());
-    }
-    // The rotation snapshot is complete under the staged key. Leftover WAL
-    // records are still encrypted with the previous key.
-    truncate_auth_wal(state_dir)?;
-    write_admin_key(state_dir, next.trim())?;
-    let _ = std::fs::remove_file(state_dir.join("admin.key.next"));
-    Ok(next)
-}
-
-fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFailure> {
-    let path = state_dir.join("admin.key");
-    let raw = if let Some(raw) = read_admin_key(&path)? {
-        raw
-    } else if std::env::var_os(ENV_MSG_HEADER_KEY).is_some() {
-        let credential = get_process_credential()
-            .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
-        let Credential::Admin(key) = credential else {
-            return Err(AuthFailure::new(
-                "administrator_key_required",
-                "the relay server cannot start with a temporary credential",
-                false,
-            ));
-        };
-        let key = String::from_utf8(key.to_vec()).map_err(|_| {
-            AuthFailure::new(
-                "administrator_key_invalid",
-                "the relay administrator key must be printable UTF-8 so it can be persisted",
-                false,
-            )
-        })?;
-        if encrypted_auth_state_exists(state_dir)
-            && !key_matches_existing_state(Some(state_dir), &key)
-        {
-            return Err(AuthFailure::new(
-                "administrator_key_invalid",
-                "MSG_HEADER_KEY does not decrypt the existing authentication state; refusing to write admin.key",
-                false,
-            ));
-        }
-        write_admin_key(state_dir, &key)?;
-        key
-    } else if Path::new(MACHINE_MSG_HEADER_KEY_PATH).is_file() {
-        let key = std::fs::read_to_string(MACHINE_MSG_HEADER_KEY_PATH).map_err(|error| {
-            AuthFailure::new(
-                "administrator_key_required",
-                format!(
-                    "legacy administrator key file `{MACHINE_MSG_HEADER_KEY_PATH}` could not be read: {error}"
-                ),
-                false,
-            )
-        })?;
-        validate_admin_credential(&key)?;
-        if encrypted_auth_state_exists(state_dir)
-            && !key_matches_existing_state(Some(state_dir), key.trim())
-        {
-            return Err(AuthFailure::new(
-                "administrator_key_invalid",
-                "legacy administrator key does not decrypt the existing authentication state; refusing to write admin.key",
-                false,
-            ));
-        }
-        write_admin_key(state_dir, key.trim())?;
-        tracing::warn!(
-            event = "administrator_key_migrated",
-            source = MACHINE_MSG_HEADER_KEY_PATH,
-            destination = %path.display(),
-            "migrated the legacy administrator key into the v0.4 authentication state directory"
-        );
-        key
-    } else {
-        let key = initialize_admin_key(&path, false)?;
-        tracing::warn!(
-            event = "administrator_key_initialized",
-            path = %path.display(),
-            "no administrator credential was configured; generated a random key file"
-        );
-        key
-    };
-    let raw = recover_admin_key_after_rotation(state_dir, &raw)?;
-    let credential = validate_admin_credential(&raw)?;
-    set_process_msg_header_key(Some(raw.trim())).map_err(AuthFailure::internal)?;
-    Ok(credential)
-}
-
-/// Load or create an app-local relay root without reading or mutating the process credential.
-///
-/// The Flutter process uses its configured process credential for the remote relay, while its
-/// optional embedded relay owns an independent administrator key under the app data directory.
-fn load_isolated_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFailure> {
-    let path = state_dir.join("admin.key");
-    let raw = match read_admin_key(&path)? {
-        Some(raw) => raw,
-        None => {
-            let key = initialize_admin_key(&path, false)?;
-            tracing::warn!(
-                event = "isolated_administrator_key_initialized",
-                path = %path.display(),
-                "generated an administrator key for an embedded relay"
-            );
-            key
-        }
-    };
-    let raw = recover_admin_key_after_rotation(state_dir, &raw)?;
-    validate_admin_credential(&raw)
-}
-
-pub fn make_key_id(generation: u32, slot: u32) -> u64 {
-    (u64::from(generation) << 32) | u64::from(slot)
-}
-
-pub fn key_generation(key_id: u64) -> u32 {
-    (key_id >> 32) as u32
-}
-
-pub fn key_slot(key_id: u64) -> u32 {
-    key_id as u32
-}
-
-pub fn derive_temporary_key(
-    admin_key: &AesKeyType,
-    instance_id: &[u8; INSTANCE_ID_LEN],
-    key_id: u64,
-) -> Result<AesKeyType, AuthFailure> {
-    let salt = Salt::new(HKDF_SHA256, instance_id);
-    let pseudo_random_key = salt.extract(admin_key);
-    let key_id_bytes = key_id.to_be_bytes();
-    let info = [b"pb-mapper-temp-key-v1".as_slice(), key_id_bytes.as_slice()];
-    let output = pseudo_random_key
-        .expand(&info, HkdfLen(32))
-        .map_err(|_| AuthFailure::internal("failed to expand temporary key"))?;
-    let mut key = [0_u8; 32];
-    output
-        .fill(&mut key)
-        .map_err(|_| AuthFailure::internal("failed to fill temporary key"))?;
-    Ok(key)
-}
-
-struct HkdfLen(usize);
-
-impl ring::hkdf::KeyType for HkdfLen {
-    fn len(&self) -> usize {
-        self.0
     }
 }
 
@@ -1000,6 +593,20 @@ mod actor;
 use actor::{run_auth_actor, AuthActorState};
 mod persistence;
 pub use persistence::*;
+pub(in crate::common::auth) use persistence::{
+    append_audit, append_mutation, append_wal, atomic_write, auth_snapshot_path, build_snapshot,
+    cancel_all_temporary_leases, clear_retained_high_slot_entries, compaction_is_allowed,
+    empty_snapshot, fail_closed_on_uncertain_wal, hex, key_matches_existing_state,
+    load_or_create_instance_id, load_persisted_state, normalize_tombstone_times, open_blob,
+    prepare_state_dir_and_lock, push_audit_record, push_persisted_audit, random_instance_id,
+    recover_instance_id_after_reset, reset_already_installed, rotation_already_installed,
+    split_high_slot_state, truncate_auth_wal, unix_seconds, write_admin_key,
+    write_snapshot_and_truncate_wal,
+};
+#[cfg(test)]
+pub(in crate::common::auth) use persistence::{
+    prepare_state_dir, read_instance_id_file, try_load_persisted_state,
+};
 mod timing_wheel;
 use timing_wheel::TimingWheel;
 #[cfg(test)]
