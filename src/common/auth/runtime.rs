@@ -227,18 +227,19 @@ impl AuthRuntime {
         if let Some(handle) = handle {
             let _ = handle.await;
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while self.inner.upgrade().is_some() {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(AuthFailure::new(
-                    "auth_state_unavailable",
-                    "authentication actor did not drop after abort",
-                    true,
-                ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.inner.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        Ok(())
+        })
+        .await
+        .map_err(|_| {
+            AuthFailure::new(
+                "auth_state_unavailable",
+                "authentication actor did not drop after abort",
+                true,
+            )
+        })
     }
 
     pub fn config(&self) -> &AuthConfig {

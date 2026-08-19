@@ -552,68 +552,45 @@ impl ServerSecurity {
                 })?;
         let mut current_ciphertext = ciphertext.clone();
         let fingerprint = replay_fingerprint(key_id, &salt);
-        let payload = match open_v2_payload(
+        let work = match open_v2_payload(
             &material,
             DIRECTION_CLIENT_TO_SERVER,
             counter,
             &mut current_ciphertext,
         ) {
-            Ok(payload) => payload,
+            Ok(payload) => FirstFlightWork::Live {
+                key,
+                payload,
+                error_session: session_without_context(&session),
+            },
             Err(error) => {
-                if stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext).is_some()
-                {
-                    let replay = self.replay.clone();
-                    let auth = self.auth.clone();
-                    return Err(tokio::task::spawn_blocking(move || {
-                        claim_stale_root_first_flight(
-                            &auth,
-                            &replay,
+                match stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext) {
+                    Some(stale) => FirstFlightWork::Stale(stale),
+                    None => {
+                        return Err(first_flight_error(
+                            "protocol_v2_decrypt_failed",
+                            error.to_string(),
+                            false,
                             key_id,
-                            salt,
-                            counter,
-                            ciphertext,
-                            fingerprint,
-                        )
-                    })
-                    .await
-                    .unwrap_or_else(|_| ServerInitialError {
-                        failure: AuthFailure::new(
-                            "connection_replay_store_unavailable",
-                            "failed to evaluate first-flight admission",
-                            true,
-                        ),
-                        response_session: None,
-                        presented_key_id: Some(key_id),
-                    }));
+                        ))
+                    }
                 }
-                return Err(ServerInitialError {
-                    failure: AuthFailure::new(
-                        "protocol_v2_decrypt_failed",
-                        error.to_string(),
-                        false,
-                    ),
-                    response_session: None,
-                    presented_key_id: Some(key_id),
-                });
             }
         };
-
         let replay = self.replay.clone();
         let auth = self.auth.clone();
-        let error_session = session_without_context(&session);
-        let context = tokio::task::spawn_blocking(move || {
-            authenticate_and_admit(&auth, &replay, key_id, key, fingerprint, error_session)
+        let (payload, context) = tokio::task::spawn_blocking(move || {
+            evaluate_first_flight(&auth, &replay, key_id, fingerprint, work)
         })
         .await
-        .map_err(|_| ServerInitialError {
-            failure: AuthFailure::new(
+        .unwrap_or_else(|_| {
+            Err(first_flight_error(
                 "connection_replay_store_unavailable",
                 "failed to evaluate first-flight admission",
                 true,
-            ),
-            response_session: None,
-            presented_key_id: Some(key_id),
-        })??;
+                key_id,
+            ))
+        })?;
         session.context = Some(context);
         Ok(ServerInitialMessage {
             payload,
@@ -657,103 +634,97 @@ async fn read_initial_v2_ciphertext<T: AsyncReadExt + Unpin>(
     Ok((counter, ciphertext))
 }
 
-#[allow(clippy::result_large_err)]
-fn authenticate_and_admit(
-    auth: &AuthRuntime,
-    replay: &std::sync::Mutex<ReplayGuard>,
+enum FirstFlightWork {
+    Live {
+        key: AesKeyType,
+        payload: Vec<u8>,
+        error_session: ServerHeaderSession,
+    },
+    Stale(ServerInitialError),
+}
+
+fn first_flight_error(
+    code: &'static str,
+    message: impl Into<String>,
+    retryable: bool,
     key_id: u64,
-    key: AesKeyType,
-    fingerprint: [u8; 32],
-    error_session: ServerHeaderSession,
-) -> std::result::Result<AuthContext, ServerInitialError> {
-    let mut replay = replay
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let already_admitted = replay.already_admitted(&fingerprint, unix_seconds());
-    let context = auth
-        .authenticate_presented(key_id, &key)
-        .map_err(|failure| {
-            let response_session = if already_admitted {
-                None
-            } else if matches!(
-                replay.claim(&fingerprint, unix_seconds()),
-                FirstFlightAdmit::Fresh
-            ) {
-                Some(error_session)
-            } else {
-                None
-            };
-            ServerInitialError {
-                failure,
-                response_session,
-                presented_key_id: Some(key_id),
-            }
-        })?;
-    match replay.admit(key_id, &fingerprint, unix_seconds()) {
-        FirstFlightAdmit::Fresh => Ok(context),
-        FirstFlightAdmit::Replayed => Err(ServerInitialError {
-            failure: AuthFailure::new(
-                "connection_salt_replayed",
-                "protocol-v2 connection salt was already accepted",
-                true,
-            ),
-            response_session: None,
-            presented_key_id: Some(key_id),
-        }),
-        FirstFlightAdmit::Limited => Err(ServerInitialError {
-            failure: AuthFailure::new(
-                "connection_admission_limited",
-                "this credential has opened too many new connections in the current window",
-                true,
-            ),
-            response_session: None,
-            presented_key_id: Some(key_id),
-        }),
-        FirstFlightAdmit::Unavailable => Err(ServerInitialError {
-            failure: AuthFailure::new(
-                "connection_replay_store_unavailable",
-                "failed to persist first-flight replay admission",
-                true,
-            ),
-            response_session: None,
-            presented_key_id: Some(key_id),
-        }),
+) -> ServerInitialError {
+    ServerInitialError {
+        failure: AuthFailure::new(code, message, retryable),
+        response_session: None,
+        presented_key_id: Some(key_id),
     }
 }
 
+fn reserved_error_session(
+    replay: &mut ReplayGuard,
+    fingerprint: &[u8; 32],
+    session: ServerHeaderSession,
+) -> Option<ServerHeaderSession> {
+    matches!(
+        replay.claim(fingerprint, unix_seconds()),
+        FirstFlightAdmit::Fresh
+    )
+    .then_some(session)
+}
+
 #[allow(clippy::result_large_err)]
-fn claim_stale_root_first_flight(
+fn evaluate_first_flight(
     auth: &AuthRuntime,
     replay: &std::sync::Mutex<ReplayGuard>,
     key_id: u64,
-    salt: [u8; CONNECTION_SALT_LEN],
-    counter: u64,
-    ciphertext: Vec<u8>,
     fingerprint: [u8; 32],
-) -> ServerInitialError {
-    let mut error = stale_root_first_flight(auth, key_id, salt, counter, &ciphertext)
-        .unwrap_or_else(|| ServerInitialError {
-            failure: AuthFailure::new(
-                "protocol_v2_decrypt_failed",
-                "stale-root first flight could not be classified",
-                false,
-            ),
-            response_session: None,
-            presented_key_id: Some(key_id),
-        });
+    work: FirstFlightWork,
+) -> std::result::Result<(Vec<u8>, AuthContext), ServerInitialError> {
     let mut replay = replay
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let already_admitted = replay.already_admitted(&fingerprint, unix_seconds());
-    if already_admitted
-        || !matches!(
-            replay.claim(&fingerprint, unix_seconds()),
-            FirstFlightAdmit::Fresh
-        )
-    {
-        error.response_session = None;
+    match work {
+        FirstFlightWork::Live {
+            key,
+            payload,
+            error_session,
+        } => {
+            let context = auth
+                .authenticate_presented(key_id, &key)
+                .map_err(|failure| ServerInitialError {
+                    failure,
+                    response_session: reserved_error_session(
+                        &mut replay,
+                        &fingerprint,
+                        error_session,
+                    ),
+                    presented_key_id: Some(key_id),
+                })?;
+            match replay.admit(key_id, &fingerprint, unix_seconds()) {
+                FirstFlightAdmit::Fresh => Ok((payload, context)),
+                FirstFlightAdmit::Replayed => Err(first_flight_error(
+                    "connection_salt_replayed",
+                    "protocol-v2 connection salt was already accepted",
+                    true,
+                    key_id,
+                )),
+                FirstFlightAdmit::Limited => Err(first_flight_error(
+                    "connection_admission_limited",
+                    "this credential has opened too many new connections in the current window",
+                    true,
+                    key_id,
+                )),
+                FirstFlightAdmit::Unavailable => Err(first_flight_error(
+                    "connection_replay_store_unavailable",
+                    "failed to persist first-flight replay admission",
+                    true,
+                    key_id,
+                )),
+            }
+        }
+        FirstFlightWork::Stale(mut error) => {
+            if let Some(session) = error.response_session.take() {
+                error.response_session = reserved_error_session(&mut replay, &fingerprint, session);
+            }
+            Err(error)
+        }
     }
-    error
 }
 
 fn stale_root_first_flight(

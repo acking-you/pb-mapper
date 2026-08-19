@@ -423,6 +423,12 @@ fn claim_key(
     })
 }
 
+#[derive(Clone, Copy)]
+struct PinnedTunnel {
+    credential: Credential,
+    endpoint: SocketAddr,
+}
+
 /// Everything [`PbMapperState::finish_register`] needs once the slow work is done.
 struct RegisterCommit {
     service_key: String,
@@ -457,10 +463,8 @@ pub struct PbMapperState {
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_handles: HashMap<String, JoinHandle<()>>,
     client_handles: HashMap<String, JoinHandle<()>>,
-    service_credentials: HashMap<String, Credential>,
-    client_credentials: HashMap<String, Credential>,
-    service_endpoints: HashMap<String, SocketAddr>,
-    client_endpoints: HashMap<String, SocketAddr>,
+    service_tunnels: HashMap<String, PinnedTunnel>,
+    client_tunnels: HashMap<String, PinnedTunnel>,
     config: AppConfig,
     config_dir: PathBuf,
     app_directory_path: Option<String>,

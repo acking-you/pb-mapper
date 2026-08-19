@@ -156,15 +156,6 @@ impl ReplayGuard {
         self
     }
 
-    pub(super) fn already_admitted(&mut self, fingerprint: &[u8; 32], now: u64) -> bool {
-        let present = self.bloom.contains(fingerprint, now);
-        if self.bloom.current_started_at != self.total_started_at {
-            self.total = 0;
-            self.total_started_at = self.bloom.current_started_at;
-        }
-        present
-    }
-
     pub(super) fn admit(
         &mut self,
         key_id: u64,
@@ -175,38 +166,41 @@ impl ReplayGuard {
         if self.bloom.contains(fingerprint, now) {
             return FirstFlightAdmit::Replayed;
         }
-        if self.bloom.current_started_at != self.total_started_at {
-            self.total = 0;
-            self.total_started_at = self.bloom.current_started_at;
-        }
+        self.reset_total_if_rotated();
         if self.counts.get(&key_id).copied().unwrap_or(0) >= self.max_per_key
             || self.total >= self.max_total
         {
             return FirstFlightAdmit::Limited;
         }
-        if self.persist(fingerprint, now).is_err() {
-            return FirstFlightAdmit::Unavailable;
+        let result = self.reserve(fingerprint, now);
+        if result == FirstFlightAdmit::Fresh {
+            *self.counts.entry(key_id).or_insert(0) += 1;
+            if now.saturating_sub(self.last_compact_at) >= REPLAY_COMPACT_INTERVAL_SECONDS {
+                self.compact(now);
+            }
         }
-        self.bloom.insert(fingerprint, now);
-        *self.counts.entry(key_id).or_insert(0) += 1;
-        self.total = self.total.saturating_add(1);
-        if now.saturating_sub(self.last_compact_at) >= REPLAY_COMPACT_INTERVAL_SECONDS {
-            self.compact(now);
-        }
-        FirstFlightAdmit::Fresh
+        result
     }
 
     pub(super) fn claim(&mut self, fingerprint: &[u8; 32], now: u64) -> FirstFlightAdmit {
         if self.bloom.contains(fingerprint, now) {
             return FirstFlightAdmit::Replayed;
         }
+        self.reset_total_if_rotated();
+        if self.total >= self.max_total {
+            return FirstFlightAdmit::Unavailable;
+        }
+        self.reserve(fingerprint, now)
+    }
+
+    fn reset_total_if_rotated(&mut self) {
         if self.bloom.current_started_at != self.total_started_at {
             self.total = 0;
             self.total_started_at = self.bloom.current_started_at;
         }
-        if self.total >= self.max_total {
-            return FirstFlightAdmit::Unavailable;
-        }
+    }
+
+    fn reserve(&mut self, fingerprint: &[u8; 32], now: u64) -> FirstFlightAdmit {
         if self.persist(fingerprint, now).is_err() {
             return FirstFlightAdmit::Unavailable;
         }

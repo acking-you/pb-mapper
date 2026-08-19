@@ -4,55 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [0.4.0] - 2026-08-18
 - Added a sole administrator credential plus renewable, expiring, and immediately revocable `pbmt1_` temporary credentials with fixed-slot O(1) lookup and isolated per-key service namespaces.
-- Added single-flight protocol-v2 authentication with directional AES-256-GCM keys, monotonic frame counters, authenticated routing metadata, replay detection, stable structured errors, and optional legacy framing during migration.
-- Added encrypted snapshot/WAL authentication state, lifecycle audit records, hierarchical timing-wheel expiry, hard closure of revoked live connections, safe-mode recovery, root-key rotation, and explicit auth-state reset.
+- Added single-flight protocol-v2 authentication with directional AES-256-GCM keys, monotonic frame counters, authenticated routing metadata, durable first-flight replay protection, and optional legacy framing during migration.
+- Added encrypted snapshot/WAL authentication state, exclusive `auth.lock`, lifecycle audit records, hierarchical timing-wheel expiry, hard closure of revoked live connections, recoverable root-key rotation, and explicit auth-state reset.
 - Extended the unified CLI with temporary-key lifecycle, service/connection inventory, auth status, protocol policy, root rotation, namespace targeting, and human/JSON/NDJSON output.
 - Replaced insecure default-key fallback with first-start random administrator-key generation, retained machine-derived keys only for explicit compatibility, and updated Flutter, installers, systemd, Docker, release metadata, and bilingual documentation.
-- Fixed remaining review findings: installer migration now honors `MSG_HEADER_KEY` from `/etc/pb-mapper/server.env`, isolated relays validate legacy frames with their own administrator key, first-flight replay retention covers the full clock-skew window, and desktop macOS/Windows servers use a user-writable auth directory.
-- Rejected NUL/non-printable rotated administrator keys, cancelled in-flight status reads on credential revocation, refused `--force-init-admin-key` when encrypted auth state already exists, bound isolated-relay legacy continuation checksums to the relay key, and doubled first-flight Bloom retention so a max-future timestamp cannot outlive the filter.
-- Centralized env-safe administrator-key checks, isolated-relay legacy codec construction, credential-cancellation races, and auth snapshot/WAL paths so later protocol and lifecycle changes reuse one implementation.
-- Refused administrator-key initialization whenever encrypted auth state is present, preserved discarded slot generations across capacity changes, rolled back or fail-closed uncertain WAL appends, authenticated first flights before consuming the replay filter, and reused the registration credential for provider streams.
-- Capped legacy first-flight allocations and kept legacy framing denied when authentication state enters safe mode.
-- Skipped snapshot compaction while startup is in safe mode, fsynced the auth directory when creating `auth.wal`, cleared retained high-slot entries on reset/rotate, dropped the slot write lock before WAL fail-closed cancellation, fail-closed process checksums after the credential is cleared, and rate-limited first flights per credential before consuming the shared replay filter.
-- Persisted first-flight replay admissions across restarts, replaced existing auth files atomically on Windows, rejected explicit out-of-range server auth flags, and exposed the embedded relay's isolated administrator key through FFI/UI.
-- Made a second administrator first-flight salt replay surface the dedicated retry-exhausted error instead of leaving that path unreachable.
-- Compacted the durable first-flight replay log while the relay is running, rolled back torn replay-log appends, rewrote that log atomically, sized first-flight admission from `PB_MAPPER_NEW_STREAMS_PER_SECOND`, and took an exclusive lock on the authentication state directory.
-- Fsynced the replay-log directory on first creation, took the state lock before `--init-admin-key`, aborted accepted connection tasks on relay shutdown, and staged `admin.key.next` so an interrupted root rotation can recover a matching key and snapshot.
-- Stopped returning the embedded relay administrator key from routine config fetches; revealing it now requires an explicit FFI/UI action.
-- Took `auth.lock` before loading or creating `admin.key`, staged `server-instance-id.next` so an interrupted reset can recover a matching snapshot, discarded leftover WAL from the previous instance during that recovery, and used a user-writable Linux auth directory when `/var/lib/pb-mapper/auth` is not usable.
-- Flushed the parent directory after Windows auth-state replacements, matching the Unix `fsync` after rename.
-- Discarded leftover WAL encrypted under the previous administrator key when promoting `admin.key.next`.
-- Opened Windows parent directories with write access before `FlushFileBuffers`, and waited for aborted connection tasks to finish so `auth.lock` is released before shutdown returns.
-- Distinguished a post-rotation or post-reset temporary credential as `temporary_key_rotated` instead of the generic `temporary_key_invalid` used for a mistyped live key.
-- Failed closed when first-flight replay-log rollback cannot restore the previous length, kept `auth.lock` in the actor until it exits, reserved `temporary_key_rotated` for a real root-epoch change, refused `--use-machine-msg-header-key` when `admin.key` already exists, and persisted installer `MSG_HEADER_KEY` into `admin.key`.
-- Refused `write_admin_key_file` of the live `admin.key` while encrypted auth state exists, matching `initialize_admin_key`; `admin.key.next` remains allowed.
-- Kept `temporary_key_rotated` after a later issue in the same slot, aborted a timed-out embedded-relay shutdown, fail-closed replay logs whose directory sync failed, allowed a post-rotation write of the live key that already decrypts the snapshot, and treated `PB_MAPPER_NEW_STREAMS_PER_SECOND=0` as the default 100.
-- Fsynced the replay-log directory after compacting replacements, treated an unreadable existing replay log as unavailable, and made timing-wheel buckets hold `Weak` leases so renewals no longer accumulate day-long strong references.
-- Retained administrator mutation replay claims from the server acceptance time, so a backdated client timestamp cannot shrink the ten-minute replay window.
-- Read first-flight replay logs with exact-record I/O and fail closed after an incomplete read or a rewrite that may have already replaced the log; compaction temporary files now use a random suffix.
-- Released revoked timing-wheel owners when the tombstone is recycled or GC frees the slot, instead of keeping them until the original TTL.
-- Kept the previous root key and instance id in memory so a stale first flight after rotation or reset can decrypt and return `temporary_key_rotated`.
-- Validated installer `MSG_HEADER_KEY` values as 32 printable ASCII bytes before writing `admin.key`.
-- Passed `--use-machine-msg-header-key` only when `admin.key` is missing, so a container restart with a persistent auth volume does not fail after first boot.
-- Pinned each local client listener to the credential captured at start, so a later Flutter config change cannot switch an existing port onto another tenant.
-- Garbage-collected expired and revoked high-slot entries while keeping their generations so shrinking capacity and running `key gc` can reclaim them.
-- Pinned local registration workers to the credential captured at start, matching the client listener.
-- Replaced a lease that was canceled while a renewal WAL record was syncing, so a successful renew does not keep a dead cancellation token.
-- Awaited the authentication actor on relay shutdown, used pinned credentials for registration probes and UI tunnel workers/status checks, and finished in-memory root rotation when `admin.key` already matched the new snapshot.
-- Bound relay tunneled-frame checksums to each hop's authenticated session key instead of the process administrator key.
-- Bound local UDP and codec tunnels to the pinned credential's checksum key so a later process-key change cannot desynchronize framed payloads.
-- Looked up high-slot credentials for admin list/show/renew/revoke, counted them in status, scheduled their tombstones across restart, and expired due high-slot entries on the actor tick. UI tunnel stop now drops the pinned credential. First-flight decrypt failures no longer send an error frame the presenter cannot read.
-- Reported cancelled leases by recorded cause, aborted the auth actor on UI shutdown timeout, validated replacement credentials before stopping a live tunnel, preserved presented key IDs on unreadable first flights, finalized reset when the new instance id was already installed, and bounded aggregate first-flight Bloom inserts.
-- Waited for the auth actor to drop before `abort_actor` returns, omitted a reused GCM nonce on salt-replay errors, restored the aggregate replay count from the durable log, and finalized root rotation only when the live `admin.key` already matches the new snapshot.
-- Restricted administrator CLI retries to pre-send failures and a readable `connection_salt_replayed`, so a dropped response cannot issue a second credential.
-- Omitted a response session for already-admitted first flights that later fail authentication, and kept namespace stream accounting until the client stream deregisters even if the registration control socket drops.
-- Evaluated first-flight admission on a blocking thread under one replay lock, omitted a session when durable admission is unavailable, aged restored Bloom generations from loaded record timestamps, validated installer keys from `server.env`, refused to persist a recovery `MSG_HEADER_KEY` that cannot decrypt existing state, batched high-slot tombstone cleanup, and captured the UI credential together with the relay address before DNS.
-- Kept replay-lock waits off Tokio workers, claimed limited and stale-root first flights before sending a nonce-0 error, accepted a recovery key that decrypts WAL-only state, verified legacy and installer keys against existing state, rolled back UI config when persistence failed, and probed tunnels at their pinned relay endpoints.
-- Stopped persisting limited first flights once the Bloom budget is full, omitted their nonce-0 error sessions, and left container `admin.key` unset when encrypted state remains so the runtime can verify a legacy recovery key.
-- Claimed revoked or expired first flights before returning a nonce-0 error, scheduled high-slot expiries instead of scanning every tick, marked administrator requests sent only after the first flight is written, allowed clearing the UI credential, failed `pb-mapper connect` without a credential, and fail-closed truncated replay records.
-- Bounded `abort_actor` so a leaked `AuthStateInner` cannot hang shutdown, and made `register`/`status` fail with a nonzero exit status when the process credential is missing or rejected.
-- Aborted pooled registration workers when the outer service task is cancelled, and kept Compose upgrades on the machine-derived key plus a persisted `/var/lib/pb-mapper-server` volume.
-- Reaped finished connection tasks with a `JoinSet` instead of scanning every live handle on accept, and batch-sorted timing-wheel tombstones after a large clock jump.
+- Recovery keys must decrypt existing snapshot or WAL state before they are persisted. Interrupted rotation and reset recover from staged `admin.key.next` and `server-instance-id.next`.
+- First-flight salts are unique for nonce 0: admission is atomic under one lock, torn replay records fail closed, and a nonce-0 error frame is sent only after that salt is reserved.
+- Pinned UI and local tunnels to the credential and relay address captured at start, and bound tunneled-frame checksums to each hop's authenticated session key.
+- Aborted pooled registration workers and accepted connection tasks on shutdown; the relay reaps connection tasks with a `JoinSet`.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

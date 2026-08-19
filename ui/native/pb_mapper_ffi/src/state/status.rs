@@ -369,15 +369,14 @@ impl PbMapperState {
             refreshing.insert(service_key.to_string());
         }
 
-        let server_addr = self
-            .service_endpoints
-            .get(service_key)
-            .map(ToString::to_string)
+        let tunnel = self.service_tunnels.get(service_key);
+        let server_addr = tunnel
+            .map(|tunnel| tunnel.endpoint.to_string())
             .unwrap_or_else(|| self.config.server_address.clone());
         let cache = self.service_status_cache.clone();
         let refreshing = self.service_status_refreshing.clone();
         let key = service_key.to_string();
-        let credential = self.service_credentials.get(service_key).copied();
+        let credential = tunnel.map(|tunnel| tunnel.credential);
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(
@@ -437,15 +436,14 @@ impl PbMapperState {
             refreshing.insert(service_key.to_string());
         }
 
-        let server_addr = self
-            .client_endpoints
-            .get(service_key)
-            .map(ToString::to_string)
+        let tunnel = self.client_tunnels.get(service_key);
+        let server_addr = tunnel
+            .map(|tunnel| tunnel.endpoint.to_string())
             .unwrap_or_else(|| self.config.server_address.clone());
         let cache = self.client_status_cache.clone();
         let refreshing = self.client_status_refreshing.clone();
         let key = service_key.to_string();
-        let credential = self.client_credentials.get(service_key).copied();
+        let credential = tunnel.map(|tunnel| tunnel.credential);
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(

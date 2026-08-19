@@ -136,14 +136,12 @@ impl PbMapperState {
             for (_, handle) in self.service_handles.drain() {
                 handle.abort();
             }
-            self.service_credentials.clear();
-            self.service_endpoints.clear();
+            self.service_tunnels.clear();
 
             for (_, handle) in self.client_handles.drain() {
                 handle.abort();
             }
-            self.client_credentials.clear();
-            self.client_endpoints.clear();
+            self.client_tunnels.clear();
 
             self.registered_services.write().await.clear();
             self.active_connections.write().await.clear();
@@ -167,7 +165,7 @@ impl PbMapperState {
             credential,
         } = commit;
 
-        self.service_credentials.remove(&service_key);
+        self.service_tunnels.remove(&service_key);
         if let Some(previous) = self.service_handles.remove(&service_key) {
             tracing::warn!(
                 "Service '{service_key}' is already registered, replacing existing handle"
@@ -206,10 +204,13 @@ impl PbMapperState {
             );
         });
 
-        self.service_credentials
-            .insert(service_key.clone(), credential);
-        self.service_endpoints
-            .insert(service_key.clone(), remote_sock_addr);
+        self.service_tunnels.insert(
+            service_key.clone(),
+            PinnedTunnel {
+                credential,
+                endpoint: remote_sock_addr,
+            },
+        );
         let handle = if protocol.to_uppercase() == "TCP" {
             tokio::spawn(async move {
                 let _ = run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
@@ -280,8 +281,7 @@ impl PbMapperState {
     }
 
     pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
-        self.service_credentials.remove(&service_key);
-        self.service_endpoints.remove(&service_key);
+        self.service_tunnels.remove(&service_key);
         if let Some(handle) = self.service_handles.remove(&service_key) {
             handle.abort();
         }
@@ -306,8 +306,7 @@ impl PbMapperState {
         &mut self,
         service_key: String,
     ) -> Result<(), CtlError> {
-        self.service_credentials.remove(&service_key);
-        self.service_endpoints.remove(&service_key);
+        self.service_tunnels.remove(&service_key);
         if let Some(handle) = self.service_handles.remove(&service_key) {
             handle.abort();
         }
@@ -328,7 +327,7 @@ impl PbMapperState {
             credential,
         } = commit;
 
-        self.client_credentials.remove(&service_key);
+        self.client_tunnels.remove(&service_key);
         if let Some(previous) = self.client_handles.remove(&service_key) {
             tracing::warn!(
                 "Client for service '{service_key}' is already connected, replacing handle"
@@ -357,10 +356,13 @@ impl PbMapperState {
             })
         };
 
-        self.client_credentials
-            .insert(service_key.clone(), credential);
-        self.client_endpoints
-            .insert(service_key.clone(), remote_sock_addr);
+        self.client_tunnels.insert(
+            service_key.clone(),
+            PinnedTunnel {
+                credential,
+                endpoint: remote_sock_addr,
+            },
+        );
         let handle = if protocol_upper == "TCP" {
             tokio::spawn(async move {
                 run_client_side_cli_with_pinned_credential::<TcpListenerProvider, _>(
@@ -442,8 +444,7 @@ impl PbMapperState {
     pub async fn disconnect_service(&mut self, service_key: String) -> Result<(), CtlError> {
         // Aborting the task is the part that matters: it is what stops the
         // retry loop still dialling in the background.
-        self.client_credentials.remove(&service_key);
-        self.client_endpoints.remove(&service_key);
+        self.client_tunnels.remove(&service_key);
         let aborted = match self.client_handles.remove(&service_key) {
             Some(handle) => {
                 handle.abort();
@@ -477,8 +478,7 @@ impl PbMapperState {
         &mut self,
         service_key: String,
     ) -> Result<(), CtlError> {
-        self.client_credentials.remove(&service_key);
-        self.client_endpoints.remove(&service_key);
+        self.client_tunnels.remove(&service_key);
         if let Some(handle) = self.client_handles.remove(&service_key) {
             handle.abort();
         }
