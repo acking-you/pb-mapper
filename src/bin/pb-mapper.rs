@@ -348,6 +348,9 @@ async fn register<LocalStream: StreamProvider + Send + 'static>(
 }
 
 async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
+    pb_mapper::common::checksum::get_process_credential().map_err(|error| {
+        std::io::Error::other(format!("client credential is required: {error}"))
+    })?;
     let local_addr = get_sockaddr_async(&args.addr).await?;
     let remote_addr = get_pb_mapper_server_async(args.relay.server.as_deref()).await?;
     let key = args.key.into();

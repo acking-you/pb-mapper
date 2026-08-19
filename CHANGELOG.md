@@ -49,6 +49,7 @@ All notable changes to this project will be documented in this file.
 - Evaluated first-flight admission on a blocking thread under one replay lock, omitted a session when durable admission is unavailable, aged restored Bloom generations from loaded record timestamps, validated installer keys from `server.env`, refused to persist a recovery `MSG_HEADER_KEY` that cannot decrypt existing state, batched high-slot tombstone cleanup, and captured the UI credential together with the relay address before DNS.
 - Kept replay-lock waits off Tokio workers, claimed limited and stale-root first flights before sending a nonce-0 error, accepted a recovery key that decrypts WAL-only state, verified legacy and installer keys against existing state, rolled back UI config when persistence failed, and probed tunnels at their pinned relay endpoints.
 - Stopped persisting limited first flights once the Bloom budget is full, omitted their nonce-0 error sessions, and left container `admin.key` unset when encrypted state remains so the runtime can verify a legacy recovery key.
+- Claimed revoked or expired first flights before returning a nonce-0 error, scheduled high-slot expiries instead of scanning every tick, marked administrator requests sent only after the first flight is written, allowed clearing the UI credential, failed `pb-mapper connect` without a credential, and fail-closed truncated replay records.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

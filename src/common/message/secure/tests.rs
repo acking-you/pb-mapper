@@ -177,7 +177,12 @@ async fn revoked_first_flights_do_not_consume_the_replay_filter() {
         Err(error) => error,
     };
     assert_eq!(first.failure.code, "temporary_key_revoked");
+    assert!(first.response_session.is_some());
     assert_eq!(second.failure.code, "temporary_key_revoked");
+    assert!(
+        second.response_session.is_none(),
+        "a claimed revoked salt must not reuse nonce 0"
+    );
 
     let _ = std::fs::remove_dir_all(config.state_dir);
 }
@@ -533,7 +538,7 @@ fn persisted_first_flights_survive_a_torn_trailing_record() {
     let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
         restored.admit(7, &fingerprint, now),
-        FirstFlightAdmit::Replayed
+        FirstFlightAdmit::Unavailable
     );
     let _ = std::fs::remove_file(path);
 }

@@ -16,6 +16,8 @@
 //! authenticated before root rotation from executing against the new administrator
 //! state. The actor is also the sole strong owner of temporary-key leases.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 pub(super) struct AuthActorState {
@@ -105,6 +107,20 @@ pub(super) async fn run_auth_actor(
     );
     tombstones.sort_unstable_by_key(|(cleanup_at, _)| *cleanup_at);
     let mut tombstones = VecDeque::from(tombstones);
+    let mut high_expiries = BTreeMap::<u64, HashSet<u64>>::new();
+    for entry in inner
+        .high_slot_entries
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+    {
+        if entry.state == SlotState::Active && entry.expires_at > now {
+            high_expiries
+                .entry(entry.expires_at)
+                .or_default()
+                .insert(entry.key_id);
+        }
+    }
     let mut last_snapshot_at = unix_seconds();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -145,7 +161,7 @@ pub(super) async fn run_auth_actor(
                         lease.cancel_expired();
                     }
                 }
-                expire_due_high_slots(&inner, &mut cold, &mut tombstones, now);
+                expire_due_high_slots(&inner, &mut cold, &mut tombstones, &mut high_expiries, now);
                 let mut due_high = Vec::new();
                 while let Some((cleanup_at, key_id)) = tombstones.front().copied() {
                     if cleanup_at > now {
@@ -252,12 +268,12 @@ pub(super) async fn run_auth_actor(
                     }
                     AuthCommand::Renew { authority, key_id, ttl, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_renew(&inner, &config, &cold, &mut wheel, key_id, ttl));
+                            .and_then(|()| actor_renew(&inner, &config, &cold, &mut wheel, &mut high_expiries, key_id, ttl));
                         let _ = response.send(result);
                     }
                     AuthCommand::Revoke { authority, key_id, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_revoke(&inner, &config, &mut cold, &mut tombstones, key_id));
+                            .and_then(|()| actor_revoke(&inner, &config, &mut cold, &mut tombstones, &mut high_expiries, key_id));
                         let _ = response.send(result);
                     }
                     AuthCommand::Gc { authority, response } => {
@@ -268,6 +284,7 @@ pub(super) async fn run_auth_actor(
                                 &mut cold,
                                 &mut wheel,
                                 &mut tombstones,
+                                &mut high_expiries,
                                 &admin_replay_order,
                             ));
                         let _ = response.send(result);
@@ -280,13 +297,14 @@ pub(super) async fn run_auth_actor(
                                 &mut cold,
                                 &mut wheel,
                                 &admin_replay_order,
+                                &mut high_expiries,
                                 "auth_state_reset",
                             ));
                         let _ = response.send(result);
                     }
                     AuthCommand::RotateRoot { authority, new_key, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_rotate_root(&inner, &config, &mut cold, &mut wheel, &mut admin_lease, new_key));
+                            .and_then(|()| actor_rotate_root(&inner, &config, &mut cold, &mut wheel, &mut admin_lease, &mut high_expiries, new_key));
                         if result.is_ok() {
                             admin_replays.clear();
                             admin_replay_order.clear();
@@ -582,6 +600,7 @@ fn actor_renew(
     config: &AuthConfig,
     cold: &HashMap<u64, ColdMetadata>,
     wheel: &mut TimingWheel,
+    high_expiries: &mut BTreeMap<u64, HashSet<u64>>,
     key_id: u64,
     ttl: Duration,
 ) -> Result<IssuedTemporaryKey, AuthFailure> {
@@ -672,8 +691,10 @@ fn actor_renew(
                 true,
             ));
         }
+        unschedule_high_expiry(high_expiries, entry.expires_at, key_id);
         entry.expires_at = expires_at;
         entry.tombstoned_at = None;
+        schedule_high_expiry(high_expiries, expires_at, key_id);
     }
     metadata_with_credential(inner, cold, key_id, true)
 }
@@ -683,6 +704,7 @@ fn actor_revoke(
     config: &AuthConfig,
     cold: &mut HashMap<u64, ColdMetadata>,
     tombstones: &mut VecDeque<(u64, u64)>,
+    high_expiries: &mut BTreeMap<u64, HashSet<u64>>,
     key_id: u64,
 ) -> Result<TemporaryKeyMetadata, AuthFailure> {
     ensure_store_available(inner)?;
@@ -748,6 +770,7 @@ fn actor_revoke(
     if entry.state != SlotState::Active {
         return Err(key_not_active());
     }
+    unschedule_high_expiry(high_expiries, entry.expires_at, key_id);
     entry.state = SlotState::Revoked;
     entry.tombstoned_at = Some(now);
     if let Some(metadata) = cold.get_mut(&key_id) {
@@ -785,6 +808,7 @@ fn actor_gc(
     cold: &mut HashMap<u64, ColdMetadata>,
     wheel: &mut TimingWheel,
     tombstones: &mut VecDeque<(u64, u64)>,
+    high_expiries: &mut BTreeMap<u64, HashSet<u64>>,
     admin_replays: &VecDeque<AdminReplayRecord>,
 ) -> Result<u64, AuthFailure> {
     ensure_store_available(inner)?;
@@ -834,6 +858,12 @@ fn actor_gc(
             }
             keep
         });
+        high_expiries.clear();
+        for entry in high.iter() {
+            if entry.state == SlotState::Active && entry.expires_at > now {
+                schedule_high_expiry(high_expiries, entry.expires_at, entry.key_id);
+            }
+        }
     }
     tombstones.clear();
     let gc_audit = audit("temporary_key_gc", None, Some(format!("removed={removed}")));
@@ -855,6 +885,7 @@ fn actor_reset(
     cold: &mut HashMap<u64, ColdMetadata>,
     wheel: &mut TimingWheel,
     admin_replays: &VecDeque<AdminReplayRecord>,
+    high_expiries: &mut BTreeMap<u64, HashSet<u64>>,
     action: &str,
 ) -> Result<(), AuthFailure> {
     let new_instance_id = random_instance_id();
@@ -907,6 +938,7 @@ fn actor_reset(
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = new_instance_id;
     cold.clear();
     wheel.clear(unix_seconds());
+    high_expiries.clear();
     clear_retained_high_slot_entries(inner);
     inner.safe_mode.store(false, Ordering::Release);
     Ok(())
@@ -918,6 +950,7 @@ fn actor_rotate_root(
     cold: &mut HashMap<u64, ColdMetadata>,
     wheel: &mut TimingWheel,
     admin_lease: &mut Arc<AuthLease>,
+    high_expiries: &mut BTreeMap<u64, HashSet<u64>>,
     new_key: AesKeyType,
 ) -> Result<(), AuthFailure> {
     if new_key == inner.admin_key() {
@@ -976,6 +1009,7 @@ fn actor_rotate_root(
     }
     cold.clear();
     wheel.clear(unix_seconds());
+    high_expiries.clear();
     clear_retained_high_slot_entries(inner);
     let new_admin_lease = Arc::new(AuthLease::new(0, u64::MAX));
     *inner
@@ -1177,18 +1211,55 @@ fn high_slot_metadata(entry: &PersistedEntry) -> TemporaryKeyMetadata {
     }
 }
 
+fn schedule_high_expiry(
+    high_expiries: &mut BTreeMap<u64, HashSet<u64>>,
+    expires_at: u64,
+    key_id: u64,
+) {
+    high_expiries.entry(expires_at).or_default().insert(key_id);
+}
+
+fn unschedule_high_expiry(
+    high_expiries: &mut BTreeMap<u64, HashSet<u64>>,
+    expires_at: u64,
+    key_id: u64,
+) {
+    if let Some(ids) = high_expiries.get_mut(&expires_at) {
+        ids.remove(&key_id);
+        if ids.is_empty() {
+            high_expiries.remove(&expires_at);
+        }
+    }
+}
+
 fn expire_due_high_slots(
     inner: &Arc<AuthStateInner>,
     cold: &mut HashMap<u64, ColdMetadata>,
     tombstones: &mut VecDeque<(u64, u64)>,
+    high_expiries: &mut BTreeMap<u64, HashSet<u64>>,
     now: u64,
 ) {
+    let mut due = Vec::new();
+    while let Some((&expires_at, _)) = high_expiries.first_key_value() {
+        if expires_at > now {
+            break;
+        }
+        if let Some(ids) = high_expiries.remove(&expires_at) {
+            due.extend(ids.into_iter().map(|key_id| (expires_at, key_id)));
+        }
+    }
+    if due.is_empty() {
+        return;
+    }
     let mut high = inner
         .high_slot_entries
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut expired = Vec::new();
-    for entry in high.iter_mut() {
+    for (_scheduled_at, key_id) in due {
+        let Some(entry) = high.iter_mut().find(|entry| entry.key_id == key_id) else {
+            continue;
+        };
         if entry.state == SlotState::Active && entry.expires_at <= now {
             entry.state = SlotState::Expired;
             let tombstoned_at = entry.expires_at;
@@ -1197,6 +1268,8 @@ fn expire_due_high_slots(
                 metadata.tombstoned_at = tombstoned_at;
             }
             expired.push((tombstoned_at, entry.key_id, entry.expires_at));
+        } else if entry.state == SlotState::Active && entry.expires_at > now {
+            schedule_high_expiry(high_expiries, entry.expires_at, key_id);
         }
     }
     drop(high);

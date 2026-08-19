@@ -672,14 +672,22 @@ fn authenticate_and_admit(
     let already_admitted = replay.already_admitted(&fingerprint, unix_seconds());
     let context = auth
         .authenticate_presented(key_id, &key)
-        .map_err(|failure| ServerInitialError {
-            failure,
-            response_session: if already_admitted {
+        .map_err(|failure| {
+            let response_session = if already_admitted {
                 None
-            } else {
+            } else if matches!(
+                replay.claim(&fingerprint, unix_seconds()),
+                FirstFlightAdmit::Fresh
+            ) {
                 Some(error_session)
-            },
-            presented_key_id: Some(key_id),
+            } else {
+                None
+            };
+            ServerInitialError {
+                failure,
+                response_session,
+                presented_key_id: Some(key_id),
+            }
         })?;
     match replay.admit(key_id, &fingerprint, unix_seconds()) {
         FirstFlightAdmit::Fresh => Ok(context),

@@ -331,8 +331,8 @@ async fn send_admin_request_with_timeout(
                 .await
                 .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
             let session = ClientHeaderSession::from_process()?;
-            sent.store(true, std::sync::atomic::Ordering::Release);
             session.write_initial(&mut stream, &encoded).await?;
+            sent.store(true, std::sync::atomic::Ordering::Release);
             let mut reader = session.response_reader(&mut stream)?;
             let message = reader.read_msg().await?;
             Ok::<_, Box<dyn Error>>(PbConnResponse::decode(message)?)

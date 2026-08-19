@@ -87,7 +87,9 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   Future<void> _saveConfiguration() async {
     if (_isSaving) return; // Prevent multiple simultaneous saves
     final msgHeaderKey = _msgHeaderKeyController.text.trim();
-    if (msgHeaderKey.length != 32 && !msgHeaderKey.startsWith('pbmt1_')) {
+    if (msgHeaderKey.isNotEmpty &&
+        msgHeaderKey.length != 32 &&
+        !msgHeaderKey.startsWith('pbmt1_')) {
       showToast(context, context.l10n.keyLengthInvalid, kind: ToastKind.error);
       return;
     }
@@ -313,7 +315,9 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       if (serverAddress.isEmpty) {
         throw const FormatException('serverAddress is required');
       }
-      if (msgHeaderKey.length != 32 && !msgHeaderKey.startsWith('pbmt1_')) {
+      if (msgHeaderKey.isNotEmpty &&
+          msgHeaderKey.length != 32 &&
+          !msgHeaderKey.startsWith('pbmt1_')) {
         throw const FormatException(
           'MSG_HEADER_KEY must be a 32-character administrator key or a pbmt1_ temporary credential',
         );

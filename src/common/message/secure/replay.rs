@@ -384,11 +384,17 @@ fn read_complete_replay_records(file: &mut File) -> std::io::Result<Vec<[u8; REP
     let mut records = Vec::new();
     loop {
         let mut record = [0_u8; REPLAY_RECORD_LEN];
-        match file.read_exact(&mut record) {
-            Ok(()) => records.push(record),
-            Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(records),
-            Err(error) => return Err(error),
+        let read = file.read(&mut record)?;
+        if read == 0 {
+            return Ok(records);
         }
+        if read < REPLAY_RECORD_LEN {
+            return Err(std::io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "truncated first-flight replay record",
+            ));
+        }
+        records.push(record);
     }
 }
 
