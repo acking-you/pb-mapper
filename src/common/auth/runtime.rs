@@ -188,12 +188,14 @@ impl AuthRuntime {
             AuthActorState::new(cold, wheel, admin_replays, admin_replay_order),
             state_lock.clone(),
         ));
+        let actor_abort = actor.abort_handle();
         let runtime = Self {
             inner: Arc::downgrade(&inner),
             command_tx,
             config: config.clone(),
             _state_lock: state_lock.clone(),
             actor: Arc::new(std::sync::Mutex::new(Some(actor))),
+            actor_abort,
         };
         Ok(runtime)
     }
@@ -212,6 +214,25 @@ impl AuthRuntime {
             .take();
         if let Some(handle) = handle {
             let _ = handle.await;
+        }
+    }
+
+    pub async fn abort_actor(&self) {
+        self.actor_abort.abort();
+        let handle = self
+            .actor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+            return;
+        }
+        for _ in 0..100 {
+            if self.inner.upgrade().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -352,7 +373,7 @@ impl AuthRuntime {
             )),
             SlotState::Active if slot.expires_at <= unix_seconds() => {
                 if let Some(lease) = slot.lease.upgrade() {
-                    lease.cancellation.cancel();
+                    lease.cancel_expired();
                 }
                 Some(AuthFailure::new(
                     "temporary_key_expired",

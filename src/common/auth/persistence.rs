@@ -228,7 +228,7 @@ pub(super) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     for lease in slots.iter().filter_map(|slot| slot.lease.upgrade()) {
-        lease.cancellation.cancel();
+        lease.cancel_rotated();
     }
 }
 
@@ -977,6 +977,29 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
         refuse_write_if_encrypted_state(path, force)?;
     }
     atomic_write(path, format!("{key}\n").as_bytes(), 0o600)
+}
+
+pub(super) fn reset_already_installed(
+    state_dir: &Path,
+    admin_key: &AesKeyType,
+    new_instance_id: &[u8; INSTANCE_ID_LEN],
+) -> bool {
+    let Ok(Some(live)) = read_instance_id_file(&state_dir.join("server-instance-id")) else {
+        return false;
+    };
+    if live != *new_instance_id {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(auth_snapshot_path(state_dir)) else {
+        return false;
+    };
+    let Ok(plain) = open_blob(admin_key, &bytes) else {
+        return false;
+    };
+    let Ok(snapshot) = serde_json::from_slice::<PersistedSnapshot>(&plain) else {
+        return false;
+    };
+    snapshot.instance_id == *new_instance_id
 }
 
 pub(super) fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str) -> bool {

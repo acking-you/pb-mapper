@@ -446,6 +446,7 @@ struct ConnectCommit {
 
 pub struct PbMapperState {
     server_handle: Option<JoinHandle<()>>,
+    server_auth: Option<AuthRuntime>,
     server_shutdown_token: Option<CancellationToken>,
     server_status_sender:
         Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<ServerStatusInfo>>>,

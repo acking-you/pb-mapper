@@ -299,6 +299,7 @@ async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
         error.response_session.is_none(),
         "the presenter cannot open a session derived from the live key"
     );
+    assert_eq!(error.presented_key_id, Some(key_id));
 
     let _ = std::fs::remove_dir_all(config.state_dir);
 }
@@ -399,6 +400,17 @@ fn per_credential_admission_limit_does_not_consume_other_keys() {
     assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
     assert_eq!(guard.admit(2, &[3_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Replayed);
+}
+
+#[test]
+fn aggregate_admission_limit_covers_all_keys() {
+    let now = unix_seconds();
+    let mut guard = ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
+        .with_max_per_key(100)
+        .with_max_total(2);
+    assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
+    assert_eq!(guard.admit(2, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
+    assert_eq!(guard.admit(3, &[3_u8; 32], now), FirstFlightAdmit::Limited);
 }
 
 #[test]

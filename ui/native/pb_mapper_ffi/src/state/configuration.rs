@@ -47,6 +47,7 @@ impl PbMapperState {
 
         let temp_state = Self {
             server_handle: None,
+            server_auth: None,
             server_shutdown_token: None,
             server_status_sender: None,
             server_start_time: None,
@@ -84,6 +85,7 @@ impl PbMapperState {
 
         let state = Self {
             server_handle: None,
+            server_auth: None,
             server_shutdown_token: None,
             server_status_sender: None,
             server_start_time: None,

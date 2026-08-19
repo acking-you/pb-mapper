@@ -43,6 +43,11 @@ fn first_flight_budget(window_seconds: u64) -> u32 {
         .max(8_192)
 }
 
+fn bloom_insert_capacity(bytes: usize) -> u32 {
+    let bits = (bytes as u64).saturating_mul(8);
+    u32::try_from(bits / 16).unwrap_or(u32::MAX).max(1)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FirstFlightAdmit {
     Fresh,
@@ -110,6 +115,9 @@ pub(super) struct ReplayGuard {
     counts_started_at: u64,
     window_seconds: u64,
     max_per_key: u32,
+    total: u32,
+    total_started_at: u64,
+    max_total: u32,
     log_path: Option<PathBuf>,
     last_compact_at: u64,
     log_failed: bool,
@@ -118,12 +126,16 @@ pub(super) struct ReplayGuard {
 impl ReplayGuard {
     pub(super) fn open(log_path: Option<PathBuf>, bytes: usize, window_seconds: u64) -> Self {
         let now = unix_seconds();
+        let configured = first_flight_budget(window_seconds);
         let mut guard = Self {
             bloom: RotatingBloom::new(bytes, window_seconds),
             counts: HashMap::new(),
             counts_started_at: now,
             window_seconds,
-            max_per_key: first_flight_budget(window_seconds),
+            max_per_key: configured,
+            total: 0,
+            total_started_at: now,
+            max_total: configured.min(bloom_insert_capacity(bytes)),
             log_path,
             last_compact_at: now,
             log_failed: false,
@@ -138,6 +150,12 @@ impl ReplayGuard {
         self
     }
 
+    #[cfg(test)]
+    pub(super) fn with_max_total(mut self, max_total: u32) -> Self {
+        self.max_total = max_total;
+        self
+    }
+
     pub(super) fn admit(
         &mut self,
         key_id: u64,
@@ -148,7 +166,14 @@ impl ReplayGuard {
         if self.bloom.contains(fingerprint, now) {
             return FirstFlightAdmit::Replayed;
         }
+        if self.bloom.current_started_at != self.total_started_at {
+            self.total = 0;
+            self.total_started_at = self.bloom.current_started_at;
+        }
         if self.counts.get(&key_id).copied().unwrap_or(0) >= self.max_per_key {
+            return FirstFlightAdmit::Limited;
+        }
+        if self.total >= self.max_total {
             return FirstFlightAdmit::Limited;
         }
         if self.persist(fingerprint, now).is_err() {
@@ -156,6 +181,7 @@ impl ReplayGuard {
         }
         self.bloom.insert(fingerprint, now);
         *self.counts.entry(key_id).or_insert(0) += 1;
+        self.total = self.total.saturating_add(1);
         if now.saturating_sub(self.last_compact_at) >= REPLAY_COMPACT_INTERVAL_SECONDS {
             self.compact(now);
         }

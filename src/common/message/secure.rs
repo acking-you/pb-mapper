@@ -265,6 +265,17 @@ pub struct ServerInitialMessage {
 pub struct ServerInitialError {
     pub failure: AuthFailure,
     pub response_session: Option<ServerHeaderSession>,
+    pub presented_key_id: Option<u64>,
+}
+
+impl ServerInitialError {
+    fn new(failure: AuthFailure) -> Self {
+        Self {
+            failure,
+            response_session: None,
+            presented_key_id: None,
+        }
+    }
 }
 
 impl fmt::Debug for ServerInitialError {
@@ -273,6 +284,7 @@ impl fmt::Debug for ServerInitialError {
             .debug_struct("ServerInitialError")
             .field("failure", &self.failure)
             .field("has_response_session", &self.response_session.is_some())
+            .field("presented_key_id", &self.presented_key_id)
             .finish()
     }
 }
@@ -329,17 +341,13 @@ impl ServerSecurity {
         reader: &mut T,
     ) -> std::result::Result<ServerInitialMessage, ServerInitialError> {
         let mut first = [0_u8; 4];
-        reader
-            .read_exact(&mut first)
-            .await
-            .map_err(|error| ServerInitialError {
-                failure: AuthFailure::new(
-                    "protocol_header_read_failed",
-                    format!("failed to read initial protocol header: {error}"),
-                    true,
-                ),
-                response_session: None,
-            })?;
+        reader.read_exact(&mut first).await.map_err(|error| {
+            ServerInitialError::new(AuthFailure::new(
+                "protocol_header_read_failed",
+                format!("failed to read initial protocol header: {error}"),
+                true,
+            ))
+        })?;
         if first == PROTOCOL_V2_MAGIC {
             self.read_v2_initial(reader).await
         } else {
@@ -360,6 +368,7 @@ impl ServerSecurity {
                     false,
                 ),
                 response_session: None,
+                presented_key_id: None,
             });
         }
         let key = self
@@ -368,6 +377,7 @@ impl ServerSecurity {
             .map_err(|failure| ServerInitialError {
                 failure,
                 response_session: None,
+                presented_key_id: None,
             })?;
         let checksum = u32::from_be_bytes(checksum_bytes);
         let datalen = reader
@@ -380,6 +390,7 @@ impl ServerSecurity {
                     true,
                 ),
                 response_session: None,
+                presented_key_id: None,
             })?;
         if !valid_checksum_for_key(datalen, checksum, &key) || datalen > MAX_INITIAL_CIPHERTEXT_LEN
         {
@@ -390,6 +401,7 @@ impl ServerSecurity {
                     false,
                 ),
                 response_session: None,
+                presented_key_id: None,
             });
         }
         let mut encrypted = vec![0_u8; datalen as usize];
@@ -403,6 +415,7 @@ impl ServerSecurity {
                     true,
                 ),
                 response_session: None,
+                presented_key_id: None,
             })?;
         let mut codec = Aes256GcmDeCodec::try_new(&key).map_err(|_| ServerInitialError {
             failure: AuthFailure::new(
@@ -411,6 +424,7 @@ impl ServerSecurity {
                 false,
             ),
             response_session: None,
+            presented_key_id: None,
         })?;
         let plain = codec
             .decrypt(&mut encrypted)
@@ -421,6 +435,7 @@ impl ServerSecurity {
                     false,
                 ),
                 response_session: None,
+                presented_key_id: None,
             })?;
         let context = self
             .auth
@@ -428,6 +443,7 @@ impl ServerSecurity {
             .map_err(|failure| ServerInitialError {
                 failure,
                 response_session: None,
+                presented_key_id: None,
             })?;
         let legacy_guard =
             self.auth
@@ -435,6 +451,7 @@ impl ServerSecurity {
                 .map_err(|failure| ServerInitialError {
                     failure,
                     response_session: None,
+                    presented_key_id: None,
                 })?;
         Ok(ServerInitialMessage {
             payload: plain.to_vec(),
@@ -465,6 +482,7 @@ impl ServerSecurity {
                     true,
                 ),
                 response_session: None,
+                presented_key_id: None,
             })?;
         let version = remainder[0];
         let flags = remainder[1];
@@ -483,6 +501,7 @@ impl ServerSecurity {
                     false,
                 ),
                 response_session: None,
+                presented_key_id: None,
             });
         }
         let key_id = u64::from_be_bytes(remainder[4..12].try_into().expect("fixed key id"));
@@ -498,6 +517,7 @@ impl ServerSecurity {
                     false,
                 ),
                 response_session: None,
+                presented_key_id: Some(key_id),
             });
         }
         let key = self
@@ -506,6 +526,7 @@ impl ServerSecurity {
             .map_err(|failure| ServerInitialError {
                 failure,
                 response_session: None,
+                presented_key_id: Some(key_id),
             })?;
         let material = derive_material(key_id, &key, salt).map_err(|error| ServerInitialError {
             failure: AuthFailure::new(
@@ -514,6 +535,7 @@ impl ServerSecurity {
                 false,
             ),
             response_session: None,
+            presented_key_id: Some(key_id),
         })?;
         let mut session = v2_session(key, material.clone());
         let (counter, ciphertext) =
@@ -526,6 +548,7 @@ impl ServerSecurity {
                         false,
                     ),
                     response_session: None,
+                    presented_key_id: Some(key_id),
                 })?;
         let mut current_ciphertext = ciphertext.clone();
         let payload = match open_v2_payload(
@@ -548,6 +571,7 @@ impl ServerSecurity {
                         false,
                     ),
                     response_session: None,
+                    presented_key_id: Some(key_id),
                 });
             }
         };
@@ -558,6 +582,7 @@ impl ServerSecurity {
             .map_err(|failure| ServerInitialError {
                 failure,
                 response_session: Some(session_without_context(&session)),
+                presented_key_id: Some(key_id),
             })?;
         let fingerprint = replay_fingerprint(key_id, &salt);
         match self
@@ -574,6 +599,7 @@ impl ServerSecurity {
                         true,
                     ),
                     response_session: Some(session),
+                    presented_key_id: Some(key_id),
                 });
             }
             FirstFlightAdmit::Limited => {
@@ -584,6 +610,7 @@ impl ServerSecurity {
                         true,
                     ),
                     response_session: Some(session),
+                    presented_key_id: Some(key_id),
                 });
             }
             FirstFlightAdmit::Unavailable => {
@@ -594,6 +621,7 @@ impl ServerSecurity {
                         true,
                     ),
                     response_session: Some(session),
+                    presented_key_id: Some(key_id),
                 });
             }
             FirstFlightAdmit::Fresh => {}
@@ -672,6 +700,7 @@ fn stale_root_first_flight(
     Some(ServerInitialError {
         failure: AuthFailure::new(code, message, false),
         response_session: Some(v2_session(previous_key, previous_material)),
+        presented_key_id: Some(key_id),
     })
 }
 

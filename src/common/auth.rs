@@ -24,7 +24,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -299,12 +299,18 @@ impl fmt::Display for AuthFailure {
 
 impl std::error::Error for AuthFailure {}
 
+const LEASE_CANCEL_NONE: u8 = 0;
+const LEASE_CANCEL_EXPIRED: u8 = 1;
+const LEASE_CANCEL_REVOKED: u8 = 2;
+const LEASE_CANCEL_ROTATED: u8 = 3;
+
 #[derive(Debug)]
 pub struct AuthLease {
     key_id: u64,
     expires_at: AtomicU64,
     wheel_version: AtomicU64,
     cancellation: CancellationToken,
+    cancel_reason: AtomicU8,
 }
 
 impl AuthLease {
@@ -314,6 +320,7 @@ impl AuthLease {
             expires_at: AtomicU64::new(expires_at),
             wheel_version: AtomicU64::new(1),
             cancellation: CancellationToken::new(),
+            cancel_reason: AtomicU8::new(LEASE_CANCEL_NONE),
         }
     }
 
@@ -327,6 +334,33 @@ impl AuthLease {
 
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
+    }
+
+    fn record_cancel(&self, reason: u8) {
+        let _ = self.cancel_reason.compare_exchange(
+            LEASE_CANCEL_NONE,
+            reason,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.cancellation.cancel();
+    }
+
+    pub(crate) fn cancel_expired(&self) {
+        self.record_cancel(LEASE_CANCEL_EXPIRED);
+    }
+
+    pub(crate) fn cancel_revoked(&self) {
+        self.record_cancel(LEASE_CANCEL_REVOKED);
+    }
+
+    pub(crate) fn cancel_rotated(&self) {
+        self.record_cancel(LEASE_CANCEL_ROTATED);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_now(&self) {
+        self.expires_at.store(0, Ordering::Release);
     }
 }
 
@@ -361,18 +395,10 @@ impl AuthContext {
             )
         })?;
         if lease.cancellation.is_cancelled() {
-            return Err(AuthFailure::new(
-                if self.is_admin {
-                    "administrator_key_rotated"
-                } else {
-                    "temporary_key_revoked"
-                },
-                "credential lease has been cancelled",
-                false,
-            ));
+            return Err(cancelled_lease_failure(self.is_admin, &lease));
         }
         if !self.is_admin && lease.expires_at() <= unix_seconds() {
-            lease.cancellation.cancel();
+            lease.cancel_expired();
             return Err(AuthFailure::new(
                 "temporary_key_expired",
                 "temporary key has expired",
@@ -407,6 +433,38 @@ impl AuthContext {
         }
         self.ensure_active()?;
         Ok(self.lease.clone())
+    }
+}
+
+fn cancelled_lease_failure(is_admin: bool, lease: &AuthLease) -> AuthFailure {
+    if is_admin {
+        return AuthFailure::new(
+            "administrator_key_rotated",
+            "credential lease has been cancelled",
+            false,
+        );
+    }
+    match lease.cancel_reason.load(Ordering::Acquire) {
+        LEASE_CANCEL_EXPIRED => AuthFailure::new(
+            "temporary_key_expired",
+            "temporary key has expired",
+            false,
+        ),
+        LEASE_CANCEL_ROTATED => AuthFailure::new(
+            "temporary_key_rotated",
+            "temporary credential was invalidated by administrator root rotation or auth-state reset",
+            false,
+        ),
+        LEASE_CANCEL_REVOKED => AuthFailure::new(
+            "temporary_key_revoked",
+            "temporary key was revoked",
+            false,
+        ),
+        _ => AuthFailure::new(
+            "temporary_key_inactive",
+            "credential lease has been cancelled",
+            false,
+        ),
     }
 }
 
@@ -496,6 +554,7 @@ pub struct AuthRuntime {
     config: AuthConfig,
     _state_lock: Arc<File>,
     actor: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    actor_abort: tokio::task::AbortHandle,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

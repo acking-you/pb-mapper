@@ -60,6 +60,7 @@ pub(super) async fn handle_conn(
                 .response_session
                 .as_ref()
                 .map(|session| session.key_id())
+                .or(error.presented_key_id)
                 .unwrap_or_default();
             let decision = security.record_failure_log(peer_addr.ip(), key_id, &error.failure.code);
             if decision.suppressed > 0 {

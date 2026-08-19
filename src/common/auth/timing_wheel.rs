@@ -184,7 +184,7 @@ impl TimingWheel {
         take_all_entries(&mut self.level2, &mut entries);
         take_all_entries(&mut self.level3, &mut entries);
         for lease in self.owners.values() {
-            lease.cancellation.cancel();
+            lease.cancel_rotated();
         }
         *self = Self::new(now);
     }

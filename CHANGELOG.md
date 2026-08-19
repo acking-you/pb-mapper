@@ -42,6 +42,7 @@ All notable changes to this project will be documented in this file.
 - Bound relay tunneled-frame checksums to each hop's authenticated session key instead of the process administrator key.
 - Bound local UDP and codec tunnels to the pinned credential's checksum key so a later process-key change cannot desynchronize framed payloads.
 - Looked up high-slot credentials for admin list/show/renew/revoke, counted them in status, scheduled their tombstones across restart, and expired due high-slot entries on the actor tick. UI tunnel stop now drops the pinned credential. First-flight decrypt failures no longer send an error frame the presenter cannot read.
+- Reported cancelled leases by recorded cause, aborted the auth actor on UI shutdown timeout, validated replacement credentials before stopping a live tunnel, preserved presented key IDs on unreadable first flights, finalized reset when the new instance id was already installed, and bounded aggregate first-flight Bloom inserts.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.

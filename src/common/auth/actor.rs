@@ -123,7 +123,7 @@ pub(super) async fn run_auth_actor(
                     if let Some(slot) = slots.get_mut(key_slot(key_id) as usize) {
                         if slot.generation == key_generation(key_id) && slot.state == SlotState::Active {
                             slot.state = SlotState::Expired;
-                            lease.cancellation.cancel();
+                            lease.cancel_expired();
                             let tombstoned_at = slot.expires_at;
                             if let Some(metadata) = cold.get_mut(&key_id) {
                                 metadata.tombstoned_at = tombstoned_at;
@@ -142,7 +142,7 @@ pub(super) async fn run_auth_actor(
                             );
                         }
                     } else {
-                        lease.cancellation.cancel();
+                        lease.cancel_expired();
                     }
                 }
                 expire_due_high_slots(&inner, &mut cold, &mut tombstones, now);
@@ -205,7 +205,7 @@ pub(super) async fn run_auth_actor(
             }
             command = command_rx.recv() => {
                 let Some(command) = command else {
-                    admin_lease.cancellation.cancel();
+                    admin_lease.cancel_rotated();
                     cancel_all_temporary_leases(&inner);
                     break;
                 };
@@ -307,7 +307,7 @@ pub(super) async fn run_auth_actor(
                         let _ = response.send(result);
                     }
                     AuthCommand::Shutdown { response } => {
-                        admin_lease.cancellation.cancel();
+                        admin_lease.cancel_rotated();
                         cancel_all_temporary_leases(&inner);
                         let _ = response.send(());
                         break;
@@ -719,7 +719,7 @@ fn actor_revoke(
         validate_slot_identity(slot, key_id)?;
         slot.state = SlotState::Revoked;
         if let Some(lease) = slot.lease.upgrade() {
-            lease.cancellation.cancel();
+            lease.cancel_revoked();
         }
         let cold_metadata = cold.get_mut(&key_id).ok_or_else(|| key_not_found(key_id))?;
         cold_metadata.tombstoned_at = now;
@@ -793,7 +793,11 @@ fn actor_gc(
         {
             let key_id = make_key_id(slot.generation, index as u32);
             if let Some(lease) = slot.lease.upgrade() {
-                lease.cancellation.cancel();
+                if slot.state == SlotState::Revoked {
+                    lease.cancel_revoked();
+                } else {
+                    lease.cancel_expired();
+                }
             }
             slot.state = SlotState::Free;
             slot.expires_at = 0;
@@ -863,9 +867,16 @@ fn actor_reset(
             )
         })
     {
-        inner.safe_mode.store(true, Ordering::Release);
-        cancel_all_temporary_leases(inner);
-        return Err(error);
+        if !reset_already_installed(&config.state_dir, &admin_key, &new_instance_id) {
+            inner.safe_mode.store(true, Ordering::Release);
+            cancel_all_temporary_leases(inner);
+            return Err(error);
+        }
+        tracing::warn!(
+            event = "auth_state_reset_finalized_after_sync_error",
+            error = %error,
+            "server-instance-id replacement reported an error, but the live id and snapshot already match the new instance; finishing in-memory reset"
+        );
     }
     let _ = std::fs::remove_file(&next_instance_path);
     push_audit_record(inner, reset_audit);
@@ -971,7 +982,7 @@ fn actor_rotate_root(
         set_process_msg_header_key(Some(&new_key_string)).map_err(AuthFailure::internal)?;
     }
     inner.safe_mode.store(false, Ordering::Release);
-    old_admin_lease.cancellation.cancel();
+    old_admin_lease.cancel_rotated();
     *admin_lease = new_admin_lease;
     Ok(())
 }

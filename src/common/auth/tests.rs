@@ -661,6 +661,38 @@ async fn issue_renew_revoke_and_persist() {
 }
 
 #[tokio::test]
+async fn ensure_active_keeps_expiry_after_the_lease_is_cancelled() {
+    let state_dir = temp_state_dir("lease-expiry-reason");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
+    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let issued = runtime
+        .issue(&admin, Duration::from_secs(60), Some("exp".to_string()))
+        .await
+        .unwrap();
+    let context = authenticate_for_test(&runtime, issued.metadata.key_id).unwrap();
+    let lease = context.ensure_active().unwrap();
+    lease.expire_now();
+    assert_eq!(
+        context.ensure_active().unwrap_err().code,
+        "temporary_key_expired"
+    );
+    assert_eq!(
+        context.ensure_active().unwrap_err().code,
+        "temporary_key_expired"
+    );
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
 async fn renew_replaces_a_lease_canceled_during_persistence() {
     let state_dir = temp_state_dir("renew-canceled-lease");
     let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
@@ -784,6 +816,39 @@ fn recover_instance_id_promotes_next_when_snapshot_matches() {
     );
     assert!(!state_dir.join("server-instance-id.next").exists());
     assert_eq!(std::fs::read(state_dir.join("auth.wal")).unwrap(), b"");
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
+fn reset_already_installed_accepts_matching_live_id_and_snapshot() {
+    let state_dir = temp_state_dir("reset-already-installed");
+    prepare_state_dir(&state_dir).unwrap();
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let new_id = [9_u8; INSTANCE_ID_LEN];
+    atomic_write(&state_dir.join("server-instance-id"), &new_id, 0o600).unwrap();
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 1,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let snapshot = PersistedSnapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        instance_id: new_id,
+        generations: vec![0; 1],
+        entries: Vec::new(),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+        admin_replays: Vec::new(),
+        audit_records: VecDeque::new(),
+        root_epoch: 1,
+    };
+    write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
+    assert!(reset_already_installed(&state_dir, &admin_key, &new_id));
+    assert!(!reset_already_installed(
+        &state_dir,
+        &admin_key,
+        &[8_u8; INSTANCE_ID_LEN]
+    ));
     let _ = std::fs::remove_dir_all(state_dir);
 }
 

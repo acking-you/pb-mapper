@@ -47,6 +47,7 @@ impl PbMapperState {
 
         let (status_sender, status_receiver) = tokio::sync::mpsc::unbounded_channel();
 
+        self.server_auth = Some(auth.clone());
         let handle = tokio::spawn(async move {
             if let Err(e) = run_server_on_listener(
                 listener,
@@ -100,10 +101,16 @@ impl PbMapperState {
                     tracing::info!("Server shutdown gracefully");
                 }
                 Err(_) => {
+                    if let Some(auth) = self.server_auth.as_ref() {
+                        auth.abort_actor().await;
+                    }
                     handle.abort();
                     let _ = handle.await;
                     tracing::warn!("Server shutdown timed out; aborted the relay task");
                 }
+            }
+            if let Some(auth) = self.server_auth.take() {
+                auth.shutdown_actor().await;
             }
 
             self.server_start_time = None;
@@ -153,6 +160,7 @@ impl PbMapperState {
             remote_sock_addr,
         } = commit;
 
+        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         self.service_credentials.remove(&service_key);
         if let Some(previous) = self.service_handles.remove(&service_key) {
             tracing::warn!(
@@ -192,7 +200,6 @@ impl PbMapperState {
             );
         });
 
-        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         self.service_credentials
             .insert(service_key.clone(), credential);
         let handle = if protocol.to_uppercase() == "TCP" {
@@ -310,6 +317,7 @@ impl PbMapperState {
             remote_sock_addr,
         } = commit;
 
+        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         self.client_credentials.remove(&service_key);
         if let Some(previous) = self.client_handles.remove(&service_key) {
             tracing::warn!(
@@ -339,7 +347,6 @@ impl PbMapperState {
             })
         };
 
-        let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
         self.client_credentials
             .insert(service_key.clone(), credential);
         let handle = if protocol_upper == "TCP" {
