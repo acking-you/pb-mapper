@@ -33,11 +33,20 @@ impl PbMapperState {
         msg_header_key: String,
     ) -> Result<(), CtlError> {
         let msg_header_key = normalize_msg_header_key(msg_header_key)?;
-        self.config.server_address = server_address;
-        self.config.keep_alive_enabled = keep_alive;
-        self.config.msg_header_key = msg_header_key;
-        self.apply_msg_header_key_env()?;
-        self.save_config()?;
+        let previous = self.config.clone();
+        let candidate = AppConfig {
+            server_address,
+            keep_alive_enabled: keep_alive,
+            msg_header_key,
+        };
+        self.write_config_file(&candidate)?;
+        self.config = candidate;
+        if let Err(error) = self.apply_msg_header_key_env() {
+            self.config = previous.clone();
+            let _ = self.write_config_file(&previous);
+            let _ = self.apply_msg_header_key_env();
+            return Err(error);
+        }
         self.reset_status_caches().await;
         Ok(())
     }
@@ -360,7 +369,11 @@ impl PbMapperState {
             refreshing.insert(service_key.to_string());
         }
 
-        let server_addr = self.config.server_address.clone();
+        let server_addr = self
+            .service_endpoints
+            .get(service_key)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.config.server_address.clone());
         let cache = self.service_status_cache.clone();
         let refreshing = self.service_status_refreshing.clone();
         let key = service_key.to_string();
@@ -424,7 +437,11 @@ impl PbMapperState {
             refreshing.insert(service_key.to_string());
         }
 
-        let server_addr = self.config.server_address.clone();
+        let server_addr = self
+            .client_endpoints
+            .get(service_key)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.config.server_address.clone());
         let cache = self.client_status_cache.clone();
         let refreshing = self.client_status_refreshing.clone();
         let key = service_key.to_string();

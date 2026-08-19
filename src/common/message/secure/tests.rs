@@ -272,6 +272,51 @@ async fn rotated_temporary_first_flight_returns_a_readable_rotated_error() {
 }
 
 #[tokio::test]
+async fn stale_root_replay_omits_the_rotated_error_session() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let admin = *b"0123456789abcdefghijklmnopqrstuv";
+    let new_admin = *b"abcdefghijklmnopqrstuvwxyz012345";
+    let config = temp_config();
+    let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
+    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let issued = auth
+        .issue(&admin_context, std::time::Duration::from_secs(60), None)
+        .await
+        .unwrap();
+    let Credential::Temporary { key_id, key } = parse_credential(&issued.credential).unwrap()
+    else {
+        panic!("expected temporary credential");
+    };
+    let client = ClientHeaderSession::new_v2(&Credential::Temporary { key_id, key }).unwrap();
+    let bytes = encode_initial(&client, b"stale-replay").await;
+    auth.rotate_root(&admin_context, new_admin).await.unwrap();
+    let security = ServerSecurity::new(auth);
+    let first = match security
+        .read_initial(&mut std::io::Cursor::new(bytes.clone()))
+        .await
+    {
+        Ok(_) => panic!("rotated credential should fail"),
+        Err(error) => error,
+    };
+    let second = match security
+        .read_initial(&mut std::io::Cursor::new(bytes))
+        .await
+    {
+        Ok(_) => panic!("rotated credential replay should fail"),
+        Err(error) => error,
+    };
+    assert_eq!(first.failure.code, "temporary_key_rotated");
+    assert!(first.response_session.is_some());
+    assert_eq!(second.failure.code, "temporary_key_rotated");
+    assert!(
+        second.response_session.is_none(),
+        "a claimed stale-root salt must not reuse nonce 0"
+    );
+
+    let _ = std::fs::remove_dir_all(config.state_dir);
+}
+
+#[tokio::test]
 async fn reset_temporary_first_flight_returns_a_readable_rotated_error() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
     let admin = *b"0123456789abcdefghijklmnopqrstuv";
@@ -447,7 +492,8 @@ fn per_credential_admission_limit_does_not_consume_other_keys() {
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
-    assert_eq!(guard.admit(2, &[3_u8; 32], now), FirstFlightAdmit::Fresh);
+    assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Replayed);
+    assert_eq!(guard.admit(2, &[4_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Replayed);
 }
 
@@ -460,6 +506,7 @@ fn aggregate_admission_limit_covers_all_keys() {
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(2, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(3, &[3_u8; 32], now), FirstFlightAdmit::Limited);
+    assert_eq!(guard.admit(3, &[3_u8; 32], now), FirstFlightAdmit::Replayed);
 }
 
 #[test]

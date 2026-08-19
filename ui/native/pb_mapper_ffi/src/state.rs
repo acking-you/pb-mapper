@@ -459,6 +459,8 @@ pub struct PbMapperState {
     client_handles: HashMap<String, JoinHandle<()>>,
     service_credentials: HashMap<String, Credential>,
     client_credentials: HashMap<String, Credential>,
+    service_endpoints: HashMap<String, SocketAddr>,
+    client_endpoints: HashMap<String, SocketAddr>,
     config: AppConfig,
     config_dir: PathBuf,
     app_directory_path: Option<String>,

@@ -972,7 +972,7 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
         ));
     }
     if path.file_name() == Some(std::ffi::OsStr::new("admin.key"))
-        && !key_matches_existing_snapshot(path.parent(), key)
+        && !key_matches_existing_state(path.parent(), key)
     {
         refuse_write_if_encrypted_state(path, force)?;
     }
@@ -1032,6 +1032,51 @@ pub(super) fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str)
         return false;
     };
     open_blob(&admin_key, &bytes).is_ok()
+}
+
+pub(super) fn key_matches_existing_state(state_dir: Option<&Path>, key: &str) -> bool {
+    if key_matches_existing_snapshot(state_dir, key) {
+        return true;
+    }
+    let Some(state_dir) = state_dir else {
+        return false;
+    };
+    if auth_snapshot_path(state_dir).exists() {
+        return false;
+    }
+    let wal_path = auth_wal_path(state_dir);
+    if !wal_path.exists() {
+        return false;
+    }
+    let Ok(Credential::Admin(admin_key)) = parse_credential(key) else {
+        return false;
+    };
+    wal_decrypts_with_key(&wal_path, &admin_key)
+}
+
+fn wal_decrypts_with_key(path: &Path, admin_key: &AesKeyType) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if metadata.len() == 0 {
+        return true;
+    }
+    let mut length = [0_u8; 4];
+    if file.read_exact(&mut length).is_err() {
+        return false;
+    }
+    let length = u32::from_be_bytes(length) as usize;
+    if length == 0 || length > 1024 * 1024 {
+        return false;
+    }
+    let mut sealed = vec![0_u8; length];
+    if file.read_exact(&mut sealed).is_err() {
+        return false;
+    }
+    open_blob(admin_key, &sealed).is_ok()
 }
 
 fn refuse_write_if_encrypted_state(path: &Path, force: bool) -> Result<(), AuthFailure> {

@@ -809,7 +809,7 @@ fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFail
             )
         })?;
         if encrypted_auth_state_exists(state_dir)
-            && !key_matches_existing_snapshot(Some(state_dir), &key)
+            && !key_matches_existing_state(Some(state_dir), &key)
         {
             return Err(AuthFailure::new(
                 "administrator_key_invalid",
@@ -830,6 +830,15 @@ fn load_server_admin_credential(state_dir: &Path) -> Result<Credential, AuthFail
             )
         })?;
         validate_admin_credential(&key)?;
+        if encrypted_auth_state_exists(state_dir)
+            && !key_matches_existing_state(Some(state_dir), key.trim())
+        {
+            return Err(AuthFailure::new(
+                "administrator_key_invalid",
+                "legacy administrator key does not decrypt the existing authentication state; refusing to write admin.key",
+                false,
+            ));
+        }
         write_admin_key(state_dir, key.trim())?;
         tracing::warn!(
             event = "administrator_key_migrated",

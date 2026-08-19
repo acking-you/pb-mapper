@@ -133,11 +133,13 @@ impl PbMapperState {
                 handle.abort();
             }
             self.service_credentials.clear();
+            self.service_endpoints.clear();
 
             for (_, handle) in self.client_handles.drain() {
                 handle.abort();
             }
             self.client_credentials.clear();
+            self.client_endpoints.clear();
 
             self.registered_services.write().await.clear();
             self.active_connections.write().await.clear();
@@ -202,6 +204,8 @@ impl PbMapperState {
 
         self.service_credentials
             .insert(service_key.clone(), credential);
+        self.service_endpoints
+            .insert(service_key.clone(), remote_sock_addr);
         let handle = if protocol.to_uppercase() == "TCP" {
             tokio::spawn(async move {
                 let _ = run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
@@ -273,6 +277,7 @@ impl PbMapperState {
 
     pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
         self.service_credentials.remove(&service_key);
+        self.service_endpoints.remove(&service_key);
         if let Some(handle) = self.service_handles.remove(&service_key) {
             handle.abort();
         }
@@ -298,6 +303,7 @@ impl PbMapperState {
         service_key: String,
     ) -> Result<(), CtlError> {
         self.service_credentials.remove(&service_key);
+        self.service_endpoints.remove(&service_key);
         if let Some(handle) = self.service_handles.remove(&service_key) {
             handle.abort();
         }
@@ -349,6 +355,8 @@ impl PbMapperState {
 
         self.client_credentials
             .insert(service_key.clone(), credential);
+        self.client_endpoints
+            .insert(service_key.clone(), remote_sock_addr);
         let handle = if protocol_upper == "TCP" {
             tokio::spawn(async move {
                 run_client_side_cli_with_pinned_credential::<TcpListenerProvider, _>(
@@ -431,6 +439,7 @@ impl PbMapperState {
         // Aborting the task is the part that matters: it is what stops the
         // retry loop still dialling in the background.
         self.client_credentials.remove(&service_key);
+        self.client_endpoints.remove(&service_key);
         let aborted = match self.client_handles.remove(&service_key) {
             Some(handle) => {
                 handle.abort();
@@ -465,6 +474,7 @@ impl PbMapperState {
         service_key: String,
     ) -> Result<(), CtlError> {
         self.client_credentials.remove(&service_key);
+        self.client_endpoints.remove(&service_key);
         if let Some(handle) = self.client_handles.remove(&service_key) {
             handle.abort();
         }

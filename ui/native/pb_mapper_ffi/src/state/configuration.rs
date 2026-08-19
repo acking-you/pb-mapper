@@ -57,6 +57,8 @@ impl PbMapperState {
             client_handles: HashMap::new(),
             service_credentials: HashMap::new(),
             client_credentials: HashMap::new(),
+            service_endpoints: HashMap::new(),
+            client_endpoints: HashMap::new(),
             config: AppConfig::default(),
             config_dir: config_dir.clone(),
             app_directory_path: app_directory_path.clone(),
@@ -95,6 +97,8 @@ impl PbMapperState {
             client_handles: HashMap::new(),
             service_credentials: HashMap::new(),
             client_credentials: HashMap::new(),
+            service_endpoints: HashMap::new(),
+            client_endpoints: HashMap::new(),
             config,
             config_dir,
             app_directory_path,
@@ -199,10 +203,10 @@ impl PbMapperState {
         }
     }
 
-    pub fn save_config(&self) -> Result<(), CtlError> {
+    pub(super) fn write_config_file(&self, config: &AppConfig) -> Result<(), CtlError> {
         let config_path = self.get_config_file_path();
         let contents =
-            serde_json::to_string_pretty(&self.config).map_err(|e| CtlError::io(e.to_string()))?;
+            serde_json::to_string_pretty(config).map_err(|e| CtlError::io(e.to_string()))?;
         fs::write(config_path, contents).map_err(|e| CtlError::io(e.to_string()))?;
         Ok(())
     }

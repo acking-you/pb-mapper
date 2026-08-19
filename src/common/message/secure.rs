@@ -552,11 +552,6 @@ impl ServerSecurity {
                 })?;
         let mut current_ciphertext = ciphertext.clone();
         let fingerprint = replay_fingerprint(key_id, &salt);
-        let already_admitted = self
-            .replay
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .already_admitted(&fingerprint, unix_seconds());
         let payload = match open_v2_payload(
             &material,
             DIRECTION_CLIENT_TO_SERVER,
@@ -565,13 +560,31 @@ impl ServerSecurity {
         ) {
             Ok(payload) => payload,
             Err(error) => {
-                if let Some(mut stale) =
-                    stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext)
+                if stale_root_first_flight(&self.auth, key_id, salt, counter, &ciphertext).is_some()
                 {
-                    if already_admitted {
-                        stale.response_session = None;
-                    }
-                    return Err(stale);
+                    let replay = self.replay.clone();
+                    let auth = self.auth.clone();
+                    return Err(tokio::task::spawn_blocking(move || {
+                        claim_stale_root_first_flight(
+                            &auth,
+                            &replay,
+                            key_id,
+                            salt,
+                            counter,
+                            ciphertext,
+                            fingerprint,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|_| ServerInitialError {
+                        failure: AuthFailure::new(
+                            "connection_replay_store_unavailable",
+                            "failed to evaluate first-flight admission",
+                            true,
+                        ),
+                        response_session: None,
+                        presented_key_id: Some(key_id),
+                    }));
                 }
                 return Err(ServerInitialError {
                     failure: AuthFailure::new(
@@ -712,6 +725,41 @@ fn authenticate_and_admit(
             presented_key_id: Some(key_id),
         }),
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn claim_stale_root_first_flight(
+    auth: &AuthRuntime,
+    replay: &std::sync::Mutex<ReplayGuard>,
+    key_id: u64,
+    salt: [u8; CONNECTION_SALT_LEN],
+    counter: u64,
+    ciphertext: Vec<u8>,
+    fingerprint: [u8; 32],
+) -> ServerInitialError {
+    let mut error = stale_root_first_flight(auth, key_id, salt, counter, &ciphertext)
+        .unwrap_or_else(|| ServerInitialError {
+            failure: AuthFailure::new(
+                "protocol_v2_decrypt_failed",
+                "stale-root first flight could not be classified",
+                false,
+            ),
+            response_session: None,
+            presented_key_id: Some(key_id),
+        });
+    let mut replay = replay
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let already_admitted = replay.already_admitted(&fingerprint, unix_seconds());
+    if already_admitted
+        || !matches!(
+            replay.claim(&fingerprint, unix_seconds()),
+            FirstFlightAdmit::Fresh
+        )
+    {
+        error.response_session = None;
+    }
+    error
 }
 
 fn stale_root_first_flight(

@@ -115,12 +115,20 @@ if [ -n "$INSTALLER_KEY" ] && [ ! -s "$ADMIN_KEY_PATH" ]; then
     echo "MSG_HEADER_KEY must be exactly 32 printable ASCII bytes without whitespace or NUL" >&2
     exit 1
   fi
-  printf '%s\n' "$INSTALLER_KEY" > "$ADMIN_KEY_PATH"
-  chmod 0600 "$ADMIN_KEY_PATH"
-  echo "Persisted installer MSG_HEADER_KEY to $ADMIN_KEY_PATH"
+  if [ -s "${AUTH_DIR}/auth.snapshot" ] || [ -s "${AUTH_DIR}/auth.wal" ]; then
+    echo "Leaving $ADMIN_KEY_PATH unset so the service can verify MSG_HEADER_KEY against existing authentication state"
+  else
+    printf '%s\n' "$INSTALLER_KEY" > "$ADMIN_KEY_PATH"
+    chmod 0600 "$ADMIN_KEY_PATH"
+    echo "Persisted installer MSG_HEADER_KEY to $ADMIN_KEY_PATH"
+  fi
 elif [ -z "$INSTALLER_KEY" ] && [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
-  install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
-  echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
+  if [ -s "${AUTH_DIR}/auth.snapshot" ] || [ -s "${AUTH_DIR}/auth.wal" ]; then
+    echo "Leaving $ADMIN_KEY_PATH unset so the service can verify the legacy key against existing authentication state"
+  else
+    install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
+    echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
+  fi
 fi
 
 # Stop and remove existing service if present

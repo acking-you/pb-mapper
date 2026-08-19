@@ -360,6 +360,82 @@ async fn env_recovery_key_is_not_written_when_it_cannot_decrypt_existing_state()
 }
 
 #[tokio::test]
+async fn env_recovery_key_is_accepted_for_wal_only_state() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let state_dir = temp_state_dir("env-key-matches-wal");
+    prepare_state_dir(&state_dir).unwrap();
+    let good = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 1,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    append_wal(
+        &config,
+        &good,
+        &WalRecord::Audit(AuditRecord {
+            at: 1,
+            action: "issue".to_string(),
+            key_id: None,
+            label: None,
+        }),
+    )
+    .unwrap();
+    set_process_msg_header_key(Some(std::str::from_utf8(&good).unwrap())).unwrap();
+    std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&good).unwrap());
+    let started = AuthRuntime::from_process(config).await;
+    std::env::remove_var(ENV_MSG_HEADER_KEY);
+    set_process_msg_header_key(None).unwrap();
+    started.expect("a matching recovery key must start from WAL-only state");
+    assert!(
+        state_dir.join("admin.key").exists(),
+        "a matching MSG_HEADER_KEY should become the live administrator key"
+    );
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
+async fn env_recovery_key_is_not_written_when_wal_only_state_does_not_match() {
+    let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+    let state_dir = temp_state_dir("env-key-must-match-wal");
+    prepare_state_dir(&state_dir).unwrap();
+    let good = *b"0123456789abcdefghijklmnopqrstuv";
+    let bad = *b"abcdefghijklmnopqrstuvwxyz012345";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 1,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    append_wal(
+        &config,
+        &good,
+        &WalRecord::Audit(AuditRecord {
+            at: 1,
+            action: "issue".to_string(),
+            key_id: None,
+            label: None,
+        }),
+    )
+    .unwrap();
+    set_process_msg_header_key(Some(std::str::from_utf8(&bad).unwrap())).unwrap();
+    std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&bad).unwrap());
+    let error = match AuthRuntime::from_process(config).await {
+        Ok(_) => panic!("a mismatched recovery key must not start from WAL-only state"),
+        Err(error) => error,
+    };
+    std::env::remove_var(ENV_MSG_HEADER_KEY);
+    set_process_msg_header_key(None).unwrap();
+    assert_eq!(error.code, "administrator_key_invalid");
+    assert!(
+        !state_dir.join("admin.key").exists(),
+        "a mismatched MSG_HEADER_KEY must not become the live administrator key"
+    );
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[tokio::test]
 async fn from_isolated_state_takes_the_state_lock_before_creating_admin_key() {
     let state_dir = temp_state_dir("lock-before-key");
     prepare_state_dir(&state_dir).unwrap();
