@@ -601,17 +601,8 @@ impl ServerSecurity {
         let replay = self.replay.clone();
         let auth = self.auth.clone();
         let error_session = session_without_context(&session);
-        let limited_session = session_without_context(&session);
         let context = tokio::task::spawn_blocking(move || {
-            authenticate_and_admit(
-                &auth,
-                &replay,
-                key_id,
-                key,
-                fingerprint,
-                error_session,
-                limited_session,
-            )
+            authenticate_and_admit(&auth, &replay, key_id, key, fingerprint, error_session)
         })
         .await
         .map_err(|_| ServerInitialError {
@@ -674,7 +665,6 @@ fn authenticate_and_admit(
     key: AesKeyType,
     fingerprint: [u8; 32],
     error_session: ServerHeaderSession,
-    limited_session: ServerHeaderSession,
 ) -> std::result::Result<AuthContext, ServerInitialError> {
     let mut replay = replay
         .lock()
@@ -708,11 +698,7 @@ fn authenticate_and_admit(
                 "this credential has opened too many new connections in the current window",
                 true,
             ),
-            response_session: if already_admitted {
-                None
-            } else {
-                Some(limited_session)
-            },
+            response_session: None,
             presented_key_id: Some(key_id),
         }),
         FirstFlightAdmit::Unavailable => Err(ServerInitialError {

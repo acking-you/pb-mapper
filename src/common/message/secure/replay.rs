@@ -182,10 +182,7 @@ impl ReplayGuard {
         if self.counts.get(&key_id).copied().unwrap_or(0) >= self.max_per_key
             || self.total >= self.max_total
         {
-            return match self.claim(fingerprint, now) {
-                FirstFlightAdmit::Unavailable => FirstFlightAdmit::Unavailable,
-                _ => FirstFlightAdmit::Limited,
-            };
+            return FirstFlightAdmit::Limited;
         }
         if self.persist(fingerprint, now).is_err() {
             return FirstFlightAdmit::Unavailable;
@@ -203,10 +200,18 @@ impl ReplayGuard {
         if self.bloom.contains(fingerprint, now) {
             return FirstFlightAdmit::Replayed;
         }
+        if self.bloom.current_started_at != self.total_started_at {
+            self.total = 0;
+            self.total_started_at = self.bloom.current_started_at;
+        }
+        if self.total >= self.max_total {
+            return FirstFlightAdmit::Unavailable;
+        }
         if self.persist(fingerprint, now).is_err() {
             return FirstFlightAdmit::Unavailable;
         }
         self.bloom.insert(fingerprint, now);
+        self.total = self.total.saturating_add(1);
         FirstFlightAdmit::Fresh
     }
 

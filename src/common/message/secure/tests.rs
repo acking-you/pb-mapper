@@ -492,7 +492,7 @@ fn per_credential_admission_limit_does_not_consume_other_keys() {
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
-    assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Replayed);
+    assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
     assert_eq!(guard.admit(2, &[4_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Replayed);
 }
@@ -506,7 +506,8 @@ fn aggregate_admission_limit_covers_all_keys() {
     assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(2, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
     assert_eq!(guard.admit(3, &[3_u8; 32], now), FirstFlightAdmit::Limited);
-    assert_eq!(guard.admit(3, &[3_u8; 32], now), FirstFlightAdmit::Replayed);
+    assert_eq!(guard.admit(3, &[3_u8; 32], now), FirstFlightAdmit::Limited);
+    assert_eq!(guard.admit(4, &[4_u8; 32], now), FirstFlightAdmit::Limited);
 }
 
 #[test]

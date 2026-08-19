@@ -16,8 +16,12 @@ LEGACY_KEY_PATH="/var/lib/pb-mapper-server/msg_header_key"
 
 install -d -m 0700 "$AUTH_DIR"
 if [ -z "${MSG_HEADER_KEY:-}" ] && [ ! -s "$ADMIN_KEY_PATH" ] && [ -s "$LEGACY_KEY_PATH" ]; then
-  install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
-  echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
+  if [ -s "$AUTH_DIR/auth.snapshot" ] || [ -s "$AUTH_DIR/auth.wal" ]; then
+    echo "Leaving $ADMIN_KEY_PATH unset so the service can verify the legacy key against existing authentication state"
+  else
+    install -m 0600 "$LEGACY_KEY_PATH" "$ADMIN_KEY_PATH"
+    echo "Migrated the legacy machine-derived key into $ADMIN_KEY_PATH"
+  fi
 fi
 
 if [ "${USE_IPV6:-false}" = "true" ]; then
