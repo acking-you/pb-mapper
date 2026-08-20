@@ -1425,197 +1425,116 @@ async fn revoking_keeps_the_row_until_its_retention_elapses() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
-/// Records which phases ran, so a test can assert on the callback's effects
-/// rather than on a return value the wheel no longer produces.
+/// Records the timers that fired, so a test can assert on callback effects
+/// rather than on a return value the wheel does not produce.
 #[derive(Clone, Default)]
-struct PhaseLog(Arc<std::sync::Mutex<Vec<&'static str>>>);
+struct FireLog(Arc<std::sync::Mutex<Vec<&'static str>>>);
 
-impl PhaseLog {
-    fn push(&self, phase: &'static str) {
-        recover_lock(self.0.lock()).push(phase);
+impl FireLog {
+    fn timer(&self, name: &'static str) -> Arc<Timer> {
+        let log = self.0.clone();
+        Timer::new(move || recover_lock(log.lock()).push(name))
     }
 
-    fn phases(&self) -> Vec<&'static str> {
+    fn fired(&self) -> Vec<&'static str> {
         recover_lock(self.0.lock()).clone()
     }
 }
 
-/// Schedules the two-phase shape `Leases` uses: a first phase that asks for a
-/// second one `gap` seconds later, then a final phase.
-fn schedule_two_phases(
-    wheel: &mut TimingWheel,
-    key_id: KeyId,
-    deadline: u64,
-    gap: u64,
-) -> PhaseLog {
-    let log = PhaseLog::default();
-    let recorder = log.clone();
-    let mut first = true;
-    wheel.schedule(key_id, deadline, move || {
-        if std::mem::take(&mut first) {
-            recorder.push("retire");
-            return Some(deadline + gap);
-        }
-        recorder.push("reap");
-        None
-    });
-    log
-}
-
-fn schedule_once(wheel: &mut TimingWheel, key_id: KeyId, deadline: u64) -> PhaseLog {
-    let log = PhaseLog::default();
-    let recorder = log.clone();
-    wheel.schedule(key_id, deadline, move || {
-        recorder.push("fired");
-        None
-    });
-    log
+/// Runs the wheel forward to `target`, one tick at a time.
+fn run_to(wheel: &mut TimingWheel, target: u64) {
+    while wheel.now() < target {
+        wheel.tick();
+    }
 }
 
 #[test]
-fn timing_wheel_runs_the_next_phase_at_the_deadline_it_asked_for() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+fn timing_wheel_fires_a_timer_at_its_deadline() {
+    let log = FireLog::default();
     let mut wheel = TimingWheel::new(1_000);
-    let log = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
+    wheel.schedule(1_005, log.timer("timer"));
 
-    wheel.advance(1_004);
-    assert!(log.phases().is_empty());
-    wheel.advance(1_005);
-    assert_eq!(log.phases(), ["retire"]);
-    // The second phase waits for the deadline the first one returned.
-    wheel.advance(1_064);
-    assert_eq!(log.phases(), ["retire"]);
-    wheel.advance(1_065);
-    assert_eq!(log.phases(), ["retire", "reap"]);
-    assert!(!wheel.holds(key_id));
+    run_to(&mut wheel, 1_004);
+    assert!(log.fired().is_empty());
+    run_to(&mut wheel, 1_005);
+    assert_eq!(log.fired(), ["timer"]);
 }
 
 #[test]
-fn timing_wheel_cancel_runs_every_remaining_phase_at_once() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+fn timing_wheel_fires_each_timer_once() {
+    let log = FireLog::default();
     let mut wheel = TimingWheel::new(1_000);
-    let log = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
+    let timer = log.timer("timer");
+    // The same timer placed twice: the first placement to drain is not the last
+    // reference, so only the later one fires it.
+    wheel.schedule(1_005, timer.clone());
+    wheel.schedule(1_020, timer);
 
-    wheel.cancel(key_id);
-    assert_eq!(log.phases(), ["retire", "reap"]);
-    assert!(!wheel.holds(key_id));
+    run_to(&mut wheel, 1_005);
+    assert!(log.fired().is_empty());
+    run_to(&mut wheel, 1_020);
+    assert_eq!(log.fired(), ["timer"]);
 }
 
 #[test]
-fn timing_wheel_cancel_after_the_first_phase_runs_only_the_rest() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+fn timing_wheel_firing_early_makes_the_scheduled_placement_inert() {
+    let log = FireLog::default();
     let mut wheel = TimingWheel::new(1_000);
-    let log = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
+    let timer = log.timer("timer");
+    wheel.schedule(1_005, timer.clone());
 
-    wheel.advance(1_005);
-    wheel.cancel(key_id);
-    assert_eq!(log.phases(), ["retire", "reap"]);
+    timer.fire();
+    assert_eq!(log.fired(), ["timer"]);
+    // The deadline arriving drops the placement, which must not fire it again.
+    run_to(&mut wheel, 1_005);
+    assert_eq!(log.fired(), ["timer"]);
 }
 
 #[test]
-fn timing_wheel_drop_runs_every_remaining_phase() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+fn timing_wheel_drop_fires_everything_it_holds() {
+    let log = FireLog::default();
     let mut wheel = TimingWheel::new(1_000);
-    let log = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
+    wheel.schedule(1_005, log.timer("early"));
+    wheel.schedule(9_999_999, log.timer("late"));
 
     drop(wheel);
-    assert_eq!(log.phases(), ["retire", "reap"]);
+    let mut fired = log.fired();
+    fired.sort_unstable();
+    assert_eq!(fired, ["early", "late"]);
 }
 
 #[test]
-fn timing_wheel_reschedule_moves_an_entry_without_running_it() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
-    let mut wheel = TimingWheel::new(1_000);
-    let log = schedule_once(&mut wheel, key_id, 1_005);
-
-    assert!(wheel.reschedule(key_id, 1_020));
-    wheel.advance(1_019);
-    assert!(log.phases().is_empty());
-    wheel.advance(1_020);
-    assert_eq!(log.phases(), ["fired"]);
-}
-
-#[test]
-fn timing_wheel_reschedule_reports_a_key_it_does_not_hold() {
-    let mut wheel = TimingWheel::new(1_000);
-    assert!(!wheel.reschedule(
-        KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0)),
-        2_000
-    ));
-}
-
-#[test]
-fn timing_wheel_scheduling_over_an_entry_finishes_the_one_it_replaces() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
-    let mut wheel = TimingWheel::new(1_000);
-    let stale = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
-    let fresh = schedule_once(&mut wheel, key_id, 1_020);
-
-    assert_eq!(stale.phases(), ["retire", "reap"]);
-    wheel.advance(1_020);
-    assert_eq!(fresh.phases(), ["fired"]);
-}
-
-#[test]
-fn timing_wheel_fires_an_entry_scheduled_in_the_past_without_wrapping() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
-    let mut wheel = TimingWheel::new(1_000);
-    let log = schedule_once(&mut wheel, key_id, 999);
-
-    wheel.advance(1_000);
-    assert_eq!(log.phases(), ["fired"]);
-}
-
-#[test]
-fn timing_wheel_cascades_an_entry_down_two_levels() {
+fn timing_wheel_cascades_a_timer_down_two_levels() {
     // A deadline two levels up has to reach level 0 before it can be drained.
     let now = 1_000;
     let deadline = now + (1 << (6 * 2));
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let log = FireLog::default();
     let mut wheel = TimingWheel::new(now);
-    let log = schedule_once(&mut wheel, key_id, deadline);
+    wheel.schedule(deadline, log.timer("timer"));
 
-    wheel.advance(deadline - 1);
-    assert!(log.phases().is_empty());
-    wheel.advance(deadline);
-    assert_eq!(log.phases(), ["fired"]);
+    run_to(&mut wheel, deadline - 1);
+    assert!(log.fired().is_empty());
+    run_to(&mut wheel, deadline);
+    assert_eq!(log.fired(), ["timer"]);
 }
 
 #[test]
 fn timing_wheel_fires_a_boundary_deadline_without_an_extra_tick() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let log = FireLog::default();
     let mut wheel = TimingWheel::new(700);
-    let log = schedule_once(&mut wheel, key_id, 1_024);
+    wheel.schedule(1_024, log.timer("timer"));
 
-    wheel.advance(1_024);
-    assert_eq!(log.phases(), ["fired"]);
+    run_to(&mut wheel, 1_024);
+    assert_eq!(log.fired(), ["timer"]);
 }
 
 #[test]
-fn timing_wheel_drains_in_one_pass_when_the_clock_jumps_past_every_deadline() {
-    // A correction longer than the longest schedulable delay leaves nothing
-    // pending, so the wheel empties without ticking through the elapsed years.
-    let now = 1_000;
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
-    let mut wheel = TimingWheel::new(now);
-    let log = schedule_two_phases(&mut wheel, key_id, now + 60, 60);
-
-    wheel.advance(now + 4 * MAX_TEMP_KEY_TTL.as_secs());
-    assert_eq!(log.phases(), ["retire", "reap"]);
-    assert!(!wheel.holds(key_id));
-}
-
-#[test]
-fn timing_wheel_keeps_its_position_when_the_clock_steps_backwards() {
-    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+fn timing_wheel_fires_a_deadline_already_in_the_past() {
+    let log = FireLog::default();
     let mut wheel = TimingWheel::new(1_000);
-    let log = schedule_once(&mut wheel, key_id, 1_030);
-
-    wheel.advance(1_020);
-    wheel.advance(1_005);
-    assert!(log.phases().is_empty());
-    wheel.advance(1_030);
-    assert_eq!(log.phases(), ["fired"]);
+    // Scheduling into the past drops the placement immediately.
+    wheel.schedule(999, log.timer("timer"));
+    assert_eq!(log.fired(), ["timer"]);
 }
 
 #[test]

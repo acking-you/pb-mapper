@@ -1,26 +1,25 @@
-//! Hierarchical timer wheel whose entries are self-advancing cleanup callbacks.
+//! Hierarchical timer wheel. It schedules opaque timers and knows nothing about
+//! what they mean.
 //!
 //! ```text
-//! schedule(deadline, callback) -> one level/slot bucket
-//!   deadline reached -> callback runs -> reschedules itself, or is done
-//!   dropped early    -> callback runs to completion right there
+//! schedule(deadline, timer) -> the bucket covering that deadline
 //!
-//! one-second tick -> drain level 0's current slot
-//!                 -> every 64th tick, cascade level 1 into finer levels, and so on
+//! tick() -> now += 1
+//!        -> drain level 0's slot for `now`; every 64th tick level 1's, and so on
+//!        -> an entry whose deadline has arrived is dropped; the rest are re-filed
+//!           into the finer level that now covers them
 //! ```
 //!
-//! The wheel knows nothing about what it schedules. An entry owns a callback that
-//! performs one phase of some cleanup and returns when it next wants to run, or
-//! `None` when finished, so a multi-stage teardown is written once at the point
-//! the entry is created. Dropping an entry early runs every phase it has left, in
-//! order, immediately — which is what lets cancelling one entry stand in for a
-//! whole cleanup routine, and lets dropping the wheel tear down everything it
-//! owns without a caller walking any of it.
+//! The wheel holds the only strong references to its timers, so a timer runs when
+//! the last entry referring to it is dropped. That is what keeps the wheel
+//! indifferent to its users: it never looks a timer up, compares identities, or
+//! has to be told that one was superseded.
 //!
-//! Each entry lives in exactly one bucket, and `positions` records which, so
-//! rescheduling or cancelling one is a map lookup rather than a search. A tick
-//! touches one slot per level that turns over, never the whole wheel, so cost
-//! tracks the entries that actually cascade or fire.
+//! Rescheduling exploits that directly. Holding a `Weak<Timer>`, a caller inserts
+//! the same timer again at a later deadline; the earlier entry still drains on its
+//! own schedule, but dropping it no longer brings the count to zero, so the timer
+//! waits for the last entry to go. Cancelling is the mirror image: [`Timer::fire`]
+//! runs the callback early and leaves the remaining entries inert.
 
 use super::*;
 
@@ -29,8 +28,8 @@ use super::*;
 const SLOT_BITS: u32 = 6;
 const SLOTS: usize = 1 << SLOT_BITS;
 const SLOT_MASK: u64 = SLOTS as u64 - 1;
-/// Six 64-slot levels span `64^6` seconds, which keeps every deadline a
-/// configured TTL can produce inside a level whose range really contains it.
+/// Six 64-slot levels span `64^6` seconds, so any deadline a caller can ask for
+/// lands in a level whose range really contains it.
 const NUM_LEVELS: usize = 6;
 const TOP_LEVEL: Level = NUM_LEVELS as Level - 1;
 
@@ -40,258 +39,113 @@ type Level = u8;
 /// Which bucket within one level: `0..SLOTS`.
 type Slot = u8;
 
-/// One phase of a scheduled teardown: does its work and returns the deadline of
-/// the phase after it, or `None` once nothing remains.
-type Phase = Box<dyn FnMut() -> Option<u64> + Send>;
+/// A callback that runs once: when its deadline arrives, or when it is cancelled,
+/// whichever comes first.
+pub(super) struct Timer {
+    /// `None` once the callback has run, so any remaining wheel entries for this
+    /// timer are inert and a cancelled timer cannot fire twice.
+    callback: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
 
+impl Timer {
+    pub(super) fn new(callback: impl FnOnce() + Send + 'static) -> Arc<Self> {
+        Arc::new(Self {
+            callback: std::sync::Mutex::new(Some(Box::new(callback))),
+        })
+    }
+
+    /// Runs the callback unless it has run already. Called by the wheel when a
+    /// deadline arrives, and by a caller cancelling ahead of that.
+    pub(super) fn fire(&self) {
+        let callback = recover_lock(self.callback.lock()).take();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+}
+
+impl Drop for Timer {
+    /// Releasing the last reference is what fires a timer, so dropping the wheel
+    /// tears down everything it was holding.
+    fn drop(&mut self) {
+        self.fire();
+    }
+}
+
+/// One placement of a timer. The deadline lives here rather than in the `Timer`,
+/// so a timer rescheduled later leaves its earlier placements draining harmlessly
+/// instead of dragging them forward.
 struct Entry {
     deadline: u64,
-    phase: Phase,
-    /// Set once a phase has returned `None`, so a completed entry's drop does
-    /// not call into its callback again.
-    finished: bool,
+    /// Never read: holding the reference *is* the entry's job, and releasing it
+    /// is what can fire the timer.
+    #[allow(dead_code)]
+    timer: Arc<Timer>,
 }
-
-impl Entry {
-    /// Runs the next phase and reports the deadline it wants, if any.
-    fn fire(&mut self) -> Option<u64> {
-        if self.finished {
-            return None;
-        }
-        let next = (self.phase)();
-        self.finished = next.is_none();
-        next
-    }
-}
-
-impl Drop for Entry {
-    /// An entry let go of before its deadline still owes every phase it has
-    /// left, so they all run here. This is why cancelling an entry and letting
-    /// it expire have the same effect, only sooner.
-    fn drop(&mut self) {
-        while self.fire().is_some() {}
-    }
-}
-
-/// Where a key's entry currently sits, so a reschedule or cancel does not have
-/// to search the wheel.
-#[derive(Clone, Copy)]
-enum Position {
-    /// Scheduled for a deadline the wheel had already passed.
-    Overdue,
-    Wheel {
-        level: Level,
-        slot: Slot,
-    },
-}
-
-type Bucket = HashMap<KeyId, Entry>;
 
 pub(super) struct TimingWheel {
     now: u64,
-    positions: HashMap<KeyId, Position>,
-    /// Entries whose deadline was already past when they were filed. Level 0's
-    /// slot for `now` was drained this tick, so filing them there would delay
-    /// them by a full revolution.
-    overdue: Bucket,
-    levels: [Vec<Bucket>; NUM_LEVELS],
+    levels: [Vec<Vec<Entry>>; NUM_LEVELS],
 }
 
 impl TimingWheel {
     pub(super) fn new(now: u64) -> Self {
         Self {
             now,
-            positions: HashMap::new(),
-            overdue: Bucket::new(),
-            levels: std::array::from_fn(|_| {
-                std::iter::repeat_with(Bucket::new).take(SLOTS).collect()
-            }),
+            levels: std::array::from_fn(|_| std::iter::repeat_with(Vec::new).take(SLOTS).collect()),
         }
     }
 
-    /// Schedules `phase` to run once `deadline` has passed. Any entry already
-    /// held for `key_id` is dropped, which runs the phases it had left.
-    pub(super) fn schedule(
-        &mut self,
-        key_id: KeyId,
-        deadline: u64,
-        phase: impl FnMut() -> Option<u64> + Send + 'static,
-    ) {
-        self.cancel(key_id);
-        self.place(
-            key_id,
-            Entry {
-                deadline,
-                phase: Box::new(phase),
-                finished: false,
-            },
-        );
+    pub(super) fn now(&self) -> u64 {
+        self.now
     }
 
-    /// Replaces the entry for `key_id`, discarding the previous one *without*
-    /// running its remaining phases. Use this only when the new entry takes over
-    /// the same cleanup, so nothing the old one owed is lost; otherwise
-    /// [`Self::schedule`] is what you want.
-    pub(super) fn supersede(
-        &mut self,
-        key_id: KeyId,
-        deadline: u64,
-        phase: impl FnMut() -> Option<u64> + Send + 'static,
-    ) {
-        if let Some(mut previous) = self.detach(key_id) {
-            previous.finished = true;
-        }
-        self.place(
-            key_id,
-            Entry {
-                deadline,
-                phase: Box::new(phase),
-                finished: false,
-            },
-        );
+    /// Holds `timer` until `deadline`. Scheduling a timer the wheel already holds
+    /// adds a placement rather than replacing one, which is how a caller moves a
+    /// deadline outward without the wheel having to find the old entry.
+    pub(super) fn schedule(&mut self, deadline: u64, timer: Arc<Timer>) {
+        self.place(Entry { deadline, timer });
     }
 
-    /// Moves an entry to a new deadline without running anything. Returns
-    /// `false` when the wheel holds no entry for `key_id`.
-    pub(super) fn reschedule(&mut self, key_id: KeyId, deadline: u64) -> bool {
-        let Some(mut entry) = self.detach(key_id) else {
-            return false;
-        };
-        entry.deadline = deadline;
-        self.place(key_id, entry);
-        true
-    }
-
-    /// Runs everything the entry for `key_id` still owes, now rather than at its
-    /// deadline. A no-op when the wheel holds no entry for it.
-    pub(super) fn cancel(&mut self, key_id: KeyId) {
-        drop(self.detach(key_id));
-    }
-
-    /// Runs only the entry's next phase, then waits for the deadline that phase
-    /// asked for. Use this where a stage has arrived early but the stages after
-    /// it must still keep their own timing — a revoke ends a key's active phase
-    /// without skipping the retention that follows it.
-    pub(super) fn advance_one_phase(&mut self, key_id: KeyId) -> bool {
-        let Some(mut entry) = self.detach(key_id) else {
-            return false;
-        };
-        match entry.fire() {
-            Some(next) => {
-                entry.deadline = next;
-                self.place(key_id, entry);
-            }
-            // Finished, so the drop below has nothing left to run.
-            None => drop(entry),
-        }
-        true
-    }
-
-    /// Runs the wheel up to `target`, firing every entry whose deadline has
-    /// passed and re-filing the phases they schedule next.
-    pub(super) fn advance(&mut self, target: u64) {
-        let overdue = std::mem::take(&mut self.overdue);
-        self.settle(overdue, target);
-        // A jump longer than the longest lifetime the config can produce means
-        // every entry is already past its deadline, so the whole wheel can be
-        // drained in one pass. Ticking through it instead would spin for hours
-        // when a bad hardware clock is corrected forward by years.
-        if target.saturating_sub(self.now) > MAX_SCHEDULABLE_DELAY.as_secs() {
-            self.now = target;
-            // A phase can schedule a successor that is also already overdue, so
-            // keep draining until a pass leaves nothing due.
-            loop {
-                let due = self
-                    .levels
-                    .iter_mut()
-                    .flat_map(|level| level.iter_mut())
-                    .fold(Bucket::new(), |mut due, bucket| {
-                        due.extend(std::mem::take(bucket));
-                        due
-                    });
-                let overdue = std::mem::take(&mut self.overdue);
-                if due.is_empty() && overdue.is_empty() {
-                    return;
-                }
-                self.settle(due, target);
-                self.settle(overdue, target);
-            }
-        }
-        while self.now < target {
-            self.now += 1;
-            // Coarse to fine, so an entry cascading several levels down still
-            // reaches level 0 in time to be drained by this same tick.
-            for level in (1..=TOP_LEVEL).rev() {
-                // A level turns over once every `slot_range` seconds, exactly
-                // when `now` has no bits left below that level's slot field.
-                if self.now & (slot_range(level) - 1) != 0 {
-                    continue;
-                }
-                let entries = self.take_bucket(level, self.now);
-                self.settle(entries, self.now);
-            }
-            let entries = self.take_bucket(0, self.now);
-            self.settle(entries, self.now);
-        }
-        // A clock stepping backwards must not rewind the wheel: buckets are
-        // indexed relative to `now`, so re-indexing against an earlier `now`
-        // would file entries into slots the wheel has already drained.
-        self.now = self.now.max(target);
-    }
-
-    /// Fires the entries due at `deadline` and re-files both the phases they
-    /// schedule next and the entries that are not due yet.
-    fn settle(&mut self, entries: Bucket, deadline: u64) {
-        for (key_id, mut entry) in entries {
-            if entry.deadline > deadline {
-                self.place(key_id, entry);
+    /// Advances one second and drains whatever that turnover exposes.
+    pub(super) fn tick(&mut self) {
+        self.now += 1;
+        // Coarse to fine, so a timer cascading several levels down still reaches
+        // level 0 in time to be drained by this same tick.
+        for level in (1..=TOP_LEVEL).rev() {
+            // A level turns over once every `slot_range` seconds, exactly when
+            // `now` has no bits left below that level's slot field.
+            if self.now & (slot_range(level) - 1) != 0 {
                 continue;
             }
-            match entry.fire() {
-                Some(next) => {
-                    entry.deadline = next;
-                    self.place(key_id, entry);
-                }
-                None => {
-                    self.positions.remove(&key_id);
-                }
-            }
+            let entries = self.take_bucket(level, self.now);
+            self.refile(entries);
+        }
+        let entries = self.take_bucket(0, self.now);
+        self.refile(entries);
+    }
+
+    fn refile(&mut self, entries: Vec<Entry>) {
+        for entry in entries {
+            self.place(entry);
         }
     }
 
-    fn place(&mut self, key_id: KeyId, entry: Entry) {
-        let position = if entry.deadline <= self.now {
-            self.overdue.insert(key_id, entry);
-            Position::Overdue
-        } else {
-            let level = level_for(self.now, entry.deadline);
-            let slot = slot_for(level, entry.deadline);
-            self.bucket(level, slot).insert(key_id, entry);
-            Position::Wheel { level, slot }
-        };
-        self.positions.insert(key_id, position);
-    }
-
-    fn detach(&mut self, key_id: KeyId) -> Option<Entry> {
-        match self.positions.remove(&key_id)? {
-            Position::Overdue => self.overdue.remove(&key_id),
-            Position::Wheel { level, slot } => self.bucket(level, slot).remove(&key_id),
+    fn place(&mut self, entry: Entry) {
+        // An arrived deadline means this placement is done: returning drops the
+        // entry, which fires the timer if this was its last reference.
+        if entry.deadline <= self.now {
+            return;
         }
-    }
-
-    fn bucket(&mut self, level: Level, slot: Slot) -> &mut Bucket {
-        &mut self.levels[level as usize][slot as usize]
+        let level = level_for(self.now, entry.deadline);
+        let slot = slot_for(level, entry.deadline);
+        self.levels[level as usize][slot as usize].push(entry);
     }
 
     /// Empties the bucket that `when` falls in at `level`.
-    fn take_bucket(&mut self, level: Level, when: u64) -> Bucket {
+    fn take_bucket(&mut self, level: Level, when: u64) -> Vec<Entry> {
         let slot = slot_for(level, when);
-        std::mem::take(self.bucket(level, slot))
-    }
-
-    #[cfg(test)]
-    pub(super) fn holds(&self, key_id: KeyId) -> bool {
-        self.positions.contains_key(&key_id)
+        std::mem::take(&mut self.levels[level as usize][slot as usize])
     }
 }
 
@@ -306,8 +160,8 @@ fn slot_for(level: Level, when: u64) -> Slot {
 
 /// Finest level able to hold `deadline`: the one whose slot field covers the
 /// highest bit in which `now` and `deadline` differ. A deadline past the top
-/// level is clamped into it and cannot fire early, because a drained entry is
-/// only fired once its own deadline has passed.
+/// level is clamped into it and cannot fire early, because an entry is dropped
+/// only once its own deadline has arrived.
 fn level_for(now: u64, deadline: u64) -> Level {
     let significant = 63 - ((now ^ deadline) | SLOT_MASK).leading_zeros();
     ((significant / SLOT_BITS) as Level).min(TOP_LEVEL)

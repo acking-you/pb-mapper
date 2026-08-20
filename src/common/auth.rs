@@ -794,6 +794,6 @@ pub use ids::{Generation, KeyId, SlotIndex, ADMIN_KEY_ID};
 mod leases;
 use leases::Leases;
 mod timing_wheel;
-use timing_wheel::TimingWheel;
+use timing_wheel::{Timer, TimingWheel};
 #[cfg(test)]
 mod tests;
