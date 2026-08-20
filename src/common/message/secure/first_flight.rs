@@ -14,7 +14,7 @@ pub(super) fn first_flight_error(
     code: &'static str,
     message: impl Into<String>,
     retryable: bool,
-    key_id: u64,
+    key_id: KeyId,
 ) -> ServerInitialError {
     ServerInitialError::fail_key(code, message, retryable, key_id)
 }
@@ -35,7 +35,7 @@ fn reserved_error_session(
 pub(super) fn evaluate_first_flight(
     auth: &AuthRuntime,
     replay: &std::sync::Mutex<ReplayGuard>,
-    key_id: u64,
+    key_id: KeyId,
     fingerprint: [u8; 32],
     work: FirstFlightWork,
 ) -> std::result::Result<(Vec<u8>, AuthContext), ServerInitialError> {
@@ -92,7 +92,7 @@ pub(super) fn evaluate_first_flight(
 
 pub(super) fn stale_root_first_flight(
     auth: &AuthRuntime,
-    key_id: u64,
+    key_id: KeyId,
     salt: [u8; CONNECTION_SALT_LEN],
     counter: u64,
     ciphertext: &[u8],
@@ -107,7 +107,7 @@ pub(super) fn stale_root_first_flight(
         &mut previous_ciphertext,
     )
     .ok()?;
-    let (code, message) = if key_id == 0 {
+    let (code, message) = if key_id.is_admin() {
         (
             "administrator_key_invalid",
             "administrator credential does not match the active root key",

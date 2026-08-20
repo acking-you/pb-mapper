@@ -1,206 +1,314 @@
-//! Hierarchical expiry scheduler for temporary credential leases.
+//! Hierarchical timer wheel whose entries are self-advancing cleanup callbacks.
 //!
 //! ```text
-//! lease(expires_at) -> level/slot bucket -> one-second actor tick -> expired leases
-//!          renew ----> version bump ------^ stale bucket entries are ignored
-//!                                       |
-//! large clock jump -> bounded bucket scan + rebuild (never second-by-second catch-up)
-//! overdue insert --> immediate-due queue --> next advance, without a wheel revolution
-//! reset/rotation -> cancel every wheel-owned lease -> clear all buckets
+//! schedule(deadline, callback) -> one level/slot bucket
+//!   deadline reached -> callback runs -> reschedules itself, or is done
+//!   dropped early    -> callback runs to completion right there
+//!
+//! one-second tick -> drain level 0's current slot
+//!                 -> every 64th tick, cascade level 1 into finer levels, and so on
 //! ```
 //!
-//! The wheel's current-owner map holds the strong `Arc<AuthLease>` for each key.
-//! Bucket entries are `Weak`, so a renew replaces the previous owner instead of
-//! accumulating day-long stale strong references. Request-facing structures also
-//! retain only `Weak` references.
+//! The wheel knows nothing about what it schedules. An entry owns a callback that
+//! performs one phase of some cleanup and returns when it next wants to run, or
+//! `None` when finished, so a multi-stage teardown is written once at the point
+//! the entry is created. Dropping an entry early runs every phase it has left, in
+//! order, immediately — which is what lets cancelling one entry stand in for a
+//! whole cleanup routine, and lets dropping the wheel tear down everything it
+//! owns without a caller walking any of it.
+//!
+//! Each entry lives in exactly one bucket, and `positions` records which, so
+//! rescheduling or cancelling one is a map lookup rather than a search. A tick
+//! touches one slot per level that turns over, never the whole wheel, so cost
+//! tracks the entries that actually cascade or fire.
 
 use super::*;
 
-const MAX_INCREMENTAL_ADVANCE_SECONDS: u64 = 256;
+/// Bits of a deadline that one level's slot field covers, so a level holds
+/// `1 << 6` slots and each is 64 times coarser than the level below it.
+const SLOT_BITS: u32 = 6;
+const SLOTS: usize = 1 << SLOT_BITS;
+const SLOT_MASK: u64 = SLOTS as u64 - 1;
+/// Six 64-slot levels span `64^6` seconds, which keeps every deadline a
+/// configured TTL can produce inside a level whose range really contains it.
+const NUM_LEVELS: usize = 6;
+const TOP_LEVEL: Level = NUM_LEVELS as Level - 1;
 
-struct WheelEntry {
-    lease: Weak<AuthLease>,
-    version: u64,
+/// Which level of the hierarchy a bucket belongs to: `0..NUM_LEVELS`.
+type Level = u8;
+
+/// Which bucket within one level: `0..SLOTS`.
+type Slot = u8;
+
+/// One phase of a scheduled teardown: does its work and returns the deadline of
+/// the phase after it, or `None` once nothing remains.
+type Phase = Box<dyn FnMut() -> Option<u64> + Send>;
+
+struct Entry {
+    deadline: u64,
+    phase: Phase,
+    /// Set once a phase has returned `None`, so a completed entry's drop does
+    /// not call into its callback again.
+    finished: bool,
 }
+
+impl Entry {
+    /// Runs the next phase and reports the deadline it wants, if any.
+    fn fire(&mut self) -> Option<u64> {
+        if self.finished {
+            return None;
+        }
+        let next = (self.phase)();
+        self.finished = next.is_none();
+        next
+    }
+}
+
+impl Drop for Entry {
+    /// An entry let go of before its deadline still owes every phase it has
+    /// left, so they all run here. This is why cancelling an entry and letting
+    /// it expire have the same effect, only sooner.
+    fn drop(&mut self) {
+        while self.fire().is_some() {}
+    }
+}
+
+/// Where a key's entry currently sits, so a reschedule or cancel does not have
+/// to search the wheel.
+#[derive(Clone, Copy)]
+enum Position {
+    /// Scheduled for a deadline the wheel had already passed.
+    Overdue,
+    Wheel {
+        level: Level,
+        slot: Slot,
+    },
+}
+
+type Bucket = HashMap<KeyId, Entry>;
 
 pub(super) struct TimingWheel {
     now: u64,
-    owners: HashMap<u64, Arc<AuthLease>>,
-    immediate_due: Vec<WheelEntry>,
-    level0: Vec<Vec<WheelEntry>>,
-    level1: Vec<Vec<WheelEntry>>,
-    level2: Vec<Vec<WheelEntry>>,
-    level3: Vec<Vec<WheelEntry>>,
+    positions: HashMap<KeyId, Position>,
+    /// Entries whose deadline was already past when they were filed. Level 0's
+    /// slot for `now` was drained this tick, so filing them there would delay
+    /// them by a full revolution.
+    overdue: Bucket,
+    levels: [Vec<Bucket>; NUM_LEVELS],
 }
 
 impl TimingWheel {
     pub(super) fn new(now: u64) -> Self {
         Self {
             now,
-            owners: HashMap::new(),
-            immediate_due: Vec::new(),
-            level0: empty_buckets(256),
-            level1: empty_buckets(64),
-            level2: empty_buckets(64),
-            level3: empty_buckets(64),
+            positions: HashMap::new(),
+            overdue: Bucket::new(),
+            levels: std::array::from_fn(|_| {
+                std::iter::repeat_with(Bucket::new).take(SLOTS).collect()
+            }),
         }
     }
 
-    pub(super) fn insert(&mut self, lease: Arc<AuthLease>) {
-        let version = lease.wheel_version.load(Ordering::Acquire);
-        self.insert_with_version(lease, version);
+    /// Schedules `phase` to run once `deadline` has passed. Any entry already
+    /// held for `key_id` is dropped, which runs the phases it had left.
+    pub(super) fn schedule(
+        &mut self,
+        key_id: KeyId,
+        deadline: u64,
+        phase: impl FnMut() -> Option<u64> + Send + 'static,
+    ) {
+        self.cancel(key_id);
+        self.place(
+            key_id,
+            Entry {
+                deadline,
+                phase: Box::new(phase),
+                finished: false,
+            },
+        );
     }
 
-    pub(super) fn release(&mut self, key_id: u64) {
-        self.owners.remove(&key_id);
+    /// Replaces the entry for `key_id`, discarding the previous one *without*
+    /// running its remaining phases. Use this only when the new entry takes over
+    /// the same cleanup, so nothing the old one owed is lost; otherwise
+    /// [`Self::schedule`] is what you want.
+    pub(super) fn supersede(
+        &mut self,
+        key_id: KeyId,
+        deadline: u64,
+        phase: impl FnMut() -> Option<u64> + Send + 'static,
+    ) {
+        if let Some(mut previous) = self.detach(key_id) {
+            previous.finished = true;
+        }
+        self.place(
+            key_id,
+            Entry {
+                deadline,
+                phase: Box::new(phase),
+                finished: false,
+            },
+        );
+    }
+
+    /// Moves an entry to a new deadline without running anything. Returns
+    /// `false` when the wheel holds no entry for `key_id`.
+    pub(super) fn reschedule(&mut self, key_id: KeyId, deadline: u64) -> bool {
+        let Some(mut entry) = self.detach(key_id) else {
+            return false;
+        };
+        entry.deadline = deadline;
+        self.place(key_id, entry);
+        true
+    }
+
+    /// Runs everything the entry for `key_id` still owes, now rather than at its
+    /// deadline. A no-op when the wheel holds no entry for it.
+    pub(super) fn cancel(&mut self, key_id: KeyId) {
+        drop(self.detach(key_id));
+    }
+
+    /// Runs only the entry's next phase, then waits for the deadline that phase
+    /// asked for. Use this where a stage has arrived early but the stages after
+    /// it must still keep their own timing — a revoke ends a key's active phase
+    /// without skipping the retention that follows it.
+    pub(super) fn advance_one_phase(&mut self, key_id: KeyId) -> bool {
+        let Some(mut entry) = self.detach(key_id) else {
+            return false;
+        };
+        match entry.fire() {
+            Some(next) => {
+                entry.deadline = next;
+                self.place(key_id, entry);
+            }
+            // Finished, so the drop below has nothing left to run.
+            None => drop(entry),
+        }
+        true
+    }
+
+    /// Runs the wheel up to `target`, firing every entry whose deadline has
+    /// passed and re-filing the phases they schedule next.
+    pub(super) fn advance(&mut self, target: u64) {
+        let overdue = std::mem::take(&mut self.overdue);
+        self.settle(overdue, target);
+        // A jump longer than the longest lifetime the config can produce means
+        // every entry is already past its deadline, so the whole wheel can be
+        // drained in one pass. Ticking through it instead would spin for hours
+        // when a bad hardware clock is corrected forward by years.
+        if target.saturating_sub(self.now) > MAX_SCHEDULABLE_DELAY.as_secs() {
+            self.now = target;
+            // A phase can schedule a successor that is also already overdue, so
+            // keep draining until a pass leaves nothing due.
+            loop {
+                let due = self
+                    .levels
+                    .iter_mut()
+                    .flat_map(|level| level.iter_mut())
+                    .fold(Bucket::new(), |mut due, bucket| {
+                        due.extend(std::mem::take(bucket));
+                        due
+                    });
+                let overdue = std::mem::take(&mut self.overdue);
+                if due.is_empty() && overdue.is_empty() {
+                    return;
+                }
+                self.settle(due, target);
+                self.settle(overdue, target);
+            }
+        }
+        while self.now < target {
+            self.now += 1;
+            // Coarse to fine, so an entry cascading several levels down still
+            // reaches level 0 in time to be drained by this same tick.
+            for level in (1..=TOP_LEVEL).rev() {
+                // A level turns over once every `slot_range` seconds, exactly
+                // when `now` has no bits left below that level's slot field.
+                if self.now & (slot_range(level) - 1) != 0 {
+                    continue;
+                }
+                let entries = self.take_bucket(level, self.now);
+                self.settle(entries, self.now);
+            }
+            let entries = self.take_bucket(0, self.now);
+            self.settle(entries, self.now);
+        }
+        // A clock stepping backwards must not rewind the wheel: buckets are
+        // indexed relative to `now`, so re-indexing against an earlier `now`
+        // would file entries into slots the wheel has already drained.
+        self.now = self.now.max(target);
+    }
+
+    /// Fires the entries due at `deadline` and re-files both the phases they
+    /// schedule next and the entries that are not due yet.
+    fn settle(&mut self, entries: Bucket, deadline: u64) {
+        for (key_id, mut entry) in entries {
+            if entry.deadline > deadline {
+                self.place(key_id, entry);
+                continue;
+            }
+            match entry.fire() {
+                Some(next) => {
+                    entry.deadline = next;
+                    self.place(key_id, entry);
+                }
+                None => {
+                    self.positions.remove(&key_id);
+                }
+            }
+        }
+    }
+
+    fn place(&mut self, key_id: KeyId, entry: Entry) {
+        let position = if entry.deadline <= self.now {
+            self.overdue.insert(key_id, entry);
+            Position::Overdue
+        } else {
+            let level = level_for(self.now, entry.deadline);
+            let slot = slot_for(level, entry.deadline);
+            self.bucket(level, slot).insert(key_id, entry);
+            Position::Wheel { level, slot }
+        };
+        self.positions.insert(key_id, position);
+    }
+
+    fn detach(&mut self, key_id: KeyId) -> Option<Entry> {
+        match self.positions.remove(&key_id)? {
+            Position::Overdue => self.overdue.remove(&key_id),
+            Position::Wheel { level, slot } => self.bucket(level, slot).remove(&key_id),
+        }
+    }
+
+    fn bucket(&mut self, level: Level, slot: Slot) -> &mut Bucket {
+        &mut self.levels[level as usize][slot as usize]
+    }
+
+    /// Empties the bucket that `when` falls in at `level`.
+    fn take_bucket(&mut self, level: Level, when: u64) -> Bucket {
+        let slot = slot_for(level, when);
+        std::mem::take(self.bucket(level, slot))
     }
 
     #[cfg(test)]
-    pub(super) fn owns(&self, key_id: u64) -> bool {
-        self.owners.contains_key(&key_id)
-    }
-
-    pub(super) fn insert_with_version(&mut self, lease: Arc<AuthLease>, version: u64) {
-        self.owners.insert(lease.key_id(), lease.clone());
-        let expires_at = lease.expires_at();
-        let delta = expires_at.saturating_sub(self.now);
-        let entry = WheelEntry {
-            lease: Arc::downgrade(&lease),
-            version,
-        };
-        if expires_at <= self.now {
-            self.immediate_due.push(entry);
-        } else if delta < 1 << 8 {
-            self.level0[(expires_at & 0xff) as usize].push(entry);
-        } else if delta < 1 << 14 {
-            self.level1[((expires_at >> 8) & 0x3f) as usize].push(entry);
-        } else if delta < 1 << 20 {
-            self.level2[((expires_at >> 14) & 0x3f) as usize].push(entry);
-        } else {
-            self.level3[((expires_at >> 20) & 0x3f) as usize].push(entry);
-        }
-    }
-
-    pub(super) fn advance(&mut self, target: u64) -> Vec<Arc<AuthLease>> {
-        if target.saturating_sub(self.now) > MAX_INCREMENTAL_ADVANCE_SECONDS {
-            return self.fast_forward(target);
-        }
-
-        let mut due = self.take_immediate_due(target);
-        while self.now < target {
-            self.now = self.now.saturating_add(1);
-            if self.now & 0xff == 0 {
-                self.cascade(1);
-                if (self.now >> 8) & 0x3f == 0 {
-                    self.cascade(2);
-                    if (self.now >> 14) & 0x3f == 0 {
-                        self.cascade(3);
-                    }
-                }
-            }
-            due.extend(self.take_immediate_due(self.now));
-            let index = (self.now & 0xff) as usize;
-            for entry in std::mem::take(&mut self.level0[index]) {
-                let Some(lease) = live_lease(&entry) else {
-                    continue;
-                };
-                if lease.expires_at() <= self.now {
-                    self.owners.remove(&lease.key_id());
-                    due.push(lease);
-                } else {
-                    self.insert_with_version(lease, entry.version);
-                }
-            }
-        }
-        due
-    }
-
-    fn fast_forward(&mut self, target: u64) -> Vec<Arc<AuthLease>> {
-        self.now = target;
-        let mut entries = std::mem::take(&mut self.immediate_due);
-        take_all_entries(&mut self.level0, &mut entries);
-        take_all_entries(&mut self.level1, &mut entries);
-        take_all_entries(&mut self.level2, &mut entries);
-        take_all_entries(&mut self.level3, &mut entries);
-
-        let mut due = Vec::new();
-        for entry in entries {
-            let Some(lease) = live_lease(&entry) else {
-                continue;
-            };
-            if lease.expires_at() <= target {
-                self.owners.remove(&lease.key_id());
-                due.push(lease);
-            } else {
-                self.insert_with_version(lease, entry.version);
-            }
-        }
-        due
-    }
-
-    fn take_immediate_due(&mut self, target: u64) -> Vec<Arc<AuthLease>> {
-        let mut due = Vec::new();
-        for entry in std::mem::take(&mut self.immediate_due) {
-            let Some(lease) = live_lease(&entry) else {
-                continue;
-            };
-            if lease.expires_at() <= target {
-                self.owners.remove(&lease.key_id());
-                due.push(lease);
-            } else {
-                self.insert_with_version(lease, entry.version);
-            }
-        }
-        due
-    }
-
-    fn cascade(&mut self, level: u8) {
-        let entries = match level {
-            1 => {
-                let index = ((self.now >> 8) & 0x3f) as usize;
-                std::mem::take(&mut self.level1[index])
-            }
-            2 => {
-                let index = ((self.now >> 14) & 0x3f) as usize;
-                std::mem::take(&mut self.level2[index])
-            }
-            3 => {
-                let index = ((self.now >> 20) & 0x3f) as usize;
-                std::mem::take(&mut self.level3[index])
-            }
-            _ => Vec::new(),
-        };
-        for entry in entries {
-            if let Some(lease) = live_lease(&entry) {
-                self.insert_with_version(lease, entry.version);
-            }
-        }
-    }
-
-    pub(super) fn clear(&mut self, now: u64) {
-        let mut entries = std::mem::take(&mut self.immediate_due);
-        take_all_entries(&mut self.level0, &mut entries);
-        take_all_entries(&mut self.level1, &mut entries);
-        take_all_entries(&mut self.level2, &mut entries);
-        take_all_entries(&mut self.level3, &mut entries);
-        for lease in self.owners.values() {
-            lease.cancel_rotated();
-        }
-        *self = Self::new(now);
+    pub(super) fn holds(&self, key_id: KeyId) -> bool {
+        self.positions.contains_key(&key_id)
     }
 }
 
-fn live_lease(entry: &WheelEntry) -> Option<Arc<AuthLease>> {
-    let lease = entry.lease.upgrade()?;
-    (entry.version == lease.wheel_version.load(Ordering::Acquire)).then_some(lease)
+/// Seconds covered by one of `level`'s slots.
+fn slot_range(level: Level) -> u64 {
+    1 << (SLOT_BITS * level as u32)
 }
 
-fn empty_buckets(count: usize) -> Vec<Vec<WheelEntry>> {
-    std::iter::repeat_with(Vec::new).take(count).collect()
+fn slot_for(level: Level, when: u64) -> Slot {
+    ((when >> (SLOT_BITS * level as u32)) & SLOT_MASK) as Slot
 }
 
-fn take_all_entries(buckets: &mut [Vec<WheelEntry>], entries: &mut Vec<WheelEntry>) {
-    for bucket in buckets {
-        entries.append(bucket);
-    }
+/// Finest level able to hold `deadline`: the one whose slot field covers the
+/// highest bit in which `now` and `deadline` differ. A deadline past the top
+/// level is clamped into it and cannot fire early, because a drained entry is
+/// only fired once its own deadline has passed.
+fn level_for(now: u64, deadline: u64) -> Level {
+    let significant = 63 - ((now ^ deadline) | SLOT_MASK).leading_zeros();
+    ((significant / SLOT_BITS) as Level).min(TOP_LEVEL)
 }

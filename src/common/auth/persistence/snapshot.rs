@@ -6,19 +6,8 @@ pub(in crate::common::auth) fn compaction_is_allowed(safe_mode: bool) -> bool {
     !safe_mode
 }
 
-pub(in crate::common::auth) fn clear_retained_high_slot_entries(inner: &AuthStateInner) {
-    inner
-        .high_slot_entries
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
-}
-
 pub(in crate::common::auth) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
-    let mut records = inner
-        .audit_records
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut records = recover_lock(inner.audit_records.write());
     while records.len() >= AUDIT_RECORD_CAPACITY {
         records.pop_front();
     }
@@ -26,24 +15,15 @@ pub(in crate::common::auth) fn push_audit_record(inner: &AuthStateInner, record:
 }
 
 pub(in crate::common::auth) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
-    let slots = inner
-        .slots
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slots = inner.slots();
     for lease in slots.iter().filter_map(|slot| slot.lease.upgrade()) {
         lease.cancel_rotated();
     }
 }
 
-fn snapshot_generations(inner: &AuthStateInner) -> Vec<u32> {
-    let slots = inner
-        .slots
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let extra = inner
-        .high_slot_generations
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn snapshot_generations(inner: &AuthStateInner) -> Vec<Generation> {
+    let slots = inner.slots();
+    let extra = recover_lock(inner.high_slot_generations.read());
     let mut generations = slots.iter().map(|slot| slot.generation).collect::<Vec<_>>();
     generations.extend_from_slice(&extra);
     generations
@@ -52,12 +32,12 @@ fn snapshot_generations(inner: &AuthStateInner) -> Vec<u32> {
 pub(in crate::common::auth) fn split_high_slot_state(
     snapshot: &PersistedSnapshot,
     capacity: usize,
-) -> (Vec<u32>, Vec<PersistedEntry>) {
+) -> (Vec<Generation>, Vec<PersistedEntry>) {
     let high_generations = snapshot.generations.get(capacity..).unwrap_or(&[]).to_vec();
     let high_entries = snapshot
         .entries
         .iter()
-        .filter(|entry| key_slot(entry.key_id) as usize >= capacity)
+        .filter(|entry| entry.key_id.slot().as_index() >= capacity)
         .cloned()
         .collect();
     (high_generations, high_entries)
@@ -65,13 +45,10 @@ pub(in crate::common::auth) fn split_high_slot_state(
 
 pub(in crate::common::auth) fn build_snapshot(
     inner: &AuthStateInner,
-    cold: &HashMap<u64, ColdMetadata>,
     admin_replays: &VecDeque<AdminReplayRecord>,
 ) -> PersistedSnapshot {
-    let slots = inner
-        .slots
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slots = inner.slots();
+    let cold = inner.cold();
     let generations = snapshot_generations(inner);
     let mut entries = slots
         .iter()
@@ -80,7 +57,7 @@ pub(in crate::common::auth) fn build_snapshot(
             if slot.state == SlotState::Free {
                 return None;
             }
-            let key_id = make_key_id(slot.generation, index as u32);
+            let key_id = KeyId::new(slot.generation, SlotIndex::from_index(index));
             let cold = cold.get(&key_id)?;
             Some(PersistedEntry {
                 key_id,
@@ -92,14 +69,7 @@ pub(in crate::common::auth) fn build_snapshot(
             })
         })
         .collect::<Vec<_>>();
-    entries.extend(
-        inner
-            .high_slot_entries
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .cloned(),
-    );
+    entries.extend(inner.high().iter().cloned());
     snapshot_with(
         inner,
         inner.instance_id(),
@@ -156,7 +126,7 @@ pub(in crate::common::auth) fn empty_snapshot(
 fn snapshot_with(
     inner: &AuthStateInner,
     instance_id: [u8; INSTANCE_ID_LEN],
-    generations: Vec<u32>,
+    generations: Vec<Generation>,
     entries: Vec<PersistedEntry>,
     admin_replays: &VecDeque<AdminReplayRecord>,
 ) -> PersistedSnapshot {
@@ -171,11 +141,7 @@ fn snapshot_with(
             LegacyProtocolPolicy::Deny
         },
         admin_replays: admin_replays.iter().cloned().collect(),
-        audit_records: inner
-            .audit_records
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone(),
+        audit_records: recover_lock(inner.audit_records.read()).clone(),
         root_epoch: inner.root_epoch.load(Ordering::Acquire),
     }
 }
@@ -226,7 +192,7 @@ pub(in crate::common::auth) fn try_load_persisted_state(
         PersistedSnapshot {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
             instance_id,
-            generations: vec![0; config.max_temporary_keys],
+            generations: vec![Generation::FIRST; config.max_temporary_keys],
             entries: Vec::new(),
             legacy_protocol: config.legacy_protocol,
             admin_replays: Vec::new(),
@@ -242,7 +208,9 @@ pub(in crate::common::auth) fn try_load_persisted_state(
         ));
     }
     if snapshot.generations.len() < config.max_temporary_keys {
-        snapshot.generations.resize(config.max_temporary_keys, 0);
+        snapshot
+            .generations
+            .resize(config.max_temporary_keys, Generation::FIRST);
     }
 
     let wal_path = auth_wal_path(&config.state_dir);
@@ -267,14 +235,14 @@ pub(in crate::common::auth) fn apply_persisted_mutation(
 ) -> Result<(), AuthFailure> {
     match mutation {
         StateMutation::Issue(entry) => {
-            let index = key_slot(entry.key_id) as usize;
+            let index = entry.key_id.slot().as_index();
             if snapshot.generations.len() <= index {
-                snapshot.generations.resize(index + 1, 0);
+                snapshot.generations.resize(index + 1, Generation::FIRST);
             }
-            snapshot.generations[index] = key_generation(entry.key_id);
+            snapshot.generations[index] = entry.key_id.generation();
             snapshot
                 .entries
-                .retain(|current| key_slot(current.key_id) as usize != index);
+                .retain(|current| current.key_id.slot().as_index() != index);
             snapshot.entries.push(entry);
         }
         StateMutation::Renew { key_id, expires_at } => {
@@ -295,7 +263,7 @@ pub(in crate::common::auth) fn apply_persisted_mutation(
 
 fn snapshot_entry_mut<'a>(
     snapshot: &'a mut PersistedSnapshot,
-    key_id: u64,
+    key_id: KeyId,
     operation: &str,
 ) -> Result<&'a mut PersistedEntry, AuthFailure> {
     snapshot

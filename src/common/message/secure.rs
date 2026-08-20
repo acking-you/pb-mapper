@@ -29,7 +29,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::{
     CodecMessageReader, CodecMessageWriter, DataLenType, MessageReader, MessageWriter, MAX_MSG_LEN,
 };
-use crate::common::auth::{AuthContext, AuthFailure, AuthRuntime, LegacyConnectionGuard};
+use crate::common::auth::{
+    AuthContext, AuthFailure, AuthRuntime, KeyId, LegacyConnectionGuard, ADMIN_KEY_ID,
+};
 use crate::common::checksum::{
     get_process_credential, valid_checksum_for_key, AesKeyType, Credential,
 };
@@ -78,7 +80,8 @@ impl ClientHeaderSession {
         for byte in &mut salt[8..] {
             *byte = rng.random();
         }
-        let material = derive_material(credential.key_id(), credential.key(), salt)?;
+        let material =
+            derive_material(KeyId::from_u64(credential.key_id()), credential.key(), salt)?;
         Ok(Self {
             protocol: HeaderProtocol::V2,
             legacy_key: *credential.key(),
@@ -218,7 +221,7 @@ impl ServerHeaderSession {
         self.legacy_key
     }
 
-    pub fn key_id(&self) -> u64 {
+    pub fn key_id(&self) -> KeyId {
         self.context
             .as_ref()
             .map(|context| context.key_id)
@@ -226,7 +229,7 @@ impl ServerHeaderSession {
                 self.v2
                     .as_ref()
                     .map(|material| material.key_id)
-                    .unwrap_or_default()
+                    .unwrap_or(ADMIN_KEY_ID)
             })
     }
 
@@ -291,7 +294,7 @@ pub struct ServerInitialMessage {
 pub struct ServerInitialError {
     pub failure: AuthFailure,
     pub response_session: Option<ServerHeaderSession>,
-    pub presented_key_id: Option<u64>,
+    pub presented_key_id: Option<KeyId>,
 }
 
 impl ServerInitialError {
@@ -311,7 +314,7 @@ impl ServerInitialError {
         code: &'static str,
         message: impl Into<String>,
         retryable: bool,
-        key_id: u64,
+        key_id: KeyId,
     ) -> Self {
         Self {
             failure: AuthFailure::new(code, message, retryable),
@@ -320,7 +323,7 @@ impl ServerInitialError {
         }
     }
 
-    fn from_failure_key(failure: AuthFailure, key_id: u64) -> Self {
+    fn from_failure_key(failure: AuthFailure, key_id: KeyId) -> Self {
         Self {
             failure,
             response_session: None,
@@ -378,7 +381,7 @@ impl ServerSecurity {
     pub fn record_failure_log(
         &self,
         peer_ip: std::net::IpAddr,
-        key_id: u64,
+        key_id: KeyId,
         reason: &str,
     ) -> FailureLogDecision {
         self.failure_logs
@@ -459,7 +462,7 @@ impl ServerSecurity {
         })?;
         let context = self
             .auth
-            .authenticate_presented(0, &key)
+            .authenticate_presented(ADMIN_KEY_ID, &key)
             .map_err(ServerInitialError::new)?;
         let legacy_guard = self
             .auth
@@ -507,7 +510,9 @@ impl ServerSecurity {
                 false,
             ));
         }
-        let key_id = u64::from_be_bytes(remainder[4..12].try_into().expect("fixed key id"));
+        let key_id = KeyId::from_u64(u64::from_be_bytes(
+            remainder[4..12].try_into().expect("fixed key id"),
+        ));
         let salt: [u8; CONNECTION_SALT_LEN] =
             remainder[12..28].try_into().expect("fixed connection salt");
         let client_timestamp = u64::from_be_bytes(salt[..8].try_into().expect("fixed timestamp"));

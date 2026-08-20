@@ -64,7 +64,7 @@ async fn temporary_credential_authenticates_without_storing_secret() {
     let admin = *b"0123456789abcdefghijklmnopqrstuv";
     let config = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
-    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
         .issue(&admin_context, std::time::Duration::from_secs(60), None)
         .await
@@ -148,7 +148,7 @@ async fn revoked_first_flights_do_not_consume_the_replay_filter() {
     let admin = *b"0123456789abcdefghijklmnopqrstuv";
     let config = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
-    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
         .issue(&admin_context, std::time::Duration::from_secs(60), None)
         .await
@@ -159,7 +159,9 @@ async fn revoked_first_flights_do_not_consume_the_replay_filter() {
     };
     let client = ClientHeaderSession::new_v2(&Credential::Temporary { key_id, key }).unwrap();
     let bytes = encode_initial(&client, b"revoked").await;
-    auth.revoke(&admin_context, key_id).await.unwrap();
+    auth.revoke(&admin_context, KeyId::from_u64(key_id))
+        .await
+        .unwrap();
     let security = ServerSecurity::new(auth);
 
     let first = match security
@@ -192,7 +194,7 @@ async fn accepted_then_revoked_replay_does_not_reuse_the_session_nonce() {
     let admin = *b"0123456789abcdefghijklmnopqrstuv";
     let config = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
-    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
         .issue(&admin_context, std::time::Duration::from_secs(60), None)
         .await
@@ -210,7 +212,7 @@ async fn accepted_then_revoked_replay_does_not_reuse_the_session_nonce() {
         .expect("first flight should be accepted");
     security
         .auth()
-        .revoke(&admin_context, key_id)
+        .revoke(&admin_context, KeyId::from_u64(key_id))
         .await
         .unwrap();
     let replayed = match security
@@ -236,7 +238,7 @@ async fn rotated_temporary_first_flight_returns_a_readable_rotated_error() {
     let new_admin = *b"abcdefghijklmnopqrstuvwxyz012345";
     let config = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
-    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
         .issue(&admin_context, std::time::Duration::from_secs(60), None)
         .await
@@ -283,7 +285,7 @@ async fn stale_root_replay_omits_the_rotated_error_session() {
     let new_admin = *b"abcdefghijklmnopqrstuvwxyz012345";
     let config = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
-    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
         .issue(&admin_context, std::time::Duration::from_secs(60), None)
         .await
@@ -327,7 +329,7 @@ async fn reset_temporary_first_flight_returns_a_readable_rotated_error() {
     let admin = *b"0123456789abcdefghijklmnopqrstuv";
     let config = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
-    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
         .issue(&admin_context, std::time::Duration::from_secs(60), None)
         .await
@@ -372,7 +374,7 @@ async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
     let admin = *b"0123456789abcdefghijklmnopqrstuv";
     let config = temp_config();
     let auth = AuthRuntime::start(admin, config.clone()).await.unwrap();
-    let admin_context = auth.authenticate_presented(0, &admin).unwrap();
+    let admin_context = auth.authenticate_presented(ADMIN_KEY_ID, &admin).unwrap();
     let issued = auth
         .issue(&admin_context, std::time::Duration::from_secs(60), None)
         .await
@@ -398,7 +400,7 @@ async fn mistyped_temporary_first_flight_does_not_send_an_unreadable_error() {
         error.response_session.is_none(),
         "the presenter cannot open a session derived from the live key"
     );
-    assert_eq!(error.presented_key_id, Some(key_id));
+    assert_eq!(error.presented_key_id, Some(KeyId::from_u64(key_id)));
 
     let _ = std::fs::remove_dir_all(config.state_dir);
 }
@@ -494,12 +496,30 @@ fn per_credential_admission_limit_does_not_consume_other_keys() {
     let now = unix_seconds();
     let mut guard =
         ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS).with_max_per_key(2);
-    assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
-    assert_eq!(guard.admit(1, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
-    assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
-    assert_eq!(guard.admit(1, &[3_u8; 32], now), FirstFlightAdmit::Limited);
-    assert_eq!(guard.admit(2, &[4_u8; 32], now), FirstFlightAdmit::Fresh);
-    assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Replayed);
+    assert_eq!(
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(1), &[2_u8; 32], now),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now),
+        FirstFlightAdmit::Limited
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(1), &[3_u8; 32], now),
+        FirstFlightAdmit::Limited
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(2), &[4_u8; 32], now),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        FirstFlightAdmit::Replayed
+    );
 }
 
 #[test]
@@ -508,11 +528,26 @@ fn aggregate_admission_limit_covers_all_keys() {
     let mut guard = ReplayGuard::open(None, 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
-    assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
-    assert_eq!(guard.admit(2, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
-    assert_eq!(guard.admit(3, &[3_u8; 32], now), FirstFlightAdmit::Limited);
-    assert_eq!(guard.admit(3, &[3_u8; 32], now), FirstFlightAdmit::Limited);
-    assert_eq!(guard.admit(4, &[4_u8; 32], now), FirstFlightAdmit::Limited);
+    assert_eq!(
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now),
+        FirstFlightAdmit::Limited
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], now),
+        FirstFlightAdmit::Limited
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(4), &[4_u8; 32], now),
+        FirstFlightAdmit::Limited
+    );
 }
 
 #[test]
@@ -530,14 +565,17 @@ fn persisted_first_flights_survive_a_torn_trailing_record() {
     let fingerprint = [17_u8; 32];
     {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
-        assert_eq!(guard.admit(7, &fingerprint, now), FirstFlightAdmit::Fresh);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(7), &fingerprint, now),
+            FirstFlightAdmit::Fresh
+        );
     }
     let mut torn = std::fs::read(&path).unwrap();
     torn.extend_from_slice(&[0_u8; 10]);
     std::fs::write(&path, torn).unwrap();
     let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(7, &fingerprint, now),
+        restored.admit(KeyId::from_u64(7), &fingerprint, now),
         FirstFlightAdmit::Unavailable
     );
     let _ = std::fs::remove_file(path);
@@ -558,7 +596,10 @@ fn replay_rewrite_succeeds_when_a_pid_temporary_file_already_exists() {
     let fingerprint = [19_u8; 32];
     {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
-        assert_eq!(guard.admit(9, &fingerprint, now), FirstFlightAdmit::Fresh);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(9), &fingerprint, now),
+            FirstFlightAdmit::Fresh
+        );
     }
     let leftover = path.with_file_name(format!(
         ".{}.tmp-{}",
@@ -568,7 +609,7 @@ fn replay_rewrite_succeeds_when_a_pid_temporary_file_already_exists() {
     std::fs::write(&leftover, b"stale").unwrap();
     let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(9, &fingerprint, now),
+        restored.admit(KeyId::from_u64(9), &fingerprint, now),
         FirstFlightAdmit::Replayed
     );
     let _ = std::fs::remove_file(leftover);
@@ -588,11 +629,14 @@ fn persisted_first_flights_survive_replay_guard_restart() {
     let fingerprint = [13_u8; 32];
     {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
-        assert_eq!(guard.admit(7, &fingerprint, now), FirstFlightAdmit::Fresh);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(7), &fingerprint, now),
+            FirstFlightAdmit::Fresh
+        );
     }
     let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
     assert_eq!(
-        restored.admit(7, &fingerprint, now),
+        restored.admit(KeyId::from_u64(7), &fingerprint, now),
         FirstFlightAdmit::Replayed
     );
     let _ = std::fs::remove_file(path);
@@ -614,14 +658,20 @@ fn restored_replay_log_consumes_the_aggregate_budget() {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
             .with_max_per_key(100)
             .with_max_total(2);
-        assert_eq!(guard.admit(1, &[1_u8; 32], now), FirstFlightAdmit::Fresh);
-        assert_eq!(guard.admit(2, &[2_u8; 32], now), FirstFlightAdmit::Fresh);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+            FirstFlightAdmit::Fresh
+        );
+        assert_eq!(
+            guard.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+            FirstFlightAdmit::Fresh
+        );
     }
     let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
     assert_eq!(
-        restored.admit(3, &[3_u8; 32], now),
+        restored.admit(KeyId::from_u64(3), &[3_u8; 32], now),
         FirstFlightAdmit::Limited
     );
     let _ = std::fs::remove_file(path);
@@ -643,15 +693,21 @@ fn restored_replay_generation_ages_with_loaded_records() {
         let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
             .with_max_per_key(100)
             .with_max_total(2);
-        assert_eq!(guard.admit(1, &[1_u8; 32], start), FirstFlightAdmit::Fresh);
-        assert_eq!(guard.admit(2, &[2_u8; 32], start), FirstFlightAdmit::Fresh);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], start),
+            FirstFlightAdmit::Fresh
+        );
+        assert_eq!(
+            guard.admit(KeyId::from_u64(2), &[2_u8; 32], start),
+            FirstFlightAdmit::Fresh
+        );
     }
     let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS)
         .with_max_per_key(100)
         .with_max_total(2);
     assert_eq!(
         restored.admit(
-            3,
+            KeyId::from_u64(3),
             &[3_u8; 32],
             start.saturating_add(DEFAULT_REPLAY_WINDOW_SECONDS)
         ),
@@ -709,7 +765,7 @@ fn failure_log_limiter_has_a_hard_cardinality_bound() {
     let mut limiter = FailureLogLimiter::default();
     let peer = "127.0.0.1".parse().unwrap();
     for key_id in 0..10_000 {
-        limiter.record(peer, key_id, "invalid", 1_000);
+        limiter.record(peer, KeyId::from_u64(key_id), "invalid", 1_000);
     }
     assert_eq!(limiter.entries.len(), 4096);
     assert!(limiter.overflow.is_some());

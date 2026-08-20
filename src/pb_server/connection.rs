@@ -61,13 +61,13 @@ pub(super) async fn handle_conn(
                 .as_ref()
                 .map(|session| session.key_id())
                 .or(error.presented_key_id)
-                .unwrap_or_default();
+                .unwrap_or(ADMIN_KEY_ID);
             let decision = security.record_failure_log(peer_addr.ip(), key_id, &error.failure.code);
             if decision.suppressed > 0 {
                 tracing::warn!(
                     event = "auth_failures_suppressed",
                     peer_ip = %peer_addr.ip(),
-                    key_id,
+                    key_id = key_id.as_u64(),
                     reason = %error.failure.code,
                     suppressed = decision.suppressed,
                     "suppressed repeated authentication failures in the previous window"
@@ -79,7 +79,7 @@ pub(super) async fn handle_conn(
                     auth_stage = "initial_frame",
                     conn_id = %conn_id,
                     peer_addr = %peer_addr,
-                    key_id,
+                    key_id = key_id.as_u64(),
                     reason = %error.failure.code,
                     retryable = error.failure.retryable,
                     error = %error.failure.message,
@@ -181,7 +181,7 @@ pub(super) async fn handle_conn(
         auth_stage = "session",
         conn_id = %conn_id,
         peer_addr = %peer_addr,
-        key_id = auth_context.key_id,
+        key_id = auth_context.key_id.as_u64(),
         namespace = auth_context.namespace,
         protocol = ?session.protocol(),
         is_admin = auth_context.is_admin,
@@ -459,7 +459,7 @@ where
         _ = cancellation.cancelled() => {
             tracing::info!(
                 event = "connection_auth_expired",
-                key_id = auth_context.key_id,
+                key_id = auth_context.key_id.as_u64(),
                 conn_id = %conn_id,
                 "closing {closed_what}"
             );

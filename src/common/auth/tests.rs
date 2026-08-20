@@ -21,7 +21,7 @@ fn temp_state_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("pb-mapper-{name}-{}", hex(&suffix)))
 }
 
-fn authenticate_for_test(runtime: &AuthRuntime, key_id: u64) -> Result<AuthContext, AuthFailure> {
+fn authenticate_for_test(runtime: &AuthRuntime, key_id: KeyId) -> Result<AuthContext, AuthFailure> {
     let key = runtime.derive_key(key_id)?;
     runtime.authenticate_presented(key_id, &key)
 }
@@ -63,7 +63,7 @@ async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
     let runtime = AuthRuntime::start(admin_key, config_two.clone())
         .await
         .unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let first = runtime
         .issue(&admin, Duration::from_secs(60), Some("first".to_string()))
         .await
@@ -84,8 +84,14 @@ async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
     else {
         panic!("expected temporary credential");
     };
-    runtime.revoke(&admin, first_id).await.unwrap();
-    runtime.revoke(&admin, second_id).await.unwrap();
+    runtime
+        .revoke(&admin, KeyId::from_u64(first_id))
+        .await
+        .unwrap();
+    runtime
+        .revoke(&admin, KeyId::from_u64(second_id))
+        .await
+        .unwrap();
     runtime.gc(&admin).await.unwrap();
     drop(runtime);
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -95,7 +101,7 @@ async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
         ..config_two.clone()
     };
     let runtime = AuthRuntime::start(admin_key, config_one).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     assert!(!runtime.status(&admin).await.unwrap().safe_mode);
     let _third = runtime
         .issue(&admin, Duration::from_secs(60), Some("third".to_string()))
@@ -105,7 +111,7 @@ async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let runtime = AuthRuntime::start(admin_key, config_two).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     assert!(!runtime.status(&admin).await.unwrap().safe_mode);
     let fourth = runtime
         .issue(&admin, Duration::from_secs(60), Some("fourth".to_string()))
@@ -136,7 +142,7 @@ async fn gc_removes_inactive_high_slot_entries_and_keeps_their_generations() {
     let runtime = AuthRuntime::start(admin_key, config_two.clone())
         .await
         .unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let first = runtime
         .issue(&admin, Duration::from_secs(60), Some("first".to_string()))
         .await
@@ -157,8 +163,14 @@ async fn gc_removes_inactive_high_slot_entries_and_keeps_their_generations() {
     else {
         panic!("expected temporary credential");
     };
-    runtime.revoke(&admin, first_id).await.unwrap();
-    runtime.revoke(&admin, second_id).await.unwrap();
+    runtime
+        .revoke(&admin, KeyId::from_u64(first_id))
+        .await
+        .unwrap();
+    runtime
+        .revoke(&admin, KeyId::from_u64(second_id))
+        .await
+        .unwrap();
     drop(runtime);
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -167,7 +179,7 @@ async fn gc_removes_inactive_high_slot_entries_and_keeps_their_generations() {
         ..config_two.clone()
     };
     let runtime = AuthRuntime::start(admin_key, config_one).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     assert_eq!(runtime.high_slot_entry_count(), 1);
     let removed = runtime.gc(&admin).await.unwrap();
     assert!(removed >= 1);
@@ -176,7 +188,7 @@ async fn gc_removes_inactive_high_slot_entries_and_keeps_their_generations() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let runtime = AuthRuntime::start(admin_key, config_two).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let _low = runtime
         .issue(&admin, Duration::from_secs(60), Some("low".to_string()))
         .await
@@ -210,7 +222,7 @@ async fn admin_lifecycle_covers_high_slot_keys_after_capacity_shrink() {
     let runtime = AuthRuntime::start(admin_key, config_two.clone())
         .await
         .unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let first = runtime
         .issue(&admin, Duration::from_secs(60), Some("first".to_string()))
         .await
@@ -227,11 +239,11 @@ async fn admin_lifecycle_covers_high_slot_keys_after_capacity_shrink() {
         ..config_two.clone()
     };
     let runtime = AuthRuntime::start(admin_key, config_one).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     assert_eq!(runtime.high_slot_entry_count(), 1);
     let high_id = [first.metadata.key_id, second.metadata.key_id]
         .into_iter()
-        .find(|key_id| key_slot(*key_id) as usize >= 1)
+        .find(|key_id| key_id.slot().as_index() >= 1)
         .expect("one issued key should land above the shrunken table");
     let page = runtime.list(&admin, 0, 100).await.unwrap();
     assert_eq!(page.items.len(), 2);
@@ -257,7 +269,7 @@ async fn admin_lifecycle_covers_high_slot_keys_after_capacity_shrink() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let runtime = AuthRuntime::start(admin_key, config_two).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let restored = runtime.show(&admin, high_id, false).await.unwrap();
     assert_eq!(restored.metadata.state, "revoked");
     drop(runtime);
@@ -276,7 +288,7 @@ async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     runtime
         .set_legacy_protocol(&admin, LegacyProtocolPolicy::Deny)
         .await
@@ -286,7 +298,7 @@ async fn safe_mode_denies_legacy_protocol_instead_of_restoring_the_default() {
     std::fs::write(state_dir.join("auth.wal"), b"broken-wal").unwrap();
 
     let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let status = runtime.status(&admin).await.unwrap();
     assert!(status.safe_mode);
     assert_eq!(status.legacy_protocol, LegacyProtocolPolicy::Deny);
@@ -335,7 +347,7 @@ async fn env_recovery_key_is_not_written_when_it_cannot_decrypt_existing_state()
     let snapshot = PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: [4_u8; INSTANCE_ID_LEN],
-        generations: vec![0; 1],
+        generations: vec![Generation::FIRST; 1],
         entries: Vec::new(),
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
@@ -479,7 +491,7 @@ async fn reset_clears_retained_high_slot_entries() {
     let runtime = AuthRuntime::start(admin_key, config_two.clone())
         .await
         .unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let first = runtime
         .issue(&admin, Duration::from_secs(60), Some("first".to_string()))
         .await
@@ -496,13 +508,13 @@ async fn reset_clears_retained_high_slot_entries() {
         ..config_two.clone()
     };
     let runtime = AuthRuntime::start(admin_key, config_one).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     runtime.reset(&admin).await.unwrap();
     drop(runtime);
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let runtime = AuthRuntime::start(admin_key, config_two).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let page = runtime.list(&admin, 0, 100).await.unwrap();
     assert!(page.items.is_empty());
     assert!(authenticate_for_test(&runtime, first.metadata.key_id).is_err());
@@ -523,7 +535,7 @@ async fn rotate_root_rejects_a_nul_containing_key() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let mut bad = *b"0123456789abcdefghijklmnopqrstuv";
     bad[4] = 0;
     let error = runtime.rotate_root(&admin, bad).await.unwrap_err();
@@ -629,10 +641,24 @@ fn legacy_protocol_policy_trims_valid_values_and_rejects_unknown_values() {
 }
 
 #[test]
+fn key_id_serializes_as_a_plain_integer() {
+    let key_id = KeyId::new(Generation::from_u32(3), SlotIndex::from_index(2));
+    assert_eq!(serde_json::to_string(&key_id).unwrap(), "12884901890");
+    assert_eq!(
+        serde_json::from_str::<KeyId>("12884901890").unwrap(),
+        key_id
+    );
+    assert_eq!(
+        serde_json::to_string(&Generation::from_u32(7)).unwrap(),
+        "7"
+    );
+}
+
+#[test]
 fn key_id_round_trip() {
-    let key_id = make_key_id(42, 65_535);
-    assert_eq!(key_generation(key_id), 42);
-    assert_eq!(key_slot(key_id), 65_535);
+    let key_id = KeyId::new(Generation::from_u32(42), SlotIndex::from_index(65_535));
+    assert_eq!(key_id.generation(), Generation::from_u32(42));
+    assert_eq!(key_id.slot(), SlotIndex::from_index(65_535));
 }
 
 #[test]
@@ -640,18 +666,38 @@ fn derived_key_is_bound_to_instance_and_key_id() {
     let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
     let instance_a = [1_u8; INSTANCE_ID_LEN];
     let instance_b = [2_u8; INSTANCE_ID_LEN];
-    let key = derive_temporary_key(&admin_key, &instance_a, make_key_id(1, 7)).unwrap();
+    let key = derive_temporary_key(
+        &admin_key,
+        &instance_a,
+        KeyId::new(Generation::from_u32(1), SlotIndex::from_index(7)),
+    )
+    .unwrap();
     assert_eq!(
         key,
-        derive_temporary_key(&admin_key, &instance_a, make_key_id(1, 7)).unwrap()
+        derive_temporary_key(
+            &admin_key,
+            &instance_a,
+            KeyId::new(Generation::from_u32(1), SlotIndex::from_index(7))
+        )
+        .unwrap()
     );
     assert_ne!(
         key,
-        derive_temporary_key(&admin_key, &instance_b, make_key_id(1, 7)).unwrap()
+        derive_temporary_key(
+            &admin_key,
+            &instance_b,
+            KeyId::new(Generation::from_u32(1), SlotIndex::from_index(7))
+        )
+        .unwrap()
     );
     assert_ne!(
         key,
-        derive_temporary_key(&admin_key, &instance_a, make_key_id(2, 7)).unwrap()
+        derive_temporary_key(
+            &admin_key,
+            &instance_a,
+            KeyId::new(Generation::from_u32(2), SlotIndex::from_index(7))
+        )
+        .unwrap()
     );
 }
 
@@ -659,9 +705,10 @@ fn derived_key_is_bound_to_instance_and_key_id() {
 async fn isolated_runtime_preserves_remote_temporary_process_credential() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
     let state_dir = temp_state_dir("isolated-relay");
-    let temporary_key_id = make_key_id(1, 0);
+    let temporary_key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
     let temporary_key = *b"temporary-remote-key-0123456789a";
-    let temporary_credential = encode_temporary_credential(temporary_key_id, &temporary_key);
+    let temporary_credential =
+        encode_temporary_credential(temporary_key_id.as_u64(), &temporary_key);
     set_process_msg_header_key(Some(&temporary_credential)).unwrap();
     let config = AuthConfig {
         state_dir: state_dir.clone(),
@@ -674,7 +721,7 @@ async fn isolated_runtime_preserves_remote_temporary_process_credential() {
     assert_eq!(
         get_process_credential().unwrap(),
         Credential::Temporary {
-            key_id: temporary_key_id,
+            key_id: temporary_key_id.as_u64(),
             key: temporary_key,
         }
     );
@@ -684,7 +731,9 @@ async fn isolated_runtime_preserves_remote_temporary_process_credential() {
     else {
         panic!("isolated relay key should be an administrator credential");
     };
-    let local_admin = runtime.authenticate_presented(0, &local_admin_key).unwrap();
+    let local_admin = runtime
+        .authenticate_presented(ADMIN_KEY_ID, &local_admin_key)
+        .unwrap();
     runtime
         .rotate_root(&local_admin, *b"isolated-new-admin-key-012345678")
         .await
@@ -692,7 +741,7 @@ async fn isolated_runtime_preserves_remote_temporary_process_credential() {
     assert_eq!(
         get_process_credential().unwrap(),
         Credential::Temporary {
-            key_id: temporary_key_id,
+            key_id: temporary_key_id.as_u64(),
             key: temporary_key,
         }
     );
@@ -714,7 +763,7 @@ async fn issue_renew_revoke_and_persist() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let issued = runtime
         .issue(&admin, Duration::from_secs(60), Some("demo".to_string()))
         .await
@@ -788,7 +837,7 @@ async fn ensure_active_keeps_expiry_after_the_lease_is_cancelled() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let issued = runtime
         .issue(&admin, Duration::from_secs(60), Some("exp".to_string()))
         .await
@@ -820,7 +869,7 @@ async fn renew_replaces_a_lease_canceled_during_persistence() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let issued = runtime
         .issue(&admin, Duration::from_secs(60), Some("renew".to_string()))
         .await
@@ -855,7 +904,7 @@ async fn reset_rotates_instance_and_prevents_old_key_id_reuse() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let before = runtime.status(&admin).await.unwrap().server_instance_id;
     let old = runtime
         .issue(
@@ -915,7 +964,7 @@ fn recover_instance_id_promotes_next_when_snapshot_matches() {
     let snapshot = PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: next,
-        generations: vec![0; 1],
+        generations: vec![Generation::FIRST; 1],
         entries: Vec::new(),
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
@@ -952,7 +1001,7 @@ fn reset_already_installed_accepts_matching_live_id_and_snapshot() {
     let snapshot = PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: new_id,
-        generations: vec![0; 1],
+        generations: vec![Generation::FIRST; 1],
         entries: Vec::new(),
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
@@ -987,7 +1036,7 @@ fn recover_instance_id_discards_stale_next_when_snapshot_still_matches_current()
     let snapshot = PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: current,
-        generations: vec![0; 1],
+        generations: vec![Generation::FIRST; 1],
         entries: Vec::new(),
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
@@ -1021,7 +1070,7 @@ fn recover_admin_key_discards_leftover_wal_from_the_old_key() {
     let snapshot = PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: [9_u8; INSTANCE_ID_LEN],
-        generations: vec![0; 1],
+        generations: vec![Generation::FIRST; 1],
         entries: Vec::new(),
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
@@ -1056,7 +1105,7 @@ fn rotation_finalize_requires_the_live_admin_key() {
     let snapshot = PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: [3_u8; INSTANCE_ID_LEN],
-        generations: vec![0; 1],
+        generations: vec![Generation::FIRST; 1],
         entries: Vec::new(),
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
@@ -1081,7 +1130,7 @@ async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let issued = runtime
         .issue(
             &admin,
@@ -1099,7 +1148,7 @@ async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
     let snapshot = PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: next,
-        generations: vec![0; 4],
+        generations: vec![Generation::FIRST; 4],
         entries: Vec::new(),
         legacy_protocol: LegacyProtocolPolicy::Allow,
         admin_replays: Vec::new(),
@@ -1116,7 +1165,7 @@ async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
     .unwrap();
 
     let restored = AuthRuntime::start(admin_key, config).await.unwrap();
-    let restored_admin = authenticate_for_test(&restored, 0).unwrap();
+    let restored_admin = authenticate_for_test(&restored, ADMIN_KEY_ID).unwrap();
     let status = restored.status(&restored_admin).await.unwrap();
     assert!(!status.safe_mode);
     assert_eq!(status.server_instance_id, hex(&next));
@@ -1138,7 +1187,7 @@ async fn corrupt_wal_fails_temporary_keys_closed_until_admin_reset() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     let issued = runtime
         .issue(
             &admin,
@@ -1152,7 +1201,7 @@ async fn corrupt_wal_fails_temporary_keys_closed_until_admin_reset() {
     std::fs::write(state_dir.join("auth.wal"), b"broken-wal").unwrap();
 
     let recovered = AuthRuntime::start(admin_key, config).await.unwrap();
-    let recovered_admin = authenticate_for_test(&recovered, 0).unwrap();
+    let recovered_admin = authenticate_for_test(&recovered, ADMIN_KEY_ID).unwrap();
     assert!(recovered.status(&recovered_admin).await.unwrap().safe_mode);
     assert_eq!(
         authenticate_for_test(&recovered, issued.metadata.key_id)
@@ -1181,7 +1230,9 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(old_key, config).await.unwrap();
-    let old_admin = runtime.authenticate_presented(0, &old_key).unwrap();
+    let old_admin = runtime
+        .authenticate_presented(ADMIN_KEY_ID, &old_key)
+        .unwrap();
     let issued = runtime
         .issue(
             &old_admin,
@@ -1203,7 +1254,7 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
     let mistyped_key = *b"1123456789abcdefghijklmnopqrstuv";
     assert_eq!(
         runtime
-            .authenticate_presented(0, &mistyped_key)
+            .authenticate_presented(ADMIN_KEY_ID, &mistyped_key)
             .unwrap_err()
             .code,
         "administrator_key_invalid"
@@ -1220,7 +1271,9 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
             .code,
         "temporary_key_rotated"
     );
-    let new_admin = runtime.authenticate_presented(0, &new_key).unwrap();
+    let new_admin = runtime
+        .authenticate_presented(ADMIN_KEY_ID, &new_key)
+        .unwrap();
     let _replacement = runtime
         .issue(
             &new_admin,
@@ -1239,7 +1292,7 @@ async fn root_rotation_rejects_old_key_and_in_flight_admin_context() {
 
     assert_eq!(
         runtime
-            .authenticate_presented(0, &old_key)
+            .authenticate_presented(ADMIN_KEY_ID, &old_key)
             .unwrap_err()
             .code,
         "administrator_key_invalid"
@@ -1272,7 +1325,7 @@ async fn admitted_admin_mutation_replay_survives_restart() {
     let fingerprint = [0x5a; 32];
     let timestamp = unix_seconds();
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     runtime
         .claim_admin_mutation(&admin, fingerprint, timestamp)
         .await
@@ -1281,7 +1334,7 @@ async fn admitted_admin_mutation_replay_survives_restart() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let restored = AuthRuntime::start(admin_key, config).await.unwrap();
-    let restored_admin = authenticate_for_test(&restored, 0).unwrap();
+    let restored_admin = authenticate_for_test(&restored, ADMIN_KEY_ID).unwrap();
     assert_eq!(
         restored
             .claim_admin_mutation(&restored_admin, fingerprint, timestamp)
@@ -1307,7 +1360,7 @@ async fn snapshot_compaction_preserves_audit_records() {
         legacy_protocol: LegacyProtocolPolicy::Allow,
     };
     let runtime = AuthRuntime::start(admin_key, config.clone()).await.unwrap();
-    let admin = authenticate_for_test(&runtime, 0).unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
     runtime
         .issue(&admin, Duration::from_secs(60), Some("audited".to_string()))
         .await
@@ -1329,84 +1382,240 @@ async fn snapshot_compaction_preserves_audit_records() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
-#[test]
-fn timing_wheel_ignores_stale_renewal_entry() {
-    let now = 1_000;
-    let lease = Arc::new(AuthLease::new(make_key_id(1, 0), now + 5));
-    let mut wheel = TimingWheel::new(now);
-    wheel.insert(lease.clone());
-    lease.expires_at.store(now + 20, Ordering::Release);
-    lease.wheel_version.fetch_add(1, Ordering::AcqRel);
-    wheel.insert(lease.clone());
-    assert!(wheel.advance(now + 6).is_empty());
-    assert_eq!(wheel.advance(now + 20).len(), 1);
+#[tokio::test]
+async fn revoking_keeps_the_row_until_its_retention_elapses() {
+    let state_dir = temp_state_dir("revoke-retention");
+    let admin_key = *b"0123456789abcdefghijklmnopqrstuv";
+    let config = AuthConfig {
+        state_dir: state_dir.clone(),
+        max_temporary_keys: 4,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    };
+    let runtime = AuthRuntime::start(admin_key, config).await.unwrap();
+    let admin = authenticate_for_test(&runtime, ADMIN_KEY_ID).unwrap();
+    let issued = runtime
+        .issue(&admin, Duration::from_secs(60), Some("revoked".to_string()))
+        .await
+        .unwrap();
+    let key_id = issued.metadata.key_id;
+    let presented = runtime.derive_key(key_id).unwrap();
+
+    runtime.revoke(&admin, key_id).await.unwrap();
+
+    // The credential stops working at once, but the row survives so the reason
+    // is still reportable rather than degrading to "unknown key".
+    assert_eq!(
+        runtime
+            .authenticate_presented(key_id, &presented)
+            .unwrap_err()
+            .code,
+        "temporary_key_revoked"
+    );
+    assert!(runtime
+        .list(&admin, 0, 100)
+        .await
+        .unwrap()
+        .items
+        .iter()
+        .any(|item| item.key_id == key_id && item.state == "revoked"));
+
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+/// Records which phases ran, so a test can assert on the callback's effects
+/// rather than on a return value the wheel no longer produces.
+#[derive(Clone, Default)]
+struct PhaseLog(Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+impl PhaseLog {
+    fn push(&self, phase: &'static str) {
+        recover_lock(self.0.lock()).push(phase);
+    }
+
+    fn phases(&self) -> Vec<&'static str> {
+        recover_lock(self.0.lock()).clone()
+    }
+}
+
+/// Schedules the two-phase shape `Leases` uses: a first phase that asks for a
+/// second one `gap` seconds later, then a final phase.
+fn schedule_two_phases(
+    wheel: &mut TimingWheel,
+    key_id: KeyId,
+    deadline: u64,
+    gap: u64,
+) -> PhaseLog {
+    let log = PhaseLog::default();
+    let recorder = log.clone();
+    let mut first = true;
+    wheel.schedule(key_id, deadline, move || {
+        if std::mem::take(&mut first) {
+            recorder.push("retire");
+            return Some(deadline + gap);
+        }
+        recorder.push("reap");
+        None
+    });
+    log
+}
+
+fn schedule_once(wheel: &mut TimingWheel, key_id: KeyId, deadline: u64) -> PhaseLog {
+    let log = PhaseLog::default();
+    let recorder = log.clone();
+    wheel.schedule(key_id, deadline, move || {
+        recorder.push("fired");
+        None
+    });
+    log
 }
 
 #[test]
-fn timing_wheel_fast_forwards_large_clock_jumps() {
-    let now = 1_000;
-    let target = now + 7 * 24 * 60 * 60;
-    let expired = Arc::new(AuthLease::new(make_key_id(1, 0), now + 5));
-    let future = Arc::new(AuthLease::new(make_key_id(1, 1), target + 20));
-    let mut wheel = TimingWheel::new(now);
-    wheel.insert(expired.clone());
-    wheel.insert(future.clone());
+fn timing_wheel_runs_the_next_phase_at_the_deadline_it_asked_for() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(1_000);
+    let log = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
 
-    let due = wheel.advance(target);
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].key_id(), expired.key_id());
-    assert!(wheel.advance(target + 19).is_empty());
-    assert_eq!(wheel.advance(target + 20).len(), 1);
+    wheel.advance(1_004);
+    assert!(log.phases().is_empty());
+    wheel.advance(1_005);
+    assert_eq!(log.phases(), ["retire"]);
+    // The second phase waits for the deadline the first one returned.
+    wheel.advance(1_064);
+    assert_eq!(log.phases(), ["retire"]);
+    wheel.advance(1_065);
+    assert_eq!(log.phases(), ["retire", "reap"]);
+    assert!(!wheel.holds(key_id));
 }
 
 #[test]
-fn timing_wheel_returns_already_expired_insert_without_wrapping() {
-    let now = 1_000;
-    let expired = Arc::new(AuthLease::new(make_key_id(1, 0), now - 1));
-    let mut wheel = TimingWheel::new(now);
-    wheel.insert(expired.clone());
+fn timing_wheel_cancel_runs_every_remaining_phase_at_once() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(1_000);
+    let log = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
 
-    let due = wheel.advance(now);
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].key_id(), expired.key_id());
+    wheel.cancel(key_id);
+    assert_eq!(log.phases(), ["retire", "reap"]);
+    assert!(!wheel.holds(key_id));
 }
 
 #[test]
-fn timing_wheel_expires_cascaded_boundary_entry_without_an_extra_tick() {
-    let now = 700;
-    let expires_at = 1_024;
-    let lease = Arc::new(AuthLease::new(make_key_id(1, 0), expires_at));
-    let mut wheel = TimingWheel::new(now);
-    wheel.insert(lease.clone());
+fn timing_wheel_cancel_after_the_first_phase_runs_only_the_rest() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(1_000);
+    let log = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
 
-    let due = wheel.advance(expires_at);
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].key_id(), lease.key_id());
+    wheel.advance(1_005);
+    wheel.cancel(key_id);
+    assert_eq!(log.phases(), ["retire", "reap"]);
 }
 
 #[test]
-fn timing_wheel_release_drops_the_current_owner() {
-    let now = 1_000;
-    let lease = Arc::new(AuthLease::new(make_key_id(1, 0), now + 60));
-    let mut wheel = TimingWheel::new(now);
-    wheel.insert(lease.clone());
-    assert!(wheel.owns(lease.key_id()));
+fn timing_wheel_drop_runs_every_remaining_phase() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(1_000);
+    let log = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
 
-    wheel.release(lease.key_id());
-    assert!(!wheel.owns(lease.key_id()));
-    assert!(!lease.cancellation_token().is_cancelled());
+    drop(wheel);
+    assert_eq!(log.phases(), ["retire", "reap"]);
 }
 
 #[test]
-fn timing_wheel_clear_cancels_owned_leases() {
-    let now = 1_000;
-    let lease = Arc::new(AuthLease::new(make_key_id(1, 0), now + 60));
-    let cancellation = lease.cancellation_token();
-    let mut wheel = TimingWheel::new(now);
-    wheel.insert(lease);
+fn timing_wheel_reschedule_moves_an_entry_without_running_it() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(1_000);
+    let log = schedule_once(&mut wheel, key_id, 1_005);
 
-    wheel.clear(now + 1);
-    assert!(cancellation.is_cancelled());
+    assert!(wheel.reschedule(key_id, 1_020));
+    wheel.advance(1_019);
+    assert!(log.phases().is_empty());
+    wheel.advance(1_020);
+    assert_eq!(log.phases(), ["fired"]);
+}
+
+#[test]
+fn timing_wheel_reschedule_reports_a_key_it_does_not_hold() {
+    let mut wheel = TimingWheel::new(1_000);
+    assert!(!wheel.reschedule(
+        KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0)),
+        2_000
+    ));
+}
+
+#[test]
+fn timing_wheel_scheduling_over_an_entry_finishes_the_one_it_replaces() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(1_000);
+    let stale = schedule_two_phases(&mut wheel, key_id, 1_005, 60);
+    let fresh = schedule_once(&mut wheel, key_id, 1_020);
+
+    assert_eq!(stale.phases(), ["retire", "reap"]);
+    wheel.advance(1_020);
+    assert_eq!(fresh.phases(), ["fired"]);
+}
+
+#[test]
+fn timing_wheel_fires_an_entry_scheduled_in_the_past_without_wrapping() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(1_000);
+    let log = schedule_once(&mut wheel, key_id, 999);
+
+    wheel.advance(1_000);
+    assert_eq!(log.phases(), ["fired"]);
+}
+
+#[test]
+fn timing_wheel_cascades_an_entry_down_two_levels() {
+    // A deadline two levels up has to reach level 0 before it can be drained.
+    let now = 1_000;
+    let deadline = now + (1 << (6 * 2));
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(now);
+    let log = schedule_once(&mut wheel, key_id, deadline);
+
+    wheel.advance(deadline - 1);
+    assert!(log.phases().is_empty());
+    wheel.advance(deadline);
+    assert_eq!(log.phases(), ["fired"]);
+}
+
+#[test]
+fn timing_wheel_fires_a_boundary_deadline_without_an_extra_tick() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(700);
+    let log = schedule_once(&mut wheel, key_id, 1_024);
+
+    wheel.advance(1_024);
+    assert_eq!(log.phases(), ["fired"]);
+}
+
+#[test]
+fn timing_wheel_drains_in_one_pass_when_the_clock_jumps_past_every_deadline() {
+    // A correction longer than the longest schedulable delay leaves nothing
+    // pending, so the wheel empties without ticking through the elapsed years.
+    let now = 1_000;
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(now);
+    let log = schedule_two_phases(&mut wheel, key_id, now + 60, 60);
+
+    wheel.advance(now + 4 * MAX_TEMP_KEY_TTL.as_secs());
+    assert_eq!(log.phases(), ["retire", "reap"]);
+    assert!(!wheel.holds(key_id));
+}
+
+#[test]
+fn timing_wheel_keeps_its_position_when_the_clock_steps_backwards() {
+    let key_id = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    let mut wheel = TimingWheel::new(1_000);
+    let log = schedule_once(&mut wheel, key_id, 1_030);
+
+    wheel.advance(1_020);
+    wheel.advance(1_005);
+    assert!(log.phases().is_empty());
+    wheel.advance(1_030);
+    assert_eq!(log.phases(), ["fired"]);
 }
 
 #[test]
@@ -1484,7 +1693,7 @@ fn replay_pruning_falls_back_to_client_timestamp_for_legacy_records() {
 fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
     let now = 10_000;
     let revoked_with_audit = PersistedEntry {
-        key_id: make_key_id(1, 0),
+        key_id: KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0)),
         state: SlotState::Revoked,
         issued_at: 100,
         expires_at: 20_000,
@@ -1492,7 +1701,7 @@ fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
         tombstoned_at: None,
     };
     let revoked_without_audit = PersistedEntry {
-        key_id: make_key_id(1, 1),
+        key_id: KeyId::new(Generation::from_u32(1), SlotIndex::from_index(1)),
         state: SlotState::Revoked,
         issued_at: 100,
         expires_at: 20_000,
@@ -1503,14 +1712,17 @@ fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
     let mut snapshot = PersistedSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         instance_id: [1; INSTANCE_ID_LEN],
-        generations: vec![1, 1],
+        generations: vec![Generation::from_u32(1), Generation::from_u32(1)],
         entries: vec![revoked_with_audit, revoked_without_audit],
         legacy_protocol: LegacyProtocolPolicy::Deny,
         admin_replays: Vec::new(),
         audit_records: VecDeque::from([AuditRecord {
             at: audit_at,
             action: "temporary_key_revoke".to_string(),
-            key_id: Some(make_key_id(1, 0)),
+            key_id: Some(KeyId::new(
+                Generation::from_u32(1),
+                SlotIndex::from_index(0),
+            )),
             label: None,
         }]),
         root_epoch: 0,

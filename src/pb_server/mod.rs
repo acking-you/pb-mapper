@@ -34,7 +34,7 @@ use self::error::{
 };
 use self::server::{handle_server_conn, ServerRegistration};
 use self::status::handle_show_status;
-use crate::common::auth::{AuthConfig, AuthContext, AuthRuntime};
+use crate::common::auth::{AuthConfig, AuthContext, AuthRuntime, ADMIN_KEY_ID};
 use crate::common::config::{control_io_timeout, keep_alive_from_env, server_lease_timeout};
 use crate::common::conn_id::{ConnIdProvider, RemoteConnId};
 use crate::common::manager::{ForwardMessage, SenderChan, TaskManager};

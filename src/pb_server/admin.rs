@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 
 use super::error::Error;
 use super::{ManagerTask, ManagerTaskSender, Result};
-use crate::common::auth::{AuthContext, AuthFailure, AuthRuntime};
+use crate::common::auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
 use crate::common::checksum::{parse_credential, Credential};
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{
@@ -90,22 +90,26 @@ async fn execute(
                 .map(AdminResponse::KeyList)
         }
         AdminRequest::KeyShow { key_id } => auth
-            .show(authorization, key_id, false)
+            .show(authorization, KeyId::from_u64(key_id), false)
             .await
             .map(AdminResponse::KeyShown),
         AdminRequest::KeyReveal { key_id } => auth
-            .show(authorization, key_id, true)
+            .show(authorization, KeyId::from_u64(key_id), true)
             .await
             .map(AdminResponse::KeyShown),
         AdminRequest::KeyRenew {
             key_id,
             ttl_seconds,
         } => auth
-            .renew(authorization, key_id, Duration::from_secs(ttl_seconds))
+            .renew(
+                authorization,
+                KeyId::from_u64(key_id),
+                Duration::from_secs(ttl_seconds),
+            )
             .await
             .map(AdminResponse::KeyRenewed),
         AdminRequest::KeyRevoke { key_id } => auth
-            .revoke(authorization, key_id)
+            .revoke(authorization, KeyId::from_u64(key_id))
             .await
             .map(AdminResponse::KeyRevoked),
         AdminRequest::KeyGc => auth
@@ -161,7 +165,7 @@ async fn execute(
                 &auth,
                 authorization,
                 "service_list",
-                key_id,
+                key_id.map(KeyId::from_u64),
                 Some(format!("page={page},page_size={page_size}")),
             )
             .await;
@@ -190,7 +194,7 @@ async fn execute(
                 &auth,
                 authorization,
                 "connection_list",
-                key_id,
+                key_id.map(KeyId::from_u64),
                 Some(format!("page={page},page_size={page_size}")),
             )
             .await;
@@ -268,7 +272,7 @@ async fn audit_read(
     auth: &AuthRuntime,
     authorization: &AuthContext,
     action: &str,
-    key_id: Option<u64>,
+    key_id: Option<KeyId>,
     detail: Option<String>,
 ) {
     if let Err(error) = auth
@@ -289,6 +293,7 @@ async fn audit_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::auth::ADMIN_KEY_ID;
     use crate::common::auth::{AuthConfig, LegacyProtocolPolicy};
 
     fn temp_state_dir(name: &str) -> std::path::PathBuf {
@@ -324,7 +329,7 @@ mod tests {
         .await
         .expect("authentication runtime should start");
         let admin = runtime
-            .authenticate_presented(0, &old_key)
+            .authenticate_presented(ADMIN_KEY_ID, &old_key)
             .expect("old administrator key should authenticate");
         let request = if connection_query {
             AdminRequest::ConnectionList {

@@ -9,6 +9,8 @@
 //! decisions: every authentication failure is still rejected, only duplicate logging
 //! is coalesced.
 
+use crate::common::auth::KeyId;
+
 #[derive(Clone, Copy, Debug)]
 pub struct FailureLogDecision {
     pub emit: bool,
@@ -23,7 +25,8 @@ pub(super) struct FailureLogEntry {
 
 #[derive(Default)]
 pub(super) struct FailureLogLimiter {
-    pub(super) entries: std::collections::HashMap<(std::net::IpAddr, u64, String), FailureLogEntry>,
+    pub(super) entries:
+        std::collections::HashMap<(std::net::IpAddr, KeyId, String), FailureLogEntry>,
     pub(super) overflow: Option<FailureLogEntry>,
 }
 
@@ -31,7 +34,7 @@ impl FailureLogLimiter {
     pub(super) fn record(
         &mut self,
         peer_ip: std::net::IpAddr,
-        key_id: u64,
+        key_id: KeyId,
         reason: &str,
         now: u64,
     ) -> FailureLogDecision {

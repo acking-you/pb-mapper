@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pb_mapper::common::auth::{
-    write_admin_key_file, AuthConfig, AuthRuntime, LegacyProtocolPolicy,
+    write_admin_key_file, AuthConfig, AuthRuntime, LegacyProtocolPolicy, ADMIN_KEY_ID,
 };
 use pb_mapper::common::checksum::{parse_credential, set_process_msg_header_key, Credential};
 use pb_mapper::common::message::command::{
@@ -108,7 +108,10 @@ async fn admin_all_preserves_json_output_mode() {
     .await
     .unwrap();
     let admin = runtime
-        .authenticate_presented(0, TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+        .authenticate_presented(
+            ADMIN_KEY_ID,
+            TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
+        )
         .unwrap();
     runtime
         .issue(
@@ -316,7 +319,10 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
     .await
     .unwrap();
     let admin = runtime
-        .authenticate_presented(0, TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+        .authenticate_presented(
+            ADMIN_KEY_ID,
+            TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
+        )
         .unwrap();
     let first = runtime
         .issue(&admin, Duration::from_secs(120), Some("first".to_string()))
@@ -418,7 +424,7 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
         server_addr,
         &admin_credential,
         PbConnRequest::Admin(AdminRequest::KeyRevoke {
-            key_id: first.metadata.key_id,
+            key_id: first.metadata.key_id.as_u64(),
         }),
     )
     .await;
@@ -461,7 +467,10 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
     .await
     .unwrap();
     let admin = runtime
-        .authenticate_presented(0, TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+        .authenticate_presented(
+            ADMIN_KEY_ID,
+            TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
+        )
         .unwrap();
     let issued = runtime
         .issue(
@@ -493,7 +502,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         need_codec: false,
         is_datagram: false,
         key: service.to_string(),
-        namespace: issued.metadata.key_id,
+        namespace: issued.metadata.key_id.as_u64(),
         force_namespace: true,
         protocol_version: Some(2),
         client_instance_id: Some("active-stream-test".to_string()),
@@ -562,7 +571,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
             &mut provider,
             &PbConnRequest::StreamScoped {
                 key: service.to_string(),
-                namespace: issued.metadata.key_id,
+                namespace: issued.metadata.key_id.as_u64(),
                 dst_id: client_id,
                 server_generation,
             }
@@ -606,7 +615,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         server_addr,
         &admin_credential,
         PbConnRequest::Admin(AdminRequest::KeyRevoke {
-            key_id: issued.metadata.key_id,
+            key_id: issued.metadata.key_id.as_u64(),
         }),
     )
     .await;

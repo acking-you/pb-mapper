@@ -203,22 +203,10 @@ pub(super) fn load_isolated_server_admin_credential(
     validate_admin_credential(&raw)
 }
 
-pub fn make_key_id(generation: u32, slot: u32) -> u64 {
-    (u64::from(generation) << 32) | u64::from(slot)
-}
-
-pub fn key_generation(key_id: u64) -> u32 {
-    (key_id >> 32) as u32
-}
-
-pub fn key_slot(key_id: u64) -> u32 {
-    key_id as u32
-}
-
 pub fn derive_temporary_key(
     admin_key: &AesKeyType,
     instance_id: &[u8; INSTANCE_ID_LEN],
-    key_id: u64,
+    key_id: KeyId,
 ) -> Result<AesKeyType, AuthFailure> {
     let salt = Salt::new(HKDF_SHA256, instance_id);
     let pseudo_random_key = salt.extract(admin_key);

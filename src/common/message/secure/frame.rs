@@ -10,11 +10,13 @@
 //! The initial reader can impose a smaller pre-authentication limit before allocating
 //! a body; continuation frames retain the normal protocol maximum.
 
+use crate::common::auth::KeyId;
+
 use super::*;
 
 #[derive(Clone)]
 pub(super) struct V2Material {
-    pub(super) key_id: u64,
+    pub(super) key_id: KeyId,
     pub(super) flags: u8,
     pub(super) salt: [u8; CONNECTION_SALT_LEN],
     pub(super) client_to_server: AesKeyType,
@@ -201,7 +203,7 @@ pub(super) fn open_v2_payload(
 }
 
 pub(super) fn derive_material(
-    key_id: u64,
+    key_id: KeyId,
     credential_key: &AesKeyType,
     salt_bytes: [u8; CONNECTION_SALT_LEN],
 ) -> Result<V2Material> {

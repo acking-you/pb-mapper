@@ -15,6 +15,8 @@
 //! Per-credential counts stop one tenant from filling the shared filter with
 //! unique salts before the request payload is decoded.
 
+use crate::common::auth::KeyId;
+
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -56,7 +58,7 @@ pub(super) enum FirstFlightAdmit {
     Unavailable,
 }
 
-pub(super) fn replay_fingerprint(key_id: u64, salt: &[u8; CONNECTION_SALT_LEN]) -> [u8; 32] {
+pub(super) fn replay_fingerprint(key_id: KeyId, salt: &[u8; CONNECTION_SALT_LEN]) -> [u8; 32] {
     let mut input = [0_u8; 8 + CONNECTION_SALT_LEN];
     input[..8].copy_from_slice(&key_id.to_be_bytes());
     input[8..].copy_from_slice(salt);
@@ -111,7 +113,7 @@ impl RotatingBloom {
 
 pub(super) struct ReplayGuard {
     bloom: RotatingBloom,
-    counts: HashMap<u64, u32>,
+    counts: HashMap<KeyId, u32>,
     counts_started_at: u64,
     window_seconds: u64,
     max_per_key: u32,
@@ -158,7 +160,7 @@ impl ReplayGuard {
 
     pub(super) fn admit(
         &mut self,
-        key_id: u64,
+        key_id: KeyId,
         fingerprint: &[u8; 32],
         now: u64,
     ) -> FirstFlightAdmit {

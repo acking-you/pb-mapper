@@ -24,22 +24,19 @@ use epoch::*;
 use lifecycle::*;
 
 pub(super) struct AuthActorState {
-    cold: HashMap<u64, ColdMetadata>,
-    wheel: TimingWheel,
+    leases: Leases,
     admin_replays: HashSet<[u8; 32]>,
     admin_replay_order: VecDeque<AdminReplayRecord>,
 }
 
 impl AuthActorState {
     pub(super) fn new(
-        cold: HashMap<u64, ColdMetadata>,
-        wheel: TimingWheel,
+        leases: Leases,
         admin_replays: HashSet<[u8; 32]>,
         admin_replay_order: VecDeque<AdminReplayRecord>,
     ) -> Self {
         Self {
-            cold,
-            wheel,
+            leases,
             admin_replays,
             admin_replay_order,
         }
@@ -55,61 +52,10 @@ pub(super) async fn run_auth_actor(
     _state_lock: Arc<File>,
 ) {
     let AuthActorState {
-        mut cold,
-        mut wheel,
+        mut leases,
         mut admin_replays,
         mut admin_replay_order,
     } = state;
-    let now = unix_seconds();
-    let mut tombstones = inner
-        .slots
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter()
-        .enumerate()
-        .filter_map(|(index, slot)| {
-            if !matches!(slot.state, SlotState::Expired | SlotState::Revoked) {
-                return None;
-            }
-            let key_id = make_key_id(slot.generation, index as u32);
-            let tombstoned_at = cold
-                .get(&key_id)
-                .map(|metadata| metadata.tombstoned_at)
-                .unwrap_or(now);
-            Some((
-                tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs()),
-                key_id,
-            ))
-        })
-        .collect::<Vec<_>>();
-    tombstones.extend(
-        inner
-            .high_slot_entries
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .filter_map(|entry| {
-                let expired_active = entry.state == SlotState::Active && entry.expires_at <= now;
-                if !matches!(entry.state, SlotState::Expired | SlotState::Revoked)
-                    && !expired_active
-                {
-                    return None;
-                }
-                let tombstoned_at = entry
-                    .tombstoned_at
-                    .or_else(|| {
-                        cold.get(&entry.key_id)
-                            .map(|metadata| metadata.tombstoned_at)
-                    })
-                    .unwrap_or(entry.expires_at.max(now));
-                Some((
-                    tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs()),
-                    entry.key_id,
-                ))
-            }),
-    );
-    tombstones.sort_unstable_by_key(|(cleanup_at, _)| *cleanup_at);
-    let mut tombstones = VecDeque::from(tombstones);
     let mut last_snapshot_at = unix_seconds();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -117,67 +63,7 @@ pub(super) async fn run_auth_actor(
         tokio::select! {
             _ = tick.tick() => {
                 let now = unix_seconds();
-                for lease in wheel.advance(now) {
-                    let key_id = lease.key_id();
-                    let version = lease.wheel_version.load(Ordering::Acquire);
-                    if lease.expires_at() > now {
-                        wheel.insert_with_version(lease, version);
-                        continue;
-                    }
-                    let mut slots = inner.slots.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if let Some(slot) = slots.get_mut(key_slot(key_id) as usize) {
-                        if slot.generation == key_generation(key_id) && slot.state == SlotState::Active {
-                            slot.state = SlotState::Expired;
-                            lease.cancel_expired();
-                            let tombstoned_at = slot.expires_at;
-                            if let Some(metadata) = cold.get_mut(&key_id) {
-                                metadata.tombstoned_at = tombstoned_at;
-                            }
-                            push_tombstone(&mut tombstones, tombstoned_at, key_id);
-                            tracing::info!(
-                                event = "temporary_key_expired",
-                                auth_stage = "expiry",
-                                key_id,
-                                expires_at = lease.expires_at(),
-                                "temporary key expired and active work was cancelled"
-                            );
-                        }
-                    } else {
-                        lease.cancel_expired();
-                    }
-                }
-                expire_due_high_slots(&inner, &mut cold, &mut tombstones, now);
-                let mut due_high = Vec::new();
-                while let Some((cleanup_at, key_id)) = tombstones.front().copied() {
-                    if cleanup_at > now {
-                        break;
-                    }
-                    tombstones.pop_front();
-                    let mut slots = inner.slots.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if let Some(slot) = slots.get_mut(key_slot(key_id) as usize) {
-                        if slot.generation == key_generation(key_id) && matches!(slot.state, SlotState::Expired | SlotState::Revoked) {
-                            slot.state = SlotState::Free;
-                            slot.expires_at = 0;
-                            slot.lease = Weak::new();
-                            cold.remove(&key_id);
-                            wheel.release(key_id);
-                        }
-                    } else {
-                        due_high.push(key_id);
-                    }
-                }
-                if !due_high.is_empty() {
-                    let due = due_high.iter().copied().collect::<HashSet<_>>();
-                    inner
-                        .high_slot_entries
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .retain(|entry| !due.contains(&entry.key_id));
-                    for key_id in due_high {
-                        cold.remove(&key_id);
-                        wheel.release(key_id);
-                    }
-                }
+                leases.tick(now);
                 prune_expired_admin_replays(
                     now,
                     &mut admin_replays,
@@ -191,7 +77,7 @@ pub(super) async fn run_auth_actor(
                     && now.saturating_sub(last_snapshot_at)
                         >= SNAPSHOT_COMPACTION_INTERVAL.as_secs()
                 {
-                    let snapshot = build_snapshot(&inner, &cold, &admin_replay_order);
+                    let snapshot = build_snapshot(&inner, &admin_replay_order);
                     if let Err(error) = write_snapshot_and_truncate_wal(
                         &config,
                         &inner.admin_key(),
@@ -238,56 +124,42 @@ pub(super) async fn run_auth_actor(
                     }
                     AuthCommand::Issue { authority, ttl, label, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_issue(&inner, &config, &mut cold, &mut wheel, ttl, label));
+                            .and_then(|()| actor_issue(&inner, &config, &mut leases, ttl, label));
                         let _ = response.send(result);
                     }
                     AuthCommand::List { authority, page, page_size, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_list(&inner, &cold, page, page_size));
+                            .and_then(|()| actor_list(&inner, page, page_size));
                         let _ = response.send(result);
                     }
                     AuthCommand::Show { authority, key_id, reveal, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_show(&inner, &config, &cold, key_id, reveal));
+                            .and_then(|()| actor_show(&inner, &config, key_id, reveal));
                         let _ = response.send(result);
                     }
                     AuthCommand::Renew { authority, key_id, ttl, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_renew(&inner, &config, &cold, &mut wheel, key_id, ttl));
+                            .and_then(|()| actor_renew(&inner, &config, &mut leases, key_id, ttl));
                         let _ = response.send(result);
                     }
                     AuthCommand::Revoke { authority, key_id, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_revoke(&inner, &config, &mut cold, &mut tombstones, key_id));
+                            .and_then(|()| actor_revoke(&inner, &config, &mut leases, key_id));
                         let _ = response.send(result);
                     }
                     AuthCommand::Gc { authority, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_gc(
-                                &inner,
-                                &config,
-                                &mut cold,
-                                &mut wheel,
-                                &mut tombstones,
-                                &admin_replay_order,
-                            ));
+                            .and_then(|()| actor_gc(&inner, &config, &mut leases, &admin_replay_order));
                         let _ = response.send(result);
                     }
                     AuthCommand::Reset { authority, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_reset(
-                                &inner,
-                                &config,
-                                &mut cold,
-                                &mut wheel,
-                                &admin_replay_order,
-                                "auth_state_reset",
-                            ));
+                            .and_then(|()| actor_reset(&inner, &config, &mut leases, &admin_replay_order, "auth_state_reset"));
                         let _ = response.send(result);
                     }
                     AuthCommand::RotateRoot { authority, new_key, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_rotate_root(&inner, &config, &mut cold, &mut wheel, &mut admin_lease, new_key));
+                            .and_then(|()| actor_rotate_root(&inner, &config, &mut leases, &mut admin_lease, new_key));
                         if result.is_ok() {
                             admin_replays.clear();
                             admin_replay_order.clear();
@@ -389,21 +261,9 @@ pub(super) fn prune_expired_admin_replays(
     });
 }
 
-fn push_tombstone(tombstones: &mut VecDeque<(u64, u64)>, tombstoned_at: u64, key_id: u64) {
-    let cleanup_at = tombstoned_at.saturating_add(TOMBSTONE_RETENTION.as_secs());
-    let index = tombstones.partition_point(|(current, _)| *current <= cleanup_at);
-    tombstones.insert(index, (cleanup_at, key_id));
-}
-
 fn actor_status(inner: &Arc<AuthStateInner>) -> AuthStatus {
-    let slots = inner
-        .slots
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let high = inner
-        .high_slot_entries
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let slots = inner.slots();
+    let high = inner.high();
     let active_keys = slots
         .iter()
         .filter(|slot| slot.state == SlotState::Active)
@@ -468,10 +328,7 @@ fn validate_admin_authority(
             false,
         ));
     }
-    let current = inner
-        .admin
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    let current = recover_lock(inner.admin.read())
         .lease
         .upgrade()
         .ok_or_else(|| {
@@ -503,15 +360,15 @@ fn ensure_store_available(inner: &AuthStateInner) -> Result<(), AuthFailure> {
     }
 }
 
-fn validate_slot_identity(slot: &SlotHot, key_id: u64) -> Result<(), AuthFailure> {
-    if slot.generation != key_generation(key_id) || slot.state == SlotState::Free {
+fn validate_slot_identity(slot: &SlotHot, key_id: KeyId) -> Result<(), AuthFailure> {
+    if slot.generation != key_id.generation() || slot.state == SlotState::Free {
         Err(key_not_found(key_id))
     } else {
         Ok(())
     }
 }
 
-fn key_not_found(key_id: u64) -> AuthFailure {
+fn key_not_found(key_id: KeyId) -> AuthFailure {
     AuthFailure::new(
         "temporary_key_not_found",
         format!("temporary key {key_id} does not exist"),
@@ -535,37 +392,6 @@ fn key_not_active() -> AuthFailure {
     )
 }
 
-fn expire_due_high_slots(
-    inner: &Arc<AuthStateInner>,
-    cold: &mut HashMap<u64, ColdMetadata>,
-    tombstones: &mut VecDeque<(u64, u64)>,
-    now: u64,
-) {
-    let mut high = inner
-        .high_slot_entries
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for entry in high.iter_mut() {
-        if entry.state != SlotState::Active || entry.expires_at > now {
-            continue;
-        }
-        entry.state = SlotState::Expired;
-        let tombstoned_at = entry.expires_at;
-        entry.tombstoned_at = Some(tombstoned_at);
-        if let Some(metadata) = cold.get_mut(&entry.key_id) {
-            metadata.tombstoned_at = tombstoned_at;
-        }
-        push_tombstone(tombstones, tombstoned_at, entry.key_id);
-        tracing::info!(
-            event = "temporary_key_expired",
-            auth_stage = "expiry",
-            key_id = entry.key_id,
-            expires_at = entry.expires_at,
-            "high-slot temporary key expired"
-        );
-    }
-}
-
 fn slot_state_name(state: SlotState) -> &'static str {
     match state {
         SlotState::Free => "free",
@@ -575,7 +401,7 @@ fn slot_state_name(state: SlotState) -> &'static str {
     }
 }
 
-fn audit(action: &str, key_id: Option<u64>, label: Option<String>) -> AuditRecord {
+fn audit(action: &str, key_id: Option<KeyId>, label: Option<String>) -> AuditRecord {
     AuditRecord {
         at: unix_seconds(),
         action: action.to_string(),

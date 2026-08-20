@@ -1,21 +1,51 @@
 //! Authentication state for protocol-v2 connections and administrator operations.
 //!
-//! The root administrator key is never copied into a temporary credential. Temporary
-//! keys are derived from `(root key, server instance id, key id)` and the hot slot table
-//! stores only lifecycle metadata plus a weak lease reference. The background actor owns
-//! the strong leases through a hierarchical timing wheel.
+//! # How a temporary credential works
+//!
+//! Nothing secret is stored per key. A temporary credential is *derived* from the
+//! root key, the server instance id, and the key id, so the server can verify a
+//! credential it holds no copy of, and a key id is all the state a key needs:
 //!
 //! ```text
-//! administrator key + instance id + key id -> derived temporary credential
-//!                                      |
-//! request -> AuthContext -> Weak lease -+-> actor-owned Arc lease -> timing wheel
-//!                                      +-> cancel on expiry/revoke/reset/rotation
-//!
-//! AuthRuntime facade -> serialized actor -> encrypted snapshot + WAL
+//! issue:  root key + instance id + key id  --HKDF-->  credential handed to the client
+//! verify: root key + instance id + key id  --HKDF-->  compare against what was presented
 //! ```
 //!
-//! The facade/model types remain in this root module; runtime checks, actor mutations,
-//! persistence, expiry scheduling, and focused tests live in their respective children.
+//! Because the material is derived, invalidating every key at once is a matter of
+//! changing an input: a root rotation replaces the root key, a state reset replaces
+//! the instance id. Neither has to touch individual keys.
+//!
+//! # Where the state lives
+//!
+//! ```text
+//!                    key_id = generation:slot
+//!                             |
+//!   request ──> derive & compare ──> slots[slot]  ── lifecycle: Free/Active/
+//!                                        │            Expired/Revoked, expires_at
+//!                                        │
+//!                                   Weak lease ──> Arc lease, owned by the actor's
+//!                                        ^          timing wheel — the single place
+//!                                        │          a lease's lifetime ends
+//!   AuthContext (also Weak) ─────────────┘
+//! ```
+//!
+//! The slot table is a preallocated array indexed straight off the key id, so
+//! verification costs an array index and churn does not grow memory. The
+//! `SlotState` docs below cover the table's layout, why generations exist, and
+//! why dead rows linger. `Leases` (`leases.rs`) owns the three structures a
+//! key's lifetime spans; `timing_wheel.rs` schedules the expiries.
+//!
+//! # Where mutations happen
+//!
+//! ```text
+//! AuthRuntime (facade) ──channel──> one actor ──> encrypted snapshot + WAL
+//! ```
+//!
+//! Every mutation is serialized through a single actor, so a request authorized
+//! before a root rotation cannot execute against the state that replaced it.
+//!
+//! The facade and model types stay in this root module; runtime checks, actor
+//! mutations, persistence, expiry scheduling, and tests live in the children.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -42,7 +72,9 @@ use super::checksum::{
     ENV_MSG_HEADER_KEY, MACHINE_MSG_HEADER_KEY_PATH,
 };
 
-pub const ADMIN_NAMESPACE: u64 = 0;
+/// The namespace administrator connections operate in. Tenant namespaces are the
+/// key id that owns them, so this mirrors [`ADMIN_KEY_ID`].
+pub const ADMIN_NAMESPACE: u64 = ADMIN_KEY_ID.as_u64();
 pub const DEFAULT_AUTH_STATE_DIR: &str = "/var/lib/pb-mapper/auth";
 pub const DEFAULT_TEMP_KEY_CAPACITY: usize = 65_536;
 pub const MAX_TEMP_KEY_CAPACITY: usize = 1_048_576;
@@ -50,6 +82,10 @@ pub const DEFAULT_MAX_TEMP_KEY_TTL: Duration = Duration::from_secs(30 * 24 * 60 
 pub const MIN_TEMP_KEY_TTL: Duration = Duration::from_secs(10);
 pub const MAX_TEMP_KEY_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 const TOMBSTONE_RETENTION: Duration = Duration::from_secs(60);
+/// Longest delay any scheduled cleanup can ask for, so the timing wheel can tell
+/// a plausible wait from a clock correction.
+const MAX_SCHEDULABLE_DELAY: Duration =
+    Duration::from_secs(MAX_TEMP_KEY_TTL.as_secs() + TOMBSTONE_RETENTION.as_secs());
 const SNAPSHOT_COMPACTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const SNAPSHOT_SCHEMA_VERSION: u16 = 1;
 const STATE_BLOB_MAGIC: &[u8; 5] = b"PBAS1";
@@ -120,25 +156,23 @@ const LEASE_CANCEL_ROTATED: u8 = 3;
 
 #[derive(Debug)]
 pub struct AuthLease {
-    key_id: u64,
+    key_id: KeyId,
     expires_at: AtomicU64,
-    wheel_version: AtomicU64,
     cancellation: CancellationToken,
     cancel_reason: AtomicU8,
 }
 
 impl AuthLease {
-    fn new(key_id: u64, expires_at: u64) -> Self {
+    fn new(key_id: KeyId, expires_at: u64) -> Self {
         Self {
             key_id,
             expires_at: AtomicU64::new(expires_at),
-            wheel_version: AtomicU64::new(1),
             cancellation: CancellationToken::new(),
             cancel_reason: AtomicU8::new(LEASE_CANCEL_NONE),
         }
     }
 
-    pub fn key_id(&self) -> u64 {
+    pub fn key_id(&self) -> KeyId {
         self.key_id
     }
 
@@ -180,17 +214,21 @@ impl AuthLease {
 
 #[derive(Clone, Debug)]
 pub struct AuthContext {
-    pub key_id: u64,
+    pub key_id: KeyId,
     pub namespace: u64,
     pub is_admin: bool,
     lease: Weak<AuthLease>,
 }
 
 impl AuthContext {
-    fn from_lease(key_id: u64, is_admin: bool, lease: &Arc<AuthLease>) -> Self {
+    fn from_lease(key_id: KeyId, is_admin: bool, lease: &Arc<AuthLease>) -> Self {
         Self {
             key_id,
-            namespace: if is_admin { ADMIN_NAMESPACE } else { key_id },
+            namespace: if is_admin {
+                ADMIN_NAMESPACE
+            } else {
+                key_id.as_u64()
+            },
             is_admin,
             lease: Arc::downgrade(lease),
         }
@@ -282,31 +320,132 @@ fn cancelled_lease_failure(is_admin: bool, lease: &AuthLease) -> AuthFailure {
     }
 }
 
+/// # The slot table
+///
+/// A temporary key is never stored. It is *derived* on demand from
+/// `(root key, instance id, key id)`, so the server can verify a credential it
+/// has no copy of. That makes the key id the whole identity of a key, and a
+/// key id is a slot index plus a generation counter:
+///
+/// ```text
+///  key_id: u64
+/// ┌───────────────────────────┬───────────────────────────┐
+/// │  generation (high 32)     │  slot index (low 32)      │
+/// └───────────────────────────┴───────────────────────────┘
+///        ^ bumped on reuse            ^ where the row lives
+/// ```
+///
+/// The slot index is a direct offset into `AuthStateInner::slots`, a
+/// preallocated `Box<[SlotHot]>`. So verifying a credential is an array index,
+/// not a map lookup or a scan, and the table's memory does not grow with churn:
+///
+/// ```text
+/// slots: [ SlotHot; max_temporary_keys ]
+///   idx 0  gen 7  Active   expires_at=…  lease─┐
+///   idx 1  gen 0  Free                         │  Weak, so the actor's
+///   idx 2  gen 3  Expired  (tombstoned)        │  timing wheel is the
+///   idx 3  gen 9  Active   expires_at=…  lease─┴─ only strong owner
+/// ```
+///
+/// ## Why the generation counter
+///
+/// A freed slot is reused, so the index alone would let a *retired* credential
+/// authenticate against the *new* tenant of that row. The generation bump makes
+/// the old key id refer to a row that no longer exists:
+///
+/// ```text
+/// issue   -> idx 2, gen 3  =>  key_id 0x0000_0003_0000_0002
+/// expire  -> idx 2 retired, generation kept at 3
+/// reissue -> idx 2, gen 4  =>  key_id 0x0000_0004_0000_0002
+///            the old key id still names gen 3, which nothing matches
+/// ```
+///
+/// This is why [`SlotHot::retire`] clears the row but preserves `generation`,
+/// and why a generation is never reset — not by expiry, GC, root rotation, or a
+/// full state reset.
+///
+/// ## The lifecycle
+///
+/// ```text
+///          issue                  deadline passes / revoke
+///   Free ─────────> Active ──────────────────────────────> Expired
+///     ^               │                                    Revoked
+///     │               └── renew: same row, later expires_at    │
+///     │                                                        │
+///     └──────────── retire, after TOMBSTONE_RETENTION ─────────┘
+/// ```
+///
+/// `Expired`/`Revoked` are tombstones, not garbage. A row lingers in that state
+/// for `TOMBSTONE_RETENTION` so a client that presents a dead credential is told
+/// *why* ("expired", "revoked") instead of receiving the indistinguishable
+/// "unknown key" it would get from an already-recycled row. `Leases` owns that
+/// delay; see `leases.rs`.
+///
+/// ## Slots above capacity
+///
+/// `max_temporary_keys` is configurable, so a restart can shrink the table below
+/// what the persisted state used. Those rows cannot be indexed any more, but
+/// their generations still have to be honoured — otherwise growing the table
+/// again would reissue a key id that was already handed out. They are retained
+/// out-of-line in `high_slot_generations` / `high_slot_entries`, which is why so
+/// many operations check the array first and fall back to a scan of that vector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SlotState {
+    /// Never used, or retired and past its tombstone.
     Free,
+    /// A live credential. `expires_at` is authoritative.
     Active,
+    /// Dead. Retained for `TOMBSTONE_RETENTION` so the reason survives.
     Expired,
     Revoked,
 }
 
+/// One row of the slot table. `generation` outlives every other field.
 #[derive(Debug)]
 struct SlotHot {
-    generation: u32,
+    generation: Generation,
     state: SlotState,
     expires_at: u64,
-    issued_epoch: u64,
+    /// `Weak`, because the actor's timing wheel holds the strong reference and is
+    /// the single place a lease's lifetime ends. See `timing_wheel.rs`.
     lease: Weak<AuthLease>,
+}
+
+impl SlotHot {
+    /// Whether this row still belongs to `key_id`'s generation. A row that has
+    /// been reissued belongs to a newer tenant and must not be touched on the
+    /// old one's behalf.
+    fn holds(&self, key_id: KeyId) -> bool {
+        self.generation == key_id.generation() && self.state != SlotState::Free
+    }
+
+    /// Whether a garbage collection should free this row: it is already dead, or
+    /// it is active but past its deadline.
+    fn is_collectable(&self, now: u64) -> bool {
+        match self.state {
+            SlotState::Expired | SlotState::Revoked => true,
+            SlotState::Active => self.expires_at <= now,
+            SlotState::Free => false,
+        }
+    }
+
+    /// Frees the slot for reuse while keeping its generation, so a key id that
+    /// has been handed out is never issued a second time.
+    fn retire(&mut self) {
+        *self = Self {
+            generation: self.generation,
+            ..Self::default()
+        };
+    }
 }
 
 impl Default for SlotHot {
     fn default() -> Self {
         Self {
-            generation: 0,
+            generation: Generation::FIRST,
             state: SlotState::Free,
             expires_at: 0,
-            issued_epoch: 0,
             lease: Weak::new(),
         }
     }
@@ -329,11 +468,27 @@ struct AuthStateInner {
     admin: RwLock<AdminState>,
     sync_process_credential: bool,
     instance_id: RwLock<[u8; INSTANCE_ID_LEN]>,
+    /// Preallocated, indexed directly by `key_slot(key_id)`. Documented on
+    /// [`SlotState`].
     slots: RwLock<Box<[SlotHot]>>,
-    /// Generations and entries for slots above the current capacity. Kept so a
-    /// later capacity increase cannot reuse a discarded slot's key id.
-    high_slot_generations: RwLock<Vec<u32>>,
+    /// Rows the configured capacity no longer covers, because a restart shrank
+    /// the table below what the persisted state used:
+    ///
+    /// ```text
+    ///  slots: [ 0 1 2 3 ]  <- indexable
+    ///  high:          [ 4 5 ]  <- generations still honoured, out-of-line
+    /// ```
+    ///
+    /// Their generations must be kept so growing the table again cannot reissue
+    /// a key id that was already handed out, and their entries so a still-live
+    /// credential in that range keeps working. This is the fallback path that
+    /// operations take after missing in `slots`.
+    high_slot_generations: RwLock<Vec<Generation>>,
     high_slot_entries: RwLock<Vec<PersistedEntry>>,
+    /// Per-key description that no authentication check needs, kept out of the
+    /// hot slot row. Lives here rather than inside the actor so a key's handle
+    /// can drop it without the actor being involved; see `leases.rs`.
+    cold: RwLock<HashMap<KeyId, ColdMetadata>>,
     safe_mode: AtomicBool,
     legacy_protocol_allowed: AtomicBool,
     active_legacy_connections: AtomicU64,
@@ -350,6 +505,32 @@ fn recover_lock<T>(result: std::sync::LockResult<T>) -> T {
 }
 
 impl AuthStateInner {
+    /// Rows the configured capacity no longer covers. See the field's docs; the
+    /// fallback is a scan because the range is small and rarely touched.
+    fn high(&self) -> std::sync::RwLockReadGuard<'_, Vec<PersistedEntry>> {
+        recover_lock(self.high_slot_entries.read())
+    }
+
+    fn high_mut(&self) -> std::sync::RwLockWriteGuard<'_, Vec<PersistedEntry>> {
+        recover_lock(self.high_slot_entries.write())
+    }
+
+    fn slots(&self) -> std::sync::RwLockReadGuard<'_, Box<[SlotHot]>> {
+        recover_lock(self.slots.read())
+    }
+
+    fn slots_mut(&self) -> std::sync::RwLockWriteGuard<'_, Box<[SlotHot]>> {
+        recover_lock(self.slots.write())
+    }
+
+    fn cold(&self) -> std::sync::RwLockReadGuard<'_, HashMap<KeyId, ColdMetadata>> {
+        recover_lock(self.cold.read())
+    }
+
+    fn cold_mut(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<KeyId, ColdMetadata>> {
+        recover_lock(self.cold.write())
+    }
+
     fn admin_key(&self) -> AesKeyType {
         recover_lock(self.admin.read()).key
     }
@@ -371,7 +552,7 @@ pub struct AuthRuntime {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TemporaryKeyMetadata {
-    pub key_id: u64,
+    pub key_id: KeyId,
     pub state: String,
     pub issued_at: u64,
     pub expires_at: u64,
@@ -436,19 +617,19 @@ enum AuthCommand {
     },
     Show {
         authority: Weak<AuthLease>,
-        key_id: u64,
+        key_id: KeyId,
         reveal: bool,
         response: oneshot::Sender<Result<IssuedTemporaryKey, AuthFailure>>,
     },
     Renew {
         authority: Weak<AuthLease>,
-        key_id: u64,
+        key_id: KeyId,
         ttl: Duration,
         response: oneshot::Sender<Result<IssuedTemporaryKey, AuthFailure>>,
     },
     Revoke {
         authority: Weak<AuthLease>,
-        key_id: u64,
+        key_id: KeyId,
         response: oneshot::Sender<Result<TemporaryKeyMetadata, AuthFailure>>,
     },
     Gc {
@@ -476,7 +657,7 @@ enum AuthCommand {
     Audit {
         authority: Weak<AuthLease>,
         action: String,
-        key_id: Option<u64>,
+        key_id: Option<KeyId>,
         detail: Option<String>,
         response: oneshot::Sender<Result<(), AuthFailure>>,
     },
@@ -496,9 +677,9 @@ pub(crate) use config::platform_default_auth_state_dir;
 #[cfg(all(test, not(any(windows, target_os = "macos"))))]
 pub(in crate::common::auth) use config::{linux_system_auth_dir_usable, unix_effective_uid};
 mod keys;
+pub use keys::derive_temporary_key;
 #[cfg(test)]
 pub(in crate::common::auth) use keys::recover_admin_key_after_rotation;
-pub use keys::{derive_temporary_key, key_generation, key_slot, make_key_id};
 pub(in crate::common::auth) use keys::{
     load_isolated_server_admin_credential, load_server_admin_credential,
 };
@@ -520,7 +701,7 @@ impl Drop for LegacyConnectionGuard {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedEntry {
-    key_id: u64,
+    key_id: KeyId,
     state: SlotState,
     issued_at: u64,
     expires_at: u64,
@@ -533,7 +714,7 @@ struct PersistedEntry {
 struct PersistedSnapshot {
     schema_version: u16,
     instance_id: [u8; INSTANCE_ID_LEN],
-    generations: Vec<u32>,
+    generations: Vec<Generation>,
     entries: Vec<PersistedEntry>,
     legacy_protocol: LegacyProtocolPolicy,
     #[serde(default)]
@@ -568,8 +749,8 @@ impl AdminReplayRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum StateMutation {
     Issue(PersistedEntry),
-    Renew { key_id: u64, expires_at: u64 },
-    Revoke { key_id: u64, at: u64 },
+    Renew { key_id: KeyId, expires_at: u64 },
+    Revoke { key_id: KeyId, at: u64 },
     LegacyProtocol(LegacyProtocolPolicy),
 }
 
@@ -577,7 +758,7 @@ enum StateMutation {
 struct AuditRecord {
     at: u64,
     action: String,
-    key_id: Option<u64>,
+    key_id: Option<KeyId>,
     label: Option<String>,
 }
 
@@ -597,18 +778,21 @@ mod persistence;
 pub use persistence::*;
 pub(in crate::common::auth) use persistence::{
     append_audit, append_mutation, append_wal, atomic_write, auth_snapshot_path, build_snapshot,
-    cancel_all_temporary_leases, clear_retained_high_slot_entries, compaction_is_allowed,
-    empty_snapshot, fail_closed_on_uncertain_wal, hex, key_matches_existing_state,
-    load_or_create_instance_id, load_persisted_state, normalize_tombstone_times, open_blob,
-    prepare_state_dir_and_lock, push_audit_record, push_persisted_audit, random_instance_id,
-    recover_instance_id_after_reset, reset_already_installed, rotation_already_installed,
-    split_high_slot_state, truncate_auth_wal, unix_seconds, write_admin_key,
-    write_snapshot_and_truncate_wal,
+    cancel_all_temporary_leases, compaction_is_allowed, empty_snapshot,
+    fail_closed_on_uncertain_wal, hex, key_matches_existing_state, load_or_create_instance_id,
+    load_persisted_state, normalize_tombstone_times, open_blob, prepare_state_dir_and_lock,
+    push_audit_record, push_persisted_audit, random_instance_id, recover_instance_id_after_reset,
+    reset_already_installed, rotation_already_installed, split_high_slot_state, truncate_auth_wal,
+    unix_seconds, write_admin_key, write_snapshot_and_truncate_wal,
 };
 #[cfg(test)]
 pub(in crate::common::auth) use persistence::{
     prepare_state_dir, read_instance_id_file, try_load_persisted_state,
 };
+mod ids;
+pub use ids::{Generation, KeyId, SlotIndex, ADMIN_KEY_ID};
+mod leases;
+use leases::Leases;
 mod timing_wheel;
 use timing_wheel::TimingWheel;
 #[cfg(test)]

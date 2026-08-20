@@ -72,9 +72,9 @@ impl AuthRuntime {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let mut cold = HashMap::new();
-        let mut wheel = TimingWheel::new(now);
+        let mut restored_leases = Vec::new();
 
-        let admin_lease = Arc::new(AuthLease::new(0, u64::MAX));
+        let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, u64::MAX));
         if let Some(state) = loaded.as_ref() {
             for (index, generation) in state.generations.iter().copied().enumerate() {
                 if let Some(slot) = slots.get_mut(index) {
@@ -82,11 +82,11 @@ impl AuthRuntime {
                 }
             }
             for entry in &state.entries {
-                let index = key_slot(entry.key_id) as usize;
+                let index = entry.key_id.slot().as_index();
                 let Some(slot) = slots.get_mut(index) else {
                     continue;
                 };
-                if slot.generation != key_generation(entry.key_id) {
+                if slot.generation != entry.key_id.generation() {
                     continue;
                 }
                 let state = if entry.state == SlotState::Active && entry.expires_at <= now {
@@ -111,7 +111,9 @@ impl AuthRuntime {
                 if state == SlotState::Active {
                     let lease = Arc::new(AuthLease::new(entry.key_id, entry.expires_at));
                     slot.lease = Arc::downgrade(&lease);
-                    wheel.insert(lease);
+                    // Held only until the schedule below adopts them; the wheel
+                    // is the lasting owner.
+                    restored_leases.push(lease);
                 }
             }
         }
@@ -178,6 +180,7 @@ impl AuthRuntime {
             root_epoch: AtomicU64::new(loaded.as_ref().map(|state| state.root_epoch).unwrap_or(0)),
             previous_root: RwLock::new(None),
             audit_records: RwLock::new(audit_records),
+            cold: RwLock::new(cold),
         });
         let (command_tx, command_rx) = mpsc::channel(256);
         let actor = tokio::spawn(run_auth_actor(
@@ -185,7 +188,11 @@ impl AuthRuntime {
             admin_lease,
             command_rx,
             config.clone(),
-            AuthActorState::new(cold, wheel, admin_replays, admin_replay_order),
+            AuthActorState::new(
+                Leases::restored(&inner, now),
+                admin_replays,
+                admin_replay_order,
+            ),
             state_lock.clone(),
         ));
         let actor_abort = actor.abort_handle();
@@ -207,11 +214,7 @@ impl AuthRuntime {
             .send(AuthCommand::Shutdown { response })
             .await;
         let _ = receiver.await;
-        let handle = self
-            .actor
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        let handle = recover_lock(self.actor.lock()).take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
@@ -219,11 +222,7 @@ impl AuthRuntime {
 
     pub async fn abort_actor(&self) -> Result<(), AuthFailure> {
         self.actor_abort.abort();
-        let handle = self
-            .actor
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        let handle = recover_lock(self.actor.lock()).take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
@@ -260,9 +259,9 @@ impl AuthRuntime {
         Ok(self.inner()?.admin_key())
     }
 
-    pub(crate) fn derive_key(&self, key_id: u64) -> Result<AesKeyType, AuthFailure> {
+    pub(crate) fn derive_key(&self, key_id: KeyId) -> Result<AesKeyType, AuthFailure> {
         let inner = self.inner()?;
-        if key_id == 0 {
+        if key_id.is_admin() {
             return Ok(inner.admin_key());
         }
         derive_temporary_key(&inner.admin_key(), &inner.instance_id(), key_id)
@@ -270,25 +269,13 @@ impl AuthRuntime {
 
     #[cfg(test)]
     pub(crate) fn high_slot_entry_count(&self) -> usize {
-        self.inner()
-            .map(|inner| {
-                inner
-                    .high_slot_entries
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .len()
-            })
-            .unwrap_or(0)
+        self.inner().map(|inner| inner.high().len()).unwrap_or(0)
     }
 
-    pub(crate) fn derive_previous_key(&self, key_id: u64) -> Option<AesKeyType> {
+    pub(crate) fn derive_previous_key(&self, key_id: KeyId) -> Option<AesKeyType> {
         let inner = self.inner().ok()?;
-        let previous = inner
-            .previous_root
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()?;
-        if key_id == 0 {
+        let previous = recover_lock(inner.previous_root.read()).clone()?;
+        if key_id.is_admin() {
             Some(previous.admin_key)
         } else {
             derive_temporary_key(&previous.admin_key, &previous.instance_id, key_id).ok()
@@ -297,15 +284,12 @@ impl AuthRuntime {
 
     pub fn authenticate_presented(
         &self,
-        key_id: u64,
+        key_id: KeyId,
         presented_key: &AesKeyType,
     ) -> Result<AuthContext, AuthFailure> {
         let inner = self.inner()?;
-        if key_id == 0 {
-            let admin = inner
-                .admin
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if key_id.is_admin() {
+            let admin = recover_lock(inner.admin.read());
             if !bool::from(presented_key.ct_eq(&admin.key)) {
                 inner.auth_failures.fetch_add(1, Ordering::Relaxed);
                 return Err(AuthFailure::new(
@@ -322,7 +306,7 @@ impl AuthRuntime {
                 )
             })?;
             inner.auth_successes.fetch_add(1, Ordering::Relaxed);
-            return Ok(AuthContext::from_lease(0, true, &lease));
+            return Ok(AuthContext::from_lease(ADMIN_KEY_ID, true, &lease));
         }
         if inner.safe_mode.load(Ordering::Acquire) {
             inner.auth_failures.fetch_add(1, Ordering::Relaxed);
@@ -339,12 +323,9 @@ impl AuthRuntime {
             return Err(temporary_key_material_mismatch(&inner, key_id));
         }
 
-        let index = key_slot(key_id) as usize;
-        let generation = key_generation(key_id);
-        let slots = inner
-            .slots
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let index = key_id.slot().as_index();
+        let generation = key_id.generation();
+        let slots = inner.slots();
         let Some(slot) = slots.get(index) else {
             inner.auth_failures.fetch_add(1, Ordering::Relaxed);
             return Err(AuthFailure::new(
@@ -497,7 +478,7 @@ impl AuthRuntime {
     pub async fn show(
         &self,
         authorization: &AuthContext,
-        key_id: u64,
+        key_id: KeyId,
         reveal: bool,
     ) -> Result<IssuedTemporaryKey, AuthFailure> {
         let authority = authorization.admin_authority()?;
@@ -513,7 +494,7 @@ impl AuthRuntime {
     pub async fn renew(
         &self,
         authorization: &AuthContext,
-        key_id: u64,
+        key_id: KeyId,
         ttl: Duration,
     ) -> Result<IssuedTemporaryKey, AuthFailure> {
         let authority = authorization.admin_authority()?;
@@ -529,7 +510,7 @@ impl AuthRuntime {
     pub async fn revoke(
         &self,
         authorization: &AuthContext,
-        key_id: u64,
+        key_id: KeyId,
     ) -> Result<TemporaryKeyMetadata, AuthFailure> {
         let authority = authorization.admin_authority()?;
         self.request(|response| AuthCommand::Revoke {
@@ -599,7 +580,7 @@ impl AuthRuntime {
         &self,
         authorization: &AuthContext,
         action: impl Into<String>,
-        key_id: Option<u64>,
+        key_id: Option<KeyId>,
         detail: Option<String>,
     ) -> Result<(), AuthFailure> {
         let authority = authorization.admin_authority()?;
@@ -615,20 +596,14 @@ impl AuthRuntime {
     }
 }
 
-fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: u64) -> AuthFailure {
-    let index = key_slot(key_id) as usize;
-    let generation = key_generation(key_id);
-    let slots = inner
-        .slots
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: KeyId) -> AuthFailure {
+    let index = key_id.slot().as_index();
+    let generation = key_id.generation();
+    let slots = inner.slots();
     let current_generation = match slots.get(index) {
         Some(slot) => Some(slot.generation),
         None => {
-            let high = inner
-                .high_slot_generations
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let high = recover_lock(inner.high_slot_generations.read());
             index
                 .checked_sub(slots.len())
                 .and_then(|offset| high.get(offset).copied())
@@ -646,7 +621,7 @@ fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: u64) -> AuthF
     }
     let current_epoch = inner.root_epoch.load(Ordering::Acquire);
     if current_epoch > 0
-        && generation > 0
+        && generation > Generation::FIRST
         && current_generation.is_some_and(|issued| generation <= issued)
     {
         return AuthFailure::new(

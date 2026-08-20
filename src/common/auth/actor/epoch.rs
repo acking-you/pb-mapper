@@ -2,31 +2,8 @@
 use super::super::*;
 use super::{audit, ensure_store_available};
 
-fn wipe_temporary_keys(
-    inner: &AuthStateInner,
-    cold: &mut HashMap<u64, ColdMetadata>,
-    wheel: &mut TimingWheel,
-) {
-    cancel_all_temporary_leases(inner);
-    let mut slots = inner
-        .slots
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for slot in slots.iter_mut() {
-        slot.state = SlotState::Free;
-        slot.expires_at = 0;
-        slot.lease = Weak::new();
-    }
-    cold.clear();
-    wheel.clear(unix_seconds());
-    clear_retained_high_slot_entries(inner);
-}
-
 fn remember_previous_root(inner: &AuthStateInner) {
-    *inner
-        .previous_root
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PreviousRoot {
+    *recover_lock(inner.previous_root.write()) = Some(PreviousRoot {
         admin_key: inner.admin_key(),
         instance_id: inner.instance_id(),
     });
@@ -35,8 +12,7 @@ fn remember_previous_root(inner: &AuthStateInner) {
 pub(super) fn actor_reset(
     inner: &Arc<AuthStateInner>,
     config: &AuthConfig,
-    cold: &mut HashMap<u64, ColdMetadata>,
-    wheel: &mut TimingWheel,
+    leases: &mut Leases,
     admin_replays: &VecDeque<AdminReplayRecord>,
     action: &str,
 ) -> Result<(), AuthFailure> {
@@ -71,11 +47,8 @@ pub(super) fn actor_reset(
     let _ = std::fs::remove_file(&next_instance_path);
     push_audit_record(inner, reset_audit);
     remember_previous_root(inner);
-    wipe_temporary_keys(inner, cold, wheel);
-    *inner
-        .instance_id
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = new_instance_id;
+    leases.wipe(unix_seconds());
+    *recover_lock(inner.instance_id.write()) = new_instance_id;
     inner.safe_mode.store(false, Ordering::Release);
     Ok(())
 }
@@ -83,8 +56,7 @@ pub(super) fn actor_reset(
 pub(super) fn actor_rotate_root(
     inner: &Arc<AuthStateInner>,
     config: &AuthConfig,
-    cold: &mut HashMap<u64, ColdMetadata>,
-    wheel: &mut TimingWheel,
+    leases: &mut Leases,
     admin_lease: &mut Arc<AuthLease>,
     new_key: AesKeyType,
 ) -> Result<(), AuthFailure> {
@@ -128,13 +100,10 @@ pub(super) fn actor_rotate_root(
     let _ = std::fs::remove_file(&next_key_path);
     push_audit_record(inner, rotate_audit);
     remember_previous_root(inner);
-    wipe_temporary_keys(inner, cold, wheel);
+    leases.wipe(unix_seconds());
     let old_admin_lease = admin_lease.clone();
-    let new_admin_lease = Arc::new(AuthLease::new(0, u64::MAX));
-    *inner
-        .admin
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = AdminState {
+    let new_admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, u64::MAX));
+    *recover_lock(inner.admin.write()) = AdminState {
         key: new_key,
         lease: Arc::downgrade(&new_admin_lease),
     };

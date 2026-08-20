@@ -35,9 +35,9 @@ pub(crate) use fs::{replace_file, sync_parent_directory};
 #[cfg(test)]
 pub(in crate::common::auth) use snapshot::try_load_persisted_state;
 pub(in crate::common::auth) use snapshot::{
-    build_snapshot, cancel_all_temporary_leases, clear_retained_high_slot_entries,
-    compaction_is_allowed, empty_snapshot, load_persisted_state, normalize_tombstone_times,
-    push_audit_record, push_persisted_audit, split_high_slot_state,
+    build_snapshot, cancel_all_temporary_leases, compaction_is_allowed, empty_snapshot,
+    load_persisted_state, normalize_tombstone_times, push_audit_record, push_persisted_audit,
+    split_high_slot_state,
 };
 pub(in crate::common::auth) use wal::{
     append_audit, append_mutation, append_wal, fail_closed_on_uncertain_wal, read_wal,
