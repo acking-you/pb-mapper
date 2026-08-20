@@ -829,7 +829,9 @@ macro_rules! start_datagram_forward_with_codec_key {
 mod tests {
     use std::collections::VecDeque;
     use std::io;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
     use std::time::Duration;
 
     use super::*;
@@ -891,22 +893,22 @@ mod tests {
 
     impl ScriptedWriter {
         fn chunks(&self) -> Vec<Vec<u8>> {
-            self.state.lock().unwrap().chunks.clone()
+            self.state.lock().chunks.clone()
         }
 
         fn shutdowns(&self) -> usize {
-            self.state.lock().unwrap().shutdowns
+            self.state.lock().shutdowns
         }
     }
 
     impl ForwardWriter for ScriptedWriter {
         async fn write(&mut self, src: &[u8]) -> Result<()> {
-            self.state.lock().unwrap().chunks.push(src.to_vec());
+            self.state.lock().chunks.push(src.to_vec());
             Ok(())
         }
 
         async fn shutdown(&mut self) {
-            self.state.lock().unwrap().shutdowns += 1;
+            self.state.lock().shutdowns += 1;
         }
     }
 
@@ -954,7 +956,7 @@ mod tests {
         }
 
         fn chunks(&self) -> Vec<Vec<u8>> {
-            self.state.lock().unwrap().chunks.clone()
+            self.state.lock().chunks.clone()
         }
     }
 
@@ -962,12 +964,12 @@ mod tests {
         async fn write(&mut self, src: &[u8]) -> Result<()> {
             self.write_started.notify_one();
             tokio::time::sleep(self.delay).await;
-            self.state.lock().unwrap().chunks.push(src.to_vec());
+            self.state.lock().chunks.push(src.to_vec());
             Ok(())
         }
 
         async fn shutdown(&mut self) {
-            self.state.lock().unwrap().shutdowns += 1;
+            self.state.lock().shutdowns += 1;
         }
     }
 

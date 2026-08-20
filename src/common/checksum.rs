@@ -4,7 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{LazyLock, RwLock};
+use std::sync::LazyLock;
+
+use parking_lot::RwLock;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -92,15 +94,9 @@ fn update_runtime_credential(credential: Option<Credential>) {
         .as_ref()
         .map(|credential| gen_checksum_by_key(credential.key()))
         .unwrap_or_default();
-    let mut guard = MSG_HEADER_KEY_STATE
-        .credential
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = MSG_HEADER_KEY_STATE.credential.write();
     *guard = credential;
-    *MSG_HEADER_KEY_STATE
-        .load_error
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *MSG_HEADER_KEY_STATE.load_error.write() = None;
     MSG_HEADER_KEY_STATE.hash.store(hash, Ordering::Release);
 }
 
@@ -129,23 +125,12 @@ static MSG_HEADER_KEY_STATE: LazyLock<MsgHeaderKeyState> = LazyLock::new(|| {
 
 /// Return the configured process credential, failing closed when none exists.
 pub fn get_process_credential() -> Result<Credential, String> {
-    if let Some(error) = MSG_HEADER_KEY_STATE
-        .load_error
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-    {
+    if let Some(error) = MSG_HEADER_KEY_STATE.load_error.read().clone() {
         return Err(error);
     }
-    MSG_HEADER_KEY_STATE
-        .credential
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .ok_or_else(|| {
-            format!(
-                "`{ENV_MSG_HEADER_KEY}` is required; no insecure default credential is available"
-            )
-        })
+    MSG_HEADER_KEY_STATE.credential.read().ok_or_else(|| {
+        format!("`{ENV_MSG_HEADER_KEY}` is required; no insecure default credential is available")
+    })
 }
 
 /// Get current message header key bytes.

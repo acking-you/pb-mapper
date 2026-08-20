@@ -3,7 +3,7 @@ use super::super::*;
 use super::{audit, ensure_store_available};
 
 fn remember_previous_root(inner: &AuthStateInner) {
-    *recover_lock(inner.previous_root.write()) = Some(PreviousRoot {
+    *inner.previous_root.write() = Some(PreviousRoot {
         admin_key: inner.admin_key(),
         instance_id: inner.instance_id(),
     });
@@ -48,7 +48,7 @@ pub(super) fn actor_reset(
     push_audit_record(inner, reset_audit);
     remember_previous_root(inner);
     leases.wipe(unix_seconds());
-    *recover_lock(inner.instance_id.write()) = new_instance_id;
+    *inner.instance_id.write() = new_instance_id;
     inner.safe_mode.store(false, Ordering::Release);
     Ok(())
 }
@@ -103,7 +103,7 @@ pub(super) fn actor_rotate_root(
     leases.wipe(unix_seconds());
     let old_admin_lease = admin_lease.clone();
     let new_admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, u64::MAX));
-    *recover_lock(inner.admin.write()) = AdminState {
+    *inner.admin.write() = AdminState {
         key: new_key,
         lease: Arc::downgrade(&new_admin_lease),
     };

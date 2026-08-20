@@ -328,16 +328,13 @@ fn validate_admin_authority(
             false,
         ));
     }
-    let current = recover_lock(inner.admin.read())
-        .lease
-        .upgrade()
-        .ok_or_else(|| {
-            AuthFailure::new(
-                "administrator_key_rotated",
-                "active administrator credential lease is unavailable",
-                false,
-            )
-        })?;
+    let current = inner.admin.read().lease.upgrade().ok_or_else(|| {
+        AuthFailure::new(
+            "administrator_key_rotated",
+            "active administrator credential lease is unavailable",
+            false,
+        )
+    })?;
     if !Arc::ptr_eq(&presented, &current) {
         return Err(AuthFailure::new(
             "administrator_key_rotated",

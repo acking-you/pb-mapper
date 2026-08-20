@@ -14,9 +14,10 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use parking_lot::Mutex as SyncMutex;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock};
@@ -388,30 +389,26 @@ struct ConnectionInfo {
 /// the first's [`JoinHandle`], leaving a tunnel running that nothing could
 /// abort. Holding the key across the gap is what closes it again.
 ///
-/// The set is behind a `std::sync::Mutex` rather than tokio's so that `Drop` can
+/// The set is behind a blocking mutex rather than tokio's so that `Drop` can
 /// release it; it is only ever held for a set insert or remove.
 struct KeyClaim {
     key: String,
-    claims: Arc<StdMutex<HashSet<String>>>,
+    claims: Arc<SyncMutex<HashSet<String>>>,
 }
 
 impl Drop for KeyClaim {
     fn drop(&mut self) {
-        if let Ok(mut claims) = self.claims.lock() {
-            claims.remove(&self.key);
-        }
+        self.claims.lock().remove(&self.key);
     }
 }
 
 /// Claims `key`, or reports that someone else is already setting it up.
 fn claim_key(
-    claims: &Arc<StdMutex<HashSet<String>>>,
+    claims: &Arc<SyncMutex<HashSet<String>>>,
     key: &str,
     what: &str,
 ) -> Result<KeyClaim, CtlError> {
-    let mut guard = claims
-        .lock()
-        .map_err(|_| CtlError::internal(format!("{what} state for '{key}' is poisoned")))?;
+    let mut guard = claims.lock();
     if !guard.insert(key.to_string()) {
         return Err(CtlError::already_in_progress(format!(
             "'{key}' is already {what}"
@@ -496,8 +493,8 @@ pub struct PbMapperState {
     client_status_refreshing: Arc<RwLock<HashSet<String>>>,
     /// Keys currently being set up. See [`KeyClaim`]. Separate sets because a
     /// key can legitimately be registered and connected to at the same time.
-    registering: Arc<StdMutex<HashSet<String>>>,
-    connecting: Arc<StdMutex<HashSet<String>>>,
+    registering: Arc<SyncMutex<HashSet<String>>>,
+    connecting: Arc<SyncMutex<HashSet<String>>>,
 }
 
 mod configuration;

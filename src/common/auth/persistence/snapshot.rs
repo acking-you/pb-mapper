@@ -7,7 +7,7 @@ pub(in crate::common::auth) fn compaction_is_allowed(safe_mode: bool) -> bool {
 }
 
 pub(in crate::common::auth) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
-    let mut records = recover_lock(inner.audit_records.write());
+    let mut records = inner.audit_records.write();
     while records.len() >= AUDIT_RECORD_CAPACITY {
         records.pop_front();
     }
@@ -23,7 +23,7 @@ pub(in crate::common::auth) fn cancel_all_temporary_leases(inner: &AuthStateInne
 
 fn snapshot_generations(inner: &AuthStateInner) -> Vec<Generation> {
     let slots = inner.slots();
-    let extra = recover_lock(inner.high_slot_generations.read());
+    let extra = inner.high_slot_generations.read();
     let mut generations = slots.iter().map(|slot| slot.generation).collect::<Vec<_>>();
     generations.extend_from_slice(&extra);
     generations
@@ -141,7 +141,7 @@ fn snapshot_with(
             LegacyProtocolPolicy::Deny
         },
         admin_replays: admin_replays.iter().cloned().collect(),
-        audit_records: recover_lock(inner.audit_records.read()).clone(),
+        audit_records: inner.audit_records.read().clone(),
         root_epoch: inner.root_epoch.load(Ordering::Acquire),
     }
 }

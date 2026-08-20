@@ -34,14 +34,12 @@ fn reserved_error_session(
 #[allow(clippy::result_large_err)]
 pub(super) fn evaluate_first_flight(
     auth: &AuthRuntime,
-    replay: &std::sync::Mutex<ReplayGuard>,
+    replay: &parking_lot::Mutex<ReplayGuard>,
     key_id: KeyId,
     fingerprint: [u8; 32],
     work: FirstFlightWork,
 ) -> std::result::Result<(Vec<u8>, AuthContext), ServerInitialError> {
-    let mut replay = replay
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut replay = replay.lock();
     match work {
         FirstFlightWork::Live {
             key,

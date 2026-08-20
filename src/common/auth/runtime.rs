@@ -201,7 +201,7 @@ impl AuthRuntime {
             command_tx,
             config: config.clone(),
             _state_lock: state_lock.clone(),
-            actor: Arc::new(std::sync::Mutex::new(Some(actor))),
+            actor: Arc::new(Mutex::new(Some(actor))),
             actor_abort,
         };
         Ok(runtime)
@@ -214,7 +214,7 @@ impl AuthRuntime {
             .send(AuthCommand::Shutdown { response })
             .await;
         let _ = receiver.await;
-        let handle = recover_lock(self.actor.lock()).take();
+        let handle = self.actor.lock().take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
@@ -222,7 +222,7 @@ impl AuthRuntime {
 
     pub async fn abort_actor(&self) -> Result<(), AuthFailure> {
         self.actor_abort.abort();
-        let handle = recover_lock(self.actor.lock()).take();
+        let handle = self.actor.lock().take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
@@ -274,7 +274,7 @@ impl AuthRuntime {
 
     pub(crate) fn derive_previous_key(&self, key_id: KeyId) -> Option<AesKeyType> {
         let inner = self.inner().ok()?;
-        let previous = recover_lock(inner.previous_root.read()).clone()?;
+        let previous = inner.previous_root.read().clone()?;
         if key_id.is_admin() {
             Some(previous.admin_key)
         } else {
@@ -289,7 +289,7 @@ impl AuthRuntime {
     ) -> Result<AuthContext, AuthFailure> {
         let inner = self.inner()?;
         if key_id.is_admin() {
-            let admin = recover_lock(inner.admin.read());
+            let admin = inner.admin.read();
             if !bool::from(presented_key.ct_eq(&admin.key)) {
                 inner.auth_failures.fetch_add(1, Ordering::Relaxed);
                 return Err(AuthFailure::new(
@@ -603,7 +603,7 @@ fn temporary_key_material_mismatch(inner: &AuthStateInner, key_id: KeyId) -> Aut
     let current_generation = match slots.get(index) {
         Some(slot) => Some(slot.generation),
         None => {
-            let high = recover_lock(inner.high_slot_generations.read());
+            let high = inner.high_slot_generations.read();
             index
                 .checked_sub(slots.len())
                 .and_then(|offset| high.get(offset).copied())

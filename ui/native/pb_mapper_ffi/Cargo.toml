@@ -23,3 +23,4 @@ dirs = "5.0"
 
 pb-mapper = { path = "../../../" }
 uni-stream.workspace = true
+parking_lot.workspace = true

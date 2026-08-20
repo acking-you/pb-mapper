@@ -17,7 +17,9 @@
 //! This root module coordinates client/server sessions. Frame mechanics, replay admission,
 //! log suppression, and protocol tests are isolated in focused child modules.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
@@ -386,7 +388,6 @@ impl ServerSecurity {
     ) -> FailureLogDecision {
         self.failure_logs
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record(peer_ip, key_id, reason, unix_seconds())
     }
 

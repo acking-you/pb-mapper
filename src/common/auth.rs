@@ -55,9 +55,10 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use parking_lot::{Mutex, RwLock};
 use rand::RngExt;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::hkdf::{Salt, HKDF_SHA256};
@@ -500,43 +501,39 @@ struct AuthStateInner {
     audit_records: RwLock<VecDeque<AuditRecord>>,
 }
 
-fn recover_lock<T>(result: std::sync::LockResult<T>) -> T {
-    result.unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 impl AuthStateInner {
     /// Rows the configured capacity no longer covers. See the field's docs; the
     /// fallback is a scan because the range is small and rarely touched.
-    fn high(&self) -> std::sync::RwLockReadGuard<'_, Vec<PersistedEntry>> {
-        recover_lock(self.high_slot_entries.read())
+    fn high(&self) -> parking_lot::RwLockReadGuard<'_, Vec<PersistedEntry>> {
+        self.high_slot_entries.read()
     }
 
-    fn high_mut(&self) -> std::sync::RwLockWriteGuard<'_, Vec<PersistedEntry>> {
-        recover_lock(self.high_slot_entries.write())
+    fn high_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Vec<PersistedEntry>> {
+        self.high_slot_entries.write()
     }
 
-    fn slots(&self) -> std::sync::RwLockReadGuard<'_, Box<[SlotHot]>> {
-        recover_lock(self.slots.read())
+    fn slots(&self) -> parking_lot::RwLockReadGuard<'_, Box<[SlotHot]>> {
+        self.slots.read()
     }
 
-    fn slots_mut(&self) -> std::sync::RwLockWriteGuard<'_, Box<[SlotHot]>> {
-        recover_lock(self.slots.write())
+    fn slots_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Box<[SlotHot]>> {
+        self.slots.write()
     }
 
-    fn cold(&self) -> std::sync::RwLockReadGuard<'_, HashMap<KeyId, ColdMetadata>> {
-        recover_lock(self.cold.read())
+    fn cold(&self) -> parking_lot::RwLockReadGuard<'_, HashMap<KeyId, ColdMetadata>> {
+        self.cold.read()
     }
 
-    fn cold_mut(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<KeyId, ColdMetadata>> {
-        recover_lock(self.cold.write())
+    fn cold_mut(&self) -> parking_lot::RwLockWriteGuard<'_, HashMap<KeyId, ColdMetadata>> {
+        self.cold.write()
     }
 
     fn admin_key(&self) -> AesKeyType {
-        recover_lock(self.admin.read()).key
+        self.admin.read().key
     }
 
     fn instance_id(&self) -> [u8; INSTANCE_ID_LEN] {
-        *recover_lock(self.instance_id.read())
+        *self.instance_id.read()
     }
 }
 
@@ -546,7 +543,7 @@ pub struct AuthRuntime {
     command_tx: mpsc::Sender<AuthCommand>,
     config: AuthConfig,
     _state_lock: Arc<File>,
-    actor: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    actor: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     actor_abort: tokio::task::AbortHandle,
 }
 

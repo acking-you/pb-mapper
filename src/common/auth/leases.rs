@@ -41,6 +41,10 @@ struct Stages {
 pub(super) struct Leases {
     inner: Weak<AuthStateInner>,
     wheel: TimingWheel,
+    /// The wall-clock second the wheel's current tick corresponds to. The wheel
+    /// itself only counts ticks, so this is where absolute deadlines are turned
+    /// into the relative delays it takes.
+    now: u64,
     /// Each key's stages, so a renew or an early end can reach them without the
     /// wheel knowing what a key is.
     stages: HashMap<KeyId, Stages>,
@@ -52,7 +56,8 @@ impl Leases {
     pub(super) fn restored(inner: &Arc<AuthStateInner>, now: u64) -> Self {
         let mut leases = Self {
             inner: Arc::downgrade(inner),
-            wheel: TimingWheel::new(now),
+            wheel: new_wheel(),
+            now,
             stages: HashMap::new(),
         };
         let mut live = Vec::new();
@@ -123,8 +128,8 @@ impl Leases {
         let (Some(retire), Some(reap)) = (stages.retire.upgrade(), stages.reap.upgrade()) else {
             return false;
         };
-        self.wheel.schedule(expires_at, retire);
-        self.wheel.schedule(retention_ends(expires_at), reap);
+        self.schedule_at(expires_at, retire);
+        self.schedule_at(retention_ends(expires_at), reap);
         true
     }
 
@@ -156,11 +161,12 @@ impl Leases {
         // A clock stepping backwards is ignored: buckets are indexed relative to
         // the wheel's `now`, so re-filing against an earlier one would place
         // entries in slots it has already drained.
-        if now.saturating_sub(self.wheel.now()) > MAX_SCHEDULABLE_DELAY.as_secs() {
+        if now.saturating_sub(self.now) > self.wheel.max_delay() {
             self.drop_schedule(now);
             return;
         }
-        while self.wheel.now() < now {
+        while self.now < now {
+            self.now += 1;
             self.wheel.tick();
         }
     }
@@ -208,7 +214,15 @@ impl Leases {
     /// Replaces the whole schedule, running every callback the old one held.
     fn drop_schedule(&mut self, now: u64) {
         self.stages.clear();
-        self.wheel = TimingWheel::new(now);
+        self.now = now;
+        self.wheel = new_wheel();
+    }
+
+    /// Schedules `timer` for an absolute second, as the delay from now the wheel
+    /// works in. A deadline already past releases the timer at once.
+    fn schedule_at(&mut self, deadline: u64, timer: Arc<Timer>) {
+        self.wheel
+            .schedule(deadline.saturating_sub(self.now), timer);
     }
 
     /// Upgrades one of a key's stages, forgetting the key once both have run.
@@ -250,8 +264,8 @@ impl Leases {
                 reap: Arc::downgrade(&reap),
             },
         );
-        self.wheel.schedule(expires_at, retire);
-        self.wheel.schedule(retention_ends(expires_at), reap);
+        self.schedule_at(expires_at, retire);
+        self.schedule_at(retention_ends(expires_at), reap);
     }
 
     /// Schedules only the reap, for a key that is already dead.
@@ -264,7 +278,7 @@ impl Leases {
                 ..Stages::default()
             },
         );
-        self.wheel.schedule(deadline, reap);
+        self.schedule_at(deadline, reap);
     }
 
     /// Builds the reap stage. `lease` is the key's live lease when there is one,
@@ -333,4 +347,10 @@ fn reap(inner: &Arc<AuthStateInner>, key_id: KeyId) {
         }
     }
     inner.cold_mut().remove(&key_id);
+}
+
+/// The wheel every schedule uses: wide enough for the longest lifetime a key can
+/// have, at 64 buckets per level.
+fn new_wheel() -> TimingWheel {
+    TimingWheel::new(MAX_SCHEDULABLE_DELAY.as_secs(), 64)
 }

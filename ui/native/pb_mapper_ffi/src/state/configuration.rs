@@ -65,8 +65,8 @@ impl PbMapperState {
             client_status_cache: Arc::new(RwLock::new(HashMap::new())),
             service_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
             client_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
-            registering: Arc::new(StdMutex::new(HashSet::new())),
-            connecting: Arc::new(StdMutex::new(HashSet::new())),
+            registering: Arc::new(SyncMutex::new(HashSet::new())),
+            connecting: Arc::new(SyncMutex::new(HashSet::new())),
         };
         state.config = state.load_config().unwrap_or_else(|e| {
             tracing::warn!("Could not load config: {}, using defaults", e);
