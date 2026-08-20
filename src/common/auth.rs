@@ -487,10 +487,12 @@ enum AuthCommand {
 
 mod config;
 pub use config::default_auth_state_dir;
+#[cfg(all(test, not(any(windows, target_os = "macos"))))]
+pub(crate) use config::linux_default_auth_state_dir;
 #[cfg(test)]
 pub(in crate::common::auth) use config::parse_legacy_protocol_policy;
 #[cfg(test)]
-pub(crate) use config::{linux_default_auth_state_dir, platform_default_auth_state_dir};
+pub(crate) use config::platform_default_auth_state_dir;
 #[cfg(all(test, not(any(windows, target_os = "macos"))))]
 pub(in crate::common::auth) use config::{linux_system_auth_dir_usable, unix_effective_uid};
 mod keys;

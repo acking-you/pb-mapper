@@ -584,6 +584,7 @@ fn sync_parent_directory_succeeds_for_a_local_file() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn linux_default_auth_state_dir_prefers_user_data_when_system_dir_is_unusable() {
     assert_eq!(

@@ -41,6 +41,7 @@ pub(crate) fn platform_default_auth_state_dir() -> PathBuf {
     }
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn linux_default_auth_state_dir(
     euid: u32,
     system_dir_usable: bool,
