@@ -49,8 +49,10 @@ Notes: CI builds release artifacts on tags `vX.Y.Z` (see `.github/workflows/rele
   need_codec)` for the common case, or `Relay` + `TunnelSpec` when a case needs
   to issue, renew, or revoke a credential first. `test_delay.rs` covers the
   transport/codec matrix and `temporary_credential_e2e.rs` the credential
-  lifecycle; each case reserves its own loopback ports and its own auth state
+  lifecycle; each case picks its own loopback ports and owns its auth state
   directory, so cases run concurrently and never collide with a live relay.
+  Prefer binding a socket and keeping it over `reserve_addr`, which has to drop
+  the socket before the real bind and so cannot rule out a race.
 - Sequence components with a readiness probe, not a sleep: poll the relay's
   `Keys` status for a registration, and round-trip a payload through the tunnel
   for forwarding. `Tunnel::start` does both before it returns.
