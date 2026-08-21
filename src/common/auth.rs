@@ -96,10 +96,6 @@ const ADMIN_REPLAY_RETENTION: Duration = Duration::from_secs(10 * 60);
 const ADMIN_REPLAY_CAPACITY: usize = 65_536;
 const AUDIT_RECORD_CAPACITY: usize = 4096;
 
-#[cfg(test)]
-pub(crate) static PROCESS_CREDENTIAL_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LegacyProtocolPolicy {

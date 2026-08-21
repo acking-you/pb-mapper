@@ -69,7 +69,11 @@ const CODEC_TAG_LEN: DataLenType = 16;
 /// For encrypted frames, the tag is appended to the payload.
 const MAX_MSG_LEN: DataLenType = MAX_PLAINTEXT_LEN + CODEC_TAG_LEN;
 
-pub type DataLenType = u32;
+// Defined in `pb-mapper-core` so that the checksum and error types can name it
+// without depending on this module. Re-exported rather than redeclared: a second
+// `pub type` would be a distinct name for the same width, and the two would read
+// as unrelated at the crate boundary.
+pub use pb_mapper_core::DataLenType;
 
 macro_rules! gen_read_network_with_error {
     ($func_name:ident, $read_method:ident, $error:expr, $return_ty:ty) => {

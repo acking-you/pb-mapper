@@ -10,10 +10,11 @@
 //! credentials, while lifecycle persistence remains covered by `common::auth::tests`.
 
 use super::*;
-use crate::common::auth::{AuthConfig, LegacyProtocolPolicy, PROCESS_CREDENTIAL_TEST_LOCK};
+use crate::common::auth::{AuthConfig, LegacyProtocolPolicy};
 use crate::common::checksum::{
     encode_temporary_credential, parse_credential, set_process_msg_header_key,
 };
+use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
 
 fn temp_config() -> AuthConfig {
     let mut random = [0_u8; 8];

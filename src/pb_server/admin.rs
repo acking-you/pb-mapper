@@ -307,7 +307,7 @@ mod tests {
     }
 
     async fn inventory_query_rejects_rotation(connection_query: bool) {
-        let _process_credential_guard = crate::common::auth::PROCESS_CREDENTIAL_TEST_LOCK
+        let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
             .lock()
             .await;
         let state_dir = temp_state_dir(if connection_query {

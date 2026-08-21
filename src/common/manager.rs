@@ -1,8 +1,17 @@
-use snafu::ResultExt;
+use snafu::{ResultExt, Snafu};
 use tracing::instrument;
 
 use super::conn_id::{ConnId, ConnIdProvider, ConnIdTrait};
-use super::error::{MngWaitForTaskSnafu, Result};
+
+/// The manager owns this rather than the core error enum: it is the only thing
+/// that waits on a task channel, and it keeps `kanal` out of the bottom layer.
+#[derive(Debug, Snafu)]
+#[snafu(display("`TaskManager` fails while waiting for a task"))]
+pub struct MngWaitForTaskError {
+    source: kanal::ReceiveError,
+}
+
+type Result<T, E = MngWaitForTaskError> = std::result::Result<T, E>;
 
 /// The [`ConnId::local_id`] of the server is the same as the client. and it is only generated
 /// by the client. The [`ConnId::remote_id`] and [`ConnId::local_id`] of the client can be used to

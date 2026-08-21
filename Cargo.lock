@@ -1038,23 +1038,38 @@ dependencies = [
  "bytes",
  "clap",
  "dotenvy",
- "futures",
  "hashbrown 0.17.1",
- "hickory-resolver",
  "kanal",
  "parking_lot",
+ "pb-mapper-core",
  "rand 0.10.0",
  "ring",
  "serde",
  "serde_json",
  "snafu",
- "socket2 0.6.1",
  "subtle",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uni-stream",
+]
+
+[[package]]
+name = "pb-mapper-core"
+version = "0.4.0"
+dependencies = [
+ "base64",
+ "clap",
+ "hickory-resolver",
+ "parking_lot",
+ "rand 0.10.0",
+ "ring",
+ "serde_json",
+ "snafu",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

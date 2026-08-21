@@ -152,7 +152,7 @@ mod tests {
     use std::slice::from_raw_parts_mut;
     use std::time::Instant;
 
-    use crate::utils::codec::Aes256GcmCodec;
+    use crate::codec::Aes256GcmCodec;
 
     struct Timer {
         ins: Instant,

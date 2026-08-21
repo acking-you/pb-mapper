@@ -3,11 +3,13 @@ use std::net::AddrParseError;
 
 use snafu::Snafu;
 
-use super::checksum::ChecksumType;
-use super::message::DataLenType;
+use crate::DataLenType;
+use crate::checksum::ChecksumType;
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub(super)))]
+// The generated context selectors are constructed by the protocol, client, and
+// server crates, so they have to be reachable from outside this one.
+#[snafu(visibility(pub))]
 pub enum Error {
     /// Error handling for message
     #[snafu(display("read `checksum` from network error"))]
@@ -67,9 +69,6 @@ pub enum Error {
         action: &'static str,
         source: std::io::Error,
     },
-    /// Error for manager
-    #[snafu(display("`TaskManager` fails while waiting for a task"))]
-    MngWaitForTask { source: kanal::ReceiveError },
     /// Error for forward
     #[snafu(display("failed to forward message to write in normal text"))]
     FwdNetworkWriteWithNormal { source: std::io::Error },

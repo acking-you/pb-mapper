@@ -4,6 +4,16 @@ pub mod local;
 pub mod pb_server;
 pub mod utils;
 
+// The `snafu_error_*` macros moved to `pb-mapper-core` with the error type.
+// `#[macro_export]` puts them at that crate's root, so re-export them here to
+// keep `crate::snafu_error_handle!` working while the split is in progress.
+pub use pb_mapper_core::{
+    snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_get_or_return_ok,
+    snafu_error_handle,
+};
+
+// This was missing `#[cfg(test)]`, so it compiled into every release build.
+#[cfg(test)]
 mod tests {
 
     #[test]

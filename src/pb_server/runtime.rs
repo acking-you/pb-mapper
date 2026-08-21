@@ -958,9 +958,8 @@ async fn abort_and_wait(handles: impl IntoIterator<Item = tokio::task::JoinHandl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::auth::{
-        AuthConfig, AuthRuntime, LegacyProtocolPolicy, PROCESS_CREDENTIAL_TEST_LOCK,
-    };
+    use crate::common::auth::{AuthConfig, AuthRuntime, LegacyProtocolPolicy};
+    use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
     use rand::RngExt;
     use std::path::PathBuf;
     use std::time::Duration;

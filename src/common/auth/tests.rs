@@ -10,6 +10,8 @@
 //! Protocol framing has its own tests under `common::message::secure::tests`; this
 //! module focuses on lifecycle, persistence, audit, replay, and timing-wheel behavior.
 
+use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+
 use super::*;
 
 fn temp_state_dir(name: &str) -> PathBuf {

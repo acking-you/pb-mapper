@@ -7,7 +7,7 @@ use snafu::ResultExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
 
-use super::error::{CfgPbServerEnvNotExistSnafu, Result};
+use crate::error::{CfgPbServerEnvNotExistSnafu, Result};
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum StatusOp {
@@ -30,24 +30,24 @@ pub fn get_sockaddr(addr: &str) -> Result<SocketAddr> {
                     Ok(mut socket_addrs) => {
                         socket_addrs
                             .next()
-                            .ok_or_else(|| super::error::Error::CfgParseSockAddr {
+                            .ok_or_else(|| crate::error::Error::CfgParseSockAddr {
                                 string: addr.to_string(),
                                 source: original_parse_error,
                             })
                     }
-                    Err(_) => Err(super::error::Error::CfgParseSockAddr {
+                    Err(_) => Err(crate::error::Error::CfgParseSockAddr {
                         string: addr.to_string(),
                         source: original_parse_error,
                     }),
                 }
             } else {
                 // For other hostnames, use the custom DNS resolution
-                use crate::utils::addr::get_socket_addrs;
+                use crate::addr::get_socket_addrs;
                 match get_socket_addrs(addr) {
                     Ok(socket_addrs) => {
                         // Return the first resolved address
                         socket_addrs.into_iter().next().ok_or_else(|| {
-                            super::error::Error::CfgParseSockAddr {
+                            crate::error::Error::CfgParseSockAddr {
                                 string: addr.to_string(),
                                 source: original_parse_error,
                             }
@@ -57,12 +57,12 @@ pub fn get_sockaddr(addr: &str) -> Result<SocketAddr> {
                         // If custom DNS resolution fails, fallback to system resolver
                         match std::net::ToSocketAddrs::to_socket_addrs(addr) {
                             Ok(mut socket_addrs) => socket_addrs.next().ok_or_else(|| {
-                                super::error::Error::CfgParseSockAddr {
+                                crate::error::Error::CfgParseSockAddr {
                                     string: addr.to_string(),
                                     source: original_parse_error,
                                 }
                             }),
-                            Err(_) => Err(super::error::Error::CfgParseSockAddr {
+                            Err(_) => Err(crate::error::Error::CfgParseSockAddr {
                                 string: addr.to_string(),
                                 source: original_parse_error,
                             }),
@@ -87,22 +87,22 @@ pub async fn get_sockaddr_async(addr: &str) -> Result<SocketAddr> {
                     Ok(mut socket_addrs) => {
                         socket_addrs
                             .next()
-                            .ok_or_else(|| super::error::Error::CfgParseSockAddr {
+                            .ok_or_else(|| crate::error::Error::CfgParseSockAddr {
                                 string: addr.to_string(),
                                 source: original_parse_error,
                             })
                     }
-                    Err(_) => Err(super::error::Error::CfgParseSockAddr {
+                    Err(_) => Err(crate::error::Error::CfgParseSockAddr {
                         string: addr.to_string(),
                         source: original_parse_error,
                     }),
                 }
             } else {
                 // For other hostnames, use the custom DNS resolution
-                use crate::utils::addr::get_socket_addrs_async;
+                use crate::addr::get_socket_addrs_async;
                 match get_socket_addrs_async(addr).await {
                     Ok(socket_addrs) => socket_addrs.into_iter().next().ok_or_else(|| {
-                        super::error::Error::CfgParseSockAddr {
+                        crate::error::Error::CfgParseSockAddr {
                             string: addr.to_string(),
                             source: original_parse_error,
                         }
@@ -111,12 +111,12 @@ pub async fn get_sockaddr_async(addr: &str) -> Result<SocketAddr> {
                         // If custom DNS resolution fails, fallback to system resolver
                         match tokio::net::lookup_host(addr).await {
                             Ok(mut socket_addrs) => socket_addrs.next().ok_or_else(|| {
-                                super::error::Error::CfgParseSockAddr {
+                                crate::error::Error::CfgParseSockAddr {
                                     string: addr.to_string(),
                                     source: original_parse_error,
                                 }
                             }),
-                            Err(_) => Err(super::error::Error::CfgParseSockAddr {
+                            Err(_) => Err(crate::error::Error::CfgParseSockAddr {
                                 string: addr.to_string(),
                                 source: original_parse_error,
                             }),

@@ -13,7 +13,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngExt;
 use ring::digest::{SHA256, digest};
 
-use super::message::DataLenType;
+use crate::DataLenType;
 
 pub type ChecksumType = u32;
 
@@ -576,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn clearing_the_process_credential_fails_closed_for_checksums() {
         use super::*;
-        use crate::common::auth::PROCESS_CREDENTIAL_TEST_LOCK;
+        use crate::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
 
         let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
         set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv")).unwrap();
