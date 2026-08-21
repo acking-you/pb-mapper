@@ -11,7 +11,7 @@ use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 
 /// Get current app config.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -37,7 +37,7 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
 
 /// Reveal the embedded relay administrator key. This is a separate call so
 /// routine config fetches cannot leak the root secret.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
@@ -58,7 +58,7 @@ pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
 }
 
 /// Update app config.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_update_config(
     handle: *mut PbMapperHandle,
     server_address: *const c_char,

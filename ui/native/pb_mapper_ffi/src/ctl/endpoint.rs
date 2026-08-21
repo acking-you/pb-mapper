@@ -105,10 +105,10 @@ mod imp {
     }
 
     pub fn endpoint() -> String {
-        if let Ok(custom) = std::env::var(super::ENDPOINT_ENV) {
-            if !custom.is_empty() {
-                return custom;
-            }
+        if let Ok(custom) = std::env::var(super::ENDPOINT_ENV)
+            && !custom.is_empty()
+        {
+            return custom;
         }
         // Per user, so two accounts on one machine do not collide.
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
@@ -160,10 +160,10 @@ mod imp {
     const SUN_PATH_MAX: usize = 100;
 
     pub fn endpoint() -> String {
-        if let Ok(custom) = std::env::var(super::ENDPOINT_ENV) {
-            if !custom.is_empty() {
-                return custom;
-            }
+        if let Ok(custom) = std::env::var(super::ENDPOINT_ENV)
+            && !custom.is_empty()
+        {
+            return custom;
         }
         // XDG_RUNTIME_DIR is per-user and cleaned on logout, which is what a
         // socket wants. TMPDIR is the macOS equivalent and matters more there
@@ -195,7 +195,7 @@ mod imp {
         format!("/tmp/pb-mapper-ui-{uid}.sock")
     }
 
-    extern "C" {
+    unsafe extern "C" {
         #[link_name = "getuid"]
         fn libc_getuid() -> u32;
     }

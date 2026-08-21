@@ -132,13 +132,15 @@ async fn identical_initial_frames_are_admitted_only_once() {
             .code,
         "connection_salt_replayed"
     );
-    assert!(results
-        .iter()
-        .filter_map(|result| result.as_ref().err())
-        .next()
-        .unwrap()
-        .response_session
-        .is_none());
+    assert!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .next()
+            .unwrap()
+            .response_session
+            .is_none()
+    );
 
     let _ = std::fs::remove_dir_all(config.state_dir);
 }

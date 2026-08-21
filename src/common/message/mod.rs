@@ -3,13 +3,13 @@
 pub mod command;
 pub mod forward;
 pub mod secure;
-use snafu::{ensure, ResultExt};
+use snafu::{ResultExt, ensure};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
 use super::checksum::{
-    get_checksum, get_checksum_for_key, get_msg_header_key, process_checksum_is_ready,
-    valid_checksum, valid_checksum_for_key, AesKeyType,
+    AesKeyType, get_checksum, get_checksum_for_key, get_msg_header_key, process_checksum_is_ready,
+    valid_checksum, valid_checksum_for_key,
 };
 use super::error::{
     self, MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,

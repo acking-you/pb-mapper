@@ -54,23 +54,23 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
 use rand::RngExt;
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
-use ring::hkdf::{Salt, HKDF_SHA256};
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+use ring::hkdf::{HKDF_SHA256, Salt};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::checksum::{
+    AesKeyType, Credential, ENV_MSG_HEADER_KEY, MACHINE_MSG_HEADER_KEY_PATH,
     encode_temporary_credential, env_safe_admin_key_error, get_process_credential,
-    is_env_safe_admin_key, parse_credential, set_process_msg_header_key, AesKeyType, Credential,
-    ENV_MSG_HEADER_KEY, MACHINE_MSG_HEADER_KEY_PATH,
+    is_env_safe_admin_key, parse_credential, set_process_msg_header_key,
 };
 
 /// The namespace administrator connections operate in. Tenant namespaces are the
@@ -298,21 +298,17 @@ fn cancelled_lease_failure(is_admin: bool, lease: &AuthLease) -> AuthFailure {
         );
     }
     match lease.cancel_reason.load(Ordering::Acquire) {
-        LEASE_CANCEL_EXPIRED => AuthFailure::new(
-            "temporary_key_expired",
-            "temporary key has expired",
-            false,
-        ),
+        LEASE_CANCEL_EXPIRED => {
+            AuthFailure::new("temporary_key_expired", "temporary key has expired", false)
+        }
         LEASE_CANCEL_ROTATED => AuthFailure::new(
             "temporary_key_rotated",
             "temporary credential was invalidated by administrator root rotation or auth-state reset",
             false,
         ),
-        LEASE_CANCEL_REVOKED => AuthFailure::new(
-            "temporary_key_revoked",
-            "temporary key was revoked",
-            false,
-        ),
+        LEASE_CANCEL_REVOKED => {
+            AuthFailure::new("temporary_key_revoked", "temporary key was revoked", false)
+        }
         _ => AuthFailure::new(
             "temporary_key_inactive",
             "credential lease has been cancelled",
@@ -770,7 +766,7 @@ enum WalRecord {
 }
 
 mod actor;
-use actor::{run_auth_actor, AuthActorState};
+use actor::{AuthActorState, run_auth_actor};
 mod persistence;
 pub use persistence::*;
 pub(in crate::common::auth) use persistence::{
@@ -787,7 +783,7 @@ pub(in crate::common::auth) use persistence::{
     prepare_state_dir, read_instance_id_file, try_load_persisted_state,
 };
 mod ids;
-pub use ids::{Generation, KeyId, SlotIndex, ADMIN_KEY_ID};
+pub use ids::{ADMIN_KEY_ID, Generation, KeyId, SlotIndex};
 mod leases;
 use leases::Leases;
 mod timing_wheel;

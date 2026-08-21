@@ -335,11 +335,13 @@ pub async fn run_server_on_listener(
                         })
                     }
                 };
-                snafu_error_get_or_continue!(conn_sender
-                    .send(ConnTask::StatusResp(resp))
-                    .await
-                    .map_err(|_| kanal::SendError(()))
-                    .context(TaskCenterSendStatusRespSnafu { conn_id }));
+                snafu_error_get_or_continue!(
+                    conn_sender
+                        .send(ConnTask::StatusResp(resp))
+                        .await
+                        .map_err(|_| kanal::SendError(()))
+                        .context(TaskCenterSendStatusRespSnafu { conn_id })
+                );
             }
             ManagerTask::Accept { stream, peer_addr } => {
                 let conn_id = manager.get_conn_id(
@@ -588,15 +590,17 @@ pub async fn run_server_on_listener(
                     idle_connections = manager.idle_conn_count(),
                     "server connection registered"
                 );
-                snafu_error_get_or_continue!(conn_sender
-                    .send(ConnTask::RegisterResp {
-                        generation,
-                        protocol_version,
-                        lease_ttl_ms: server_lease_timeout().as_millis() as u64,
-                    })
-                    .await
-                    .map_err(|_| kanal::SendError(()))
-                    .context(TaskCenterSendRegisterRespSnafu { key, conn_id }));
+                snafu_error_get_or_continue!(
+                    conn_sender
+                        .send(ConnTask::RegisterResp {
+                            generation,
+                            protocol_version,
+                            lease_ttl_ms: server_lease_timeout().as_millis() as u64,
+                        })
+                        .await
+                        .map_err(|_| kanal::SendError(()))
+                        .context(TaskCenterSendRegisterRespSnafu { key, conn_id })
+                );
             }
             ManagerTask::Stream {
                 key,
@@ -660,19 +664,23 @@ pub async fn run_server_on_listener(
                     active_connections = manager.active_conn_count(),
                     "server stream ready for client"
                 );
-                let client_sender = snafu_error_get_or_continue!(manager
-                    .get_conn_sender_chan(&client_id)
-                    .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id }));
-                snafu_error_handle!(client_sender
-                    .send(ConnTask::StreamResp {
-                        server_id,
-                        server_generation: expected_generation,
-                        stream,
-                        session,
-                    })
-                    .await
-                    .map_err(|_| kanal::SendError(()))
-                    .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id }));
+                let client_sender = snafu_error_get_or_continue!(
+                    manager
+                        .get_conn_sender_chan(&client_id)
+                        .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id })
+                );
+                snafu_error_handle!(
+                    client_sender
+                        .send(ConnTask::StreamResp {
+                            server_id,
+                            server_generation: expected_generation,
+                            stream,
+                            session,
+                        })
+                        .await
+                        .map_err(|_| kanal::SendError(()))
+                        .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id })
+                );
             }
             ManagerTask::StreamAck {
                 server_id,
@@ -714,17 +722,21 @@ pub async fn run_server_on_listener(
                 {
                     info.health = ServerConnHealth::Healthy;
                 }
-                let client_sender = snafu_error_get_or_continue!(manager
-                    .get_conn_sender_chan(&client_id)
-                    .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id }));
-                snafu_error_handle!(client_sender
-                    .send(ConnTask::StreamAck {
-                        server_id,
-                        server_generation,
-                    })
-                    .await
-                    .map_err(|_| kanal::SendError(()))
-                    .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id }));
+                let client_sender = snafu_error_get_or_continue!(
+                    manager
+                        .get_conn_sender_chan(&client_id)
+                        .context(TaskCenterStreamConnIdNotExistSnafu { conn_id: client_id })
+                );
+                snafu_error_handle!(
+                    client_sender
+                        .send(ConnTask::StreamAck {
+                            server_id,
+                            server_generation,
+                        })
+                        .await
+                        .map_err(|_| kanal::SendError(()))
+                        .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id })
+                );
             }
             ManagerTask::Subcribe {
                 key,

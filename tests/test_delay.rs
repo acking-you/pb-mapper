@@ -8,12 +8,12 @@ use pb_mapper::common::message::{
     MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter,
 };
 use pb_mapper::local::client::run_client_side_cli;
-use pb_mapper::local::server::{run_server_side_cli, ServerTunnelOptions};
+use pb_mapper::local::server::{ServerTunnelOptions, run_server_side_cli};
 use pb_mapper::pb_server::run_server_with_auth_config;
 use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use tokio::time::{timeout, Instant};
+use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
@@ -219,11 +219,11 @@ async fn run_udp_datagram_echo(addr: &str, rounds: usize, burst: usize) {
     let mut ready = false;
     for _ in 0..10 {
         socket.send(probe).await.unwrap();
-        if let Ok(Ok(len)) = timeout(Duration::from_millis(300), socket.recv(&mut buf)).await {
-            if &buf[..len] == probe {
-                ready = true;
-                break;
-            }
+        if let Ok(Ok(len)) = timeout(Duration::from_millis(300), socket.recv(&mut buf)).await
+            && &buf[..len] == probe
+        {
+            ready = true;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

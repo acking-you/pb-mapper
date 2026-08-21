@@ -42,7 +42,7 @@ pub fn acquire_state_dir_lock(state_dir: &Path) -> Result<File, AuthFailure> {
 fn lock_exclusive_nonblock(file: &File) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        extern "C" {
+        unsafe extern "C" {
             fn flock(fd: i32, operation: i32) -> i32;
         }
         const LOCK_EX: i32 = 2;

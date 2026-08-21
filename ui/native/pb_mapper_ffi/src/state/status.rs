@@ -193,14 +193,13 @@ impl PbMapperState {
 
             if let Some(sender) = sender {
                 let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
-                if sender.send(response_sender).is_ok() {
-                    if let Ok(Ok(info)) =
+                if sender.send(response_sender).is_ok()
+                    && let Ok(Ok(info)) =
                         tokio::time::timeout(Duration::from_millis(200), response_receiver).await
-                    {
-                        status.active_connections = info.active_connections;
-                        status.registered_services = info.registered_services;
-                        status.uptime_seconds = info.uptime_seconds;
-                    }
+                {
+                    status.active_connections = info.active_connections;
+                    status.registered_services = info.registered_services;
+                    status.uptime_seconds = info.uptime_seconds;
                 }
             }
 

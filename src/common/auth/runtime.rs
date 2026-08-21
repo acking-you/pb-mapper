@@ -62,10 +62,10 @@ impl AuthRuntime {
             recover_instance_id_after_reset(&config.state_dir, &admin_key, instance_id)?;
         let (mut loaded, safe_mode) = load_persisted_state(&config, &admin_key, instance_id);
         let now = unix_seconds();
-        if let Some(state) = loaded.as_mut() {
-            if normalize_tombstone_times(state, now) {
-                write_snapshot_and_truncate_wal(&config, &admin_key, state)?;
-            }
+        if let Some(state) = loaded.as_mut()
+            && normalize_tombstone_times(state, now)
+        {
+            write_snapshot_and_truncate_wal(&config, &admin_key, state)?;
         }
         let mut slots = (0..config.max_temporary_keys)
             .map(|_| SlotHot::default())

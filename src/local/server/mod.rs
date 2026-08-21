@@ -17,15 +17,15 @@ use self::error::{
     EncodeRegisterReqSnafu, EncodeStreamAckMsgSnafu, ReadRegisterRespSnafu, ReadStreamReqSnafu,
     RegisterRespNotMatchSnafu, SendRegisterReqSnafu, WritePingMsgSnafu, WriteStreamAckMsgSnafu,
 };
-use self::stream::{handle_stream, StreamConnect};
-use crate::common::checksum::{get_process_credential, Credential};
+use self::stream::{StreamConnect, handle_stream};
+use crate::common::checksum::{Credential, get_process_credential};
 use crate::common::config::{
     control_conn_pool_size, control_heartbeat_interval, control_heartbeat_tolerance,
     control_io_timeout, control_suspect_grace, registration_probe_timeout,
 };
 use crate::common::message::command::{
-    LocalServer, MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq,
-    PbConnStatusResp, PbServerRequest, CONTROL_PROTOCOL_V2,
+    CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnRequest, PbConnResponse,
+    PbConnStatusReq, PbConnStatusResp, PbServerRequest,
 };
 use crate::common::message::forward::StreamForward;
 use crate::common::message::secure::ClientHeaderSession;
@@ -35,9 +35,9 @@ use crate::{
     snafu_error_get_or_continue, snafu_error_get_or_return, snafu_error_get_or_return_ok,
     snafu_error_handle,
 };
-use uni_stream::addr::{each_addr, ToSocketAddrs};
+use uni_stream::addr::{ToSocketAddrs, each_addr};
 use uni_stream::stream::{
-    got_one_socket_addr, set_tcp_keep_alive, set_tcp_nodelay, StreamProvider,
+    StreamProvider, got_one_socket_addr, set_tcp_keep_alive, set_tcp_nodelay,
 };
 
 fn get_ping_message(protocol_version: u16, seq: u64) -> error::Result<Vec<u8>> {
@@ -208,7 +208,7 @@ async fn probe_remote_registration(
         Err(_) => {
             return RegistrationProbeResult::Failed(format!(
                 "status probe timed out after {timeout:?}"
-            ))
+            ));
         }
     };
 
@@ -553,11 +553,13 @@ where
     let msg = snafu_error_get_or_return_ok!(request.encode().context(EncodeRegisterReqSnafu));
     match tokio::time::timeout(timeout, session.write_initial(&mut manager_stream, &msg)).await {
         Ok(result) => snafu_error_get_or_return_ok!(result.context(SendRegisterReqSnafu)),
-        Err(_) => snafu_error_get_or_return_ok!(ControlIoTimeoutSnafu {
-            action: "send register request",
-            timeout,
-        }
-        .fail()),
+        Err(_) => snafu_error_get_or_return_ok!(
+            ControlIoTimeoutSnafu {
+                action: "send register request",
+                timeout,
+            }
+            .fail()
+        ),
     }
     let (mut reader, mut writer) = manager_stream.into_split();
     let mut msg_reader = match session.response_reader(&mut reader) {
@@ -572,11 +574,13 @@ where
         let timeout = control_io_timeout();
         let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
             Ok(result) => snafu_error_get_or_return_ok!(result.context(ReadRegisterRespSnafu)),
-            Err(_) => snafu_error_get_or_return_ok!(ControlIoTimeoutSnafu {
-                action: "read register response",
-                timeout,
-            }
-            .fail()),
+            Err(_) => snafu_error_get_or_return_ok!(
+                ControlIoTimeoutSnafu {
+                    action: "read register response",
+                    timeout,
+                }
+                .fail()
+            ),
         };
         let resp = snafu_error_get_or_return_ok!(
             PbConnResponse::decode(msg).context(DecodeRegisterRespSnafu)

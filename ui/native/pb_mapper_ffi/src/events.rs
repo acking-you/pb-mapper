@@ -7,7 +7,7 @@
 //! mean taking the state lock on the emit path and guessing which projection
 //! the receiver wants.
 
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
@@ -71,7 +71,7 @@ pub fn emit(kind: ChangeKind, key: Option<&str>, origin: Origin) {
 ///
 /// # Safety
 /// `callback` must stay valid until it is replaced or cleared with null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_set_change_callback(callback: Option<ChangeCallback>) {
     CHANGE_CALLBACK.store(callback);
 }

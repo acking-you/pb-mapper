@@ -32,19 +32,19 @@ use self::error::{
     TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu, TaskCenterSendStatusRespSnafu,
     TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
 };
-use self::server::{handle_server_conn, ServerRegistration};
+use self::server::{ServerRegistration, handle_server_conn};
 use self::status::handle_show_status;
-use crate::common::auth::{AuthConfig, AuthContext, AuthRuntime, ADMIN_KEY_ID};
+use crate::common::auth::{ADMIN_KEY_ID, AuthConfig, AuthContext, AuthRuntime};
 use crate::common::config::{control_io_timeout, keep_alive_from_env, server_lease_timeout};
 use crate::common::conn_id::{ConnIdProvider, RemoteConnId};
 use crate::common::manager::{ForwardMessage, SenderChan, TaskManager};
+use crate::common::message::MessageWriter;
 use crate::common::message::command::{
     AdminConnectionInfo, AdminConnectionPage, AdminServiceInfo, AdminServicePage,
     MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
     PbServiceConnStatus,
 };
 use crate::common::message::secure::{HeaderProtocol, ServerHeaderSession, ServerSecurity};
-use crate::common::message::MessageWriter;
 use crate::pb_server::error::{
     ServerListenSnafu, TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,
     TaskCenterSendStreamRespToClientSnafu, TaskCenterSendSubcribeRespSnafu,
@@ -249,14 +249,14 @@ fn remove_server_conn(
     key: &ImutableKey,
     conn_id: RemoteConnId,
 ) -> bool {
-    if let Some(ids) = server_conn_map.get_mut(key) {
-        if let Some(idx) = ids.iter().position(|info| info.conn_id == conn_id) {
-            ids.remove(idx);
-            if ids.is_empty() {
-                server_conn_map.remove(key);
-            }
-            return true;
+    if let Some(ids) = server_conn_map.get_mut(key)
+        && let Some(idx) = ids.iter().position(|info| info.conn_id == conn_id)
+    {
+        ids.remove(idx);
+        if ids.is_empty() {
+            server_conn_map.remove(key);
         }
+        return true;
     }
     false
 }

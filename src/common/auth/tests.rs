@@ -356,12 +356,20 @@ async fn env_recovery_key_is_not_written_when_it_cannot_decrypt_existing_state()
     };
     write_snapshot_and_truncate_wal(&config, &good, &snapshot).unwrap();
     set_process_msg_header_key(Some(std::str::from_utf8(&bad).unwrap())).unwrap();
-    std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&bad).unwrap());
+    // SAFETY: this test holds `PROCESS_CREDENTIAL_TEST_LOCK`, which
+    // serialises every test that touches the process credential.
+    unsafe {
+        std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&bad).unwrap());
+    };
     let error = match AuthRuntime::from_process(config).await {
         Ok(_) => panic!("a mismatched recovery key must not start the runtime"),
         Err(error) => error,
     };
-    std::env::remove_var(ENV_MSG_HEADER_KEY);
+    // SAFETY: this test holds `PROCESS_CREDENTIAL_TEST_LOCK`, which
+    // serialises every test that touches the process credential.
+    unsafe {
+        std::env::remove_var(ENV_MSG_HEADER_KEY);
+    };
     set_process_msg_header_key(None).unwrap();
     assert_eq!(error.code, "administrator_key_invalid");
     assert!(
@@ -395,9 +403,17 @@ async fn env_recovery_key_is_accepted_for_wal_only_state() {
     )
     .unwrap();
     set_process_msg_header_key(Some(std::str::from_utf8(&good).unwrap())).unwrap();
-    std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&good).unwrap());
+    // SAFETY: this test holds `PROCESS_CREDENTIAL_TEST_LOCK`, which
+    // serialises every test that touches the process credential.
+    unsafe {
+        std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&good).unwrap());
+    };
     let started = AuthRuntime::from_process(config).await;
-    std::env::remove_var(ENV_MSG_HEADER_KEY);
+    // SAFETY: this test holds `PROCESS_CREDENTIAL_TEST_LOCK`, which
+    // serialises every test that touches the process credential.
+    unsafe {
+        std::env::remove_var(ENV_MSG_HEADER_KEY);
+    };
     set_process_msg_header_key(None).unwrap();
     started.expect("a matching recovery key must start from WAL-only state");
     assert!(
@@ -432,12 +448,20 @@ async fn env_recovery_key_is_not_written_when_wal_only_state_does_not_match() {
     )
     .unwrap();
     set_process_msg_header_key(Some(std::str::from_utf8(&bad).unwrap())).unwrap();
-    std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&bad).unwrap());
+    // SAFETY: this test holds `PROCESS_CREDENTIAL_TEST_LOCK`, which
+    // serialises every test that touches the process credential.
+    unsafe {
+        std::env::set_var(ENV_MSG_HEADER_KEY, std::str::from_utf8(&bad).unwrap());
+    };
     let error = match AuthRuntime::from_process(config).await {
         Ok(_) => panic!("a mismatched recovery key must not start from WAL-only state"),
         Err(error) => error,
     };
-    std::env::remove_var(ENV_MSG_HEADER_KEY);
+    // SAFETY: this test holds `PROCESS_CREDENTIAL_TEST_LOCK`, which
+    // serialises every test that touches the process credential.
+    unsafe {
+        std::env::remove_var(ENV_MSG_HEADER_KEY);
+    };
     set_process_msg_header_key(None).unwrap();
     assert_eq!(error.code, "administrator_key_invalid");
     assert!(
@@ -1412,13 +1436,15 @@ async fn revoking_keeps_the_row_until_its_retention_elapses() {
             .code,
         "temporary_key_revoked"
     );
-    assert!(runtime
-        .list(&admin, 0, 100)
-        .await
-        .unwrap()
-        .items
-        .iter()
-        .any(|item| item.key_id == key_id && item.state == "revoked"));
+    assert!(
+        runtime
+            .list(&admin, 0, 100)
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.key_id == key_id && item.state == "revoked")
+    );
 
     drop(runtime);
     tokio::time::sleep(Duration::from_millis(20)).await;

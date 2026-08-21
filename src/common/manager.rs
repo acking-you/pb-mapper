@@ -31,11 +31,11 @@ pub struct TaskManager<ManagerTaskType, ConnTaskType, ConnIdType, ConnIdProvider
 const DEFAULT_CHAN_CAP: usize = 1024;
 
 impl<
-        MangerChanType,
-        ConnChanType,
-        ConnIdType: ConnIdTrait,
-        ConnIdProviderType: ConnIdProvider<ConnIdType>,
-    > TaskManager<MangerChanType, ConnChanType, ConnIdType, ConnIdProviderType>
+    MangerChanType,
+    ConnChanType,
+    ConnIdType: ConnIdTrait,
+    ConnIdProviderType: ConnIdProvider<ConnIdType>,
+> TaskManager<MangerChanType, ConnChanType, ConnIdType, ConnIdProviderType>
 {
     pub fn new(
         conn_id_provider: ConnIdProviderType,

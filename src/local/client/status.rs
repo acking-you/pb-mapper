@@ -81,7 +81,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_status_times_out_when_peer_stalls_after_request() {
-        std::env::set_var("PB_MAPPER_CONTROL_IO_TIMEOUT", "20ms");
+        // SAFETY: no other thread in this test reads the environment.
+        unsafe { std::env::set_var("PB_MAPPER_CONTROL_IO_TIMEOUT", "20ms") };
         let (mut client, _server) = tokio::io::duplex(1024);
 
         let result = tokio::time::timeout(
@@ -91,7 +92,8 @@ mod tests {
         .await
         .expect("get_status ignored PB_MAPPER_CONTROL_IO_TIMEOUT");
 
-        std::env::remove_var("PB_MAPPER_CONTROL_IO_TIMEOUT");
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("PB_MAPPER_CONTROL_IO_TIMEOUT") };
         assert!(result.is_err());
     }
 }

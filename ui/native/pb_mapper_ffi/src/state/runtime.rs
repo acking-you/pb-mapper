@@ -101,12 +101,12 @@ impl PbMapperState {
                     tracing::info!("Server shutdown gracefully");
                 }
                 Err(_) => {
-                    if let Some(auth) = self.server_auth.as_ref() {
-                        if let Err(error) = auth.abort_actor().await {
-                            tracing::warn!(
-                                "timed out waiting for the authentication actor to drop: {error}"
-                            );
-                        }
+                    if let Some(auth) = self.server_auth.as_ref()
+                        && let Err(error) = auth.abort_actor().await
+                    {
+                        tracing::warn!(
+                            "timed out waiting for the authentication actor to drop: {error}"
+                        );
                     }
                     handle.abort();
                     let _ = handle.await;

@@ -5,7 +5,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use snafu::ResultExt;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{fmt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 use super::error::{CfgPbServerEnvNotExistSnafu, Result};
 
@@ -410,17 +410,27 @@ mod tests {
     fn keep_alive_reads_the_environment_every_time() {
         let restore = std::env::var(PB_MAPPER_KEEP_ALIVE).ok();
 
-        std::env::remove_var(PB_MAPPER_KEEP_ALIVE);
+        // SAFETY: mutating the environment is unsafe in edition 2024 because
+        // it is process-global. This is the only test that touches
+        // `PB_MAPPER_KEEP_ALIVE` — which is why it is one test and not several
+        // — and it restores the original value before returning.
+        unsafe {
+            std::env::remove_var(PB_MAPPER_KEEP_ALIVE);
+        }
         assert!(!keep_alive_from_env(), "absent means off");
 
-        std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
+        unsafe {
+            std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
+        }
         assert!(keep_alive_from_env(), "the documented spelling");
 
         // The regression. This used to be a `LazyLock<bool>`, so the answer was
         // whatever the first caller in the process saw and could never change —
         // which is why the UI's per-service toggle did nothing after the first
         // tunnel started.
-        std::env::set_var(PB_MAPPER_KEEP_ALIVE, "OFF");
+        unsafe {
+            std::env::set_var(PB_MAPPER_KEEP_ALIVE, "OFF");
+        }
         assert!(
             !keep_alive_from_env(),
             "OFF must mean off; the old check was `is_ok()`, so any value at \
@@ -428,17 +438,23 @@ mod tests {
         );
 
         for truthy in ["on", "1", "true", "yes", " ON "] {
-            std::env::set_var(PB_MAPPER_KEEP_ALIVE, truthy);
+            unsafe {
+                std::env::set_var(PB_MAPPER_KEEP_ALIVE, truthy);
+            }
             assert!(keep_alive_from_env(), "{truthy:?} should enable");
         }
         for falsy in ["", "off", "0", "false", "no"] {
-            std::env::set_var(PB_MAPPER_KEEP_ALIVE, falsy);
+            unsafe {
+                std::env::set_var(PB_MAPPER_KEEP_ALIVE, falsy);
+            }
             assert!(!keep_alive_from_env(), "{falsy:?} should not enable");
         }
 
-        match restore {
-            Some(value) => std::env::set_var(PB_MAPPER_KEEP_ALIVE, value),
-            None => std::env::remove_var(PB_MAPPER_KEEP_ALIVE),
+        unsafe {
+            match restore {
+                Some(value) => std::env::set_var(PB_MAPPER_KEEP_ALIVE, value),
+                None => std::env::remove_var(PB_MAPPER_KEEP_ALIVE),
+            }
         }
     }
 }

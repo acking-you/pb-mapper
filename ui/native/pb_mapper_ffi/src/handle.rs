@@ -1,7 +1,7 @@
 //! FFI handle lifecycle and app directory configuration.
 #![allow(clippy::missing_safety_doc)]
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 use std::ptr;
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ impl Drop for PbMapperHandle {
 ///
 /// # Safety
 /// Returns a pointer that must be freed with `pb_mapper_destroy`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
     let runtime = match Runtime::new() {
         Ok(rt) => rt,
@@ -57,7 +57,7 @@ pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
 ///
 /// # Safety
 /// `handle` must be a valid pointer returned by `pb_mapper_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_start_control_server(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn pb_mapper_start_control_server(
 ///
 /// # Safety
 /// `handle` must be a valid pointer returned by `pb_mapper_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_destroy(handle: *mut PbMapperHandle) {
     if !handle.is_null() {
         unsafe { drop(Box::from_raw(handle)) };
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn pb_mapper_destroy(handle: *mut PbMapperHandle) {
 ///
 /// # Safety
 /// `handle` must be valid. `path` must be valid C string or null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_set_app_dir(
     handle: *mut PbMapperHandle,
     path: *const c_char,

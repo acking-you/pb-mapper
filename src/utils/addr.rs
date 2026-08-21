@@ -2,7 +2,7 @@ use std::future::{self, Future};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::pin::Pin;
 use std::sync::LazyLock;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;

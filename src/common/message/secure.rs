@@ -23,19 +23,19 @@ use parking_lot::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
-use ring::digest::{digest, SHA256};
-use ring::hkdf::{Salt, HKDF_SHA256};
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+use ring::digest::{SHA256, digest};
+use ring::hkdf::{HKDF_SHA256, Salt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{
-    CodecMessageReader, CodecMessageWriter, DataLenType, MessageReader, MessageWriter, MAX_MSG_LEN,
+    CodecMessageReader, CodecMessageWriter, DataLenType, MAX_MSG_LEN, MessageReader, MessageWriter,
 };
 use crate::common::auth::{
-    AuthContext, AuthFailure, AuthRuntime, KeyId, LegacyConnectionGuard, ADMIN_KEY_ID,
+    ADMIN_KEY_ID, AuthContext, AuthFailure, AuthRuntime, KeyId, LegacyConnectionGuard,
 };
 use crate::common::checksum::{
-    get_process_credential, valid_checksum_for_key, AesKeyType, Credential,
+    AesKeyType, Credential, get_process_credential, valid_checksum_for_key,
 };
 use crate::common::error::{Error, Result};
 use crate::utils::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor};
@@ -160,7 +160,7 @@ impl ClientHeaderSession {
             Err(_) => {
                 return Err(protocol_error(format!(
                     "timed out writing first-flight request after {timeout:?}"
-                )))
+                )));
             }
         }
         let mut reader = self.response_reader(stream)?;
@@ -169,7 +169,7 @@ impl ClientHeaderSession {
             Err(_) => {
                 return Err(protocol_error(format!(
                     "timed out reading first-flight response after {timeout:?}"
-                )))
+                )));
             }
         };
         Ok(message.to_vec())
@@ -575,7 +575,7 @@ impl ServerSecurity {
                             error.to_string(),
                             false,
                             key_id,
-                        ))
+                        ));
                     }
                 }
             }
@@ -637,12 +637,12 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for HeaderMessageWriter<'_, T> {
 }
 
 mod frame;
-use frame::{derive_material, first_prefix, open_v2_payload, read_v2_frame, V2Material};
+use frame::{V2Material, derive_material, first_prefix, open_v2_payload, read_v2_frame};
 pub use frame::{V2MessageReader, V2MessageWriter};
 mod replay;
 #[cfg(test)]
 use replay::RotatingBloom;
-use replay::{replay_fingerprint, FirstFlightAdmit, ReplayGuard};
+use replay::{FirstFlightAdmit, ReplayGuard, replay_fingerprint};
 mod first_flight;
 use first_flight::*;
 fn legacy_message_reader<'a, T: AsyncReadExt + Unpin>(

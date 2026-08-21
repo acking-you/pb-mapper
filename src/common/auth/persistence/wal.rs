@@ -9,11 +9,11 @@ pub(in crate::common::auth) fn fail_closed_on_uncertain_wal(
     inner: &AuthStateInner,
     result: Result<(), AuthFailure>,
 ) -> Result<(), AuthFailure> {
-    if let Err(error) = &result {
-        if !error.retryable {
-            inner.safe_mode.store(true, Ordering::Release);
-            cancel_all_temporary_leases(inner);
-        }
+    if let Err(error) = &result
+        && !error.retryable
+    {
+        inner.safe_mode.store(true, Ordering::Release);
+        cancel_all_temporary_leases(inner);
     }
     result
 }

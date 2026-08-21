@@ -119,9 +119,7 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: common::error::Error,
     },
-    #[snafu(display(
-        "server conn write register resp error with `key:{key}` `conn_id:{conn_id}`"
-    ))]
+    #[snafu(display("server conn write register resp error with `key:{key}` `conn_id:{conn_id}`"))]
     ServerConnWriteRegisteredOk {
         key: Arc<str>,
         conn_id: RemoteConnId,
@@ -262,9 +260,7 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: common::error::Error,
     },
-    #[snafu(display(
-        "client conn write subcribe resp error with `key:{key}` `conn_id:{conn_id}`"
-    ))]
+    #[snafu(display("client conn write subcribe resp error with `key:{key}` `conn_id:{conn_id}`"))]
     ClientConnWriteSubcribeResp {
         key: Arc<str>,
         conn_id: RemoteConnId,

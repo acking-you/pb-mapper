@@ -247,11 +247,9 @@ impl ReplayGuard {
             }
             return Err(error);
         }
-        if created {
-            if let Err(error) = crate::common::auth::sync_parent_directory(path) {
-                self.log_failed = true;
-                return Err(std::io::Error::other(error.to_string()));
-            }
+        if created && let Err(error) = crate::common::auth::sync_parent_directory(path) {
+            self.log_failed = true;
+            return Err(std::io::Error::other(error.to_string()));
         }
         Ok(())
     }

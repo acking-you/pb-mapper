@@ -15,7 +15,7 @@ use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use crate::common::config::server_lease_timeout;
 use crate::common::conn_id::RemoteConnId;
 use crate::common::message::command::{
-    LocalServer, MessageSerializer, PbConnResponse, PbServerRequest, CONTROL_PROTOCOL_V2,
+    CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
 };
 use crate::common::message::secure::ServerHeaderSession;
 use crate::common::message::{MessageReader, MessageWriter};
@@ -582,7 +582,7 @@ mod tests {
     use crate::common::conn_id::RemoteConnId;
     use crate::pb_server::ManagerTask;
 
-    use super::{ServerConnGuard, SERVER_TIMEOUT};
+    use super::{SERVER_TIMEOUT, ServerConnGuard};
 
     #[test]
     fn server_timeout_has_slack_over_local_server_ping_interval() {

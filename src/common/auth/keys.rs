@@ -92,10 +92,10 @@ pub(super) fn recover_admin_key_after_rotation(
             false,
         )
     })?;
-    if let Ok(Credential::Admin(current_key)) = parse_credential(current.trim()) {
-        if open_blob(&current_key, &bytes).is_ok() {
-            return Ok(current.to_string());
-        }
+    if let Ok(Credential::Admin(current_key)) = parse_credential(current.trim())
+        && open_blob(&current_key, &bytes).is_ok()
+    {
+        return Ok(current.to_string());
     }
     let Some(next) = read_admin_key(&state_dir.join("admin.key.next"))? else {
         return Ok(current.to_string());

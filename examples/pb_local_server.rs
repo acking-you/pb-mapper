@@ -1,5 +1,5 @@
 use pb_mapper::common::config::init_tracing;
-use pb_mapper::local::server::{run_server_side_cli, ServerTunnelOptions};
+use pb_mapper::local::server::{ServerTunnelOptions, run_server_side_cli};
 use uni_stream::stream::TcpStreamProvider;
 
 #[tokio::main]

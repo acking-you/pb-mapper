@@ -51,26 +51,26 @@ pub(crate) fn linux_default_auth_state_dir(
     if euid == 0 || system_dir_usable {
         return PathBuf::from(DEFAULT_AUTH_STATE_DIR);
     }
-    if let Some(xdg) = xdg_data_home {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("pb-mapper").join("auth");
-        }
+    if let Some(xdg) = xdg_data_home
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("pb-mapper").join("auth");
     }
-    if let Some(home) = home {
-        if !home.is_empty() {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("pb-mapper")
-                .join("auth");
-        }
+    if let Some(home) = home
+        && !home.is_empty()
+    {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("pb-mapper")
+            .join("auth");
     }
     PathBuf::from(DEFAULT_AUTH_STATE_DIR)
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(super) fn unix_effective_uid() -> u32 {
-    extern "C" {
+    unsafe extern "C" {
         fn geteuid() -> u32;
     }
     unsafe { geteuid() }
@@ -88,7 +88,7 @@ fn unix_path_is_writable(path: &Path) -> bool {
     let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
         return false;
     };
-    extern "C" {
+    unsafe extern "C" {
         fn access(pathname: *const std::os::raw::c_char, mode: i32) -> i32;
     }
     const W_OK: i32 = 2;

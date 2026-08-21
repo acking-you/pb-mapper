@@ -8,9 +8,9 @@ use super::error::{
 };
 use super::{ConnTask, ManagerTask, ManagerTaskSender};
 use crate::common::conn_id::RemoteConnId;
+use crate::common::message::MessageWriter;
 use crate::common::message::command::{MessageSerializer, PbConnStatusReq};
 use crate::common::message::secure::ServerHeaderSession;
-use crate::common::message::MessageWriter;
 
 struct StatusConnGuard {
     conn_id: RemoteConnId,

@@ -3,15 +3,15 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::RwLock;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngExt;
-use ring::digest::{digest, SHA256};
+use ring::digest::{SHA256, digest};
 
 use super::message::DataLenType;
 
@@ -145,14 +145,21 @@ pub fn get_msg_header_key() -> Result<Vec<u8>, String> {
 pub fn set_process_msg_header_key(msg_header_key: Option<&str>) -> Result<(), String> {
     let normalized = msg_header_key.map(str::trim).unwrap_or("");
     if normalized.is_empty() {
-        std::env::remove_var(ENV_MSG_HEADER_KEY);
+        // SAFETY: edition 2024 makes these unsafe because the environment is
+        // process-global and another thread reading it concurrently is a data
+        // race. Here the environment is only a mirror for child processes and
+        // for the initial read at startup; the credential every operation
+        // actually consults is `MSG_HEADER_KEY_STATE`, behind an `RwLock`, and
+        // it is updated immediately below.
+        unsafe { std::env::remove_var(ENV_MSG_HEADER_KEY) };
         update_runtime_credential(None);
         return Ok(());
     }
 
     let credential = parse_credential(normalized)?;
 
-    std::env::set_var(ENV_MSG_HEADER_KEY, normalized);
+    // SAFETY: as above.
+    unsafe { std::env::set_var(ENV_MSG_HEADER_KEY, normalized) };
     update_runtime_credential(Some(credential));
     Ok(())
 }
@@ -240,18 +247,18 @@ fn get_machine_hostname() -> io::Result<String> {
         return Ok(hostname);
     }
 
-    if let Ok(content) = std::fs::read_to_string("/etc/hostname") {
-        if let Some(hostname) = normalize_non_empty(Some(content.as_str())) {
-            return Ok(hostname);
-        }
+    if let Ok(content) = std::fs::read_to_string("/etc/hostname")
+        && let Some(hostname) = normalize_non_empty(Some(content.as_str()))
+    {
+        return Ok(hostname);
     }
 
-    if let Ok(output) = Command::new("hostname").output() {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(hostname) = normalize_non_empty(Some(stdout.as_ref())) {
-                return Ok(hostname);
-            }
+    if let Ok(output) = Command::new("hostname").output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(hostname) = normalize_non_empty(Some(stdout.as_ref())) {
+            return Ok(hostname);
         }
     }
 
@@ -272,22 +279,22 @@ fn normalize_non_empty(input: Option<&str>) -> Option<String> {
 }
 
 fn get_machine_mac_addresses() -> io::Result<Vec<String>> {
-    if let Ok(mac_addresses) = get_machine_mac_addresses_from_sysfs() {
-        if !mac_addresses.is_empty() {
-            return Ok(mac_addresses);
-        }
+    if let Ok(mac_addresses) = get_machine_mac_addresses_from_sysfs()
+        && !mac_addresses.is_empty()
+    {
+        return Ok(mac_addresses);
     }
 
-    if let Ok(mac_addresses) = get_machine_mac_addresses_from_ip_link() {
-        if !mac_addresses.is_empty() {
-            return Ok(mac_addresses);
-        }
+    if let Ok(mac_addresses) = get_machine_mac_addresses_from_ip_link()
+        && !mac_addresses.is_empty()
+    {
+        return Ok(mac_addresses);
     }
 
-    if let Ok(mac_addresses) = get_machine_mac_addresses_from_ifconfig() {
-        if !mac_addresses.is_empty() {
-            return Ok(mac_addresses);
-        }
+    if let Ok(mac_addresses) = get_machine_mac_addresses_from_ifconfig()
+        && !mac_addresses.is_empty()
+    {
+        return Ok(mac_addresses);
     }
 
     Err(io::Error::new(

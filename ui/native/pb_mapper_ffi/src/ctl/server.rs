@@ -11,8 +11,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::ctl::endpoint;
-use crate::ctl::proto::{self, Request, Response, PROTOCOL_VERSION};
-use crate::ctl::{dispatch, Origin};
+use crate::ctl::proto::{self, PROTOCOL_VERSION, Request, Response};
+use crate::ctl::{Origin, dispatch};
 use crate::error::CtlError;
 use crate::state::PbMapperState;
 

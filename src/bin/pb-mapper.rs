@@ -19,27 +19,27 @@ use std::time::Duration;
 use better_mimalloc_rs::MiMalloc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use pb_mapper::common::auth::{
-    acquire_state_dir_lock, generate_admin_key, initialize_admin_key, write_admin_key_file,
     AuthConfig, KeyPage, LegacyProtocolPolicy, MAX_TEMP_KEY_CAPACITY, MAX_TEMP_KEY_TTL,
-    MIN_TEMP_KEY_TTL,
+    MIN_TEMP_KEY_TTL, acquire_state_dir_lock, generate_admin_key, initialize_admin_key,
+    write_admin_key_file,
 };
 use pb_mapper::common::checksum::set_process_msg_header_key;
-use pb_mapper::common::checksum::{setup_machine_msg_header_key, MACHINE_MSG_HEADER_KEY_PATH};
+use pb_mapper::common::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
 use pb_mapper::common::config::{
-    control_io_timeout, get_pb_mapper_server_async, get_sockaddr_async, init_tracing,
-    keep_alive_from_env, StatusOp,
+    StatusOp, control_io_timeout, get_pb_mapper_server_async, get_sockaddr_async, init_tracing,
+    keep_alive_from_env,
 };
+use pb_mapper::common::message::MessageReader;
 use pb_mapper::common::message::command::{
     AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage, MessageSerializer,
     PbConnRequest, PbConnResponse,
 };
 use pb_mapper::common::message::forward::StreamForward;
 use pb_mapper::common::message::secure::ClientHeaderSession;
-use pb_mapper::common::message::MessageReader;
 use pb_mapper::local::client::{
     handle_status_cli_scoped, run_client_side_cli_with_callback_scoped,
 };
-use pb_mapper::local::server::{run_server_side_cli_with_pinned_credential, ServerTunnelOptions};
+use pb_mapper::local::server::{ServerTunnelOptions, run_server_side_cli_with_pinned_credential};
 use pb_mapper::pb_server::run_server_with_shutdown;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -229,9 +229,18 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Publishes CLI flags as environment variables, which is how the auth
+/// subsystem reads its configuration.
+///
+/// # Safety note
+///
+/// Mutating the environment is unsafe in edition 2024 because it races
+/// concurrent readers. Every call here happens during argument handling on the
+/// main thread, before any runtime task or thread is spawned, so there is no
+/// concurrent reader to race.
 fn apply_server_auth_overrides(args: &ServerArgs) -> Result<(), Box<dyn Error>> {
     if let Some(auth_state_dir) = &args.auth_state_dir {
-        std::env::set_var("PB_MAPPER_AUTH_STATE_DIR", auth_state_dir);
+        unsafe { std::env::set_var("PB_MAPPER_AUTH_STATE_DIR", auth_state_dir) };
     }
     if let Some(max_temporary_keys) = args.max_temporary_keys {
         if !(1..=MAX_TEMP_KEY_CAPACITY).contains(&max_temporary_keys) {
@@ -240,10 +249,12 @@ fn apply_server_auth_overrides(args: &ServerArgs) -> Result<(), Box<dyn Error>> 
             )
             .into());
         }
-        std::env::set_var(
-            "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
-            max_temporary_keys.to_string(),
-        );
+        unsafe {
+            std::env::set_var(
+                "PB_MAPPER_AUTH_MAX_TEMP_KEYS",
+                max_temporary_keys.to_string(),
+            )
+        };
     }
     if let Some(max_temporary_key_ttl) = args.max_temporary_key_ttl {
         if max_temporary_key_ttl < MIN_TEMP_KEY_TTL || max_temporary_key_ttl > MAX_TEMP_KEY_TTL {
@@ -254,10 +265,12 @@ fn apply_server_auth_overrides(args: &ServerArgs) -> Result<(), Box<dyn Error>> 
             )
             .into());
         }
-        std::env::set_var(
-            "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
-            max_temporary_key_ttl.as_secs().to_string(),
-        );
+        unsafe {
+            std::env::set_var(
+                "PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS",
+                max_temporary_key_ttl.as_secs().to_string(),
+            )
+        };
     }
     Ok(())
 }
@@ -265,13 +278,17 @@ fn apply_server_auth_overrides(args: &ServerArgs) -> Result<(), Box<dyn Error>> 
 async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     apply_server_auth_overrides(&args)?;
     if let Some(legacy_protocol) = args.legacy_protocol {
-        std::env::set_var(
-            "PB_MAPPER_LEGACY_PROTOCOL",
-            match legacy_protocol {
-                LegacyProtocolArg::Allow => "allow",
-                LegacyProtocolArg::Deny => "deny",
-            },
-        );
+        // SAFETY: as in `apply_server_auth_overrides` — this runs before the
+        // server spawns anything that reads the environment.
+        unsafe {
+            std::env::set_var(
+                "PB_MAPPER_LEGACY_PROTOCOL",
+                match legacy_protocol {
+                    LegacyProtocolArg::Allow => "allow",
+                    LegacyProtocolArg::Deny => "deny",
+                },
+            )
+        };
     }
     let auth_config = AuthConfig::default();
     if args.init_admin_key {
@@ -426,7 +443,7 @@ fn parse_duration(raw: &str) -> Result<Duration, String> {
         _ => {
             return Err(format!(
                 "unsupported duration unit `{unit}`; use s, m, h, or d"
-            ))
+            ));
         }
     };
     value
@@ -548,17 +565,19 @@ mod tests {
             Cli::try_parse_from(["pb-mapper", "admin", "key", "list", "--page-size", "1001",])
                 .is_err()
         );
-        assert!(Cli::try_parse_from(
-            ["pb-mapper", "admin", "key", "issue", "--ttl", "1fortnight",]
-        )
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "pb-mapper",
-            "server",
-            "--init-admin-key",
-            "--use-machine-msg-header-key",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["pb-mapper", "admin", "key", "issue", "--ttl", "1fortnight",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "pb-mapper",
+                "server",
+                "--init-admin-key",
+                "--use-machine-msg-header-key",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

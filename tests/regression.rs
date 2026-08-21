@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pb_mapper::common::auth::{
-    write_admin_key_file, AuthConfig, AuthRuntime, LegacyProtocolPolicy, ADMIN_KEY_ID,
+    ADMIN_KEY_ID, AuthConfig, AuthRuntime, LegacyProtocolPolicy, write_admin_key_file,
 };
-use pb_mapper::common::checksum::{parse_credential, set_process_msg_header_key, Credential};
+use pb_mapper::common::checksum::{Credential, parse_credential, set_process_msg_header_key};
 use pb_mapper::common::message::command::{
     AdminRequest, AdminResponse, LocalServer, MessageSerializer, PbConnRequest, PbConnResponse,
     PbConnStatusReq, PbConnStatusResp, PbServerRequest, PbServiceConnStatus,
@@ -15,10 +15,10 @@ use pb_mapper::common::message::secure::{
     ClientHeaderSession, ServerHeaderSession, ServerSecurity,
 };
 use pb_mapper::common::message::{
-    get_header_msg_reader, get_header_msg_writer, MessageReader, MessageWriter,
+    MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
 };
 use pb_mapper::local::client::run_client_side_cli_with_callback;
-use pb_mapper::local::server::{run_server_side_cli_with_callback, ServerTunnelOptions};
+use pb_mapper::local::server::{ServerTunnelOptions, run_server_side_cli_with_callback};
 use pb_mapper::pb_server::run_server_with_auth_config;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -33,19 +33,27 @@ struct EnvVarGuard {
 }
 
 impl EnvVarGuard {
+    /// # Safety note
+    ///
+    /// Mutating the environment is unsafe in edition 2024 because it races
+    /// concurrent readers. The tests that use this guard set a variable no
+    /// other test reads, and the guard restores the previous value on drop.
     fn set(key: &'static str, value: &'static str) -> Self {
         let old_value = std::env::var(key).ok();
-        std::env::set_var(key, value);
+        unsafe { std::env::set_var(key, value) };
         Self { key, old_value }
     }
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        if let Some(value) = self.old_value.take() {
-            std::env::set_var(self.key, value);
-        } else {
-            std::env::remove_var(self.key);
+        // SAFETY: as in `set`.
+        unsafe {
+            if let Some(value) = self.old_value.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
         }
     }
 }
@@ -743,10 +751,10 @@ async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_sta
                         .unwrap();
                         let mut writer = session.response_writer(&mut stream).unwrap();
                         writer.write_msg(&response).await.unwrap();
-                        if count == 2 {
-                            if let Some(tx) = second_register_tx.lock().await.take() {
-                                tx.send(()).unwrap();
-                            }
+                        if count == 2
+                            && let Some(tx) = second_register_tx.lock().await.take()
+                        {
+                            tx.send(()).unwrap();
                         }
                         tracing::debug!(key, count, "fake server accepted register");
                         std::future::pending::<()>().await;

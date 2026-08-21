@@ -12,7 +12,7 @@ use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_str
 use crate::state::{ClientConfigInfo, ClientStatusResponse};
 
 /// Connect client to service.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_connect_service(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
 }
 
 /// Disconnect client from service.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_disconnect_service(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn pb_mapper_disconnect_service(
 }
 
 /// Delete client config (also stops client if running).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_delete_client_config(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn pb_mapper_delete_client_config(
 }
 
 /// Get client configs list.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_client_configs_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn pb_mapper_get_client_configs_json(
 }
 
 /// Get client status for a specific key.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_client_status_json(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
