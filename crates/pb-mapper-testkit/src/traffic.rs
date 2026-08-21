@@ -12,12 +12,14 @@ use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{StreamProvider, StreamSplit};
 use uni_stream::udp::tune_udp_socket;
 
-use crate::{PROBE, READY_TIMEOUT, UDP_TEST_PAYLOAD_MAX};
+use crate::{PROBE, RAW_TCP_PAYLOAD_MAX, READY_TIMEOUT, UDP_TEST_PAYLOAD_MAX};
 
-/// What an echo server tagged with `tag` replies to `payload`.
+/// What an echo server replies to `payload`, given the tag it still owes.
 ///
 /// The tag is a leading byte identifying which echo server answered; see
-/// [`crate::TunnelSpec::echo_tag`]. Untagged servers echo the payload verbatim.
+/// [`crate::TunnelSpec::echo_tag`]. Pass `None` once a TCP connection has already
+/// received it — on a stream it arrives once, not per reply — and for every
+/// untagged server, which echoes the payload verbatim.
 pub fn tagged_echo(tag: Option<u8>, payload: &[u8]) -> Vec<u8> {
     let mut expected = Vec::with_capacity(payload.len() + 1);
     expected.extend(tag);
@@ -177,22 +179,27 @@ pub async fn run_echo_delay<P: StreamProvider, A: ToSocketAddrs + Send>(addr: A,
 /// as many bytes as it expects.
 pub async fn run_raw_tcp_echo(addr: SocketAddr, rounds: usize, tag: Option<u8>) {
     let mut stream = TcpStream::connect(addr).await.unwrap();
-    for _ in 0..rounds {
+    // The tag arrives once, ahead of the first echoed byte on this connection —
+    // see the note in `echo.rs` for why it cannot be per reply on a stream.
+    let mut pending_tag = tag;
+    for round in 0..rounds {
+        // Deliberately past one segment and past the forwarding buffer, so a
+        // driver that assumed write boundaries survive would fail here.
+        let payload = gen_random_msg(RAW_TCP_PAYLOAD_MAX);
         // At least one byte, so a payload is never indistinguishable from a bare tag.
-        let payload = gen_random_msg(2000);
         let payload = if payload.is_empty() {
             vec![7u8]
         } else {
             payload
         };
-        let expected = tagged_echo(tag, &payload);
+        let expected = tagged_echo(pending_tag.take(), &payload);
         stream.write_all(&payload).await.unwrap();
         let mut echoed = vec![0u8; expected.len()];
         timeout(Duration::from_secs(5), stream.read_exact(&mut echoed))
             .await
-            .expect("raw tcp echo timed out")
-            .expect("raw tcp echo failed");
-        assert_eq!(expected, echoed);
+            .unwrap_or_else(|_| panic!("raw tcp echo round {round} timed out"))
+            .unwrap_or_else(|error| panic!("raw tcp echo round {round} failed: {error}"));
+        assert_eq!(expected, echoed, "raw tcp echo round {round} mismatched");
     }
 }
 

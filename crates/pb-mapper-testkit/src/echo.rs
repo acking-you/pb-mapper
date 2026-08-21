@@ -3,10 +3,19 @@
 //! Both take an already-bound socket, so the caller can learn the address without
 //! a window in which another test could take the port.
 //!
-//! `tag` prepends one byte to every reply. Two tunnels that share a service name
-//! in different namespaces get different tags, so a test can tell which echo
-//! server actually received the traffic — without it, a namespace leak would
-//! still satisfy payload equality, since both servers echo identically.
+//! `tag` identifies which echo server answered. Two tunnels that share a service
+//! name in different namespaces get different tags, so a test can tell which one
+//! actually received the traffic — without it, a namespace leak would still
+//! satisfy payload equality, since both servers echo identically.
+//!
+//! Where the tag goes differs by transport, because the transports differ in what
+//! they preserve. UDP keeps datagram boundaries, so every reply carries it. TCP
+//! keeps none: one write can arrive as several reads and several writes as one, so
+//! a tag per read would inject bytes into the middle of a payload. The TCP server
+//! therefore sends it **once, as the first byte of the connection**, and the reply
+//! stream is `tag` followed by the echoed bytes verbatim. That is well defined
+//! however the traffic happens to be chunked, and it is still enough to identify
+//! the server — which is all the tag is for.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -19,12 +28,14 @@ pub async fn tcp_echo_server(listener: TcpListener, tag: Option<u8>) {
         };
         tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
+            // Consumed by the first reply on this connection; see the module note.
+            let mut pending_tag = tag;
             loop {
                 match stream.read(&mut buf).await {
                     Ok(0) | Err(_) => return,
                     Ok(n) => {
                         let mut reply = Vec::with_capacity(n + 1);
-                        reply.extend(tag);
+                        reply.extend(pending_tag.take());
                         reply.extend_from_slice(&buf[..n]);
                         if stream.write_all(&reply).await.is_err() {
                             return;

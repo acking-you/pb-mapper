@@ -75,6 +75,13 @@ pub const PROBE: &[u8] = b"pb-mapper-probe";
 /// Upper bound on generated UDP payloads, comfortably inside one datagram.
 pub const UDP_TEST_PAYLOAD_MAX: usize = 1200;
 
+/// Upper bound on generated raw-TCP payloads.
+///
+/// Deliberately past both one segment and the 8 KiB initial forwarding buffer, so
+/// a driver that assumed a write arrives as one read is caught here rather than by
+/// whoever later raises a payload size.
+pub const RAW_TCP_PAYLOAD_MAX: usize = 20_000;
+
 /// Tracing plus the process credential, set up once per test process.
 ///
 /// The framing helpers in this crate ([`run_echo_delay`] and the TCP probe) write
@@ -83,6 +90,16 @@ pub const UDP_TEST_PAYLOAD_MAX: usize = 1200;
 /// unrelated to which credential a tunnel authenticates with: `pb-mapper`'s local
 /// side is byte-transparent, so these frames are only ever read back by the same
 /// process that wrote them.
+///
+/// This establishes the baseline for the whole test binary rather than taking
+/// `PROCESS_CREDENTIAL_TEST_LOCK` around a write, which is why the `LazyLock` is
+/// the whole synchronisation: it runs once, before any case can observe the
+/// credential, and never writes again. **The consequence is a rule for test
+/// files: a target that uses this crate must not also set the process credential
+/// itself.** There is no lock to coordinate with — a case that wrote its own
+/// would corrupt the framing under every concurrent case in the binary. A case
+/// that needs a different credential should pass it to
+/// [`TunnelSpec::credential`], which is per tunnel and touches nothing global.
 pub fn init_test_env() {
     static TEST_ENV: LazyLock<()> = LazyLock::new(|| {
         init_tracing();
@@ -139,12 +156,18 @@ impl Transport {
     }
 }
 
-/// Reserve a loopback port by binding it and immediately dropping the socket.
+/// Pick a free loopback port by binding it and immediately dropping the socket.
 ///
-/// TCP and UDP have separate port spaces, so the reservation has to use the same
-/// protocol the caller will bind. A relay and an echo server keep the socket they
-/// bound; this is for `connect`, whose bind happens inside the client and cannot
-/// be handed a pre-bound socket.
+/// TCP and UDP have separate port spaces, so this has to use the same protocol the
+/// caller will bind. A relay and an echo server keep the socket they bound; this is
+/// for `connect`, whose bind happens inside the client and cannot be handed a
+/// pre-bound socket.
+///
+/// That leaves a window between the drop and the real bind, so this is not a
+/// reservation and cannot be made into one. What keeps it from colliding in
+/// practice: the ephemeral range holds tens of thousands of ports, and a kernel
+/// does not hand back a just-released one while others are free. A test that can
+/// own its socket outright should do that instead of calling this.
 pub async fn reserve_addr(transport: Transport) -> std::net::SocketAddr {
     match transport {
         Transport::Tcp => {

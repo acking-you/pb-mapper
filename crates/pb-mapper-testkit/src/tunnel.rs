@@ -35,7 +35,8 @@ pub struct TunnelSpec {
     namespace: Option<u64>,
     /// Required for an administrator registering into a temporary namespace.
     force_namespace: bool,
-    /// A byte the echo server prepends to every reply, identifying it.
+    /// A byte identifying the echo server: per datagram on UDP, once per
+    /// connection on TCP.
     echo_tag: Option<u8>,
 }
 
@@ -99,11 +100,15 @@ impl TunnelSpec {
         self
     }
 
-    /// Have this tunnel's echo server stamp every reply with `tag`.
+    /// Have this tunnel's echo server identify itself with `tag`.
     ///
     /// Two tunnels sharing a service name across namespaces need distinct tags:
     /// without them, traffic reaching the wrong echo server would still come back
     /// byte-identical and the test would pass on a leak.
+    ///
+    /// A UDP server tags every datagram; a TCP server tags the connection once,
+    /// ahead of its first echoed byte. See `echo.rs` for why a stream cannot carry
+    /// it per reply.
     pub fn echo_tag(mut self, tag: u8) -> Self {
         self.echo_tag = Some(tag);
         self
@@ -125,6 +130,15 @@ pub struct Tunnel {
     transport: Transport,
     service_key: String,
     echo_tag: Option<u8>,
+    /// The socket every UDP probe reuses.
+    ///
+    /// The relay keys UDP streams by source address, so a fresh socket starts a
+    /// fresh stream whose first datagram can be dropped during setup. Probing on
+    /// one socket means a retry exercises the stream the previous attempt
+    /// established, rather than opening another one — and it is what makes
+    /// [`Self::wait_until_not_forwarding`] observe the established stream going
+    /// away instead of a new stream failing to start.
+    udp_probe_socket: Option<UdpSocket>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -231,11 +245,17 @@ impl Tunnel {
             }
         }));
 
+        let udp_probe_socket = match transport {
+            Transport::Tcp => None,
+            Transport::Udp => Some(connected_udp_socket(tunnel_addr).await),
+        };
+
         let tunnel = Self {
             tunnel_addr,
             transport,
             service_key,
             echo_tag,
+            udp_probe_socket,
             tasks,
         };
         tunnel.wait_until_forwarding().await;
@@ -255,12 +275,16 @@ impl Tunnel {
         &self.service_key
     }
 
-    /// The tag this tunnel's echo server prepends, if any.
+    /// The tag this tunnel's echo server identifies itself with, if any.
     pub fn echo_tag(&self) -> Option<u8> {
         self.echo_tag
     }
 
-    /// What a reply to `payload` should look like, tag included.
+    /// What a reply to a single probe should look like, tag included.
+    ///
+    /// Correct for both transports because a probe is one datagram, or the first
+    /// and only exchange on a fresh connection — which is exactly where a TCP
+    /// tag sits.
     fn expected_echo(&self, payload: &[u8]) -> Vec<u8> {
         let mut expected = Vec::with_capacity(payload.len() + 1);
         expected.extend(self.echo_tag);
@@ -328,8 +352,11 @@ impl Tunnel {
     }
 
     async fn probe_udp(&self) -> Result<(), String> {
-        let socket = connected_udp_socket(self.tunnel_addr).await;
-        probe_udp_socket(&socket, &self.expected_echo(PROBE)).await
+        let socket = self
+            .udp_probe_socket
+            .as_ref()
+            .ok_or_else(|| "no udp probe socket on a tcp tunnel".to_string())?;
+        probe_udp_socket(socket, &self.expected_echo(PROBE)).await
     }
 }
 
@@ -374,5 +401,63 @@ impl TunnelHarness {
     /// Where a test client sends its traffic.
     pub fn tunnel_addr(&self) -> SocketAddr {
         self.tunnel.addr()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    use super::*;
+    use crate::{RAW_TCP_PAYLOAD_MAX, run_raw_tcp_echo};
+
+    /// A tagged TCP tunnel carries a payload larger than one read intact.
+    ///
+    /// This is the case the harness got wrong: the echo server tagged every read,
+    /// so a payload that arrived as two reads came back with a tag injected into
+    /// its middle. It only showed up past roughly 4 KiB, which the driver's
+    /// payloads did not reach — so the bug sat under passing tests, waiting for
+    /// whoever raised the size.
+    #[tokio::test]
+    async fn a_tagged_tcp_tunnel_survives_a_payload_larger_than_one_read() {
+        let relay = Relay::start("tag-fragmentation").await;
+        let tunnel = relay
+            .start_tunnel(TunnelSpec::new(Transport::Tcp).echo_tag(b'1'))
+            .await;
+
+        let mut stream = TcpStream::connect(tunnel.addr()).await.unwrap();
+        // Past one segment and past the 8 KiB initial forwarding buffer, so the
+        // echo server is guaranteed more than one read.
+        let payload = vec![0xABu8; 64 * 1024];
+        stream.write_all(&payload).await.unwrap();
+
+        let mut echoed = vec![0u8; payload.len() + 1];
+        tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut echoed))
+            .await
+            .expect("tagged echo timed out")
+            .expect("tagged echo failed");
+
+        assert_eq!(echoed[0], b'1', "the reply should open with the tag");
+        assert_eq!(
+            &echoed[1..],
+            &payload[..],
+            "the payload came back altered, so a tag was injected mid-stream"
+        );
+    }
+
+    /// The driver's payloads must be able to exceed one read, or the case below
+    /// proves nothing about fragmentation.
+    const _: () = assert!(RAW_TCP_PAYLOAD_MAX > 8 * 1024);
+
+    /// The driver agrees with the server about where the tag goes, over enough
+    /// rounds that its random sizes cross the fragmentation threshold.
+    #[tokio::test]
+    async fn the_raw_tcp_driver_agrees_with_a_tagged_server() {
+        let relay = Relay::start("tag-driver").await;
+        let tunnel = relay
+            .start_tunnel(TunnelSpec::new(Transport::Tcp).echo_tag(b'7'))
+            .await;
+        run_raw_tcp_echo(tunnel.addr(), 12, Some(b'7')).await;
     }
 }
