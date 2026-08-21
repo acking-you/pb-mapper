@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Rust-based network tunneling/proxy system called `pb-mapper` that allows exposing local services to clients over a public network. The project enables users to access their home services (like file transfer servers) from anywhere by creating secure tunnels through a public server.
 
-The system uses one **pb-mapper** binary (`src/bin/pb-mapper.rs`) with explicit role commands:
+The system uses one **pb-mapper** binary (`crates/pb-mapper-cli/src/bin/pb-mapper.rs`) with explicit role commands:
 
 1. **`pb-mapper server`**: Central server that manages connections between local services and clients
    - Runs on port 7666 by default
@@ -25,7 +25,11 @@ The system uses one **pb-mapper** binary (`src/bin/pb-mapper.rs`) with explicit 
 
 4. **`pb-mapper status`**: Queries remote IDs and registered service keys
 
-5. **UI Module** (`ui/`): Flutter graphical interface
+5. **`pb-mapper admin`**: Administrator operations against a running server —
+   issuing, listing, and revoking temporary credentials, rotating the
+   administrator key, and listing services and connections
+
+6. **UI Module** (`ui/`): Flutter graphical interface
    - Replaces all CLI functionality with a user-friendly GUI
    - Calls into Rust through raw `dart:ffi` against the `pb-mapper-ffi` crate
    - Provides comprehensive service management interface
@@ -36,62 +40,101 @@ The system works by creating a bridge between local services and remote clients 
 
 ### Project Structure
 
+The root `Cargo.toml` is a virtual manifest; every crate lives under `crates/`,
+except the FFI cdylib, which sits next to the Flutter code that loads it.
+
 ```
 pb-mapper/
-├── src/                    # Main Rust codebase
-│   ├── bin/               # Unified pb-mapper CLI entry point
-│   ├── pb_server/         # Central server implementation
-│   ├── local/             # Local service handlers (server/client)
-│   ├── common/            # Shared utilities and protocols
-│   └── utils/             # Helper functions
+├── crates/
+│   ├── pb-mapper-core/     # Bottom layer: checksum, config, conn_id, error,
+│   │                       # addr, codec, timeout, durable_file, DataLenType
+│   ├── pb-mapper-auth/     # Credential lifecycle, persistence, timing wheel
+│   ├── pb-mapper-protocol/ # Message framing, v2 secure sessions, forwarding
+│   ├── pb-mapper-server/   # Central relay server, plus the task manager
+│   ├── pb-mapper-client/   # Both tunnel ends: `register` and `connect`
+│   └── pb-mapper-cli/      # The `pb-mapper` binary, integration tests, examples
 ├── ui/                    # Flutter UI, talking to Rust over dart:ffi
 │   ├── lib/               # Flutter application code
 │   │   ├── l10n/          # ARB sources and generated AppLocalizations
 │   │   └── src/ffi/       # The Dart side of the FFI boundary
 │   ├── native/pb_mapper_ffi/  # C ABI crate (a workspace member)
 │   └── test/              # Widget tests
-├── examples/              # Example implementations
-├── tests/                 # Integration tests
 ├── docker/                # Docker deployment configuration
 └── services/              # Systemd service files
 ```
 
+The dependency graph is a DAG, and the layering is what the crate split
+encodes:
+
+```
+pb-mapper-cli          pb-mapper-ffi
+      │                      │
+      └────┬─────────────────┤
+           ▼                 ▼
+    pb-mapper-server   pb-mapper-client   (peers: no reference either way)
+           └──────┬──────────┘
+                  ▼
+          pb-mapper-protocol
+                  ▼
+            pb-mapper-auth
+                  ▼
+            pb-mapper-core
+```
+
+Note that the binary is still named `pb-mapper`, discovered from
+`src/bin/pb-mapper.rs` inside `pb-mapper-cli`. The release workflows, both
+Dockerfiles, and the install scripts hardcode that name, and `cargo build --bin
+pb-mapper` resolves it from the workspace root regardless of the crate name.
+Likewise `pb-mapper-ffi` keeps its package name, because it determines the
+`libpb_mapper_ffi.{so,dylib,a}` / `pb_mapper_ffi.dll` filenames that the Dart
+loader, two CMakeLists, four xcconfigs, and the release-ui hash checks expect.
+
 ### Core Modules
 
-#### Rust Backend (`src/`)
-- **`src/pb_server/`**: Central server implementation
-  - `server.rs`: Main server logic with connection management
-  - `client.rs`: Client connection handling
-  - `status.rs`: Server status reporting
-  - `mod.rs`: Server manager with ManagerTask and ConnTask enums
+#### Rust Backend (`crates/`)
+- **`pb-mapper-core/`**: The bottom layer; depends on no other crate here
+  - `checksum.rs`: The process credential, and the framing checksum over `datalen`
+  - `config.rs`: Environment configuration and address resolution entry points
+  - `conn_id.rs`: Connection ID types
+  - `error.rs`: The shared error type, plus the `snafu_error_*` macros
+  - `addr.rs`: Address resolution; custom DNS servers on the async path
+  - `codec.rs`: AES-256-GCM encrypt/decrypt
+  - `timeout.rs`: `RetryBackoff`
+  - `durable_file.rs`: Atomic replace and parent-directory fsync
+  - `test_support.rs`: `PROCESS_CREDENTIAL_TEST_LOCK`, shared across crates' tests
+  - `lib.rs`: `DataLenType`, which lives here so `checksum` and `error` can name it
 
-- **`src/local/server/`**: Local service registration (`register` functionality)
-  - `stream.rs`: Stream handling for service registration
-  - `mod.rs`: Registration logic and server-side CLI implementation
-  - `error.rs`: Server-specific error handling
+- **`pb-mapper-auth/`**: The credential subsystem, and the largest one
+  - `lib.rs`: `AuthRuntime`, `AuthContext`, `AuthFailure`, `KeyId`
+  - `runtime.rs`: Key derivation and authentication of a presented key
+  - `actor/`: The lifecycle actor — `epoch.rs` for root rotation
+  - `persistence/`: `snapshot.rs`, `wal.rs`, `blob.rs`, `admin_key.rs`, `fs.rs`
+  - `timing_wheel.rs`: Hierarchical wheel driving credential expiry
+  - `leases.rs`, `keys.rs`, `ids.rs`, `config.rs`: Leases, key material, platform dirs
 
-- **`src/local/client/`**: Client connection handling (`connect` functionality)
-  - `stream.rs`: Stream management for client connections
-  - `status.rs`: Status checking and reporting
-  - `mod.rs`: Client-side CLI implementation
-  - `error.rs`: Client-specific error handling
+- **`pb-mapper-protocol/`**: Framing and the authenticated session
+  - `lib.rs`: The checksum + length framing, and the reader/writer traits
+  - `command.rs`: Request/response types (`PbConnRequest`, `LocalServer`, `AdminRequest`, …)
+  - `secure.rs`: Protocol-v2 single-flight sessions, client and server
+  - `secure/`: `frame.rs`, `first_flight.rs`, `replay.rs`, `limiter.rs`
+  - `forward.rs`: Stream and datagram forwarding
+  - `buffer.rs`: Read buffers for the framing
 
-- **`src/common/`**: Shared utilities and protocols
-  - `message/`: Protocol definitions (command.rs, forward.rs)
-  - `config.rs`: Configuration management and environment variables
-  - `stream.rs`: Stream abstractions (TcpStreamProvider, UdpStreamProvider)
-  - `listener.rs`: Listener abstractions (TcpListenerProvider, UdpListenerProvider)
-  - `manager.rs`: Connection management utilities
-  - `buffer.rs`: Buffer management for data streaming
-  - `checksum.rs`: Data integrity verification
-  - `conn_id.rs`: Connection ID management
-  - `error.rs`: Common error definitions
+- **`pb-mapper-server/`**: The central relay
+  - `lib.rs`: `ManagerTask` / `ConnTask`, and the routing domain model
+  - `runtime.rs`: Serialises the global routing maps and quotas (the largest file)
+  - `connection.rs`: Per-socket authentication and dispatch
+  - `server.rs`, `client.rs`: The service-side and subscriber-side loops
+  - `admin.rs`: Administrator request handling
+  - `status.rs`, `error.rs`, `manager.rs`: Status replies, errors, the task manager
 
-- **`src/utils/`**: Helper functions
-  - `addr.rs`: Address resolution with OneOrMore enum for multiple addresses
-  - `codec.rs`: Encryption/decryption utilities
-  - `timeout.rs`: Timeout handling mechanisms
-  - `udp.rs`: UDP-specific utilities
+- **`pb-mapper-client/`**: Both ends of a tunnel
+  - `server/`: `register` — publishes a local service (`mod.rs`, `stream.rs`, `error.rs`)
+  - `client/`: `connect` — subscribes and listens locally, plus `status.rs`
+
+- **`pb-mapper-cli/`**: The binary, integration tests, and examples
+  - `src/bin/pb-mapper.rs`: Argument parsing and the role commands
+  - `src/bin/pb-mapper/admin.rs`: The `admin` subcommand
 
 #### Flutter UI (`ui/`)
 - **`lib/src/views/`**: One file per zone the shell can show
@@ -126,12 +169,17 @@ pb-mapper/
 
 ### Key Components
 
-1. **Message Protocol** (`src/common/message/`): 
+1. **Message Protocol** (`crates/pb-mapper-protocol/`):
    - **Command Protocol** (`command.rs`): Defines request/response types:
      - `PbConnStatusReq`/`PbConnStatusResp`: Status checking
      - `PbConnRequest`/`PbConnResponse`: Connection management
      - `PbServerRequest`: Server operation requests
-     - `LocalService`: Service type definitions (TCP/UDP)
+     - `LocalServer`: Service type definitions (TCP/UDP)
+     - `AdminRequest`/`AdminResponse`: Administrator operations
+   - **Secure sessions** (`secure.rs`): Protocol-v2 first flight — the initial
+     frame carries a clear-text routing prefix plus an authenticated encrypted
+     request, adding no extra round trip, and later frames on the connection use
+     directional keys with monotonic counters
    - **Forward Protocol** (`forward.rs`): Data forwarding mechanisms
    - Uses JSON serialization with custom framing (checksum + length header)
    - Supports encryption/decryption for secure communication via ring crate
@@ -142,15 +190,17 @@ pb-mapper/
    - Implements keep-alive and timeout mechanisms
    - Uses actor model for concurrent connection handling
 
-3. **Stream Abstractions**:
-   - `StreamProvider` trait for TCP/UDP stream handling
-   - `ListenerProvider` trait for TCP/UDP listener management
-   - Unified interface for different transport protocols
+3. **Stream Abstractions**: `StreamProvider` and `ListenerProvider` give TCP and
+   UDP one interface. These live in the external `uni-stream` crate, not in this
+   repository.
 
-4. **Configuration System**:
-   - Environment variable support:
-     - `PB_MAPPER_SERVER`: Remote server address
-     - `PB_MAPPER_KEEP_ALIVE`: TCP keep-alive setting
+4. **Authentication** (`crates/pb-mapper-auth/`): An administrator key plus
+   derived temporary credentials, persisted through a write-ahead log and
+   snapshots, with expiry driven by a hierarchical timing wheel. See
+   `docs/authentication-v2.md`.
+
+5. **Configuration System**:
+   - Environment variables (see Environment Variables below)
    - Command-line argument parsing with clap
    - Workspace-based dependency management
 
@@ -184,16 +234,20 @@ and it is what lets a widget test substitute `FakePbMapperApi`
 
 ### Current UI Implementation Status
 
-The UI is fully implemented with the following structure:
+Every view under `ui/lib/src/views/`:
 
 - **Main App** (`ui/lib/main.dart`): Entry point with navigation and theme management
 - **Landing Page** (`main_landing_view.dart`): Central navigation hub
-- **Server Management** (`server_management_page.dart`, `server_management_view.dart`): Complete server control
-- **Service Registration** (`service_registration_page.dart`, `service_registration_view.dart`): Service registration interface
-- **Client Connection** (`client_connection_page.dart`, `client_connection_view.dart`): Client connection management
+- **Setup Wizard** (`setup_wizard_view.dart`): First-run guided setup
+- **Service Registration** (`service_registration_view.dart`): The register workspace
+- **Registered Services** (`registered_services_view.dart`): What this process has registered
+- **Client Connection** (`client_connection_view.dart`): The connect workspace
 - **Status Monitoring** (`status_monitoring_view.dart`): Real-time status dashboard
 - **Configuration** (`configuration_view.dart`): Environment and settings management
-- **Logging** (`log_display_widget.dart`, `log_manager.dart`): Comprehensive log viewing
+- **Logging** (`log_view_page.dart`, `src/common/log_manager.dart` (under `ui/lib/`)): The log stream
+
+There is no separate server-management view: starting and stopping the relay is
+part of the landing page and the setup wizard.
 
 ### UI Features Implemented
 
@@ -265,29 +319,34 @@ The UI is fully implemented with the following structure:
 - **FFI Integration**: Direct `dart:ffi` calls into the `pb-mapper-ffi` crate
 - **Real-time Updates**: Live status monitoring and log streaming
 - **Configuration Management**: Persistent settings and environment variable management
-- **Multi-platform**: Desktop, mobile, and web support
+- **Multi-platform**: Desktop and mobile. There is no web/wasm target — the UI
+  loads a native library over `dart:ffi`, which the web cannot do.
 
 ## Development Notes
 
 ### Project Structure & Dependencies
-- **Workspace Configuration**: Multi-crate workspace with shared dependencies in root `Cargo.toml`
+- **Workspace Configuration**: Virtual manifest at the root; versions are pinned
+  once in `[workspace.dependencies]` and crates take them with `.workspace = true`
 - **Memory Optimization**: Uses mimalloc-rust for improved memory allocation performance
-- **Error Handling**: Comprehensive error handling with snafu crate across all modules
+- **Error Handling**: snafu, with each crate owning its own error type and wrapping
+  the layer below as a `source` rather than sharing one workspace-wide enum
 - **Async Runtime**: Built on Tokio with full async/await support
 - **Serialization**: serde and serde_json for message serialization
-- **Networking**: socket2 for low-level socket operations, trust-dns-resolver for DNS
+- **Networking**: uni-stream for the stream/listener abstractions, hickory-resolver
+  for DNS (custom resolvers on the async path only — the sync path uses `std`,
+  since hickory has no blocking resolver)
 - **Cryptography**: ring crate for encryption/decryption functionality
 
 ### Code Quality & Standards
-- **Linting**: Strict clippy rules in UI native hub (deny unwrap_used, expect_used, wildcard_imports)
+- **Linting**: `unwrap_used` and `expect_used` are denied for the whole workspace
+  via `[workspace.lints]`; `clippy.toml` exempts test code, and `tests/` and
+  `examples/` targets carry a file-level allow. A production `unwrap` needs a
+  reason recorded at the site.
 - **Formatting**: rustfmt.toml configuration for consistent code style
 - **Toolchain**: rust-toolchain.toml for reproducible builds
-- **Testing**: Comprehensive test suite in `tests/` directory
-
-### Build Profiles
-- **wasm-dev**: Optimized for WebAssembly builds
-- **server-dev**: Development profile for server components
-- **android-dev**: Android-specific build optimizations
+- **Testing**: Unit tests live beside the code; integration tests are in
+  `crates/pb-mapper-cli/tests/`, which is the crate that depends on every layer
+  they exercise
 
 ### UI Development Guidelines
 - **Framework**: Flutter 3.44.9, Material 3. CI pins the same version.
@@ -299,9 +358,23 @@ The UI is fully implemented with the following structure:
 - **Responsive Design**: Adaptive layouts for different screen sizes
 
 ### Environment Variables
+
+The commonly used ones:
+
 - **`PB_MAPPER_SERVER`**: Default remote server address for CLI tools
-- **`PB_MAPPER_KEEP_ALIVE`**: Global TCP keep-alive setting ("ON" to enable)
+- **`PB_MAPPER_KEEP_ALIVE`**: TCP keep-alive ("ON", "1", "true", "yes" to enable).
+  Read on every call, not cached — the UI's per-service toggle depends on that.
+- **`MSG_HEADER_KEY`**: The process credential, administrator or temporary.
+  Required; there is no insecure default.
 - **`RUST_LOG`**: Tracing level configuration (supports env-filter)
+- **`PB_MAPPER_LOG_FORMAT`**: Log output format
+
+Timeouts, intervals, and pool sizes are also configurable, and there are more
+than a dozen: the authoritative list is the `pub const PB_MAPPER_*` declarations
+at the top of `crates/pb-mapper-core/src/config.rs`, each read by the accessor
+named after it. Beyond those, `PB_MAPPER_AUTH_STATE_DIR`,
+`PB_MAPPER_LEGACY_PROTOCOL`, and `PB_MAPPER_NEW_STREAMS_PER_SECOND` are read by
+name where they are used; the first two are also settable as `server` flags.
 
 ## Development Workflow
 

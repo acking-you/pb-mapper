@@ -321,17 +321,22 @@ state.
 
 ## Code index
 
-- Credential format and process configuration: `src/common/checksum.rs`
-- Authentication facade and shared model: `src/common/auth.rs`
-- Lifecycle actor, persistence, runtime, and timing wheel:
-  `src/common/auth/{actor,persistence,runtime,timing_wheel}.rs`
+- Credential format and process configuration:
+  `crates/pb-mapper-core/src/checksum.rs`
+- Authentication facade and shared model: `crates/pb-mapper-auth/src/lib.rs`
+- Lifecycle actor: `crates/pb-mapper-auth/src/actor/`
+- Persistence: `crates/pb-mapper-auth/src/persistence/`
+- Runtime and timing wheel: `crates/pb-mapper-auth/src/runtime.rs` and
+  `crates/pb-mapper-auth/src/timing_wheel.rs`
 - V2 session facade plus frame, limiter, and replay modules:
-  `src/common/message/secure.rs` and `src/common/message/secure/`
+  `crates/pb-mapper-protocol/src/secure.rs` and
+  `crates/pb-mapper-protocol/src/secure/`
 - Relay state, runtime loop, and connection dispatch:
-  `src/pb_server/{mod,runtime,connection}.rs`
-- Administrator request execution: `src/pb_server/admin.rs`
-- Unified CLI and administrator command module: `src/bin/pb-mapper.rs` and
-  `src/bin/pb-mapper/admin.rs`
+  `crates/pb-mapper-server/src/lib.rs`, `runtime.rs`, and `connection.rs`
+- Administrator request execution: `crates/pb-mapper-server/src/admin.rs`
+- Unified CLI and administrator command module:
+  `crates/pb-mapper-cli/src/bin/pb-mapper.rs` and
+  `crates/pb-mapper-cli/src/bin/pb-mapper/admin.rs`
 
 ## Summary
 

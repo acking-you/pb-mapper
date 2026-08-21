@@ -10,7 +10,7 @@
 
 ## 1. 问题从哪里来
 
-重构 `src/common/auth/timing_wheel.rs` 时，中间某一版长成这样：
+重构 `crates/pb-mapper-auth/src/timing_wheel.rs` 时，中间某一版长成这样：
 
 ```rust
 struct Queues {
@@ -245,7 +245,7 @@ where F: Future + Send + 'static, F::Output: Send + 'static
 
 第 1 节那版每级一把 `Mutex`，走的是「`Drop` 里投递 → 需要共享 `Queues` → 加锁」。
 现在 `Link::Relay` 只是纯数据，`tick` 拿 `&mut self` 自己投递
-（`src/common/auth/timing_wheel.rs`）：
+（`crates/pb-mapper-auth/src/timing_wheel.rs`）：
 
 ```rust
 Link::Relay { level, slot, next } => self.file(level as usize, slot as usize, *next),
@@ -257,7 +257,7 @@ Link::Relay { level, slot, next } => self.file(level as usize, slot as usize, *n
 
 ```rust
 pub struct AuthLease {
-    expires_at: AtomicU64,   // src/common/auth.rs
+    expires_at: AtomicU64,   // crates/pb-mapper-auth/src/lib.rs
     ...
 }
 ```
@@ -345,7 +345,7 @@ struct AuthStateInner {
 lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
 ```
 
-即「无论如何都取出内部值」，等于把 poisoning 显式关掉。`src/common/auth.rs` 里还为此
+即「无论如何都取出内部值」，等于把 poisoning 显式关掉。`crates/pb-mapper-auth/src/lib.rs` 里还为此
 养了一个 `recover_lock` 辅助函数专门抹掉 `LockResult`。
 
 `parking_lot` 不做 poisoning，于是：

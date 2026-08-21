@@ -1,5 +1,10 @@
 # pb-mapper UI as a CLI — design spec
 
+> Historical design document: this reflects the implementation at some point in
+> 2025. Its line numbers and code references may have drifted — the crate split
+> moved every path under `crates/` — and it is kept for design intent only. For
+> current behaviour, read the code.
+
 > Historical design note: the standalone CLI was consolidated in v0.3.0. In
 > current commands, `pb-mapper-server` maps to `pb-mapper server`,
 > `pb-mapper-server-cli` maps to `pb-mapper register`, and

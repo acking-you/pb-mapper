@@ -3,7 +3,7 @@
 <img src="docs/assets/poster.png" alt="pb-mapper" width="800" />
 
 <p>
-  <a href="https://www.rust-lang.org/"><img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white"></a>
+  <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
   <a href="https://tokio.rs/"><img alt="Tokio" src="https://img.shields.io/badge/Async-Tokio-3873AD"></a>
   <a href="https://flutter.dev/"><img alt="Flutter" src="https://img.shields.io/badge/UI-Flutter-02569B?logo=flutter&logoColor=white"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
@@ -110,7 +110,7 @@ pb-mapper connect tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:3000
 
 ## 开发者视角
 
-- **Rust 核心**：统一入口为 `src/bin/pb-mapper.rs`；协议与网络通用逻辑在 `src/common`、`src/utils`；server/register/connect 实现在 `src/pb_server`、`src/local/server`、`src/local/client`。
+- **Rust 核心**：`crates/` 下的 workspace，自底向上分层：`pb-mapper-core`（凭据、校验和、配置、地址解析）→ `pb-mapper-auth`（凭据生命周期与持久化）→ `pb-mapper-protocol`（帧格式与安全会话）→ `pb-mapper-server` 与 `pb-mapper-client`（二者平级，互不引用）→ `pb-mapper-cli`（`pb-mapper` 二进制所在）。
 - **Flutter UI**：界面在 `ui/lib/src/views`，FFI 各层在 `ui/lib/src/ffi`，Rust 桥接在 `ui/native/pb_mapper_ffi`。FFI 调用跑在后台 isolate，Rust 统一返回 JSON（`{success, message, data}`）以保持 C ABI 稳定。
 
 ## 文档
@@ -122,10 +122,10 @@ pb-mapper connect tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:3000
 
 ## 仓库结构
 
-- `src/` — Rust 后端
+- `crates/` — Rust workspace（六个 crate，根清单为虚拟清单）
 - `ui/` — Flutter UI + 原生桥接
 - `docs/` — 文档与素材
-- `docker/`、`services/`、`scripts/`、`tests/` — 部署与工具
+- `docker/`、`services/`、`scripts/` — 部署与工具
 - `skills/` — AI 编程助手部署 skill（服务端、客户端隧道）
 
 ## 许可证

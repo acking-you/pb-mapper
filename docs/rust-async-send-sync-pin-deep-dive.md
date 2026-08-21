@@ -1,5 +1,9 @@
 # Rust 并发安全（Send/Sync/Pin）与 async 状态机深度解析
 
+> 历史设计文档：反映 2025 年某时期的实现，其中的行号与代码引用可能已漂移
+> （拆分为多 crate 后所有路径都已移到 `crates/` 下），仅供设计意图参考。
+> 当前实现请以代码为准。
+
 面向场景：你在实现网络转发（如 pb-mapper）时需要理解 **为什么某些 future 必须 `Send + 'static`**、为什么 `async fn` 能跨 `.await` 持有借用、以及 `Pin` 如何保证自引用安全。
 
 > **Code Version**: pb-mapper 本地工作区（2026-01-17）

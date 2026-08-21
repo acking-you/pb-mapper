@@ -3,7 +3,7 @@
 <img src="docs/assets/poster.png" alt="pb-mapper" width="800" />
 
 <p>
-  <a href="https://www.rust-lang.org/"><img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white"></a>
+  <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
   <a href="https://tokio.rs/"><img alt="Tokio" src="https://img.shields.io/badge/Async-Tokio-3873AD"></a>
   <a href="https://flutter.dev/"><img alt="Flutter" src="https://img.shields.io/badge/UI-Flutter-02569B?logo=flutter&logoColor=white"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
@@ -110,7 +110,7 @@ Open `http://localhost:3000` in the coffee-shop browser — traffic flows throug
 
 ## Developer view
 
-- **Rust core** — the unified entry point is `src/bin/pb-mapper.rs`; shared protocol and networking live in `src/common` and `src/utils`; server / register / connect internals live in `src/pb_server`, `src/local/server`, and `src/local/client`.
+- **Rust core** — a workspace under `crates/`, layered bottom-up: `pb-mapper-core` (credentials, checksum, config, addressing), `pb-mapper-auth` (credential lifecycle and persistence), `pb-mapper-protocol` (framing and secure sessions), then `pb-mapper-server` and `pb-mapper-client` as peers, with the `pb-mapper` binary in `pb-mapper-cli`.
 - **Flutter UI** — views in `ui/lib/src/views`, FFI layers in `ui/lib/src/ffi`, Rust bridge in `ui/native/pb_mapper_ffi`. FFI calls run on a background isolate, and Rust returns JSON (`{success, message, data}`) to keep the C ABI stable.
 
 ## Documentation
@@ -122,10 +122,10 @@ Open `http://localhost:3000` in the coffee-shop browser — traffic flows throug
 
 ## Repository layout
 
-- `src/` — Rust backend
+- `crates/` — the Rust workspace (six crates; the root manifest is virtual)
 - `ui/` — Flutter UI + native bridge
 - `docs/` — documentation and assets
-- `docker/`, `services/`, `scripts/`, `tests/` — deployment and tooling
+- `docker/`, `services/`, `scripts/` — deployment and tooling
 - `skills/` — AI coding agent deployment skills (server and connect tunnel)
 
 ## License

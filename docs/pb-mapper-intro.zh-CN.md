@@ -45,7 +45,7 @@ flowchart LR
 
 ## 技术栈
 
-- **语言和运行时**：Rust 2021 + Tokio 异步运行时
+- **语言和运行时**：Rust 2024 edition + Tokio 异步运行时
 - **内存分配器**：自己 fork 的 [`better_mimalloc_rs`](https://github.com/acking-you/better_mimalloc_rs)，后面会细说为什么
 - **网络抽象**：自研 [`uni-stream`](https://github.com/acking-you/uni-stream)，把 TCP 和 UDP 统一成一套流接口；底层用 `socket2` 控制 socket 选项，`trust-dns-resolver` 做 DNS
 - **协议**：serde_json 序列化，自定义帧格式（checksum + 长度头），可选 `ring` 做 AES-256-GCM 端到端加密

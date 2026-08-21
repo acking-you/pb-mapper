@@ -250,15 +250,20 @@ Docker 必须持久化 `/var/lib/pb-mapper/auth`；否则重建容器会产生�
 
 ## 代码索引
 
-- 凭据格式与进程配置：`src/common/checksum.rs`
-- 认证 facade 与共享模型：`src/common/auth.rs`
-- 生命周期 actor、持久化、runtime 与时间轮：
-  `src/common/auth/{actor,persistence,runtime,timing_wheel}.rs`
+- 凭据格式与进程配置：`crates/pb-mapper-core/src/checksum.rs`
+- 认证 facade 与共享模型：`crates/pb-mapper-auth/src/lib.rs`
+- 生命周期 actor：`crates/pb-mapper-auth/src/actor/`
+- 持久化：`crates/pb-mapper-auth/src/persistence/`
+- runtime 与时间轮：`crates/pb-mapper-auth/src/runtime.rs`、
+  `crates/pb-mapper-auth/src/timing_wheel.rs`
 - V2 session facade、frame、限流与 replay 模块：
-  `src/common/message/secure.rs` 与 `src/common/message/secure/`
-- 中继状态、runtime loop 与连接分发：`src/pb_server/{mod,runtime,connection}.rs`
-- 管理请求执行：`src/pb_server/admin.rs`
-- 统一 CLI 与管理员命令模块：`src/bin/pb-mapper.rs`、`src/bin/pb-mapper/admin.rs`
+  `crates/pb-mapper-protocol/src/secure.rs` 与
+  `crates/pb-mapper-protocol/src/secure/`
+- 中继状态、runtime loop 与连接分发：`crates/pb-mapper-server/src/lib.rs`、
+  `runtime.rs`、`connection.rs`
+- 管理请求执行：`crates/pb-mapper-server/src/admin.rs`
+- 统一 CLI 与管理员命令模块：`crates/pb-mapper-cli/src/bin/pb-mapper.rs`、
+  `crates/pb-mapper-cli/src/bin/pb-mapper/admin.rs`
 
 ## 总结
 
