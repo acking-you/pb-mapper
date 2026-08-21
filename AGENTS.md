@@ -16,7 +16,8 @@
 - `crates/`: the Rust workspace; the root `Cargo.toml` is a virtual manifest
   - `crates/pb-mapper-cli/src/bin/pb-mapper.rs`: unified CLI entry point
   - `crates/pb-mapper-{core,auth,protocol,server,client,cli}`
-  - `crates/pb-mapper-cli/tests/`: integration tests; loads env from `tests/.env`
+  - `crates/pb-mapper-testkit/`: test support only; nothing shipped depends on it
+  - `crates/pb-mapper-cli/tests/`: integration tests; no env setup required
   - `crates/pb-mapper-cli/examples/`: runnable examples
 - `ui/`: Flutter UI; Rust bridge under `ui/native/*`
 - `docker/`, `services/`, `scripts/`: container, systemd, build/release
@@ -41,10 +42,28 @@ Notes: CI builds release artifacts on tags `vX.Y.Z` (see `.github/workflows/rele
 - Naming: modules/functions `snake_case`, types/traits `PascalCase`, consts `SCREAMING_SNAKE_CASE`
 
 ## Testing Guidelines
-- Framework: `tokio` async + integration tests under `tests/`
-- Env vars (see `tests/.env`): `PB_MAPPER_TEST_SERVER`, `LOCAL_TEST_SERVER`, `ECHO_TEST_SERVER`, `SERVER_TEST_KEY`, `SERVER_TEST_TYPE` (`TCP`/`UDP`)
-- Run ignored tests: `cargo test -- --ignored`
-- Prefer new integration tests in `tests/` with reproducible env defaults
+- Framework: `tokio` async + integration tests in `crates/pb-mapper-cli/tests/`
+- No test needs environment setup. `pb-mapper-testkit` stands up a complete
+  tunnel (`server` + `register` + `connect`), so any test file can build one
+  rather than a single file owning the harness: `TunnelHarness::start(transport,
+  need_codec)` for the common case, or `Relay` + `TunnelSpec` when a case needs
+  to issue, renew, or revoke a credential first. `test_delay.rs` covers the
+  transport/codec matrix and `temporary_credential_e2e.rs` the credential
+  lifecycle; each case picks its own loopback ports and owns its auth state
+  directory, so cases run concurrently and never collide with a live relay.
+  Prefer binding a socket and keeping it over `reserve_addr`, which has to drop
+  the socket before the real bind and so cannot rule out a race.
+- Sequence components with a readiness probe, not a sleep: poll the relay's
+  `Keys` status for a registration, and round-trip a payload through the tunnel
+  for forwarding. `Tunnel::start` does both before it returns.
+- A framed driver (`run_echo_delay`) needs a byte-transparent echo server; a
+  tagged tunnel (`TunnelSpec::echo_tag`, which is how a namespace-isolation
+  assertion avoids passing on a leak) needs the raw drivers instead.
+- Anything that sets the process credential takes
+  `pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK` first — it is
+  process-global, and that includes indirect writers such as building a
+  `PbMapperState`.
+- Prefer new integration tests that need no external setup
 
 ## Commit & Pull Request Guidelines
 - Commits: short, imperative (e.g., "Fix localhost resolution panic", "add network perms", "change to StreamBuilder")
