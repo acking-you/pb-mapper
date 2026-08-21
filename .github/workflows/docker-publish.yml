@@ -61,7 +61,7 @@ jobs:
         uses: houseabsolute/actions-rust-cross@v1
         with:
           target: ${{ matrix.target.arch }}-unknown-linux-musl
-          toolchain: 1.88.0
+          toolchain: 1.98.0
           args: "--locked --release --bin pb-mapper"
           strip: true
 

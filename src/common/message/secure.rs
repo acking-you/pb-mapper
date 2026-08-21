@@ -362,6 +362,10 @@ pub struct ServerSecurity {
     failure_logs: Arc<Mutex<FailureLogLimiter>>,
 }
 
+// `ServerInitialError` is 256 bytes, but the success type it is paired with,
+// `ServerInitialMessage`, is 264 — so the `Result` is already sized by its `Ok`
+// variant and boxing the error would buy an allocation for no size reduction.
+#[allow(clippy::result_large_err)]
 impl ServerSecurity {
     pub fn new(auth: AuthRuntime) -> Self {
         let replay_path = auth.config().state_dir.join("connection.replay");

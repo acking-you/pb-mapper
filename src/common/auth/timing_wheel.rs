@@ -190,7 +190,7 @@ impl TimingWheel {
         for level in 0..self.levels.len() {
             // A level turns over every `radix^level` ticks. Once one does not, no
             // coarser one can either, since its period divides theirs.
-            if self.ticks % self.period(level) != 0 {
+            if !self.ticks.is_multiple_of(self.period(level)) {
                 break;
             }
             let bucket = self.rotate(level);

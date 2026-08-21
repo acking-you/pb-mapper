@@ -80,7 +80,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.98.0
       - name: Build latest Windows FFI
         run: |
           make build-pb-mapper-ffi-windows
@@ -128,7 +128,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.98.0
       - name: Install dependencies
         run: |
           sudo apt-get update -y
@@ -236,7 +236,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.98.0
       - name: Set up Android NDK
         uses: nttld/setup-ndk@v1
         with:
@@ -399,7 +399,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.98.0
       - name: Install appdmg
         run: |
           npm install -g appdmg
@@ -480,7 +480,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.98.0
       - name: Build latest iOS FFI
         run: |
           make build-pb-mapper-ffi-ios
