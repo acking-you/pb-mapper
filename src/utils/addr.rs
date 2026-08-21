@@ -4,9 +4,10 @@ use std::pin::Pin;
 use std::sync::LazyLock;
 use std::task::{ready, Context, Poll};
 
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::{Resolver, TokioResolver};
 use tokio::task::JoinHandle;
-use trust_dns_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
-use trust_dns_resolver::{Resolver, TokioAsyncResolver};
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
 type ReadyFuture<T> = future::Ready<Result<T>>;
@@ -243,42 +244,40 @@ const DEFAULT_DNS_SERVER_GROUP: &[IpAddr] = &[
     IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)), // google
 ];
 
-const DNS_QUERY_PORT: u16 = 53;
-
 #[inline]
 fn custom_resolver_config() -> ResolverConfig {
+    // `udp_and_tcp` uses the standard DNS port and trusts negative responses,
+    // matching what this passed explicitly before.
     ResolverConfig::from_parts(
         None,
         vec![],
-        NameServerConfigGroup::from_ips_clear(DEFAULT_DNS_SERVER_GROUP, DNS_QUERY_PORT, true),
+        DEFAULT_DNS_SERVER_GROUP
+            .iter()
+            .copied()
+            .map(NameServerConfig::udp_and_tcp)
+            .collect::<Vec<_>>(),
     )
 }
 
+/// The custom resolver, or `None` if it could not be built.
+///
+/// Built once: `build()` can fail, and retrying per lookup would repeat the
+/// same failure. Callers fall back to the system resolver.
 #[inline]
-pub fn get_custom_resolver() -> Option<Resolver> {
-    // The sync resolver uses `block_on` internally and will panic if called from a Tokio runtime
-    // thread. Keep a guard here so callers can fall back to system DNS, and use the async helpers
-    // below when running inside async code.
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tracing::debug!("Skipping sync custom DNS resolver inside Tokio runtime thread");
-        return None;
-    }
-
-    match Resolver::new(custom_resolver_config(), ResolverOpts::default()) {
-        Ok(r) => Some(r),
-        Err(e) => {
-            tracing::error!(
-                "Create custom dns resolver error:{e},we will use default dns resolver"
-            );
-            None
+fn get_custom_async_resolver() -> Option<TokioResolver> {
+    static RESOLVER: LazyLock<Option<TokioResolver>> = LazyLock::new(|| {
+        let mut builder = Resolver::builder_with_config(
+            custom_resolver_config(),
+            TokioRuntimeProvider::default(),
+        );
+        *builder.options_mut() = ResolverOpts::default();
+        match builder.build() {
+            Ok(resolver) => Some(resolver),
+            Err(e) => {
+                tracing::error!("Create custom dns resolver error:{e},falling back to system dns");
+                None
+            }
         }
-    }
-}
-
-#[inline]
-fn get_custom_async_resolver() -> TokioAsyncResolver {
-    static RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
-        TokioAsyncResolver::tokio(custom_resolver_config(), ResolverOpts::default())
     });
     RESOLVER.clone()
 }
@@ -298,24 +297,15 @@ macro_rules! try_opt {
     };
 }
 
-fn get_ip_addrs(s: &str) -> Result<Vec<IpAddr>> {
-    thread_local! {
-        static RESOLVER:Option<Resolver> = get_custom_resolver();
-    }
-    let result = RESOLVER.with(|r| r.as_ref().map(|r| r.lookup_ip(s)));
-    try_opt!(result, "custom resolver not exist")
-        .map(|v| v.into_iter().collect())
-        .map_err(|e| invalid_input!(e))
-}
-
-/// Blocking DNS lookup. Avoid calling this from inside a Tokio runtime thread.
+/// Blocking DNS lookup, via the system resolver.
+///
+/// The custom DNS servers are only reachable from the async helpers below.
+/// hickory has no blocking resolver, and the sync path never reached the
+/// custom one in practice anyway: it was skipped inside a Tokio runtime, and
+/// outside one this fell back to `std` whenever it was unavailable.
 #[inline]
 pub fn get_socket_addrs_from_host_port(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
-    match get_ip_addrs(host) {
-        Ok(r) => Ok(r.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()),
-        // Resolve dns properly with the standard library
-        Err(_) => std::net::ToSocketAddrs::to_socket_addrs(&(host, port)).map(|v| v.collect()),
-    }
+    std::net::ToSocketAddrs::to_socket_addrs(&(host, port)).map(|v| v.collect())
 }
 
 /// Blocking DNS lookup. Avoid calling this from inside a Tokio runtime thread.
@@ -328,7 +318,7 @@ pub fn get_socket_addrs(s: &str) -> Result<Vec<SocketAddr>> {
 
 /// Async DNS lookup using the custom resolver, safe to call inside Tokio runtimes.
 pub async fn get_ip_addrs_async(s: &str) -> Result<Vec<IpAddr>> {
-    let resolver = get_custom_async_resolver();
+    let resolver = try_opt!(get_custom_async_resolver(), "custom resolver not exist");
     resolver
         .lookup_ip(s)
         .await
