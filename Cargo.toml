@@ -24,6 +24,8 @@ pb-mapper-client = { path = "crates/pb-mapper-client" }
 pb-mapper-core = { path = "crates/pb-mapper-core" }
 pb-mapper-protocol = { path = "crates/pb-mapper-protocol" }
 pb-mapper-server = { path = "crates/pb-mapper-server" }
+# Test support only; never a dependency of a shipped crate.
+pb-mapper-testkit = { path = "crates/pb-mapper-testkit" }
 
 base64 = "0.23.1"
 better_mimalloc_rs = { version = "0.1.2", features = ["config"] }

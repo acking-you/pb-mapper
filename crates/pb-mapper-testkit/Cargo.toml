@@ -1,0 +1,30 @@
+[package]
+name = "pb-mapper-testkit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+
+# Test-only support crate. It stands up a complete relay + `register` + `connect`
+# flow so that any integration test file can build one, instead of a single test
+# file owning the harness privately.
+#
+# A real crate rather than `tests/common/mod.rs`: that module is compiled into
+# every test binary separately, and whatever a given binary does not use is
+# reported as dead code — fatal under `-D warnings`.
+
+[dependencies]
+pb-mapper-auth.workspace = true
+pb-mapper-client.workspace = true
+pb-mapper-core.workspace = true
+pb-mapper-protocol.workspace = true
+pb-mapper-server.workspace = true
+
+rand.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uni-stream.workspace = true
+
+[lints]
+workspace = true

@@ -1050,6 +1050,7 @@ dependencies = [
  "pb-mapper-core",
  "pb-mapper-protocol",
  "pb-mapper-server",
+ "pb-mapper-testkit",
  "rand 0.10.0",
  "serde_json",
  "tokio",
@@ -1139,6 +1140,22 @@ dependencies = [
  "pb-mapper-protocol",
  "rand 0.10.0",
  "snafu",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uni-stream",
+]
+
+[[package]]
+name = "pb-mapper-testkit"
+version = "0.4.0"
+dependencies = [
+ "pb-mapper-auth",
+ "pb-mapper-client",
+ "pb-mapper-core",
+ "pb-mapper-protocol",
+ "pb-mapper-server",
+ "rand 0.10.0",
  "tokio",
  "tokio-util",
  "tracing",

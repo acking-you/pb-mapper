@@ -25,6 +25,8 @@ tracing.workspace = true
 uni-stream.workspace = true
 
 [dev-dependencies]
+pb-mapper-testkit.workspace = true
+
 rand.workspace = true
 
 [features]
