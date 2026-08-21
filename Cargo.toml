@@ -49,7 +49,7 @@ rand = "0.10"
 socket2 = "0.6"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-snafu = "0.8.7"
+snafu = "0.9.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 tracing = "0.1.40"
@@ -58,14 +58,14 @@ tracing-subscriber = { version = "0.3.18", features = [
     "fmt",
     "json",
 ], default-features = true }
-hashbrown = { version = "0.16" }
+hashbrown = { version = "0.17.1" }
 clap = { version = "4.5", features = ["derive"] }
 futures = "0.3.31"
 better_mimalloc_rs = { version = "0.1.2", features = ["config"] }
 bytes = "1.11"
 hickory-resolver = { version = "0.26.1" }
 ring = "0.17.14"
-base64 = "0.22.1"
+base64 = "0.23.1"
 subtle = "2.6.1"
 parking_lot = "0.12"
 uni-stream = { git = "https://github.com/acking-you/uni-stream.git", branch = "master" }

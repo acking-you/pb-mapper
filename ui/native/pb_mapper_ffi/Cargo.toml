@@ -19,7 +19,7 @@ tokio.workspace = true
 clap.workspace = true
 better_mimalloc_rs.workspace = true
 tokio-util = "0.7"
-dirs = "5.0"
+dirs = "6.0.0"
 
 pb-mapper = { path = "../../../" }
 uni-stream.workspace = true
