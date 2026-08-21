@@ -1,0 +1,24 @@
+[package]
+name = "pb-mapper-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+pb-mapper-auth.workspace = true
+pb-mapper-core.workspace = true
+pb-mapper-protocol.workspace = true
+
+hashbrown.workspace = true
+kanal.workspace = true
+snafu.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uni-stream.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+
+[features]
+udp-timeout = ["uni-stream/udp-timeout", "pb-mapper-protocol/udp-timeout"]

@@ -333,3 +333,31 @@ gen_impl_msg_serializer!(PbConnRequest);
 gen_impl_msg_serializer!(PbConnResponse);
 gen_impl_msg_serializer!(PbServerRequest);
 gen_impl_msg_serializer!(LocalServer);
+
+#[cfg(test)]
+mod tests {
+    use super::PbConnRequest;
+
+    /// The wire form of `Register` is load-bearing: a running peer on the other
+    /// side of an upgrade has to keep parsing it. The `None` fields must stay
+    /// absent from the JSON rather than serialise as null.
+    #[test]
+    fn test_serde_mapper_header() {
+        let mapper = PbConnRequest::Register {
+            key: "test".into(),
+            need_codec: false,
+            is_datagram: false,
+            protocol_version: None,
+            client_instance_id: None,
+            heartbeat_interval_ms: None,
+            heartbeat_tolerance_ms: None,
+        };
+        let json_value = serde_json::to_string(&mapper).unwrap();
+        let raw_json_str =
+            r##"{"Register":{"need_codec":false,"is_datagram":false,"key":"test"}}"##;
+        assert_eq!(raw_json_str, json_value);
+
+        let value: PbConnRequest = serde_json::from_str(raw_json_str).unwrap();
+        assert_eq!(mapper, value)
+    }
+}

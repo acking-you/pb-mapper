@@ -1030,34 +1030,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pb-mapper"
-version = "0.4.0"
-dependencies = [
- "base64",
- "better_mimalloc_rs",
- "bytes",
- "clap",
- "dotenvy",
- "hashbrown 0.17.1",
- "kanal",
- "parking_lot",
- "pb-mapper-auth",
- "pb-mapper-core",
- "pb-mapper-protocol",
- "rand 0.10.0",
- "ring",
- "serde",
- "serde_json",
- "snafu",
- "subtle",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uni-stream",
-]
-
-[[package]]
 name = "pb-mapper-auth"
 version = "0.4.0"
 dependencies = [
@@ -1071,6 +1043,39 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "pb-mapper-cli"
+version = "0.4.0"
+dependencies = [
+ "better_mimalloc_rs",
+ "clap",
+ "dotenvy",
+ "pb-mapper-auth",
+ "pb-mapper-client",
+ "pb-mapper-core",
+ "pb-mapper-protocol",
+ "pb-mapper-server",
+ "rand 0.10.0",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uni-stream",
+]
+
+[[package]]
+name = "pb-mapper-client"
+version = "0.4.0"
+dependencies = [
+ "pb-mapper-core",
+ "pb-mapper-protocol",
+ "serde_json",
+ "snafu",
+ "tokio",
+ "tracing",
+ "uni-stream",
 ]
 
 [[package]]
@@ -1098,7 +1103,11 @@ dependencies = [
  "clap",
  "dirs",
  "parking_lot",
- "pb-mapper",
+ "pb-mapper-auth",
+ "pb-mapper-client",
+ "pb-mapper-core",
+ "pb-mapper-protocol",
+ "pb-mapper-server",
  "serde",
  "serde_json",
  "tokio",
@@ -1122,6 +1131,23 @@ dependencies = [
  "serde_json",
  "snafu",
  "tokio",
+ "tracing",
+ "uni-stream",
+]
+
+[[package]]
+name = "pb-mapper-server"
+version = "0.4.0"
+dependencies = [
+ "hashbrown 0.17.1",
+ "kanal",
+ "pb-mapper-auth",
+ "pb-mapper-core",
+ "pb-mapper-protocol",
+ "rand 0.10.0",
+ "snafu",
+ "tokio",
+ "tokio-util",
  "tracing",
  "uni-stream",
 ]
