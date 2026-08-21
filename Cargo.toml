@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 pb-mapper-auth.workspace = true
 pb-mapper-core.workspace = true
+pb-mapper-protocol.workspace = true
 rand.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -32,7 +33,7 @@ parking_lot.workspace = true
 dotenvy.workspace = true
 
 [features]
-udp-timeout = ["uni-stream/udp-timeout"]
+udp-timeout = ["uni-stream/udp-timeout", "pb-mapper-protocol/udp-timeout"]
 
 [workspace]
 members = ["crates/*", "ui/native/pb_mapper_ffi"]
@@ -58,6 +59,7 @@ expect_used = "deny"
 [workspace.dependencies]
 pb-mapper-auth = { path = "crates/pb-mapper-auth" }
 pb-mapper-core = { path = "crates/pb-mapper-core" }
+pb-mapper-protocol = { path = "crates/pb-mapper-protocol" }
 
 rand = "0.10"
 tokio = { version = "1", features = ["full"] }

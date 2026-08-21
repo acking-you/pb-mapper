@@ -10,7 +10,7 @@
 //! The initial reader can impose a smaller pre-authentication limit before allocating
 //! a body; continuation frames retain the normal protocol maximum.
 
-use crate::common::auth::KeyId;
+use pb_mapper_auth::KeyId;
 
 use super::*;
 

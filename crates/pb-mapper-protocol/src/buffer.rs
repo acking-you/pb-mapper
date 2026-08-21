@@ -3,7 +3,7 @@
 use snafu::ResultExt;
 use tokio::io::AsyncReadExt;
 
-use super::error::MsgNetworkReadBufferdRawDataSnafu;
+use pb_mapper_core::error::MsgNetworkReadBufferdRawDataSnafu;
 
 const INIT_BUF_SIZE: usize = 8 * 1024;
 const MAX_BUF_SIZE: usize = 8 * 1024 * 1024;
@@ -104,7 +104,7 @@ impl BufferGetter for CommonBuffer {
 
 /// This trait is used for buffered reads where the packet length is not known
 pub trait BufferedReader {
-    async fn read(&mut self) -> super::error::Result<&'_ [u8]>;
+    async fn read(&mut self) -> pb_mapper_core::error::Result<&'_ [u8]>;
 }
 
 pub struct BufferReader<'a, T> {
@@ -119,7 +119,7 @@ impl<'reader, T: AsyncReadExt + Unpin> BufferReader<'reader, T> {
         }
     }
 
-    async fn read_inner(&mut self) -> super::error::Result<&[u8]> {
+    async fn read_inner(&mut self) -> pb_mapper_core::error::Result<&[u8]> {
         if self.buffer.need_resize() {
             self.buffer.dyn_resize()
         }
@@ -134,7 +134,7 @@ impl<'reader, T: AsyncReadExt + Unpin> BufferReader<'reader, T> {
 }
 
 impl<'reader, T: AsyncReadExt + Unpin> BufferedReader for BufferReader<'reader, T> {
-    async fn read(&mut self) -> super::error::Result<&'_ [u8]> {
+    async fn read(&mut self) -> pb_mapper_core::error::Result<&'_ [u8]> {
         self.read_inner().await
     }
 }

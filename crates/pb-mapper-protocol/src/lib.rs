@@ -1,24 +1,31 @@
 //! Define message protocols and tools for reading and writing
 //! messages
+//!
+//! The reader and writer traits are `async fn` in a public trait, which cannot
+//! state its auto-trait bounds. That is deliberate: these are only ever awaited
+//! on the connection task that owns the stream, never sent across one.
+#![allow(async_fn_in_trait)]
+
+pub mod buffer;
 pub mod command;
 pub mod forward;
 pub mod secure;
 use snafu::{ResultExt, ensure};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
-use super::checksum::{
+use crate::buffer::{BufferGetter, CommonBuffer, FixedSizeBuffer};
+use pb_mapper_core::checksum::{
     AesKeyType, get_checksum, get_checksum_for_key, get_msg_header_key, process_checksum_is_ready,
     valid_checksum, valid_checksum_for_key,
 };
-use super::error::{
+use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor, Encryptor};
+use pb_mapper_core::error::MsgDatalenExceededSnafu;
+use pb_mapper_core::error::{
     self, MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,
     MsgNetworkReadDatalenSnafu, MsgNetworkWriteBodySnafu, MsgNetworkWriteCheckSumSnafu,
     MsgNetworkWriteCodecMsgSnafu, MsgNetworkWriteCodecTagSnafu, MsgNetworkWriteDatalenSnafu,
     Result,
 };
-use crate::common::error::MsgDatalenExceededSnafu;
-use crate::utils::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor, Encryptor};
 
 /// This message protocol contains header and body, and the header
 /// includes checksum, datalen,respectively, u32, u32, where datalen

@@ -10,8 +10,8 @@
 //! credentials, while lifecycle persistence remains covered by `common::auth::tests`.
 
 use super::*;
-use crate::common::auth::{AuthConfig, LegacyProtocolPolicy};
-use crate::common::checksum::{
+use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
+use pb_mapper_core::checksum::{
     encode_temporary_credential, parse_credential, set_process_msg_header_key,
 };
 use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
@@ -71,7 +71,7 @@ async fn temporary_credential_authenticates_without_storing_secret() {
         .await
         .unwrap();
     let Credential::Temporary { key_id, key } =
-        crate::common::checksum::parse_credential(&issued.credential).unwrap()
+        pb_mapper_core::checksum::parse_credential(&issued.credential).unwrap()
     else {
         panic!("expected temporary credential")
     };
@@ -435,7 +435,7 @@ async fn oversized_initial_frame_is_rejected_before_reading_its_body() {
 
 #[tokio::test]
 async fn oversized_legacy_initial_frame_is_rejected_before_reading_its_body() {
-    use crate::common::checksum::get_checksum_for_key;
+    use pb_mapper_core::checksum::get_checksum_for_key;
 
     let admin = *b"0123456789abcdefghijklmnopqrstuv";
     let config = temp_config();

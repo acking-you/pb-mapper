@@ -6,16 +6,16 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
-use super::super::buffer::{BufferReader, BufferedReader};
-use super::error::{FwdNetworkWriteWithNormalSnafu, Result};
 use super::{
     CodecMessageReader, CodecMessageWriter, MessageReader, MessageWriter, NormalMessageReader,
     NormalMessageWriter,
 };
-use crate::common::checksum::AesKeyType;
-use crate::common::config::duration_from_env;
-use crate::snafu_error_get_or_return_ok;
-use crate::utils::codec::{Decryptor, Encryptor};
+use crate::buffer::{BufferReader, BufferedReader};
+use pb_mapper_core::checksum::AesKeyType;
+use pb_mapper_core::codec::{Decryptor, Encryptor};
+use pb_mapper_core::config::duration_from_env;
+use pb_mapper_core::error::{FwdNetworkWriteWithNormalSnafu, Result};
+use pb_mapper_core::snafu_error_get_or_return_ok;
 use uni_stream::stream::{StreamSplit, TcpStreamImpl, UdpStreamImpl};
 use uni_stream::udp::{UdpStreamReadHalf, UdpStreamWriteHalf};
 
@@ -533,7 +533,7 @@ impl DatagramReader for UdpStreamReadHalf {
     async fn recv(&mut self) -> Result<Bytes> {
         self.recv_datagram()
             .await
-            .map_err(|e| super::error::Error::MsgForward {
+            .map_err(|e| pb_mapper_core::error::Error::MsgForward {
                 action: "read",
                 source: e,
             })
@@ -544,7 +544,7 @@ impl DatagramWriter for UdpStreamWriteHalf<'_> {
     async fn send(&mut self, src: &[u8]) -> Result<()> {
         self.send_datagram(src)
             .await
-            .map_err(|e| super::error::Error::MsgForward {
+            .map_err(|e| pb_mapper_core::error::Error::MsgForward {
                 action: "write",
                 source: e,
             })
@@ -689,8 +689,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::common::config::parse_duration;
-    use crate::common::error::Error;
+    use pb_mapper_core::config::parse_duration;
+    use pb_mapper_core::error::Error;
     use tokio::sync::Notify;
 
     enum ReadAction {

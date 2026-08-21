@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use super::super::error::{MsgSerializeSnafu, Result};
-use crate::common::auth::{
+use pb_mapper_auth::{
     AuthStatus, IssuedTemporaryKey, KeyPage, LegacyProtocolPolicy, TemporaryKeyMetadata,
 };
-use crate::common::checksum::AesKeyType;
+use pb_mapper_core::checksum::AesKeyType;
+use pb_mapper_core::error::{MsgSerializeSnafu, Result};
 
 pub const CONTROL_PROTOCOL_V2: u16 = 2;
 

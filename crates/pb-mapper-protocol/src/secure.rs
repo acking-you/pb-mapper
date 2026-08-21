@@ -31,14 +31,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::{
     CodecMessageReader, CodecMessageWriter, DataLenType, MAX_MSG_LEN, MessageReader, MessageWriter,
 };
-use crate::common::auth::{
+use pb_mapper_auth::{
     ADMIN_KEY_ID, AuthContext, AuthFailure, AuthRuntime, KeyId, LegacyConnectionGuard,
 };
-use crate::common::checksum::{
+use pb_mapper_core::checksum::{
     AesKeyType, Credential, get_process_credential, valid_checksum_for_key,
 };
-use crate::common::error::{Error, Result};
-use crate::utils::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor};
+use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor};
+use pb_mapper_core::error::{Error, Result};
 
 pub const PROTOCOL_V2_MAGIC: [u8; 4] = *b"PBM2";
 pub const PROTOCOL_V2_VERSION: u8 = 2;

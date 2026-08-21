@@ -1043,6 +1043,7 @@ dependencies = [
  "parking_lot",
  "pb-mapper-auth",
  "pb-mapper-core",
+ "pb-mapper-protocol",
  "rand 0.10.0",
  "ring",
  "serde",
@@ -1104,6 +1105,24 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uni-stream",
+]
+
+[[package]]
+name = "pb-mapper-protocol"
+version = "0.4.0"
+dependencies = [
+ "bytes",
+ "parking_lot",
+ "pb-mapper-auth",
+ "pb-mapper-core",
+ "rand 0.10.0",
+ "ring",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tokio",
+ "tracing",
  "uni-stream",
 ]
 

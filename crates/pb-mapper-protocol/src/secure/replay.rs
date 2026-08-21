@@ -15,7 +15,7 @@
 //! Per-credential counts stop one tenant from filling the shared filter with
 //! unique salts before the request payload is decoded.
 
-use crate::common::auth::KeyId;
+use pb_mapper_auth::KeyId;
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

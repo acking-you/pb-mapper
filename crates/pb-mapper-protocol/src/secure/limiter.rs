@@ -9,7 +9,7 @@
 //! decisions: every authentication failure is still rejected, only duplicate logging
 //! is coalesced.
 
-use crate::common::auth::KeyId;
+use pb_mapper_auth::KeyId;
 
 #[derive(Clone, Copy, Debug)]
 pub struct FailureLogDecision {
