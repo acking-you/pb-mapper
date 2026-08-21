@@ -1,10 +1,7 @@
 //! AEAD wrap/unwrap for snapshot and WAL payloads.
 use super::super::*;
 
-pub(in crate::common::auth) fn seal_blob(
-    admin_key: &AesKeyType,
-    plain: &[u8],
-) -> Result<Vec<u8>, AuthFailure> {
+pub(crate) fn seal_blob(admin_key: &AesKeyType, plain: &[u8]) -> Result<Vec<u8>, AuthFailure> {
     let key = LessSafeKey::new(
         UnboundKey::new(&AES_256_GCM, admin_key)
             .map_err(|_| AuthFailure::internal("failed to initialize state encryption key"))?,
@@ -28,10 +25,7 @@ pub(in crate::common::auth) fn seal_blob(
     Ok(sealed)
 }
 
-pub(in crate::common::auth) fn open_blob(
-    admin_key: &AesKeyType,
-    sealed: &[u8],
-) -> Result<Vec<u8>, AuthFailure> {
+pub(crate) fn open_blob(admin_key: &AesKeyType, sealed: &[u8]) -> Result<Vec<u8>, AuthFailure> {
     if sealed.len() < STATE_BLOB_MAGIC.len() + 12 + AES_256_GCM.tag_len()
         || &sealed[..STATE_BLOB_MAGIC.len()] != STATE_BLOB_MAGIC
     {

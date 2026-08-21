@@ -67,7 +67,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use super::checksum::{
+use pb_mapper_core::checksum::{
     AesKeyType, Credential, ENV_MSG_HEADER_KEY, MACHINE_MSG_HEADER_KEY_PATH,
     encode_temporary_credential, env_safe_admin_key_error, get_process_credential,
     is_env_safe_admin_key, parse_credential, set_process_msg_header_key,
@@ -261,7 +261,7 @@ impl AuthContext {
         Ok(self.ensure_active()?.cancellation_token())
     }
 
-    pub(crate) fn admin_cancellation_token(&self) -> Result<CancellationToken, AuthFailure> {
+    pub fn admin_cancellation_token(&self) -> Result<CancellationToken, AuthFailure> {
         self.require_admin()?;
         self.cancellation_token()
     }
@@ -660,18 +660,16 @@ pub use config::default_auth_state_dir;
 #[cfg(all(test, not(any(windows, target_os = "macos"))))]
 pub(crate) use config::linux_default_auth_state_dir;
 #[cfg(test)]
-pub(in crate::common::auth) use config::parse_legacy_protocol_policy;
+pub(crate) use config::parse_legacy_protocol_policy;
 #[cfg(test)]
 pub(crate) use config::platform_default_auth_state_dir;
 #[cfg(all(test, not(any(windows, target_os = "macos"))))]
-pub(in crate::common::auth) use config::{linux_system_auth_dir_usable, unix_effective_uid};
+pub(crate) use config::{linux_system_auth_dir_usable, unix_effective_uid};
 mod keys;
 pub use keys::derive_temporary_key;
 #[cfg(test)]
-pub(in crate::common::auth) use keys::recover_admin_key_after_rotation;
-pub(in crate::common::auth) use keys::{
-    load_isolated_server_admin_credential, load_server_admin_credential,
-};
+pub(crate) use keys::recover_admin_key_after_rotation;
+pub(crate) use keys::{load_isolated_server_admin_credential, load_server_admin_credential};
 mod runtime;
 
 pub struct LegacyConnectionGuard {
@@ -765,7 +763,7 @@ mod actor;
 use actor::{AuthActorState, run_auth_actor};
 mod persistence;
 pub use persistence::*;
-pub(in crate::common::auth) use persistence::{
+pub(crate) use persistence::{
     append_audit, append_mutation, append_wal, atomic_write, auth_snapshot_path, build_snapshot,
     cancel_all_temporary_leases, compaction_is_allowed, empty_snapshot,
     fail_closed_on_uncertain_wal, hex, key_matches_existing_state, load_or_create_instance_id,
@@ -775,9 +773,7 @@ pub(in crate::common::auth) use persistence::{
     unix_seconds, write_admin_key, write_snapshot_and_truncate_wal,
 };
 #[cfg(test)]
-pub(in crate::common::auth) use persistence::{
-    prepare_state_dir, read_instance_id_file, try_load_persisted_state,
-};
+pub(crate) use persistence::{prepare_state_dir, read_instance_id_file, try_load_persisted_state};
 mod ids;
 pub use ids::{ADMIN_KEY_ID, Generation, KeyId, SlotIndex};
 mod leases;

@@ -5,7 +5,7 @@ use super::{
     push_audit_record, seal_blob, sync_parent_directory,
 };
 
-pub(in crate::common::auth) fn fail_closed_on_uncertain_wal(
+pub(crate) fn fail_closed_on_uncertain_wal(
     inner: &AuthStateInner,
     result: Result<(), AuthFailure>,
 ) -> Result<(), AuthFailure> {
@@ -18,7 +18,7 @@ pub(in crate::common::auth) fn fail_closed_on_uncertain_wal(
     result
 }
 
-pub(in crate::common::auth) fn append_mutation(
+pub(crate) fn append_mutation(
     config: &AuthConfig,
     inner: &AuthStateInner,
     mutation: StateMutation,
@@ -39,7 +39,7 @@ pub(in crate::common::auth) fn append_mutation(
     Ok(())
 }
 
-pub(in crate::common::auth) fn append_audit(
+pub(crate) fn append_audit(
     config: &AuthConfig,
     inner: &AuthStateInner,
     audit: AuditRecord,
@@ -52,7 +52,7 @@ pub(in crate::common::auth) fn append_audit(
     Ok(())
 }
 
-pub(in crate::common::auth) fn append_wal(
+pub(crate) fn append_wal(
     config: &AuthConfig,
     admin_key: &AesKeyType,
     record: &WalRecord,
@@ -125,10 +125,7 @@ pub(in crate::common::auth) fn append_wal(
     Ok(())
 }
 
-pub(in crate::common::auth) fn read_wal(
-    path: &Path,
-    admin_key: &AesKeyType,
-) -> Result<Vec<WalRecord>, AuthFailure> {
+pub(crate) fn read_wal(path: &Path, admin_key: &AesKeyType) -> Result<Vec<WalRecord>, AuthFailure> {
     let mut file = File::open(path).map_err(|error| {
         AuthFailure::new(
             "temporary_key_store_unavailable",
@@ -186,7 +183,7 @@ pub(in crate::common::auth) fn read_wal(
     Ok(records)
 }
 
-pub(in crate::common::auth) fn write_snapshot_and_truncate_wal(
+pub(crate) fn write_snapshot_and_truncate_wal(
     config: &AuthConfig,
     admin_key: &AesKeyType,
     snapshot: &PersistedSnapshot,
@@ -200,7 +197,7 @@ pub(in crate::common::auth) fn write_snapshot_and_truncate_wal(
     truncate_auth_wal(&config.state_dir)
 }
 
-pub(in crate::common::auth) fn truncate_auth_wal(state_dir: &Path) -> Result<(), AuthFailure> {
+pub(crate) fn truncate_auth_wal(state_dir: &Path) -> Result<(), AuthFailure> {
     let wal_path = auth_wal_path(state_dir);
     let created = !wal_path.exists();
     let wal = OpenOptions::new()

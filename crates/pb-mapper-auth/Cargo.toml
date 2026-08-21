@@ -1,0 +1,18 @@
+[package]
+name = "pb-mapper-auth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+pb-mapper-core.workspace = true
+
+parking_lot.workspace = true
+rand.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true

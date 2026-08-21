@@ -255,11 +255,11 @@ impl AuthRuntime {
         })
     }
 
-    pub(crate) fn admin_key(&self) -> Result<AesKeyType, AuthFailure> {
+    pub fn admin_key(&self) -> Result<AesKeyType, AuthFailure> {
         Ok(self.inner()?.admin_key())
     }
 
-    pub(crate) fn derive_key(&self, key_id: KeyId) -> Result<AesKeyType, AuthFailure> {
+    pub fn derive_key(&self, key_id: KeyId) -> Result<AesKeyType, AuthFailure> {
         let inner = self.inner()?;
         if key_id.is_admin() {
             return Ok(inner.admin_key());
@@ -272,7 +272,7 @@ impl AuthRuntime {
         self.inner().map(|inner| inner.high().len()).unwrap_or(0)
     }
 
-    pub(crate) fn derive_previous_key(&self, key_id: KeyId) -> Option<AesKeyType> {
+    pub fn derive_previous_key(&self, key_id: KeyId) -> Option<AesKeyType> {
         let inner = self.inner().ok()?;
         let previous = inner.previous_root.read().clone()?;
         if key_id.is_admin() {

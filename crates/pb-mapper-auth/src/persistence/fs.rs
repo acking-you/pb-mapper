@@ -4,9 +4,7 @@ use super::hex;
 
 /// Create the state directory and take `auth.lock` before any credential or
 /// snapshot file is read or written.
-pub(in crate::common::auth) fn prepare_state_dir_and_lock(
-    state_dir: &Path,
-) -> Result<Arc<File>, AuthFailure> {
+pub(crate) fn prepare_state_dir_and_lock(state_dir: &Path) -> Result<Arc<File>, AuthFailure> {
     prepare_state_dir(state_dir)?;
     Ok(Arc::new(acquire_state_dir_lock(state_dir)?))
 }
@@ -106,77 +104,18 @@ fn lock_exclusive_nonblock(file: &File) -> std::io::Result<()> {
     }
 }
 
-pub(crate) fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-
-        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-        extern "system" {
-            fn MoveFileExW(
-                lp_existing_file_name: *const u16,
-                lp_new_file_name: *const u16,
-                dw_flags: u32,
-            ) -> i32;
-        }
-        fn wide(path: &Path) -> Vec<u16> {
-            path.as_os_str()
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect()
-        }
-        let from_w = wide(from);
-        let to_w = wide(to);
-        let ok = unsafe {
-            MoveFileExW(
-                from_w.as_ptr(),
-                to_w.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if ok == 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-    #[cfg(not(windows))]
-    std::fs::rename(from, to)
-}
-
+/// `core`'s durability primitive, reported as an `AuthFailure`.
 pub(crate) fn sync_parent_directory(path: &Path) -> Result<(), AuthFailure> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    open_directory_for_sync(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            AuthFailure::new(
-                "temporary_key_store_unavailable",
-                format!("failed to sync `{}`: {error}", parent.display()),
-                false,
-            )
-        })
+    pb_mapper_core::durable_file::sync_parent_directory(path).map_err(|error| {
+        AuthFailure::new(
+            "temporary_key_store_unavailable",
+            format!("failed to sync `{}`: {error}", path.display()),
+            false,
+        )
+    })
 }
 
-fn open_directory_for_sync(path: &Path) -> std::io::Result<File> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const GENERIC_READ: u32 = 0x8000_0000;
-        const GENERIC_WRITE: u32 = 0x4000_0000;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        OpenOptions::new()
-            .access_mode(GENERIC_READ | GENERIC_WRITE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)
-    }
-    #[cfg(not(windows))]
-    File::open(path)
-}
-
-pub(in crate::common::auth) fn prepare_state_dir(path: &Path) -> Result<(), AuthFailure> {
+pub(crate) fn prepare_state_dir(path: &Path) -> Result<(), AuthFailure> {
     std::fs::create_dir_all(path).map_err(|error| {
         AuthFailure::new(
             "auth_state_unavailable",
@@ -201,11 +140,7 @@ pub(in crate::common::auth) fn prepare_state_dir(path: &Path) -> Result<(), Auth
     Ok(())
 }
 
-pub(in crate::common::auth) fn atomic_write(
-    path: &Path,
-    data: &[u8],
-    mode: u32,
-) -> Result<(), AuthFailure> {
+pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), AuthFailure> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             AuthFailure::new(
@@ -258,7 +193,7 @@ pub(in crate::common::auth) fn atomic_write(
                 )
             })?;
         drop(file);
-        replace_file(&temporary, path).map_err(|error| {
+        pb_mapper_core::durable_file::replace_file(&temporary, path).map_err(|error| {
             AuthFailure::new(
                 "auth_state_unavailable",
                 format!("failed to replace `{}`: {error}", path.display()),

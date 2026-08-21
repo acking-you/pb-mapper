@@ -5,7 +5,7 @@ use super::{
     truncate_auth_wal,
 };
 
-pub(in crate::common::auth) fn load_or_create_instance_id(
+pub(crate) fn load_or_create_instance_id(
     path: &Path,
 ) -> Result<[u8; INSTANCE_ID_LEN], AuthFailure> {
     let instance_path = path.join("server-instance-id");
@@ -17,7 +17,7 @@ pub(in crate::common::auth) fn load_or_create_instance_id(
     Ok(instance_id)
 }
 
-pub(in crate::common::auth) fn read_instance_id_file(
+pub(crate) fn read_instance_id_file(
     path: &Path,
 ) -> Result<Option<[u8; INSTANCE_ID_LEN]>, AuthFailure> {
     if !path.exists() {
@@ -44,7 +44,7 @@ pub(in crate::common::auth) fn read_instance_id_file(
 /// Reset writes that staged file, then the empty snapshot, then the live
 /// instance-id file. A crash after the snapshot lands would otherwise fail
 /// closed on the next start because the live file still has the old id.
-pub(in crate::common::auth) fn recover_instance_id_after_reset(
+pub(crate) fn recover_instance_id_after_reset(
     state_dir: &Path,
     admin_key: &AesKeyType,
     current: [u8; INSTANCE_ID_LEN],
@@ -86,7 +86,7 @@ pub(in crate::common::auth) fn recover_instance_id_after_reset(
     Ok(next)
 }
 
-pub(in crate::common::auth) fn random_instance_id() -> [u8; INSTANCE_ID_LEN] {
+pub(crate) fn random_instance_id() -> [u8; INSTANCE_ID_LEN] {
     let mut instance_id = [0_u8; INSTANCE_ID_LEN];
     let mut rng = rand::rng();
     for byte in &mut instance_id {
@@ -95,10 +95,7 @@ pub(in crate::common::auth) fn random_instance_id() -> [u8; INSTANCE_ID_LEN] {
     instance_id
 }
 
-pub(in crate::common::auth) fn write_admin_key(
-    state_dir: &Path,
-    key: &str,
-) -> Result<(), AuthFailure> {
+pub(crate) fn write_admin_key(state_dir: &Path, key: &str) -> Result<(), AuthFailure> {
     atomic_write(
         &state_dir.join("admin.key"),
         format!("{key}\n").as_bytes(),
@@ -156,7 +153,7 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
     atomic_write(path, format!("{key}\n").as_bytes(), 0o600)
 }
 
-pub(in crate::common::auth) fn reset_already_installed(
+pub(crate) fn reset_already_installed(
     state_dir: &Path,
     admin_key: &AesKeyType,
     new_instance_id: &[u8; INSTANCE_ID_LEN],
@@ -179,7 +176,7 @@ pub(in crate::common::auth) fn reset_already_installed(
     snapshot.instance_id == *new_instance_id
 }
 
-pub(in crate::common::auth) fn rotation_already_installed(state_dir: &Path, new_key: &str) -> bool {
+pub(crate) fn rotation_already_installed(state_dir: &Path, new_key: &str) -> bool {
     key_matches_existing_snapshot(Some(state_dir), new_key)
         && live_admin_key_matches(state_dir, new_key)
 }
@@ -194,10 +191,7 @@ fn live_admin_key_matches(state_dir: &Path, new_key: &str) -> bool {
     text.trim().as_bytes() == new_key.trim().as_bytes()
 }
 
-pub(in crate::common::auth) fn key_matches_existing_snapshot(
-    state_dir: Option<&Path>,
-    key: &str,
-) -> bool {
+pub(crate) fn key_matches_existing_snapshot(state_dir: Option<&Path>, key: &str) -> bool {
     let Some(state_dir) = state_dir else {
         return false;
     };
@@ -214,10 +208,7 @@ pub(in crate::common::auth) fn key_matches_existing_snapshot(
     open_blob(&admin_key, &bytes).is_ok()
 }
 
-pub(in crate::common::auth) fn key_matches_existing_state(
-    state_dir: Option<&Path>,
-    key: &str,
-) -> bool {
+pub(crate) fn key_matches_existing_state(state_dir: Option<&Path>, key: &str) -> bool {
     if key_matches_existing_snapshot(state_dir, key) {
         return true;
     }

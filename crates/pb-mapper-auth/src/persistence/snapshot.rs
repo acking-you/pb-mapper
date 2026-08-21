@@ -2,11 +2,11 @@
 use super::super::*;
 use super::{auth_snapshot_path, auth_wal_path, open_blob, read_wal};
 
-pub(in crate::common::auth) fn compaction_is_allowed(safe_mode: bool) -> bool {
+pub(crate) fn compaction_is_allowed(safe_mode: bool) -> bool {
     !safe_mode
 }
 
-pub(in crate::common::auth) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
+pub(crate) fn push_audit_record(inner: &AuthStateInner, record: AuditRecord) {
     let mut records = inner.audit_records.write();
     while records.len() >= AUDIT_RECORD_CAPACITY {
         records.pop_front();
@@ -14,7 +14,7 @@ pub(in crate::common::auth) fn push_audit_record(inner: &AuthStateInner, record:
     records.push_back(record);
 }
 
-pub(in crate::common::auth) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
+pub(crate) fn cancel_all_temporary_leases(inner: &AuthStateInner) {
     let slots = inner.slots();
     for lease in slots.iter().filter_map(|slot| slot.lease.upgrade()) {
         lease.cancel_rotated();
@@ -29,7 +29,7 @@ fn snapshot_generations(inner: &AuthStateInner) -> Vec<Generation> {
     generations
 }
 
-pub(in crate::common::auth) fn split_high_slot_state(
+pub(crate) fn split_high_slot_state(
     snapshot: &PersistedSnapshot,
     capacity: usize,
 ) -> (Vec<Generation>, Vec<PersistedEntry>) {
@@ -43,7 +43,7 @@ pub(in crate::common::auth) fn split_high_slot_state(
     (high_generations, high_entries)
 }
 
-pub(in crate::common::auth) fn build_snapshot(
+pub(crate) fn build_snapshot(
     inner: &AuthStateInner,
     admin_replays: &VecDeque<AdminReplayRecord>,
 ) -> PersistedSnapshot {
@@ -79,10 +79,7 @@ pub(in crate::common::auth) fn build_snapshot(
     )
 }
 
-pub(in crate::common::auth) fn normalize_tombstone_times(
-    snapshot: &mut PersistedSnapshot,
-    now: u64,
-) -> bool {
+pub(crate) fn normalize_tombstone_times(snapshot: &mut PersistedSnapshot, now: u64) -> bool {
     let mut changed = false;
     for entry in &mut snapshot.entries {
         if entry.tombstoned_at.is_some() {
@@ -109,7 +106,7 @@ pub(in crate::common::auth) fn normalize_tombstone_times(
     changed
 }
 
-pub(in crate::common::auth) fn empty_snapshot(
+pub(crate) fn empty_snapshot(
     inner: &AuthStateInner,
     instance_id: [u8; INSTANCE_ID_LEN],
     admin_replays: &VecDeque<AdminReplayRecord>,
@@ -146,7 +143,7 @@ fn snapshot_with(
     }
 }
 
-pub(in crate::common::auth) fn load_persisted_state(
+pub(crate) fn load_persisted_state(
     config: &AuthConfig,
     admin_key: &AesKeyType,
     instance_id: [u8; INSTANCE_ID_LEN],
@@ -166,7 +163,7 @@ pub(in crate::common::auth) fn load_persisted_state(
     }
 }
 
-pub(in crate::common::auth) fn try_load_persisted_state(
+pub(crate) fn try_load_persisted_state(
     config: &AuthConfig,
     admin_key: &AesKeyType,
     instance_id: [u8; INSTANCE_ID_LEN],
@@ -229,7 +226,7 @@ pub(in crate::common::auth) fn try_load_persisted_state(
     Ok(snapshot)
 }
 
-pub(in crate::common::auth) fn apply_persisted_mutation(
+pub(crate) fn apply_persisted_mutation(
     snapshot: &mut PersistedSnapshot,
     mutation: StateMutation,
 ) -> Result<(), AuthFailure> {
@@ -279,10 +276,7 @@ fn snapshot_entry_mut<'a>(
         })
 }
 
-pub(in crate::common::auth) fn push_persisted_audit(
-    records: &mut VecDeque<AuditRecord>,
-    record: AuditRecord,
-) {
+pub(crate) fn push_persisted_audit(records: &mut VecDeque<AuditRecord>, record: AuditRecord) {
     while records.len() >= AUDIT_RECORD_CAPACITY {
         records.pop_front();
     }

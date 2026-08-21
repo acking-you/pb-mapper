@@ -247,9 +247,9 @@ impl ReplayGuard {
             }
             return Err(error);
         }
-        if created && let Err(error) = crate::common::auth::sync_parent_directory(path) {
+        if created && let Err(error) = pb_mapper_core::durable_file::sync_parent_directory(path) {
             self.log_failed = true;
-            return Err(std::io::Error::other(error.to_string()));
+            return Err(error);
         }
         Ok(())
     }
@@ -363,9 +363,8 @@ impl ReplayGuard {
             file.write_all(&live.concat())?;
             file.sync_all()?;
             drop(file);
-            crate::common::auth::replace_file(&temporary, path)?;
-            crate::common::auth::sync_parent_directory(path)
-                .map_err(|error| std::io::Error::other(error.to_string()))
+            pb_mapper_core::durable_file::replace_file(&temporary, path)?;
+            pb_mapper_core::durable_file::sync_parent_directory(path)
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary);
