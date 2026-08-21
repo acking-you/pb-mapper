@@ -14,6 +14,12 @@
 //! end of a window with a max-future timestamp cannot be replayed after rotation.
 //! Per-credential counts stop one tenant from filling the shared filter with
 //! unique salts before the request payload is decoded.
+//!
+//! The `expect`s here are all slices of a `[u8; REPLAY_RECORD_LEN]` at constant
+//! offsets, or SHA-256's 32-byte output — widths the array types already fix, so
+//! the conversions cannot fail. Unlike the parsing paths, these sit in functions
+//! that return `()`, so there is nothing to report a width error to.
+#![allow(clippy::expect_used)]
 
 use pb_mapper_auth::KeyId;
 

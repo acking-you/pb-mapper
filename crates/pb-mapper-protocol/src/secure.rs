@@ -69,6 +69,16 @@ pub struct ClientHeaderSession {
 }
 
 impl ClientHeaderSession {
+    /// The v2 material, which is `Some` exactly when `protocol` is `V2`.
+    ///
+    /// The type does not tie the two together, so this reports instead of
+    /// panicking on a state that construction never produces.
+    fn v2_material(&self) -> Result<&V2Material> {
+        self.v2
+            .as_ref()
+            .ok_or_else(|| protocol_error("v2 session is missing its key material"))
+    }
+
     /// New clients always use protocol v2, for both administrator and temporary credentials.
     pub fn from_process() -> Result<Self> {
         let credential = get_process_credential().map_err(protocol_error)?;
@@ -116,7 +126,7 @@ impl ClientHeaderSession {
                     .await
             }
             HeaderProtocol::V2 => {
-                let material = self.v2.as_ref().expect("v2 session material");
+                let material = self.v2_material()?;
                 writer
                     .write_all(&first_prefix(material))
                     .await
@@ -142,7 +152,7 @@ impl ClientHeaderSession {
             )?)),
             HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
                 reader,
-                self.v2.as_ref().expect("v2 session material").clone(),
+                self.v2_material()?.clone(),
                 DIRECTION_SERVER_TO_CLIENT,
                 0,
             )?)),
@@ -187,7 +197,7 @@ impl ClientHeaderSession {
             )?)),
             HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
                 writer,
-                self.v2.as_ref().expect("v2 session material").clone(),
+                self.v2_material()?.clone(),
                 DIRECTION_CLIENT_TO_SERVER,
                 1,
             )?)),
@@ -215,6 +225,14 @@ impl fmt::Debug for ServerHeaderSession {
 }
 
 impl ServerHeaderSession {
+    /// The v2 material, `Some` exactly when `protocol` is `V2` — see
+    /// [`ClientHeaderSession::v2_material`].
+    fn v2_material(&self) -> Result<&V2Material> {
+        self.v2
+            .as_ref()
+            .ok_or_else(|| protocol_error("v2 session is missing its key material"))
+    }
+
     pub fn protocol(&self) -> HeaderProtocol {
         self.protocol
     }
@@ -259,7 +277,7 @@ impl ServerHeaderSession {
             )?)),
             HeaderProtocol::V2 => Ok(HeaderMessageWriter::V2(V2MessageWriter::new(
                 writer,
-                self.v2.as_ref().expect("v2 session material").clone(),
+                self.v2_material()?.clone(),
                 DIRECTION_SERVER_TO_CLIENT,
                 0,
             )?)),
@@ -278,7 +296,7 @@ impl ServerHeaderSession {
             )?)),
             HeaderProtocol::V2 => Ok(HeaderMessageReader::V2(V2MessageReader::new(
                 reader,
-                self.v2.as_ref().expect("v2 session material").clone(),
+                self.v2_material()?.clone(),
                 DIRECTION_CLIENT_TO_SERVER,
                 1,
             )?)),
@@ -515,12 +533,17 @@ impl ServerSecurity {
                 false,
             ));
         }
+        // The prefix-length check above fixes all three widths, so none of these
+        // can fail. Reported rather than asserted: this parses the first bytes an
+        // unauthenticated peer sends, and a panic there is a remote abort.
+        let malformed =
+            || ServerInitialError::fail("protocol_error", "v2 prefix is malformed", false);
         let key_id = KeyId::from_u64(u64::from_be_bytes(
-            remainder[4..12].try_into().expect("fixed key id"),
+            remainder[4..12].try_into().map_err(|_| malformed())?,
         ));
         let salt: [u8; CONNECTION_SALT_LEN] =
-            remainder[12..28].try_into().expect("fixed connection salt");
-        let client_timestamp = u64::from_be_bytes(salt[..8].try_into().expect("fixed timestamp"));
+            remainder[12..28].try_into().map_err(|_| malformed())?;
+        let client_timestamp = u64::from_be_bytes(salt[..8].try_into().map_err(|_| malformed())?);
         let now = unix_seconds();
         if now.abs_diff(client_timestamp) > MAX_CONNECTION_CLOCK_SKEW_SECONDS {
             return Err(ServerInitialError::fail_key(

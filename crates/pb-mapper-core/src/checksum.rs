@@ -185,13 +185,20 @@ pub fn parse_credential(raw: &str) -> Result<Credential, String> {
         if expected.as_ref()[..4] != payload[41..45] {
             return Err("temporary credential checksum mismatch".to_string());
         }
-        let key_id = u64::from_be_bytes(payload[1..9].try_into().expect("fixed key id width"));
+        // The 45-byte check above already guarantees both widths, so neither arm
+        // is reachable — but this returns `Result` anyway, so saying so costs a
+        // line and removes a panic from a path that parses network input.
+        let key_id = u64::from_be_bytes(
+            payload[1..9]
+                .try_into()
+                .map_err(|_| "temporary credential key id is malformed".to_string())?,
+        );
         if key_id == 0 {
             return Err("temporary credential key id must not be zero".to_string());
         }
         let key = payload[9..41]
             .try_into()
-            .expect("fixed temporary key width");
+            .map_err(|_| "temporary credential key is malformed".to_string())?;
         return Ok(Credential::Temporary { key_id, key });
     }
 
@@ -202,8 +209,9 @@ pub fn parse_credential(raw: &str) -> Result<Credential, String> {
     if !is_env_safe_admin_key(bytes) {
         return Err(env_safe_admin_key_error());
     }
+    // Unreachable after the `ADMIN_KEY_LEN` check above, for the same reason.
     Ok(Credential::Admin(
-        bytes.try_into().expect("validated admin key width"),
+        bytes.try_into().map_err(|_| key_len_error(raw))?,
     ))
 }
 
@@ -539,6 +547,8 @@ pub fn gen_random_key() -> [u8; 32] {
     random_key
 }
 
+// This was missing its `#[cfg(test)]`, so it compiled into release builds.
+#[cfg(test)]
 mod tests {
     #[test]
     fn test_random_checksum() {

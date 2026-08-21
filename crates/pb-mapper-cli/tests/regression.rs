@@ -1,3 +1,8 @@
+// An integration test: a failed `unwrap` is a failed test, which is the report
+// this file exists to produce. `allow-unwrap-in-tests` covers `#[cfg(test)]`
+// modules but not a `tests/` target, whose whole body is test code.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

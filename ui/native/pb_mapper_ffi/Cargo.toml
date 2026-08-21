@@ -6,9 +6,8 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true
 
 [dependencies]
 serde = { version = "1.0.219", features = ["derive"] }

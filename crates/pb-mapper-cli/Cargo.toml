@@ -35,3 +35,6 @@ udp-timeout = [
     "pb-mapper-client/udp-timeout",
     "pb-mapper-server/udp-timeout",
 ]
+
+[lints]
+workspace = true

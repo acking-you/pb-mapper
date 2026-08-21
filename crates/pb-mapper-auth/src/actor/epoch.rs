@@ -74,8 +74,15 @@ pub(super) fn actor_rotate_root(
             false,
         ));
     }
-    let new_key_string =
-        String::from_utf8(new_key.to_vec()).expect("printable ASCII is valid UTF-8");
+    // Unreachable: `is_env_safe_admin_key` above accepts only printable ASCII.
+    // Reported rather than panicked, since this already returns `Result`.
+    let new_key_string = String::from_utf8(new_key.to_vec()).map_err(|_| {
+        AuthFailure::new(
+            "administrator_key_invalid",
+            env_safe_admin_key_error(),
+            false,
+        )
+    })?;
 
     inner.root_epoch.fetch_add(1, Ordering::AcqRel);
     let rotate_audit = audit("administrator_key_rotate", None, None);

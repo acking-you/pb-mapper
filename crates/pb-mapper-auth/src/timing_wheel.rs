@@ -173,10 +173,15 @@ impl TimingWheel {
         // into its rotation, so its bucket comes off on a rotation boundary. Every
         // finer level is at zero offset there, which makes the delay still
         // remaining a plain base-`radix` decomposition from that point down.
-        let (level, slot, remaining) = (0..self.levels.len())
+        // The guard above bounds `delay`, so some level always takes it.
+        // Unreachable, and treated like the out-of-range case: dropping the
+        // timer fires it, which is the safe direction for a credential deadline.
+        let Some((level, slot, remaining)) = (0..self.levels.len())
             .rev()
             .find_map(|level| self.entry_leg(level, self.ticks + delay))
-            .expect("a delay within max_delay reaches some level");
+        else {
+            return;
+        };
         let route = match remaining {
             0 => deliver,
             remaining => self.route(remaining, deliver),

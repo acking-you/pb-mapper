@@ -37,9 +37,16 @@ pub(crate) fn open_blob(admin_key: &AesKeyType, sealed: &[u8]) -> Result<Vec<u8>
     }
     let nonce_start = STATE_BLOB_MAGIC.len();
     let nonce_end = nonce_start + 12;
-    let nonce_bytes: [u8; 12] = sealed[nonce_start..nonce_end]
-        .try_into()
-        .expect("validated nonce width");
+    // Unreachable: the length check above guarantees these 12 bytes exist. This
+    // parses a file that may have been truncated or corrupted, so it reports
+    // rather than panics.
+    let nonce_bytes: [u8; 12] = sealed[nonce_start..nonce_end].try_into().map_err(|_| {
+        AuthFailure::new(
+            "temporary_key_store_unavailable",
+            "authentication state blob has an invalid nonce",
+            false,
+        )
+    })?;
     let mut plain = sealed[nonce_end..].to_vec();
     let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, admin_key).map_err(|_| {
         AuthFailure::new(

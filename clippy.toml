@@ -1,0 +1,5 @@
+# `unwrap_used` and `expect_used` are denied workspace-wide (see the root
+# `[workspace.lints.clippy]`). A panic in a test is a failing test, which is the
+# point, so exempt test code rather than annotating every assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

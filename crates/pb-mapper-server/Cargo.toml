@@ -22,3 +22,6 @@ rand.workspace = true
 
 [features]
 udp-timeout = ["uni-stream/udp-timeout", "pb-mapper-protocol/udp-timeout"]
+
+[lints]
+workspace = true

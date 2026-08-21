@@ -1,3 +1,6 @@
+// An example: panicking on a failed bind is the clearest thing it can do.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::error::Error;
 use std::net::SocketAddr;
 use std::str::FromStr;

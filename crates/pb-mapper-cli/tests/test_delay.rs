@@ -1,3 +1,6 @@
+// See the note in `regression.rs`: the whole file is test code.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::env;
 use std::sync::LazyLock;
 use std::time::Duration;

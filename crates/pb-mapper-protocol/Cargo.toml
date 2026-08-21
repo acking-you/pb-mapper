@@ -21,3 +21,6 @@ uni-stream.workspace = true
 
 [features]
 udp-timeout = ["uni-stream/udp-timeout"]
+
+[lints]
+workspace = true
