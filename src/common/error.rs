@@ -73,30 +73,6 @@ pub enum Error {
     /// Error for forward
     #[snafu(display("failed to forward message to write in normal text"))]
     FwdNetworkWriteWithNormal { source: std::io::Error },
-    /// Error for stream
-    #[snafu(display("failed to connect stream, type:`{stream_type}`"))]
-    StmConnectStream {
-        // must be "UDP" or "TCP"
-        stream_type: &'static str,
-        source: std::io::Error,
-    },
-    #[snafu(display("failed to got one addr from iter"))]
-    StmGotOneAddrFromIter,
-    #[snafu(display("failed to got one addr when parsing address"))]
-    StmGotOneAddr { source: std::io::Error },
-    /// Error for listener
-    #[snafu(display("listener failed to bind addr, type:`{listener_type}`"))]
-    LsnListenerBind {
-        // must be "UDP" or "TCP"
-        listener_type: &'static str,
-        source: std::io::Error,
-    },
-    #[snafu(display("listener failed to accept stream, type:`{listener_type}`"))]
-    LsnListenerAccept {
-        // must be "UDP" or "TCP"
-        listener_type: &'static str,
-        source: std::io::Error,
-    },
     /// Error for config
     #[snafu(display("parse socket address from string:`{string}` error"))]
     CfgParseSockAddr {

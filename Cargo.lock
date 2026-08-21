@@ -787,7 +787,6 @@ dependencies = [
  "futures",
  "hashbrown 0.16.1",
  "kanal",
- "once_cell",
  "parking_lot",
  "rand 0.10.0",
  "ring",
