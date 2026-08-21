@@ -11,7 +11,7 @@ use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 
 /// Start pb-mapper server.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_start_server(
     handle: *mut PbMapperHandle,
     port: u16,
@@ -38,7 +38,7 @@ pub unsafe extern "C" fn pb_mapper_start_server(
 }
 
 /// Stop pb-mapper server.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *
 }
 
 /// Get local server status (running/uptime).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_local_server_status_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
@@ -84,7 +84,7 @@ pub unsafe extern "C" fn pb_mapper_get_local_server_status_json(
 /// The status detail's `serverMap` is a Debug dump of the whole map and is not
 /// something a UI should be parsing. This answers the same question with the
 /// protocol's own structured query, one key at a time.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
 }
 
 /// Get server status detail (remote server).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
@@ -134,7 +134,7 @@ pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
 }
 
 /// Force-refresh server status (blocks until network result is available).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {

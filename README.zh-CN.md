@@ -3,7 +3,7 @@
 <img src="docs/assets/poster.png" alt="pb-mapper" width="800" />
 
 <p>
-  <a href="https://www.rust-lang.org/"><img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white"></a>
+  <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
   <a href="https://tokio.rs/"><img alt="Tokio" src="https://img.shields.io/badge/Async-Tokio-3873AD"></a>
   <a href="https://flutter.dev/"><img alt="Flutter" src="https://img.shields.io/badge/UI-Flutter-02569B?logo=flutter&logoColor=white"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
@@ -27,6 +27,8 @@
 ## 亮点
 
 - **单二进制、单公网端口**：统一的 `pb-mapper` 命令覆盖所有运行角色，服务 key 注册表取代逐个服务规划端口。
+- **临时凭据与命名空间隔离**：管理员密钥可签发可续期、自动过期的 `pbmt1_` 凭据；每把临时凭据只能查看、注册和连接自己的命名空间。
+- **V2 首帧鉴权**：控制帧使用按方向派生的 AES-256-GCM 密钥，在第一个请求内完成鉴权，不增加额外握手往返；新客户端固定使用 V2，服务端可在迁移期兼容旧协议。
 - **可选加密**：转发流量可启用 AES-256-GCM（基于 `ring`），注册服务时用 `--codec` 开启。
 - **生产可用**：真实负载下（例如 Palworld UDP 服务器），延迟与 frp 直暴端口相当。
 
@@ -41,17 +43,20 @@
 
 ### 备选方式：一键安装脚本
 
-远程主机能直连 GitHub 时，一条命令即可在 Linux（x86_64，musl）上安装统一的 `pb-mapper` 二进制，并以 `server` 子命令启动 systemd 服务：端口 `7666`，启用 `--use-machine-msg-header-key`，key 落盘在 `/var/lib/pb-mapper-server/msg_header_key`。
+远程主机能直连 GitHub 时，一条命令即可在 Linux（x86_64，musl）上安装统一的 `pb-mapper` 二进制，并以 `server` 子命令启动 systemd 服务。中继监听 `7666`，首次启动时会在 `/var/lib/pb-mapper/auth/admin.key` 创建随机管理员密钥。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
 ```
 
-安装完成后，在运行 `pb-mapper register` 或 `pb-mapper connect` 前加载同一把 key：
+管理员密钥只用于管理；先为一项业务签发临时凭据：
 
 ```bash
-export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
+export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
+pb-mapper admin --server <public-ip>:7666 key issue --ttl 24h --label home-web
 ```
+
+把输出的 `pbmt1_...` 凭据作为 register 与 connect 机器上的 `MSG_HEADER_KEY`。不同临时凭据即使使用相同的 service name，也不会相互冲突。
 
 ## 架构
 
@@ -80,10 +85,13 @@ register 与 connect 工作流也可以通过 Flutter UI 操作。
 # 1. 公网服务器：启动中心路由
 pb-mapper server --port 7666
 
-# 2. 家中机器：以 key 'web' 注册服务
+# 2. 签发临时凭据，并在两端机器导入
+export MSG_HEADER_KEY='<pbmt1_credential>'
+
+# 3. 家中机器：以 key 'web' 注册服务
 pb-mapper register tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:8080
 
-# 3. 咖啡店机器：订阅并在本地暴露
+# 4. 咖啡店机器：订阅并在本地暴露
 pb-mapper connect tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:3000
 ```
 
@@ -97,25 +105,27 @@ pb-mapper connect tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:3000
 | `pb-mapper register tcp\|udp` | 将本地 TCP/UDP 服务注册到服务器 |
 | `pb-mapper connect tcp\|udp` | 订阅已注册的服务并在本地暴露端口 |
 | `pb-mapper status keys\|remote-id` | 查询中心路由状态 |
+| `pb-mapper admin ...` | 签发/续期/吊销临时凭据并查看认证、服务与连接状态 |
 | **Flutter UI**（`ui/`） | server、register、connect、status 的图形化界面 |
 
 ## 开发者视角
 
-- **Rust 核心**：统一入口为 `src/bin/pb-mapper.rs`；协议与网络通用逻辑在 `src/common`、`src/utils`；server/register/connect 实现在 `src/pb_server`、`src/local/server`、`src/local/client`。
+- **Rust 核心**：`crates/` 下的 workspace，自底向上分层：`pb-mapper-core`（凭据、校验和、配置、地址解析）→ `pb-mapper-auth`（凭据生命周期与持久化）→ `pb-mapper-protocol`（帧格式与安全会话）→ `pb-mapper-server` 与 `pb-mapper-client`（二者平级，互不引用）→ `pb-mapper-cli`（`pb-mapper` 二进制所在）。
 - **Flutter UI**：界面在 `ui/lib/src/views`，FFI 各层在 `ui/lib/src/ffi`，Rust 桥接在 `ui/native/pb_mapper_ffi`。FFI 调用跑在后台 isolate，Rust 统一返回 JSON（`{success, message, data}`）以保持 C ABI 稳定。
 
 ## 文档
 
 - 使用手册（编译/运行/使用）：[`docs/user-guide.zh-CN.md`](docs/user-guide.zh-CN.md)
+- 认证与 V2 协议：[`docs/authentication-v2.zh-CN.md`](docs/authentication-v2.zh-CN.md)
 - Docker 服务器指南：[`DOCKER_README.md`](DOCKER_README.md)
 - English docs: [`README.md`](README.md)、[`docs/user-guide.md`](docs/user-guide.md)
 
 ## 仓库结构
 
-- `src/` — Rust 后端
+- `crates/` — Rust workspace（六个 crate，根清单为虚拟清单）
 - `ui/` — Flutter UI + 原生桥接
 - `docs/` — 文档与素材
-- `docker/`、`services/`、`scripts/`、`tests/` — 部署与工具
+- `docker/`、`services/`、`scripts/` — 部署与工具
 - `skills/` — AI 编程助手部署 skill（服务端、客户端隧道）
 
 ## 许可证

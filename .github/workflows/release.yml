@@ -61,7 +61,7 @@ jobs:
         uses: houseabsolute/actions-rust-cross@v1
         with:
           target: ${{ matrix.platform.target }}
-          toolchain: 1.88.0
+          toolchain: 1.98.0
           args: "--locked --release --bin pb-mapper"
           strip: true
 
@@ -77,3 +77,7 @@ jobs:
             LICENSE
             README.md
             README.zh-CN.md
+            docs/authentication-v2.md
+            docs/authentication-v2.zh-CN.md
+            docs/user-guide.md
+            docs/user-guide.zh-CN.md

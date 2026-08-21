@@ -12,7 +12,7 @@ use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_str
 use crate::state::{ServiceConfigInfo, ServiceStatusResponse};
 
 /// Register a service.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_register_service(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn pb_mapper_register_service(
 }
 
 /// Unregister a service (stop running but keep config).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_unregister_service(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn pb_mapper_unregister_service(
 }
 
 /// Delete service config (also stops service if running).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_delete_service_config(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn pb_mapper_delete_service_config(
 }
 
 /// Get service configs list.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_service_configs_json(
     handle: *mut PbMapperHandle,
 ) -> *mut c_char {
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_configs_json(
 }
 
 /// Get service status for a specific key.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_service_status_json(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,

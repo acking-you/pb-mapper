@@ -32,14 +32,12 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   bool? _serverReachable;
   String _serverCheckMessage = '';
   ConfigStatus? _currentConfig;
+  String _revealedIsolatedRelayAdminKey = '';
 
   ChangeSubscription? _changes;
 
-
   @override
-
   void initState() {
-
     super.initState();
 
     // Reload when anything changes this list, including a change made
@@ -47,20 +45,19 @@ class _ConfigurationViewState extends State<ConfigurationView> {
     // from a terminal while this window was open.
 
     _changes = ChangeSubscription.listen(
-
       PbMapperService.changeStream,
 
       {StateChangeKind.config},
 
-      (_) { if (mounted) _loadConfig(); },
-
+      (_) {
+        if (mounted) _loadConfig();
+      },
     );
     _loadConfig();
   }
 
   @override
   void dispose() {
-
     _changes?.cancel();
     _serverAddressController.dispose();
     _msgHeaderKeyController.dispose();
@@ -90,7 +87,9 @@ class _ConfigurationViewState extends State<ConfigurationView> {
   Future<void> _saveConfiguration() async {
     if (_isSaving) return; // Prevent multiple simultaneous saves
     final msgHeaderKey = _msgHeaderKeyController.text.trim();
-    if (msgHeaderKey.isNotEmpty && msgHeaderKey.length != 32) {
+    if (msgHeaderKey.isNotEmpty &&
+        msgHeaderKey.length != 32 &&
+        !msgHeaderKey.startsWith('pbmt1_')) {
       showToast(context, context.l10n.keyLengthInvalid, kind: ToastKind.error);
       return;
     }
@@ -125,6 +124,14 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       });
       showToast(context, context.l10n.saveFailed, kind: ToastKind.error);
     }
+  }
+
+  Future<void> _revealIsolatedRelayAdminKey() async {
+    final key = await _api.revealIsolatedRelayAdminKey();
+    if (!mounted) return;
+    setState(() {
+      _revealedIsolatedRelayAdminKey = key;
+    });
   }
 
   Future<void> _checkServerConnection() async {
@@ -308,9 +315,11 @@ class _ConfigurationViewState extends State<ConfigurationView> {
       if (serverAddress.isEmpty) {
         throw const FormatException('serverAddress is required');
       }
-      if (msgHeaderKey.isNotEmpty && msgHeaderKey.length != 32) {
+      if (msgHeaderKey.isNotEmpty &&
+          msgHeaderKey.length != 32 &&
+          !msgHeaderKey.startsWith('pbmt1_')) {
         throw const FormatException(
-          'MSG_HEADER_KEY must be exactly 32 characters',
+          'MSG_HEADER_KEY must be a 32-character administrator key or a pbmt1_ temporary credential',
         );
       }
 
@@ -364,11 +373,28 @@ class _ConfigurationViewState extends State<ConfigurationView> {
                       controller: _msgHeaderKeyController,
                       decoration: InputDecoration(
                         labelText: 'MSG_HEADER_KEY',
-                        hintText: '32 characters, or empty',
+                        hintText: '32-character admin key or pbmt1_ credential',
                         border: OutlineInputBorder(),
                         helperText: context.l10n.msgHeaderKeyHelp,
                       ),
                     ),
+                    if (_currentConfig?.isolatedRelayAdminKeySet == true) ...[
+                      const SizedBox(height: 16),
+                      if (_revealedIsolatedRelayAdminKey.isEmpty)
+                        OutlinedButton(
+                          onPressed: _revealIsolatedRelayAdminKey,
+                          child: Text(context.l10n.isolatedRelayReveal),
+                        )
+                      else
+                        InputDecorator(
+                          decoration: InputDecoration(
+                            labelText: context.l10n.isolatedRelayAdminKey,
+                            border: const OutlineInputBorder(),
+                            helperText: context.l10n.isolatedRelayAdminKeyHelp,
+                          ),
+                          child: SelectableText(_revealedIsolatedRelayAdminKey),
+                        ),
+                    ],
                     const SizedBox(height: 16),
                     SwitchListTile(
                       title: const Text('PB_MAPPER_KEEP_ALIVE'),

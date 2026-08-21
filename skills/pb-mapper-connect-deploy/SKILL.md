@@ -38,7 +38,7 @@ Prompt the user for each value below. Do NOT assume or hardcode any value.
 | `SERVICE_KEY` | pb-mapper service name to subscribe | — | Required |
 | `LISTEN_IP` | Listen on localhost only (`127.0.0.1`) or all interfaces (`0.0.0.0`)? | `127.0.0.1` | Required |
 | `LISTEN_PORT` | Local listening port on remote host | — | Required |
-| `MSG_HEADER_KEY` | Encryption key (exactly 32 chars) | *(empty)* | Optional, **confidential** — never log or echo |
+| `MSG_HEADER_KEY` | Administrator key or `pbmt1_...` temporary credential | *(empty)* | Required for authenticated v2 connections; **confidential** — never log or echo |
 | `PUBLIC_CHECK_URL` | URL for external validation | *(empty)* | Optional |
 | `VERSION` | Release version (without `v` prefix) | Latest release | Auto-detect or user-specified |
 | `TARGET_TRIPLE` | Build target | `x86_64-unknown-linux-musl` | User can override |
@@ -143,7 +143,10 @@ REMOTE_SYSTEMD
 
 ### 4. Write instance env file and start service
 
-`MSG_HEADER_KEY` must be omitted when empty; never write an empty value to env file.
+Prefer a temporary credential issued by the relay administrator. It can register,
+connect, and inspect only its own namespace, and it expires automatically. Use the
+administrator key only for relay administration or an intentional namespace-0
+deployment. Never write an empty credential to the environment file.
 
 ```bash
 ssh ${SSH_PORT_OPT} "${SSH_TARGET}" \
@@ -159,14 +162,21 @@ RUST_LOG=info
 PB_MAPPER_KEEP_ALIVE=ON
 EOF
 
-if [ -n "${MSG_HEADER_KEY}" ]; then
-  CLEAN_KEY="$(printf '%s' "${MSG_HEADER_KEY}" | tr -d '\r\n')"
-  if [ "${#CLEAN_KEY}" -ne 32 ]; then
-    echo "MSG_HEADER_KEY must be exactly 32 characters" >&2
-    exit 1
-  fi
-  echo "MSG_HEADER_KEY=${CLEAN_KEY}" | sudo tee -a "${ENV_FILE}" >/dev/null
+if [ -z "${MSG_HEADER_KEY}" ]; then
+  echo "MSG_HEADER_KEY is required" >&2
+  exit 1
 fi
+CLEAN_KEY="$(printf '%s' "${MSG_HEADER_KEY}" | tr -d '\r\n')"
+case "${CLEAN_KEY}" in
+  pbmt1_*) ;;
+  *)
+    if [ "${#CLEAN_KEY}" -ne 32 ]; then
+      echo "MSG_HEADER_KEY must be a 32-byte administrator key or pbmt1_ temporary credential" >&2
+      exit 1
+    fi
+    ;;
+esac
+echo "MSG_HEADER_KEY=${CLEAN_KEY}" | sudo tee -a "${ENV_FILE}" >/dev/null
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now "pb-mapper-connect@${INSTANCE_NAME}.service"
@@ -191,7 +201,10 @@ If `jq` is available, pipe through `jq .` for formatted JSON output.
 
 Use this quick triage when startup or forwarding fails:
 
-- `datalen not valid`: likely `MSG_HEADER_KEY` mismatch or hidden newline; verify both sides use the same 32-byte key.
+- `protocol_v2_decrypt_failed`: credential does not belong to this relay or was corrupted in transit.
+- `temporary_key_expired` / `temporary_key_revoked`: ask an administrator to renew the same key ID or issue a replacement.
+- `namespace_access_denied`: a temporary credential can only use its own namespace; remove an incorrect `--namespace` value.
+- Legacy `datalen not valid`: administrator key mismatch or a hidden newline in an old protocol-v1 client.
 - Service restarts immediately: inspect logs with `journalctl -u pb-mapper-connect@${INSTANCE_NAME} -n 200 --no-pager`.
 - Remote port not listening: confirm `LOCAL_ADDR` host/port and no port conflict.
 - Public URL fails but localhost works: investigate reverse proxy (for example, Caddy route/TLS config).

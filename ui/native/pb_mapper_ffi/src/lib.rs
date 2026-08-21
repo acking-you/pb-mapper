@@ -17,16 +17,18 @@ mod state;
 
 // Re-export public FFI functions and handle type.
 use better_mimalloc_rs::MiMalloc;
-pub use cli::{pb_mapper_cli_main, NOT_A_COMMAND};
+pub use cli::{NOT_A_COMMAND, pb_mapper_cli_main};
 pub use client::{
     pb_mapper_connect_service, pb_mapper_delete_client_config, pb_mapper_disconnect_service,
     pb_mapper_get_client_configs_json, pb_mapper_get_client_status_json,
 };
-pub use config::{pb_mapper_get_config_json, pb_mapper_update_config};
+pub use config::{
+    pb_mapper_get_config_json, pb_mapper_reveal_isolated_admin_key, pb_mapper_update_config,
+};
 pub use events::pb_mapper_set_change_callback;
 pub use handle::{
-    pb_mapper_create, pb_mapper_destroy, pb_mapper_set_app_dir, pb_mapper_start_control_server,
-    PbMapperHandle,
+    PbMapperHandle, pb_mapper_create, pb_mapper_destroy, pb_mapper_set_app_dir,
+    pb_mapper_start_control_server,
 };
 pub use logging::{pb_mapper_free_string, pb_mapper_init_logging, pb_mapper_set_log_callback};
 pub use server::{

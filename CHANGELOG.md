@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-08-18
+- Added a sole administrator credential plus renewable, expiring, and immediately revocable `pbmt1_` temporary credentials with fixed-slot O(1) lookup and isolated per-key service namespaces.
+- Added single-flight protocol-v2 authentication with directional AES-256-GCM keys, monotonic frame counters, authenticated routing metadata, durable first-flight replay protection, and optional legacy framing during migration.
+- Added encrypted snapshot/WAL authentication state, exclusive `auth.lock`, lifecycle audit records, hierarchical timing-wheel expiry, hard closure of revoked live connections, recoverable root-key rotation, and explicit auth-state reset.
+- Extended the unified CLI with temporary-key lifecycle, service/connection inventory, auth status, protocol policy, root rotation, namespace targeting, and human/JSON/NDJSON output.
+- Replaced insecure default-key fallback with first-start random administrator-key generation, retained machine-derived keys only for explicit compatibility, and updated Flutter, installers, systemd, Docker, release metadata, and bilingual documentation.
+- Recovery keys must decrypt existing snapshot or WAL state before they are persisted. Interrupted rotation and reset recover from staged `admin.key.next` and `server-instance-id.next`.
+- First-flight salts are unique for nonce 0: admission is atomic under one lock, torn replay records fail closed, and a nonce-0 error frame is sent only after that salt is reserved.
+- Pinned UI and local tunnels to the credential and relay address captured at start, and bound tunneled-frame checksums to each hop's authenticated session key.
+- Aborted pooled registration workers and accepted connection tasks on shutdown; the relay reaps connection tasks with a `JoinSet`.
+
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.
 - Consolidated release archives into one cross-platform binary artifact per target and updated Docker, installers, systemd templates, build scripts, deployment skills, and documentation to use it.

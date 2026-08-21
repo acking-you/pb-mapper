@@ -1,19 +1,24 @@
 # Repository Guidelines
 
 ## Architecture Overview
-- One `pb-mapper` binary in `src/bin/` with four role commands:
+- One `pb-mapper` binary in `crates/pb-mapper-cli/src/bin/` with five role commands:
   - `server`: central router (default port 7666)
   - `register`: registers local TCP/UDP services with the router
   - `connect`: connects to a registered service and exposes a local port
   - `status`: queries router IDs and registered keys
-- Core crates: `src/pb_server`, `src/local/{server,client}`, `src/common` (protocol, streams, listeners), `src/utils`.
+  - `admin`: issues, lists, and revokes credentials; rotates the administrator key
+- Crates, bottom-up: `pb-mapper-core` (credentials, checksum, config, addressing)
+  → `pb-mapper-auth` (credential lifecycle and persistence) → `pb-mapper-protocol`
+  (framing and secure sessions) → `pb-mapper-server` and `pb-mapper-client`, which
+  are peers → `pb-mapper-cli`. `ui/native/pb_mapper_ffi` is the C ABI cdylib.
 
 ## Project Structure & Modules
-- `src/`: Rust backend and CLI
-  - `src/bin/pb-mapper.rs`: unified CLI entry point
-  - `src/pb_server`, `src/local`, `src/common`, `src/utils`
+- `crates/`: the Rust workspace; the root `Cargo.toml` is a virtual manifest
+  - `crates/pb-mapper-cli/src/bin/pb-mapper.rs`: unified CLI entry point
+  - `crates/pb-mapper-{core,auth,protocol,server,client,cli}`
+  - `crates/pb-mapper-cli/tests/`: integration tests; loads env from `tests/.env`
+  - `crates/pb-mapper-cli/examples/`: runnable examples
 - `ui/`: Flutter UI; Rust bridge under `ui/native/*`
-- `tests/`: integration tests; loads env from `tests/.env`
 - `docker/`, `services/`, `scripts/`: container, systemd, build/release
 
 ## Build, Test, and Development Commands
@@ -28,7 +33,9 @@
 Notes: CI builds release artifacts on tags `vX.Y.Z` (see `.github/workflows/release.yml`).
 
 ## Coding Style & Naming Conventions
-- Rust 2021; toolchain pinned via `rust-toolchain.toml` (CI uses 1.88.0)
+- Edition is set once in `[workspace.package]`; the toolchain is pinned in
+  `rust-toolchain.toml`, which CI installs. Both are deliberately not repeated
+  here — a version in prose goes stale on the next upgrade.
 - Format: `cargo fmt --all` (4 spaces; import grouping per `rustfmt.toml`)
 - Lint: `cargo clippy --all-targets -- -D warnings`
 - Naming: modules/functions `snake_case`, types/traits `PascalCase`, consts `SCREAMING_SNAKE_CASE`

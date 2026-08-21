@@ -11,12 +11,12 @@
 //! Dart's whole part is: hand argv over, print nothing, exit with what comes
 //! back.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{CStr, c_char, c_int};
 
 use clap::{CommandFactory, Parser};
 
 use crate::ctl::proto::Response;
-use crate::ctl::{endpoint, server, Command};
+use crate::ctl::{Command, endpoint, server};
 
 /// Returned when argv is not a command at all, so Dart knows to run the GUI.
 /// Chosen so it cannot collide with a real exit code.
@@ -143,7 +143,7 @@ fn run(args: Vec<String>) -> c_int {
 ///
 /// # Safety
 /// `argv` must point to `argc` valid, NUL-terminated C strings.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_cli_main(argc: c_int, argv: *const *const c_char) -> c_int {
     if argv.is_null() || argc <= 0 {
         return NOT_A_COMMAND;

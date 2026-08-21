@@ -1,6 +1,6 @@
 //! Shared helpers for FFI response formatting and argument parsing.
 
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 
 use serde_json::json;

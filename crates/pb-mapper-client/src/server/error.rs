@@ -1,0 +1,66 @@
+use std::time::Duration;
+
+use snafu::Snafu;
+
+// The `common::error::Error` spellings below are the source type on nearly every
+// variant; aliasing keeps them as they were.
+use pb_mapper_core as common;
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(super)))]
+pub enum Error {
+    #[snafu(display("send register request error"))]
+    SendRegisterReq { source: common::error::Error },
+    #[snafu(display("encode register request error"))]
+    EncodeRegisterReq { source: common::error::Error },
+    #[snafu(display("read register response error"))]
+    ReadRegisterResp { source: common::error::Error },
+    #[snafu(display("decode register response error"))]
+    DecodeRegisterResp { source: common::error::Error },
+    #[snafu(display("register response not `PbConnResponse::Register`"))]
+    RegisterRespNotMatch,
+    #[snafu(display("read stream request error"))]
+    ReadStreamReq { source: common::error::Error },
+    #[snafu(display("decode stream request error"))]
+    DecodeStreamReq { source: common::error::Error },
+    #[snafu(display("encode pb connect stream request error"))]
+    EncodePbConnStreamReq { source: common::error::Error },
+    #[snafu(display("connect local stream error"))]
+    ConnectLocalStream { source: std::io::Error },
+    #[snafu(display("connect remote stream error"))]
+    ConnectRemoteStream { source: std::io::Error },
+    #[snafu(display("write pb conn stream request error"))]
+    WritePbConnStreamReq { source: common::error::Error },
+    #[snafu(display("read pb conn stream response error"))]
+    ReadPbConnStreamResp { source: common::error::Error },
+    #[snafu(display("decode pb conn stream response error"))]
+    DecodePbConnStreamResp { source: common::error::Error },
+    #[snafu(display("we expected `PbConnResponse::Stream`,but actual response is `{resp}`"))]
+    PbConnStreamRespNotMatch {
+        // Structured representation of response
+        resp: String,
+    },
+    #[snafu(display("Failed to write ping message"))]
+    WritePingMsg { source: common::error::Error },
+    #[snafu(display("Failed to encode ping message"))]
+    EncodePingMsg { source: common::error::Error },
+    #[snafu(display("Failed to write stream ack message"))]
+    WriteStreamAckMsg { source: common::error::Error },
+    #[snafu(display("Failed to encode stream ack message"))]
+    EncodeStreamAckMsg { source: common::error::Error },
+    #[snafu(display("control writer closed while scheduling `{action}`"))]
+    ControlWriterClosed { action: &'static str },
+    #[snafu(display("header msg tool:`{action}` create failed!"))]
+    CreateHeaderTool {
+        // Must be `reader/writer`
+        action: &'static str,
+        source: common::error::Error,
+    },
+    #[snafu(display("control io `{action}` timed out after {timeout:?}"))]
+    ControlIoTimeout {
+        action: &'static str,
+        timeout: Duration,
+    },
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;

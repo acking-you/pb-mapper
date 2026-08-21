@@ -1,6 +1,6 @@
 //! Logging system for FFI interface.
 
-use std::ffi::{c_char, c_int, CString};
+use std::ffi::{CString, c_char, c_int};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::callback::CallbackSlot;
@@ -34,7 +34,7 @@ pub(crate) fn send_log(level: c_int, message: &str) {
 ///
 /// # Safety
 /// `callback` must be a valid function pointer or null to disable logging.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
     LOG_CALLBACK.store(callback);
 }
@@ -43,7 +43,7 @@ pub extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
 ///
 /// # Safety
 /// `s` must be a valid pointer returned from this library, or null.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_free_string(s: *mut c_char) {
     if !s.is_null() {
         unsafe { drop(CString::from_raw(s)) };
@@ -112,11 +112,11 @@ impl tracing::field::Visit for MessageVisitor {
 ///
 /// # Safety
 /// Can be called multiple times safely.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_init_logging() {
+    use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Layer;
 
     let _ = tracing_subscriber::registry()
         .with(FfiLogLayer)

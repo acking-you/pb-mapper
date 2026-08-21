@@ -4,7 +4,7 @@
 
 ## Overview
 
-pb-mapper exposes local TCP/UDP services through a public relay using a service key. One `pb-mapper` binary provides the `server`, `register`, `connect`, and `status` commands, alongside an optional Flutter GUI.
+pb-mapper exposes local TCP/UDP services through a public relay using a service key. One `pb-mapper` binary provides the `server`, `register`, `connect`, `status`, and `admin` commands, alongside an optional Flutter GUI.
 
 ## How it works
 
@@ -112,30 +112,51 @@ Optional flags:
 
 - `--ipv6`: enable IPv6 listening
 - `--keep-alive`: enable TCP keep-alive
-- `--use-machine-msg-header-key`: derive `MSG_HEADER_KEY` from current machine hostname + MAC,
-  and write it to `/var/lib/pb-mapper-server/msg_header_key`
+- `--auth-state-dir`: authentication state directory (Linux services default `/var/lib/pb-mapper/auth`; unprivileged Linux, macOS, and Windows use a user-writable application directory)
+- `--max-temporary-keys`: fixed temporary-key slot capacity (default `65536`)
+- `--max-temporary-key-ttl`: maximum issued TTL (default `30d`)
+- `--legacy-protocol allow|deny`: initial legacy-client policy
+- `--use-machine-msg-header-key`: explicit legacy compatibility mode
 
-### Machine-derived `MSG_HEADER_KEY` (optional)
+### Administrator and temporary credentials
 
-When you want each deployed server to use a host-specific key (instead of the built-in default),
-start server with:
+On first start, the relay creates a random administrator key in its
+authentication state directory (`admin.key`). On Linux system services that
+is `/var/lib/pb-mapper/auth/admin.key`. Unprivileged Linux, macOS, and
+Windows builds use a user-writable application directory instead. There is
+no built-in default credential.
+Keep the administrator key on the relay host and use it to issue a temporary
+credential for a workload:
+
+```bash
+export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
+pb-mapper admin --server "your-server:7666" \
+  key issue --ttl 24h --label my-service
+```
+
+Export the printed `pbmt1_...` credential on both the register and connect
+machines. The temporary key can see and use only its own namespace:
+
+```bash
+export MSG_HEADER_KEY='pbmt1_...'
+pb-mapper register tcp --server "your-server:7666" --key "my-service" --addr "127.0.0.1:8080"
+```
+
+Renewing a key preserves the credential text. Revocation or expiry immediately
+closes its active control and data connections. See
+[`authentication-v2.md`](authentication-v2.md) for the full lifecycle,
+namespace model, protocol framing, and migration procedure.
+
+The machine-derived option remains available for an existing deployment, but
+it is not recommended for new installations:
 
 ```bash
 pb-mapper server --port 7666 --use-machine-msg-header-key
 ```
 
-This will:
-
-- derive a stable 32-byte key from hostname + MAC addresses
-- set server process `MSG_HEADER_KEY` automatically
-- persist the key to `/var/lib/pb-mapper-server/msg_header_key`
-
-Then use the same key for the `register` and `connect` commands:
-
-```bash
-export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
-pb-mapper register tcp --server "your-server:7666" --key "my-service" --addr "127.0.0.1:8080"
-```
+On upgrade, if no new administrator key or `MSG_HEADER_KEY` is present, the
+relay automatically imports `/var/lib/pb-mapper-server/msg_header_key` so
+legacy clients keep working.
 
 ### 2) Register a local service
 
@@ -177,6 +198,30 @@ pb-mapper status remote-id --server "your-server:7666"
 pb-mapper status keys --server "your-server:7666"
 ```
 
+An administrator can explicitly inspect or connect to a temporary namespace:
+
+```bash
+pb-mapper status keys --server "your-server:7666" --namespace 4294967296
+pb-mapper connect tcp --server "your-server:7666" --namespace 4294967296 \
+  --key "my-service" --addr "127.0.0.1:9090"
+```
+
+Registering as administrator inside a temporary namespace additionally requires
+`--force`.
+
+### Administrator commands
+
+```bash
+pb-mapper admin --server "your-server:7666" status
+pb-mapper admin --server "your-server:7666" key list
+pb-mapper admin --server "your-server:7666" key reveal 4294967296
+pb-mapper admin --server "your-server:7666" service list --all
+pb-mapper admin --server "your-server:7666" connection list --all
+```
+
+Use `--output json` for one JSON document or `--output ndjson` for streaming
+automation. Page size defaults to 100 and is capped at 1000.
+
 ## Run (GUI)
 
 The Flutter UI can start the server, register services, and connect clients through a graphical workflow. Start it from `ui/`:
@@ -189,6 +234,16 @@ flutter run
 ## Environment variables
 
 - `PB_MAPPER_SERVER`: default server address for the CLI
+- `MSG_HEADER_KEY`: 32-character administrator key or a `pbmt1_` temporary credential
+- `PB_MAPPER_AUTH_STATE_DIR`: relay auth-state directory (Linux services default `/var/lib/pb-mapper/auth`; unprivileged Linux, macOS, and Windows use a user-writable application directory)
+- `PB_MAPPER_AUTH_MAX_TEMP_KEYS`: fixed temporary-key capacity, default `65536`
+- `PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS`: maximum temporary-key TTL, default 30 days
+- `PB_MAPPER_LEGACY_PROTOCOL`: `allow` or `deny`, default `allow`
+- `PB_MAPPER_MAX_SERVICES_PER_NAMESPACE`: service names per namespace, default `256`
+- `PB_MAPPER_MAX_REGISTER_CONNECTIONS_PER_SERVICE`: control connections per service, default `16`
+- `PB_MAPPER_MAX_STREAMS_PER_NAMESPACE`: active streams per namespace, default `1024`
+- `PB_MAPPER_NEW_STREAMS_PER_SECOND`: sustained new-stream rate per namespace, default `100`
+- `PB_MAPPER_NEW_STREAMS_BURST`: new-stream burst per namespace, default `200`
 - `PB_MAPPER_KEEP_ALIVE`: enable TCP keep-alive (set to `ON`)
 - `PB_MAPPER_LOG_FORMAT`: tracing output format, one of `pretty` (default), `compact`, or `json`
 - `PB_MAPPER_CONTROL_IO_TIMEOUT`: close stalled control-plane handshakes after this duration, default `30s`

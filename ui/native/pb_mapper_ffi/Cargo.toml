@@ -1,14 +1,13 @@
 [package]
 name = "pb-mapper-ffi"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true
 
 [dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
@@ -18,8 +17,13 @@ tracing-subscriber.workspace = true
 tokio.workspace = true
 clap.workspace = true
 better_mimalloc_rs.workspace = true
-tokio-util = "0.7"
-dirs = "5.0"
+tokio-util.workspace = true
+dirs.workspace = true
 
-pb-mapper = { path = "../../../" }
+pb-mapper-auth.workspace = true
+pb-mapper-client.workspace = true
+pb-mapper-core.workspace = true
+pb-mapper-protocol.workspace = true
+pb-mapper-server.workspace = true
 uni-stream.workspace = true
+parking_lot.workspace = true

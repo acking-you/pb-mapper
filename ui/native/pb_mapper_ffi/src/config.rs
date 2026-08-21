@@ -9,10 +9,9 @@ use crate::ctl::Origin;
 use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
-use crate::state::AppConfig;
 
 /// Get current app config.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -20,20 +19,46 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
 
     let handle = unsafe { &mut *handle };
     let state = handle.state.clone();
-    let config: AppConfig = handle.runtime.block_on(async move {
+    let (config, isolated_admin_key_set) = handle.runtime.block_on(async move {
         let state = state.lock().await;
-        state.get_config_status().await
+        (
+            state.get_config_status().await,
+            state.isolated_admin_key().is_some(),
+        )
     });
 
     ok_data(json!({
         "serverAddress": config.server_address,
         "keepAliveEnabled": config.keep_alive_enabled,
-        "msgHeaderKey": config.msg_header_key
+        "msgHeaderKey": config.msg_header_key,
+        "isolatedRelayAdminKeySet": isolated_admin_key_set,
+    }))
+}
+
+/// Reveal the embedded relay administrator key. This is a separate call so
+/// routine config fetches cannot leak the root secret.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
+    handle: *mut PbMapperHandle,
+) -> *mut c_char {
+    if handle.is_null() {
+        return err_null_handle();
+    }
+
+    let handle = unsafe { &mut *handle };
+    let state = handle.state.clone();
+    let key = handle.runtime.block_on(async move {
+        let state = state.lock().await;
+        state.isolated_admin_key()
+    });
+
+    ok_data(json!({
+        "isolatedRelayAdminKey": key.unwrap_or_default(),
     }))
 }
 
 /// Update app config.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_update_config(
     handle: *mut PbMapperHandle,
     server_address: *const c_char,

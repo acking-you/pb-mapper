@@ -45,7 +45,7 @@ flowchart LR
 
 ## 技术栈
 
-- **语言和运行时**：Rust 2021 + Tokio 异步运行时
+- **语言和运行时**：Rust 2024 edition + Tokio 异步运行时
 - **内存分配器**：自己 fork 的 [`better_mimalloc_rs`](https://github.com/acking-you/better_mimalloc_rs)，后面会细说为什么
 - **网络抽象**：自研 [`uni-stream`](https://github.com/acking-you/uni-stream)，把 TCP 和 UDP 统一成一套流接口；底层用 `socket2` 控制 socket 选项，`trust-dns-resolver` 做 DNS
 - **协议**：serde_json 序列化，自定义帧格式（checksum + 长度头），可选 `ring` 做 AES-256-GCM 端到端加密
@@ -87,11 +87,11 @@ VPS 能直连 GitHub 的话：
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
 ```
 
-装完默认监听 `7666`，开启 `--use-machine-msg-header-key`，密钥写到 `/var/lib/pb-mapper-server/msg_header_key`。client 侧 `export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"` 就能对上。
+装完默认监听 `7666`，首次启动会在 `/var/lib/pb-mapper/auth/admin.key` 生成随机管理员密钥。管理员用它签发带过期时间的 `pbmt1_` 临时凭据，再把临时凭据交给 register/connect 两端；不同临时凭据的同名 service 不会撞名。
 
 ### 方式三：手动跑 CLI 或者用 Flutter UI
 
-三个二进制，名字就是功能：
+同一个 `pb-mapper` 二进制通过子命令切换功能：
 
 - `pb-mapper server`：公网中继
 - `pb-mapper register`：跑在本地服务那一侧，把 `127.0.0.1:xxx` 注册成一个 service key
@@ -102,6 +102,11 @@ curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts
 ```bash
 # VPS 上
 pb-mapper server --port 7666
+export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
+pb-mapper admin --server 127.0.0.1:7666 key issue --ttl 24h --label web
+
+# 家里和咖啡店都先导入上一步输出的 pbmt1_ 临时凭据
+export MSG_HEADER_KEY='<pbmt1_credential>'
 
 # 家里
 pb-mapper register tcp --server <vps-ip>:7666 --key web --addr 127.0.0.1:8080

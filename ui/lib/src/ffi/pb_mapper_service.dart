@@ -240,6 +240,10 @@ class PbMapperService {
     return _runJsonOnWorker('getConfig', {});
   }
 
+  Future<Map<String, dynamic>> revealIsolatedRelayAdminKey() {
+    return _runJsonOnWorker('revealIsolatedRelayAdminKey', {});
+  }
+
   Future<Map<String, dynamic>> updateConfig({
     required String serverAddress,
     required bool keepAlive,
@@ -382,6 +386,9 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
         break;
       case 'getConfig':
         result = ffi.pbMapperGetConfig(handle);
+        break;
+      case 'revealIsolatedRelayAdminKey':
+        result = ffi.pbMapperRevealIsolatedAdminKey(handle);
         break;
       case 'updateConfig':
         arg1 = (params['serverAddress'] as String).toNativeUtf8();

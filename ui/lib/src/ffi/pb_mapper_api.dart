@@ -16,11 +16,15 @@ class ConfigStatus {
   final String serverAddress;
   final bool keepAliveEnabled;
   final String msgHeaderKey;
+  final bool isolatedRelayAdminKeySet;
+  final String isolatedRelayAdminKey;
 
   const ConfigStatus({
     required this.serverAddress,
     required this.keepAliveEnabled,
     required this.msgHeaderKey,
+    this.isolatedRelayAdminKeySet = false,
+    this.isolatedRelayAdminKey = '',
   });
 
   factory ConfigStatus.fromMap(Map<String, dynamic> map) {
@@ -31,6 +35,11 @@ class ConfigStatus {
       ),
       keepAliveEnabled: _asBool(map['keepAliveEnabled'], fallback: true),
       msgHeaderKey: _asString(map['msgHeaderKey']),
+      isolatedRelayAdminKeySet: _asBool(
+        map['isolatedRelayAdminKeySet'],
+        fallback: false,
+      ),
+      isolatedRelayAdminKey: _asString(map['isolatedRelayAdminKey']),
     );
   }
 }
@@ -241,6 +250,7 @@ abstract interface class PbMapperApiClient {
   Future<OperationResult> setAppDirectoryPath(String path);
 
   Future<ConfigStatus> fetchConfig();
+  Future<String> revealIsolatedRelayAdminKey();
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,
@@ -308,6 +318,15 @@ class PbMapperApi implements PbMapperApiClient {
       keepAliveEnabled: true,
       msgHeaderKey: '',
     );
+  }
+
+  @override
+  Future<String> revealIsolatedRelayAdminKey() async {
+    final result = await _service.revealIsolatedRelayAdminKey();
+    if (result['success'] == true) {
+      return _asString(_asMap(result['data'])['isolatedRelayAdminKey']);
+    }
+    return '';
   }
 
   @override

@@ -4,7 +4,7 @@
 
 ## 概览
 
-pb-mapper 通过“服务 key”将本地 TCP/UDP 服务暴露到公网中继。统一的 `pb-mapper` 二进制提供 `server`、`register`、`connect`、`status` 四类命令，并保留可选的 Flutter GUI。
+pb-mapper 通过“服务 key”将本地 TCP/UDP 服务暴露到公网中继。统一的 `pb-mapper` 二进制提供 `server`、`register`、`connect`、`status`、`admin` 五类命令，并保留可选的 Flutter GUI。
 
 ## 运转机制
 
@@ -112,29 +112,45 @@ pb-mapper server --port 7666
 
 - `--ipv6`：开启 IPv6 监听
 - `--keep-alive`：开启 TCP keep-alive
-- `--use-machine-msg-header-key`：基于当前机器 hostname + MAC 派生 `MSG_HEADER_KEY`，
-  并写入 `/var/lib/pb-mapper-server/msg_header_key`
+- `--auth-state-dir`：认证状态目录（Linux 系统服务默认 `/var/lib/pb-mapper/auth`；无特权 Linux、macOS 与 Windows 使用当前用户可写的应用目录）
+- `--max-temporary-keys`：临时 key 固定槽位容量，默认 `65536`
+- `--max-temporary-key-ttl`：临时 key 最大 TTL，默认 `30d`
+- `--legacy-protocol allow|deny`：旧协议初始接入策略
+- `--use-machine-msg-header-key`：明确启用旧版机器派生 key 兼容模式
 
-### 基于机器信息派生 `MSG_HEADER_KEY`（可选）
+### 管理员密钥与临时凭据
 
-如果你希望每台部署机器都使用各自唯一的 key（而不是内置默认 key），可以这样启动服务端：
+中继首次启动时会在认证状态目录生成随机管理员密钥（`admin.key`）。Linux 系统服务
+默认写到 `/var/lib/pb-mapper/auth/admin.key`；无特权 Linux、macOS 与 Windows
+桌面构建则使用当前用户可写的应用目录。系统不再提供内置默认 key。管理员密钥留在
+中继机器上，用它为业务签发临时凭据：
+
+```bash
+export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
+pb-mapper admin --server "your-server:7666" \
+  key issue --ttl 24h --label my-service
+```
+
+把输出的 `pbmt1_...` 凭据导入 register 与 connect 两端。临时 key 只能看到并操作
+自己的命名空间：
+
+```bash
+export MSG_HEADER_KEY='pbmt1_...'
+pb-mapper register tcp --server "your-server:7666" --key "my-service" --addr "127.0.0.1:8080"
+```
+
+续期不会改变凭据文本；吊销或到期会立即关闭对应的控制连接与数据连接。完整生命周期、
+命名空间、V2 帧格式和迁移步骤见
+[`authentication-v2.zh-CN.md`](authentication-v2.zh-CN.md)。
+
+已有部署仍可显式启用机器派生 key，但不建议新安装继续使用：
 
 ```bash
 pb-mapper server --port 7666 --use-machine-msg-header-key
 ```
 
-该参数会完成：
-
-- 基于 hostname + MAC 地址派生稳定的 32 字节 key
-- 自动设置当前服务端进程的 `MSG_HEADER_KEY`
-- 将 key 持久化到 `/var/lib/pb-mapper-server/msg_header_key`
-
-随后在 `register` 与 `connect` 命令中使用同一 key：
-
-```bash
-export MSG_HEADER_KEY="$(cat /var/lib/pb-mapper-server/msg_header_key)"
-pb-mapper register tcp --server "your-server:7666" --key "my-service" --addr "127.0.0.1:8080"
-```
+升级时，如果新管理员密钥和 `MSG_HEADER_KEY` 都不存在，中继会自动导入
+`/var/lib/pb-mapper-server/msg_header_key`，旧客户端无需立刻换 key。
 
 ### 2）注册本地服务
 
@@ -176,6 +192,29 @@ pb-mapper status remote-id --server "your-server:7666"
 pb-mapper status keys --server "your-server:7666"
 ```
 
+管理员可明确查看或连接某个临时命名空间：
+
+```bash
+pb-mapper status keys --server "your-server:7666" --namespace 4294967296
+pb-mapper connect tcp --server "your-server:7666" --namespace 4294967296 \
+  --key "my-service" --addr "127.0.0.1:9090"
+```
+
+管理员要在临时命名空间注册服务，还必须增加 `--force`。
+
+### 管理命令
+
+```bash
+pb-mapper admin --server "your-server:7666" status
+pb-mapper admin --server "your-server:7666" key list
+pb-mapper admin --server "your-server:7666" key reveal 4294967296
+pb-mapper admin --server "your-server:7666" service list --all
+pb-mapper admin --server "your-server:7666" connection list --all
+```
+
+自动化场景可使用 `--output json` 输出单个 JSON 文档，或用 `--output ndjson` 流式输出。
+默认每页 100 条，最大 1000 条。
+
 ## 运行（GUI）
 
 Flutter UI 可用于启动服务器、注册服务与建立连接。启动方式：
@@ -188,6 +227,16 @@ flutter run
 ## 环境变量
 
 - `PB_MAPPER_SERVER`：CLI 默认服务器地址
+- `MSG_HEADER_KEY`：32 字符管理员密钥或 `pbmt1_` 临时凭据
+- `PB_MAPPER_AUTH_STATE_DIR`：中继认证状态目录（Linux 系统服务默认 `/var/lib/pb-mapper/auth`；无特权 Linux、macOS 与 Windows 使用当前用户可写的应用目录）
+- `PB_MAPPER_AUTH_MAX_TEMP_KEYS`：临时 key 固定容量，默认 `65536`
+- `PB_MAPPER_AUTH_MAX_TEMP_TTL_SECS`：临时 key 最大 TTL，默认 30 天
+- `PB_MAPPER_LEGACY_PROTOCOL`：`allow` 或 `deny`，默认 `allow`
+- `PB_MAPPER_MAX_SERVICES_PER_NAMESPACE`：每命名空间 service 数，默认 `256`
+- `PB_MAPPER_MAX_REGISTER_CONNECTIONS_PER_SERVICE`：每 service 控制连接数，默认 `16`
+- `PB_MAPPER_MAX_STREAMS_PER_NAMESPACE`：每命名空间活动 stream 数，默认 `1024`
+- `PB_MAPPER_NEW_STREAMS_PER_SECOND`：每命名空间持续新建 stream 速率，默认 `100`
+- `PB_MAPPER_NEW_STREAMS_BURST`：每命名空间新建 stream 突发量，默认 `200`
 - `PB_MAPPER_KEEP_ALIVE`：启用 TCP keep-alive（设置为 `ON`）
 - `PB_MAPPER_LOG_FORMAT`：tracing 输出格式，可选 `pretty`（默认）、`compact` 或 `json`
 - `PB_MAPPER_CONTROL_IO_TIMEOUT`：控制面握手卡住后的关闭时间，默认 `30s`

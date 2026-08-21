@@ -62,8 +62,11 @@ jobs:
               # belongs to the Rust side and must be matched before ui/*.
               ui/native/*) rust=true ;;
               ui/*) flutter=true ;;
-              src/*|tests/*|examples/*) rust=true ;;
+              crates/*|src/*|tests/*|examples/*) rust=true ;;
               Cargo.toml|Cargo.lock|rust-toolchain.toml|rustfmt.toml) rust=true ;;
+              # Per-crate manifests. `case` patterns match the whole path, so
+              # the unanchored entry above only ever catches the root manifest.
+              */Cargo.toml|*/Cargo.lock) rust=true ;;
               # A change to this workflow has to prove itself on both.
               .github/workflows/syntax-check.yml) rust=true; flutter=true ;;
             esac
@@ -88,7 +91,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.98.0
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies

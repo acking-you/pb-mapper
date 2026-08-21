@@ -5,8 +5,17 @@ services:
     image: ackingliu/pb-mapper:x86_64_musl
     environment:
       PB_MAPPER_PORT: 7666
+      # Keep the machine-derived key on first boot of an empty auth volume so
+      # recreating this service does not mint a new administrator key.
       USE_MACHINE_MSG_HEADER_KEY: true
       RUST_LOG: error
+    volumes:
+      - pb-mapper-auth:/var/lib/pb-mapper/auth
+      - pb-mapper-legacy:/var/lib/pb-mapper-server
     ports:
       - "7666:7666"
     restart: unless-stopped
+
+volumes:
+  pb-mapper-auth:
+  pb-mapper-legacy:

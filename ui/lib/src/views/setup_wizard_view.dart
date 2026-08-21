@@ -158,7 +158,7 @@ class _SetupWizardViewState extends State<SetupWizardView> {
       setState(() => _error = l10n.setupServerInvalid);
       return;
     }
-    if (key.isNotEmpty && key.length != 32) {
+    if (key.isNotEmpty && key.length != 32 && !key.startsWith('pbmt1_')) {
       setState(() => _error = l10n.setupKeyInvalid);
       return;
     }

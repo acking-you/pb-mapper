@@ -13,8 +13,8 @@ docker run -d \
   --name pb-mapper \
   -p 7666:7666 \
   -e PB_MAPPER_PORT=7666 \
-  -e USE_MACHINE_MSG_HEADER_KEY=true \
   -e RUST_LOG=error \
+  -v pb-mapper-auth:/var/lib/pb-mapper/auth \
   ackingliu/pb-mapper:latest-x86_64_musl
 ```
 
@@ -28,11 +28,16 @@ services:
     environment:
       - PB_MAPPER_PORT=7666
       - USE_IPV6=false
-      - USE_MACHINE_MSG_HEADER_KEY=true
+      - USE_MACHINE_MSG_HEADER_KEY=false
       - RUST_LOG=error
+    volumes:
+      - pb-mapper-auth:/var/lib/pb-mapper/auth
     ports:
       - "7666:7666"
     restart: unless-stopped
+
+volumes:
+  pb-mapper-auth:
 ```
 
 Save as `docker-compose.yml` and run:
@@ -46,10 +51,12 @@ docker-compose up -d
 |----------|---------|-------------|
 | `PB_MAPPER_PORT` | `7666` | **Required** - Port for the pb-mapper server to listen on |
 | `USE_IPV6` | `false` | Enable IPv6 support (`true`/`false`) |
-| `USE_MACHINE_MSG_HEADER_KEY` | `true` | Derive `MSG_HEADER_KEY` from hostname + MAC and persist to `/var/lib/pb-mapper-server/msg_header_key` |
+| `MSG_HEADER_KEY` | unset | Optional 32-character administrator key used only to initialize a new persistent auth volume |
+| `USE_MACHINE_MSG_HEADER_KEY` | `false` | Legacy compatibility: derive the administrator key from hostname + MAC |
+| `PB_MAPPER_AUTH_STATE_DIR` | `/var/lib/pb-mapper/auth` | Persistent encrypted authentication state |
 | `RUST_LOG` | `error` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) |
 
-⚠️ **Important**: `PB_MAPPER_PORT` must be set or the container will exit with an error.
+⚠️ **Important**: `PB_MAPPER_PORT` must be set and `/var/lib/pb-mapper/auth` must be persistent. The first start creates a random administrator key at `admin.key`; losing the volume changes the root credential and loses temporary-key state.
 
 ## 📋 Ubuntu Deployment Guide
 
@@ -85,11 +92,16 @@ services:
     environment:
       PB_MAPPER_PORT: 7666
       USE_IPV6: false
-      USE_MACHINE_MSG_HEADER_KEY: true
+      USE_MACHINE_MSG_HEADER_KEY: false
       RUST_LOG: error
+    volumes:
+      - pb-mapper-auth:/var/lib/pb-mapper/auth
     ports:
       - "7666:7666"
     restart: unless-stopped
+
+volumes:
+  pb-mapper-auth:
 EOF
 ```
 
@@ -112,6 +124,9 @@ docker-compose ps
 
 # View logs
 docker-compose logs -f pb-mapper
+
+# Read the administrator key on the Docker host
+docker exec pb-mapper cat /var/lib/pb-mapper/auth/admin.key
 ```
 
 ### Step 5: Verify Installation
@@ -154,18 +169,18 @@ For other architectures, you can build the image yourself using the provided Doc
 |-----|-------------|
 | `latest-x86_64_musl` | Latest stable x86_64 build (recommended) |
 | `latest-aarch64_musl` | Latest stable ARM64 build |
-| `v0.3.0-x86_64_musl` | Tagged-release x86_64 build |
-| `v0.3.0-aarch64_musl` | Tagged-release ARM64 build |
-| `0.3.0-x86_64_musl` | Semver x86_64 alias |
-| `0.3.0-aarch64_musl` | Semver ARM64 alias |
+| `v0.4.0-x86_64_musl` | Tagged-release x86_64 build |
+| `v0.4.0-aarch64_musl` | Tagged-release ARM64 build |
+| `0.4.0-x86_64_musl` | Semver x86_64 alias |
+| `0.4.0-aarch64_musl` | Semver ARM64 alias |
 
 **Recommendation**: Use `latest-x86_64_musl` for x86_64 systems or `latest-aarch64_musl` for ARM64 systems for best compatibility.
 
 ## 🛡️ Security Considerations
 
 - **Firewall**: Only expose port 7666 to trusted networks
-- **Encryption**: Use the encryption features in client/server tools
-- **Access Control**: Implement service key management strategy
+- **Authentication**: Keep `admin.key` on the relay and distribute expiring `pbmt1_` temporary credentials to workloads
+- **Forwarded payload encryption**: Use `register --codec` when the inner application protocol is plaintext
 - **Updates**: Regularly update to the latest version for security patches
 
 ## 📊 Monitoring and Logs

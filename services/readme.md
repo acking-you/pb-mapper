@@ -9,9 +9,20 @@ sudo install -m 0644 services/pb-mapper-register@.service /etc/systemd/system/
 sudo install -m 0644 services/pb-mapper-connect@.service /etc/systemd/system/
 ```
 
-The relay unit runs `pb-mapper server` directly. Override it with a systemd
-drop-in if the default `7666` port or machine-derived key behavior is not
-appropriate.
+The relay unit runs `pb-mapper server` directly. On first start it creates a
+random administrator key at `/var/lib/pb-mapper/auth/admin.key` with mode
+`0600`. Keep that directory persistent. If upgrading from the old
+machine-derived mode, the first v0.4 start automatically copies
+`/var/lib/pb-mapper-server/msg_header_key` to the new path when neither an
+administrator key file nor `MSG_HEADER_KEY` is already configured.
+
+Use the administrator key locally for management, then issue a scoped temporary
+credential for each tenant or workload:
+
+```bash
+export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
+pb-mapper admin --server relay.example.com:7666 key issue --ttl 24h --label home-web
+```
 
 Registration instances read `/etc/pb-mapper/register/<name>.env`:
 
@@ -21,7 +32,7 @@ SERVICE_KEY=home-web
 LOCAL_ADDR=127.0.0.1:8080
 TRANSPORT=tcp
 REGISTER_EXTRA_ARGS=--codec --keep-alive
-MSG_HEADER_KEY=replace-with-the-shared-32-byte-key
+MSG_HEADER_KEY=pbmt1_replace-with-an-issued-temporary-credential
 ```
 
 Connect instances read `/etc/pb-mapper/connect/<name>.env`:
@@ -32,7 +43,7 @@ SERVICE_KEY=home-web
 LOCAL_ADDR=127.0.0.1:9090
 TRANSPORT=tcp
 CONNECT_EXTRA_ARGS=--keep-alive
-MSG_HEADER_KEY=replace-with-the-shared-32-byte-key
+MSG_HEADER_KEY=pbmt1_replace-with-the-same-temporary-credential
 ```
 
 Create the matching directory and env file, then enable the instance:
