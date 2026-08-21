@@ -16,7 +16,7 @@
 - `crates/`: the Rust workspace; the root `Cargo.toml` is a virtual manifest
   - `crates/pb-mapper-cli/src/bin/pb-mapper.rs`: unified CLI entry point
   - `crates/pb-mapper-{core,auth,protocol,server,client,cli}`
-  - `crates/pb-mapper-cli/tests/`: integration tests; loads env from `tests/.env`
+  - `crates/pb-mapper-cli/tests/`: integration tests; no env setup required
   - `crates/pb-mapper-cli/examples/`: runnable examples
 - `ui/`: Flutter UI; Rust bridge under `ui/native/*`
 - `docker/`, `services/`, `scripts/`: container, systemd, build/release
@@ -41,10 +41,15 @@ Notes: CI builds release artifacts on tags `vX.Y.Z` (see `.github/workflows/rele
 - Naming: modules/functions `snake_case`, types/traits `PascalCase`, consts `SCREAMING_SNAKE_CASE`
 
 ## Testing Guidelines
-- Framework: `tokio` async + integration tests under `tests/`
-- Env vars (see `tests/.env`): `PB_MAPPER_TEST_SERVER`, `LOCAL_TEST_SERVER`, `ECHO_TEST_SERVER`, `SERVER_TEST_KEY`, `SERVER_TEST_TYPE` (`TCP`/`UDP`)
-- Run ignored tests: `cargo test -- --ignored`
-- Prefer new integration tests in `tests/` with reproducible env defaults
+- Framework: `tokio` async + integration tests in `crates/pb-mapper-cli/tests/`
+- No test needs environment setup. `test_delay.rs` runs the whole tunnel
+  (`server` + `register` + `connect`) over both transports with and without
+  `--codec`; each case reserves its own loopback ports and its own auth state
+  directory, so cases run concurrently and never collide with a live relay.
+- Sequence components with a readiness probe, not a sleep: poll the relay's
+  `Keys` status for a registration, and round-trip a payload through the tunnel
+  for forwarding. `TunnelHarness` in `test_delay.rs` does both.
+- Prefer new integration tests that need no external setup
 
 ## Commit & Pull Request Guidelines
 - Commits: short, imperative (e.g., "Fix localhost resolution panic", "add network perms", "change to StreamBuilder")

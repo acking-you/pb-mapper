@@ -30,7 +30,6 @@ better_mimalloc_rs = { version = "0.1.2", features = ["config"] }
 bytes = "1.11"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0.0"
-dotenvy = "0.15.7"
 hashbrown = { version = "0.17.1" }
 hickory-resolver = { version = "0.26.1" }
 kanal = { git = "https://github.com/acking-you/kanal.git", branch = "dev/pb-mapper" }

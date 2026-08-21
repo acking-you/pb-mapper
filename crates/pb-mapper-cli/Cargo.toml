@@ -25,7 +25,6 @@ tracing.workspace = true
 uni-stream.workspace = true
 
 [dev-dependencies]
-dotenvy.workspace = true
 rand.workspace = true
 
 [features]

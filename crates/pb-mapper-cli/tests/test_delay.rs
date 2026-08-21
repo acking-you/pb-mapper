@@ -1,32 +1,83 @@
 // See the note in `regression.rs`: the whole file is test code.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::env;
+//! End-to-end tunnel tests over the full `server` + `register` + `connect` path.
+//!
+//! Every case builds its own relay, echo server, and tunnel on reserved loopback
+//! ports, so the four transport/codec combinations run concurrently and none of
+//! them collides with a relay already running on the machine.
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
-use pb_mapper_client::client::run_client_side_cli;
-use pb_mapper_client::server::{ServerTunnelOptions, run_server_side_cli};
+use pb_mapper_auth::{AuthConfig, AuthRuntime, LegacyProtocolPolicy};
+use pb_mapper_client::client::run_client_side_cli_with_pinned_credential;
+use pb_mapper_client::client::status::get_status_with_credential;
+use pb_mapper_client::server::{ServerTunnelOptions, run_server_side_cli_with_pinned_credential};
+use pb_mapper_core::checksum::{Credential, set_process_msg_header_key};
 use pb_mapper_core::config::init_tracing;
+use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper_protocol::{MessageReader, MessageWriter, NormalMessageReader, NormalMessageWriter};
-use pb_mapper_server::run_server_with_auth_config;
+use pb_mapper_server::run_server_on_listener;
 use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UdpSocket;
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 use uni_stream::addr::ToSocketAddrs;
-use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
-use uni_stream::stream::{StreamProvider, StreamSplit, TcpStreamProvider, UdpStreamProvider};
+use uni_stream::stream::{
+    StreamProvider, StreamSplit, TcpListenerProvider, TcpStreamProvider, UdpListenerProvider,
+    UdpStreamProvider,
+};
 use uni_stream::udp::tune_udp_socket;
 
-struct TimerTickGurad<'a> {
+const TEST_ADMIN_KEY: &str = "0123456789abcdefghijklmnopqrstuv";
+const UDP_TEST_PAYLOAD_MAX: usize = 1200;
+const PROBE: &[u8] = b"pb-mapper-probe";
+/// Every readiness probe polls until this deadline before failing the test.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+static TEST_ENV: LazyLock<()> = LazyLock::new(|| {
+    init_tracing();
+    // `run_echo_delay` frames its payload with the process credential's checksum,
+    // so one must be configured before any case runs. Every case uses the same
+    // administrator key, which keeps this a one-time write.
+    set_process_msg_header_key(Some(TEST_ADMIN_KEY)).unwrap();
+});
+
+fn admin_credential() -> Credential {
+    Credential::Admin(*TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transport {
+    Tcp,
+    Udp,
+}
+
+impl Transport {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+
+    fn is_datagram(self) -> bool {
+        self == Self::Udp
+    }
+}
+
+struct TimerTickGuard<'a> {
     ins: Instant,
     mut_duration: &'a mut Duration,
 }
 
-impl<'a> TimerTickGurad<'a> {
+impl<'a> TimerTickGuard<'a> {
     fn new(mut_duration: &'a mut Duration) -> Self {
         Self {
             ins: Instant::now(),
@@ -35,200 +86,398 @@ impl<'a> TimerTickGurad<'a> {
     }
 }
 
-impl<'a> Drop for TimerTickGurad<'a> {
+impl Drop for TimerTickGuard<'_> {
     fn drop(&mut self) {
-        let end = Instant::now();
-        let duration = end - self.ins;
+        let duration = Instant::now() - self.ins;
         *self.mut_duration += duration;
         println!("duration:{duration:?}");
     }
 }
 
-use uni_stream::stream::StreamAccept;
+/// Reserve a loopback port by binding it and immediately dropping the socket.
+///
+/// TCP and UDP have separate port spaces, so the reservation has to use the same
+/// protocol the caller will bind. The relay keeps its own listener (see
+/// [`TunnelHarness::start`]); this is only for `connect`, whose bind happens
+/// inside the client and cannot be handed a pre-bound socket.
+async fn reserve_addr(transport: Transport) -> SocketAddr {
+    match transport {
+        Transport::Tcp => {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            addr
+        }
+        Transport::Udp => {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let addr = socket.local_addr().unwrap();
+            drop(socket);
+            addr
+        }
+    }
+}
 
-const UDP_TEST_PAYLOAD_MAX: usize = 1200;
+fn auth_config(label: &str) -> AuthConfig {
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    AuthConfig {
+        state_dir: std::env::temp_dir().join(format!(
+            "pb-mapper-delay-{}-{label}-{sequence}",
+            std::process::id()
+        )),
+        max_temporary_keys: 64,
+        max_temporary_key_ttl: Duration::from_secs(3600),
+        legacy_protocol: LegacyProtocolPolicy::Allow,
+    }
+}
 
-async fn echo_server<P: ListenerProvider>(
-    server_addr: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = P::bind(server_addr).await?;
-    println!("run echo server:{server_addr}");
+async fn tcp_echo_server(listener: TcpListener) {
     loop {
-        // Accept incoming connections
-        let (mut stream, addr) = listener.accept().await?;
-        println!("Connected from {addr}");
-
-        // Process each connection concurrently
+        let Ok((mut stream, peer)) = listener.accept().await else {
+            return;
+        };
         tokio::spawn(async move {
-            // Read data from client
-            let mut buf = vec![0; 1024];
+            let mut buf = vec![0u8; 4096];
             loop {
-                let n = match stream.read(&mut buf).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        println!("Error reading: {e}");
-                        return;
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        if stream.write_all(&buf[..n]).await.is_err() {
+                            return;
+                        }
+                        tracing::debug!("echoed {n} bytes to {peer}");
                     }
-                };
-
-                // If no data received, assume disconnect
-                if n == 0 {
-                    return;
                 }
-
-                // Echo data back to client
-                if let Err(e) = stream.write_all(&buf[..n]).await {
-                    println!("Error writing: {e}");
-                    return;
-                }
-
-                println!("Echoed {n} bytes to {addr}");
             }
         });
     }
 }
 
-async fn run_echo_server(
-    server_type: ServerType,
-    addr: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match server_type {
-        ServerType::Udp => run_udp_echo_server(addr).await,
-        ServerType::Tcp => echo_server::<TcpListenerProvider>(addr).await,
-    }
-}
-
-async fn run_udp_echo_server(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = UdpSocket::bind(addr).await?;
+async fn udp_echo_server(socket: UdpSocket) {
     tune_udp_socket(&socket);
     let mut buf = vec![0u8; 65_507];
-    println!("run udp echo server:{addr}");
     loop {
-        let (len, peer) = socket.recv_from(&mut buf).await?;
+        let Ok((len, peer)) = socket.recv_from(&mut buf).await else {
+            return;
+        };
         if let Err(err) = socket.send_to(&buf[..len], peer).await {
-            println!("udp echo send error: {err}");
+            tracing::warn!("udp echo send error: {err}");
         }
     }
 }
 
-async fn run_pb_mapper_server(addr: &str) {
-    let port = addr
-        .rsplit_once(':')
-        .and_then(|(_, port)| port.parse::<u16>().ok())
-        .unwrap_or_default();
-    let auth_config = AuthConfig {
-        state_dir: std::env::temp_dir()
-            .join(format!("pb-mapper-delay-{}-{port}", std::process::id())),
-        max_temporary_keys: 64,
-        max_temporary_key_ttl: Duration::from_secs(3600),
-        legacy_protocol: LegacyProtocolPolicy::Allow,
-    };
-    if let Err(e) =
-        run_server_with_auth_config(addr, CancellationToken::new(), None, false, auth_config).await
-    {
-        eprintln!("pb-mapper server failed to start: {e}");
+/// One complete tunnel: relay, echo server, `register`, and `connect`.
+///
+/// `start` returns only once the tunnel carries traffic, so the tests contain no
+/// timing assumptions. `Drop` tears the four tasks down and removes the relay's
+/// authentication state directory.
+struct TunnelHarness {
+    /// Where a test client sends its traffic — the address `connect` listens on.
+    tunnel_addr: SocketAddr,
+    transport: Transport,
+    shutdown: CancellationToken,
+    tasks: Vec<JoinHandle<()>>,
+    state_dir: PathBuf,
+}
+
+impl TunnelHarness {
+    async fn start(transport: Transport, need_codec: bool) -> Self {
+        *TEST_ENV;
+        let label = format!(
+            "{}-{}",
+            transport.name(),
+            if need_codec { "codec" } else { "plain" }
+        );
+        let config = auth_config(&label);
+        let _ = std::fs::remove_dir_all(&config.state_dir);
+        let state_dir = config.state_dir.clone();
+        let credential = admin_credential();
+
+        // The relay gets its listener pre-bound, so nothing can take the port
+        // between reserving it and the relay's own bind.
+        let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay_listener.local_addr().unwrap();
+        let auth = AuthRuntime::start(
+            *TEST_ADMIN_KEY.as_bytes().first_chunk::<32>().unwrap(),
+            config,
+        )
+        .await
+        .unwrap();
+
+        let shutdown = CancellationToken::new();
+        let relay_shutdown = shutdown.clone();
+        let mut tasks = Vec::new();
+        tasks.push(tokio::spawn(async move {
+            if let Err(error) =
+                run_server_on_listener(relay_listener, relay_shutdown, None, false, auth).await
+            {
+                tracing::error!("relay stopped: {error}");
+            }
+        }));
+
+        // The echo server also owns its socket from the start.
+        let echo_addr = match transport {
+            Transport::Tcp => {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tasks.push(tokio::spawn(tcp_echo_server(listener)));
+                addr
+            }
+            Transport::Udp => {
+                let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let addr = socket.local_addr().unwrap();
+                tasks.push(tokio::spawn(udp_echo_server(socket)));
+                addr
+            }
+        };
+
+        let service_key = format!("echo-{label}");
+        let options = ServerTunnelOptions {
+            need_codec,
+            is_datagram: transport.is_datagram(),
+            keep_alive: false,
+            namespace: None,
+            force_namespace: false,
+        };
+        let register_key = service_key.clone();
+        tasks.push(tokio::spawn(async move {
+            match transport {
+                Transport::Tcp => {
+                    run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
+                        echo_addr,
+                        relay_addr,
+                        register_key.into(),
+                        options,
+                        None,
+                        credential,
+                    )
+                    .await
+                }
+                Transport::Udp => {
+                    run_server_side_cli_with_pinned_credential::<UdpStreamProvider, _>(
+                        echo_addr,
+                        relay_addr,
+                        register_key.into(),
+                        options,
+                        None,
+                        credential,
+                    )
+                    .await
+                }
+            }
+        }));
+
+        // `register` must have published the key before `connect` probes for it;
+        // otherwise `connect` burns its backoff waiting.
+        wait_for_registration(relay_addr, &service_key, credential).await;
+
+        let tunnel_addr = reserve_addr(transport).await;
+        let connect_key = service_key.clone();
+        tasks.push(tokio::spawn(async move {
+            match transport {
+                Transport::Tcp => {
+                    run_client_side_cli_with_pinned_credential::<TcpListenerProvider, _>(
+                        tunnel_addr,
+                        relay_addr,
+                        connect_key.into(),
+                        false,
+                        None,
+                        credential,
+                    )
+                    .await
+                }
+                Transport::Udp => {
+                    run_client_side_cli_with_pinned_credential::<UdpListenerProvider, _>(
+                        tunnel_addr,
+                        relay_addr,
+                        connect_key.into(),
+                        false,
+                        None,
+                        credential,
+                    )
+                    .await
+                }
+            }
+        }));
+
+        let harness = Self {
+            tunnel_addr,
+            transport,
+            shutdown,
+            tasks,
+            state_dir,
+        };
+        harness.wait_until_forwarding().await;
+        harness
     }
 }
 
-async fn run_pb_mapper_server_cli(
-    server_type: ServerType,
-    local_addr: &str,
-    remote_addr: &str,
-    key: &str,
-    need_codec: bool,
-) {
-    match server_type {
-        ServerType::Udp => {
-            run_server_side_cli::<UdpStreamProvider, _>(
-                local_addr,
-                remote_addr,
-                key.into(),
-                ServerTunnelOptions {
-                    need_codec,
-                    is_datagram: true,
-                    keep_alive: false,
-                    namespace: None,
-                    force_namespace: false,
-                },
-            )
-            .await
+impl TunnelHarness {
+    /// Send one probe payload through the tunnel and wait for it to come back.
+    ///
+    /// This replaces the fixed sleeps the earlier version of this file used: it is
+    /// true end-to-end readiness, covering the relay, `register`'s control
+    /// connection, `connect`'s local listener, and the echo server at once.
+    async fn wait_until_forwarding(&self) {
+        let deadline = Instant::now() + READY_TIMEOUT;
+        let mut last_error = String::from("no attempt completed");
+        while Instant::now() < deadline {
+            match self.probe_once().await {
+                Ok(()) => return,
+                Err(error) => last_error = error,
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        ServerType::Tcp => {
-            run_server_side_cli::<TcpStreamProvider, _>(
-                local_addr,
-                remote_addr,
-                key.into(),
-                ServerTunnelOptions {
-                    need_codec,
-                    is_datagram: false,
-                    keep_alive: false,
-                    namespace: None,
-                    force_namespace: false,
-                },
-            )
-            .await
+        panic!(
+            "{} tunnel at {} never forwarded traffic: {last_error}",
+            self.transport.name(),
+            self.tunnel_addr
+        );
+    }
+
+    async fn probe_once(&self) -> Result<(), String> {
+        match self.transport {
+            Transport::Tcp => self.probe_tcp().await,
+            Transport::Udp => self.probe_udp().await,
         }
+    }
+
+    async fn probe_tcp(&self) -> Result<(), String> {
+        let mut stream = timeout(Duration::from_secs(1), TcpStream::connect(self.tunnel_addr))
+            .await
+            .map_err(|_| "tcp connect timed out".to_string())?
+            .map_err(|error| format!("tcp connect failed: {error}"))?;
+        let (mut reader, mut writer) = stream.split();
+        let mut reader = NormalMessageReader::new(&mut reader);
+        let mut writer = NormalMessageWriter::new(&mut writer);
+        writer
+            .write_msg(PROBE)
+            .await
+            .map_err(|error| format!("tcp probe write failed: {error}"))?;
+        let echoed = timeout(Duration::from_secs(1), reader.read_msg())
+            .await
+            .map_err(|_| "tcp probe read timed out".to_string())?
+            .map_err(|error| format!("tcp probe read failed: {error}"))?;
+        if echoed == PROBE {
+            Ok(())
+        } else {
+            Err(format!("tcp probe echoed {} bytes", echoed.len()))
+        }
+    }
+
+    async fn probe_udp(&self) -> Result<(), String> {
+        let socket = connected_udp_socket(self.tunnel_addr).await;
+        probe_udp_socket(&socket).await
     }
 }
 
-async fn run_pb_mapper_client_cli(
-    server_type: ServerType,
-    local_addr: &str,
-    remote_addr: &str,
-    key: &str,
-) {
-    match server_type {
-        ServerType::Udp => {
-            run_client_side_cli::<UdpListenerProvider, _>(
-                local_addr.to_string(),
-                remote_addr.to_string(),
-                key.into(),
-                false,
-            )
-            .await
-        }
-        ServerType::Tcp => {
-            run_client_side_cli::<TcpListenerProvider, _>(
-                local_addr.to_string(),
-                remote_addr.to_string(),
-                key.into(),
-                false,
-            )
-            .await
-        }
+async fn connected_udp_socket(addr: SocketAddr) -> UdpSocket {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    tune_udp_socket(&socket);
+    socket.connect(addr).await.unwrap();
+    socket
+}
+
+/// Round-trip one probe datagram on `socket`.
+///
+/// The tunnel keys UDP streams by source address, so every new socket starts a
+/// new stream and its first datagram can be dropped while the relay sets that
+/// stream up. Callers that go on to assert payload equality warm their own
+/// socket with this first.
+async fn probe_udp_socket(socket: &UdpSocket) -> Result<(), String> {
+    socket
+        .send(PROBE)
+        .await
+        .map_err(|error| format!("udp probe send failed: {error}"))?;
+    let mut buf = vec![0u8; 65_507];
+    let len = timeout(Duration::from_millis(500), socket.recv(&mut buf))
+        .await
+        .map_err(|_| "udp probe timed out".to_string())?
+        .map_err(|error| format!("udp probe recv failed: {error}"))?;
+    if &buf[..len] == PROBE {
+        Ok(())
+    } else {
+        Err(format!("udp probe echoed {len} bytes"))
     }
 }
 
-/// get random message
+async fn wait_until_udp_socket_forwards(socket: &UdpSocket) {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    let mut last_error = String::from("no attempt completed");
+    while Instant::now() < deadline {
+        match probe_udp_socket(socket).await {
+            Ok(()) => return,
+            Err(error) => last_error = error,
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("udp socket never forwarded through the tunnel: {last_error}");
+}
+
+impl Drop for TunnelHarness {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        for task in &self.tasks {
+            task.abort();
+        }
+        let _ = std::fs::remove_dir_all(&self.state_dir);
+    }
+}
+
+/// Poll the relay's `Keys` status until `register` has published `service_key`.
+async fn wait_for_registration(relay_addr: SocketAddr, service_key: &str, credential: Credential) {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    let mut last_error = String::from("no attempt completed");
+    while Instant::now() < deadline {
+        match registered_keys(relay_addr, credential).await {
+            Ok(keys) => {
+                if keys.iter().any(|key| key == service_key) {
+                    return;
+                }
+                last_error = format!("relay reports keys {keys:?}");
+            }
+            Err(error) => last_error = error,
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("`{service_key}` was never registered: {last_error}");
+}
+
+async fn registered_keys(
+    relay_addr: SocketAddr,
+    credential: Credential,
+) -> Result<Vec<String>, String> {
+    let mut stream = timeout(Duration::from_secs(1), TcpStream::connect(relay_addr))
+        .await
+        .map_err(|_| "status connect timed out".to_string())?
+        .map_err(|error| format!("status connect failed: {error}"))?;
+    let response = timeout(
+        Duration::from_secs(1),
+        get_status_with_credential(&mut stream, PbConnStatusReq::Keys, None, &credential),
+    )
+    .await
+    .map_err(|_| "status request timed out".to_string())?
+    .map_err(|error| format!("status request failed: {error}"))?;
+    match response {
+        PbConnStatusResp::Keys(keys) => Ok(keys),
+        other => Err(format!("unexpected status response: {other:?}")),
+    }
+}
+
+/// Random payload; the length is random too, so framing is exercised at many sizes.
 fn gen_random_msg(max_len: usize) -> Vec<u8> {
     let len = rand::rng().random_range(0_usize..max_len);
-    let mut vec = Vec::new();
+    let mut vec = Vec::with_capacity(len);
     for _ in 0..len {
         vec.push(rand::rng().random_range(0..212));
     }
     vec
 }
 
-async fn run_udp_datagram_echo(addr: &str, rounds: usize, burst: usize) {
-    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    tune_udp_socket(&socket);
-    socket.connect(addr).await.unwrap();
+async fn run_udp_datagram_echo(addr: SocketAddr, rounds: usize, burst: usize) {
+    let socket = connected_udp_socket(addr).await;
+    wait_until_udp_socket_forwards(&socket).await;
     let mut buf = vec![0u8; 65_507];
-
-    // Warm up UDP path to ensure listener and forwarding pipeline are ready.
-    let probe = b"pb-mapper-probe";
-    let mut ready = false;
-    for _ in 0..10 {
-        socket.send(probe).await.unwrap();
-        if let Ok(Ok(len)) = timeout(Duration::from_millis(300), socket.recv(&mut buf)).await
-            && &buf[..len] == probe
-        {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(ready, "udp echo path not ready");
 
     for round in 0..rounds {
         for seq in 0..burst {
@@ -239,7 +488,7 @@ async fn run_udp_datagram_echo(addr: &str, rounds: usize, burst: usize) {
                 msg.extend(gen_random_msg(UDP_TEST_PAYLOAD_MAX));
             }
             socket.send(&msg).await.unwrap();
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let wait = deadline.saturating_duration_since(Instant::now());
                 let len = match timeout(wait, socket.recv(&mut buf)).await {
@@ -250,8 +499,9 @@ async fn run_udp_datagram_echo(addr: &str, rounds: usize, burst: usize) {
                 if len < 4 {
                     continue;
                 }
-                let recv_seq = u32::from_be_bytes(buf[..4].try_into().unwrap());
-                if recv_seq != seq as u32 {
+                // A datagram from an earlier sequence number may still be in
+                // flight; skip it rather than failing the comparison.
+                if u32::from_be_bytes(buf[..4].try_into().unwrap()) != seq as u32 {
                     continue;
                 }
                 assert_eq!(msg, &buf[..len]);
@@ -271,7 +521,7 @@ async fn run_echo_delay<P: StreamProvider, A: ToSocketAddrs + Send>(addr: A, tim
         let expected = gen_random_msg(2000);
         for _ in 0..10 {
             let msg = {
-                let _guard = TimerTickGurad::new(&mut duration);
+                let _guard = TimerTickGuard::new(&mut duration);
                 writer.write_msg(&expected).await.unwrap();
                 reader.read_msg().await.unwrap()
             };
@@ -282,136 +532,33 @@ async fn run_echo_delay<P: StreamProvider, A: ToSocketAddrs + Send>(addr: A, tim
     println!("{times} rounds of 10 random data echo delay tests each took a total of {duration:?}");
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ServerType {
-    Udp,
-    Tcp,
+/// Push traffic through the tunnel and assert every payload comes back byte for byte.
+///
+/// These cases verify the logic. For latency numbers, run a separate binary.
+async fn assert_tunnel_echoes(transport: Transport, need_codec: bool) {
+    let harness = TunnelHarness::start(transport, need_codec).await;
+    match transport {
+        Transport::Tcp => run_echo_delay::<TcpStreamProvider, _>(harness.tunnel_addr, 10).await,
+        Transport::Udp => run_udp_datagram_echo(harness.tunnel_addr, 10, 8).await,
+    }
 }
 
-static PB_MAPPER_SERVER: LazyLock<String> =
-    LazyLock::new(|| env::var("PB_MAPPER_TEST_SERVER").unwrap());
-
-static LOCAL_SERVER: LazyLock<String> = LazyLock::new(|| env::var("LOCAL_TEST_SERVER").unwrap());
-
-static ECHO_SERVER: LazyLock<String> = LazyLock::new(|| env::var("ECHO_TEST_SERVER").unwrap());
-
-static SERVER_KEY: LazyLock<String> = LazyLock::new(|| env::var("SERVER_TEST_KEY").unwrap());
-
-static SERVER_TYPE: LazyLock<ServerType> = LazyLock::new(|| {
-    if env::var("SERVER_TEST_TYPE").unwrap() == "UDP" {
-        ServerType::Udp
-    } else {
-        ServerType::Tcp
-    }
-});
-
-static INIT_TRACING: LazyLock<()> = LazyLock::new(|| {
-    println!("{:?}", env::current_dir().unwrap());
-    dotenvy::from_filename(env::current_dir().unwrap().join("tests").join(".env")).unwrap();
-    init_tracing();
-});
-
-/// This is only for testing the correctness of the logic, for performance testing of latency,
-/// please run a separate binary.
-#[ignore = "run codec test enough"]
 #[tokio::test]
-async fn test_pb_mapper_server_no_codec() {
-    *INIT_TRACING;
-    // run echo server
-    let remote_echo = ECHO_SERVER.clone();
-    let server_type = *SERVER_TYPE;
-    let pb_mapper_server = PB_MAPPER_SERVER.clone();
-    let server_key = SERVER_KEY.clone();
-    let echo_server = ECHO_SERVER.clone();
-    let local_server = LOCAL_SERVER.clone();
-
-    let echo_server_handle =
-        tokio::spawn(async move { run_echo_server(server_type, &remote_echo).await.unwrap() });
-    // run the pb-mapper server role
-    let pb_server = pb_mapper_server.clone();
-    let pb_mapper_server_handle = tokio::spawn(async move {
-        run_pb_mapper_server(&pb_server).await;
-    });
-    // slepp some time to wait for pb server
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // run subcribe server cli
-    let key = server_key.clone();
-    let subcribe_remote = pb_mapper_server.clone();
-    let pb_mapper_server_cli_handle = tokio::spawn(async move {
-        run_pb_mapper_server_cli(server_type, &echo_server, &subcribe_remote, &key, false).await;
-    });
-    // slepp some time to wait for pb server cli
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // run register client cli
-    let key = server_key.clone();
-    let local_echo = local_server.clone();
-    let register_remote = pb_mapper_server.clone();
-    let pb_mapper_client_cli_handle = tokio::spawn(async move {
-        run_pb_mapper_client_cli(server_type, &local_echo, &register_remote, &key).await;
-    });
-    // slepp some time to wait for pb client cli
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // run echo test
-    match server_type {
-        ServerType::Udp => run_udp_datagram_echo(local_server.as_str(), 10, 8).await,
-        ServerType::Tcp => run_echo_delay::<TcpStreamProvider, _>(local_server.as_str(), 10).await,
-    }
-
-    // abort all thread
-    echo_server_handle.abort();
-    pb_mapper_server_handle.abort();
-    pb_mapper_server_cli_handle.abort();
-    pb_mapper_client_cli_handle.abort();
+async fn tcp_tunnel_echoes_without_codec() {
+    assert_tunnel_echoes(Transport::Tcp, false).await;
 }
 
-/// This is only for testing the correctness of the logic, for performance testing of latency,
-/// please run a separate binary.
 #[tokio::test]
-async fn test_pb_mapper_server_codec() {
-    *INIT_TRACING;
-    // run echo server
-    let remote_echo = ECHO_SERVER.clone();
-    let server_type = *SERVER_TYPE;
-    let pb_mapper_server = PB_MAPPER_SERVER.clone();
-    let server_key = SERVER_KEY.clone();
-    let echo_server = ECHO_SERVER.clone();
-    let local_server = LOCAL_SERVER.clone();
+async fn tcp_tunnel_echoes_with_codec() {
+    assert_tunnel_echoes(Transport::Tcp, true).await;
+}
 
-    let echo_server_handle =
-        tokio::spawn(async move { run_echo_server(server_type, &remote_echo).await.unwrap() });
-    // run the pb-mapper server role
-    let pb_server = pb_mapper_server.clone();
-    let pb_mapper_server_handle = tokio::spawn(async move {
-        run_pb_mapper_server(&pb_server).await;
-    });
-    // slepp some time to wait for pb server
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // run subcribe server cli
-    let key = server_key.clone();
-    let subcribe_remote = pb_mapper_server.clone();
-    let pb_mapper_server_cli_handle = tokio::spawn(async move {
-        run_pb_mapper_server_cli(server_type, &echo_server, &subcribe_remote, &key, true).await;
-    });
-    // slepp some time to wait for pb server cli
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // run register client cli
-    let key = server_key.clone();
-    let local_echo = local_server.clone();
-    let register_remote = pb_mapper_server.clone();
-    let pb_mapper_client_cli_handle = tokio::spawn(async move {
-        run_pb_mapper_client_cli(server_type, &local_echo, &register_remote, &key).await;
-    });
-    // slepp some time to wait for pb client cli
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // run echo test
-    match server_type {
-        ServerType::Udp => run_udp_datagram_echo(local_server.as_str(), 10, 8).await,
-        ServerType::Tcp => run_echo_delay::<TcpStreamProvider, _>(local_server.as_str(), 10).await,
-    }
+#[tokio::test]
+async fn udp_tunnel_echoes_without_codec() {
+    assert_tunnel_echoes(Transport::Udp, false).await;
+}
 
-    // abort all thread
-    echo_server_handle.abort();
-    pb_mapper_server_handle.abort();
-    pb_mapper_server_cli_handle.abort();
-    pb_mapper_client_cli_handle.abort();
+#[tokio::test]
+async fn udp_tunnel_echoes_with_codec() {
+    assert_tunnel_echoes(Transport::Udp, true).await;
 }
