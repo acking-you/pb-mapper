@@ -620,12 +620,25 @@ pub async fn connect_service(
 // FFI boundary. In a test a panic *is* the failure report.
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
+
     use super::*;
     use crate::error::ErrorCode;
 
+    type ProcessCredentialGuard = tokio::sync::MutexGuard<'static, ()>;
+
     /// A state rooted in a temporary directory, so a test never reads or writes
     /// the real user config.
-    fn temp_state(name: &str) -> (Arc<Mutex<PbMapperState>>, PathBuf) {
+    ///
+    /// Building a state applies its stored `MSG_HEADER_KEY` to the process, and
+    /// a fresh temporary directory has no stored key — so this *clears* the
+    /// process credential. That is process-global, so the returned guard is what
+    /// keeps one test's state from wiping the credential another test just set.
+    /// Hold it for the whole test, not just the construction.
+    async fn temp_state(
+        name: &str,
+    ) -> (ProcessCredentialGuard, Arc<Mutex<PbMapperState>>, PathBuf) {
+        let guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
         let root = std::env::temp_dir().join(format!(
             "pb-mapper-ffi-test-{name}-{}",
             SystemTime::now()
@@ -634,12 +647,12 @@ mod tests {
                 .unwrap_or_default()
         ));
         let state = PbMapperState::new(Some(root.to_string_lossy().into_owned()));
-        (Arc::new(Mutex::new(state)), root)
+        (guard, Arc::new(Mutex::new(state)), root)
     }
 
     #[tokio::test]
     async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
-        let (state, root) = temp_state("server-auth-path");
+        let (_process_credential_guard, state, root) = temp_state("server-auth-path").await;
         let auth_dir = {
             let mut state = state.lock().await;
             let auth_dir = state.config_dir.join("auth");
@@ -675,7 +688,7 @@ mod tests {
     /// nothing able to abort it.
     #[tokio::test]
     async fn a_second_registration_of_the_same_key_is_refused() {
-        let (state, root) = temp_state("claim");
+        let (_process_credential_guard, state, root) = temp_state("claim").await;
 
         let held = {
             let guard = state.lock().await;
@@ -717,7 +730,7 @@ mod tests {
     /// path can forget it — this pins that.
     #[tokio::test]
     async fn a_failed_registration_releases_its_claim() {
-        let (state, root) = temp_state("release");
+        let (_process_credential_guard, state, root) = temp_state("release").await;
         struct RestoreProcessKey;
         impl Drop for RestoreProcessKey {
             fn drop(&mut self) {
@@ -771,7 +784,7 @@ mod tests {
     /// must not block each other.
     #[tokio::test]
     async fn registering_and_connecting_claim_separately() {
-        let (state, root) = temp_state("separate");
+        let (_process_credential_guard, state, root) = temp_state("separate").await;
 
         let guard = state.lock().await;
         let _registering = guard
