@@ -52,6 +52,7 @@ pb-mapper/
 │   ├── pb-mapper-protocol/ # Message framing, v2 secure sessions, forwarding
 │   ├── pb-mapper-server/   # Central relay server, plus the task manager
 │   ├── pb-mapper-client/   # Both tunnel ends: `register` and `connect`
+│   ├── pb-mapper-testkit/  # Test support: a complete e2e tunnel, for any test file
 │   └── pb-mapper-cli/      # The `pb-mapper` binary, integration tests, examples
 ├── ui/                    # Flutter UI, talking to Rust over dart:ffi
 │   ├── lib/               # Flutter application code
@@ -132,9 +133,23 @@ loader, two CMakeLists, four xcconfigs, and the release-ui hash checks expect.
   - `server/`: `register` — publishes a local service (`mod.rs`, `stream.rs`, `error.rs`)
   - `client/`: `connect` — subscribes and listens locally, plus `status.rs`
 
+- **`pb-mapper-testkit/`**: Test support only; nothing shipped depends on it
+  - `relay.rs`: `Relay` — a live server that retains its `AuthRuntime`, so a case
+    can issue, renew, and revoke credentials without the admin wire protocol
+  - `tunnel.rs`: `TunnelSpec` / `Tunnel` / `TunnelHarness` — echo server plus
+    `register` plus `connect`, each on reserved loopback ports
+  - `echo.rs`, `traffic.rs`: Echo servers and the framed and raw traffic drivers
+  - A crate rather than `tests/common/mod.rs`: that module is compiled separately
+    into every test binary, and whatever a binary does not use is reported as
+    dead code — fatal under `-D warnings`
+
 - **`pb-mapper-cli/`**: The binary, integration tests, and examples
   - `src/bin/pb-mapper.rs`: Argument parsing and the role commands
   - `src/bin/pb-mapper/admin.rs`: The `admin` subcommand
+  - `tests/test_delay.rs`: The transport/codec matrix over the whole tunnel
+  - `tests/temporary_credential_e2e.rs`: The credential lifecycle over the whole
+    tunnel — namespace isolation, renew, expiry, revoke
+  - `tests/regression.rs`: Protocol-level cases against hand-rolled frames
 
 #### Flutter UI (`ui/`)
 - **`lib/src/views/`**: One file per zone the shell can show
@@ -346,7 +361,9 @@ part of the landing page and the setup wizard.
 - **Toolchain**: rust-toolchain.toml for reproducible builds
 - **Testing**: Unit tests live beside the code; integration tests are in
   `crates/pb-mapper-cli/tests/`, which is the crate that depends on every layer
-  they exercise
+  they exercise. The e2e scaffolding is `pb-mapper-testkit`, so a new test file
+  stands up its own full `server` + `register` + `connect` flow instead of
+  everything accumulating in one file.
 
 ### UI Development Guidelines
 - **Framework**: Flutter 3.44.9, Material 3. CI pins the same version.
@@ -406,7 +423,8 @@ docker-compose -f docker/docker-compose.yml up
 
 - **Unit Tests**: `cargo test` for Rust components
 - **Widget Tests**: `flutter test` in ui/ directory
-- **Integration Tests**: `tests/` directory contains end-to-end tests
+- **Integration Tests**: `crates/pb-mapper-cli/tests/` — end-to-end tests built
+  on `pb-mapper-testkit`
 - **Examples**: `examples/` directory provides working usage examples
 
 ### Service Deployment

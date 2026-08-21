@@ -16,6 +16,7 @@
 - `crates/`: the Rust workspace; the root `Cargo.toml` is a virtual manifest
   - `crates/pb-mapper-cli/src/bin/pb-mapper.rs`: unified CLI entry point
   - `crates/pb-mapper-{core,auth,protocol,server,client,cli}`
+  - `crates/pb-mapper-testkit/`: test support only; nothing shipped depends on it
   - `crates/pb-mapper-cli/tests/`: integration tests; no env setup required
   - `crates/pb-mapper-cli/examples/`: runnable examples
 - `ui/`: Flutter UI; Rust bridge under `ui/native/*`
@@ -42,13 +43,24 @@ Notes: CI builds release artifacts on tags `vX.Y.Z` (see `.github/workflows/rele
 
 ## Testing Guidelines
 - Framework: `tokio` async + integration tests in `crates/pb-mapper-cli/tests/`
-- No test needs environment setup. `test_delay.rs` runs the whole tunnel
-  (`server` + `register` + `connect`) over both transports with and without
-  `--codec`; each case reserves its own loopback ports and its own auth state
+- No test needs environment setup. `pb-mapper-testkit` stands up a complete
+  tunnel (`server` + `register` + `connect`), so any test file can build one
+  rather than a single file owning the harness: `TunnelHarness::start(transport,
+  need_codec)` for the common case, or `Relay` + `TunnelSpec` when a case needs
+  to issue, renew, or revoke a credential first. `test_delay.rs` covers the
+  transport/codec matrix and `temporary_credential_e2e.rs` the credential
+  lifecycle; each case reserves its own loopback ports and its own auth state
   directory, so cases run concurrently and never collide with a live relay.
 - Sequence components with a readiness probe, not a sleep: poll the relay's
   `Keys` status for a registration, and round-trip a payload through the tunnel
-  for forwarding. `TunnelHarness` in `test_delay.rs` does both.
+  for forwarding. `Tunnel::start` does both before it returns.
+- A framed driver (`run_echo_delay`) needs a byte-transparent echo server; a
+  tagged tunnel (`TunnelSpec::echo_tag`, which is how a namespace-isolation
+  assertion avoids passing on a leak) needs the raw drivers instead.
+- Anything that sets the process credential takes
+  `pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK` first — it is
+  process-global, and that includes indirect writers such as building a
+  `PbMapperState`.
 - Prefer new integration tests that need no external setup
 
 ## Commit & Pull Request Guidelines

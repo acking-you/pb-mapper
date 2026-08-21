@@ -122,7 +122,7 @@ Open `http://localhost:3000` in the coffee-shop browser — traffic flows throug
 
 ## Repository layout
 
-- `crates/` — the Rust workspace (six crates; the root manifest is virtual)
+- `crates/` — the Rust workspace (six shipped crates plus a test-support one; the root manifest is virtual)
 - `ui/` — Flutter UI + native bridge
 - `docs/` — documentation and assets
 - `docker/`, `services/`, `scripts/` — deployment and tooling

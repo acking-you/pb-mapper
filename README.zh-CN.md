@@ -122,7 +122,7 @@ pb-mapper connect tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:3000
 
 ## 仓库结构
 
-- `crates/` — Rust workspace（六个 crate，根清单为虚拟清单）
+- `crates/` — Rust workspace（六个发布 crate 加一个测试支撑 crate，根清单为虚拟清单）
 - `ui/` — Flutter UI + 原生桥接
 - `docs/` — 文档与素材
 - `docker/`、`services/`、`scripts/` — 部署与工具
