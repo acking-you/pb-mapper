@@ -38,7 +38,7 @@ mod imp {
     const OWNER_ONLY: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)";
 
     #[link(name = "advapi32")]
-    extern "system" {
+    unsafe extern "system" {
         fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl: *const u16,
             revision: u32,
@@ -48,7 +48,7 @@ mod imp {
     }
 
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn LocalFree(mem: *mut c_void) -> *mut c_void;
     }
 

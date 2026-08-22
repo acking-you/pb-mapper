@@ -64,7 +64,7 @@ fn lock_exclusive_nonblock(file: &File) -> std::io::Result<()> {
             offset_high: u32,
             event: *mut core::ffi::c_void,
         }
-        extern "system" {
+        unsafe extern "system" {
             fn LockFileEx(
                 file: *mut core::ffi::c_void,
                 flags: u32,
