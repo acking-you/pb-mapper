@@ -2,7 +2,8 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.4.0] - 2026-08-18
+## [0.4.0] - 2026-08-22
+This is also the first published release to carry the 0.3.0 changes below: 0.3.0 was never tagged, so its single-CLI consolidation ships here.
 - Added a sole administrator credential plus renewable, expiring, and immediately revocable `pbmt1_` temporary credentials with fixed-slot O(1) lookup and isolated per-key service namespaces.
 - Added single-flight protocol-v2 authentication with directional AES-256-GCM keys, monotonic frame counters, authenticated routing metadata, durable first-flight replay protection, and optional legacy framing during migration.
 - Added encrypted snapshot/WAL authentication state, exclusive `auth.lock`, lifecycle audit records, hierarchical timing-wheel expiry, hard closure of revoked live connections, recoverable root-key rotation, and explicit auth-state reset.
@@ -12,6 +13,12 @@ All notable changes to this project will be documented in this file.
 - First-flight salts are unique for nonce 0: admission is atomic under one lock, torn replay records fail closed, and a nonce-0 error frame is sent only after that salt is reserved.
 - Pinned UI and local tunnels to the credential and relay address captured at start, and bound tunneled-frame checksums to each hop's authenticated session key.
 - Aborted pooled registration workers and accepted connection tasks on shutdown; the relay reaps connection tasks with a `JoinSet`.
+- Split the single crate into six shipped crates under `crates/` plus a test-support one, with the root manifest now virtual: `pb-mapper-core` → `pb-mapper-auth` → `pb-mapper-protocol` → `pb-mapper-server` and `pb-mapper-client` as peers → `pb-mapper-cli`, which holds the `pb-mapper` binary. Each crate owns its own error type and wraps the layer below as a `source` rather than sharing one enum.
+- Moved to Rust 1.98.0 and edition 2024, and lifted `clippy::unwrap_used` and `clippy::expect_used` to `deny` for the whole workspace, which every crate and the FFI cdylib now inherit.
+- Replaced the frozen `trust-dns-resolver` with `hickory-resolver` 0.26. Custom DNS servers now apply on the async path only: hickory ships no blocking resolver, so `get_socket_addrs_from_host_port` resolves through `std` alone. This matches what the sync path already did in practice, since it fell back to `std` whenever a custom resolver was absent — as it always was inside a Tokio runtime.
+- Upgraded snafu to 0.9, hashbrown to 0.17, base64 to 0.23, and dirs to 6.0.
+- Removed dead weight rather than carrying it across the split: five error variants left over from externalising `uni-stream`, three unused `#[macro_export]` forwarding macros, `Aes256GcmCodec::try_new_with_default_key`, the unused `once_cell` dependency, and three unreferenced cargo profiles.
+- Extracted the end-to-end tunnel harness into `pb-mapper-testkit`, so any test file can stand up a full `server` + `register` + `connect` flow instead of one file owning it, and covered the temporary-credential lifecycle end to end: namespace isolation, renewal, expiry, and revocation.
 
 ## [0.3.0] - 2026-08-18
 - Replaced the three role-specific executables with one `pb-mapper` CLI and explicit `server`, `register`, `connect`, and `status` commands.
