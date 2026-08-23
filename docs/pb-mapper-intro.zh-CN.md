@@ -70,14 +70,13 @@ flowchart LR
 
 ### 方式一：AI Agent 一键部署
 
-如果你在用 Claude Code、Cursor、Kiro 这类带 agent 能力的工具，仓库里自带两个部署 skill：
+如果你在用 Claude Code、Cursor、Kiro 这类带 agent 能力的工具，直接把这句话发给 agent，无需先 clone 仓库：
 
-| Skill | 干什么 |
-|---|---|
-| `/pb-mapper-server-deploy` | 本地下载二进制 → SCP 传到 VPS → 写 systemd unit → 启动 |
-| `/pb-mapper-connect-deploy` | 同样的流程，在任意 Linux 机器上起一条 connect 隧道 |
+```text
+Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md
+```
 
-全程交互式，会问你 SSH 信息、端口、加密 key。GitHub 下载不通的话会自动走代理兜底，远程主机不需要能访问 GitHub。
+安装后的 `pb-mapper-suite` Skill 会先确认 SSH、relay 端口防火墙、服务器 OS 与架构，再安装统一 CLI、部署 relay、配置 register/connect 并完成验收；远程主机无法访问 GitHub 时，也可以在本地下载匹配的制品后通过 SSH 传入。
 
 ### 方式二：一条命令
 

@@ -74,66 +74,9 @@ This makes a relay a useful rendezvous layer for remote agent runtimes, coding
 harnesses, private APIs, model gateways, browser-control endpoints, development
 machines, and operational tools.
 
-## Harness-oriented quick start
+## Install the agent Skill
 
-If your coding agent can load repository Skills, start with
-[`pb-mapper-server-deploy`](skills/pb-mapper-server-deploy/SKILL.md) for the
-relay and [`pb-mapper-connect-deploy`](skills/pb-mapper-connect-deploy/SKILL.md)
-for a managed local endpoint. They build or download the artifact, upload it,
-install systemd units, and verify the resulting path. The manual flow below
-makes the same trust boundary explicit.
-
-### 1. Deploy one public relay
-
-On an x86_64 Linux host that can reach GitHub:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
-```
-
-The installer starts `pb-mapper server` on port `7666` and creates a random
-administrator key at `/var/lib/pb-mapper/auth/admin.key`.
-
-### 2. Issue a scoped credential
-
-Keep the administrator key on the relay. Use it to mint a credential for one
-harness or workload:
-
-```bash
-export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
-pb-mapper admin --server <relay>:7666 key issue --ttl 24h --label coding-harness
-```
-
-Distribute the printed `pbmt1_...` credential to only the corresponding target
-and harness. It can register, connect, and inspect services in its own namespace;
-it cannot perform administrator operations.
-
-### 3. Register a private control endpoint
-
-On the target machine:
-
-```bash
-export MSG_HEADER_KEY='<pbmt1_credential>'
-pb-mapper register tcp \
-  --server <relay>:7666 \
-  --key agent-control \
-  --addr 127.0.0.1:10999
-```
-
-### 4. Attach the harness
-
-On the machine running the harness:
-
-```bash
-export MSG_HEADER_KEY='<pbmt1_credential>'
-pb-mapper connect tcp \
-  --server <relay>:7666 \
-  --key agent-control \
-  --addr 127.0.0.1:11999
-```
-
-The harness can now reach the private endpoint at `127.0.0.1:11999`. Only the
-relay's `7666` port is public.
+Tell your agent: `Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md`.
 
 ## Credential model for automation
 
@@ -158,7 +101,7 @@ identity or protection against traffic analysis. See the
 | Surface | What is available today |
 | --- | --- |
 | Unified CLI | `server`, `register`, `connect`, `status`, and `admin` roles |
-| Deployment Skills | Agent-readable server deployment, connect deployment, and release workflows under `skills/` |
+| Agent Skills | Complete installation, relay, register/connect, and verification through `pb-mapper-suite`, plus a separate release workflow |
 | Operations | Linux systemd units, install scripts, Docker image, status and administrator inventory |
 | Native embedding | Rust crates plus a C ABI used by the Flutter desktop/mobile UI |
 | Networking | TCP and UDP, per-tunnel keep-alive, optional forwarded-data encryption |
@@ -168,8 +111,8 @@ identity or protection against traffic analysis. See the
 The current release provides the secure network and credential foundation. The
 next layer will make that foundation directly consumable by agent harnesses:
 
-- one-click Skills for relay deployment, target registration, harness
-  attachment, credential issuance, distribution, renewal, and revocation;
+- harness-specific adapters and credential automation built on the existing
+  `pb-mapper-suite` workflow;
 - stable Rust and language-level client SDKs for embedding tunnels without
   shelling out to the CLI;
 - a TypeScript package backed by Node-API (N-API);
@@ -179,19 +122,6 @@ next layer will make that foundation directly consumable by agent harnesses:
   private APIs, development machines, and browser-control endpoints.
 
 These are roadmap items, not yet part of the published compatibility contract.
-
-## Commands
-
-| Command | Role |
-| --- | --- |
-| `pb-mapper server` | Run the central relay (default port `7666`) |
-| `pb-mapper register tcp\|udp` | Register a private TCP/UDP service |
-| `pb-mapper connect tcp\|udp` | Expose a registered service on a local address |
-| `pb-mapper status keys\|remote-id` | Inspect the caller's namespace |
-| `pb-mapper admin ...` | Manage credentials, services, connections, auth state, and legacy migration |
-
-The same server, register, connect, and status workflows are available in the
-Flutter UI.
 
 ## Build and documentation
 

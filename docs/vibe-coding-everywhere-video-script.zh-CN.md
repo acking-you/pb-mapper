@@ -150,10 +150,10 @@ pb-mapper 是一个 Rust 写的网络穿透工具。它的特点是：
 
 > 💡 PPT 第 9 页：一键部署 pb-mapper server
 
-这一步最简单。如果你用 Claude Code 或者其他 AI 编程助手，直接用 pb-mapper 项目提供的部署 skill：
+这一步最简单。如果你用 Claude Code 或者其他 AI 编程助手，直接让它安装 pb-mapper 提供的 Skill，无需先 clone 仓库：
 
 ```
-/pb-mapper-server-deploy
+Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md
 ```
 
 AI 会自动帮你：
@@ -195,10 +195,10 @@ AI 会自动帮你：
 
 > 如果你不想在手机上装 App，还有一种方式——
 
-在 `pb-mapper server` 所在的公网服务器上，用 AI 编程助手执行：
+在 `pb-mapper server` 所在的公网服务器上，让 AI 编程助手使用已经安装的 Skill：
 
 ```
-/pb-mapper-connect-deploy
+Use pb-mapper-suite to deploy a connect role for hapi-hub on this server.
 ```
 
 这会在服务器上部署一个 `pb-mapper connect` 进程，订阅 `hapi-hub` 服务并监听一个公网端口。
@@ -262,6 +262,5 @@ AI 会自动帮你：
 | 安装 Bun | `curl -fsSL https://bun.sh/install \| bash` |
 | 构建 HAPI | `cd hapi && bun install && bun run build:single-exe` |
 | 启动 HAPI | `hapi` |
-| 部署 pb-mapper server | AI 助手中执行 `/pb-mapper-server-deploy` |
-| 部署 connect（备选） | AI 助手中执行 `/pb-mapper-connect-deploy` |
+| 安装 pb-mapper Skill | 把 README 中的 `Fetch and follow instructions from .../INSTALL.md` 发给 AI 助手 |
 | HAPI Web 地址 | `http://localhost:3006` |

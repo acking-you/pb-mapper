@@ -64,63 +64,9 @@ pb-mapper 负责传输字节；隧道后的服务仍然负责自身的应用层�
 因此，一台 relay 可以同时作为远程 agent runtime、coding harness、私有 API、
 模型网关、浏览器控制端点、开发机和运维工具的会合层。
 
-## 面向 Harness 的快速开始
+## 安装 Agent Skill
 
-如果编程 agent 可以读取仓库 Skills，可以先用
-[`pb-mapper-server-deploy`](skills/pb-mapper-server-deploy/SKILL.md) 部署 relay，
-再用 [`pb-mapper-connect-deploy`](skills/pb-mapper-connect-deploy/SKILL.md)
-部署受 systemd 管理的本地端点。它们会完成制品构建或下载、上传、服务安装与路径
-验证。下面的手动流程展示的是同一条信任边界。
-
-### 1. 部署一个公网 Relay
-
-在可以访问 GitHub 的 x86_64 Linux 主机上执行：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
-```
-
-安装脚本会在 `7666` 端口启动 `pb-mapper server`，并在首次启动时把随机管理员
-密钥写入 `/var/lib/pb-mapper/auth/admin.key`。
-
-### 2. 签发一把隔离凭据
-
-管理员密钥只留在 relay 上，用它为一套 harness 或 workload 签发临时凭据：
-
-```bash
-export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
-pb-mapper admin --server <relay>:7666 key issue --ttl 24h --label coding-harness
-```
-
-只把输出的 `pbmt1_...` 凭据分发给对应的目标机与 harness。它可以在自己的
-命名空间内注册、连接和查看服务，但无法执行管理员操作。
-
-### 3. 注册私有控制端点
-
-在目标机器上执行：
-
-```bash
-export MSG_HEADER_KEY='<pbmt1_credential>'
-pb-mapper register tcp \
-  --server <relay>:7666 \
-  --key agent-control \
-  --addr 127.0.0.1:10999
-```
-
-### 4. 让 Harness 接入
-
-在运行 harness 的机器上执行：
-
-```bash
-export MSG_HEADER_KEY='<pbmt1_credential>'
-pb-mapper connect tcp \
-  --server <relay>:7666 \
-  --key agent-control \
-  --addr 127.0.0.1:11999
-```
-
-harness 此时可通过 `127.0.0.1:11999` 访问私有端点，公网只需要暴露 relay 的
-`7666` 端口。
+直接告诉你的 agent：`Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md`。
 
 ## 面向自动化的凭据模型
 
@@ -143,7 +89,7 @@ pb-mapper 使用预共享凭据，不提供公钥身份体系。如果还需要�
 | 接入面 | 当前能力 |
 | --- | --- |
 | 统一 CLI | `server`、`register`、`connect`、`status`、`admin` 五种角色 |
-| 部署 Skills | `skills/` 下已有 agent 可读取的 server 部署、connect 部署与 release 工作流 |
+| Agent Skills | 通过 `pb-mapper-suite` 完成安装、relay、register/connect 与验收，release 工作流保持独立 |
 | 运维能力 | Linux systemd、安装脚本、Docker 镜像、状态查询与管理员级服务/连接清单 |
 | 原生嵌入 | Rust crates，以及 Flutter 桌面/移动端已经使用的 C ABI |
 | 网络能力 | TCP、UDP、按隧道 keep-alive、可选的转发数据加密 |
@@ -153,8 +99,7 @@ pb-mapper 使用预共享凭据，不提供公钥身份体系。如果还需要�
 当前版本已经提供安全网络与凭据生命周期基础。下一层将让 agent harness 能够直接
 消费这些能力：
 
-- 面向 relay 部署、目标服务注册、harness 接入、凭据签发/分发/续期/吊销的
-  一键 Skills；
+- 基于现有 `pb-mapper-suite` 工作流扩展更多 harness 专用 adapter 与凭据自动化；
 - 无需启动 CLI 子进程即可嵌入隧道的稳定 Rust SDK 与语言级 client SDK；
 - 基于 Node-API（N-API）的 TypeScript 包；
 - 独立的 client-only 构建，在支持的平台上以发布包 **小于 5 MB** 为目标；
@@ -162,18 +107,6 @@ pb-mapper 使用预共享凭据，不提供公钥身份体系。如果还需要�
   harness adapter 和示例。
 
 以上均为路线图，不属于当前已发布的兼容性承诺。
-
-## 命令
-
-| 命令 | 角色 |
-| --- | --- |
-| `pb-mapper server` | 启动中心 relay（默认端口 `7666`） |
-| `pb-mapper register tcp\|udp` | 注册私有 TCP/UDP 服务 |
-| `pb-mapper connect tcp\|udp` | 把已注册服务暴露到本地地址 |
-| `pb-mapper status keys\|remote-id` | 查看调用方自己的命名空间 |
-| `pb-mapper admin ...` | 管理凭据、服务、连接、认证状态与旧协议迁移 |
-
-Flutter UI 也支持相同的 server、register、connect 与 status 工作流。
 
 ## 构建与文档
 

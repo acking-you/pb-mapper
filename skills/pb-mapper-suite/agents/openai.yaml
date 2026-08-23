@@ -1,0 +1,4 @@
+interface:
+  display_name: "pb-mapper Suite"
+  short_description: "Install, deploy, and use the complete pb-mapper suite"
+  default_prompt: "Use $pb-mapper-suite to install or upgrade pb-mapper and set up the relay, register, or connect role I need."
