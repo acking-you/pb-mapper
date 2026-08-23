@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/poster.png" alt="pb-mapper" width="800" />
+<img src="docs/assets/poster.png" alt="pb-mapper — remote control infrastructure for the agent harness era" width="800" />
 
 <p>
   <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
@@ -22,111 +22,196 @@
 
 ---
 
-**pb-mapper** exposes any number of local TCP/UDP services through a **single** public port. Instead of frp-style one-port-per-service mapping, services register under a key and anyone holding that key can reach them.
+> **Remote control infrastructure for the agent harness era.**
 
-## Highlights
+Agent harnesses can write code, run tools, and coordinate long workflows. They
+still need a narrow, durable path into private runtimes. **pb-mapper** provides
+that network primitive: expose one relay port, register any number of keyed
+TCP/UDP services behind it, and delegate access without publishing every
+service or sharing the relay's root credential.
 
-- **One binary, one public port** — `pb-mapper` provides every runtime role, while a service-key registry replaces per-service port planning.
-- **Scoped temporary credentials** — the administrator key can issue renewable, expiring `pbmt1_` credentials; each credential gets an isolated service namespace and can only inspect, register, and connect inside it.
-- **Authenticated protocol v2** — directional AES-256-GCM control frames authenticate in the first request without adding a handshake round trip. New clients use v2; the server can temporarily allow legacy clients during migration.
-- **Optional encryption** — AES-256-GCM (via `ring`) on forwarded traffic, enabled with `--codec` at registration.
-- **Proven in production** — on real workloads (e.g. a Palworld UDP server), latency matches frp with a directly exposed port.
+pb-mapper transports bytes. The service behind a tunnel still owns its
+application-level authentication and authorization.
 
-## Quick Start
+## Why it fits an agent harness
 
-### Recommended — AI agent deployment skill
+- **Compact and easy to embed** — one Rust binary contains the relay, register,
+  connect, status, and administrator roles. Linux releases are distributed as a
+  small, self-contained archive with no language runtime to install.
+- **One public port, many control paths** — registration, subscription, status,
+  and administration all enter through the same relay port. Adding another
+  remote-control endpoint does not require another public listener.
+- **Delegate access instead of the root key** — keep one 32-byte administrator
+  key on the relay and issue renewable, expiring `pbmt1_` credentials to
+  harnesses or workloads. Each credential receives an isolated namespace.
+- **Revoke live access** — expiry, revocation, auth-state reset, and root-key
+  rotation close affected live control and data connections.
+- **Native performance, production experience** — the data path is implemented
+  in Rust on Tokio, supports TCP and UDP, and has been exercised by long-running
+  self-hosted products and real game-server traffic. The end-to-end suite covers
+  the transport/encryption matrix and credential lifecycle.
 
-With an AI coding agent (Claude Code, Cursor, Kiro), the built-in skills handle deployment interactively. The binary is downloaded locally and uploaded over SCP, so the remote host needs no GitHub access.
+## One relay, many private services
 
-- `/pb-mapper-server-deploy` — deploys `pb-mapper server` as a systemd service.
-- `/pb-mapper-connect-deploy` — deploys `pb-mapper connect` as a managed tunnel and validates it end to end.
+![pb-mapper architecture](docs/assets/architecture-flow.svg)
 
-### Alternative — one-liner install script
+```text
+ private runtime A ── register "app" ──┐
+ private runtime B ── register "shell" ├──► pb-mapper relay :7666 ◄── agent harnesses
+ private runtime C ── register "tools" ┘          one public port
+```
 
-If the remote host can reach GitHub directly, this installs the unified `pb-mapper` binary and runs its `server` command as a systemd service on Linux (x86_64, musl). The relay listens on port `7666` and creates a random administrator key at `/var/lib/pb-mapper/auth/admin.key` on first start.
+- `pb-mapper register` runs beside a private TCP/UDP service and publishes a
+  service name to the relay.
+- `pb-mapper connect` runs beside an agent or operator and exposes that service
+  on a local address.
+- The relay matches both sides by namespace and service name, then forwards data
+  bidirectionally.
+- Different temporary credentials can reuse the same service names without
+  seeing or colliding with each other.
+
+This makes a relay a useful rendezvous layer for remote agent runtimes, coding
+harnesses, private APIs, model gateways, browser-control endpoints, development
+machines, and operational tools.
+
+## Harness-oriented quick start
+
+If your coding agent can load repository Skills, start with
+[`pb-mapper-server-deploy`](skills/pb-mapper-server-deploy/SKILL.md) for the
+relay and [`pb-mapper-connect-deploy`](skills/pb-mapper-connect-deploy/SKILL.md)
+for a managed local endpoint. They build or download the artifact, upload it,
+install systemd units, and verify the resulting path. The manual flow below
+makes the same trust boundary explicit.
+
+### 1. Deploy one public relay
+
+On an x86_64 Linux host that can reach GitHub:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acking-you/pb-mapper/master/scripts/install-server-github.sh | bash
 ```
 
-Use the administrator key only for management and issue a temporary credential for a workload:
+The installer starts `pb-mapper server` on port `7666` and creates a random
+administrator key at `/var/lib/pb-mapper/auth/admin.key`.
+
+### 2. Issue a scoped credential
+
+Keep the administrator key on the relay. Use it to mint a credential for one
+harness or workload:
 
 ```bash
 export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
-pb-mapper admin --server <public-ip>:7666 key issue --ttl 24h --label home-web
+pb-mapper admin --server <relay>:7666 key issue --ttl 24h --label coding-harness
 ```
 
-Copy the printed `pbmt1_...` credential to the register and connect machines as their `MSG_HEADER_KEY`. They may use the same service name without colliding with another temporary credential's namespace.
+Distribute the printed `pbmt1_...` credential to only the corresponding target
+and harness. It can register, connect, and inspect services in its own namespace;
+it cannot perform administrator operations.
 
-## Architecture
+### 3. Register a private control endpoint
 
-![pb-mapper architecture](docs/assets/architecture-flow.svg)
-
-- **Local service side** (green) — `pb-mapper register` registers a local TCP/UDP service.
-- **Public network** (blue) — `pb-mapper server` keeps the registry and forwards data bidirectionally.
-- **Remote client side** (orange) — `pb-mapper connect` subscribes to a key and exposes it as a local port.
-
-The register and connect workflows are also available in the Flutter UI.
-
-### Example: reach a home web server from a coffee shop
-
-Your web server runs on `localhost:8080` at home.
-
-```
-                  Home LAN                    Public Server                Coffee Shop
-          ┌─────────────────────┐       ┌──────────────────┐       ┌──────────────────┐
-          │  Web Server :8080   │       │ pb-mapper server │       │  Browser :3000   │
-          │        ↑            │       │     :7666        │       │       ↑          │
-          │ register ───────────┼──────►│  key='web' ──────┼◄──────┼── connect        │
-          └─────────────────────┘       └──────────────────┘       └──────────────────┘
-```
+On the target machine:
 
 ```bash
-# 1. on the public server — start the central router
-pb-mapper server --port 7666
-
-# 2. issue a temporary credential, then export it on both endpoint machines
 export MSG_HEADER_KEY='<pbmt1_credential>'
-
-# 3. at home — register the web server under key 'web'
-pb-mapper register tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:8080
-
-# 4. at the coffee shop — subscribe and expose it locally
-pb-mapper connect tcp --server <public-ip>:7666 --key web --addr 127.0.0.1:3000
+pb-mapper register tcp \
+  --server <relay>:7666 \
+  --key agent-control \
+  --addr 127.0.0.1:10999
 ```
 
-Open `http://localhost:3000` in the coffee-shop browser — traffic flows through the public server back home.
+### 4. Attach the harness
 
-## Components
+On the machine running the harness:
+
+```bash
+export MSG_HEADER_KEY='<pbmt1_credential>'
+pb-mapper connect tcp \
+  --server <relay>:7666 \
+  --key agent-control \
+  --addr 127.0.0.1:11999
+```
+
+The harness can now reach the private endpoint at `127.0.0.1:11999`. Only the
+relay's `7666` port is public.
+
+## Credential model for automation
+
+| Credential | Intended holder | Authority |
+| --- | --- | --- |
+| Administrator key | Relay operator or trusted provisioning automation | Issue, reveal, renew, revoke, rotate, inspect all namespaces |
+| Temporary `pbmt1_` credential | One harness, tenant, device, or workload | Register, connect, and inspect only its own namespace |
+
+Protocol v2 authenticates the encrypted first request without adding a separate
+handshake round trip. Temporary credentials are derived from the administrator
+key, persistent server instance ID, and key ID; the relay stores lifecycle
+metadata rather than a copy of each temporary secret. Optional AES-256-GCM data
+encryption is enabled with `--codec` when registering a service.
+
+pb-mapper uses pre-shared credentials, not public-key identity. Use TLS or
+another application protocol when you also need certificate-based endpoint
+identity or protection against traffic analysis. See the
+[authentication design](docs/authentication-v2.md) for the exact boundary.
+
+## Current integration surface
+
+| Surface | What is available today |
+| --- | --- |
+| Unified CLI | `server`, `register`, `connect`, `status`, and `admin` roles |
+| Deployment Skills | Agent-readable server deployment, connect deployment, and release workflows under `skills/` |
+| Operations | Linux systemd units, install scripts, Docker image, status and administrator inventory |
+| Native embedding | Rust crates plus a C ABI used by the Flutter desktop/mobile UI |
+| Networking | TCP and UDP, per-tunnel keep-alive, optional forwarded-data encryption |
+
+## Roadmap: harness-native remote control
+
+The current release provides the secure network and credential foundation. The
+next layer will make that foundation directly consumable by agent harnesses:
+
+- one-click Skills for relay deployment, target registration, harness
+  attachment, credential issuance, distribution, renewal, and revocation;
+- stable Rust and language-level client SDKs for embedding tunnels without
+  shelling out to the CLI;
+- a TypeScript package backed by Node-API (N-API);
+- a separate client-only build, targeting a packaged size below **5 MB** on
+  supported platforms;
+- harness adapters and examples for remote model runtimes, tool servers,
+  private APIs, development machines, and browser-control endpoints.
+
+These are roadmap items, not yet part of the published compatibility contract.
+
+## Commands
 
 | Command | Role |
 | --- | --- |
-| `pb-mapper server` | Central router (default port `7666`) |
-| `pb-mapper register tcp\|udp` | Registers a local TCP/UDP service with the server |
-| `pb-mapper connect tcp\|udp` | Subscribes to a registered service and exposes a local port |
-| `pb-mapper status keys\|remote-id` | Queries the central router |
-| `pb-mapper admin ...` | Issues/renews/revokes credentials and inspects auth, services, and connections |
-| **Flutter UI** (`ui/`) | GUI for server, register, connect, and status workflows |
+| `pb-mapper server` | Run the central relay (default port `7666`) |
+| `pb-mapper register tcp\|udp` | Register a private TCP/UDP service |
+| `pb-mapper connect tcp\|udp` | Expose a registered service on a local address |
+| `pb-mapper status keys\|remote-id` | Inspect the caller's namespace |
+| `pb-mapper admin ...` | Manage credentials, services, connections, auth state, and legacy migration |
 
-## Developer view
+The same server, register, connect, and status workflows are available in the
+Flutter UI.
 
-- **Rust core** — a workspace under `crates/`, layered bottom-up: `pb-mapper-core` (credentials, checksum, config, addressing), `pb-mapper-auth` (credential lifecycle and persistence), `pb-mapper-protocol` (framing and secure sessions), then `pb-mapper-server` and `pb-mapper-client` as peers, with the `pb-mapper` binary in `pb-mapper-cli`.
-- **Flutter UI** — views in `ui/lib/src/views`, FFI layers in `ui/lib/src/ffi`, Rust bridge in `ui/native/pb_mapper_ffi`. FFI calls run on a background isolate, and Rust returns JSON (`{success, message, data}`) to keep the C ABI stable.
+## Build and documentation
 
-## Documentation
+```bash
+make build-pb-mapper
+cargo test
+```
 
-- User guide (build / run / use): [`docs/user-guide.md`](docs/user-guide.md)
+- User guide: [`docs/user-guide.md`](docs/user-guide.md)
 - Authentication and protocol v2: [`docs/authentication-v2.md`](docs/authentication-v2.md)
 - Docker server guide: [`DOCKER_README.md`](DOCKER_README.md)
-- 中文文档: [`README.zh-CN.md`](README.zh-CN.md), [`docs/user-guide.zh-CN.md`](docs/user-guide.zh-CN.md)
+- Chinese documentation: [`README.zh-CN.md`](README.zh-CN.md), [`docs/user-guide.zh-CN.md`](docs/user-guide.zh-CN.md)
 
-## Repository layout
+Repository layout:
 
-- `crates/` — the Rust workspace (six shipped crates plus a test-support one; the root manifest is virtual)
-- `ui/` — Flutter UI + native bridge
-- `docs/` — documentation and assets
-- `docker/`, `services/`, `scripts/` — deployment and tooling
-- `skills/` — AI coding agent deployment skills (server and connect tunnel)
+- `crates/` — Rust workspace: core, auth, protocol, server, client, CLI, and testkit
+- `ui/` — Flutter UI and native C ABI bridge
+- `skills/` — agent-readable deployment and release workflows
+- `docs/` — architecture, authentication, user guides, and project assets
+- `docker/`, `services/`, `scripts/` — packaging and operations
 
 ## License
 
