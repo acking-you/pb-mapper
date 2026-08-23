@@ -66,7 +66,11 @@ pb-mapper 负责传输字节；隧道后的服务仍然负责自身的应用层�
 
 ## 安装 Agent Skill
 
-直接告诉你的 agent：`Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md`。
+直接告诉你的 agent：
+
+```text
+Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md
+```
 
 ## 面向自动化的凭据模型
 

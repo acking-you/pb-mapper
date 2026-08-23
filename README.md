@@ -76,7 +76,11 @@ machines, and operational tools.
 
 ## Install the agent Skill
 
-Tell your agent: `Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md`.
+Tell your agent:
+
+```text
+Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md
+```
 
 ## Credential model for automation
 
