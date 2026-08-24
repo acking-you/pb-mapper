@@ -162,7 +162,7 @@ impl Client {
                     worker_shutdown,
                 )
                 .await;
-                let _ = status_tx.send(TunnelStatus::Stopped);
+                settle_stopped(&status_tx);
             }),
             Transport::Udp => tokio::spawn(async move {
                 let callback = watch_callback(status_tx.clone());
@@ -176,7 +176,7 @@ impl Client {
                     worker_shutdown,
                 )
                 .await;
-                let _ = status_tx.send(TunnelStatus::Stopped);
+                settle_stopped(&status_tx);
             }),
         };
 
@@ -215,7 +215,7 @@ impl Client {
                     worker_shutdown,
                 )
                 .await;
-                let _ = status_tx.send(TunnelStatus::Stopped);
+                settle_stopped(&status_tx);
             }),
             Transport::Udp => tokio::spawn(async move {
                 let callback = client_watch_callback(status_tx.clone());
@@ -230,7 +230,7 @@ impl Client {
                     worker_shutdown,
                 )
                 .await;
-                let _ = status_tx.send(TunnelStatus::Stopped);
+                settle_stopped(&status_tx);
             }),
         };
 
@@ -298,6 +298,21 @@ async fn resolve(addr: &str) -> Result<std::net::SocketAddr> {
     get_sockaddr_async(addr)
         .await
         .context(AddressSnafu { addr })
+}
+
+/// Mark a finished worker as `Stopped`, unless it already reported why it will
+/// never come up. The status is a watch channel, so it keeps only the newest
+/// value: overwriting a `Failed(reason)` that the worker set on its way out
+/// would replace the only description of a permanent rejection the caller ever
+/// gets, leaving `wait_ready` to report a bare stop instead.
+fn settle_stopped(tx: &watch::Sender<TunnelStatus>) {
+    tx.send_if_modified(|status| match status {
+        TunnelStatus::Failed(_) => false,
+        _ => {
+            *status = TunnelStatus::Stopped;
+            true
+        }
+    });
 }
 
 fn watch_callback(tx: watch::Sender<TunnelStatus>) -> StatusCallback {
