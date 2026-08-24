@@ -331,3 +331,86 @@ async fn sdk_admin_show_reveal_renew() {
 
     admin.revoke_key(issued.key_id).await.unwrap();
 }
+
+/// A `connect` whose local address is already taken must not report itself ready:
+/// the status drives `wait_ready`, and a caller told the tunnel is up has to be
+/// able to reach the local endpoint.
+#[tokio::test]
+async fn sdk_connect_is_not_ready_while_local_port_is_occupied() {
+    let relay = Relay::start("sdk-occupied-port").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let (registration, _) = register_echo(&client, "echo-busy", Transport::Tcp, false).await;
+
+    // Held for the whole case, so the SDK's bind can never succeed.
+    let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let busy_addr = squatter.local_addr().unwrap();
+
+    let connection = client
+        .connect(ConnectRequest {
+            key: "echo-busy".into(),
+            local_addr: busy_addr.to_string(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+
+    let ready = connection.wait_ready_timeout(Duration::from_secs(2)).await;
+    assert!(
+        ready.is_err(),
+        "connect should not report ready while `{busy_addr}` is occupied"
+    );
+    assert_ne!(
+        connection.status(),
+        TunnelStatus::Connected,
+        "status must not claim Connected without a bound listener"
+    );
+
+    drop(squatter);
+    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    run_raw_tcp_echo(busy_addr, 4, None).await;
+
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+/// `stop()` must take the in-flight forwarded session with it, not leave it
+/// forwarding on a tunnel the caller believes is gone.
+#[tokio::test]
+async fn sdk_stop_closes_established_forwarded_stream() {
+    let relay = Relay::start("sdk-stop-stream").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let (registration, _) = register_echo(&client, "echo-live", Transport::Tcp, false).await;
+
+    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    let connection = client
+        .connect(ConnectRequest {
+            key: "echo-live".into(),
+            local_addr: listen_addr.to_string(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+
+    // An established session: the round trip proves the whole path is forwarding.
+    let mut stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+    stream.write_all(b"ping").await.unwrap();
+    let mut echoed = [0_u8; 4];
+    stream.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping");
+
+    connection.stop().await.unwrap();
+
+    // The forwarding task is cancelled, so the local half is torn down: the next
+    // read sees EOF or a reset rather than another echo.
+    stream.write_all(b"post").await.ok();
+    let mut buf = [0_u8; 4];
+    let after_stop = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+    match after_stop {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        Ok(Ok(n)) => panic!("stopped tunnel still forwarded {n} bytes: {:?}", &buf[..n]),
+        Err(_) => panic!("stopped tunnel left the forwarded stream open"),
+    }
+
+    registration.stop().await.unwrap();
+}

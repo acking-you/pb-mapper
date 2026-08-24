@@ -242,16 +242,58 @@ impl Admin {
         }
     }
 
+    /// Rotate the root key and persist it to `path`.
+    ///
+    /// The candidate is written to a staged sibling file first, and `path` is only
+    /// replaced once the relay has accepted the rotation and the new key has passed
+    /// a post-rotation status check. Otherwise a failed rotation would leave `path`
+    /// holding a key the relay never installed, discarding the still-valid one — the
+    /// same staging the `admin root-key rotate` CLI flow performs.
     pub async fn rotate_root_key_to_file(
         &self,
         path: &Path,
         new_key: Option<String>,
     ) -> Result<String> {
         let new_key = new_key.unwrap_or_else(generate_admin_key);
-        write_admin_key_file(path, &new_key, true).map_err(|error| Error::AuthFile {
+        let staged_path = staged_key_path(path);
+        write_admin_key_file(&staged_path, &new_key, true).map_err(|error| Error::AuthFile {
             message: error.to_string(),
         })?;
-        self.rotate_root_key(Some(new_key)).await
+
+        let staged_note = || format!("the candidate key remains at `{}`", staged_path.display());
+        let rotated = match self.rotate_root_key(Some(new_key)).await {
+            Ok(rotated) => rotated,
+            Err(error) => {
+                return Err(Error::AuthFile {
+                    message: format!("root rotation request failed; {}: {error}", staged_note()),
+                });
+            }
+        };
+        // `rotate_root_key` already swapped the in-memory credential, so this
+        // proves the relay authenticates the key we are about to persist.
+        if let Err(error) = self.auth_status().await {
+            return Err(Error::AuthFile {
+                message: format!(
+                    "new administrator key did not pass the post-rotation status check; {}: {error}",
+                    staged_note()
+                ),
+            });
+        }
+        write_admin_key_file(path, &rotated, true).map_err(|error| Error::AuthFile {
+            message: format!(
+                "administrator key rotated and verified, but `{}` could not be updated; recover the key from `{}`: {error}",
+                path.display(),
+                staged_path.display()
+            ),
+        })?;
+        if let Err(error) = std::fs::remove_file(&staged_path) {
+            tracing::warn!(
+                path = %staged_path.display(),
+                %error,
+                "administrator key was rotated, but the staged key file could not be removed"
+            );
+        }
+        Ok(rotated)
     }
 
     pub async fn set_legacy_protocol(&self, policy: LegacyProtocol) -> Result<()> {
@@ -329,6 +371,15 @@ impl Admin {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// The sibling path a rotation candidate is staged at, matching the CLI's naming.
+fn staged_key_path(path: &Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("admin.key");
+    path.with_file_name(format!(".{name}.next"))
 }
 
 fn validate_page_size(page_size: u16) -> Result<u16> {

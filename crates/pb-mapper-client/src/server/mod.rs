@@ -450,22 +450,27 @@ async fn run_server_side_cli_worker<LocalStream, A>(
         worker_index,
         credential,
     };
-    loop {
+    // Forwarded sessions outlive a single control connection, so the set lives
+    // here rather than inside the attempt: a reconnect is not a reason to drop
+    // streams that are still healthy. It is drained before this worker returns.
+    let mut stream_tasks = JoinSet::new();
+    'outer: loop {
         if shutdown.is_cancelled() {
-            return;
+            break 'outer;
         }
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
             &mut retry_backoff,
             run_config.clone(),
             status_callback.as_ref(),
             shutdown.clone(),
+            &mut stream_tasks,
         )
         .await
         {
             status
         } else {
             if shutdown.is_cancelled() {
-                return;
+                break 'outer;
             }
             tracing::warn!(
                 event = "local_server_control_worker_finished",
@@ -476,7 +481,7 @@ async fn run_server_side_cli_worker<LocalStream, A>(
             Status::ReadMsg
         };
         match status {
-            Status::Cancelled => return,
+            Status::Cancelled => break 'outer,
             Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
                 let retry_interval = retry_backoff.next_delay();
                 tracing::info!(
@@ -497,11 +502,11 @@ async fn run_server_side_cli_worker<LocalStream, A>(
                 }
 
                 tokio::select! {
-                    () = shutdown.cancelled() => return,
+                    () = shutdown.cancelled() => break 'outer,
                     () = tokio::time::sleep(retry_interval) => {}
                 }
                 if shutdown.is_cancelled() {
-                    return;
+                    break 'outer;
                 }
                 if let Some(ref callback) = status_callback {
                     callback("retrying");
@@ -509,14 +514,19 @@ async fn run_server_side_cli_worker<LocalStream, A>(
             }
         }
     }
+
+    // Cancellation is already signalled by the token the sessions hold; this only
+    // waits for them to observe it.
+    stream_tasks.shutdown().await;
 }
 
-#[instrument(skip(status_callback, shutdown))]
+#[instrument(skip(status_callback, shutdown, stream_tasks))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
     retry_backoff: &mut RetryBackoff,
     config: ServerCliRunConfig<A>,
     status_callback: Option<&StatusCallback>,
     shutdown: CancellationToken,
+    stream_tasks: &mut JoinSet<()>,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,
@@ -795,9 +805,15 @@ where
                         registration.conn_id,
                         &write_tx,
                         lease_state.clone(),
+                        stream_tasks,
+                        &shutdown,
                     )
                     .await
                 );
+            }
+            Some(_) = stream_tasks.join_next() => {
+                // Reap finished sessions so the set does not grow for the lifetime
+                // of the registration. `handle_stream` logs its own failures.
             }
             result = &mut writer_handle => {
                 break match result {
@@ -957,7 +973,8 @@ async fn handle_ping_interval<T: MessageWriter>(
     }
 }
 
-#[instrument(skip(msg, write_tx, lease_state))]
+#[instrument(skip(msg, write_tx, lease_state, stream_tasks, shutdown))]
+#[allow(clippy::too_many_arguments)]
 async fn handle_request<
     LocalStream: StreamProvider,
     A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
@@ -968,6 +985,8 @@ async fn handle_request<
     conn_id: u32,
     write_tx: &tokio::sync::mpsc::UnboundedSender<LocalControlWrite>,
     lease_state: Arc<tokio::sync::Mutex<ControlLeaseState>>,
+    stream_tasks: &mut JoinSet<()>,
+    shutdown: &CancellationToken,
 ) -> error::Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -996,11 +1015,17 @@ where
                     action: "stream ack message",
                 })?;
             let key = key.clone();
-            tokio::spawn(async move {
-                snafu_error_handle!(
-                    handle_stream::<LocalStream, _>(key, client_id, server_generation, target,)
-                        .await
-                )
+            let stream_shutdown = shutdown.clone();
+            // Tracked rather than detached: a cancelled registration must take its
+            // in-flight forwarded sessions with it, so `stop()` returning means no
+            // stream of this tunnel is still moving bytes.
+            stream_tasks.spawn(async move {
+                let forward =
+                    handle_stream::<LocalStream, _>(key, client_id, server_generation, target);
+                tokio::select! {
+                    () = stream_shutdown.cancelled() => {}
+                    result = forward => snafu_error_handle!(result),
+                }
             });
         }
         // got pong response

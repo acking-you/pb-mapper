@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use snafu::ResultExt;
 use tokio::net::TcpStream;
+use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use uni_stream::udp::set_custom_timeout;
@@ -225,10 +226,15 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
     };
 
     let mut retry_backoff = RetryBackoff::default();
+    // Accepted local streams are tracked rather than detached, so a cancelled
+    // tunnel takes its in-flight forwarding sessions down with it instead of
+    // leaving them forwarding after `stop()` has returned. The set is declared
+    // outside the loop: a listener restart is not a reason to drop live sessions.
+    let mut stream_tasks = JoinSet::new();
 
-    loop {
+    'outer: loop {
         if shutdown.is_cancelled() {
-            return;
+            break 'outer;
         }
         tracing::debug!(
             event = "client_probe_start",
@@ -257,7 +263,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                 callback("retrying");
             }
             tokio::select! {
-                () = shutdown.cancelled() => return,
+                () = shutdown.cancelled() => break 'outer,
                 () = tokio::time::sleep(retry_delay) => {}
             }
             continue;
@@ -271,12 +277,12 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
             "remote server key is available; local listener will start"
         );
 
-        if let Some(ref callback) = status_callback {
-            callback("connected");
-        }
-
         retry_backoff.reset();
 
+        // The listener binds before "connected" is reported: that status is what
+        // drives readiness for external callers, and a caller told the tunnel is
+        // up must be able to reach the local endpoint. Reporting it on the remote
+        // probe alone would call an occupied local address ready.
         let listener = match LocalListener::bind(local_addr)
             .await
             .context(BindLocalListenerSnafu)
@@ -290,14 +296,29 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                     error = %e,
                     "failed to bind local listener"
                 );
+                if let Some(ref callback) = status_callback {
+                    callback("retrying");
+                }
                 let retry_delay = retry_backoff.next_delay();
                 tokio::select! {
-                    () = shutdown.cancelled() => return,
+                    () = shutdown.cancelled() => break 'outer,
                     () = tokio::time::sleep(retry_delay) => {}
                 }
                 continue;
             }
         };
+
+        tracing::info!(
+            event = "client_local_listener_bound",
+            key = %key,
+            local_addr = %local_addr,
+            remote_addr = %remote_addr,
+            "local listener bound; tunnel is ready"
+        );
+
+        if let Some(ref callback) = status_callback {
+            callback("connected");
+        }
 
         let (stream_failure_tx, mut stream_failure_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut health_interval = tokio::time::interval(client_health_check_interval());
@@ -315,7 +336,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                         local_addr = %local_addr,
                         "client listener loop cancelled"
                     );
-                    return;
+                    break 'outer;
                 }
                 accepted = listener.accept() => {
                     let (stream, peer_addr) = match accepted.context(AcceptLocalStreamSnafu) {
@@ -340,9 +361,14 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                     );
                     let key = key.clone();
                     let failure_tx = stream_failure_tx.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_local_stream(stream, key, remote_addr, keep_alive, namespace, credential).await
+                    let stream_shutdown = shutdown.clone();
+                    stream_tasks.spawn(async move {
+                        let forward = handle_local_stream(stream, key, remote_addr, keep_alive, namespace, credential);
+                        let forward = tokio::select! {
+                            () = stream_shutdown.cancelled() => return,
+                            result = forward => result,
+                        };
+                        if let Err(e) = forward
                         {
                             let reason = snafu::Report::from_error(e).to_string();
                             tracing::warn!(
@@ -389,6 +415,11 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                     consecutive_health_failures = 0;
                     retry_backoff.reset();
                 }
+                Some(_) = stream_tasks.join_next() => {
+                    // Reap finished sessions so the set does not grow for the
+                    // lifetime of the process. Failures are already reported
+                    // through `stream_failure_tx`.
+                }
                 Some(stream_failure) = stream_failure_rx.recv() => {
                     tracing::warn!(
                         event = "client_stream_failure_reported",
@@ -419,7 +450,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
         }
 
         if shutdown.is_cancelled() {
-            return;
+            break 'outer;
         }
         let retry_delay = retry_backoff.next_delay();
         tracing::info!(
@@ -432,10 +463,14 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
             "client listener stopped; remote probe will retry"
         );
         tokio::select! {
-            () = shutdown.cancelled() => return,
+            () = shutdown.cancelled() => break 'outer,
             () = tokio::time::sleep(retry_delay) => {}
         }
     }
+
+    // Wait for the forwarding sessions to observe the cancellation, so returning
+    // from here means no stream of this tunnel is still moving bytes.
+    stream_tasks.shutdown().await;
 }
 
 async fn probe_remote_key(

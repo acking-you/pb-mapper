@@ -156,31 +156,57 @@ impl Transport {
     }
 }
 
-/// Pick a free loopback port by binding it and immediately dropping the socket.
+/// Where [`reserve_addr`] allocates from: below every platform's ephemeral range
+/// (Linux defaults to 32768, macOS and Windows to 49152), so a port handed out
+/// here is never one the kernel also assigns to a `:0` bind elsewhere.
+const RESERVED_PORT_FLOOR: u16 = 20_000;
+const RESERVED_PORT_CEILING: u16 = 32_767;
+
+/// How many ports one test process owns before wrapping into another's slots.
+const RESERVED_PORTS_PER_PROCESS: u16 = 64;
+
+/// Pick a free loopback port for an address the caller cannot bind itself.
 ///
 /// TCP and UDP have separate port spaces, so this has to use the same protocol the
 /// caller will bind. A relay and an echo server keep the socket they bound; this is
 /// for `connect`, whose bind happens inside the client and cannot be handed a
-/// pre-bound socket.
+/// pre-bound socket. A test that can own its socket outright should do that instead
+/// of calling this.
 ///
-/// That leaves a window between the drop and the real bind, so this is not a
-/// reservation and cannot be made into one. What keeps it from colliding in
-/// practice: the ephemeral range holds tens of thousands of ports, and a kernel
-/// does not hand back a just-released one while others are free. A test that can
-/// own its socket outright should do that instead of calling this.
+/// The socket still has to be dropped before the client binds, so the port is not
+/// held for the caller — what this guarantees is that nothing else is going to pick
+/// the same one:
+///
+/// - It allocates outside the ephemeral range, so no `:0` bind anywhere in the
+///   process, the test binary, or the machine can be handed this port.
+/// - Candidates advance from a per-process base, so two concurrent cases in one
+///   binary never see the same port, and two test binaries running at once start
+///   from different bases.
+/// - Every candidate is proven free by binding it, so wrapping into a slot another
+///   process is using costs a retry rather than a flake.
 pub async fn reserve_addr(transport: Transport) -> std::net::SocketAddr {
-    match transport {
-        Transport::Tcp => {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            drop(listener);
-            addr
-        }
-        Transport::Udp => {
-            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-            let addr = socket.local_addr().unwrap();
-            drop(socket);
-            addr
+    static NEXT_PORT: AtomicUsize = AtomicUsize::new(0);
+    let span = u32::from(RESERVED_PORT_CEILING - RESERVED_PORT_FLOOR + 1);
+    let slots = span / u32::from(RESERVED_PORTS_PER_PROCESS);
+    let base = u32::from(RESERVED_PORT_FLOOR)
+        + (std::process::id() % slots) * u32::from(RESERVED_PORTS_PER_PROCESS);
+
+    for _ in 0..span {
+        let offset = NEXT_PORT.fetch_add(1, Ordering::Relaxed) as u32;
+        let port =
+            RESERVED_PORT_FLOOR + ((base - u32::from(RESERVED_PORT_FLOOR) + offset) % span) as u16;
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let bound = match transport {
+            Transport::Tcp => tokio::net::TcpListener::bind(addr)
+                .await
+                .map(|listener| listener.local_addr()),
+            Transport::Udp => tokio::net::UdpSocket::bind(addr)
+                .await
+                .map(|socket| socket.local_addr()),
+        };
+        if let Ok(Ok(addr)) = bound {
+            return addr;
         }
     }
+    panic!("no free loopback port in {RESERVED_PORT_FLOOR}..={RESERVED_PORT_CEILING}");
 }

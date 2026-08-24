@@ -70,7 +70,12 @@ jobs:
               # run the JS e2e, because the addon is a thin wrap over it.
               crates/pb-mapper-node/*|crates/pb-mapper-client/*|crates/pb-mapper/*) rust=true; node=true ;;
               crates/*|src/*|tests/*|examples/*) rust=true ;;
-              Cargo.toml|Cargo.lock|rust-toolchain.toml|rustfmt.toml) rust=true ;;
+              # The addon is built from this workspace, and `bun run
+              # build:release` consumes the root `release-node` profile — a
+              # profile or lockfile change that pushes it past the size limit
+              # has to be caught here, not after release.
+              Cargo.toml|Cargo.lock|rust-toolchain.toml) rust=true; node=true ;;
+              rustfmt.toml) rust=true ;;
               # Per-crate manifests. `case` patterns match the whole path, so
               # the unanchored entry above only ever catches the root manifest.
               */Cargo.toml|*/Cargo.lock) rust=true ;;
