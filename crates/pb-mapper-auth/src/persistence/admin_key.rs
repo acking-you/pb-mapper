@@ -1,8 +1,8 @@
 //! Administrator key files, instance id, and recovery-key identity checks.
 use super::super::*;
 use super::{
-    atomic_write, auth_snapshot_path, auth_wal_path, encrypted_auth_state_exists, open_blob,
-    truncate_auth_wal,
+    atomic_write, auth_snapshot_path, auth_wal_path, create_new_write, encrypted_auth_state_exists,
+    open_blob, truncate_auth_wal,
 };
 
 pub(crate) fn load_or_create_instance_id(
@@ -125,7 +125,8 @@ pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFail
     Ok(key)
 }
 
-pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), AuthFailure> {
+/// Reject anything that is not a 32-byte administrator key before it reaches disk.
+fn validate_admin_key(key: &str) -> Result<(), AuthFailure> {
     let Credential::Admin(_) = parse_credential(key)
         .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?
     else {
@@ -135,6 +136,11 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
             false,
         ));
     };
+    Ok(())
+}
+
+pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), AuthFailure> {
+    validate_admin_key(key)?;
     if path.exists() && !force {
         return Err(AuthFailure::new(
             "administrator_key_exists",
@@ -178,27 +184,48 @@ pub fn staged_admin_key_path(path: &Path) -> PathBuf {
 pub fn stage_admin_key_candidate(path: &Path, key: &str) -> Result<PathBuf, AuthFailure> {
     let staged_path = staged_admin_key_path(path);
     if let Some(staged) = read_admin_key_file(&staged_path)? {
-        if staged.trim() != key.trim() {
-            return Err(AuthFailure::new(
-                "administrator_key_staged",
-                format!(
-                    "a previous root rotation left an unresolved candidate at `{}`, so the relay's \
-                     active administrator key is either `{}` or that candidate; determine which \
-                     key the relay accepts, install it at `{}`, and delete the staged file before \
-                     rotating again",
-                    staged_path.display(),
-                    path.display(),
-                    path.display()
-                ),
-                false,
-            ));
-        }
+        return accept_staged_candidate(path, staged_path, &staged, key);
+    }
+    validate_admin_key(key)?;
+    // Claims the path itself rather than renaming onto it. The read above is a
+    // check-then-act: two rotations racing here both pass it, and a rename always
+    // wins, so the loser's candidate — possibly the only copy of the key the
+    // relay just installed — would vanish. `O_EXCL` makes exactly one of them the
+    // winner and sends the other through the same decision as a pre-existing file.
+    if !create_new_write(&staged_path, format!("{key}\n").as_bytes(), 0o600)? {
+        let staged = read_admin_key_file(&staged_path)?.unwrap_or_default();
+        return accept_staged_candidate(path, staged_path, &staged, key);
+    }
+    Ok(staged_path)
+}
+
+/// Whether the candidate already at `staged_path` can stand in for `key`.
+///
+/// The same key means this is a retry of the rotation that staged it, so the
+/// staged file is exactly what the caller wanted. A different one — including
+/// the empty or short file a crash mid-write leaves behind — means the relay's
+/// active key is unknown, and only the operator can say which it is.
+fn accept_staged_candidate(
+    path: &Path,
+    staged_path: PathBuf,
+    staged: &str,
+    key: &str,
+) -> Result<PathBuf, AuthFailure> {
+    if staged.trim() == key.trim() {
         return Ok(staged_path);
     }
-    // `force: false` re-checks existence: the read above races with a concurrent
-    // rotation, and losing that race must fail rather than clobber.
-    write_admin_key_file(&staged_path, key, false)?;
-    Ok(staged_path)
+    Err(AuthFailure::new(
+        "administrator_key_staged",
+        format!(
+            "a previous root rotation left an unresolved candidate at `{}`, so the relay's active \
+             administrator key is either `{}` or that candidate; determine which key the relay \
+             accepts, install it at `{}`, and delete the staged file before rotating again",
+            staged_path.display(),
+            path.display(),
+            path.display()
+        ),
+        false,
+    ))
 }
 
 /// Drop a staged candidate once the rotation it belongs to is durably recorded

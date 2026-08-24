@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use pb_mapper_core::checksum::Credential;
+use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_protocol::MessageReader;
 use pb_mapper_protocol::command::{
     AdminRequest, AdminResponse, MessageSerializer, PbConnRequest, PbConnResponse,
@@ -10,6 +11,7 @@ use pb_mapper_protocol::command::{
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use snafu::ResultExt;
 use tokio::net::TcpStream;
+use uni_stream::addr::each_addr;
 
 use super::super::Error;
 use super::super::error::{ConnectSnafu, Result};
@@ -37,7 +39,7 @@ pub(super) async fn send_admin_request(
     request: AdminRequest,
     io_timeout: Duration,
 ) -> Result<AdminResponse> {
-    let addr = pb_mapper_core::config::get_sockaddr_async(server)
+    let addrs = pb_mapper_core::config::resolve_addrs_async(server)
         .await
         .map_err(|source| Error::Address {
             addr: server.to_string(),
@@ -48,7 +50,7 @@ pub(super) async fn send_admin_request(
     for attempt in 0..MAX_ATTEMPTS {
         let last_attempt = attempt + 1 == MAX_ATTEMPTS;
         let mut exchange = Exchange::new();
-        let outcome = tokio::time::timeout(io_timeout, exchange.run(addr, &credential, &encoded))
+        let outcome = tokio::time::timeout(io_timeout, exchange.run(&addrs, &credential, &encoded))
             .await
             .unwrap_or(Err(Error::TimedOut {
                 timeout: io_timeout,
@@ -99,15 +101,22 @@ impl Exchange {
         Self { sent: false }
     }
 
+    /// Runs one exchange against `addrs`, trying each candidate in turn.
+    ///
+    /// `each_addr` stops at the first address that connects, so `sent` still
+    /// describes a single relay: the candidates are alternative routes to it, not
+    /// separate recipients, and only the one that answered ever saw the request.
     async fn run(
         &mut self,
-        addr: std::net::SocketAddr,
+        addrs: &ResolvedAddrs,
         credential: &Credential,
         encoded: &[u8],
     ) -> Result<PbConnResponse> {
-        let mut stream = TcpStream::connect(addr).await.context(ConnectSnafu {
-            addr: addr.to_string(),
-        })?;
+        let mut stream = each_addr(addrs.as_slice(), TcpStream::connect)
+            .await
+            .context(ConnectSnafu {
+                addr: addrs.to_string(),
+            })?;
         let session = ClientHeaderSession::new_v2(credential).map_err(protocol)?;
         session
             .write_initial(&mut stream, encoded)

@@ -3,7 +3,6 @@ pub mod status;
 mod stream;
 
 use std::fmt::Debug;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +16,9 @@ use uni_stream::udp::set_custom_timeout;
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
 use self::status::{get_status_scoped, get_status_with_credential};
 use self::stream::handle_local_stream;
+use crate::addr::{resolve_all, resolve_tunnel_ends};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
+use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_core::config::{
     StatusOp, client_health_check_interval, client_health_check_timeout,
     client_health_failure_threshold,
@@ -26,11 +27,27 @@ use pb_mapper_core::timeout::RetryBackoff;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper_protocol::forward::StreamForward;
 use uni_stream::addr::{ToSocketAddrs, each_addr};
-use uni_stream::stream::got_one_socket_addr;
 use uni_stream::stream::{ListenerProvider, StreamAccept};
 
 // Callback for notifying status changes to external systems
 pub type ClientStatusCallback = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Resolve both ends, reporting a bad address through `status_callback`.
+///
+/// The callback is the only channel a caller has here — these entry points return
+/// `()` — so an address that never resolves has to settle the tunnel as failed
+/// rather than just leaving a log line behind.
+async fn resolve_ends_or_fail<A: ToSocketAddrs>(
+    local_addr: A,
+    remote_addr: A,
+    status_callback: Option<&ClientStatusCallback>,
+) -> Option<(ResolvedAddrs, ResolvedAddrs)> {
+    let resolved = resolve_tunnel_ends(local_addr, remote_addr).await;
+    if let (None, Some(callback)) = (&resolved, status_callback) {
+        callback("failed");
+    }
+    resolved
+}
 
 pub async fn run_client_side_cli<LocalListener: ListenerProvider, A: ToSocketAddrs>(
     local_addr: A,
@@ -59,7 +76,7 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_loop::<LocalListener, A>(
+    run_client_side_cli_with_callback_scoped::<LocalListener, A>(
         local_addr,
         remote_addr,
         key,
@@ -67,7 +84,6 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         None,
         status_callback,
         None,
-        CancellationToken::new(),
     )
     .await
 }
@@ -85,7 +101,7 @@ pub async fn run_client_side_cli_with_pinned_credential<
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_loop::<LocalListener, A>(
+    run_client_side_cli_with_callback_scoped::<LocalListener, A>(
         local_addr,
         remote_addr,
         key,
@@ -93,7 +109,6 @@ pub async fn run_client_side_cli_with_pinned_credential<
         None,
         status_callback,
         Some(credential),
-        CancellationToken::new(),
     )
     .await
 }
@@ -112,7 +127,12 @@ pub async fn run_client_side_cli_with_callback_scoped<
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_loop::<LocalListener, A>(
+    let Some((local_addr, remote_addr)) =
+        resolve_ends_or_fail(local_addr, remote_addr, status_callback.as_ref()).await
+    else {
+        return;
+    };
+    run_client_side_cli_loop::<LocalListener>(
         local_addr,
         remote_addr,
         key,
@@ -127,10 +147,13 @@ pub async fn run_client_side_cli_with_callback_scoped<
 
 /// Same as [`run_client_side_cli_with_callback_scoped`], but the retry loop
 /// returns when `shutdown` is cancelled.
+///
+/// Takes both ends already resolved, because its caller — the SDK — resolves them
+/// itself in order to report a bad address as an error rather than a log line.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_client_side_cli_with_shutdown<LocalListener: ListenerProvider, A: ToSocketAddrs>(
-    local_addr: A,
-    remote_addr: A,
+pub async fn run_client_side_cli_with_shutdown<LocalListener: ListenerProvider>(
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
     key: Arc<str>,
     keep_alive: bool,
     namespace: Option<u64>,
@@ -140,7 +163,7 @@ pub async fn run_client_side_cli_with_shutdown<LocalListener: ListenerProvider, 
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_loop::<LocalListener, A>(
+    run_client_side_cli_loop::<LocalListener>(
         local_addr,
         remote_addr,
         key,
@@ -154,9 +177,9 @@ pub async fn run_client_side_cli_with_shutdown<LocalListener: ListenerProvider, 
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAddrs>(
-    local_addr: A,
-    remote_addr: A,
+async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
     key: Arc<str>,
     keep_alive: bool,
     namespace: Option<u64>,
@@ -168,26 +191,6 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
 {
     set_custom_timeout(Duration::from_secs(120));
 
-    let local_addr = match got_one_socket_addr(local_addr).await {
-        Ok(addr) => addr,
-        Err(e) => {
-            tracing::error!("parse local addr failed: {e}");
-            if let Some(ref callback) = status_callback {
-                callback("failed");
-            }
-            return;
-        }
-    };
-    let remote_addr = match got_one_socket_addr(remote_addr).await {
-        Ok(addr) => addr,
-        Err(e) => {
-            tracing::error!("parse remote addr failed: {e}");
-            if let Some(ref callback) = status_callback {
-                callback("failed");
-            }
-            return;
-        }
-    };
     let credential = match pinned_credential {
         Some(credential) => credential,
         None => match get_process_credential() {
@@ -223,7 +226,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
         );
 
         if let Err(failure) =
-            probe_remote_key(remote_addr, key.as_ref(), namespace, credential).await
+            probe_remote_key(&remote_addr, key.as_ref(), namespace, credential).await
         {
             // A refusal the relay marks permanent — a namespace this credential
             // does not own, an invalid service name — cannot be fixed by trying
@@ -280,7 +283,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
         // drives readiness for external callers, and a caller told the tunnel is
         // up must be able to reach the local endpoint. Reporting it on the remote
         // probe alone would call an occupied local address ready.
-        let listener = match LocalListener::bind(local_addr)
+        let listener = match LocalListener::bind(local_addr.as_slice())
             .await
             .context(BindLocalListenerSnafu)
         {
@@ -359,8 +362,9 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                     let key = key.clone();
                     let failure_tx = stream_failure_tx.clone();
                     let stream_shutdown = shutdown.clone();
+                    let stream_remote = remote_addr.clone();
                     stream_tasks.spawn(async move {
-                        let forward = handle_local_stream(stream, key, remote_addr, keep_alive, namespace, credential);
+                        let forward = handle_local_stream(stream, key, stream_remote.clone(), keep_alive, namespace, credential);
                         let forward = tokio::select! {
                             () = stream_shutdown.cancelled() => return,
                             result = forward => result,
@@ -370,7 +374,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                             let reason = snafu::Report::from_error(e).to_string();
                             tracing::warn!(
                                 event = "client_local_stream_failed_before_forward",
-                                remote_addr = %remote_addr,
+                                remote_addr = %stream_remote,
                                 reason = %reason,
                                 "local client stream failed before forwarding started"
                             );
@@ -379,7 +383,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                     });
                 }
                 _ = health_interval.tick() => {
-                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace, credential).await {
+                    if let Err(reason) = probe_remote_key(&remote_addr, key.as_ref(), namespace, credential).await {
                         consecutive_health_failures = consecutive_health_failures.saturating_add(1);
                         if consecutive_health_failures < health_failure_threshold {
                             tracing::warn!(
@@ -426,7 +430,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
                         stream_failure = %stream_failure,
                         "local stream failure reported; probing remote key"
                     );
-                    if let Err(reason) = probe_remote_key(remote_addr, key.as_ref(), namespace, credential).await {
+                    if let Err(reason) = probe_remote_key(&remote_addr, key.as_ref(), namespace, credential).await {
                         tracing::warn!(
                             event = "client_remote_probe_failed_after_stream_error",
                             key = %key,
@@ -510,7 +514,7 @@ impl std::fmt::Display for ProbeFailure {
 }
 
 async fn probe_remote_key(
-    remote_addr: SocketAddr,
+    remote_addr: &ResolvedAddrs,
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
@@ -530,7 +534,7 @@ async fn probe_remote_key(
 }
 
 async fn probe_remote_key_once(
-    remote_addr: SocketAddr,
+    remote_addr: &ResolvedAddrs,
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
@@ -589,12 +593,12 @@ async fn probe_remote_key_once(
 }
 
 async fn fetch_remote_status(
-    remote_addr: SocketAddr,
+    remote_addr: &ResolvedAddrs,
     req: PbConnStatusReq,
     namespace: Option<u64>,
     credential: Credential,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
-    let mut stream = each_addr(remote_addr, TcpStream::connect)
+    let mut stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
         .await
         .map_err(|error| {
             ProbeFailure::transient(format!("connect remote stream failed: {error}"))
@@ -604,7 +608,7 @@ async fn fetch_remote_status(
         .map_err(|error| ProbeFailure::from_status_error("get status failed", error))
 }
 
-pub async fn handle_status_cli_scoped<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
+pub async fn handle_status_cli_scoped<A: ToSocketAddrs>(
     op: StatusOp,
     addr: A,
     namespace: Option<u64>,
@@ -615,12 +619,13 @@ pub async fn handle_status_cli_scoped<A: ToSocketAddrs + Debug + Copy + Send + '
     }
 }
 
-pub async fn show_status_scoped<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
+pub async fn show_status_scoped<A: ToSocketAddrs>(
     remote_addr: A,
     req: PbConnStatusReq,
     namespace: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = each_addr(remote_addr, TcpStream::connect)
+    let remote_addr = resolve_all(remote_addr).await?;
+    let mut stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
         .await
         .map_err(|error| format!("get status stream: {error}"))?;
     let status = get_status_scoped(&mut stream, req, namespace).await?;

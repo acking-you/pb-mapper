@@ -31,15 +31,24 @@ pub use self::types::{
     ServiceInfo, ServicePage,
 };
 
-/// Page size used by the `*_all` helpers, which page on the caller's behalf.
-const DEFAULT_PAGE_SIZE: u16 = 100;
-
 /// Largest page the relay will serve. Rejected locally so an oversized request
 /// fails with a clear message instead of a protocol error from the relay.
 const MAX_PAGE_SIZE: u16 = 1000;
 
+/// Page size used by the `*_all` helpers, which page on the caller's behalf.
+///
+/// The largest page the relay serves, not a smaller round number, for two
+/// reasons. A relay configured up to `MAX_TEMP_KEY_CAPACITY` (1,048,576) holds
+/// more credentials than [`MAX_PAGES`] pages of 100 could carry, so `*_all`
+/// would fail on a full inventory instead of returning it. And the relay
+/// re-collects and re-sorts its whole table for every page it serves, so the
+/// page count is what that work is multiplied by.
+const COLLECT_PAGE_SIZE: u16 = MAX_PAGE_SIZE;
+
 /// A cap on `*_all` pagination, so a relay that keeps handing back a `next_page`
 /// cursor cannot spin the caller forever.
+///
+/// Ample at [`COLLECT_PAGE_SIZE`]: the relay's hard capacity needs 1,049 pages.
 const MAX_PAGES: u32 = 10_000;
 
 /// Administrator RPCs. Constructed via [`super::Client::admin`].
@@ -205,17 +214,17 @@ impl Admin {
     /// Every temporary credential, paging until the relay stops handing back a
     /// cursor.
     pub async fn list_keys_all(&self) -> Result<Vec<KeyMetadata>> {
-        collect_pages(|page| self.list_keys(page, DEFAULT_PAGE_SIZE)).await
+        collect_pages(|page| self.list_keys(page, COLLECT_PAGE_SIZE)).await
     }
 
     /// Every registered service, optionally scoped to one credential.
     pub async fn list_services_all(&self, key_id: Option<u64>) -> Result<Vec<ServiceInfo>> {
-        collect_pages(|page| self.list_services(key_id, page, DEFAULT_PAGE_SIZE)).await
+        collect_pages(|page| self.list_services(key_id, page, COLLECT_PAGE_SIZE)).await
     }
 
     /// Every live connection, optionally scoped to one credential.
     pub async fn list_connections_all(&self, key_id: Option<u64>) -> Result<Vec<ConnectionInfo>> {
-        collect_pages(|page| self.list_connections(key_id, page, DEFAULT_PAGE_SIZE)).await
+        collect_pages(|page| self.list_connections(key_id, page, COLLECT_PAGE_SIZE)).await
     }
 
     /// Rotate the relay's administrator key, returning the key now in force.
@@ -379,4 +388,103 @@ where
     Err(Error::protocol(format!(
         "pagination exceeded {MAX_PAGES} pages"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::admin::types::KeyListPage;
+
+    fn page(next_page: Option<u32>, ids: &[u64]) -> KeyListPage {
+        KeyListPage {
+            schema_version: 1,
+            items: ids
+                .iter()
+                .map(|&key_id| KeyMetadata {
+                    key_id,
+                    state: "active".into(),
+                    issued_at: 0,
+                    expires_at: 0,
+                    label: None,
+                })
+                .collect(),
+            next_page,
+        }
+    }
+
+    /// The `*_all` helpers have to be able to drain a relay filled to its hard
+    /// capacity. At a smaller page size they cannot: 1,048,576 credentials over
+    /// pages of 100 is 10,486 pages, past the [`MAX_PAGES`] guard, so a full
+    /// inventory would come back as a pagination error instead of a listing.
+    #[test]
+    fn the_collect_page_size_can_drain_a_relay_at_capacity() {
+        assert_eq!(
+            COLLECT_PAGE_SIZE, MAX_PAGE_SIZE,
+            "paging below the relay's maximum multiplies its per-page re-sort \
+             and shrinks what `*_all` can drain"
+        );
+        let pages_at_capacity =
+            pb_mapper_auth::MAX_TEMP_KEY_CAPACITY.div_ceil(usize::from(COLLECT_PAGE_SIZE));
+        assert!(
+            pages_at_capacity <= MAX_PAGES as usize,
+            "a full inventory needs {pages_at_capacity} pages, over the {MAX_PAGES} cap"
+        );
+    }
+
+    /// `validate_page_size` rejects locally, so an oversized request never
+    /// reaches the relay to come back as an opaque protocol error.
+    #[test]
+    fn a_page_size_outside_the_relays_range_is_rejected_locally() {
+        assert!(validate_page_size(0).is_err());
+        assert!(validate_page_size(MAX_PAGE_SIZE + 1).is_err());
+        assert_eq!(validate_page_size(1).unwrap(), 1);
+        assert_eq!(validate_page_size(MAX_PAGE_SIZE).unwrap(), MAX_PAGE_SIZE);
+    }
+
+    #[tokio::test]
+    async fn collect_pages_follows_the_cursor_and_concatenates() {
+        let requested = std::sync::Mutex::new(Vec::new());
+        let items = collect_pages::<KeyListPage, _, _>(|page_number| {
+            requested.lock().expect("not poisoned").push(page_number);
+            async move {
+                Ok(match page_number {
+                    0 => page(Some(7), &[1, 2]),
+                    7 => page(Some(9), &[3]),
+                    _ => page(None, &[4]),
+                })
+            }
+        })
+        .await
+        .expect("three pages is well inside the cap");
+
+        assert_eq!(
+            items.iter().map(|item| item.key_id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            *requested.lock().expect("not poisoned"),
+            vec![0, 7, 9],
+            "the cursor the relay hands back is what gets asked for next"
+        );
+    }
+
+    /// A relay that always hands back a cursor must not spin the caller: the
+    /// cursor is remote input, so the loop is bounded here rather than trusted.
+    #[tokio::test]
+    async fn collect_pages_gives_up_on_a_cursor_that_never_ends() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let error = collect_pages::<KeyListPage, _, _>(|page_number| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move { Ok(page(Some(page_number + 1), &[u64::from(page_number)])) }
+        })
+        .await
+        .expect_err("an endless cursor must fail rather than hang");
+
+        assert!(error.to_string().contains("pagination exceeded"));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_PAGES,
+            "the cap is what stops it, and it stops exactly there"
+        );
+    }
 }

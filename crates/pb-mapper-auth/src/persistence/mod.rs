@@ -34,7 +34,7 @@ pub use fs::acquire_state_dir_lock;
 #[cfg(test)]
 pub(crate) use fs::prepare_state_dir;
 pub(crate) use fs::sync_parent_directory;
-pub(crate) use fs::{atomic_write, prepare_state_dir_and_lock};
+pub(crate) use fs::{atomic_write, create_new_write, prepare_state_dir_and_lock};
 #[cfg(test)]
 pub(crate) use snapshot::try_load_persisted_state;
 pub(crate) use snapshot::{

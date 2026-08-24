@@ -30,7 +30,8 @@ use pb_mapper_client::server::{ServerTunnelOptions, run_server_side_cli_with_pin
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
 use pb_mapper_core::config::{
-    StatusOp, get_pb_mapper_server_async, get_sockaddr_async, init_tracing, keep_alive_from_env,
+    ResolvedAddrs, StatusOp, init_tracing, keep_alive_from_env, pb_mapper_server_addr,
+    resolve_addrs_async, resolve_pb_mapper_server_async,
 };
 use pb_mapper_protocol::command::{
     AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage,
@@ -332,8 +333,8 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
     let credential = pb_mapper_core::checksum::get_process_credential().map_err(|error| {
         std::io::Error::other(format!("registration credential is required: {error}"))
     })?;
-    let local_addr = get_sockaddr_async(&args.addr).await?;
-    let remote_addr = get_pb_mapper_server_async(args.relay.server.as_deref()).await?;
+    let local_addr = resolve_addrs_async(&args.addr).await?;
+    let remote_addr = resolve_pb_mapper_server_async(args.relay.server.as_deref()).await?;
     let options = ServerTunnelOptions {
         need_codec: args.codec,
         is_datagram: args.transport == Transport::Udp,
@@ -356,8 +357,8 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
 }
 
 async fn register<LocalStream: StreamProvider + Send + 'static>(
-    local_addr: std::net::SocketAddr,
-    remote_addr: std::net::SocketAddr,
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
     key: String,
     options: ServerTunnelOptions,
     credential: pb_mapper_core::checksum::Credential,
@@ -365,8 +366,8 @@ async fn register<LocalStream: StreamProvider + Send + 'static>(
     LocalStream::Item: StreamForward,
 {
     run_server_side_cli_with_pinned_credential::<LocalStream, _>(
-        local_addr,
-        remote_addr,
+        local_addr.as_slice(),
+        remote_addr.as_slice(),
         key.into(),
         options,
         None,
@@ -379,16 +380,16 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
     let credential = pb_mapper_core::checksum::get_process_credential().map_err(|error| {
         std::io::Error::other(format!("client credential is required: {error}"))
     })?;
-    let local_addr = get_sockaddr_async(&args.addr).await?;
-    let remote_addr = get_pb_mapper_server_async(args.relay.server.as_deref()).await?;
+    let local_addr = resolve_addrs_async(&args.addr).await?;
+    let remote_addr = resolve_pb_mapper_server_async(args.relay.server.as_deref()).await?;
     let key = args.key.into();
     let keep_alive = args.relay.keep_alive || keep_alive_from_env();
 
     match args.transport {
         Transport::Tcp => {
             run_client_side_cli_with_callback_scoped::<TcpListenerProvider, _>(
-                local_addr,
-                remote_addr,
+                local_addr.as_slice(),
+                remote_addr.as_slice(),
                 key,
                 keep_alive,
                 args.namespace,
@@ -399,8 +400,8 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
         }
         Transport::Udp => {
             run_client_side_cli_with_callback_scoped::<UdpListenerProvider, _>(
-                local_addr,
-                remote_addr,
+                local_addr.as_slice(),
+                remote_addr.as_slice(),
                 key,
                 keep_alive,
                 args.namespace,
@@ -414,8 +415,8 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_status(args: StatusArgs) -> Result<(), Box<dyn Error>> {
-    let remote_addr = get_pb_mapper_server_async(args.server.as_deref()).await?;
-    handle_status_cli_scoped(args.op, remote_addr, args.namespace).await
+    let remote_addr = resolve_pb_mapper_server_async(args.server.as_deref()).await?;
+    handle_status_cli_scoped(args.op, remote_addr.as_slice(), args.namespace).await
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, String> {

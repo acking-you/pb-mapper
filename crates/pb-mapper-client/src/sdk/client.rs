@@ -8,11 +8,12 @@
 use std::sync::{Arc, RwLock};
 
 use pb_mapper_core::checksum::{Credential, parse_credential};
-use pb_mapper_core::config::{control_io_timeout, get_sockaddr_async};
+use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout, resolve_addrs_async};
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use uni_stream::addr::each_addr;
 use uni_stream::stream::{
     TcpListenerProvider, TcpStreamProvider, UdpListenerProvider, UdpStreamProvider,
 };
@@ -157,7 +158,7 @@ impl Client {
         let credential = self.credential();
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
-                run_server_side_cli_with_shutdown::<TcpStreamProvider, _>(
+                run_server_side_cli_with_shutdown::<TcpStreamProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -168,7 +169,7 @@ impl Client {
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
-                run_server_side_cli_with_shutdown::<UdpStreamProvider, _>(
+                run_server_side_cli_with_shutdown::<UdpStreamProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -199,7 +200,7 @@ impl Client {
         let namespace = self.inner.namespace;
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
-                run_client_side_cli_with_shutdown::<TcpListenerProvider, _>(
+                run_client_side_cli_with_shutdown::<TcpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -211,7 +212,7 @@ impl Client {
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
-                run_client_side_cli_with_shutdown::<UdpListenerProvider, _>(
+                run_client_side_cli_with_shutdown::<UdpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -275,16 +276,20 @@ impl Client {
     }
 
     async fn status_request(&self, request: PbConnStatusReq) -> Result<PbConnStatusResp> {
-        let addr = resolve(&self.inner.server).await?;
+        let addrs = resolve(&self.inner.server).await?;
         let credential = self.credential();
         // The connect is inside the timeout, not just the exchange that follows it.
         // A relay that drops SYNs silently leaves `TcpStream::connect` waiting on
         // the OS timeout — minutes — so the SDK's own bound has to cover it, the
         // way the administrator path already does.
         let io_timeout = control_io_timeout();
-        let mut stream = match tokio::time::timeout(io_timeout, TcpStream::connect(addr)).await {
+        // Every candidate, under one shared bound: `each_addr` moves on to the next
+        // address when one refuses, and the timeout covers the whole sequence so a
+        // list of blackholed addresses cannot multiply the wait by its length.
+        let connect = each_addr(addrs.as_slice(), TcpStream::connect);
+        let mut stream = match tokio::time::timeout(io_timeout, connect).await {
             Ok(result) => result.context(ConnectSnafu {
-                addr: addr.to_string(),
+                addr: addrs.to_string(),
             })?,
             Err(_) => {
                 return Err(Error::TimedOut {
@@ -298,8 +303,13 @@ impl Client {
     }
 }
 
-async fn resolve(addr: &str) -> Result<std::net::SocketAddr> {
-    get_sockaddr_async(addr)
+/// Resolve one endpoint to every address it names.
+///
+/// The list, not just its first entry: a worker handed the whole list dials each
+/// candidate in turn, so a relay hostname with several records survives one of
+/// them being unreachable.
+async fn resolve(addr: &str) -> Result<ResolvedAddrs> {
+    resolve_addrs_async(addr)
         .await
         .context(AddressSnafu { addr })
 }
@@ -332,8 +342,8 @@ fn watch_callback(tx: watch::Sender<TunnelStatus>) -> StatusCallback {
 /// What a spawned tunnel worker is given: its resolved endpoints, its key, the
 /// callback that publishes its status, and the token that stops it.
 struct WorkerContext {
-    local_addr: std::net::SocketAddr,
-    remote_addr: std::net::SocketAddr,
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
     key: Arc<str>,
     status_callback: StatusCallback,
     shutdown: CancellationToken,
@@ -346,8 +356,8 @@ struct WorkerContext {
 /// signatures but one lifecycle: spawn, publish status, settle as `Stopped`.
 /// This owns that lifecycle so each call site is left with just its own call.
 struct TunnelWorker {
-    local_addr: std::net::SocketAddr,
-    remote_addr: std::net::SocketAddr,
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
     key: Arc<str>,
     shutdown: CancellationToken,
     status_tx: watch::Sender<TunnelStatus>,

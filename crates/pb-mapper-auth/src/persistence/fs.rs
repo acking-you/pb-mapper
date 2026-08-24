@@ -140,6 +140,76 @@ pub(crate) fn prepare_state_dir(path: &Path) -> Result<(), AuthFailure> {
     Ok(())
 }
 
+/// Write `data` to `path`, claiming the path itself and failing if it is taken.
+///
+/// Returns `false` — having written nothing — when `path` already exists.
+///
+/// Unlike [`atomic_write`], which renames a finished temporary file over its
+/// destination, this creates the destination exclusively. Rename always wins, so
+/// two processes writing the same path both believe they succeeded and one
+/// silently loses; `O_EXCL` makes exactly one of them the winner and tells the
+/// other. Use it where the file must not be replaced.
+///
+/// The trade-off is that the contents are no longer written atomically: a crash
+/// between the create and the final write leaves the file short. A caller must
+/// therefore treat contents it cannot parse as somebody else's file rather than
+/// its own.
+pub(crate) fn create_new_write(path: &Path, data: &[u8], mode: u32) -> Result<bool, AuthFailure> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AuthFailure::new(
+                "auth_state_unavailable",
+                format!("failed to create `{}`: {error}", parent.display()),
+                false,
+            )
+        })?;
+    }
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    // Created with its mode, not chmod-ed afterwards: this path is the
+    // destination, so a window where it is readable by anyone is a window on the
+    // real file. `atomic_write` can chmod late because its window is on a
+    // temporary name nobody else looks at.
+    #[cfg(unix)]
+    options.mode(mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => {
+            return Err(AuthFailure::new(
+                "auth_state_unavailable",
+                format!("failed to create `{}`: {error}", path.display()),
+                false,
+            ));
+        }
+    };
+    // The file exists from here on, so every failure removes it: leaving a
+    // half-written one behind would block the next attempt with contents that
+    // mean nothing.
+    let result = (|| {
+        file.write_all(data)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| {
+                AuthFailure::new(
+                    "auth_state_unavailable",
+                    format!("failed to write `{}`: {error}", path.display()),
+                    false,
+                )
+            })?;
+        drop(file);
+        sync_parent_directory(path)
+    })();
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            let _ = std::fs::remove_file(path);
+            Err(error)
+        }
+    }
+}
+
 pub(crate) fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), AuthFailure> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {

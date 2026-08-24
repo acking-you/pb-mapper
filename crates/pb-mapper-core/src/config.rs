@@ -1,5 +1,5 @@
-use std::net::SocketAddr;
-use std::sync::Once;
+use std::net::{AddrParseError, SocketAddr};
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use clap::ValueEnum;
@@ -17,115 +17,179 @@ pub enum StatusOp {
     Keys,
 }
 
-#[inline]
-pub fn get_sockaddr(addr: &str) -> Result<SocketAddr> {
-    // First try direct parsing for IP addresses like "127.0.0.1:8080"
-    match addr.parse::<SocketAddr>() {
-        Ok(socket_addr) => Ok(socket_addr),
-        Err(original_parse_error) => {
-            // Check if it's localhost - use system resolver for localhost
-            if addr.starts_with("localhost:") {
-                // Use standard library for localhost resolution to avoid custom DNS resolver issues
-                match std::net::ToSocketAddrs::to_socket_addrs(addr) {
-                    Ok(mut socket_addrs) => {
-                        socket_addrs
-                            .next()
-                            .ok_or_else(|| crate::error::Error::CfgParseSockAddr {
-                                string: addr.to_string(),
-                                source: original_parse_error,
-                            })
-                    }
-                    Err(_) => Err(crate::error::Error::CfgParseSockAddr {
-                        string: addr.to_string(),
-                        source: original_parse_error,
-                    }),
-                }
-            } else {
-                // For other hostnames, use the custom DNS resolution
-                use crate::addr::get_socket_addrs;
-                match get_socket_addrs(addr) {
-                    Ok(socket_addrs) => {
-                        // Return the first resolved address
-                        socket_addrs.into_iter().next().ok_or_else(|| {
-                            crate::error::Error::CfgParseSockAddr {
-                                string: addr.to_string(),
-                                source: original_parse_error,
-                            }
-                        })
-                    }
-                    Err(_) => {
-                        // If custom DNS resolution fails, fallback to system resolver
-                        match std::net::ToSocketAddrs::to_socket_addrs(addr) {
-                            Ok(mut socket_addrs) => socket_addrs.next().ok_or_else(|| {
-                                crate::error::Error::CfgParseSockAddr {
-                                    string: addr.to_string(),
-                                    source: original_parse_error,
-                                }
-                            }),
-                            Err(_) => Err(crate::error::Error::CfgParseSockAddr {
-                                string: addr.to_string(),
-                                source: original_parse_error,
-                            }),
-                        }
-                    }
-                }
-            }
+/// Every address a name resolved to, in the order the resolver returned them.
+///
+/// Resolution used to end in `.next()`, which threw away everything after the
+/// first candidate. That is enough for an `ip:port` literal, but a hostname with
+/// several A/AAAA records — a relay behind round-robin DNS, or a dual-stack host
+/// whose first record is an unreachable IPv6 address — resolved to one address
+/// and then failed against it, with the working candidates never tried.
+///
+/// The dial loops below this were always able to try every address: both
+/// `each_addr` and the `uni-stream` providers iterate a `ToSocketAddrs` and only
+/// report the last error once every candidate has failed. They just never
+/// received more than one. So this type is the whole of the fix: carry the list
+/// to them, and they do the rest.
+///
+/// Guaranteed non-empty, so a caller never has to handle a resolution that
+/// succeeded with nothing in it. Cheap to clone — the addresses are shared, not
+/// copied — because every tunnel worker and every retry needs its own handle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedAddrs {
+    /// Non-empty by construction; see [`ResolvedAddrs::new`].
+    addrs: Arc<[SocketAddr]>,
+}
+
+impl ResolvedAddrs {
+    /// Build from resolver output, rejecting an empty result.
+    ///
+    /// `name` is what was resolved, and `parse_error` the failure from parsing it
+    /// as a literal `ip:port`, so an empty resolution reports the same error a
+    /// malformed address would.
+    fn new(name: &str, addrs: Vec<SocketAddr>, parse_error: AddrParseError) -> Result<Self> {
+        if addrs.is_empty() {
+            return Err(crate::error::Error::CfgParseSockAddr {
+                string: name.to_string(),
+                source: parse_error,
+            });
+        }
+        Ok(Self {
+            addrs: Arc::from(addrs),
+        })
+    }
+
+    /// Build from candidates already resolved elsewhere, rejecting an empty list.
+    ///
+    /// For callers that resolve through another address trait — the tunnel
+    /// internals take a generic `ToSocketAddrs` at their public boundary — and
+    /// need the result in this non-empty form.
+    #[must_use]
+    pub fn from_candidates(addrs: Vec<SocketAddr>) -> Option<Self> {
+        if addrs.is_empty() {
+            return None;
+        }
+        Some(Self {
+            addrs: Arc::from(addrs),
+        })
+    }
+
+    /// The candidates, for handing to `each_addr` or a `ToSocketAddrs` bound.
+    ///
+    /// `&[SocketAddr]` is what both address traits in play accept, and it is
+    /// `Copy`, which the `A: ToSocketAddrs + Copy` bounds on the tunnel internals
+    /// require. A `Vec` is neither.
+    #[inline]
+    #[must_use]
+    pub fn as_slice(&self) -> &[SocketAddr] {
+        &self.addrs
+    }
+
+    /// The first candidate.
+    ///
+    /// For the places that genuinely need one address rather than a list: a
+    /// `SocketAddr` field on a status record, a preflight probe, a log line. Not
+    /// for dialling — that is what [`Self::as_slice`] is for.
+    #[inline]
+    #[must_use]
+    pub fn primary(&self) -> SocketAddr {
+        // Non-empty by construction, so indexing cannot panic. `[0]` rather than
+        // `first().unwrap()`: the invariant is the reason, and `unwrap` is denied.
+        self.addrs[0]
+    }
+}
+
+impl std::fmt::Display for ResolvedAddrs {
+    /// Renders the primary address, with a count when candidates were dropped.
+    ///
+    /// Log lines pass these through `%`, and a bare Debug dump of a one-element
+    /// list reads worse than the address itself.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.primary())?;
+        match self.addrs.len() {
+            1 => Ok(()),
+            more => write!(formatter, " (+{} more)", more - 1),
         }
     }
 }
 
-/// Async socket address resolution for Tokio contexts.
-/// Uses custom DNS servers first and falls back to the system resolver.
-pub async fn get_sockaddr_async(addr: &str) -> Result<SocketAddr> {
-    // First try direct parsing for IP addresses like "127.0.0.1:8080"
-    match addr.parse::<SocketAddr>() {
-        Ok(socket_addr) => Ok(socket_addr),
-        Err(original_parse_error) => {
-            // Check if it's localhost - use system resolver for localhost
-            if addr.starts_with("localhost:") {
-                match tokio::net::lookup_host(addr).await {
-                    Ok(mut socket_addrs) => {
-                        socket_addrs
-                            .next()
-                            .ok_or_else(|| crate::error::Error::CfgParseSockAddr {
-                                string: addr.to_string(),
-                                source: original_parse_error,
-                            })
-                    }
-                    Err(_) => Err(crate::error::Error::CfgParseSockAddr {
-                        string: addr.to_string(),
-                        source: original_parse_error,
-                    }),
-                }
-            } else {
-                // For other hostnames, use the custom DNS resolution
-                use crate::addr::get_socket_addrs_async;
-                match get_socket_addrs_async(addr).await {
-                    Ok(socket_addrs) => socket_addrs.into_iter().next().ok_or_else(|| {
-                        crate::error::Error::CfgParseSockAddr {
-                            string: addr.to_string(),
-                            source: original_parse_error,
-                        }
-                    }),
-                    Err(_) => {
-                        // If custom DNS resolution fails, fallback to system resolver
-                        match tokio::net::lookup_host(addr).await {
-                            Ok(mut socket_addrs) => socket_addrs.next().ok_or_else(|| {
-                                crate::error::Error::CfgParseSockAddr {
-                                    string: addr.to_string(),
-                                    source: original_parse_error,
-                                }
-                            }),
-                            Err(_) => Err(crate::error::Error::CfgParseSockAddr {
-                                string: addr.to_string(),
-                                source: original_parse_error,
-                            }),
-                        }
-                    }
-                }
-            }
+impl From<SocketAddr> for ResolvedAddrs {
+    fn from(addr: SocketAddr) -> Self {
+        Self {
+            addrs: Arc::from(vec![addr]),
         }
     }
+}
+
+/// Resolve `addr` to every candidate it names.
+///
+/// A literal `ip:port` short-circuits. Otherwise `localhost:` goes to the system
+/// resolver — the custom DNS path does not answer for it — and any other hostname
+/// tries the configured DNS servers first, falling back to the system resolver.
+#[inline]
+pub fn resolve_addrs(addr: &str) -> Result<ResolvedAddrs> {
+    // The literal case returns here; otherwise the parse error is kept as the
+    // failure reported below, so a caller sees what it asked for rather than a
+    // resolver's internal complaint.
+    let parse_error = match addr.parse::<SocketAddr>() {
+        Ok(socket_addr) => return Ok(ResolvedAddrs::from(socket_addr)),
+        Err(error) => error,
+    };
+
+    let system = || match std::net::ToSocketAddrs::to_socket_addrs(addr) {
+        Ok(addrs) => addrs.collect(),
+        Err(_) => Vec::new(),
+    };
+
+    let addrs = if addr.starts_with("localhost:") {
+        system()
+    } else {
+        match crate::addr::get_socket_addrs(addr) {
+            Ok(addrs) if !addrs.is_empty() => addrs,
+            _ => system(),
+        }
+    };
+    ResolvedAddrs::new(addr, addrs, parse_error)
+}
+
+/// Async counterpart of [`resolve_addrs`], for Tokio contexts.
+pub async fn resolve_addrs_async(addr: &str) -> Result<ResolvedAddrs> {
+    let parse_error = match addr.parse::<SocketAddr>() {
+        Ok(socket_addr) => return Ok(ResolvedAddrs::from(socket_addr)),
+        Err(error) => error,
+    };
+
+    async fn system(addr: &str) -> Vec<SocketAddr> {
+        match tokio::net::lookup_host(addr).await {
+            Ok(addrs) => addrs.collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    let addrs = if addr.starts_with("localhost:") {
+        system(addr).await
+    } else {
+        match crate::addr::get_socket_addrs_async(addr).await {
+            Ok(addrs) if !addrs.is_empty() => addrs,
+            _ => system(addr).await,
+        }
+    };
+    ResolvedAddrs::new(addr, addrs, parse_error)
+}
+
+/// The first address `addr` resolves to.
+///
+/// Prefer [`resolve_addrs`] wherever the result is dialled: this keeps only one
+/// candidate, so a hostname with several records loses the ones that work.
+#[inline]
+pub fn get_sockaddr(addr: &str) -> Result<SocketAddr> {
+    resolve_addrs(addr).map(|addrs| addrs.primary())
+}
+
+/// The first address `addr` resolves to, for Tokio contexts.
+///
+/// Same caveat as [`get_sockaddr`]: prefer [`resolve_addrs_async`] when dialling.
+pub async fn get_sockaddr_async(addr: &str) -> Result<SocketAddr> {
+    resolve_addrs_async(addr).await.map(|addrs| addrs.primary())
 }
 
 const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
@@ -329,26 +393,53 @@ pub fn keep_alive_from_env() -> bool {
     }
 }
 
-#[inline]
-pub fn get_pb_mapper_server(addr: Option<&str>) -> Result<SocketAddr> {
+/// The relay address as configured: `addr` if given, else `PB_MAPPER_SERVER`.
+///
+/// Unresolved on purpose. A caller that hands the address to something which
+/// resolves it itself — the SDK client, for one — should pass the name along
+/// rather than resolve it here and stringify the result, which both duplicates
+/// the lookup and narrows a multi-address name down to one entry on the way.
+pub fn pb_mapper_server_addr(addr: Option<&str>) -> Result<String> {
     match addr {
-        Some(addr) => get_sockaddr(addr),
+        Some(addr) => Ok(addr.to_string()),
+        None => std::env::var(PB_MAPPER_SERVER).context(CfgPbServerEnvNotExistSnafu),
+    }
+}
+
+/// Every address the relay resolves to: `addr` if given, else `PB_MAPPER_SERVER`.
+#[inline]
+pub fn resolve_pb_mapper_server(addr: Option<&str>) -> Result<ResolvedAddrs> {
+    match addr {
+        Some(addr) => resolve_addrs(addr),
         None => {
             let addr = std::env::var(PB_MAPPER_SERVER).context(CfgPbServerEnvNotExistSnafu)?;
-            get_sockaddr(&addr)
+            resolve_addrs(&addr)
         }
     }
 }
 
-/// Async version of `get_pb_mapper_server` for Tokio contexts.
-pub async fn get_pb_mapper_server_async(addr: Option<&str>) -> Result<SocketAddr> {
+/// Async counterpart of [`resolve_pb_mapper_server`], for Tokio contexts.
+pub async fn resolve_pb_mapper_server_async(addr: Option<&str>) -> Result<ResolvedAddrs> {
     match addr {
-        Some(addr) => get_sockaddr_async(addr).await,
+        Some(addr) => resolve_addrs_async(addr).await,
         None => {
             let addr = std::env::var(PB_MAPPER_SERVER).context(CfgPbServerEnvNotExistSnafu)?;
-            get_sockaddr_async(&addr).await
+            resolve_addrs_async(&addr).await
         }
     }
+}
+
+/// The relay's first address. See [`get_sockaddr`] for when to prefer the list.
+#[inline]
+pub fn get_pb_mapper_server(addr: Option<&str>) -> Result<SocketAddr> {
+    resolve_pb_mapper_server(addr).map(|addrs| addrs.primary())
+}
+
+/// The relay's first address, for Tokio contexts.
+pub async fn get_pb_mapper_server_async(addr: Option<&str>) -> Result<SocketAddr> {
+    resolve_pb_mapper_server_async(addr)
+        .await
+        .map(|addrs| addrs.primary())
 }
 
 pub fn init_tracing() {
@@ -456,5 +547,83 @@ mod tests {
                 None => std::env::remove_var(PB_MAPPER_KEEP_ALIVE),
             }
         }
+    }
+
+    /// The point of [`ResolvedAddrs`]: a name with several records keeps them
+    /// all, so the dial loops can try each one. Collapsing to the first is what
+    /// made a multi-record relay unreachable whenever its first address was.
+    #[test]
+    fn resolved_addrs_keeps_every_candidate() {
+        let first: SocketAddr = "127.0.0.1:7666".parse().expect("literal");
+        let second: SocketAddr = "[::1]:7666".parse().expect("literal");
+        let addrs = ResolvedAddrs::from_candidates(vec![first, second]).expect("non-empty");
+
+        assert_eq!(addrs.as_slice(), [first, second]);
+        assert_eq!(addrs.primary(), first, "order is the resolver's order");
+    }
+
+    /// An empty candidate list is not a resolution: nothing could be dialled, so
+    /// it has to be rejected here rather than surface as a connect failure
+    /// against an address the caller never gave.
+    #[test]
+    fn resolved_addrs_rejects_an_empty_candidate_list() {
+        assert!(ResolvedAddrs::from_candidates(Vec::new()).is_none());
+    }
+
+    /// The rendering has to name one address — it goes into connect errors and
+    /// log fields — while still admitting that others were available.
+    #[test]
+    fn resolved_addrs_renders_the_primary_and_the_rest_as_a_count() {
+        let single: SocketAddr = "127.0.0.1:7666".parse().expect("literal");
+        assert_eq!(ResolvedAddrs::from(single).to_string(), "127.0.0.1:7666");
+
+        let second: SocketAddr = "[::1]:7666".parse().expect("literal");
+        let both = ResolvedAddrs::from_candidates(vec![single, second]).expect("non-empty");
+        assert_eq!(both.to_string(), "127.0.0.1:7666 (+1 more)");
+    }
+
+    /// A literal address needs no resolver, and must survive verbatim.
+    #[test]
+    fn resolve_addrs_passes_a_literal_through() {
+        let addrs = resolve_addrs("127.0.0.1:7666").expect("a literal always resolves");
+        assert_eq!(
+            addrs.as_slice(),
+            ["127.0.0.1:7666".parse().expect("literal")]
+        );
+    }
+
+    /// `localhost` is the everyday multi-record name: it resolves to a v4 and a
+    /// v6 loopback on most hosts, and both must reach the dial loop.
+    #[test]
+    fn resolve_addrs_keeps_every_localhost_record() {
+        let addrs = resolve_addrs("localhost:7666").expect("localhost always resolves");
+        assert!(
+            addrs.as_slice().iter().all(|addr| addr.ip().is_loopback()),
+            "localhost must resolve to loopback only, got {:?}",
+            addrs.as_slice()
+        );
+    }
+
+    /// A name that resolves to nothing is an error, not an empty success.
+    ///
+    /// Tested with a missing port rather than an unresolvable host: a resolver
+    /// that answers every query with a wildcard address — WSL's NAT DNS, among
+    /// others — makes "this host does not exist" untestable, while no resolver
+    /// invents a port.
+    #[test]
+    fn resolve_addrs_fails_when_nothing_can_be_resolved() {
+        assert!(resolve_addrs("127.0.0.1").is_err(), "no port");
+        assert!(resolve_addrs("localhost").is_err(), "no port");
+    }
+
+    /// The async path is the one the tunnels use, and has to agree with the
+    /// blocking one on a literal.
+    #[tokio::test]
+    async fn resolve_addrs_async_matches_the_blocking_path_on_a_literal() {
+        let expected = resolve_addrs("127.0.0.1:7666").expect("literal");
+        let actual = resolve_addrs_async("127.0.0.1:7666")
+            .await
+            .expect("literal");
+        assert_eq!(actual, expected);
     }
 }

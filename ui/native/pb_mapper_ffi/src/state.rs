@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,10 +34,9 @@ use pb_mapper_core::addr::each_addr;
 use pb_mapper_core::checksum::{
     Credential, get_process_credential, parse_credential, set_process_msg_header_key,
 };
-use pb_mapper_core::config::{get_pb_mapper_server_async, get_sockaddr_async};
+use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async, resolve_pb_mapper_server_async};
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper_server::{ServerStatusInfo, run_server_on_listener};
-use uni_stream::stream::got_one_socket_addr;
 use uni_stream::stream::{
     ListenerProvider, StreamProvider, TcpListenerProvider, TcpStreamProvider, UdpListenerProvider,
     UdpStreamProvider,
@@ -58,16 +57,36 @@ struct StatusCacheEntry {
     updated_at: Instant,
 }
 
+/// Where a status probe should dial.
+enum ProbeTarget {
+    /// A running tunnel's own candidates, taken from its pin: the probe then
+    /// reports on the addresses that tunnel actually dials, even if the
+    /// configuration has changed underneath it since.
+    Pinned(ResolvedAddrs),
+    /// The configured relay address, resolved when the probe runs. Used when no
+    /// tunnel is pinned, so there is nothing to inherit.
+    Configured(String),
+}
+
+impl ProbeTarget {
+    async fn resolve(&self) -> Result<ResolvedAddrs, CtlError> {
+        match self {
+            Self::Pinned(addrs) => Ok(addrs.clone()),
+            Self::Configured(addr) => resolve_addrs_async(addr)
+                .await
+                .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}"))),
+        }
+    }
+}
+
 async fn check_service_with_get_status(
-    server_addr: &str,
+    target: ProbeTarget,
     service_key: &str,
     credential: Option<Credential>,
 ) -> Result<bool, CtlError> {
-    let addr = get_sockaddr_async(server_addr)
-        .await
-        .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
+    let addrs = target.resolve().await?;
 
-    match TcpStreamProvider::from_addr(addr).await {
+    match TcpStreamProvider::from_addr(addrs.as_slice()).await {
         Ok(mut stream) => {
             let status_req = PbConnStatusReq::Keys;
             let status = match credential {
@@ -119,11 +138,11 @@ async fn fetch_real_status_with_addr(
 async fn get_server_keys_with_addr(server_addr: &str) -> Result<Vec<String>, CtlError> {
     use tokio::net::TcpStream;
 
-    let socket_addr = got_one_socket_addr(server_addr).await.map_err(|e| {
+    let addrs = resolve_addrs_async(server_addr).await.map_err(|e| {
         CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
     })?;
 
-    let mut stream = each_addr(socket_addr, TcpStream::connect)
+    let mut stream = each_addr(addrs.as_slice(), TcpStream::connect)
         .await
         .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
 
@@ -150,11 +169,11 @@ async fn get_service_conns_with_addr(
     server_addr: &str,
     service_key: &str,
 ) -> Result<Vec<ServiceConnInfo>, CtlError> {
-    let socket_addr = got_one_socket_addr(server_addr).await.map_err(|e| {
+    let addrs = resolve_addrs_async(server_addr).await.map_err(|e| {
         CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
     })?;
 
-    let mut stream = each_addr(socket_addr, TcpStream::connect)
+    let mut stream = each_addr(addrs.as_slice(), TcpStream::connect)
         .await
         .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
 
@@ -187,11 +206,11 @@ async fn get_service_conns_with_addr(
 async fn get_remote_id_data_with_addr(server_addr: &str) -> Result<RemoteIdData, CtlError> {
     use tokio::net::TcpStream;
 
-    let socket_addr = got_one_socket_addr(server_addr).await.map_err(|e| {
+    let addrs = resolve_addrs_async(server_addr).await.map_err(|e| {
         CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
     })?;
 
-    let mut stream = each_addr(socket_addr, TcpStream::connect)
+    let mut stream = each_addr(addrs.as_slice(), TcpStream::connect)
         .await
         .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
 
@@ -420,10 +439,10 @@ fn claim_key(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PinnedTunnel {
     credential: Credential,
-    endpoint: SocketAddr,
+    endpoint: ResolvedAddrs,
 }
 
 struct TunnelRuntime {
@@ -454,8 +473,8 @@ struct RegisterCommit {
     protocol: String,
     enable_encryption: bool,
     enable_keep_alive: bool,
-    local_sock_addr: SocketAddr,
-    remote_sock_addr: SocketAddr,
+    local_addrs: ResolvedAddrs,
+    remote_addrs: ResolvedAddrs,
     credential: Credential,
 }
 
@@ -465,8 +484,8 @@ struct ConnectCommit {
     local_address: String,
     protocol: String,
     enable_keep_alive: bool,
-    local_sock_addr: SocketAddr,
-    remote_sock_addr: SocketAddr,
+    local_addrs: ResolvedAddrs,
+    remote_addrs: ResolvedAddrs,
     credential: Credential,
 }
 
@@ -528,16 +547,20 @@ pub async fn register_service(
     };
 
     // 2. The slow parts, with the lock released.
-    let local_sock_addr = get_sockaddr_async(&local_address)
+    let local_addrs = resolve_addrs_async(&local_address)
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
-    let remote_sock_addr = get_pb_mapper_server_async(Some(&server_address))
+    let remote_addrs = resolve_pb_mapper_server_async(Some(&server_address))
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
     // Preflight remote server connectivity to surface errors early.
-    TcpStream::connect(remote_sock_addr).await.map_err(|e| {
-        CtlError::server_unreachable(format!("Failed to connect to server {server_address}: {e}"))
-    })?;
+    each_addr(remote_addrs.as_slice(), TcpStream::connect)
+        .await
+        .map_err(|e| {
+            CtlError::server_unreachable(format!(
+                "Failed to connect to server {server_address}: {e}"
+            ))
+        })?;
 
     // 3. Commit. Microseconds again.
     state
@@ -549,8 +572,8 @@ pub async fn register_service(
             protocol,
             enable_encryption,
             enable_keep_alive,
-            local_sock_addr,
-            remote_sock_addr,
+            local_addrs,
+            remote_addrs,
             credential,
         })
         .await
@@ -572,16 +595,16 @@ pub async fn connect_service(
         (claim, state.config.server_address.clone(), credential)
     };
 
-    let local_sock_addr = get_sockaddr_async(&local_address)
+    let local_addrs = resolve_addrs_async(&local_address)
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
-    let remote_sock_addr = get_pb_mapper_server_async(Some(&server_address))
+    let remote_addrs = resolve_pb_mapper_server_async(Some(&server_address))
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
 
     // Preflight local bind to detect "port already in use" before starting client.
     if protocol.to_uppercase() == "TCP" {
-        let listener = TcpListenerProvider::bind(local_sock_addr)
+        let listener = TcpListenerProvider::bind(local_addrs.as_slice())
             .await
             .map_err(|e| {
                 CtlError::address_in_use(format!(
@@ -590,7 +613,7 @@ pub async fn connect_service(
             })?;
         drop(listener);
     } else {
-        let listener = UdpListenerProvider::bind(local_sock_addr)
+        let listener = UdpListenerProvider::bind(local_addrs.as_slice())
             .await
             .map_err(|e| {
                 CtlError::address_in_use(format!(
@@ -608,8 +631,8 @@ pub async fn connect_service(
             local_address,
             protocol,
             enable_keep_alive,
-            local_sock_addr,
-            remote_sock_addr,
+            local_addrs,
+            remote_addrs,
             credential,
         })
         .await

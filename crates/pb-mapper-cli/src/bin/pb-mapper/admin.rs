@@ -158,7 +158,10 @@ enum OutputFormat {
 }
 
 pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
-    let remote_addr = get_pb_mapper_server_async(args.server.as_deref()).await?;
+    // Unresolved: the SDK client resolves the name itself, and keeps every
+    // address it names rather than the first.
+    let remote_addr = pb_mapper_server_addr(args.server.as_deref())?;
+    let remote_addr = remote_addr.as_str();
     match args.command {
         AdminCommand::Key(AdminKeyArgs { command }) => match command {
             AdminKeyCommand::Issue { ttl, label } => {
@@ -316,9 +319,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn admin_client(
-    remote_addr: std::net::SocketAddr,
-) -> Result<pb_mapper_client::sdk::Client, Box<dyn Error>> {
+fn admin_client(remote_addr: &str) -> Result<pb_mapper_client::sdk::Client, Box<dyn Error>> {
     let credential =
         pb_mapper_core::checksum::get_process_credential().map_err(std::io::Error::other)?;
     Ok(pb_mapper_client::sdk::Client::from_credential(
@@ -330,7 +331,7 @@ fn admin_client(
 }
 
 async fn send_admin_request(
-    remote_addr: std::net::SocketAddr,
+    remote_addr: &str,
     request: AdminRequest,
 ) -> Result<AdminResponse, Box<dyn Error>> {
     let client = admin_client(remote_addr)?;
@@ -433,7 +434,7 @@ impl_admin_page!(
 /// as it arrives, while human and JSON aggregate into a single page so their
 /// output stays one well-formed document.
 async fn stream_pages<P, F>(
-    remote_addr: std::net::SocketAddr,
+    remote_addr: &str,
     output: OutputFormat,
     mut page: u32,
     all: bool,
@@ -605,7 +606,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let error = admin_client(remote_addr)
+        let error = admin_client(&remote_addr.to_string())
             .expect("test client")
             .admin()
             .expect("administrator credential")
