@@ -282,6 +282,31 @@ pub fn duration_from_env(name: &str, default: Duration) -> Duration {
         .unwrap_or(default)
 }
 
+/// Read a duration that has to be positive, falling back to `default` on a zero.
+///
+/// Zero is never a usable value for these settings: a period of zero panics
+/// `tokio::time::interval`, and a zero minimum trips [`RetryBackoff::new`]'s
+/// assertion. Clamping a zero up to a millisecond avoids the panic, but trades it
+/// for a hot loop — a rejected registration retried a thousand times a second, or
+/// a full registration scan queued into the routing loop every millisecond. The
+/// default is the only value that is both safe and useful, so a zero selects it
+/// and says so once.
+///
+/// [`RetryBackoff::new`]: crate::timeout::RetryBackoff::new
+fn positive_duration_from_env(name: &str, default: Duration) -> Duration {
+    let value = duration_from_env(name, default);
+    if value.is_zero() {
+        tracing::warn!(
+            event = "config_zero_duration_ignored",
+            variable = name,
+            default = ?default,
+            "ignoring a zero duration and using the default instead"
+        );
+        return default;
+    }
+    value
+}
+
 pub fn control_io_timeout() -> Duration {
     duration_from_env(PB_MAPPER_CONTROL_IO_TIMEOUT, DEFAULT_CONTROL_IO_TIMEOUT)
 }
@@ -348,19 +373,26 @@ pub fn registration_probe_timeout() -> Duration {
 /// clear, and it produced thousands of identical reject lines a minute in
 /// production. So the ladder starts at 5s and settles at 80s.
 ///
-/// Both ends come back together because they are only valid as a pair: the
-/// maximum is raised to the minimum, and the minimum to a non-zero value, rather
-/// than letting an environment typo reach [`RetryBackoff::new`]'s assertions,
-/// which would abort the process at start-up.
+/// Both ends come back together because they are only valid as a pair: a zero
+/// falls back to its default, and the maximum is then raised to the minimum,
+/// rather than letting an environment typo reach [`RetryBackoff::new`]'s
+/// assertions, which would abort the process at start-up.
 ///
+/// Raising the maximum, but defaulting a zero minimum, because the two failures
+/// are different. An inverted range is a legible request — wait exactly this long
+/// — and collapsing it to a fixed delay honours it. A zero minimum is not: it
+/// asks for no wait at all, and since [`RetryBackoff`] caps its multiplier at
+/// 1024, a millisecond minimum would never climb past about a second no matter
+/// how high the maximum, hammering the very quota the ladder exists to let clear.
+///
+/// [`RetryBackoff`]: crate::timeout::RetryBackoff
 /// [`RetryBackoff::new`]: crate::timeout::RetryBackoff::new
 pub fn registration_reject_backoff() -> (Duration, Duration) {
-    let min = duration_from_env(
+    let min = positive_duration_from_env(
         PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN,
         DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
-    )
-    .max(Duration::from_millis(1));
-    let max = duration_from_env(
+    );
+    let max = positive_duration_from_env(
         PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX,
         DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX,
     )
@@ -379,14 +411,15 @@ pub fn server_lease_timeout() -> Duration {
 /// because the sweep needs two passes to retire one — how much grace a live
 /// connection gets to notice its own idle timeout first.
 ///
-/// Clamped to a non-zero value: `tokio::time::interval` panics on a zero period,
-/// and an environment typo must not take the relay down at start-up.
+/// A zero falls back to the default: `tokio::time::interval` panics on a zero
+/// period, and each tick queues a scan over every registration through the single
+/// routing loop, so sweeping as fast as the timer allows would starve the traffic
+/// the sweep exists to protect.
 pub fn server_lease_sweep_interval() -> Duration {
-    duration_from_env(
+    positive_duration_from_env(
         PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL,
         DEFAULT_SERVER_LEASE_SWEEP_INTERVAL,
     )
-    .max(Duration::from_millis(1))
 }
 
 pub fn client_health_check_interval() -> Duration {
@@ -686,16 +719,35 @@ mod tests {
             "both ends come from the environment"
         );
 
-        // The point of the clamping: `RetryBackoff::new` asserts on a zero
-        // minimum and on a maximum below it, and an assertion here would abort
-        // the process at start-up rather than report a bad setting.
+        // A zero is not a usable setting at either end: `RetryBackoff::new`
+        // asserts on a zero minimum, and a millisecond minimum would retry a
+        // thousand times a second. Both fall back to their defaults instead.
         unsafe {
             std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "0s");
             std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "0s");
         }
-        let (min, max) = registration_reject_backoff();
-        assert!(!min.is_zero(), "a zero minimum is raised");
-        assert!(max >= min);
+        assert_eq!(
+            registration_reject_backoff(),
+            (
+                DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
+                DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX
+            ),
+            "a zero at either end selects the default, not a millisecond"
+        );
+
+        // A zero minimum with a usable maximum still defaults the minimum, and
+        // the maximum given is kept.
+        unsafe {
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "0ms");
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "3m");
+        }
+        assert_eq!(
+            registration_reject_backoff(),
+            (
+                DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
+                Duration::from_secs(180)
+            )
+        );
 
         unsafe {
             std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "1m");
@@ -708,9 +760,11 @@ mod tests {
         unsafe {
             std::env::set_var(PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL, "0s");
         }
-        assert!(
-            !server_lease_sweep_interval().is_zero(),
-            "`tokio::time::interval` panics on a zero period"
+        assert_eq!(
+            server_lease_sweep_interval(),
+            DEFAULT_SERVER_LEASE_SWEEP_INTERVAL,
+            "a zero period would panic `tokio::time::interval`, and a millisecond \
+             one would queue a full scan every millisecond"
         );
 
         unsafe {

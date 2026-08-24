@@ -427,7 +427,13 @@ pub async fn run_server_on_listener(
             ManagerTask::DeRegisterServerConn { key, conn_id } => {
                 let removed_from_service_map =
                     remove_server_conn(&mut server_conn_map, &key, conn_id);
-                let removed_from_active_map = manager.deregister_conn(conn_id);
+                let removed_from_active_map = manager.drop_conn_sender(conn_id);
+                // Recycled here and only here, whether or not the sender was still
+                // registered: this task comes from the socket's own guard, so its
+                // arrival is the proof that nothing will speak for the ID again.
+                // A retired connection reaches this with its sender already gone,
+                // and its ID has been held out of circulation until now.
+                manager.recycle_conn_id(conn_id);
                 release_namespace_rate_limit_if_idle(
                     split_scoped_service_key(&key).0,
                     &server_conn_map,
@@ -481,12 +487,18 @@ pub async fn run_server_on_listener(
                     decrement_namespace_stream_count(&mut namespace_stream_counts, namespace);
                     namespace
                 });
+                // Same rule as `DeRegisterServerConn`: the guard's arrival is what
+                // makes recycling safe, so both IDs come back here even if their
+                // senders were dropped earlier.
                 let removed_server_conn = if let Some(server_id) = server_id {
-                    manager.deregister_conn(server_id)
+                    let removed = manager.drop_conn_sender(server_id);
+                    manager.recycle_conn_id(server_id);
+                    removed
                 } else {
                     false
                 };
-                let removed_client_conn = manager.deregister_conn(client_id);
+                let removed_client_conn = manager.drop_conn_sender(client_id);
+                manager.recycle_conn_id(client_id);
                 if let Some(namespace) = removed_namespace {
                     release_namespace_rate_limit_if_idle(
                         namespace,
@@ -851,7 +863,7 @@ pub async fn run_server_on_listener(
                             "subscribe skipped stale server connection"
                         );
                         remove_server_conn(&mut server_conn_map, &key, server_conn_id);
-                        let _ = manager.deregister_conn(server_conn_id);
+                        let _ = manager.drop_conn_sender(server_conn_id);
                         continue;
                     };
                     // 1. Send a request to get server stream
@@ -877,7 +889,7 @@ pub async fn run_server_on_listener(
                             "failed to send stream request to registered server"
                         );
                         remove_server_conn(&mut server_conn_map, &key, server_conn_id);
-                        let _ = manager.deregister_conn(server_conn_id);
+                        let _ = manager.drop_conn_sender(server_conn_id);
                         continue;
                     }
                     // sign up client connection after a server accepted the stream request
@@ -914,7 +926,7 @@ pub async fn run_server_on_listener(
                             error = %report,
                             "failed to send subscribe response to client"
                         );
-                        manager.deregister_conn(conn_id);
+                        manager.drop_conn_sender(conn_id);
                         selected = true;
                         break;
                     }
@@ -1016,7 +1028,13 @@ fn retire_server_conn(
 ) {
     let conn_sender = manager.get_conn_sender_chan(&conn_id);
     let removed_from_service_map = remove_server_conn(server_conn_map, key, conn_id);
-    let removed_from_active_map = manager.deregister_conn(conn_id);
+    // The sender goes, but the ID does not come back yet: the socket task is still
+    // running and still holds a guard that will deregister when it unwinds.
+    // Recycling here would let a newly accepted socket register under the same ID,
+    // and that pending deregistration — which matches on ID alone — would unwind
+    // the replacement instead. The `DeRegisterServerConn` arm recycles it when the
+    // guard's task finally arrives.
+    let removed_from_active_map = manager.drop_conn_sender(conn_id);
     release_namespace_rate_limit_if_idle(
         split_scoped_service_key(key).0,
         server_conn_map,
@@ -1082,6 +1100,96 @@ mod tests {
                 .collect::<String>()
         ))
     }
+
+    fn server_conn_info(conn_id: u32, generation: u64) -> ServerConnInfo {
+        ServerConnInfo {
+            conn_id: RemoteConnId::from(conn_id),
+            generation,
+            health: ServerConnHealth::Healthy,
+            need_codec: false,
+            is_datagram: false,
+            protocol_version: CONTROL_PROTOCOL_V2,
+            last_rx_at: Instant::now(),
+        }
+    }
+
+    /// A retired connection's ID must not be handed out again until its own socket
+    /// task has deregistered.
+    ///
+    /// The race this pins: retirement drops the routing entry while the socket task
+    /// is still unwinding, and that task still owns a guard that will send
+    /// `DeRegisterServerConn` for the same ID. If the ID were recycled at
+    /// retirement, the next `Accept` would take it, a replacement could register
+    /// under it, and the old guard's deregistration — which matches on ID alone —
+    /// would remove the replacement's sender and its service-map entry instead.
+    #[test]
+    fn a_retired_conn_id_is_withheld_until_its_socket_task_deregisters() {
+        let key: ImutableKey = Arc::from("echo");
+        let mut manager: ServerMananger = TaskManager::new(RemoteIdProvider::new());
+        let pending_streams = hashbrown::HashMap::new();
+        let mut namespace_rate_limits = hashbrown::HashMap::new();
+        let mut server_conn_map: ServerConnMap = ServerConnMap::new();
+
+        // One registered control connection, holding the first ID the provider hands out.
+        let retired = manager.get_conn_id(std::iter::empty());
+        let (conn_sender, _conn_receiver) = kanal::bounded_async(DEFAULT_CHAN_CAP_FOR_TEST);
+        manager.sign_up_conn_sender(retired, conn_sender);
+        server_conn_map.insert(key.clone(), vec![server_conn_info(retired.into(), 1)]);
+
+        retire_server_conn(
+            &mut manager,
+            &mut server_conn_map,
+            &pending_streams,
+            &mut namespace_rate_limits,
+            &key,
+            retired,
+            "retired by administrator",
+        );
+        assert!(
+            !server_conn_map.contains_key(&key),
+            "retirement unwinds the routing entry immediately"
+        );
+
+        // The retired socket task has not unwound yet, so its ID is still spoken for.
+        let replacement = manager.get_conn_id(
+            server_conn_map
+                .iter()
+                .flat_map(|(_, ids)| ids.iter().map(|info| info.conn_id)),
+        );
+        assert_ne!(
+            replacement, retired,
+            "the retired id was handed to a new connection while its guard was still live"
+        );
+
+        // The replacement registers, and only then does the old guard's
+        // deregistration arrive. It must not disturb the replacement.
+        let (replacement_sender, _replacement_receiver) =
+            kanal::bounded_async(DEFAULT_CHAN_CAP_FOR_TEST);
+        manager.sign_up_conn_sender(replacement, replacement_sender);
+        server_conn_map.insert(key.clone(), vec![server_conn_info(replacement.into(), 2)]);
+
+        let removed_from_service_map = remove_server_conn(&mut server_conn_map, &key, retired);
+        let removed_from_active_map = manager.drop_conn_sender(retired);
+        manager.recycle_conn_id(retired);
+
+        assert!(!removed_from_service_map, "nothing left to remove");
+        assert!(!removed_from_active_map, "the sender went at retirement");
+        assert!(
+            manager.get_conn_sender_chan(&replacement).is_some(),
+            "the replacement kept its sender"
+        );
+        assert_eq!(
+            service_conn_count(&server_conn_map, &key),
+            1,
+            "the replacement kept its service-map entry"
+        );
+
+        // And the ID is available again now that its task is gone.
+        assert_eq!(manager.get_conn_id(std::iter::empty()), retired);
+    }
+
+    /// Mirrors the manager channel capacity; the value itself does not matter here.
+    const DEFAULT_CHAN_CAP_FOR_TEST: usize = 8;
 
     #[tokio::test]
     async fn shutdown_releases_auth_lock_while_a_connection_is_open() {

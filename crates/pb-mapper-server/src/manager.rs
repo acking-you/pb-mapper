@@ -86,17 +86,32 @@ impl<
         self.idle_conn_id_list.len()
     }
 
+    /// Stop routing to a connection, without returning its ID to the idle pool.
+    ///
+    /// Dropping the sender and recycling the ID are separate steps because they
+    /// become safe at different moments. The sender must go the instant the
+    /// connection stops being usable — a retirement, a subscribe that found it
+    /// unreachable — but the socket task is still running then, and still owns a
+    /// guard that will deregister when it unwinds. Recycling at that point would
+    /// let a freshly accepted socket take the ID and register under it, and the
+    /// old task's deregistration, which matches on ID alone, would unwind the
+    /// replacement instead.
+    ///
+    /// So the ID stays out of circulation until [`Self::recycle_conn_id`], which
+    /// the manager calls when the guard's deregistration finally arrives — the one
+    /// point at which nothing will speak for that ID again. Every registered
+    /// connection produces exactly one such task, so no ID is stranded.
     #[inline]
-    pub fn deregister_conn(&mut self, conn_id: ConnIdType) -> bool {
-        if self.active_conn_map.remove(&conn_id).is_none() {
-            return false;
-        }
+    pub fn drop_conn_sender(&mut self, conn_id: ConnIdType) -> bool {
+        self.active_conn_map.remove(&conn_id).is_some()
+    }
 
+    /// Return an ID to the idle pool, if it is not already there.
+    #[inline]
+    pub fn recycle_conn_id(&mut self, conn_id: ConnIdType) {
         if !self.idle_conn_id_list.contains(&conn_id) {
             self.idle_conn_id_list.push(conn_id);
         }
-
-        true
     }
 
     pub fn get_conn_id(
@@ -190,13 +205,43 @@ mod tests {
     }
 
     #[test]
-    fn deregister_only_recycles_active_connections_once() {
+    fn dropping_a_sender_reports_whether_it_was_registered() {
         let mut manager = manager();
         manager.sign_up_conn_sender(TestConnId(0), sender());
 
-        assert!(manager.deregister_conn(TestConnId(0)));
-        assert!(!manager.deregister_conn(TestConnId(0)));
+        assert!(manager.drop_conn_sender(TestConnId(0)));
+        assert!(!manager.drop_conn_sender(TestConnId(0)));
+    }
 
+    /// The reason the two steps are separate: a retirement drops the sender while
+    /// the socket task is still unwinding, and its ID must not be handed out again
+    /// until that task's deregistration arrives.
+    #[test]
+    fn a_dropped_sender_does_not_release_its_id_until_recycled() {
+        let mut manager = manager();
+        manager.sign_up_conn_sender(TestConnId(0), sender());
+
+        assert!(manager.drop_conn_sender(TestConnId(0)));
+        assert_eq!(
+            manager.get_conn_id(std::iter::empty()),
+            TestConnId(1),
+            "a retired id is not reused while its socket task may still deregister"
+        );
+
+        manager.recycle_conn_id(TestConnId(0));
+        assert_eq!(manager.get_conn_id(std::iter::empty()), TestConnId(0));
+    }
+
+    #[test]
+    fn recycling_an_id_twice_queues_it_once() {
+        let mut manager = manager();
+        manager.sign_up_conn_sender(TestConnId(0), sender());
+        assert!(manager.drop_conn_sender(TestConnId(0)));
+
+        manager.recycle_conn_id(TestConnId(0));
+        manager.recycle_conn_id(TestConnId(0));
+
+        assert_eq!(manager.idle_conn_count(), 1);
         assert_eq!(manager.get_conn_id(std::iter::empty()), TestConnId(0));
         assert_eq!(manager.get_conn_id(std::iter::empty()), TestConnId(1));
     }
@@ -219,7 +264,8 @@ mod tests {
         assert_eq!(manager.active_conn_count(), 1);
         assert_eq!(manager.idle_conn_count(), 0);
 
-        assert!(manager.deregister_conn(TestConnId(0)));
+        assert!(manager.drop_conn_sender(TestConnId(0)));
+        manager.recycle_conn_id(TestConnId(0));
 
         assert_eq!(manager.active_conn_count(), 0);
         assert_eq!(manager.idle_conn_count(), 1);

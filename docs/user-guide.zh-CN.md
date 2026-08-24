@@ -256,8 +256,8 @@ flutter run
 - `PB_MAPPER_CONTROL_SUSPECT_GRACE`：远端注册探测失败后的额外宽限时间，超过后主动重连，默认 `2s`
 - `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`：register 角色每次远端注册状态探测的超时时间，默认 `1s`
 - `PB_MAPPER_SERVER_LEASE_TIMEOUT`：server 侧 V2 已注册控制连接的空闲租约超时，默认 `15s`
-- `PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL`：server 回收租约已过期的已注册控制连接的扫描间隔，默认 `5s`
-- `PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN` / `_MAX`：register 角色被服务器*拒绝*注册（例如连接配额已满）后的重试等待时间，区别于连不上服务器时的传输重试，默认 `5s` 与 `80s`
+- `PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL`：server 回收租约已过期的已注册控制连接的扫描间隔，默认 `5s`。填 0 会回退到默认值：每次扫描都要遍历全部注册，周期为 0 反而会拖垮它本该保护的流量
+- `PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN` / `_MAX`：register 角色被服务器*拒绝*注册（例如连接配额已满）后的重试等待时间，区别于连不上服务器时的传输重试，默认 `5s` 与 `80s`。任一端填 0 都会回退到默认值；上限低于下限时退化为固定间隔
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`：client 侧本地 listener 重新确认远端 service key 仍已注册的间隔，默认 `15s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`：client 侧每次远端 key 健康检查的超时时间，默认 `5s`
 - `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`：连续多少次健康检查失败后才重启 client 侧本地 listener，默认 `3`

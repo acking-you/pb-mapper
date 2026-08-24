@@ -265,8 +265,8 @@ flutter run
 - `PB_MAPPER_CONTROL_SUSPECT_GRACE`: additional grace after a failed remote registration probe before reconnecting, default `2s`
 - `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`: timeout for each register-role remote registration status probe, default `1s`
 - `PB_MAPPER_SERVER_LEASE_TIMEOUT`: server-side idle lease timeout for V2 registered control connections, default `15s`
-- `PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL`: how often the server sweeps registered control connections whose lease has expired, default `5s`
-- `PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN` / `_MAX`: how long the register role waits after the server *refuses* a registration — a full connection quota, say — as opposed to failing to reach it, default `5s` and `80s`
+- `PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL`: how often the server sweeps registered control connections whose lease has expired, default `5s`. A zero falls back to the default: each sweep scans every registration, so a zero period would starve the traffic it protects
+- `PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN` / `_MAX`: how long the register role waits after the server *refuses* a registration — a full connection quota, say — as opposed to failing to reach it, default `5s` and `80s`. A zero at either end falls back to that default; a maximum below the minimum collapses the ladder to a fixed delay
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`: how often the client-side local listener rechecks that the remote service key is still registered, default `15s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`: timeout for each client-side remote key health check, default `5s`
 - `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`: consecutive failed health checks required before restarting the client-side local listener, default `3`
