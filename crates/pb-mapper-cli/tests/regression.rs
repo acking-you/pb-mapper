@@ -30,6 +30,47 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uni_stream::stream::{TcpListenerProvider, TcpStreamProvider};
 
+/// Serialises the tests that override process-global configuration.
+///
+/// The environment is one namespace shared by every test in this binary, and
+/// several of these tests override the *same* variable —
+/// `PB_MAPPER_CONTROL_CONN_POOL_SIZE`, so that one control worker serves the
+/// registration and its retries are countable. Run concurrently, one test's
+/// guard restores the variable while another test's tunnel is still reading it,
+/// and that tunnel silently gets the default two-worker pool: two register
+/// attempts where the test asserts one.
+static ENV_OVERRIDE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// A set of environment overrides held for the duration of one test.
+///
+/// Restores every previous value on drop, and releases the lock only then, so no
+/// two overriding tests overlap.
+struct EnvOverrides {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    vars: Vec<EnvVarGuard>,
+}
+
+impl EnvOverrides {
+    async fn set(overrides: &[(&'static str, &'static str)]) -> Self {
+        let lock = ENV_OVERRIDE_LOCK.lock().await;
+        let vars = overrides
+            .iter()
+            .map(|(key, value)| EnvVarGuard::set(key, value))
+            .collect();
+        Self { _lock: lock, vars }
+    }
+}
+
+impl Drop for EnvOverrides {
+    fn drop(&mut self) {
+        // Explicit, so the ordering against the lock guard is stated rather than
+        // left to field order: every variable is restored before the next test
+        // that overrides one can start.
+        self.vars.clear();
+    }
+}
+
 struct EnvVarGuard {
     key: &'static str,
     old_value: Option<String>,
@@ -39,8 +80,9 @@ impl EnvVarGuard {
     /// # Safety note
     ///
     /// Mutating the environment is unsafe in edition 2024 because it races
-    /// concurrent readers. The tests that use this guard set a variable no
-    /// other test reads, and the guard restores the previous value on drop.
+    /// concurrent readers. Callers reach this through [`EnvOverrides`], which
+    /// holds [`ENV_OVERRIDE_LOCK`] for as long as the values are in place, and
+    /// the guard restores the previous value on drop.
     fn set(key: &'static str, value: &'static str) -> Self {
         let old_value = std::env::var(key).ok();
         unsafe { std::env::set_var(key, value) };
@@ -715,11 +757,14 @@ async fn status_service_reports_registered_v2_control_connection() {
 
 #[tokio::test]
 async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_status() {
-    let _pool_size = EnvVarGuard::set("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1");
-    let _heartbeat = EnvVarGuard::set("PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL", "20ms");
-    let _tolerance = EnvVarGuard::set("PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE", "50ms");
-    let _grace = EnvVarGuard::set("PB_MAPPER_CONTROL_SUSPECT_GRACE", "20ms");
-    let _probe_timeout = EnvVarGuard::set("PB_MAPPER_REGISTRATION_PROBE_TIMEOUT", "50ms");
+    let _env = EnvOverrides::set(&[
+        ("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1"),
+        ("PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL", "20ms"),
+        ("PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE", "50ms"),
+        ("PB_MAPPER_CONTROL_SUSPECT_GRACE", "20ms"),
+        ("PB_MAPPER_REGISTRATION_PROBE_TIMEOUT", "50ms"),
+    ])
+    .await;
 
     let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = remote_listener.local_addr().unwrap();
@@ -865,9 +910,12 @@ async fn client_closes_initial_status_probe_after_key_check() {
 
 #[tokio::test]
 async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
-    let _health_interval = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL", "20ms");
-    let _health_timeout = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT", "200ms");
-    let _health_threshold = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD", "3");
+    let _env = EnvOverrides::set(&[
+        ("PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL", "20ms"),
+        ("PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT", "200ms"),
+        ("PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD", "3"),
+    ])
+    .await;
 
     let local_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = local_probe.local_addr().unwrap();
@@ -1578,9 +1626,12 @@ async fn wait_for_register_attempts(
 
 #[tokio::test]
 async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
-    let _pool_size = EnvVarGuard::set("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1");
-    let _reject_min = EnvVarGuard::set("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN", "400ms");
-    let _reject_max = EnvVarGuard::set("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX", "800ms");
+    let _env = EnvOverrides::set(&[
+        ("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1"),
+        ("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN", "400ms"),
+        ("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX", "800ms"),
+    ])
+    .await;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();
@@ -1638,7 +1689,7 @@ async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
 
 #[tokio::test]
 async fn terminal_registration_rejection_stops_the_worker() {
-    let _pool_size = EnvVarGuard::set("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1");
+    let _env = EnvOverrides::set(&[("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1")]).await;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = listener.local_addr().unwrap();

@@ -471,7 +471,7 @@ pub use runtime::{
 mod connection;
 use connection::{
     compose_service_key, decrement_namespace_stream_count, handle_conn, handle_listener,
-    release_namespace_rate_limit_if_idle, split_scoped_service_key,
+    release_namespace_rate_limit_if_idle, split_scoped_service_key, validate_service_name,
 };
 
 #[cfg(test)]

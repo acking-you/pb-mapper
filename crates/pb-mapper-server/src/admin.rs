@@ -6,15 +6,19 @@
 //! ```
 //!
 //! Credential lifecycle operations go to `AuthRuntime`; service and connection
-//! inventory requests go to the routing manager. Read operations are audited without
-//! weakening the primary response when only audit emission fails.
+//! requests go to the routing manager. Every audited operation keeps its primary
+//! response when only audit emission fails.
+//!
+//! Reads and mutations differ in where the authorization point sits: see
+//! [`query_inventory`] and [`apply_mutation`].
 
 use std::time::Duration;
 
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 
 use super::error::Error;
-use super::{ManagerTask, ManagerTaskSender, Result, compose_service_key};
+use super::{ManagerTask, ManagerTaskSender, Result, compose_service_key, validate_service_name};
 use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::conn_id::RemoteConnId;
@@ -75,7 +79,7 @@ async fn execute(
             .await
             .map(AdminResponse::KeyIssued),
         AdminRequest::KeyList { page, page_size } => {
-            audit_read(
+            audit_action(
                 &auth,
                 authorization,
                 "temporary_key_list",
@@ -115,7 +119,7 @@ async fn execute(
             .await
             .map(|removed| AdminResponse::KeyGc { removed }),
         AdminRequest::AuthStatus => {
-            audit_read(&auth, authorization, "auth_status", None, None).await;
+            audit_action(&auth, authorization, "auth_status", None, None).await;
             auth.status(authorization)
                 .await
                 .map(AdminResponse::AuthStatus)
@@ -159,7 +163,7 @@ async fn execute(
             page,
             page_size,
         } => {
-            audit_read(
+            audit_action(
                 &auth,
                 authorization,
                 "service_list",
@@ -188,7 +192,7 @@ async fn execute(
             page,
             page_size,
         } => {
-            audit_read(
+            audit_action(
                 &auth,
                 authorization,
                 "connection_list",
@@ -217,10 +221,15 @@ async fn execute(
             service_name,
             conn_id,
         } => {
+            // The name arrives from the wire, so it gets the same check a
+            // registration's does. Without it a name carrying the NUL separator
+            // would compose another namespace's routing key, retiring a service
+            // the audit record does not name.
+            validate_service_name(&service_name)?;
             let namespace = key_id.unwrap_or_default();
             let key = compose_service_key(namespace, &service_name);
             let (response_sender, receiver) = tokio::sync::oneshot::channel();
-            let retired = query_inventory(
+            let retired = apply_mutation(
                 authorization,
                 &manager,
                 ManagerTask::AdminConnectionRetire {
@@ -229,13 +238,15 @@ async fn execute(
                     response_sender,
                 },
                 receiver,
-                "connection retire",
+                "connection retirement",
             )
             .await?;
-            // Audited after the fact, not before: unlike a read, the interesting
-            // record is what was actually dropped. A `retired=0` entry says the
-            // operator named something the relay no longer had.
-            audit_read(
+            // Audited after the fact, not before: the interesting record is what
+            // was actually dropped. A `retired=0` entry says the operator named
+            // something the relay no longer had. Reached unconditionally, since
+            // `apply_mutation` does not re-check the lease — a change that
+            // happened gets recorded even if the credential rotated meanwhile.
+            audit_action(
                 &auth,
                 authorization,
                 "connection_retire",
@@ -264,6 +275,46 @@ async fn query_inventory<T>(
     receiver: tokio::sync::oneshot::Receiver<T>,
     inventory: &'static str,
 ) -> std::result::Result<T, AuthFailure> {
+    let cancellation = send_manager_task(authorization, manager, task).await?;
+    let response = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(cancelled_authorization(authorization)),
+        result = receiver => result.map_err(|_| manager_dropped(inventory))?,
+    };
+    authorization.ensure_active()?;
+    Ok(response)
+}
+
+/// Run a manager task that changes relay state, and report what it did.
+///
+/// Differs from [`query_inventory`] in where the authorization point sits. A read
+/// re-checks the lease afterwards, because a snapshot taken under a credential
+/// that has since rotated should not be handed back. A mutation cannot: by the
+/// time the manager answers, the change is already applied, so racing the
+/// cancellation or re-checking the lease would report failure for a mutation that
+/// happened — and skip auditing it. The authorization is therefore established
+/// before the task is sent, and the outcome reported unconditionally after.
+async fn apply_mutation<T>(
+    authorization: &AuthContext,
+    manager: &ManagerTaskSender,
+    task: ManagerTask,
+    receiver: tokio::sync::oneshot::Receiver<T>,
+    mutation: &'static str,
+) -> std::result::Result<T, AuthFailure> {
+    let _cancellation = send_manager_task(authorization, manager, task).await?;
+    receiver.await.map_err(|_| manager_dropped(mutation))
+}
+
+/// Authorize the caller, then hand the task to the manager.
+///
+/// Returns the administrator lease's cancellation token, since a caller that
+/// still has waiting left to do needs it. Racing the cancellation here is safe
+/// for a mutation too: a task that was never sent was never applied.
+async fn send_manager_task(
+    authorization: &AuthContext,
+    manager: &ManagerTaskSender,
+    task: ManagerTask,
+) -> std::result::Result<CancellationToken, AuthFailure> {
     let cancellation = authorization.admin_cancellation_token()?;
     tokio::select! {
         biased;
@@ -276,19 +327,15 @@ async fn query_inventory<T>(
             )
         })?,
     }
-    let response = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => return Err(cancelled_authorization(authorization)),
-        result = receiver => result.map_err(|_| {
-            AuthFailure::new(
-                "server_state_unavailable",
-                format!("relay connection manager dropped the {inventory} query"),
-                true,
-            )
-        })?,
-    };
-    authorization.ensure_active()?;
-    Ok(response)
+    Ok(cancellation)
+}
+
+fn manager_dropped(what: &'static str) -> AuthFailure {
+    AuthFailure::new(
+        "server_state_unavailable",
+        format!("relay connection manager dropped the {what} query"),
+        true,
+    )
 }
 
 fn cancelled_authorization(authorization: &AuthContext) -> AuthFailure {
@@ -302,7 +349,13 @@ fn cancelled_authorization(authorization: &AuthContext) -> AuthFailure {
     }
 }
 
-async fn audit_read(
+/// Record an administrator action, and never fail the action if recording fails.
+///
+/// The audit itself needs a live administrator lease, so a root rotation between
+/// the action and this call loses the record. For a mutation that record is the
+/// only trace the change leaves, which is why the failure is logged rather than
+/// swallowed: the log line is what an operator reconstructs the gap from.
+async fn audit_action(
     auth: &AuthRuntime,
     authorization: &AuthContext,
     action: &str,
@@ -319,7 +372,7 @@ async fn audit_read(
             action,
             reason = %error.code,
             error = %error.message,
-            "administrator read operation could not be audited"
+            "administrator operation could not be audited"
         );
     }
 }
@@ -434,5 +487,131 @@ mod tests {
     #[tokio::test]
     async fn connection_inventory_rejects_root_rotation_after_dispatch() {
         inventory_query_rejects_rotation(true).await;
+    }
+
+    /// A retirement that has already happened is reported, not disowned.
+    ///
+    /// The mirror image of the two cases above: a read taken under a credential
+    /// that has since rotated must be refused, but a mutation cannot be, because
+    /// refusing it would tell the operator nothing was retired while leaving the
+    /// connections gone and the action unaudited.
+    #[tokio::test]
+    async fn connection_retire_reports_a_mutation_that_outlived_its_credential() {
+        let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
+            .lock()
+            .await;
+        let state_dir = temp_state_dir("retire-rotation");
+        let old_key = *b"0123456789abcdefghijklmnopqrstuv";
+        let new_key = *b"abcdefghijklmnopqrstuvwxyz012345";
+        let runtime = AuthRuntime::start(
+            old_key,
+            AuthConfig {
+                state_dir: state_dir.clone(),
+                max_temporary_keys: 4,
+                max_temporary_key_ttl: Duration::from_secs(3600),
+                legacy_protocol: LegacyProtocolPolicy::Allow,
+            },
+        )
+        .await
+        .expect("authentication runtime should start");
+        let admin = runtime
+            .authenticate_presented(ADMIN_KEY_ID, &old_key)
+            .expect("old administrator key should authenticate");
+        let (manager, receiver) = kanal::unbounded_async();
+        let request_admin = admin.clone();
+        let request_runtime = runtime.clone();
+        let pending = tokio::spawn(async move {
+            execute(
+                AdminRequest::ConnectionRetire {
+                    key_id: None,
+                    service_name: "echo".to_string(),
+                    conn_id: None,
+                },
+                &request_admin,
+                request_runtime,
+                manager,
+            )
+            .await
+        });
+
+        let manager_task = receiver
+            .recv()
+            .await
+            .expect("retire request should reach the manager");
+        runtime
+            .rotate_root(&admin, new_key)
+            .await
+            .expect("root rotation should succeed");
+        let ManagerTask::AdminConnectionRetire {
+            response_sender, ..
+        } = manager_task
+        else {
+            panic!("expected an administrator retire manager task");
+        };
+        let _ = response_sender.send(3);
+
+        let response = pending
+            .await
+            .expect("retire task should not panic")
+            .expect("a retirement that happened must be reported");
+        assert!(matches!(
+            response,
+            AdminResponse::ConnectionsRetired { retired: 3 }
+        ));
+
+        drop(runtime);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    /// A retire name carrying the scoped-key separator never reaches the manager.
+    ///
+    /// `@{namespace:016x}\0{name}` is the routing key of a namespaced service, so
+    /// a name spelling one out would retire a service in a namespace the request
+    /// never named — and the audit record would name the unscoped one.
+    #[tokio::test]
+    async fn connection_retire_rejects_a_name_that_spells_out_a_scoped_key() {
+        let _process_credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
+            .lock()
+            .await;
+        let state_dir = temp_state_dir("retire-nul");
+        let key = *b"0123456789abcdefghijklmnopqrstuv";
+        let runtime = AuthRuntime::start(
+            key,
+            AuthConfig {
+                state_dir: state_dir.clone(),
+                max_temporary_keys: 4,
+                max_temporary_key_ttl: Duration::from_secs(3600),
+                legacy_protocol: LegacyProtocolPolicy::Allow,
+            },
+        )
+        .await
+        .expect("authentication runtime should start");
+        let admin = runtime
+            .authenticate_presented(ADMIN_KEY_ID, &key)
+            .expect("administrator key should authenticate");
+        let (manager, receiver) = kanal::unbounded_async();
+
+        let failure = execute(
+            AdminRequest::ConnectionRetire {
+                key_id: None,
+                service_name: "@0000000000000001\u{0}echo".to_string(),
+                conn_id: None,
+            },
+            &admin,
+            runtime.clone(),
+            manager.clone(),
+        )
+        .await
+        .expect_err("a NUL-carrying service name must be refused");
+        assert_eq!(failure.code, "service_name_invalid");
+        assert!(
+            receiver.is_empty(),
+            "a refused retirement must not reach the manager"
+        );
+
+        drop(runtime);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = std::fs::remove_dir_all(state_dir);
     }
 }
