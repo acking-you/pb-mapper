@@ -578,6 +578,25 @@ impl Admin {
             .collect())
     }
 
+    /// Drops registered control connections the relay is still holding for a
+    /// service, and resolves with how many it dropped.
+    ///
+    /// Omit `connId` to retire every connection the service has, which is what
+    /// frees a connection quota filled by connections that should have gone away.
+    #[napi]
+    pub async fn retire_connections(
+        &self,
+        service_name: String,
+        key_id: Option<i64>,
+        conn_id: Option<u32>,
+    ) -> Result<u32> {
+        let key_id = as_opt_u64("keyId", key_id)?;
+        self.inner
+            .retire_connections(key_id, service_name, conn_id)
+            .await
+            .map_err(to_napi)
+    }
+
     #[napi]
     pub async fn list_connections(&self, key_id: Option<i64>) -> Result<Vec<JsConnectionInfo>> {
         let key_id = as_opt_u64("keyId", key_id)?;

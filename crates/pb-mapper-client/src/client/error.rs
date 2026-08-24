@@ -21,8 +21,6 @@ pub enum Error {
     EncodeStatusReq { source: common::error::Error },
     #[snafu(display("write status request error"))]
     WriteStatusReq { source: common::error::Error },
-    #[snafu(display("read status response error"))]
-    ReadStatusResp { source: common::error::Error },
     #[snafu(display("decode status response error"))]
     DecodeStatusResp { source: common::error::Error },
     #[snafu(display("we expected `PbConnResponse::Status`,but actual response is `{resp}`"))]
@@ -44,20 +42,12 @@ pub enum Error {
     },
     #[snafu(display("write subcribe request error"))]
     WriteSubcribeReq { source: common::error::Error },
-    #[snafu(display("read subcribe response error"))]
-    ReadSubcribeResp { source: common::error::Error },
     #[snafu(display("decode subcribe response error"))]
     DecodeSubcribeResp { source: common::error::Error },
     #[snafu(display("we expected `PbConnResponse::Subcribe`,but actual response is `{resp}`"))]
     SubcribeRespNotMatch {
         // Structured representation of response
         resp: String,
-    },
-    #[snafu(display("`{action}` failed!"))]
-    GetCodec {
-        // Must be `client/server-reader/writer-decode/encode`
-        action: &'static str,
-        source: common::error::Error,
     },
     #[snafu(display("header msg tool:`{action}` create failed!"))]
     CreateHeaderTool {

@@ -155,6 +155,30 @@ pub async fn run_server_on_listener(
         })
     };
 
+    // Drives lease expiry. A tick is a request to sweep, not a deadline: it is
+    // dropped rather than queued behind a busy manager, since the next tick asks
+    // for the same thing and a backlog of sweeps would only pile up while the loop
+    // was already too busy to serve them.
+    let sweep_handle = {
+        let sweep_sender = manager.get_task_sender();
+        let sweep_interval = server_lease_sweep_interval();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(sweep_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                // A tick that finds the queue full is dropped, not retried: the
+                // next tick asks for the same sweep, and a backlog of them would
+                // only grow while the manager was already behind.
+                if let Err(kanal::SendTimeoutError::Closed(_)) =
+                    sweep_sender.try_send(ManagerTask::SweepServerLeases)
+                {
+                    break;
+                }
+            }
+        })
+    };
+
     loop {
         let task = match manager.wait_for_task().await {
             Ok(task) => task,
@@ -255,6 +279,37 @@ pub async fn run_server_on_listener(
                     items,
                     next_page,
                 });
+            }
+            ManagerTask::AdminConnectionRetire {
+                key,
+                conn_id,
+                response_sender,
+            } => {
+                // Snapshot the targets before retiring any of them: `retire_server_conn`
+                // mutates the very map that names them, and dropping the last connection
+                // of a service removes its entry outright.
+                let targets: Vec<RemoteConnId> = server_conn_map
+                    .get(&key)
+                    .map(|connections| {
+                        connections
+                            .iter()
+                            .map(|connection| connection.conn_id)
+                            .filter(|candidate| conn_id.is_none_or(|wanted| wanted == *candidate))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for target in &targets {
+                    retire_server_conn(
+                        &mut manager,
+                        &mut server_conn_map,
+                        &pending_streams,
+                        &mut namespace_rate_limits,
+                        &key,
+                        *target,
+                        "retired by administrator",
+                    );
+                }
+                let _ = response_sender.send(u32::try_from(targets.len()).unwrap_or(u32::MAX));
             }
             ManagerTask::StatusQuery { response_sender } => {
                 let total_connections = server_conn_map
@@ -407,39 +462,14 @@ pub async fn run_server_on_listener(
                 conn_id,
                 reason,
             } => {
-                let conn_sender = manager.get_conn_sender_chan(&conn_id);
-                let removed_from_service_map =
-                    remove_server_conn(&mut server_conn_map, &key, conn_id);
-                let removed_from_active_map = manager.deregister_conn(conn_id);
-                release_namespace_rate_limit_if_idle(
-                    split_scoped_service_key(&key).0,
-                    &server_conn_map,
+                retire_server_conn(
+                    &mut manager,
+                    &mut server_conn_map,
                     &pending_streams,
                     &mut namespace_rate_limits,
-                );
-                let retire_notified = conn_sender
-                    .as_ref()
-                    .and_then(|sender| {
-                        sender
-                            .try_send(ConnTask::Retire {
-                                reason: reason.clone(),
-                            })
-                            .ok()
-                    })
-                    .is_some();
-                tracing::warn!(
-                    event = "server_conn_retired",
-                    key = %key,
-                    conn_id = %conn_id,
-                    reason = %reason,
-                    removed_from_service_map,
-                    removed_from_active_map,
-                    retire_notified,
-                    registered_services = server_conn_map.len(),
-                    server_connections = registered_server_conn_count(&server_conn_map),
-                    active_connections = manager.active_conn_count(),
-                    idle_connections = manager.idle_conn_count(),
-                    "server connection retired"
+                    &key,
+                    conn_id,
+                    &reason,
                 );
             }
             ManagerTask::DeRegisterClientConn {
@@ -922,6 +952,26 @@ pub async fn run_server_on_listener(
                     }
                 }
             }
+            ManagerTask::SweepServerLeases => {
+                // Retire in place rather than queueing `RetireServerConn` back into
+                // the manager channel: this loop is that channel's only consumer, so
+                // a full queue would have it waiting on itself.
+                for stale in sweep_server_conn_leases(&mut server_conn_map) {
+                    let reason = format!(
+                        "lease expired: no control traffic for {:?} (protocol v{})",
+                        stale.idle_for, stale.protocol_version
+                    );
+                    retire_server_conn(
+                        &mut manager,
+                        &mut server_conn_map,
+                        &pending_streams,
+                        &mut namespace_rate_limits,
+                        &stale.key,
+                        stale.conn_id,
+                        &reason,
+                    );
+                }
+            }
             ManagerTask::Shutdown => {
                 tracing::info!("Server shutdown requested, stopping main loop");
                 break;
@@ -935,14 +985,68 @@ pub async fn run_server_on_listener(
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
     abort_and_wait(
-        std::iter::once(listener_handle)
-            .chain(std::iter::once(shutdown_handle))
+        [listener_handle, shutdown_handle, sweep_handle]
+            .into_iter()
             .chain(status_forward_handle),
     )
     .await;
     security.auth().shutdown_actor().await;
     tracing::info!("Server shutdown completed");
     Ok(())
+}
+
+/// Drop one registered control connection from every map that tracks it, and tell
+/// its socket task to unwind.
+///
+/// Shared by every caller that retires a connection — a subscriber that found it
+/// unresponsive, and the lease sweep — so an operator reads one `server_conn_retired`
+/// record with one shape regardless of which noticed.
+///
+/// The `ConnTask::Retire` notification is best-effort: a task whose queue is full or
+/// already gone is a task that is not going to serve traffic either way, and the maps
+/// have already been unwound by the time it is sent.
+fn retire_server_conn(
+    manager: &mut ServerMananger,
+    server_conn_map: &mut ServerConnMap,
+    pending_streams: &hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>,
+    namespace_rate_limits: &mut hashbrown::HashMap<u64, NamespaceRateLimit>,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+    reason: &str,
+) {
+    let conn_sender = manager.get_conn_sender_chan(&conn_id);
+    let removed_from_service_map = remove_server_conn(server_conn_map, key, conn_id);
+    let removed_from_active_map = manager.deregister_conn(conn_id);
+    release_namespace_rate_limit_if_idle(
+        split_scoped_service_key(key).0,
+        server_conn_map,
+        pending_streams,
+        namespace_rate_limits,
+    );
+    let retire_notified = conn_sender
+        .as_ref()
+        .and_then(|sender| {
+            sender
+                .try_send(ConnTask::Retire {
+                    reason: reason.to_string(),
+                })
+                .ok()
+        })
+        .is_some();
+    tracing::warn!(
+        event = "server_conn_retired",
+        key = %key,
+        conn_id = %conn_id,
+        reason = %reason,
+        removed_from_service_map,
+        removed_from_active_map,
+        retire_notified,
+        registered_services = server_conn_map.len(),
+        server_connections = registered_server_conn_count(server_conn_map),
+        active_connections = manager.active_conn_count(),
+        idle_connections = manager.idle_conn_count(),
+        "server connection retired"
+    );
 }
 
 async fn abort_and_wait(handles: impl IntoIterator<Item = tokio::task::JoinHandle<()>>) {

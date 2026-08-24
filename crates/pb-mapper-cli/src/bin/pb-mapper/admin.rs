@@ -84,27 +84,63 @@ enum AdminKeyCommand {
 #[derive(Debug, Args)]
 struct AdminConnectionArgs {
     #[command(subcommand)]
-    command: AdminListCommand,
+    command: AdminConnectionCommand,
 }
 
 #[derive(Debug, Args)]
 struct AdminServiceArgs {
     #[command(subcommand)]
-    command: AdminListCommand,
+    command: AdminServiceCommand,
+}
+
+/// The paging flags every inventory listing takes, declared once.
+#[derive(Debug, Clone, Args)]
+struct AdminListArgs {
+    #[arg(long)]
+    key_id: Option<u64>,
+    #[arg(long, default_value_t = 0)]
+    page: u32,
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+    page_size: u16,
+    #[arg(long, default_value_t = false)]
+    all: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
-enum AdminListCommand {
-    List {
+enum AdminConnectionCommand {
+    /// List relay connections across namespaces.
+    List(AdminListArgs),
+    /// Drop registered control connections the relay is still holding.
+    ///
+    /// For a registration the relay cannot see is gone: one that still answers
+    /// its heartbeat but no longer forwards, or a service whose connection quota
+    /// is full of connections that should have unwound. A healthy client
+    /// reconnects afterwards, so this costs a brief interruption at worst.
+    ///
+    /// The group makes the target mandatory and exclusive, so the error for
+    /// naming neither lists both ways to name one.
+    #[command(group = clap::ArgGroup::new("target").required(true))]
+    Retire {
+        /// Service to retire connections for, unscoped by the namespace prefix.
+        service_name: String,
+        /// Namespace owning the service. Omit for the unscoped namespace.
         #[arg(long)]
         key_id: Option<u64>,
-        #[arg(long, default_value_t = 0)]
-        page: u32,
-        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
-        page_size: u16,
-        #[arg(long, default_value_t = false)]
+        /// Retire just this connection, as reported by `admin connection list`.
+        #[arg(long, group = "target")]
+        conn_id: Option<u32>,
+        /// Retire every connection the service has. Required to be explicit,
+        /// because it is what frees a full quota and also what interrupts every
+        /// healthy connection at once.
+        #[arg(long, group = "target", default_value_t = false)]
         all: bool,
     },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum AdminServiceCommand {
+    /// List registered services across namespaces.
+    List(AdminListArgs),
 }
 
 #[derive(Debug, Args)]
@@ -216,29 +252,56 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 print_admin_response(args.output, &response)?;
             }
         },
-        AdminCommand::Connection(AdminConnectionArgs { command }) => {
-            let AdminListCommand::List {
+        AdminCommand::Connection(AdminConnectionArgs { command }) => match command {
+            AdminConnectionCommand::List(AdminListArgs {
                 key_id,
                 page,
                 page_size,
                 all,
-            } = command;
-            stream_pages::<AdminConnectionPage, _>(remote_addr, args.output, page, all, |page| {
-                AdminRequest::ConnectionList {
+            }) => {
+                stream_pages::<AdminConnectionPage, _>(
+                    remote_addr,
+                    args.output,
+                    page,
+                    all,
+                    |page| AdminRequest::ConnectionList {
+                        key_id,
+                        page,
+                        page_size,
+                    },
+                )
+                .await?;
+            }
+            AdminConnectionCommand::Retire {
+                service_name,
+                key_id,
+                conn_id,
+                all,
+            } => {
+                // `--all` is the absence of a target, not a separate field on the
+                // wire: clap has already ensured exactly one of the two was given.
+                let conn_id = if all { None } else { conn_id };
+                let response = send_admin_request(
+                    remote_addr,
+                    AdminRequest::ConnectionRetire {
+                        key_id,
+                        service_name,
+                        conn_id,
+                    },
+                )
+                .await?;
+                print_admin_response(args.output, &response)?;
+            }
+        },
+        AdminCommand::Service(AdminServiceArgs {
+            command:
+                AdminServiceCommand::List(AdminListArgs {
                     key_id,
                     page,
                     page_size,
-                }
-            })
-            .await?;
-        }
-        AdminCommand::Service(AdminServiceArgs { command }) => {
-            let AdminListCommand::List {
-                key_id,
-                page,
-                page_size,
-                all,
-            } = command;
+                    all,
+                }),
+        }) => {
             stream_pages::<AdminServicePage, _>(remote_addr, args.output, page, all, |page| {
                 AdminRequest::ServiceList {
                     key_id,
@@ -559,20 +622,33 @@ fn print_human_admin_response(response: &AdminResponse) {
                     service.connection_count
                 );
             }
+            if let Some(next) = page.next_page {
+                println!("next page: {next}");
+            }
         }
         AdminResponse::Connections(page) => {
-            println!("KEY ID\tSERVICE\tCONN ID\tHEALTHY\tTRANSPORT\tCODEC");
+            // IDLE MS is what tells an operator which connection to retire: a
+            // registration well past its lease is one the relay is holding for
+            // nothing.
+            println!("KEY ID\tSERVICE\tCONN ID\tHEALTHY\tIDLE MS\tTRANSPORT\tCODEC");
             for connection in &page.items {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     connection.key_id,
                     connection.service_name,
                     connection.conn_id,
                     connection.healthy,
+                    connection.last_rx_age_ms,
                     connection.transport,
                     connection.codec_enabled
                 );
             }
+            if let Some(next) = page.next_page {
+                println!("next page: {next}");
+            }
+        }
+        AdminResponse::ConnectionsRetired { retired } => {
+            println!("retired {retired} registered connections");
         }
         AdminResponse::Ok { action } => println!("ok: {action}"),
     }

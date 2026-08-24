@@ -211,6 +211,19 @@ impl Admin {
         response: Connections(page) => ConnectionPage::from(page)
     );
 
+    admin_rpc_struct!(
+        /// Drop registered control connections the relay is still holding for a
+        /// service, returning how many it dropped.
+        ///
+        /// `conn_id` of `None` retires every connection the service has, which is
+        /// what frees a connection quota filled by connections that should have
+        /// gone away. A registration whose client is still healthy simply
+        /// reconnects, so this is a nudge rather than a shutdown.
+        retire_connections(key_id: Option<u64>, service_name: String, conn_id: Option<u32>) -> u32,
+        request: AdminRequest::ConnectionRetire { key_id, service_name, conn_id },
+        response: ConnectionsRetired { retired } => retired
+    );
+
     /// Every temporary credential, paging until the relay stops handing back a
     /// cursor.
     pub async fn list_keys_all(&self) -> Result<Vec<KeyMetadata>> {

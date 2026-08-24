@@ -99,33 +99,6 @@ impl<
         true
     }
 
-    pub fn active_conn_id_msg(&self) -> String {
-        let mut ret = self
-            .active_conn_map
-            .iter()
-            .map(|(&k, _)| -> u32 { k.into() })
-            .collect::<Vec<_>>();
-        ret.sort();
-        let count = ret.len();
-        let max = ret.last();
-        format!(
-            r#"
-        count:{count},
-        max:{max:?},
-        list:{ret:?}
-        "#
-        )
-    }
-
-    pub fn idle_conn_id_msg(&self) -> String {
-        let list = self
-            .idle_conn_id_list
-            .iter()
-            .map(|&i| -> u32 { i.into() })
-            .collect::<Vec<_>>();
-        format!("list:{list:?}",)
-    }
-
     pub fn get_conn_id(
         &mut self,
         action_server_ids: impl Iterator<Item = ConnIdType>,

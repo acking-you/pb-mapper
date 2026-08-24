@@ -210,10 +210,17 @@ pb-mapper admin --server "your-server:7666" key list
 pb-mapper admin --server "your-server:7666" key reveal 4294967296
 pb-mapper admin --server "your-server:7666" service list --all
 pb-mapper admin --server "your-server:7666" connection list --all
+pb-mapper admin --server "your-server:7666" connection retire my-service --all
 ```
 
 自动化场景可使用 `--output json` 输出单个 JSON 文档，或用 `--output ndjson` 流式输出。
 默认每页 100 条，最大 1000 条。
+
+`connection retire` 会断开服务器仍为某个服务保留的控制连接。若某个服务明明已经没有
+实例在跑，注册却一直返回 `service_connection_limit_exceeded`，说明连接配额被本该消失的
+连接占满，此时使用该命令。`--all` 断开该服务的全部连接，健康连接也会被一并中断；
+`--conn-id` 只断开 `connection list` 中列出的某一条。服务器本身会定期回收过期租约，
+所以这条命令属于手动兜底，而非常规操作。
 
 ## 运行（GUI）
 
@@ -249,6 +256,8 @@ flutter run
 - `PB_MAPPER_CONTROL_SUSPECT_GRACE`：远端注册探测失败后的额外宽限时间，超过后主动重连，默认 `2s`
 - `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`：register 角色每次远端注册状态探测的超时时间，默认 `1s`
 - `PB_MAPPER_SERVER_LEASE_TIMEOUT`：server 侧 V2 已注册控制连接的空闲租约超时，默认 `15s`
+- `PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL`：server 回收租约已过期的已注册控制连接的扫描间隔，默认 `5s`
+- `PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN` / `_MAX`：register 角色被服务器*拒绝*注册（例如连接配额已满）后的重试等待时间，区别于连不上服务器时的传输重试，默认 `5s` 与 `80s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`：client 侧本地 listener 重新确认远端 service key 仍已注册的间隔，默认 `15s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`：client 侧每次远端 key 健康检查的超时时间，默认 `5s`
 - `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`：连续多少次健康检查失败后才重启 client 侧本地 listener，默认 `3`

@@ -12,7 +12,6 @@ use super::error::{
     ServerConnWriteRegisteredOkSnafu, ServerConnWriteStreamRequestSnafu,
 };
 use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
-use pb_mapper_core::config::server_lease_timeout;
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
@@ -123,9 +122,11 @@ impl Drop for ServerConnGuard {
 }
 
 const DEFAULT_SERVER_CHAN_CAP: usize = 32 * 4;
-// Must be greater than the local server ping interval (5 minutes). Equal values race
-// under scheduler/network jitter and can drop a healthy registration.
-const SERVER_TIMEOUT: Duration = Duration::from_secs(60 * 11);
+/// Idle threshold for a protocol-v1 registration, which has no lease to renew.
+///
+/// Must be greater than the local server ping interval (5 minutes). Equal values race
+/// under scheduler/network jitter and can drop a healthy registration.
+pub(super) const LEGACY_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 11);
 
 enum ServerControlWrite {
     Pong(Vec<u8>),
@@ -327,11 +328,7 @@ pub async fn handle_server_conn(
 
         let reader_result = async {
             loop {
-                let idle_timeout = if protocol_version >= CONTROL_PROTOCOL_V2 {
-                    server_lease_timeout()
-                } else {
-                    SERVER_TIMEOUT
-                };
+                let idle_timeout = crate::server_conn_idle_timeout(protocol_version);
                 let msg = match tokio::time::timeout(idle_timeout, msg_reader.read_msg()).await {
                     Ok(Ok(msg)) => msg,
                     Ok(Err(e)) => {
@@ -577,38 +574,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::time::Instant;
-
     use crate::ManagerTask;
     use pb_mapper_core::conn_id::RemoteConnId;
 
-    use super::{SERVER_TIMEOUT, ServerConnGuard};
+    use super::{LEGACY_SERVER_IDLE_TIMEOUT, ServerConnGuard};
 
     #[test]
     fn server_timeout_has_slack_over_local_server_ping_interval() {
-        assert!(SERVER_TIMEOUT > Duration::from_secs(5 * 60));
-    }
-
-    #[tokio::test]
-    async fn test_sleep() {
-        let expired_time = Instant::now();
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let mut cnt = 0;
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep_until(expired_time)=>{
-                    println!("end");
-                    return;
-                }
-                _ = tokio::time::sleep(Duration::from_secs(3)) =>{
-                    cnt += 1;
-                    if cnt > 3 {
-                        break;
-                    }
-                    println!("never print this: {cnt}");
-                }
-            }
-        }
+        assert!(LEGACY_SERVER_IDLE_TIMEOUT > Duration::from_secs(5 * 60));
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@ use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{
     ResolvedAddrs, control_conn_pool_size, control_heartbeat_interval, control_heartbeat_tolerance,
     control_io_timeout, control_suspect_grace, registration_probe_timeout,
+    registration_reject_backoff,
 };
 use pb_mapper_core::timeout::RetryBackoff;
 use pb_mapper_core::{
@@ -49,6 +50,17 @@ fn get_ping_message(protocol_version: u16, seq: u64) -> error::Result<Vec<u8>> {
     }
 }
 
+/// Why one attempt at holding a control connection ended, and therefore how the
+/// worker should treat it.
+///
+/// The three transport variants are interchangeable as far as the retry decision
+/// goes — they differ only in what they report — while the two rejection variants
+/// each mean something the transport ones do not:
+///
+/// * [`Status::Rejected`] is terminal, so the worker stops.
+/// * [`Status::RejectedRetryable`] is not, but the relay answered and refused, so
+///   the worker waits on the much slower [`registration_reject_backoff`] ladder
+///   instead of the transport one.
 #[derive(Debug)]
 enum Status {
     ReadMsg,
@@ -60,6 +72,44 @@ enum Status {
     /// would loop forever while the caller's `wait_ready` never resolves, so this
     /// ends the worker instead.
     Rejected(String),
+    /// The relay refused the registration for a condition that can clear on its
+    /// own — a full per-service connection quota, a namespace at its service
+    /// limit. Worth retrying, but slowly: the relay is reachable and answering,
+    /// and reconnecting hard only adds load to what has to drain.
+    RejectedRetryable(String),
+}
+
+/// The two retry ladders a control worker climbs, and the reason they are two.
+///
+/// A transport failure and a retryable rejection are not the same kind of
+/// problem, so they must not share a counter. Sharing one meant a reconnect —
+/// which happens on its own schedule — reset the wait a full quota was serving,
+/// leaving the worker hammering the relay with a request it had just refused.
+#[derive(Debug)]
+struct ControlBackoff {
+    /// Could not reach or hold the relay. Retry quickly; that is how the tunnel
+    /// comes back.
+    transport: RetryBackoff,
+    /// The relay answered and refused, for something that may clear. Retry
+    /// slowly; see [`registration_reject_backoff`].
+    reject: RetryBackoff,
+}
+
+impl ControlBackoff {
+    fn new() -> Self {
+        let (reject_min, reject_max) = registration_reject_backoff();
+        Self {
+            transport: RetryBackoff::default(),
+            reject: RetryBackoff::new(reject_min, reject_max),
+        }
+    }
+
+    /// Clear both ladders. Called once a registration is established: it is the
+    /// only evidence that either condition has passed.
+    fn reset(&mut self) {
+        self.transport.reset();
+        self.reject.reset();
+    }
 }
 
 enum LocalControlWrite {
@@ -220,13 +270,6 @@ impl PoolStatus {
             _ => WorkerStatus::Retrying,
         }
     }
-}
-
-#[derive(Debug)]
-pub enum ServiceStatus {
-    Retrying,
-    Connected,
-    Failed,
 }
 
 /// How a local-server tunnel forwards: the codec, the transport, and whether
@@ -546,7 +589,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             pool_status.report(worker_index, status);
         }
     };
-    let mut retry_backoff = RetryBackoff::default();
+    let mut backoff = ControlBackoff::new();
     let run_config = ServerCliRunConfig {
         local_addr: local_addr.clone(),
         remote_addr: remote_addr.clone(),
@@ -564,7 +607,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             break 'outer;
         }
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream>(
-            &mut retry_backoff,
+            &mut backoff,
             run_config.clone(),
             &report,
             shutdown.clone(),
@@ -585,7 +628,8 @@ async fn run_server_side_cli_worker<LocalStream>(
             );
             Status::ReadMsg
         };
-        match status {
+        // Every non-terminal outcome retries; only the ladder differs.
+        let (retry_interval, retry_count) = match status {
             Status::Cancelled => break 'outer,
             Status::Rejected(reason) => {
                 tracing::error!(
@@ -598,30 +642,43 @@ async fn run_server_side_cli_worker<LocalStream>(
                 report(WorkerStatus::Failed(reason));
                 break 'outer;
             }
-            Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
-                let retry_interval = retry_backoff.next_delay();
-                tracing::info!(
-                    event = "local_server_control_reconnect_scheduled",
+            Status::RejectedRetryable(ref reason) => {
+                let interval = backoff.reject.next_delay();
+                tracing::warn!(
+                    event = "local_server_registration_rejected_retryable",
                     key = %key,
                     worker_index,
-                    local_addr = ?local_addr,
-                    remote_addr = ?remote_addr,
-                    status = ?status,
-                    retry_delay = ?retry_interval,
-                    retry_count = retry_backoff.failures(),
-                    "local server control connection will reconnect"
+                    reason = %reason,
+                    retry_delay = ?interval,
+                    retry_count = backoff.reject.failures(),
+                    "pb server rejected this registration for a condition that may clear"
                 );
-
-                report(WorkerStatus::Retrying);
-
-                tokio::select! {
-                    () = shutdown.cancelled() => break 'outer,
-                    () = tokio::time::sleep(retry_interval) => {}
-                }
-                if shutdown.is_cancelled() {
-                    break 'outer;
-                }
+                (interval, backoff.reject.failures())
             }
+            Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
+                (backoff.transport.next_delay(), backoff.transport.failures())
+            }
+        };
+        tracing::info!(
+            event = "local_server_control_reconnect_scheduled",
+            key = %key,
+            worker_index,
+            local_addr = ?local_addr,
+            remote_addr = ?remote_addr,
+            status = ?status,
+            retry_delay = ?retry_interval,
+            retry_count,
+            "local server control connection will reconnect"
+        );
+
+        report(WorkerStatus::Retrying);
+
+        tokio::select! {
+            () = shutdown.cancelled() => break 'outer,
+            () = tokio::time::sleep(retry_interval) => {}
+        }
+        if shutdown.is_cancelled() {
+            break 'outer;
         }
     }
 
@@ -630,9 +687,11 @@ async fn run_server_side_cli_worker<LocalStream>(
     stream_tasks.shutdown().await;
 }
 
-#[instrument(skip(report, shutdown, stream_tasks))]
+// `backoff` is skipped: it is mutable retry state, and recording it would
+// print two ladders' internals on every span the worker enters.
+#[instrument(skip(backoff, report, shutdown, stream_tasks))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
-    retry_backoff: &mut RetryBackoff,
+    backoff: &mut ControlBackoff,
     config: ServerCliRunConfig,
     report: &impl Fn(WorkerStatus),
     shutdown: CancellationToken,
@@ -770,21 +829,27 @@ where
                 protocol_version: 1,
                 lease_ttl_ms: 0,
             },
+            // A rejection is an answer, not a failure to get one, so it never
+            // goes through `snafu_error_get_or_return_ok!`: that would report the
+            // attempt as having "finished without an error" and retry it on the
+            // transport ladder, which is how a refused registration turned into
+            // thousands of reject lines a minute.
             PbConnResponse::Error(error) => {
                 tracing::error!(
                     event = "local_server_registration_rejected",
+                    key = %key,
+                    worker_index,
                     reason = %error.code,
                     retryable = error.retryable,
                     message = %error.message,
                     "pb server rejected service registration"
                 );
-                if !error.retryable {
-                    return Err(Status::Rejected(format!(
-                        "{}: {}",
-                        error.code, error.message
-                    )));
-                }
-                snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail())
+                let reason = format!("{}: {}", error.code, error.message);
+                return Err(if error.retryable {
+                    Status::RejectedRetryable(reason)
+                } else {
+                    Status::Rejected(reason)
+                });
             }
             _ => snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail()),
         };
@@ -807,7 +872,7 @@ where
         (key, registration)
     };
 
-    retry_backoff.reset();
+    backoff.reset();
     let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<LocalControlWrite>();
     let lease_state = Arc::new(tokio::sync::Mutex::new(ControlLeaseState::new()));
     let writer_key = key.clone();

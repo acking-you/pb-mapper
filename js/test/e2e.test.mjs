@@ -151,6 +151,36 @@ test.skipIf(!hasRelay)(
 );
 
 test.skipIf(!hasRelay)(
+  "napi admin retires the connections a service is holding",
+  async () => {
+    await withRelay(async (relay) => {
+      const client = clientFor(relay);
+      const admin = client.admin();
+      const echo = await startEchoServer();
+      const registration = await client.register({
+        key: "echo",
+        localAddr: echo.address,
+        transport: "tcp",
+      });
+      try {
+        await registration.waitReady(READY_MS);
+        const before = await admin.listConnections();
+        expect(before.length).toBeGreaterThan(0);
+
+        // What an operator reaches for when a service's connection quota is
+        // full of connections that should have gone away.
+        const retired = await admin.retireConnections("echo");
+        expect(retired).toBe(before.length);
+      } finally {
+        await registration.stop();
+        await echo.close();
+      }
+    });
+  },
+  30_000,
+);
+
+test.skipIf(!hasRelay)(
   "napi constructor still requires a real credential even with a live relay",
   async () => {
     await withRelay(async (relay) => {

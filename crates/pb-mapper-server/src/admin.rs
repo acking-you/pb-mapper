@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 
 use super::error::Error;
-use super::{ManagerTask, ManagerTaskSender, Result};
+use super::{ManagerTask, ManagerTaskSender, Result, compose_service_key};
 use pb_mapper_auth::{AuthContext, AuthFailure, AuthRuntime, KeyId};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::conn_id::RemoteConnId;
@@ -211,6 +211,42 @@ async fn execute(
             )
             .await?;
             Ok(AdminResponse::Connections(response))
+        }
+        AdminRequest::ConnectionRetire {
+            key_id,
+            service_name,
+            conn_id,
+        } => {
+            let namespace = key_id.unwrap_or_default();
+            let key = compose_service_key(namespace, &service_name);
+            let (response_sender, receiver) = tokio::sync::oneshot::channel();
+            let retired = query_inventory(
+                authorization,
+                &manager,
+                ManagerTask::AdminConnectionRetire {
+                    key,
+                    conn_id: conn_id.map(RemoteConnId::from),
+                    response_sender,
+                },
+                receiver,
+                "connection retire",
+            )
+            .await?;
+            // Audited after the fact, not before: unlike a read, the interesting
+            // record is what was actually dropped. A `retired=0` entry says the
+            // operator named something the relay no longer had.
+            audit_read(
+                &auth,
+                authorization,
+                "connection_retire",
+                key_id.map(KeyId::from_u64),
+                Some(format!(
+                    "service={service_name},conn_id={},retired={retired}",
+                    conn_id.map_or_else(|| "all".to_string(), |id| id.to_string())
+                )),
+            )
+            .await;
+            Ok(AdminResponse::ConnectionsRetired { retired })
         }
     }
 }

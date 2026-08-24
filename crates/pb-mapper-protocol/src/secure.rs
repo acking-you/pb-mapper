@@ -259,12 +259,6 @@ impl ServerHeaderSession {
             .ok_or_else(|| protocol_error("server session was not authenticated"))
     }
 
-    pub fn take_context(&mut self) -> Result<AuthContext> {
-        self.context
-            .take()
-            .ok_or_else(|| protocol_error("server session was not authenticated"))
-    }
-
     pub fn response_writer<'a, T: AsyncWriteExt + Unpin>(
         &self,
         writer: &'a mut T,

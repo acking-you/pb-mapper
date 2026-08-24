@@ -537,10 +537,20 @@ fn scoped_service_key(
             false,
         ));
     }
+    Ok(compose_service_key(namespace, service_name))
+}
+
+/// Build the routing-map key for a service without validating the name.
+///
+/// The inverse of [`split_scoped_service_key`], and the one place the scoped-key
+/// format is written. Callers that accept a service name from the wire go through
+/// [`scoped_service_key`] instead, which validates it first; this is for callers
+/// naming a service that is already registered — an administrator retiring one.
+pub(super) fn compose_service_key(namespace: u64, service_name: &str) -> ImutableKey {
     if namespace == 0 {
-        Ok(Arc::from(service_name))
+        Arc::from(service_name)
     } else {
-        Ok(Arc::from(format!("@{namespace:016x}\u{0}{service_name}")))
+        Arc::from(format!("@{namespace:016x}\u{0}{service_name}"))
     }
 }
 

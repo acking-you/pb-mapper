@@ -292,11 +292,6 @@ impl Tunnel {
         expected
     }
 
-    /// True if one probe payload round-trips right now.
-    pub async fn forwards_now(&self) -> bool {
-        self.probe_once().await.is_ok()
-    }
-
     /// Poll until a payload round-trips, or fail the test.
     ///
     /// This is true end-to-end readiness — the relay, `register`'s control

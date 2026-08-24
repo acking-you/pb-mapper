@@ -1501,3 +1501,186 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
     shutdown_token.cancel();
     server.await.unwrap();
 }
+
+/// A fake relay that refuses every registration with one error.
+///
+/// Returns the timestamps of the register attempts it saw, which is what the two
+/// cases below actually assert on: how long the client waited before trying
+/// again, and whether it tried again at all.
+fn spawn_rejecting_relay(
+    listener: TcpListener,
+    remote_addr: SocketAddr,
+    code: &'static str,
+    retryable: bool,
+) -> (
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Vec<tokio::time::Instant>>>,
+) {
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let relay_attempts = attempts.clone();
+    let relay = tokio::spawn(async move {
+        let security = ServerSecurity::new(
+            AuthRuntime::from_process(auth_config(remote_addr))
+                .await
+                .unwrap(),
+        );
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let attempts = relay_attempts.clone();
+            let security = security.clone();
+            tokio::spawn(async move {
+                let (request, session) = read_secure_request(&security, &mut stream).await;
+                let response = match request {
+                    PbConnRequest::Register { .. } | PbConnRequest::RegisterScoped { .. } => {
+                        attempts.lock().unwrap().push(tokio::time::Instant::now());
+                        PbConnResponse::error(code, "refused by the test relay", retryable)
+                    }
+                    // The registration probe, which the client runs against a
+                    // relay it has not registered with yet.
+                    PbConnRequest::Status(PbConnStatusReq::Service { key }) => {
+                        PbConnResponse::Status(PbConnStatusResp::Service {
+                            key,
+                            connections: Vec::new(),
+                        })
+                    }
+                    PbConnRequest::Status(PbConnStatusReq::Keys) => {
+                        PbConnResponse::Status(PbConnStatusResp::Keys(Vec::new()))
+                    }
+                    _ => return,
+                };
+                let mut writer = session.response_writer(&mut stream).unwrap();
+                writer.write_msg(&response.encode().unwrap()).await.unwrap();
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+    (relay, attempts)
+}
+
+/// Wait until the fake relay has seen `count` register attempts.
+async fn wait_for_register_attempts(
+    attempts: &Arc<Mutex<Vec<tokio::time::Instant>>>,
+    count: usize,
+    within: Duration,
+) -> Vec<tokio::time::Instant> {
+    timeout(within, async {
+        loop {
+            let seen = attempts.lock().unwrap().clone();
+            if seen.len() >= count {
+                return seen;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("relay saw fewer than {count} register attempts"))
+}
+
+#[tokio::test]
+async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
+    let _pool_size = EnvVarGuard::set("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1");
+    let _reject_min = EnvVarGuard::set("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN", "400ms");
+    let _reject_max = EnvVarGuard::set("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX", "800ms");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = listener.local_addr().unwrap();
+    let (relay, attempts) = spawn_rejecting_relay(
+        listener,
+        remote_addr,
+        "service_connection_limit_exceeded",
+        true,
+    );
+
+    let status_changes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let callback_status_changes = status_changes.clone();
+    let local_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let local_server = tokio::spawn(run_server_side_cli_with_callback::<TcpStreamProvider, _>(
+        local_addr,
+        remote_addr,
+        Arc::from("sf-backend"),
+        ServerTunnelOptions {
+            need_codec: false,
+            is_datagram: false,
+            keep_alive: false,
+            namespace: None,
+            force_namespace: false,
+        },
+        Some(Box::new(move |status| {
+            callback_status_changes
+                .lock()
+                .unwrap()
+                .push(status.to_string());
+        })),
+    ));
+
+    let seen = wait_for_register_attempts(&attempts, 2, Duration::from_secs(5)).await;
+    let gap = seen[1].duration_since(seen[0]);
+    // The transport ladder's first delay is 100ms, so anything under the reject
+    // ladder's 400ms minimum means the rejection was retried as a transport
+    // failure — which is what turned one refusal into thousands a minute.
+    assert!(
+        gap >= Duration::from_millis(300),
+        "a retryable rejection retried after {gap:?}, far quicker than the reject ladder"
+    );
+    assert!(
+        !status_changes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s == "connected"),
+        "a refused registration reported itself connected: {:?}",
+        status_changes.lock().unwrap()
+    );
+
+    local_server.abort();
+    relay.abort();
+}
+
+#[tokio::test]
+async fn terminal_registration_rejection_stops_the_worker() {
+    let _pool_size = EnvVarGuard::set("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = listener.local_addr().unwrap();
+    let (relay, attempts) =
+        spawn_rejecting_relay(listener, remote_addr, "service_transport_mismatch", false);
+
+    let status_changes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let callback_status_changes = status_changes.clone();
+    let local_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let local_server = tokio::spawn(run_server_side_cli_with_callback::<TcpStreamProvider, _>(
+        local_addr,
+        remote_addr,
+        Arc::from("sf-backend"),
+        ServerTunnelOptions {
+            need_codec: false,
+            is_datagram: false,
+            keep_alive: false,
+            namespace: None,
+            force_namespace: false,
+        },
+        Some(Box::new(move |status| {
+            callback_status_changes
+                .lock()
+                .unwrap()
+                .push(status.to_string());
+        })),
+    ));
+
+    // The pool returns once its only worker gives up, which is the whole point:
+    // a permanent rejection has to end the tunnel rather than retry it forever.
+    timeout(Duration::from_secs(5), local_server)
+        .await
+        .expect("a permanently rejected registration kept retrying")
+        .unwrap();
+    assert_eq!(attempts.lock().unwrap().len(), 1);
+    let statuses = status_changes.lock().unwrap().clone();
+    assert!(
+        statuses
+            .last()
+            .is_some_and(|status| status.starts_with("failed: service_transport_mismatch")),
+        "a permanent rejection was not reported to the caller: {statuses:?}"
+    );
+
+    relay.abort();
+}
