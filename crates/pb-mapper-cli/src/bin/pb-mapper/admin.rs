@@ -158,7 +158,10 @@ enum OutputFormat {
 }
 
 pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
-    let remote_addr = get_pb_mapper_server_async(args.server.as_deref()).await?;
+    // Unresolved: the SDK client resolves the name itself, and keeps every
+    // address it names rather than the first.
+    let remote_addr = pb_mapper_server_addr(args.server.as_deref())?;
+    let remote_addr = remote_addr.as_str();
     match args.command {
         AdminCommand::Key(AdminKeyArgs { command }) => match command {
             AdminKeyCommand::Issue { ttl, label } => {
@@ -177,7 +180,10 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 page_size,
                 all,
             } => {
-                stream_key_pages(remote_addr, args.output, page, page_size, all).await?;
+                stream_pages::<KeyPage, _>(remote_addr, args.output, page, all, |page| {
+                    AdminRequest::KeyList { page, page_size }
+                })
+                .await?;
             }
             AdminKeyCommand::Show { key_id } => {
                 let response =
@@ -217,7 +223,14 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 page_size,
                 all,
             } = command;
-            stream_connection_pages(remote_addr, args.output, key_id, page, page_size, all).await?;
+            stream_pages::<AdminConnectionPage, _>(remote_addr, args.output, page, all, |page| {
+                AdminRequest::ConnectionList {
+                    key_id,
+                    page,
+                    page_size,
+                }
+            })
+            .await?;
         }
         AdminCommand::Service(AdminServiceArgs { command }) => {
             let AdminListCommand::List {
@@ -226,7 +239,14 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 page_size,
                 all,
             } = command;
-            stream_service_pages(remote_addr, args.output, key_id, page, page_size, all).await?;
+            stream_pages::<AdminServicePage, _>(remote_addr, args.output, page, all, |page| {
+                AdminRequest::ServiceList {
+                    key_id,
+                    page,
+                    page_size,
+                }
+            })
+            .await?;
         }
         AdminCommand::Status => {
             let response = send_admin_request(remote_addr, AdminRequest::AuthStatus).await?;
@@ -244,35 +264,29 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
         }) => {
             let key_file = key_file.unwrap_or_else(default_admin_recovery_key_file);
             let new_key = new_key.unwrap_or_else(generate_admin_key);
-            let staged_key_file = key_file.with_file_name(format!(
-                ".{}.next",
-                key_file
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("admin.key")
-            ));
-            write_admin_key_file(&staged_key_file, &new_key, true)?;
-            let response = send_admin_request(
-                remote_addr,
-                AdminRequest::RootKeyRotate {
-                    new_admin_key: new_key.clone(),
+            // Staged before the relay is contacted, and never over an unresolved
+            // candidate from an earlier attempt: that file may hold the only copy
+            // of a key the relay already installed.
+            let staged_key_file = stage_admin_key_candidate(&key_file, &new_key)?;
+            let client = admin_client(remote_addr)?;
+            let response = match client.admin()?.rotate_root_key(Some(new_key.clone())).await {
+                Ok(_) => AdminResponse::Ok {
+                    action: "administrator_key_rotated".to_string(),
                 },
-            )
-            .await
-            .map_err(|error| {
+                Err(error) => {
+                    return Err(std::io::Error::other(format!(
+                        "root rotation request failed; the candidate key remains at `{}`: {error}",
+                        staged_key_file.display()
+                    ))
+                    .into());
+                }
+            };
+            set_process_msg_header_key(Some(&new_key))?;
+            client.admin()?.auth_status().await.map_err(|error| {
                 std::io::Error::other(format!(
-                    "root rotation request failed; the candidate key remains at `{}`: {error}",
-                    staged_key_file.display()
+                    "new administrator key did not pass the post-rotation status check: {error}"
                 ))
             })?;
-            set_process_msg_header_key(Some(&new_key))?;
-            let verification = send_admin_request(remote_addr, AdminRequest::AuthStatus).await?;
-            if !matches!(verification, AdminResponse::AuthStatus(_)) {
-                return Err(std::io::Error::other(
-                    "new administrator key did not pass the post-rotation status check",
-                )
-                .into());
-            }
             write_admin_key_file(&key_file, &new_key, true).map_err(|error| {
                 std::io::Error::other(format!(
                     "administrator key rotated and verified, but `{}` could not be updated; recover the key from `{}`: {error}",
@@ -280,13 +294,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                     staged_key_file.display()
                 ))
             })?;
-            if let Err(error) = std::fs::remove_file(&staged_key_file) {
-                tracing::warn!(
-                    path = %staged_key_file.display(),
-                    %error,
-                    "administrator key was rotated, but the staged key file could not be removed"
-                );
-            }
+            discard_staged_admin_key(&staged_key_file);
             if args.output == OutputFormat::Human {
                 println!("administrator key rotated and verified");
                 println!("all temporary credentials are now invalid (temporary_key_rotated)");
@@ -311,224 +319,154 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn admin_client(remote_addr: &str) -> Result<pb_mapper_client::sdk::Client, Box<dyn Error>> {
+    let credential =
+        pb_mapper_core::checksum::get_process_credential().map_err(std::io::Error::other)?;
+    Ok(pb_mapper_client::sdk::Client::from_credential(
+        remote_addr.to_string(),
+        credential,
+        false,
+        None,
+    ))
+}
+
 async fn send_admin_request(
-    remote_addr: std::net::SocketAddr,
+    remote_addr: &str,
     request: AdminRequest,
 ) -> Result<AdminResponse, Box<dyn Error>> {
-    send_admin_request_with_timeout(remote_addr, request, control_io_timeout()).await
+    let client = admin_client(remote_addr)?;
+    Ok(client.admin()?.request(request).await?)
 }
 
-async fn send_admin_request_with_timeout(
-    remote_addr: std::net::SocketAddr,
-    request: AdminRequest,
-    io_timeout: Duration,
-) -> Result<AdminResponse, Box<dyn Error>> {
-    let encoded = PbConnRequest::Admin(request).encode()?;
-    for attempt in 0..2 {
-        let sent = std::sync::atomic::AtomicBool::new(false);
-        let attempt_result = tokio::time::timeout(io_timeout, async {
-            let mut stream = TcpStream::connect(remote_addr)
-                .await
-                .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
-            let session = ClientHeaderSession::from_process()?;
-            session.write_initial(&mut stream, &encoded).await?;
-            sent.store(true, std::sync::atomic::Ordering::Release);
-            let mut reader = session.response_reader(&mut stream)?;
-            let message = reader.read_msg().await?;
-            Ok::<_, Box<dyn Error>>(PbConnResponse::decode(message)?)
-        })
-        .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!(
-                    "administrator request attempt timed out after {} ms",
-                    io_timeout.as_millis()
-                ),
-            )
-        });
-        let pre_send = !sent.load(std::sync::atomic::Ordering::Acquire);
-        let response = match attempt_result {
-            Ok(Ok(response)) => response,
-            Ok(Err(_)) if attempt == 0 && pre_send => continue,
-            Ok(Err(error)) => return Err(error),
-            Err(_) if attempt == 0 && pre_send => continue,
-            Err(error) => return Err(error.into()),
-        };
-        match response {
-            PbConnResponse::Admin(response) => return Ok(response),
-            PbConnResponse::Error(error)
-                if error.code == "connection_salt_replayed" && error.retryable =>
-            {
-                if attempt == 0 {
-                    continue;
+/// One paginated administrator listing, as [`stream_pages`] drives it.
+///
+/// Key, service, and connection listings are the same page shape three times
+/// over — a schema version, a vector of items, and a `next_page` cursor that is
+/// `None` on the last page. This trait is what lets one loop serve all three.
+///
+/// The item type stays out of the trait: the per-page methods below are all the
+/// loop needs, and keeping them concrete means this crate never has to name the
+/// three item types or carry a `serde` dependency for the bound.
+trait AdminPage: Clone {
+    /// Names this listing in the error raised when the relay answers with some
+    /// other response variant.
+    const LABEL: &'static str;
+
+    /// Borrow this listing's page out of a response, or `None` if the relay
+    /// answered with a different variant.
+    fn from_response(response: &AdminResponse) -> Option<&Self>;
+
+    /// Re-wrap an aggregated page for [`print_admin_response`].
+    fn into_response(self) -> AdminResponse;
+
+    fn next_page(&self) -> Option<u32>;
+
+    /// Print one item per line, as `--output ndjson` streams them.
+    fn print_ndjson(&self) -> Result<(), Box<dyn Error>>;
+
+    /// This page with its items dropped and its cursor cleared: the accumulator
+    /// `--all` fills, which keeps the relay's schema version but must not claim
+    /// there is a further page.
+    fn empty_clone(&self) -> Self;
+
+    /// Append `page`'s items to this accumulator.
+    fn absorb(&mut self, page: &Self);
+}
+
+/// Declares [`AdminPage`] for one wire page type.
+macro_rules! impl_admin_page {
+    ($page:ty, variant = $variant:ident, label = $label:literal) => {
+        impl AdminPage for $page {
+            const LABEL: &'static str = $label;
+
+            fn from_response(response: &AdminResponse) -> Option<&Self> {
+                match response {
+                    AdminResponse::$variant(page) => Some(page),
+                    _ => None,
                 }
             }
-            PbConnResponse::Error(error) => {
-                return Err(std::io::Error::other(format!(
-                    "{}: {} (retryable={})",
-                    error.code, error.message, error.retryable
-                ))
-                .into());
-            }
-            response => {
-                return Err(std::io::Error::other(format!(
-                    "unexpected administrator response: {response:?}"
-                ))
-                .into());
-            }
-        }
-    }
-    Err(std::io::Error::other("connection salt replay retry was exhausted").into())
-}
 
-async fn stream_key_pages(
-    remote_addr: std::net::SocketAddr,
-    output: OutputFormat,
-    mut page: u32,
-    page_size: u16,
-    all: bool,
-) -> Result<(), Box<dyn Error>> {
-    let mut combined: Option<KeyPage> = None;
-    loop {
-        let response =
-            send_admin_request(remote_addr, AdminRequest::KeyList { page, page_size }).await?;
-        let AdminResponse::KeyList(key_page) = &response else {
-            return Err(std::io::Error::other("unexpected key-list response").into());
-        };
-        if all {
-            if output == OutputFormat::Ndjson {
-                for item in &key_page.items {
+            fn into_response(self) -> AdminResponse {
+                AdminResponse::$variant(self)
+            }
+
+            fn next_page(&self) -> Option<u32> {
+                self.next_page
+            }
+
+            fn print_ndjson(&self) -> Result<(), Box<dyn Error>> {
+                for item in &self.items {
                     println!("{}", serde_json::to_string(item)?);
                 }
-            } else {
-                let page = combined.get_or_insert_with(|| {
-                    let mut page = key_page.clone();
-                    page.items.clear();
-                    page.next_page = None;
-                    page
-                });
-                page.items.extend(key_page.items.iter().cloned());
+                Ok(())
             }
-        } else {
-            print_admin_response(output, &response)?;
+
+            fn empty_clone(&self) -> Self {
+                Self {
+                    items: Vec::new(),
+                    next_page: None,
+                    ..self.clone()
+                }
+            }
+
+            fn absorb(&mut self, page: &Self) {
+                self.items.extend_from_slice(&page.items);
+            }
         }
-        let Some(next_page) = key_page.next_page else {
-            break;
-        };
-        if !all {
-            break;
-        }
-        page = next_page;
-    }
-    if let Some(page) = combined {
-        print_admin_response(output, &AdminResponse::KeyList(page))?;
-    }
-    Ok(())
+    };
 }
 
-async fn stream_service_pages(
-    remote_addr: std::net::SocketAddr,
-    output: OutputFormat,
-    key_id: Option<u64>,
-    mut page: u32,
-    page_size: u16,
-    all: bool,
-) -> Result<(), Box<dyn Error>> {
-    let mut combined: Option<AdminServicePage> = None;
-    loop {
-        let response = send_admin_request(
-            remote_addr,
-            AdminRequest::ServiceList {
-                key_id,
-                page,
-                page_size,
-            },
-        )
-        .await?;
-        let AdminResponse::Services(service_page) = &response else {
-            return Err(std::io::Error::other("unexpected service-list response").into());
-        };
-        if all {
-            if output == OutputFormat::Ndjson {
-                for item in &service_page.items {
-                    println!("{}", serde_json::to_string(item)?);
-                }
-            } else {
-                let page = combined.get_or_insert_with(|| {
-                    let mut page = service_page.clone();
-                    page.items.clear();
-                    page.next_page = None;
-                    page
-                });
-                page.items.extend(service_page.items.iter().cloned());
-            }
-        } else {
-            print_admin_response(output, &response)?;
-        }
-        let Some(next_page) = service_page.next_page else {
-            break;
-        };
-        if !all {
-            break;
-        }
-        page = next_page;
-    }
-    if let Some(page) = combined {
-        print_admin_response(output, &AdminResponse::Services(page))?;
-    }
-    Ok(())
-}
+impl_admin_page!(KeyPage, variant = KeyList, label = "key-list");
+impl_admin_page!(AdminServicePage, variant = Services, label = "service-list");
+impl_admin_page!(
+    AdminConnectionPage,
+    variant = Connections,
+    label = "connection-list"
+);
 
-async fn stream_connection_pages(
-    remote_addr: std::net::SocketAddr,
+/// Fetch and render one page, or every page from `page` onwards when `all`.
+///
+/// `request` builds the listing's request for a given page number; everything
+/// else — the walk, the output contract, and the aggregation — is the same for
+/// all three listings.
+///
+/// The output modes deliberately differ under `--all`: NDJSON streams each item
+/// as it arrives, while human and JSON aggregate into a single page so their
+/// output stays one well-formed document.
+async fn stream_pages<P, F>(
+    remote_addr: &str,
     output: OutputFormat,
-    key_id: Option<u64>,
     mut page: u32,
-    page_size: u16,
     all: bool,
-) -> Result<(), Box<dyn Error>> {
-    let mut combined: Option<AdminConnectionPage> = None;
+    request: F,
+) -> Result<(), Box<dyn Error>>
+where
+    P: AdminPage,
+    F: Fn(u32) -> AdminRequest,
+{
+    let mut aggregated: Option<P> = None;
     loop {
-        let response = send_admin_request(
-            remote_addr,
-            AdminRequest::ConnectionList {
-                key_id,
-                page,
-                page_size,
-            },
-        )
-        .await?;
-        let AdminResponse::Connections(connection_page) = &response else {
-            return Err(std::io::Error::other("unexpected connection-list response").into());
+        let response = send_admin_request(remote_addr, request(page)).await?;
+        let Some(current) = P::from_response(&response) else {
+            return Err(std::io::Error::other(format!("unexpected {} response", P::LABEL)).into());
         };
-        if all {
-            if output == OutputFormat::Ndjson {
-                for item in &connection_page.items {
-                    println!("{}", serde_json::to_string(item)?);
-                }
-            } else {
-                let page = combined.get_or_insert_with(|| {
-                    let mut page = connection_page.clone();
-                    page.items.clear();
-                    page.next_page = None;
-                    page
-                });
-                page.items.extend(connection_page.items.iter().cloned());
-            }
-        } else {
-            print_admin_response(output, &response)?;
+
+        match (all, output) {
+            (false, _) => print_admin_response(output, &response)?,
+            (true, OutputFormat::Ndjson) => current.print_ndjson()?,
+            (true, _) => aggregated
+                .get_or_insert_with(|| current.empty_clone())
+                .absorb(current),
         }
-        let Some(next_page) = connection_page.next_page else {
-            break;
-        };
-        if !all {
-            break;
+
+        match current.next_page() {
+            Some(next_page) if all => page = next_page,
+            _ => break,
         }
-        page = next_page;
     }
-    if let Some(page) = combined {
-        print_admin_response(output, &AdminResponse::Connections(page))?;
+
+    if let Some(aggregated) = aggregated {
+        print_admin_response(output, &aggregated.into_response())?;
     }
     Ok(())
 }
@@ -668,18 +606,18 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let error = send_admin_request_with_timeout(
-            remote_addr,
-            AdminRequest::AuthStatus,
-            Duration::from_millis(50),
-        )
-        .await
-        .expect_err("a stalled administrator request should time out");
+        let error = admin_client(&remote_addr.to_string())
+            .expect("test client")
+            .admin()
+            .expect("administrator credential")
+            .request_with_timeout(AdminRequest::AuthStatus, Duration::from_millis(50))
+            .await
+            .expect_err("a stalled administrator request should time out");
 
-        let io_error = error
-            .downcast_ref::<std::io::Error>()
-            .expect("timeout should be reported as an I/O error");
-        assert_eq!(io_error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            matches!(error, pb_mapper_client::sdk::Error::TimedOut { .. }),
+            "timeout should be reported as TimedOut, got {error}"
+        );
         stalled_peer.abort();
     }
 }

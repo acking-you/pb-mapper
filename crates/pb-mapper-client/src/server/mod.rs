@@ -2,14 +2,14 @@ pub mod error;
 mod stream;
 
 use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use snafu::ResultExt;
 use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use self::error::{
@@ -18,9 +18,10 @@ use self::error::{
     RegisterRespNotMatchSnafu, SendRegisterReqSnafu, WritePingMsgSnafu, WriteStreamAckMsgSnafu,
 };
 use self::stream::{StreamConnect, handle_stream};
+use crate::addr::resolve_tunnel_ends;
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{
-    control_conn_pool_size, control_heartbeat_interval, control_heartbeat_tolerance,
+    ResolvedAddrs, control_conn_pool_size, control_heartbeat_interval, control_heartbeat_tolerance,
     control_io_timeout, control_suspect_grace, registration_probe_timeout,
 };
 use pb_mapper_core::timeout::RetryBackoff;
@@ -36,9 +37,7 @@ use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use pb_mapper_protocol::{MessageReader, MessageWriter};
 use uni_stream::addr::{ToSocketAddrs, each_addr};
-use uni_stream::stream::{
-    StreamProvider, got_one_socket_addr, set_tcp_keep_alive, set_tcp_nodelay,
-};
+use uni_stream::stream::{StreamProvider, set_tcp_keep_alive, set_tcp_nodelay};
 
 fn get_ping_message(protocol_version: u16, seq: u64) -> error::Result<Vec<u8>> {
     if protocol_version >= CONTROL_PROTOCOL_V2 {
@@ -55,6 +54,12 @@ enum Status {
     ReadMsg,
     SendPing,
     ConnectRemote,
+    Cancelled,
+    /// The relay refused the registration for a reason reconnecting cannot fix —
+    /// a namespace the credential does not own, a malformed service name. Retrying
+    /// would loop forever while the caller's `wait_ready` never resolves, so this
+    /// ends the worker instead.
+    Rejected(String),
 }
 
 enum LocalControlWrite {
@@ -114,6 +119,109 @@ enum RegistrationProbeResult {
 // Callback for notifying status changes to external systems
 pub type StatusCallback = Box<dyn Fn(&str) + Send + Sync>;
 
+/// Turns the control pool's per-worker statuses into the one status a caller sees.
+///
+/// A registration is served by [`control_conn_pool_size`] control connections,
+/// any one of which keeps the service reachable. Reporting only the first
+/// worker's view — which is what this code did — meant a caller was told
+/// `retrying` while the rest of the pool was registered and forwarding fine.
+///
+/// So the pool's status is the best of its workers, in this order:
+///
+/// * `connected` — at least one worker is registered.
+/// * `retrying` — none is, but at least one is still trying.
+/// * `failed` — every worker gave up permanently. Only then, because a caller
+///   awaiting readiness with no timeout must not be released while any worker
+///   could still bring the service up.
+///
+/// The reported status is recomputed on every worker transition and forwarded
+/// only when it actually changes, so a caller sees pool-level transitions rather
+/// than one line per worker.
+struct PoolStatus {
+    callback: StatusCallback,
+    workers: Mutex<PoolStatusState>,
+}
+
+/// What each worker last reported, plus what the pool last published.
+struct PoolStatusState {
+    workers: Vec<WorkerStatus>,
+    published: Option<WorkerStatus>,
+}
+
+/// One worker's latest view of its own control connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkerStatus {
+    /// Connecting, or reconnecting after a retryable failure.
+    Retrying,
+    /// Registered: this worker alone makes the service reachable.
+    Connected,
+    /// Permanently rejected; this worker will not try again.
+    Failed(String),
+}
+
+impl PoolStatus {
+    fn new(callback: StatusCallback, pool_size: usize) -> Self {
+        Self {
+            callback,
+            workers: Mutex::new(PoolStatusState {
+                workers: vec![WorkerStatus::Retrying; pool_size],
+                published: None,
+            }),
+        }
+    }
+
+    /// Record `status` for `worker_index`, and publish the pool's status if the
+    /// aggregate changed.
+    fn report(&self, worker_index: usize, status: WorkerStatus) {
+        let next = {
+            let mut state = self
+                .workers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(slot) = state.workers.get_mut(worker_index) {
+                *slot = status;
+            }
+            let aggregate = Self::aggregate(&state.workers);
+            if state.published.as_ref() == Some(&aggregate) {
+                return;
+            }
+            state.published = Some(aggregate.clone());
+            aggregate
+        };
+        // Outside the lock: the callback runs caller code, which must not be able
+        // to deadlock a worker reporting its own transition.
+        match next {
+            WorkerStatus::Connected => (self.callback)("connected"),
+            WorkerStatus::Retrying => (self.callback)("retrying"),
+            WorkerStatus::Failed(reason) => (self.callback)(&format!("failed: {reason}")),
+        }
+    }
+
+    /// The best status among the workers. `Failed` needs every one of them.
+    ///
+    /// `Connected` short-circuits; `Retrying` cannot, because a later worker may
+    /// still be connected and outrank it.
+    fn aggregate(workers: &[WorkerStatus]) -> WorkerStatus {
+        let mut retrying = false;
+        let mut first_failure = None;
+        for status in workers {
+            match status {
+                WorkerStatus::Connected => return WorkerStatus::Connected,
+                WorkerStatus::Retrying => retrying = true,
+                WorkerStatus::Failed(reason) => {
+                    first_failure.get_or_insert(reason);
+                }
+            }
+        }
+        match first_failure {
+            // A pool that is out of workers reports the first permanent rejection
+            // it collected, which is the one that explains the others.
+            Some(reason) if !retrying => WorkerStatus::Failed(reason.clone()),
+            _ => WorkerStatus::Retrying,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ServiceStatus {
     Retrying,
@@ -137,16 +245,16 @@ pub struct ServerTunnelOptions {
 }
 
 #[derive(Clone)]
-struct ServerCliRunConfig<A> {
-    local_addr: A,
-    remote_addr: A,
+struct ServerCliRunConfig {
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
     key: Arc<str>,
     options: ServerTunnelOptions,
     worker_index: usize,
     credential: Credential,
 }
 
-impl<A: Debug> Debug for ServerCliRunConfig<A> {
+impl Debug for ServerCliRunConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ServerCliRunConfig")
@@ -173,7 +281,7 @@ fn new_client_instance_id(worker_index: usize) -> String {
 }
 
 async fn probe_remote_registration(
-    remote_addr: SocketAddr,
+    remote_addr: ResolvedAddrs,
     key: Arc<str>,
     registration: ControlRegistration,
     namespace: Option<u64>,
@@ -181,7 +289,7 @@ async fn probe_remote_registration(
 ) -> RegistrationProbeResult {
     let timeout = registration_probe_timeout();
     let result = tokio::time::timeout(timeout, async {
-        let mut stream = each_addr(remote_addr, TcpStream::connect)
+        let mut stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
             .await
             .map_err(|e| format!("connect remote status stream failed: {e}"))?;
         crate::client::status::get_status_with_credential(
@@ -246,7 +354,7 @@ pub async fn run_server_side_cli<LocalStream, A>(
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
-    A: ToSocketAddrs + Debug + Copy,
+    A: ToSocketAddrs,
 {
     run_server_side_cli_with_callback::<LocalStream, A>(local_addr, remote_addr, key, options, None)
         .await
@@ -262,15 +370,48 @@ pub async fn run_server_side_cli_with_pinned_credential<LocalStream, A>(
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
-    A: ToSocketAddrs + Debug + Copy,
+    A: ToSocketAddrs,
 {
-    run_server_side_cli_pool::<LocalStream, A>(
+    let Some((local_addr, remote_addr)) = resolve_tunnel_ends(local_addr, remote_addr).await else {
+        return;
+    };
+    run_server_side_cli_pool::<LocalStream>(
         local_addr,
         remote_addr,
         key,
         options,
         status_callback,
         Some(credential),
+        CancellationToken::new(),
+    )
+    .await;
+}
+
+/// Same as [`run_server_side_cli_with_pinned_credential`], but the retry loop
+/// returns when `shutdown` is cancelled.
+///
+/// Takes both ends already resolved, because its caller — the SDK — resolves them
+/// itself in order to report a bad address as an error rather than a log line.
+pub async fn run_server_side_cli_with_shutdown<LocalStream>(
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
+    key: Arc<str>,
+    options: ServerTunnelOptions,
+    status_callback: Option<StatusCallback>,
+    credential: Credential,
+    shutdown: CancellationToken,
+) where
+    LocalStream: StreamProvider + Send + 'static,
+    LocalStream::Item: StreamForward,
+{
+    run_server_side_cli_pool::<LocalStream>(
+        local_addr,
+        remote_addr,
+        key,
+        options,
+        status_callback,
+        Some(credential),
+        shutdown,
     )
     .await;
 }
@@ -284,62 +425,64 @@ pub async fn run_server_side_cli_with_callback<LocalStream, A>(
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
-    A: ToSocketAddrs + Debug + Copy,
+    A: ToSocketAddrs,
 {
-    run_server_side_cli_pool::<LocalStream, A>(
+    let Some((local_addr, remote_addr)) = resolve_tunnel_ends(local_addr, remote_addr).await else {
+        return;
+    };
+    run_server_side_cli_pool::<LocalStream>(
         local_addr,
         remote_addr,
         key,
         options,
         status_callback,
         None,
+        CancellationToken::new(),
     )
     .await;
 }
 
-async fn resolve_registration_credential(pinned: Option<Credential>) -> Credential {
+async fn resolve_registration_credential(
+    pinned: Option<Credential>,
+    shutdown: &CancellationToken,
+) -> Option<Credential> {
     if let Some(credential) = pinned {
-        return credential;
+        return Some(credential);
     }
     let mut retry_backoff = RetryBackoff::default();
     loop {
+        if shutdown.is_cancelled() {
+            return None;
+        }
         match get_process_credential() {
-            Ok(credential) => return credential,
+            Ok(credential) => return Some(credential),
             Err(error) => {
                 tracing::error!("load registration credential failed: {error}");
-                tokio::time::sleep(retry_backoff.next_delay()).await;
+                tokio::select! {
+                    () = shutdown.cancelled() => return None,
+                    () = tokio::time::sleep(retry_backoff.next_delay()) => {}
+                }
             }
         }
     }
 }
 
-async fn run_server_side_cli_pool<LocalStream, A>(
-    local_addr: A,
-    remote_addr: A,
+async fn run_server_side_cli_pool<LocalStream>(
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
     key: Arc<str>,
     options: ServerTunnelOptions,
     status_callback: Option<StatusCallback>,
     pinned_credential: Option<Credential>,
+    shutdown: CancellationToken,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
-    A: ToSocketAddrs + Debug + Copy,
 {
-    let local_addr = match got_one_socket_addr(local_addr).await {
-        Ok(addr) => addr,
-        Err(e) => {
-            tracing::error!("parse local addr failed: {e}");
-            return;
-        }
+    let Some(credential) = resolve_registration_credential(pinned_credential, &shutdown).await
+    else {
+        return;
     };
-    let remote_addr = match got_one_socket_addr(remote_addr).await {
-        Ok(addr) => addr,
-        Err(e) => {
-            tracing::error!("parse remote addr failed: {e}");
-            return;
-        }
-    };
-    let credential = resolve_registration_credential(pinned_credential).await;
     let pool_size = control_conn_pool_size().max(1);
     tracing::info!(
         event = "local_server_control_pool_starting",
@@ -348,23 +491,27 @@ async fn run_server_side_cli_pool<LocalStream, A>(
         "starting local server control connection pool"
     );
     let mut workers = JoinSet::new();
-    let mut status_callback = status_callback;
+    // Every worker reports here, and the pool's aggregate is what the caller is
+    // told: one healthy control connection is a reachable service, whichever
+    // worker holds it.
+    let pool_status =
+        status_callback.map(|callback| Arc::new(PoolStatus::new(callback, pool_size)));
     for worker_index in 0..pool_size {
         let worker_key = key.clone();
-        let callback = if worker_index == 0 {
-            status_callback.take()
-        } else {
-            None
-        };
+        let worker_status = pool_status.clone();
+        let worker_shutdown = shutdown.clone();
+        let worker_local = local_addr.clone();
+        let worker_remote = remote_addr.clone();
         workers.spawn(async move {
-            run_server_side_cli_worker::<LocalStream, _>(
-                local_addr,
-                remote_addr,
+            run_server_side_cli_worker::<LocalStream>(
+                worker_local,
+                worker_remote,
                 worker_key,
                 options,
-                callback,
+                worker_status,
                 worker_index,
                 credential,
+                worker_shutdown,
             )
             .await;
         });
@@ -380,38 +527,56 @@ async fn run_server_side_cli_pool<LocalStream, A>(
     }
 }
 
-async fn run_server_side_cli_worker<LocalStream, A>(
-    local_addr: A,
-    remote_addr: A,
+#[allow(clippy::too_many_arguments)]
+async fn run_server_side_cli_worker<LocalStream>(
+    local_addr: ResolvedAddrs,
+    remote_addr: ResolvedAddrs,
     key: Arc<str>,
     options: ServerTunnelOptions,
-    status_callback: Option<StatusCallback>,
+    pool_status: Option<Arc<PoolStatus>>,
     worker_index: usize,
     credential: Credential,
+    shutdown: CancellationToken,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
-    A: ToSocketAddrs + Debug + Copy + Send + 'static,
 {
+    let report = |status: WorkerStatus| {
+        if let Some(ref pool_status) = pool_status {
+            pool_status.report(worker_index, status);
+        }
+    };
     let mut retry_backoff = RetryBackoff::default();
     let run_config = ServerCliRunConfig {
-        local_addr,
-        remote_addr,
+        local_addr: local_addr.clone(),
+        remote_addr: remote_addr.clone(),
         key: key.clone(),
         options,
         worker_index,
         credential,
     };
-    loop {
-        let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
+    // Forwarded sessions outlive a single control connection, so the set lives
+    // here rather than inside the attempt: a reconnect is not a reason to drop
+    // streams that are still healthy. It is drained before this worker returns.
+    let mut stream_tasks = JoinSet::new();
+    'outer: loop {
+        if shutdown.is_cancelled() {
+            break 'outer;
+        }
+        let status = if let Err(status) = run_server_side_cli_inner::<LocalStream>(
             &mut retry_backoff,
             run_config.clone(),
-            status_callback.as_ref(),
+            &report,
+            shutdown.clone(),
+            &mut stream_tasks,
         )
         .await
         {
             status
         } else {
+            if shutdown.is_cancelled() {
+                break 'outer;
+            }
             tracing::warn!(
                 event = "local_server_control_worker_finished",
                 key = %key,
@@ -421,6 +586,18 @@ async fn run_server_side_cli_worker<LocalStream, A>(
             Status::ReadMsg
         };
         match status {
+            Status::Cancelled => break 'outer,
+            Status::Rejected(reason) => {
+                tracing::error!(
+                    event = "local_server_registration_rejected_permanently",
+                    key = %key,
+                    worker_index,
+                    reason = %reason,
+                    "pb server permanently rejected this registration; not reconnecting"
+                );
+                report(WorkerStatus::Failed(reason));
+                break 'outer;
+            }
             Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
                 let retry_interval = retry_backoff.next_delay();
                 tracing::info!(
@@ -435,25 +612,31 @@ async fn run_server_side_cli_worker<LocalStream, A>(
                     "local server control connection will reconnect"
                 );
 
-                if let Some(ref callback) = status_callback {
-                    let status = format!("{status:?}");
-                    callback(&status);
-                }
+                report(WorkerStatus::Retrying);
 
-                tokio::time::sleep(retry_interval).await;
-                if let Some(ref callback) = status_callback {
-                    callback("retrying");
+                tokio::select! {
+                    () = shutdown.cancelled() => break 'outer,
+                    () = tokio::time::sleep(retry_interval) => {}
+                }
+                if shutdown.is_cancelled() {
+                    break 'outer;
                 }
             }
         }
     }
+
+    // Cancellation is already signalled by the token the sessions hold; this only
+    // waits for them to observe it.
+    stream_tasks.shutdown().await;
 }
 
-#[instrument(skip(status_callback))]
-async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
+#[instrument(skip(report, shutdown, stream_tasks))]
+async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     retry_backoff: &mut RetryBackoff,
-    config: ServerCliRunConfig<A>,
-    status_callback: Option<&StatusCallback>,
+    config: ServerCliRunConfig,
+    report: &impl Fn(WorkerStatus),
+    shutdown: CancellationToken,
+    stream_tasks: &mut JoinSet<()>,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,
@@ -473,23 +656,8 @@ where
         worker_index,
         credential,
     } = config;
-    let local_addr = match got_one_socket_addr(local_addr).await {
-        Ok(addr) => addr,
-        Err(e) => {
-            tracing::error!("parse local addr failed: {e}");
-            return Err(Status::ConnectRemote);
-        }
-    };
-    let remote_addr = match got_one_socket_addr(remote_addr).await {
-        Ok(addr) => addr,
-        Err(e) => {
-            tracing::error!("parse remote addr failed: {e}");
-            return Err(Status::ConnectRemote);
-        }
-    };
-
     let mut manager_stream = snafu_error_get_or_return!(
-        each_addr(remote_addr, TcpStream::connect).await,
+        each_addr(remote_addr.as_slice(), TcpStream::connect).await,
         "[connect remote stream]",
         Err(Status::ConnectRemote)
     );
@@ -610,6 +778,12 @@ where
                     message = %error.message,
                     "pb server rejected service registration"
                 );
+                if !error.retryable {
+                    return Err(Status::Rejected(format!(
+                        "{}: {}",
+                        error.code, error.message
+                    )));
+                }
                 snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail())
             }
             _ => snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail()),
@@ -627,10 +801,9 @@ where
             "local server registered with pb server"
         );
 
-        // Notify external systems that connection is established
-        if let Some(ref callback) = status_callback {
-            callback("connected");
-        }
+        // This worker holds a registered control connection, which is on its own
+        // enough to make the service reachable.
+        report(WorkerStatus::Connected);
         (key, registration)
     };
 
@@ -719,11 +892,11 @@ where
                 };
                 lease_state.lock().await.record_rx();
                 snafu_error_get_or_continue!(
-                    handle_request::<LocalStream, _>(
+                    handle_request::<LocalStream>(
                         msg,
                         StreamConnect {
-                            local_addr,
-                            remote_addr,
+                            local_addr: local_addr.clone(),
+                            remote_addr: remote_addr.clone(),
                             keep_alive,
                             namespace,
                             credential,
@@ -732,9 +905,15 @@ where
                         registration.conn_id,
                         &write_tx,
                         lease_state.clone(),
+                        stream_tasks,
+                        &shutdown,
                     )
                     .await
                 );
+            }
+            Some(_) = stream_tasks.join_next() => {
+                // Reap finished sessions so the set does not grow for the lifetime
+                // of the registration. `handle_stream` logs its own failures.
             }
             result = &mut writer_handle => {
                 break match result {
@@ -776,9 +955,10 @@ where
                     probe_in_flight = true;
                     let probe_tx = probe_tx.clone();
                     let probe_key = key.clone();
+                    let probe_remote = remote_addr.clone();
                     tokio::spawn(async move {
                         let result = probe_remote_registration(
-                            remote_addr,
+                            probe_remote,
                             probe_key,
                             registration,
                             namespace,
@@ -788,6 +968,17 @@ where
                         let _ = probe_tx.send(result);
                     });
                 }
+            }
+            () = shutdown.cancelled() => {
+                tracing::info!(
+                    event = "local_server_control_cancelled",
+                    key = %key,
+                    conn_id = %registration.conn_id,
+                    generation = registration.generation,
+                    worker_index,
+                    "local server control loop cancelled"
+                );
+                break Err(Status::Cancelled);
             }
             Some(probe_result) = probe_rx.recv() => {
                 probe_in_flight = false;
@@ -883,17 +1074,17 @@ async fn handle_ping_interval<T: MessageWriter>(
     }
 }
 
-#[instrument(skip(msg, write_tx, lease_state))]
-async fn handle_request<
-    LocalStream: StreamProvider,
-    A: ToSocketAddrs + Debug + Copy + Clone + Send + 'static,
->(
+#[instrument(skip(msg, write_tx, lease_state, stream_tasks, shutdown))]
+#[allow(clippy::too_many_arguments)]
+async fn handle_request<LocalStream: StreamProvider>(
     msg: &[u8],
-    target: StreamConnect<A>,
+    target: StreamConnect,
     key: Arc<str>,
     conn_id: u32,
     write_tx: &tokio::sync::mpsc::UnboundedSender<LocalControlWrite>,
     lease_state: Arc<tokio::sync::Mutex<ControlLeaseState>>,
+    stream_tasks: &mut JoinSet<()>,
+    shutdown: &CancellationToken,
 ) -> error::Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -922,11 +1113,17 @@ where
                     action: "stream ack message",
                 })?;
             let key = key.clone();
-            tokio::spawn(async move {
-                snafu_error_handle!(
-                    handle_stream::<LocalStream, _>(key, client_id, server_generation, target,)
-                        .await
-                )
+            let stream_shutdown = shutdown.clone();
+            // Tracked rather than detached: a cancelled registration must take its
+            // in-flight forwarded sessions with it, so `stop()` returning means no
+            // stream of this tunnel is still moving bytes.
+            stream_tasks.spawn(async move {
+                let forward =
+                    handle_stream::<LocalStream>(key, client_id, server_generation, target);
+                tokio::select! {
+                    () = stream_shutdown.cancelled() => {}
+                    result = forward => snafu_error_handle!(result),
+                }
             });
         }
         // got pong response
@@ -987,5 +1184,131 @@ async fn write_stream_ack<T: MessageWriter>(
             timeout,
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod pool_status_tests {
+    use std::sync::Mutex as StdMutex;
+
+    use super::*;
+
+    /// Records what the pool published, in order.
+    fn recording_pool(pool_size: usize) -> (PoolStatus, Arc<StdMutex<Vec<String>>>) {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let sink = seen.clone();
+        let callback: StatusCallback = Box::new(move |status: &str| {
+            sink.lock().unwrap().push(status.to_string());
+        });
+        (PoolStatus::new(callback, pool_size), seen)
+    }
+
+    fn published(seen: &Arc<StdMutex<Vec<String>>>) -> Vec<String> {
+        seen.lock().unwrap().clone()
+    }
+
+    /// One connected worker is enough: the service is reachable through it, so
+    /// the pool must not report the other worker's retry as the pool's state.
+    #[test]
+    fn one_connected_worker_makes_the_pool_connected() {
+        let (pool, seen) = recording_pool(2);
+        pool.report(0, WorkerStatus::Connected);
+        pool.report(1, WorkerStatus::Retrying);
+        assert_eq!(published(&seen), vec!["connected".to_string()]);
+    }
+
+    /// The guarantee `wait_ready()` depends on: while any worker might still
+    /// bring the service up, one worker's permanent rejection is not the pool's.
+    #[test]
+    fn a_single_failure_does_not_fail_the_pool() {
+        let (pool, seen) = recording_pool(2);
+        pool.report(0, WorkerStatus::Failed("service_transport_mismatch".into()));
+        assert_eq!(published(&seen), vec!["retrying".to_string()]);
+
+        pool.report(1, WorkerStatus::Connected);
+        assert_eq!(
+            published(&seen),
+            vec!["retrying".to_string(), "connected".to_string()]
+        );
+    }
+
+    /// Once every worker has given up, the pool reports failed and says why —
+    /// otherwise a caller awaiting readiness with no timeout waits forever.
+    #[test]
+    fn the_pool_fails_only_when_every_worker_has() {
+        let (pool, seen) = recording_pool(2);
+        pool.report(0, WorkerStatus::Failed("service_transport_mismatch".into()));
+        pool.report(1, WorkerStatus::Failed("namespace_access_denied".into()));
+        assert_eq!(
+            published(&seen),
+            vec![
+                "retrying".to_string(),
+                "failed: service_transport_mismatch".to_string(),
+            ],
+            "the first permanent rejection is the one that explains the pool"
+        );
+    }
+
+    /// A worker that reconnects repeatedly must not turn into a stream of
+    /// identical status lines for the caller.
+    #[test]
+    fn unchanged_aggregates_are_not_republished() {
+        let (pool, seen) = recording_pool(2);
+        pool.report(0, WorkerStatus::Connected);
+        pool.report(1, WorkerStatus::Connected);
+        pool.report(0, WorkerStatus::Connected);
+        assert_eq!(published(&seen), vec!["connected".to_string()]);
+    }
+
+    /// Losing the last connected worker has to be visible: the service is no
+    /// longer reachable, and the caller's status must say so.
+    #[test]
+    fn losing_the_last_connection_publishes_retrying() {
+        let (pool, seen) = recording_pool(1);
+        pool.report(0, WorkerStatus::Connected);
+        pool.report(0, WorkerStatus::Retrying);
+        assert_eq!(
+            published(&seen),
+            vec!["connected".to_string(), "retrying".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use uni_stream::stream::TcpStreamProvider;
+
+    #[tokio::test]
+    async fn register_loop_stops_on_cancel() {
+        let shutdown = CancellationToken::new();
+        let token = shutdown.clone();
+        let addr = ResolvedAddrs::from("127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap());
+        let task = tokio::spawn(async move {
+            run_server_side_cli_with_shutdown::<TcpStreamProvider>(
+                addr.clone(),
+                addr,
+                "k".into(),
+                ServerTunnelOptions {
+                    need_codec: false,
+                    is_datagram: false,
+                    keep_alive: false,
+                    namespace: None,
+                    force_namespace: false,
+                },
+                None,
+                Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+                token,
+            )
+            .await;
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("register loop did not stop after cancel")
+            .expect("join");
     }
 }

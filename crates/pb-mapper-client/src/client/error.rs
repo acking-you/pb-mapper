@@ -30,6 +30,18 @@ pub enum Error {
         // Structured representation of response
         resp: String,
     },
+    /// The relay answered a status request with a structured refusal.
+    ///
+    /// `retryable` is the relay's own verdict and the reason this is a variant of
+    /// its own: a caller that loops on every status failure would spin forever on
+    /// a refusal that reconnecting cannot fix, such as a namespace the credential
+    /// does not own.
+    #[snafu(display("relay refused the status request: {code}: {message}"))]
+    StatusRemoteError {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
     #[snafu(display("write subcribe request error"))]
     WriteSubcribeReq { source: common::error::Error },
     #[snafu(display("read subcribe response error"))]
@@ -58,6 +70,20 @@ pub enum Error {
         action: &'static str,
         timeout: Duration,
     },
+}
+
+impl Error {
+    /// The relay's verdict on whether the same request could ever succeed, or
+    /// `None` when this failure did not come from the relay.
+    ///
+    /// Transport and framing failures are `None`: nothing about a dropped
+    /// connection says the relay's answer is final.
+    pub fn remote_retryable(&self) -> Option<bool> {
+        match self {
+            Self::StatusRemoteError { retryable, .. } => Some(*retryable),
+            _ => None,
+        }
+    }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

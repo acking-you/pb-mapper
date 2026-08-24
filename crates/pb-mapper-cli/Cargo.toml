@@ -3,6 +3,7 @@ name = "pb-mapper-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+publish = false
 
 # The binary keeps the name `pb-mapper`, discovered from
 # `src/bin/pb-mapper.rs`. Release workflows, both Dockerfiles, and the install

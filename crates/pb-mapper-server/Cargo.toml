@@ -1,5 +1,6 @@
 [package]
 name = "pb-mapper-server"
+publish = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

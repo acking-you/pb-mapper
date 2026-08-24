@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use std::sync::Arc;
 
 use snafu::ResultExt;
@@ -12,18 +11,22 @@ use super::error::{
 };
 use crate::server::error::CreateHeaderToolSnafu;
 use pb_mapper_core::checksum::Credential;
-use pb_mapper_core::config::control_io_timeout;
+use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout};
 use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
-use uni_stream::addr::{ToSocketAddrs, each_addr};
+use uni_stream::addr::each_addr;
 use uni_stream::stream::{StreamProvider, StreamSplit, set_tcp_keep_alive, set_tcp_nodelay};
 
-#[derive(Clone, Copy, Debug)]
-pub struct StreamConnect<A> {
-    pub local_addr: A,
-    pub remote_addr: A,
+/// Where one forwarded session dials, both ends resolved.
+///
+/// Each end is the full candidate list rather than one address, so a session
+/// opened long after registration still has every record to try.
+#[derive(Clone, Debug)]
+pub struct StreamConnect {
+    pub local_addr: ResolvedAddrs,
+    pub remote_addr: ResolvedAddrs,
     pub keep_alive: bool,
     pub namespace: Option<u64>,
     pub credential: Credential,
@@ -32,14 +35,11 @@ pub struct StreamConnect<A> {
 /// Handle a stream connection and establish a forward network traffic forwarding.
 /// This function handles both local and remote streams, sets up message writers and readers,
 /// and starts forwarding network traffic between the two endpoints.
-pub async fn handle_stream<
-    LocalStream: StreamProvider,
-    A: ToSocketAddrs + Debug + Copy + Clone + Send,
->(
+pub async fn handle_stream<LocalStream: StreamProvider>(
     key: Arc<str>,
     client_id: u32,
     server_generation: u64,
-    connect: StreamConnect<A>,
+    connect: StreamConnect,
 ) -> Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -71,15 +71,19 @@ where
     let msg = request.encode().context(EncodePbConnStreamReqSnafu)?;
 
     let timeout = control_io_timeout();
-    let mut remote_stream =
-        match tokio::time::timeout(timeout, each_addr(remote_addr, TcpStream::connect)).await {
-            Ok(result) => result.context(ConnectRemoteStreamSnafu)?,
-            Err(_) => ControlIoTimeoutSnafu {
-                action: "connect remote stream",
-                timeout,
-            }
-            .fail()?,
-        };
+    let mut remote_stream = match tokio::time::timeout(
+        timeout,
+        each_addr(remote_addr.as_slice(), TcpStream::connect),
+    )
+    .await
+    {
+        Ok(result) => result.context(ConnectRemoteStreamSnafu)?,
+        Err(_) => ControlIoTimeoutSnafu {
+            action: "connect remote stream",
+            timeout,
+        }
+        .fail()?,
+    };
     if keep_alive {
         snafu_error_handle!(
             set_tcp_keep_alive(&remote_stream),
@@ -112,7 +116,7 @@ where
     };
 
     // start forward network traffic
-    let mut local_stream = LocalStream::from_addr(local_addr)
+    let mut local_stream = LocalStream::from_addr(local_addr.as_slice())
         .await
         .context(ConnectLocalStreamSnafu)?;
 

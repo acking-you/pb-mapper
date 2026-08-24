@@ -52,6 +52,154 @@ fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+/// A staged candidate is the only copy of a key the relay may already have
+/// installed, so a second rotation attempt must not overwrite it with a third
+/// key: that would leave no way back into the relay.
+#[test]
+fn staging_a_second_rotation_candidate_refuses_to_replace_the_first() {
+    let state_dir = temp_state_dir("stage-candidate");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let key_path = state_dir.join("admin.key");
+    let first = "abcdefghijklmnopqrstuvwxyz012345";
+    let second = "zyxwvutsrqponmlkjihgfedcba543210";
+
+    let staged = stage_admin_key_candidate(&key_path, first).unwrap();
+    assert_eq!(staged, staged_admin_key_path(&key_path));
+    assert_eq!(std::fs::read_to_string(&staged).unwrap().trim(), first);
+
+    // Restaging the same key is a retry of the same rotation, so it is allowed.
+    stage_admin_key_candidate(&key_path, first).unwrap();
+    assert_eq!(std::fs::read_to_string(&staged).unwrap().trim(), first);
+
+    let error = stage_admin_key_candidate(&key_path, second).unwrap_err();
+    assert_eq!(error.code, "administrator_key_staged");
+    assert!(!error.retryable);
+    assert_eq!(
+        std::fs::read_to_string(&staged).unwrap().trim(),
+        first,
+        "the first candidate must survive a rejected second attempt"
+    );
+
+    // Once resolved, the next rotation stages freely again.
+    discard_staged_admin_key(&staged);
+    stage_admin_key_candidate(&key_path, second).unwrap();
+    assert_eq!(std::fs::read_to_string(&staged).unwrap().trim(), second);
+
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+/// Two rotations racing to stage a candidate: exactly one may win, and the
+/// loser must be told rather than silently overwriting the winner's file.
+///
+/// The check-then-act this replaced let both pass the existence check, and a
+/// rename always wins — so the loser destroyed the winner's candidate, which may
+/// be the only copy of the key the relay had already installed.
+#[test]
+fn racing_rotations_stage_exactly_one_candidate() {
+    let state_dir = temp_state_dir("stage-candidate-race");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let key_path = state_dir.join("admin.key");
+    let staged_path = staged_admin_key_path(&key_path);
+
+    // Distinct keys, so whichever file survives names its winner unambiguously.
+    let keys = [
+        "abcdefghijklmnopqrstuvwxyz012345",
+        "zyxwvutsrqponmlkjihgfedcba543210",
+        "0123456789abcdefghijklmnopqrstuv",
+        "vutsrqponmlkjihgfedcba9876543210",
+    ];
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(keys.len()));
+    let outcomes: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                let key_path = key_path.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    stage_admin_key_candidate(&key_path, key).map(|_| *key)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    let winners: Vec<_> = outcomes.iter().filter_map(|o| o.as_ref().ok()).collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one racer may claim the staged path, got {outcomes:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&staged_path).unwrap().trim(),
+        *winners[0],
+        "the file must hold the winner's key, not a later racer's"
+    );
+    for outcome in &outcomes {
+        if let Err(error) = outcome {
+            assert_eq!(error.code, "administrator_key_staged");
+            assert!(!error.retryable);
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+/// A staged candidate is a live administrator key, so it must never be readable
+/// by another user — not even for the moment between creating it and writing it.
+#[cfg(unix)]
+#[test]
+fn a_staged_candidate_is_owner_only_from_the_moment_it_exists() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let state_dir = temp_state_dir("stage-candidate-mode");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let key_path = state_dir.join("admin.key");
+
+    let staged_path =
+        stage_admin_key_candidate(&key_path, "abcdefghijklmnopqrstuvwxyz012345").unwrap();
+    let mode = std::fs::metadata(&staged_path)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "staged key mode was {:o}",
+        mode & 0o777
+    );
+
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+/// `create_new_write` gives up atomic contents in exchange for claiming the
+/// path, so a crash between the create and the write leaves a short file. That
+/// file is somebody else's unresolved rotation, and staging over it would
+/// destroy it — even though it does not parse as a key.
+#[test]
+fn a_truncated_staged_candidate_still_blocks_rotation() {
+    let state_dir = temp_state_dir("stage-candidate-truncated");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let key_path = state_dir.join("admin.key");
+    let staged_path = staged_admin_key_path(&key_path);
+    std::fs::write(&staged_path, b"abcdef").unwrap();
+
+    let error =
+        stage_admin_key_candidate(&key_path, "abcdefghijklmnopqrstuvwxyz012345").unwrap_err();
+    assert_eq!(error.code, "administrator_key_staged");
+    assert_eq!(
+        std::fs::read_to_string(&staged_path).unwrap(),
+        "abcdef",
+        "a short candidate is still evidence of an unresolved rotation"
+    );
+
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
 #[tokio::test]
 async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
     let state_dir = temp_state_dir("capacity-shrink");

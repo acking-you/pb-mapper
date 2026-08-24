@@ -1,8 +1,8 @@
 //! Administrator key files, instance id, and recovery-key identity checks.
 use super::super::*;
 use super::{
-    atomic_write, auth_snapshot_path, auth_wal_path, encrypted_auth_state_exists, open_blob,
-    truncate_auth_wal,
+    atomic_write, auth_snapshot_path, auth_wal_path, create_new_write, encrypted_auth_state_exists,
+    open_blob, truncate_auth_wal,
 };
 
 pub(crate) fn load_or_create_instance_id(
@@ -125,7 +125,8 @@ pub fn initialize_admin_key(path: &Path, force: bool) -> Result<String, AuthFail
     Ok(key)
 }
 
-pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), AuthFailure> {
+/// Reject anything that is not a 32-byte administrator key before it reaches disk.
+fn validate_admin_key(key: &str) -> Result<(), AuthFailure> {
     let Credential::Admin(_) = parse_credential(key)
         .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?
     else {
@@ -135,6 +136,11 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
             false,
         ));
     };
+    Ok(())
+}
+
+pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), AuthFailure> {
+    validate_admin_key(key)?;
     if path.exists() && !force {
         return Err(AuthFailure::new(
             "administrator_key_exists",
@@ -151,6 +157,103 @@ pub fn write_admin_key_file(path: &Path, key: &str, force: bool) -> Result<(), A
         refuse_write_if_encrypted_state(path, force)?;
     }
     atomic_write(path, format!("{key}\n").as_bytes(), 0o600)
+}
+
+/// The sibling path a root-rotation candidate is staged at, next to the live
+/// administrator key file `path`.
+///
+/// A dotted sibling rather than a subdirectory, so the candidate lands on the
+/// same filesystem as `path` and inherits the directory's permissions.
+pub fn staged_admin_key_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("admin.key");
+    path.with_file_name(format!(".{name}.next"))
+}
+
+/// Write a root-rotation candidate to the staged sibling of `path`, returning
+/// the staged path.
+///
+/// Refuses to replace a candidate that is already staged under a *different*
+/// key. Rotation is not idempotent, so a staged file that outlived its rotation
+/// attempt means the relay's active key is unknown: it is either the live key at
+/// `path` or that candidate. Overwriting it would destroy the only copy of a key
+/// the relay may already have installed, locking the operator out. Restaging the
+/// same key is allowed, so retrying a rotation with the candidate in hand works.
+pub fn stage_admin_key_candidate(path: &Path, key: &str) -> Result<PathBuf, AuthFailure> {
+    let staged_path = staged_admin_key_path(path);
+    if let Some(staged) = read_admin_key_file(&staged_path)? {
+        return accept_staged_candidate(path, staged_path, &staged, key);
+    }
+    validate_admin_key(key)?;
+    // Claims the path itself rather than renaming onto it. The read above is a
+    // check-then-act: two rotations racing here both pass it, and a rename always
+    // wins, so the loser's candidate — possibly the only copy of the key the
+    // relay just installed — would vanish. `O_EXCL` makes exactly one of them the
+    // winner and sends the other through the same decision as a pre-existing file.
+    if !create_new_write(&staged_path, format!("{key}\n").as_bytes(), 0o600)? {
+        let staged = read_admin_key_file(&staged_path)?.unwrap_or_default();
+        return accept_staged_candidate(path, staged_path, &staged, key);
+    }
+    Ok(staged_path)
+}
+
+/// Whether the candidate already at `staged_path` can stand in for `key`.
+///
+/// The same key means this is a retry of the rotation that staged it, so the
+/// staged file is exactly what the caller wanted. A different one — including
+/// the empty or short file a crash mid-write leaves behind — means the relay's
+/// active key is unknown, and only the operator can say which it is.
+fn accept_staged_candidate(
+    path: &Path,
+    staged_path: PathBuf,
+    staged: &str,
+    key: &str,
+) -> Result<PathBuf, AuthFailure> {
+    if staged.trim() == key.trim() {
+        return Ok(staged_path);
+    }
+    Err(AuthFailure::new(
+        "administrator_key_staged",
+        format!(
+            "a previous root rotation left an unresolved candidate at `{}`, so the relay's active \
+             administrator key is either `{}` or that candidate; determine which key the relay \
+             accepts, install it at `{}`, and delete the staged file before rotating again",
+            staged_path.display(),
+            path.display(),
+            path.display()
+        ),
+        false,
+    ))
+}
+
+/// Drop a staged candidate once the rotation it belongs to is durably recorded
+/// at the live key file.
+///
+/// A leftover staged file blocks the next rotation, but failing to remove it is
+/// not worth failing a rotation that already succeeded, so this only warns.
+pub fn discard_staged_admin_key(staged_path: &Path) {
+    if let Err(error) = std::fs::remove_file(staged_path) {
+        tracing::warn!(
+            path = %staged_path.display(),
+            %error,
+            "administrator key was rotated, but the staged candidate could not be removed"
+        );
+    }
+}
+
+/// Read an administrator key file, or `None` when it does not exist.
+fn read_admin_key_file(path: &Path) -> Result<Option<String>, AuthFailure> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AuthFailure::new(
+            "auth_state_unavailable",
+            format!("failed to read `{}`: {error}", path.display()),
+            false,
+        )),
+    }
 }
 
 pub(crate) fn reset_already_installed(

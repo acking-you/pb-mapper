@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use std::sync::Arc;
 
 use snafu::ResultExt;
@@ -11,27 +10,24 @@ use super::error::{
 };
 use crate::client::error::CreateHeaderToolSnafu;
 use pb_mapper_core::checksum::Credential;
-use pb_mapper_core::config::control_io_timeout;
+use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout};
 use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
-use uni_stream::addr::{ToSocketAddrs, each_addr};
+use uni_stream::addr::each_addr;
 use uni_stream::stream::{NetworkStream, set_tcp_keep_alive, set_tcp_nodelay};
 
 #[instrument(skip(local_stream))]
-pub async fn handle_local_stream<
-    LocalStream: NetworkStream + StreamForward,
-    A: ToSocketAddrs + Debug + Send + 'static,
->(
+pub async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
     mut local_stream: LocalStream,
     key: Arc<str>,
-    remote_addr: A,
+    remote_addr: ResolvedAddrs,
     keep_alive: bool,
     namespace: Option<u64>,
     credential: Credential,
 ) -> Result<()> {
-    let mut remote_stream = each_addr(remote_addr, TcpStream::connect)
+    let mut remote_stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
         .await
         .context(ConnectRemoteStreamSnafu)?;
 

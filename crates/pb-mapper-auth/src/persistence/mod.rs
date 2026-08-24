@@ -20,7 +20,10 @@ mod wal;
 
 #[cfg(test)]
 pub(crate) use admin_key::read_instance_id_file;
-pub use admin_key::{generate_admin_key, initialize_admin_key, write_admin_key_file};
+pub use admin_key::{
+    discard_staged_admin_key, generate_admin_key, initialize_admin_key, stage_admin_key_candidate,
+    staged_admin_key_path, write_admin_key_file,
+};
 pub(crate) use admin_key::{
     key_matches_existing_state, load_or_create_instance_id, random_instance_id,
     recover_instance_id_after_reset, reset_already_installed, rotation_already_installed,
@@ -31,7 +34,7 @@ pub use fs::acquire_state_dir_lock;
 #[cfg(test)]
 pub(crate) use fs::prepare_state_dir;
 pub(crate) use fs::sync_parent_directory;
-pub(crate) use fs::{atomic_write, prepare_state_dir_and_lock};
+pub(crate) use fs::{atomic_write, create_new_write, prepare_state_dir_and_lock};
 #[cfg(test)]
 pub(crate) use snapshot::try_load_persisted_state;
 pub(crate) use snapshot::{

@@ -2,8 +2,8 @@ use snafu::ResultExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::error::{
-    CreateHeaderToolSnafu, DecodeStatusRespSnafu, EncodeStatusReqSnafu, StatusRespNotMatchSnafu,
-    WriteStatusReqSnafu,
+    CreateHeaderToolSnafu, DecodeStatusRespSnafu, EncodeStatusReqSnafu, StatusRemoteSnafu,
+    StatusRespNotMatchSnafu, WriteStatusReqSnafu,
 };
 use pb_mapper_core::checksum::Credential;
 use pb_mapper_core::config::control_io_timeout;
@@ -62,8 +62,13 @@ async fn get_status_with_session<S: AsyncReadExt + AsyncWriteExt + Send + Unpin>
     let resp = PbConnResponse::decode(&response).context(DecodeStatusRespSnafu)?;
     match resp {
         PbConnResponse::Status(status) => Ok(status),
-        PbConnResponse::Error(error) => StatusRespNotMatchSnafu {
-            resp: format!("{}: {}", error.code, error.message),
+        // Kept structured rather than flattened into a message: callers retry on
+        // the relay's `retryable` verdict, and a refusal it marks permanent has to
+        // end the retry loop instead of feeding it.
+        PbConnResponse::Error(error) => StatusRemoteSnafu {
+            code: error.code,
+            message: error.message,
+            retryable: error.retryable,
         }
         .fail(),
         other => StatusRespNotMatchSnafu {

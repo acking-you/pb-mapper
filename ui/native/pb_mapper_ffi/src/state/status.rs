@@ -360,10 +360,11 @@ impl PbMapperState {
         let tunnel = self
             .service_runtime
             .get(service_key)
-            .map(|runtime| runtime.pin);
-        let server_addr = tunnel
-            .map(|tunnel| tunnel.endpoint.to_string())
-            .unwrap_or_else(|| self.config.server_address.clone());
+            .map(|runtime| runtime.pin.clone());
+        let target = match tunnel.as_ref() {
+            Some(tunnel) => ProbeTarget::Pinned(tunnel.endpoint.clone()),
+            None => ProbeTarget::Configured(self.config.server_address.clone()),
+        };
         let cache = self.service_status_cache.clone();
         let refreshing = self.service_status_refreshing.clone();
         let key = service_key.to_string();
@@ -372,7 +373,7 @@ impl PbMapperState {
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 STATUS_REFRESH_TIMEOUT,
-                check_service_with_get_status(&server_addr, &key, credential),
+                check_service_with_get_status(target, &key, credential),
             )
             .await;
 
@@ -430,10 +431,11 @@ impl PbMapperState {
         let tunnel = self
             .client_runtime
             .get(service_key)
-            .map(|runtime| runtime.pin);
-        let server_addr = tunnel
-            .map(|tunnel| tunnel.endpoint.to_string())
-            .unwrap_or_else(|| self.config.server_address.clone());
+            .map(|runtime| runtime.pin.clone());
+        let target = match tunnel.as_ref() {
+            Some(tunnel) => ProbeTarget::Pinned(tunnel.endpoint.clone()),
+            None => ProbeTarget::Configured(self.config.server_address.clone()),
+        };
         let cache = self.client_status_cache.clone();
         let refreshing = self.client_status_refreshing.clone();
         let key = service_key.to_string();
@@ -442,7 +444,7 @@ impl PbMapperState {
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 STATUS_REFRESH_TIMEOUT,
-                check_service_with_get_status(&server_addr, &key, credential),
+                check_service_with_get_status(target, &key, credential),
             )
             .await;
 

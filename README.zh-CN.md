@@ -95,18 +95,39 @@ pb-mapper 使用预共享凭据，不提供公钥身份体系。如果还需要�
 | 统一 CLI | `server`、`register`、`connect`、`status`、`admin` 五种角色 |
 | Agent Skills | 通过 `pb-mapper-suite` 完成安装、relay、register/connect 与验收，release 工作流保持独立 |
 | 运维能力 | Linux systemd、安装脚本、Docker 镜像、状态查询与管理员级服务/连接清单 |
-| 原生嵌入 | Rust crates，以及 Flutter 桌面/移动端已经使用的 C ABI |
+| 原生嵌入 | Rust crate `pb-mapper`（`Client`：register / connect / status / admin）、Flutter 使用的 C ABI、`js/` 下的 Node-API 包 |
 | 网络能力 | TCP、UDP、按隧道 keep-alive、可选的转发数据加密 |
+
+### Rust SDK
+
+```toml
+pb-mapper = { git = "https://github.com/acking-you/pb-mapper" }
+```
+
+填入已部署的 relay 地址和凭据后即可 register、connect、查 status，以及用管理员凭据调用全部 admin 接口。示例见 `crates/pb-mapper/examples/`。
+
+### TypeScript（Node-API）
+
+```bash
+cd js && bun install && bun run build
+```
+
+```ts
+import { Client } from "pb-mapper";
+const client = new Client({
+  server: "relay.example.com:7666",
+  credential: process.env.MSG_HEADER_KEY!,
+});
+const admin = client.admin();
+```
 
 ## Roadmap：Harness 原生的 Remote Control
 
-当前版本已经提供安全网络与凭据生命周期基础。下一层将让 agent harness 能够直接
-消费这些能力：
+当前版本已经提供安全网络、Rust client SDK 与 Node-API 包。仍待完成：
 
 - 基于现有 `pb-mapper-suite` 工作流扩展更多 harness 专用 adapter 与凭据自动化；
-- 无需启动 CLI 子进程即可嵌入隧道的稳定 Rust SDK 与语言级 client SDK；
-- 基于 Node-API（N-API）的 TypeScript 包；
-- 独立的 client-only 构建，在支持的平台上以发布包 **小于 5 MB** 为目标；
+- 继续压缩 client-only Node 插件（linux-x64 上 `release-node` + strip 已经低于 **5 MB**）；
+- 在 `uni-stream` 进入 crates.io 后发布 SDK；
 - 面向远程模型 runtime、tool server、私有 API、开发机与浏览器控制端点的
   harness adapter 和示例。
 
@@ -126,7 +147,8 @@ cargo test
 
 仓库结构：
 
-- `crates/` — Rust workspace：core、auth、protocol、server、client、CLI 与 testkit
+- `crates/` — Rust workspace：core、auth、protocol、server、client、SDK facade（`pb-mapper`）、Node-API（`pb-mapper-node`）、CLI 与 testkit
+- `js/` — 包装 Node-API 插件的 JS 包（用 bun 构建）
 - `ui/` — Flutter UI 与原生 C ABI bridge
 - `skills/` — agent 可读取的部署与 release 工作流
 - `docs/` — 架构、认证、使用手册与项目素材

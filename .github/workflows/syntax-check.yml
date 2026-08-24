@@ -19,6 +19,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       flutter: ${{ steps.filter.outputs.flutter }}
+      node: ${{ steps.filter.outputs.node }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +47,7 @@ jobs:
             echo "No usable base commit; checking everything."
             echo "rust=true" >> "$GITHUB_OUTPUT"
             echo "flutter=true" >> "$GITHUB_OUTPUT"
+            echo "node=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -55,6 +57,7 @@ jobs:
 
           rust=false
           flutter=false
+          node=false
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
@@ -62,20 +65,36 @@ jobs:
               # belongs to the Rust side and must be matched before ui/*.
               ui/native/*) rust=true ;;
               ui/*) flutter=true ;;
+              js/*) node=true ;;
+              # The Node-API addon is a workspace crate; SDK changes must also
+              # run the JS e2e, because the addon is a thin wrap over it.
+              # Its transitive dependencies count too: the JS e2e runs against a
+              # real relay, so a change to any layer below the SDK — or to the
+              # server that relay is — can break the JS path or the addon size
+              # while every Rust check still passes.
+              crates/pb-mapper-node/*|crates/pb-mapper-client/*|crates/pb-mapper/*) rust=true; node=true ;;
+              crates/pb-mapper-core/*|crates/pb-mapper-auth/*|crates/pb-mapper-protocol/*|crates/pb-mapper-server/*) rust=true; node=true ;;
               crates/*|src/*|tests/*|examples/*) rust=true ;;
-              Cargo.toml|Cargo.lock|rust-toolchain.toml|rustfmt.toml) rust=true ;;
+              # The addon is built from this workspace, and `bun run
+              # build:release` consumes the root `release-node` profile — a
+              # profile or lockfile change that pushes it past the size limit
+              # has to be caught here, not after release.
+              Cargo.toml|Cargo.lock|rust-toolchain.toml) rust=true; node=true ;;
+              rustfmt.toml) rust=true ;;
               # Per-crate manifests. `case` patterns match the whole path, so
               # the unanchored entry above only ever catches the root manifest.
               */Cargo.toml|*/Cargo.lock) rust=true ;;
-              # A change to this workflow has to prove itself on both.
-              .github/workflows/syntax-check.yml) rust=true; flutter=true ;;
+              # A change to this workflow has to prove itself on every job.
+              .github/workflows/syntax-check.yml) rust=true; flutter=true; node=true ;;
             esac
           done <<< "$changed"
 
           echo "rust=$rust"
           echo "flutter=$flutter"
+          echo "node=$node"
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "flutter=$flutter" >> "$GITHUB_OUTPUT"
+          echo "node=$node" >> "$GITHUB_OUTPUT"
 
   rust-syntax-check:
     needs: changes
@@ -113,6 +132,52 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --all-features
+
+  node-e2e:
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-node-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-node-
+            ${{ runner.os }}-cargo-
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+
+      - name: Build relay binary for N-API e2e
+        run: cargo build --bin pb-mapper
+
+      - name: Build addon and run N-API tests
+        working-directory: js
+        env:
+          CI: true
+          PB_MAPPER_BIN: ${{ github.workspace }}/target/debug/pb-mapper
+        run: |
+          bun install --frozen-lockfile
+          bun run build:release
+          bun test
+          bun -e "const fs = require('fs'); const f = fs.readdirSync('.').find((n) => n.endsWith('.node')); const s = fs.statSync(f).size; console.log(f, s); if (s > 5.5 * 1024 * 1024) { console.error('addon larger than 5.5 MiB'); process.exit(1); }"
 
   flutter-syntax-check:
     needs: changes

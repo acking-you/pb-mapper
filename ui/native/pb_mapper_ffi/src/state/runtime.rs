@@ -157,8 +157,8 @@ impl PbMapperState {
             protocol,
             enable_encryption,
             enable_keep_alive,
-            local_sock_addr,
-            remote_sock_addr,
+            local_addrs,
+            remote_addrs,
             credential,
         } = commit;
 
@@ -198,8 +198,8 @@ impl PbMapperState {
 
         let handle = spawn_register_tunnel(
             &protocol,
-            local_sock_addr,
-            remote_sock_addr,
+            &local_addrs,
+            &remote_addrs,
             key_clone,
             ServerTunnelOptions {
                 need_codec: enable_encryption,
@@ -218,7 +218,7 @@ impl PbMapperState {
                 handle,
                 pin: PinnedTunnel {
                     credential,
-                    endpoint: remote_sock_addr,
+                    endpoint: remote_addrs,
                 },
             },
         );
@@ -288,8 +288,8 @@ impl PbMapperState {
             local_address,
             protocol,
             enable_keep_alive,
-            local_sock_addr,
-            remote_sock_addr,
+            local_addrs,
+            remote_addrs,
             credential,
         } = commit;
 
@@ -320,8 +320,8 @@ impl PbMapperState {
 
         let handle = spawn_connect_tunnel(
             &protocol_upper,
-            local_sock_addr,
-            remote_sock_addr,
+            &local_addrs,
+            &remote_addrs,
             key_clone,
             enable_keep_alive,
             status_callback,
@@ -334,7 +334,7 @@ impl PbMapperState {
                 handle,
                 pin: PinnedTunnel {
                     credential,
-                    endpoint: remote_sock_addr,
+                    endpoint: remote_addrs,
                 },
             },
         );
@@ -429,18 +429,20 @@ impl PbMapperState {
 
 fn spawn_register_tunnel(
     protocol: &str,
-    local_sock_addr: SocketAddr,
-    remote_sock_addr: SocketAddr,
+    local_addrs: &ResolvedAddrs,
+    remote_addrs: &ResolvedAddrs,
     key: String,
     options: ServerTunnelOptions,
     callback: StatusCallback,
     credential: Credential,
 ) -> JoinHandle<()> {
     if protocol.eq_ignore_ascii_case("TCP") {
+        let local_addrs = local_addrs.clone();
+        let remote_addrs = remote_addrs.clone();
         tokio::spawn(async move {
             let _ = run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
-                local_sock_addr,
-                remote_sock_addr,
+                local_addrs.as_slice(),
+                remote_addrs.as_slice(),
                 key.into(),
                 options,
                 Some(callback),
@@ -449,10 +451,12 @@ fn spawn_register_tunnel(
             .await;
         })
     } else {
+        let local_addrs = local_addrs.clone();
+        let remote_addrs = remote_addrs.clone();
         tokio::spawn(async move {
             let _ = run_server_side_cli_with_pinned_credential::<UdpStreamProvider, _>(
-                local_sock_addr,
-                remote_sock_addr,
+                local_addrs.as_slice(),
+                remote_addrs.as_slice(),
                 key.into(),
                 options,
                 Some(callback),
@@ -465,18 +469,20 @@ fn spawn_register_tunnel(
 
 fn spawn_connect_tunnel(
     protocol: &str,
-    local_sock_addr: SocketAddr,
-    remote_sock_addr: SocketAddr,
+    local_addrs: &ResolvedAddrs,
+    remote_addrs: &ResolvedAddrs,
     key: String,
     enable_keep_alive: bool,
     callback: ClientStatusCallback,
     credential: Credential,
 ) -> JoinHandle<()> {
     if protocol.eq_ignore_ascii_case("TCP") {
+        let local_addrs = local_addrs.clone();
+        let remote_addrs = remote_addrs.clone();
         tokio::spawn(async move {
             run_client_side_cli_with_pinned_credential::<TcpListenerProvider, _>(
-                local_sock_addr,
-                remote_sock_addr,
+                local_addrs.as_slice(),
+                remote_addrs.as_slice(),
                 key.into(),
                 enable_keep_alive,
                 Some(callback),
@@ -485,10 +491,12 @@ fn spawn_connect_tunnel(
             .await;
         })
     } else {
+        let local_addrs = local_addrs.clone();
+        let remote_addrs = remote_addrs.clone();
         tokio::spawn(async move {
             run_client_side_cli_with_pinned_credential::<UdpListenerProvider, _>(
-                local_sock_addr,
-                remote_sock_addr,
+                local_addrs.as_slice(),
+                remote_addrs.as_slice(),
                 key.into(),
                 enable_keep_alive,
                 Some(callback),
