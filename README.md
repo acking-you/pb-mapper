@@ -107,21 +107,63 @@ identity or protection against traffic analysis. See the
 | Unified CLI | `server`, `register`, `connect`, `status`, and `admin` roles |
 | Agent Skills | Complete installation, relay, register/connect, and verification through `pb-mapper-suite`, plus a separate release workflow |
 | Operations | Linux systemd units, install scripts, Docker image, status and administrator inventory |
-| Native embedding | Rust crates plus a C ABI used by the Flutter desktop/mobile UI |
+| Native embedding | Rust crate `pb-mapper` (`Client` for register/connect/status/admin), C ABI for the Flutter UI, Node-API package under `js/` |
 | Networking | TCP and UDP, per-tunnel keep-alive, optional forwarded-data encryption |
+
+### Rust SDK
+
+```toml
+pb-mapper = { git = "https://github.com/acking-you/pb-mapper" }
+```
+
+```rust,ignore
+use pb_mapper::{Client, ClientConfig, RegisterRequest, Transport};
+
+let client = Client::new(ClientConfig {
+    server: "relay.example.com:7666".into(),
+    credential: std::env::var("MSG_HEADER_KEY")?,
+    keep_alive: true,
+    namespace: None,
+})?;
+let registration = client.register(RegisterRequest {
+    key: "echo".into(),
+    local_addr: "127.0.0.1:8080".into(),
+    transport: Transport::Tcp,
+    codec: false,
+    force_namespace: false,
+}).await?;
+registration.wait_ready().await?;
+```
+
+The CLI binary remains `cargo install` / `make build-pb-mapper` (`pb-mapper-cli`).
+
+### TypeScript (Node-API)
+
+```bash
+cd js && bun install && bun run build
+```
+
+```ts
+import { Client } from "pb-mapper";
+
+const client = new Client({
+  server: "relay.example.com:7666",
+  credential: process.env.MSG_HEADER_KEY!,
+});
+const admin = client.admin();
+const issued = await admin.issueKey(3600, "agent");
+```
 
 ## Roadmap: harness-native remote control
 
-The current release provides the secure network and credential foundation. The
-next layer will make that foundation directly consumable by agent harnesses:
+The current release provides the secure network, a Rust client SDK, and a
+Node-API package. Remaining work:
 
 - harness-specific adapters and credential automation built on the existing
   `pb-mapper-suite` workflow;
-- stable Rust and language-level client SDKs for embedding tunnels without
-  shelling out to the CLI;
-- a TypeScript package backed by Node-API (N-API);
-- a separate client-only build, targeting a packaged size below **5 MB** on
-  supported platforms;
+- further shrinking the client-only Node addon (release-node + strip is already
+  under **5 MB** on linux-x64);
+- crates.io publish once `uni-stream` is a registry dependency rather than git;
 - harness adapters and examples for remote model runtimes, tool servers,
   private APIs, development machines, and browser-control endpoints.
 
@@ -141,7 +183,8 @@ cargo test
 
 Repository layout:
 
-- `crates/` — Rust workspace: core, auth, protocol, server, client, CLI, and testkit
+- `crates/` — Rust workspace: core, auth, protocol, server, client, SDK facade (`pb-mapper`), Node-API (`pb-mapper-node`), CLI, and testkit
+- `js/` — JS package wrapping the Node-API addon (built with bun)
 - `ui/` — Flutter UI and native C ABI bridge
 - `skills/` — agent-readable deployment and release workflows
 - `docs/` — architecture, authentication, user guides, and project assets

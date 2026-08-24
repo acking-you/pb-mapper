@@ -10,6 +10,7 @@ use std::time::Duration;
 use snafu::ResultExt;
 use tokio::net::TcpStream;
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 use uni_stream::udp::set_custom_timeout;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
@@ -58,7 +59,7 @@ pub async fn run_client_side_cli_scoped<LocalListener: ListenerProvider, A: ToSo
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_with_callback_scoped::<LocalListener, A>(
+    run_client_side_cli_loop::<LocalListener, A>(
         local_addr,
         remote_addr,
         key,
@@ -66,6 +67,7 @@ pub async fn run_client_side_cli_scoped<LocalListener: ListenerProvider, A: ToSo
         namespace,
         None,
         None,
+        CancellationToken::new(),
     )
     .await
 }
@@ -79,7 +81,7 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_with_callback_scoped::<LocalListener, A>(
+    run_client_side_cli_loop::<LocalListener, A>(
         local_addr,
         remote_addr,
         key,
@@ -87,6 +89,7 @@ pub async fn run_client_side_cli_with_callback<LocalListener: ListenerProvider, 
         None,
         status_callback,
         None,
+        CancellationToken::new(),
     )
     .await
 }
@@ -104,7 +107,7 @@ pub async fn run_client_side_cli_with_pinned_credential<
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
-    run_client_side_cli_with_callback_scoped::<LocalListener, A>(
+    run_client_side_cli_loop::<LocalListener, A>(
         local_addr,
         remote_addr,
         key,
@@ -112,6 +115,7 @@ pub async fn run_client_side_cli_with_pinned_credential<
         None,
         status_callback,
         Some(credential),
+        CancellationToken::new(),
     )
     .await
 }
@@ -127,6 +131,60 @@ pub async fn run_client_side_cli_with_callback_scoped<
     namespace: Option<u64>,
     status_callback: Option<ClientStatusCallback>,
     pinned_credential: Option<pb_mapper_core::checksum::Credential>,
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
+    run_client_side_cli_loop::<LocalListener, A>(
+        local_addr,
+        remote_addr,
+        key,
+        keep_alive,
+        namespace,
+        status_callback,
+        pinned_credential,
+        CancellationToken::new(),
+    )
+    .await
+}
+
+/// Same as [`run_client_side_cli_with_callback_scoped`], but the retry loop
+/// returns when `shutdown` is cancelled.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_client_side_cli_with_shutdown<LocalListener: ListenerProvider, A: ToSocketAddrs>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    keep_alive: bool,
+    namespace: Option<u64>,
+    status_callback: Option<ClientStatusCallback>,
+    pinned_credential: Option<pb_mapper_core::checksum::Credential>,
+    shutdown: CancellationToken,
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
+    run_client_side_cli_loop::<LocalListener, A>(
+        local_addr,
+        remote_addr,
+        key,
+        keep_alive,
+        namespace,
+        status_callback,
+        pinned_credential,
+        shutdown,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAddrs>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    keep_alive: bool,
+    namespace: Option<u64>,
+    status_callback: Option<ClientStatusCallback>,
+    pinned_credential: Option<pb_mapper_core::checksum::Credential>,
+    shutdown: CancellationToken,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
@@ -169,6 +227,9 @@ pub async fn run_client_side_cli_with_callback_scoped<
     let mut retry_backoff = RetryBackoff::default();
 
     loop {
+        if shutdown.is_cancelled() {
+            return;
+        }
         tracing::debug!(
             event = "client_probe_start",
             key = %key,
@@ -195,7 +256,10 @@ pub async fn run_client_side_cli_with_callback_scoped<
             if let Some(ref callback) = status_callback {
                 callback("retrying");
             }
-            tokio::time::sleep(retry_delay).await;
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(retry_delay) => {}
+            }
             continue;
         }
 
@@ -227,7 +291,10 @@ pub async fn run_client_side_cli_with_callback_scoped<
                     "failed to bind local listener"
                 );
                 let retry_delay = retry_backoff.next_delay();
-                tokio::time::sleep(retry_delay).await;
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(retry_delay) => {}
+                }
                 continue;
             }
         };
@@ -241,6 +308,15 @@ pub async fn run_client_side_cli_with_callback_scoped<
 
         loop {
             tokio::select! {
+                () = shutdown.cancelled() => {
+                    tracing::info!(
+                        event = "client_listener_cancelled",
+                        key = %key,
+                        local_addr = %local_addr,
+                        "client listener loop cancelled"
+                    );
+                    return;
+                }
                 accepted = listener.accept() => {
                     let (stream, peer_addr) = match accepted.context(AcceptLocalStreamSnafu) {
                         Ok(result) => result,
@@ -342,6 +418,9 @@ pub async fn run_client_side_cli_with_callback_scoped<
             }
         }
 
+        if shutdown.is_cancelled() {
+            return;
+        }
         let retry_delay = retry_backoff.next_delay();
         tracing::info!(
             event = "client_listener_restart_scheduled",
@@ -352,7 +431,10 @@ pub async fn run_client_side_cli_with_callback_scoped<
             retry_count = retry_backoff.failures(),
             "client listener stopped; remote probe will retry"
         );
-        tokio::time::sleep(retry_delay).await;
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep(retry_delay) => {}
+        }
     }
 }
 

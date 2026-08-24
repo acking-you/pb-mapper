@@ -252,27 +252,25 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                     .unwrap_or("admin.key")
             ));
             write_admin_key_file(&staged_key_file, &new_key, true)?;
-            let response = send_admin_request(
-                remote_addr,
-                AdminRequest::RootKeyRotate {
-                    new_admin_key: new_key.clone(),
+            let client = admin_client(remote_addr)?;
+            let response = match client.admin()?.rotate_root_key(Some(new_key.clone())).await {
+                Ok(_) => AdminResponse::Ok {
+                    action: "administrator_key_rotated".to_string(),
                 },
-            )
-            .await
-            .map_err(|error| {
+                Err(error) => {
+                    return Err(std::io::Error::other(format!(
+                        "root rotation request failed; the candidate key remains at `{}`: {error}",
+                        staged_key_file.display()
+                    ))
+                    .into());
+                }
+            };
+            set_process_msg_header_key(Some(&new_key))?;
+            client.admin()?.auth_status().await.map_err(|error| {
                 std::io::Error::other(format!(
-                    "root rotation request failed; the candidate key remains at `{}`: {error}",
-                    staged_key_file.display()
+                    "new administrator key did not pass the post-rotation status check: {error}"
                 ))
             })?;
-            set_process_msg_header_key(Some(&new_key))?;
-            let verification = send_admin_request(remote_addr, AdminRequest::AuthStatus).await?;
-            if !matches!(verification, AdminResponse::AuthStatus(_)) {
-                return Err(std::io::Error::other(
-                    "new administrator key did not pass the post-rotation status check",
-                )
-                .into());
-            }
             write_admin_key_file(&key_file, &new_key, true).map_err(|error| {
                 std::io::Error::other(format!(
                     "administrator key rotated and verified, but `{}` could not be updated; recover the key from `{}`: {error}",
@@ -311,75 +309,25 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn admin_client(
+    remote_addr: std::net::SocketAddr,
+) -> Result<pb_mapper_client::sdk::Client, Box<dyn Error>> {
+    let credential =
+        pb_mapper_core::checksum::get_process_credential().map_err(std::io::Error::other)?;
+    Ok(pb_mapper_client::sdk::Client::from_credential(
+        remote_addr.to_string(),
+        credential,
+        false,
+        None,
+    ))
+}
+
 async fn send_admin_request(
     remote_addr: std::net::SocketAddr,
     request: AdminRequest,
 ) -> Result<AdminResponse, Box<dyn Error>> {
-    send_admin_request_with_timeout(remote_addr, request, control_io_timeout()).await
-}
-
-async fn send_admin_request_with_timeout(
-    remote_addr: std::net::SocketAddr,
-    request: AdminRequest,
-    io_timeout: Duration,
-) -> Result<AdminResponse, Box<dyn Error>> {
-    let encoded = PbConnRequest::Admin(request).encode()?;
-    for attempt in 0..2 {
-        let sent = std::sync::atomic::AtomicBool::new(false);
-        let attempt_result = tokio::time::timeout(io_timeout, async {
-            let mut stream = TcpStream::connect(remote_addr)
-                .await
-                .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
-            let session = ClientHeaderSession::from_process()?;
-            session.write_initial(&mut stream, &encoded).await?;
-            sent.store(true, std::sync::atomic::Ordering::Release);
-            let mut reader = session.response_reader(&mut stream)?;
-            let message = reader.read_msg().await?;
-            Ok::<_, Box<dyn Error>>(PbConnResponse::decode(message)?)
-        })
-        .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!(
-                    "administrator request attempt timed out after {} ms",
-                    io_timeout.as_millis()
-                ),
-            )
-        });
-        let pre_send = !sent.load(std::sync::atomic::Ordering::Acquire);
-        let response = match attempt_result {
-            Ok(Ok(response)) => response,
-            Ok(Err(_)) if attempt == 0 && pre_send => continue,
-            Ok(Err(error)) => return Err(error),
-            Err(_) if attempt == 0 && pre_send => continue,
-            Err(error) => return Err(error.into()),
-        };
-        match response {
-            PbConnResponse::Admin(response) => return Ok(response),
-            PbConnResponse::Error(error)
-                if error.code == "connection_salt_replayed" && error.retryable =>
-            {
-                if attempt == 0 {
-                    continue;
-                }
-            }
-            PbConnResponse::Error(error) => {
-                return Err(std::io::Error::other(format!(
-                    "{}: {} (retryable={})",
-                    error.code, error.message, error.retryable
-                ))
-                .into());
-            }
-            response => {
-                return Err(std::io::Error::other(format!(
-                    "unexpected administrator response: {response:?}"
-                ))
-                .into());
-            }
-        }
-    }
-    Err(std::io::Error::other("connection salt replay retry was exhausted").into())
+    let client = admin_client(remote_addr)?;
+    Ok(client.admin()?.request(request).await?)
 }
 
 async fn stream_key_pages(
@@ -668,18 +616,18 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let error = send_admin_request_with_timeout(
-            remote_addr,
-            AdminRequest::AuthStatus,
-            Duration::from_millis(50),
-        )
-        .await
-        .expect_err("a stalled administrator request should time out");
+        let error = admin_client(remote_addr)
+            .expect("test client")
+            .admin()
+            .expect("administrator credential")
+            .request_with_timeout(AdminRequest::AuthStatus, Duration::from_millis(50))
+            .await
+            .expect_err("a stalled administrator request should time out");
 
-        let io_error = error
-            .downcast_ref::<std::io::Error>()
-            .expect("timeout should be reported as an I/O error");
-        assert_eq!(io_error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            matches!(error, pb_mapper_client::sdk::Error::TimedOut { .. }),
+            "timeout should be reported as TimedOut, got {error}"
+        );
         stalled_peer.abort();
     }
 }

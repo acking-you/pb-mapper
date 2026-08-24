@@ -1,0 +1,21 @@
+[package]
+name = "pb-mapper"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Client SDK for exposing and consuming keyed TCP/UDP services through a pb-mapper relay"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["proxy", "tunnel", "nat", "tcp", "udp"]
+categories = ["network-programming"]
+
+[dependencies]
+pb-mapper-client.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

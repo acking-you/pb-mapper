@@ -13,6 +13,9 @@ resolver = "3"
 version = "0.4.0"
 authors = ["L_B__"]
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/acking-you/pb-mapper"
+homepage = "https://github.com/acking-you/pb-mapper"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
@@ -20,6 +23,7 @@ expect_used = "deny"
 
 [workspace.dependencies]
 pb-mapper-auth = { path = "crates/pb-mapper-auth" }
+pb-mapper = { path = "crates/pb-mapper" }
 pb-mapper-client = { path = "crates/pb-mapper-client" }
 pb-mapper-core = { path = "crates/pb-mapper-core" }
 pb-mapper-protocol = { path = "crates/pb-mapper-protocol" }
@@ -51,3 +55,14 @@ tracing-subscriber = { version = "0.3.18", features = [
     "json",
 ], default-features = true }
 uni-stream = { git = "https://github.com/acking-you/uni-stream.git", branch = "master" }
+
+# Used by `js/` (`napi build --profile release-node --strip`) to keep the
+# Node-API cdylib small. The default `release` profile is left alone so the
+# CLI/server compile time does not grow.
+[profile.release-node]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"

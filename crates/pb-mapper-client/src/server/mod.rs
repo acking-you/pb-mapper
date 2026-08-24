@@ -10,6 +10,7 @@ use snafu::ResultExt;
 use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use self::error::{
@@ -55,6 +56,7 @@ enum Status {
     ReadMsg,
     SendPing,
     ConnectRemote,
+    Cancelled,
 }
 
 enum LocalControlWrite {
@@ -271,6 +273,34 @@ pub async fn run_server_side_cli_with_pinned_credential<LocalStream, A>(
         options,
         status_callback,
         Some(credential),
+        CancellationToken::new(),
+    )
+    .await;
+}
+
+/// Same as [`run_server_side_cli_with_pinned_credential`], but the retry loop
+/// returns when `shutdown` is cancelled.
+pub async fn run_server_side_cli_with_shutdown<LocalStream, A>(
+    local_addr: A,
+    remote_addr: A,
+    key: Arc<str>,
+    options: ServerTunnelOptions,
+    status_callback: Option<StatusCallback>,
+    credential: Credential,
+    shutdown: CancellationToken,
+) where
+    LocalStream: StreamProvider + Send + 'static,
+    LocalStream::Item: StreamForward,
+    A: ToSocketAddrs + Debug + Copy,
+{
+    run_server_side_cli_pool::<LocalStream, A>(
+        local_addr,
+        remote_addr,
+        key,
+        options,
+        status_callback,
+        Some(credential),
+        shutdown,
     )
     .await;
 }
@@ -293,21 +323,31 @@ pub async fn run_server_side_cli_with_callback<LocalStream, A>(
         options,
         status_callback,
         None,
+        CancellationToken::new(),
     )
     .await;
 }
 
-async fn resolve_registration_credential(pinned: Option<Credential>) -> Credential {
+async fn resolve_registration_credential(
+    pinned: Option<Credential>,
+    shutdown: &CancellationToken,
+) -> Option<Credential> {
     if let Some(credential) = pinned {
-        return credential;
+        return Some(credential);
     }
     let mut retry_backoff = RetryBackoff::default();
     loop {
+        if shutdown.is_cancelled() {
+            return None;
+        }
         match get_process_credential() {
-            Ok(credential) => return credential,
+            Ok(credential) => return Some(credential),
             Err(error) => {
                 tracing::error!("load registration credential failed: {error}");
-                tokio::time::sleep(retry_backoff.next_delay()).await;
+                tokio::select! {
+                    () = shutdown.cancelled() => return None,
+                    () = tokio::time::sleep(retry_backoff.next_delay()) => {}
+                }
             }
         }
     }
@@ -320,6 +360,7 @@ async fn run_server_side_cli_pool<LocalStream, A>(
     options: ServerTunnelOptions,
     status_callback: Option<StatusCallback>,
     pinned_credential: Option<Credential>,
+    shutdown: CancellationToken,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -339,7 +380,10 @@ async fn run_server_side_cli_pool<LocalStream, A>(
             return;
         }
     };
-    let credential = resolve_registration_credential(pinned_credential).await;
+    let Some(credential) = resolve_registration_credential(pinned_credential, &shutdown).await
+    else {
+        return;
+    };
     let pool_size = control_conn_pool_size().max(1);
     tracing::info!(
         event = "local_server_control_pool_starting",
@@ -356,6 +400,7 @@ async fn run_server_side_cli_pool<LocalStream, A>(
         } else {
             None
         };
+        let worker_shutdown = shutdown.clone();
         workers.spawn(async move {
             run_server_side_cli_worker::<LocalStream, _>(
                 local_addr,
@@ -365,6 +410,7 @@ async fn run_server_side_cli_pool<LocalStream, A>(
                 callback,
                 worker_index,
                 credential,
+                worker_shutdown,
             )
             .await;
         });
@@ -380,6 +426,7 @@ async fn run_server_side_cli_pool<LocalStream, A>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_server_side_cli_worker<LocalStream, A>(
     local_addr: A,
     remote_addr: A,
@@ -388,6 +435,7 @@ async fn run_server_side_cli_worker<LocalStream, A>(
     status_callback: Option<StatusCallback>,
     worker_index: usize,
     credential: Credential,
+    shutdown: CancellationToken,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -403,15 +451,22 @@ async fn run_server_side_cli_worker<LocalStream, A>(
         credential,
     };
     loop {
+        if shutdown.is_cancelled() {
+            return;
+        }
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream, _>(
             &mut retry_backoff,
             run_config.clone(),
             status_callback.as_ref(),
+            shutdown.clone(),
         )
         .await
         {
             status
         } else {
+            if shutdown.is_cancelled() {
+                return;
+            }
             tracing::warn!(
                 event = "local_server_control_worker_finished",
                 key = %key,
@@ -421,6 +476,7 @@ async fn run_server_side_cli_worker<LocalStream, A>(
             Status::ReadMsg
         };
         match status {
+            Status::Cancelled => return,
             Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
                 let retry_interval = retry_backoff.next_delay();
                 tracing::info!(
@@ -440,7 +496,13 @@ async fn run_server_side_cli_worker<LocalStream, A>(
                     callback(&status);
                 }
 
-                tokio::time::sleep(retry_interval).await;
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(retry_interval) => {}
+                }
+                if shutdown.is_cancelled() {
+                    return;
+                }
                 if let Some(ref callback) = status_callback {
                     callback("retrying");
                 }
@@ -449,11 +511,12 @@ async fn run_server_side_cli_worker<LocalStream, A>(
     }
 }
 
-#[instrument(skip(status_callback))]
+#[instrument(skip(status_callback, shutdown))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider, A: ToSocketAddrs + Debug + Copy>(
     retry_backoff: &mut RetryBackoff,
     config: ServerCliRunConfig<A>,
     status_callback: Option<&StatusCallback>,
+    shutdown: CancellationToken,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,
@@ -789,6 +852,17 @@ where
                     });
                 }
             }
+            () = shutdown.cancelled() => {
+                tracing::info!(
+                    event = "local_server_control_cancelled",
+                    key = %key,
+                    conn_id = %registration.conn_id,
+                    generation = registration.generation,
+                    worker_index,
+                    "local server control loop cancelled"
+                );
+                break Err(Status::Cancelled);
+            }
             Some(probe_result) = probe_rx.recv() => {
                 probe_in_flight = false;
                 let last_rx_age = lease_state.lock().await.last_rx_age();
@@ -987,5 +1061,44 @@ async fn write_stream_ack<T: MessageWriter>(
             timeout,
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use uni_stream::stream::TcpStreamProvider;
+
+    #[tokio::test]
+    async fn register_loop_stops_on_cancel() {
+        let shutdown = CancellationToken::new();
+        let token = shutdown.clone();
+        let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let task = tokio::spawn(async move {
+            run_server_side_cli_with_shutdown::<TcpStreamProvider, _>(
+                addr,
+                addr,
+                "k".into(),
+                ServerTunnelOptions {
+                    need_codec: false,
+                    is_datagram: false,
+                    keep_alive: false,
+                    namespace: None,
+                    force_namespace: false,
+                },
+                None,
+                Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+                token,
+            )
+            .await;
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("register loop did not stop after cancel")
+            .expect("join");
     }
 }

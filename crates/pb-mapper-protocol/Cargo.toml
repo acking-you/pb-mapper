@@ -3,6 +3,10 @@ name = "pb-mapper-protocol"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Message framing and authenticated sessions for pb-mapper"
 
 [dependencies]
 pb-mapper-auth.workspace = true

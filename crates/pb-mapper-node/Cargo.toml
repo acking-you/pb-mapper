@@ -1,0 +1,21 @@
+[package]
+name = "pb-mapper-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Node-API bindings for the pb-mapper client SDK"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+napi = { version = "3.12.2", default-features = false, features = ["napi8", "async"] }
+napi-derive = "3.6.3"
+pb-mapper-client.workspace = true
+
+[build-dependencies]
+napi-build = "2.4.1"
