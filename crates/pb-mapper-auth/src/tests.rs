@@ -52,6 +52,42 @@ fn initialize_admin_key_refuses_to_replace_a_key_when_encrypted_state_exists() {
     let _ = std::fs::remove_dir_all(state_dir);
 }
 
+/// A staged candidate is the only copy of a key the relay may already have
+/// installed, so a second rotation attempt must not overwrite it with a third
+/// key: that would leave no way back into the relay.
+#[test]
+fn staging_a_second_rotation_candidate_refuses_to_replace_the_first() {
+    let state_dir = temp_state_dir("stage-candidate");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let key_path = state_dir.join("admin.key");
+    let first = "abcdefghijklmnopqrstuvwxyz012345";
+    let second = "zyxwvutsrqponmlkjihgfedcba543210";
+
+    let staged = stage_admin_key_candidate(&key_path, first).unwrap();
+    assert_eq!(staged, staged_admin_key_path(&key_path));
+    assert_eq!(std::fs::read_to_string(&staged).unwrap().trim(), first);
+
+    // Restaging the same key is a retry of the same rotation, so it is allowed.
+    stage_admin_key_candidate(&key_path, first).unwrap();
+    assert_eq!(std::fs::read_to_string(&staged).unwrap().trim(), first);
+
+    let error = stage_admin_key_candidate(&key_path, second).unwrap_err();
+    assert_eq!(error.code, "administrator_key_staged");
+    assert!(!error.retryable);
+    assert_eq!(
+        std::fs::read_to_string(&staged).unwrap().trim(),
+        first,
+        "the first candidate must survive a rejected second attempt"
+    );
+
+    // Once resolved, the next rotation stages freely again.
+    discard_staged_admin_key(&staged);
+    stage_admin_key_candidate(&key_path, second).unwrap();
+    assert_eq!(std::fs::read_to_string(&staged).unwrap().trim(), second);
+
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
 #[tokio::test]
 async fn shrinking_then_expanding_capacity_does_not_reuse_old_key_ids() {
     let state_dir = temp_state_dir("capacity-shrink");

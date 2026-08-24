@@ -177,7 +177,10 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 page_size,
                 all,
             } => {
-                stream_key_pages(remote_addr, args.output, page, page_size, all).await?;
+                stream_pages::<KeyPage, _>(remote_addr, args.output, page, all, |page| {
+                    AdminRequest::KeyList { page, page_size }
+                })
+                .await?;
             }
             AdminKeyCommand::Show { key_id } => {
                 let response =
@@ -217,7 +220,14 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 page_size,
                 all,
             } = command;
-            stream_connection_pages(remote_addr, args.output, key_id, page, page_size, all).await?;
+            stream_pages::<AdminConnectionPage, _>(remote_addr, args.output, page, all, |page| {
+                AdminRequest::ConnectionList {
+                    key_id,
+                    page,
+                    page_size,
+                }
+            })
+            .await?;
         }
         AdminCommand::Service(AdminServiceArgs { command }) => {
             let AdminListCommand::List {
@@ -226,7 +236,14 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 page_size,
                 all,
             } = command;
-            stream_service_pages(remote_addr, args.output, key_id, page, page_size, all).await?;
+            stream_pages::<AdminServicePage, _>(remote_addr, args.output, page, all, |page| {
+                AdminRequest::ServiceList {
+                    key_id,
+                    page,
+                    page_size,
+                }
+            })
+            .await?;
         }
         AdminCommand::Status => {
             let response = send_admin_request(remote_addr, AdminRequest::AuthStatus).await?;
@@ -244,14 +261,10 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
         }) => {
             let key_file = key_file.unwrap_or_else(default_admin_recovery_key_file);
             let new_key = new_key.unwrap_or_else(generate_admin_key);
-            let staged_key_file = key_file.with_file_name(format!(
-                ".{}.next",
-                key_file
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("admin.key")
-            ));
-            write_admin_key_file(&staged_key_file, &new_key, true)?;
+            // Staged before the relay is contacted, and never over an unresolved
+            // candidate from an earlier attempt: that file may hold the only copy
+            // of a key the relay already installed.
+            let staged_key_file = stage_admin_key_candidate(&key_file, &new_key)?;
             let client = admin_client(remote_addr)?;
             let response = match client.admin()?.rotate_root_key(Some(new_key.clone())).await {
                 Ok(_) => AdminResponse::Ok {
@@ -278,13 +291,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                     staged_key_file.display()
                 ))
             })?;
-            if let Err(error) = std::fs::remove_file(&staged_key_file) {
-                tracing::warn!(
-                    path = %staged_key_file.display(),
-                    %error,
-                    "administrator key was rotated, but the staged key file could not be removed"
-                );
-            }
+            discard_staged_admin_key(&staged_key_file);
             if args.output == OutputFormat::Human {
                 println!("administrator key rotated and verified");
                 println!("all temporary credentials are now invalid (temporary_key_rotated)");
@@ -330,153 +337,135 @@ async fn send_admin_request(
     Ok(client.admin()?.request(request).await?)
 }
 
-async fn stream_key_pages(
-    remote_addr: std::net::SocketAddr,
-    output: OutputFormat,
-    mut page: u32,
-    page_size: u16,
-    all: bool,
-) -> Result<(), Box<dyn Error>> {
-    let mut combined: Option<KeyPage> = None;
-    loop {
-        let response =
-            send_admin_request(remote_addr, AdminRequest::KeyList { page, page_size }).await?;
-        let AdminResponse::KeyList(key_page) = &response else {
-            return Err(std::io::Error::other("unexpected key-list response").into());
-        };
-        if all {
-            if output == OutputFormat::Ndjson {
-                for item in &key_page.items {
-                    println!("{}", serde_json::to_string(item)?);
-                }
-            } else {
-                let page = combined.get_or_insert_with(|| {
-                    let mut page = key_page.clone();
-                    page.items.clear();
-                    page.next_page = None;
-                    page
-                });
-                page.items.extend(key_page.items.iter().cloned());
-            }
-        } else {
-            print_admin_response(output, &response)?;
-        }
-        let Some(next_page) = key_page.next_page else {
-            break;
-        };
-        if !all {
-            break;
-        }
-        page = next_page;
-    }
-    if let Some(page) = combined {
-        print_admin_response(output, &AdminResponse::KeyList(page))?;
-    }
-    Ok(())
+/// One paginated administrator listing, as [`stream_pages`] drives it.
+///
+/// Key, service, and connection listings are the same page shape three times
+/// over — a schema version, a vector of items, and a `next_page` cursor that is
+/// `None` on the last page. This trait is what lets one loop serve all three.
+///
+/// The item type stays out of the trait: the per-page methods below are all the
+/// loop needs, and keeping them concrete means this crate never has to name the
+/// three item types or carry a `serde` dependency for the bound.
+trait AdminPage: Clone {
+    /// Names this listing in the error raised when the relay answers with some
+    /// other response variant.
+    const LABEL: &'static str;
+
+    /// Borrow this listing's page out of a response, or `None` if the relay
+    /// answered with a different variant.
+    fn from_response(response: &AdminResponse) -> Option<&Self>;
+
+    /// Re-wrap an aggregated page for [`print_admin_response`].
+    fn into_response(self) -> AdminResponse;
+
+    fn next_page(&self) -> Option<u32>;
+
+    /// Print one item per line, as `--output ndjson` streams them.
+    fn print_ndjson(&self) -> Result<(), Box<dyn Error>>;
+
+    /// This page with its items dropped and its cursor cleared: the accumulator
+    /// `--all` fills, which keeps the relay's schema version but must not claim
+    /// there is a further page.
+    fn empty_clone(&self) -> Self;
+
+    /// Append `page`'s items to this accumulator.
+    fn absorb(&mut self, page: &Self);
 }
 
-async fn stream_service_pages(
-    remote_addr: std::net::SocketAddr,
-    output: OutputFormat,
-    key_id: Option<u64>,
-    mut page: u32,
-    page_size: u16,
-    all: bool,
-) -> Result<(), Box<dyn Error>> {
-    let mut combined: Option<AdminServicePage> = None;
-    loop {
-        let response = send_admin_request(
-            remote_addr,
-            AdminRequest::ServiceList {
-                key_id,
-                page,
-                page_size,
-            },
-        )
-        .await?;
-        let AdminResponse::Services(service_page) = &response else {
-            return Err(std::io::Error::other("unexpected service-list response").into());
-        };
-        if all {
-            if output == OutputFormat::Ndjson {
-                for item in &service_page.items {
+/// Declares [`AdminPage`] for one wire page type.
+macro_rules! impl_admin_page {
+    ($page:ty, variant = $variant:ident, label = $label:literal) => {
+        impl AdminPage for $page {
+            const LABEL: &'static str = $label;
+
+            fn from_response(response: &AdminResponse) -> Option<&Self> {
+                match response {
+                    AdminResponse::$variant(page) => Some(page),
+                    _ => None,
+                }
+            }
+
+            fn into_response(self) -> AdminResponse {
+                AdminResponse::$variant(self)
+            }
+
+            fn next_page(&self) -> Option<u32> {
+                self.next_page
+            }
+
+            fn print_ndjson(&self) -> Result<(), Box<dyn Error>> {
+                for item in &self.items {
                     println!("{}", serde_json::to_string(item)?);
                 }
-            } else {
-                let page = combined.get_or_insert_with(|| {
-                    let mut page = service_page.clone();
-                    page.items.clear();
-                    page.next_page = None;
-                    page
-                });
-                page.items.extend(service_page.items.iter().cloned());
+                Ok(())
             }
-        } else {
-            print_admin_response(output, &response)?;
+
+            fn empty_clone(&self) -> Self {
+                Self {
+                    items: Vec::new(),
+                    next_page: None,
+                    ..self.clone()
+                }
+            }
+
+            fn absorb(&mut self, page: &Self) {
+                self.items.extend_from_slice(&page.items);
+            }
         }
-        let Some(next_page) = service_page.next_page else {
-            break;
-        };
-        if !all {
-            break;
-        }
-        page = next_page;
-    }
-    if let Some(page) = combined {
-        print_admin_response(output, &AdminResponse::Services(page))?;
-    }
-    Ok(())
+    };
 }
 
-async fn stream_connection_pages(
+impl_admin_page!(KeyPage, variant = KeyList, label = "key-list");
+impl_admin_page!(AdminServicePage, variant = Services, label = "service-list");
+impl_admin_page!(
+    AdminConnectionPage,
+    variant = Connections,
+    label = "connection-list"
+);
+
+/// Fetch and render one page, or every page from `page` onwards when `all`.
+///
+/// `request` builds the listing's request for a given page number; everything
+/// else — the walk, the output contract, and the aggregation — is the same for
+/// all three listings.
+///
+/// The output modes deliberately differ under `--all`: NDJSON streams each item
+/// as it arrives, while human and JSON aggregate into a single page so their
+/// output stays one well-formed document.
+async fn stream_pages<P, F>(
     remote_addr: std::net::SocketAddr,
     output: OutputFormat,
-    key_id: Option<u64>,
     mut page: u32,
-    page_size: u16,
     all: bool,
-) -> Result<(), Box<dyn Error>> {
-    let mut combined: Option<AdminConnectionPage> = None;
+    request: F,
+) -> Result<(), Box<dyn Error>>
+where
+    P: AdminPage,
+    F: Fn(u32) -> AdminRequest,
+{
+    let mut aggregated: Option<P> = None;
     loop {
-        let response = send_admin_request(
-            remote_addr,
-            AdminRequest::ConnectionList {
-                key_id,
-                page,
-                page_size,
-            },
-        )
-        .await?;
-        let AdminResponse::Connections(connection_page) = &response else {
-            return Err(std::io::Error::other("unexpected connection-list response").into());
+        let response = send_admin_request(remote_addr, request(page)).await?;
+        let Some(current) = P::from_response(&response) else {
+            return Err(std::io::Error::other(format!("unexpected {} response", P::LABEL)).into());
         };
-        if all {
-            if output == OutputFormat::Ndjson {
-                for item in &connection_page.items {
-                    println!("{}", serde_json::to_string(item)?);
-                }
-            } else {
-                let page = combined.get_or_insert_with(|| {
-                    let mut page = connection_page.clone();
-                    page.items.clear();
-                    page.next_page = None;
-                    page
-                });
-                page.items.extend(connection_page.items.iter().cloned());
-            }
-        } else {
-            print_admin_response(output, &response)?;
+
+        match (all, output) {
+            (false, _) => print_admin_response(output, &response)?,
+            (true, OutputFormat::Ndjson) => current.print_ndjson()?,
+            (true, _) => aggregated
+                .get_or_insert_with(|| current.empty_clone())
+                .absorb(current),
         }
-        let Some(next_page) = connection_page.next_page else {
-            break;
-        };
-        if !all {
-            break;
+
+        match current.next_page() {
+            Some(next_page) if all => page = next_page,
+            _ => break,
         }
-        page = next_page;
     }
-    if let Some(page) = combined {
-        print_admin_response(output, &AdminResponse::Connections(page))?;
+
+    if let Some(aggregated) = aggregated {
+        print_admin_response(output, &aggregated.into_response())?;
     }
     Ok(())
 }

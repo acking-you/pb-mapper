@@ -455,3 +455,49 @@ async fn sdk_register_reports_permanent_rejection_as_failed() {
     let _ = clashing.stop().await;
     registration.stop().await.unwrap();
 }
+
+/// The `connect` half of the same guarantee: a subscription the relay refuses
+/// permanently must surface as `Failed`, not loop as `Retrying`. A temporary
+/// credential asking for someone else's namespace is one of those refusals.
+#[tokio::test]
+async fn sdk_connect_reports_permanent_rejection_as_failed() {
+    let relay = Relay::start("sdk-connect-reject").await;
+    let (key_id, credential) = relay
+        .issue_credential(LONG_TTL.max(MIN_TEMP_KEY_TTL), "connect-reject")
+        .await;
+
+    // Any namespace but its own: a temporary credential is confined to the one
+    // its key id names, and the relay says so with `retryable: false`.
+    let foreign_namespace = key_id.as_u64() + 1;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        credential,
+        false,
+        Some(foreign_namespace),
+    );
+
+    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    let connection = client
+        .connect(ConnectRequest {
+            key: "echo-denied".into(),
+            local_addr: listen_addr.to_string(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+
+    let ready = connection.wait_ready_timeout(READY_TIMEOUT).await;
+    let error = ready.expect_err("a foreign namespace can never become ready");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("namespace_access_denied"),
+        "the rejection reason should reach the caller, got: {rendered}"
+    );
+    assert!(
+        matches!(connection.status(), TunnelStatus::Failed(_)),
+        "a permanent rejection must be Failed, not Retrying: {:?}",
+        connection.status()
+    );
+
+    let _ = connection.stop().await;
+}

@@ -1,3 +1,8 @@
+//! The SDK's error type.
+//!
+//! One flat enum, deliberately: a caller has to be able to match on what went
+//! wrong without importing the error type of every layer below.
+
 use std::time::Duration;
 
 use snafu::Snafu;

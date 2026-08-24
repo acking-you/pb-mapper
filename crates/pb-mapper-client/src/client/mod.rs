@@ -15,14 +15,13 @@ use tokio_util::sync::CancellationToken;
 use uni_stream::udp::set_custom_timeout;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
-use self::status::{get_status, get_status_scoped, get_status_with_credential};
+use self::status::{get_status_scoped, get_status_with_credential};
 use self::stream::handle_local_stream;
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{
     StatusOp, client_health_check_interval, client_health_check_timeout,
     client_health_failure_threshold,
 };
-use pb_mapper_core::snafu_error_get_or_return;
 use pb_mapper_core::timeout::RetryBackoff;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper_protocol::forward::StreamForward;
@@ -47,28 +46,6 @@ pub async fn run_client_side_cli<LocalListener: ListenerProvider, A: ToSocketAdd
         key,
         keep_alive,
         None,
-    )
-    .await
-}
-
-pub async fn run_client_side_cli_scoped<LocalListener: ListenerProvider, A: ToSocketAddrs>(
-    local_addr: A,
-    remote_addr: A,
-    key: Arc<str>,
-    keep_alive: bool,
-    namespace: Option<u64>,
-) where
-    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
-{
-    run_client_side_cli_loop::<LocalListener, A>(
-        local_addr,
-        remote_addr,
-        key,
-        keep_alive,
-        namespace,
-        None,
-        None,
-        CancellationToken::new(),
     )
     .await
 }
@@ -245,16 +222,36 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
             "client probing remote server"
         );
 
-        if let Err(reason) =
+        if let Err(failure) =
             probe_remote_key(remote_addr, key.as_ref(), namespace, credential).await
         {
+            // A refusal the relay marks permanent — a namespace this credential
+            // does not own, an invalid service name — cannot be fixed by trying
+            // again. Looping on it would leave the caller's `wait_ready` pending
+            // forever with nothing but "retrying" to show for it, so the reason is
+            // reported and the loop ends. Mirrors the register side's
+            // `Status::Rejected`.
+            if failure.permanent {
+                tracing::error!(
+                    event = "client_remote_probe_rejected_permanently",
+                    key = %key,
+                    local_addr = %local_addr,
+                    remote_addr = %remote_addr,
+                    reason = %failure,
+                    "pb server permanently refused this subscription; not retrying"
+                );
+                if let Some(ref callback) = status_callback {
+                    callback(&format!("failed: {failure}"));
+                }
+                break 'outer;
+            }
             let retry_delay = retry_backoff.next_delay();
             tracing::warn!(
                 event = "client_remote_probe_failed",
                 key = %key,
                 local_addr = %local_addr,
                 remote_addr = %remote_addr,
-                reason = %reason,
+                reason = %failure,
                 retry_delay = ?retry_delay,
                 retry_count = retry_backoff.failures(),
                 "client remote probe failed; retrying"
@@ -473,12 +470,51 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider, A: ToSocketAd
     stream_tasks.shutdown().await;
 }
 
+/// Why a remote probe did not confirm the service, and whether waiting could
+/// change that.
+///
+/// The distinction is what keeps the retry loop from spinning: a service that has
+/// not registered yet may still appear, but a namespace the credential does not
+/// own never will.
+#[derive(Debug)]
+struct ProbeFailure {
+    reason: String,
+    permanent: bool,
+}
+
+impl ProbeFailure {
+    /// A failure worth retrying: a transport error, or a service that is simply
+    /// not registered yet.
+    fn transient(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            permanent: false,
+        }
+    }
+
+    /// A status failure classified by the relay's own `retryable` verdict, which
+    /// is the only party that knows whether the refusal is final.
+    fn from_status_error(context: &str, error: crate::client::error::Error) -> Self {
+        let permanent = error.remote_retryable() == Some(false);
+        Self {
+            reason: format!("{context}: {}", snafu::Report::from_error(error)),
+            permanent,
+        }
+    }
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+
 async fn probe_remote_key(
     remote_addr: SocketAddr,
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), ProbeFailure> {
     let timeout = client_health_check_timeout();
     match tokio::time::timeout(
         timeout,
@@ -487,7 +523,9 @@ async fn probe_remote_key(
     .await
     {
         Ok(result) => result,
-        Err(_) => Err(format!("remote key probe timed out after {timeout:?}")),
+        Err(_) => Err(ProbeFailure::transient(format!(
+            "remote key probe timed out after {timeout:?}"
+        ))),
     }
 }
 
@@ -496,7 +534,7 @@ async fn probe_remote_key_once(
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), ProbeFailure> {
     match fetch_remote_status(
         remote_addr,
         PbConnStatusReq::Service {
@@ -511,21 +549,24 @@ async fn probe_remote_key_once(
             if connections.iter().any(|conn| conn.healthy) {
                 return Ok(());
             }
-            return Err(format!(
+            return Err(ProbeFailure::transient(format!(
                 "client key `{key}` has no healthy remote server connections"
-            ));
+            )));
         }
         Ok(status_resp) => {
-            return Err(format!(
+            return Err(ProbeFailure::transient(format!(
                 "expected service status response, got {status_resp:?}"
-            ));
+            )));
         }
-        Err(service_reason) => {
+        // A refusal the relay calls final applies to the keys probe just as much,
+        // so there is nothing to fall back to.
+        Err(failure) if failure.permanent => return Err(failure),
+        Err(service_failure) => {
             tracing::debug!(
                 event = "client_remote_service_probe_failed",
                 key = %key,
                 remote_addr = %remote_addr,
-                reason = %service_reason,
+                reason = %service_failure,
                 "service status probe failed; falling back to key status"
             );
         }
@@ -534,16 +575,16 @@ async fn probe_remote_key_once(
     let status_resp =
         fetch_remote_status(remote_addr, PbConnStatusReq::Keys, namespace, credential).await?;
     let PbConnStatusResp::Keys(keys) = status_resp else {
-        return Err(format!(
+        return Err(ProbeFailure::transient(format!(
             "expected keys status response, got {status_resp:?}"
-        ));
+        )));
     };
     if keys.iter().any(|candidate| candidate == key) {
         Ok(())
     } else {
-        Err(format!(
+        Err(ProbeFailure::transient(format!(
             "client key `{key}` is not registered on remote server; valid keys: {keys:?}"
-        ))
+        )))
     }
 }
 
@@ -552,36 +593,15 @@ async fn fetch_remote_status(
     req: PbConnStatusReq,
     namespace: Option<u64>,
     credential: Credential,
-) -> std::result::Result<PbConnStatusResp, String> {
+) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
     let mut stream = each_addr(remote_addr, TcpStream::connect)
         .await
-        .map_err(|e| format!("connect remote stream failed: {e}"))?;
+        .map_err(|error| {
+            ProbeFailure::transient(format!("connect remote stream failed: {error}"))
+        })?;
     get_status_with_credential(&mut stream, req, namespace, &credential)
         .await
-        .map_err(|e| format!("get status failed: {}", snafu::Report::from_error(e)))
-}
-
-pub async fn show_status<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
-    remote_addr: A,
-    req: PbConnStatusReq,
-) {
-    let mut stream = snafu_error_get_or_return!(
-        each_addr(remote_addr, TcpStream::connect).await,
-        "get status stream"
-    );
-    let status = snafu_error_get_or_return!(get_status(&mut stream, req).await);
-    let status = snafu_error_get_or_return!(serde_json::to_string_pretty(&status));
-    println!("Status:{status}");
-}
-
-#[inline]
-pub async fn handle_status_cli<A: ToSocketAddrs + Debug + Copy + Send + 'static>(
-    op: StatusOp,
-    addr: A,
-) {
-    if let Err(error) = handle_status_cli_scoped(op, addr, None).await {
-        tracing::error!("{error}");
-    }
+        .map_err(|error| ProbeFailure::from_status_error("get status failed", error))
 }
 
 pub async fn handle_status_cli_scoped<A: ToSocketAddrs + Debug + Copy + Send + 'static>(

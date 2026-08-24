@@ -1,4 +1,19 @@
 //! Node-API surface over [`pb_mapper_client::sdk`].
+//!
+//! Three things happen at this boundary and nowhere else:
+//!
+//! * **Numbers narrow.** JavaScript has no `u64`, so napi maps the SDK's
+//!   unsigned ids and timestamps to `i64` and its page sizes to `u32`. Every
+//!   inbound narrowing is checked — see [`as_u64`] and [`narrow_page_size`] —
+//!   because a silent `as` cast turns a caller's mistake into wrong data
+//!   instead of an error.
+//! * **Enums become strings.** `"tcp"`, `"connected"`, `"allow"`: idiomatic on
+//!   the JS side, and parsed back into the SDK's enums here.
+//! * **Errors flatten.** Every SDK error becomes a JS `Error` carrying its
+//!   rendered message, since napi has no structured error channel.
+//!
+//! Beyond that this crate holds no logic: anything worth testing belongs in the
+//! SDK, which is exercised by `crates/pb-mapper-cli/tests/sdk_e2e.rs`.
 
 #![allow(clippy::needless_pass_by_value)]
 
@@ -11,20 +26,53 @@ use pb_mapper_client::sdk::{
     self, ClientConfig, ConnectRequest, RegisterRequest, Transport, TunnelStatus,
 };
 
+/// Default page size for the `list*` calls that take an explicit page.
+const DEFAULT_PAGE_SIZE: u32 = 100;
+
 fn to_napi(error: sdk::Error) -> Error {
     Error::from_reason(error.to_string())
+}
+
+fn invalid_argument(message: impl Into<String>) -> Error {
+    Error::from_reason(message.into())
+}
+
+/// Narrow a JS integer to the `u64` the SDK expects.
+///
+/// `field` names the argument, so a caller sees which one was negative rather
+/// than a bare type complaint.
+fn as_u64(field: &str, value: i64) -> Result<u64> {
+    u64::try_from(value).map_err(|_| invalid_argument(format!("{field} must be non-negative")))
+}
+
+/// Same as [`as_u64`], for an optional argument.
+fn as_opt_u64(field: &str, value: Option<i64>) -> Result<Option<u64>> {
+    value.map(|value| as_u64(field, value)).transpose()
+}
+
+/// Narrow a JS page size to the `u16` the SDK expects.
+///
+/// Checked rather than cast: `as u16` silently wraps, so `pageSize: 65_537`
+/// would have asked for a single-item page instead of failing.
+fn narrow_page_size(value: Option<u32>) -> Result<u16> {
+    let value = value.unwrap_or(DEFAULT_PAGE_SIZE);
+    u16::try_from(value).map_err(|_| invalid_argument(format!("pageSize {value} is out of range")))
 }
 
 fn parse_transport(raw: &str) -> Result<Transport> {
     match raw.to_ascii_lowercase().as_str() {
         "tcp" => Ok(Transport::Tcp),
         "udp" => Ok(Transport::Udp),
-        _ => Err(Error::from_reason(format!(
+        _ => Err(invalid_argument(format!(
             "transport must be \"tcp\" or \"udp\", got {raw}"
         ))),
     }
 }
 
+/// Render a tunnel status for JS.
+///
+/// `Failed` keeps its reason after the colon: it is the only description of a
+/// permanent rejection a JS caller ever receives.
 fn status_label(status: &TunnelStatus) -> String {
     match status {
         TunnelStatus::Starting => "starting".into(),
@@ -101,7 +149,34 @@ pub struct JsAuthStatus {
     pub revoked_keys: i64,
     pub legacy_protocol: String,
     pub active_legacy_connections: i64,
+    /// Unix seconds of the most recent legacy (protocol-v1) connection, or
+    /// `null` if the server has never seen one.
+    pub last_legacy_connection_at: Option<i64>,
+    pub auth_successes: i64,
+    pub auth_failures: i64,
     pub server_instance_id: String,
+}
+
+impl From<sdk::AuthStatusInfo> for JsAuthStatus {
+    fn from(value: sdk::AuthStatusInfo) -> Self {
+        Self {
+            schema_version: u32::from(value.schema_version),
+            safe_mode: value.safe_mode,
+            capacity: value.capacity as i64,
+            active_keys: value.active_keys as i64,
+            expired_keys: value.expired_keys as i64,
+            revoked_keys: value.revoked_keys as i64,
+            legacy_protocol: match value.legacy_protocol {
+                sdk::LegacyProtocol::Allow => "allow".into(),
+                sdk::LegacyProtocol::Deny => "deny".into(),
+            },
+            active_legacy_connections: value.active_legacy_connections as i64,
+            last_legacy_connection_at: value.last_legacy_connection_at.map(|at| at as i64),
+            auth_successes: value.auth_successes as i64,
+            auth_failures: value.auth_failures as i64,
+            server_instance_id: value.server_instance_id,
+        }
+    }
 }
 
 impl From<sdk::KeyMetadata> for JsKeyMetadata {
@@ -207,18 +282,11 @@ pub struct Client {
 impl Client {
     #[napi(constructor)]
     pub fn new(config: JsClientConfig) -> Result<Self> {
-        let namespace = match config.namespace {
-            Some(value) if value < 0 => {
-                return Err(Error::from_reason("namespace must be non-negative"));
-            }
-            Some(value) => Some(value as u64),
-            None => None,
-        };
         let inner = sdk::Client::new(ClientConfig {
             server: config.server,
             credential: config.credential,
             keep_alive: config.keep_alive.unwrap_or(false),
-            namespace,
+            namespace: as_opt_u64("namespace", config.namespace)?,
         })
         .map_err(to_napi)?;
         Ok(Self { inner })
@@ -242,9 +310,7 @@ impl Client {
             })
             .await
             .map_err(to_napi)?;
-        Ok(Registration {
-            inner: Arc::new(registration),
-        })
+        Ok(Registration::new(registration))
     }
 
     #[napi]
@@ -258,9 +324,7 @@ impl Client {
             })
             .await
             .map_err(to_napi)?;
-        Ok(Connection {
-            inner: Arc::new(connection),
-        })
+        Ok(Connection::new(connection))
     }
 
     #[napi]
@@ -298,61 +362,84 @@ impl Client {
     }
 }
 
+/// A live `register` tunnel: a local service published on the relay.
 #[napi]
 pub struct Registration {
     inner: Arc<sdk::Registration>,
 }
 
-#[napi]
-impl Registration {
-    #[napi]
-    pub fn key(&self) -> String {
-        self.inner.key().to_string()
-    }
-
-    #[napi]
-    pub fn status(&self) -> String {
-        status_label(&self.inner.status())
-    }
-
-    #[napi]
-    pub async fn wait_ready(&self, timeout_ms: Option<u32>) -> Result<()> {
-        wait_ready_registration(&self.inner, timeout_ms).await
-    }
-
-    #[napi]
-    pub async fn stop(&self) -> Result<()> {
-        self.inner.stop().await.map_err(to_napi)
-    }
-}
-
+/// A live `connect` tunnel: a local listener forwarding to a registered service.
 #[napi]
 pub struct Connection {
     inner: Arc<sdk::Connection>,
 }
 
-#[napi]
-impl Connection {
-    #[napi]
-    pub fn key(&self) -> String {
-        self.inner.key().to_string()
-    }
+/// Implements the JS surface of one tunnel handle.
+///
+/// [`Registration`] and [`Connection`] stay distinct types on both sides of the
+/// boundary — neither may be passed where the other is meant — but their JS
+/// surface is identical down to the last method, so it is written once here.
+///
+/// The structs themselves are declared above rather than generated: napi copies
+/// doc comments into `index.d.ts`, and a comment forwarded through a macro
+/// argument arrives there mangled.
+///
+/// Both hold the handle in an `Arc`, because napi passes `&self` to an
+/// `async fn` and the returned future must not borrow the wrapper.
+macro_rules! tunnel_class {
+    ($name:ident wrapping $handle:ty) => {
+        impl $name {
+            fn new(inner: $handle) -> Self {
+                Self {
+                    inner: Arc::new(inner),
+                }
+            }
+        }
 
-    #[napi]
-    pub fn status(&self) -> String {
-        status_label(&self.inner.status())
-    }
+        #[napi]
+        impl $name {
+            /// The service key this tunnel is bound to.
+            #[napi]
+            pub fn key(&self) -> String {
+                self.inner.key().to_string()
+            }
 
-    #[napi]
-    pub async fn wait_ready(&self, timeout_ms: Option<u32>) -> Result<()> {
-        wait_ready_connection(&self.inner, timeout_ms).await
-    }
+            /// The tunnel's latest status: `starting`, `connected`, `retrying`,
+            /// `stopped`, or `failed:<reason>`.
+            #[napi]
+            pub fn status(&self) -> String {
+                status_label(&self.inner.status())
+            }
 
-    #[napi]
-    pub async fn stop(&self) -> Result<()> {
-        self.inner.stop().await.map_err(to_napi)
-    }
+            /// Resolves once the tunnel is connected, and rejects if it fails or
+            /// is stopped first.
+            ///
+            /// Without `timeoutMs` this waits indefinitely, which is only safe
+            /// because a tunnel the relay refuses permanently settles as failed
+            /// rather than retrying forever.
+            #[napi]
+            pub async fn wait_ready(&self, timeout_ms: Option<u32>) -> Result<()> {
+                match timeout_ms {
+                    Some(ms) => self
+                        .inner
+                        .wait_ready_timeout(Duration::from_millis(u64::from(ms)))
+                        .await
+                        .map_err(to_napi),
+                    None => self.inner.wait_ready().await.map_err(to_napi),
+                }
+            }
+
+            /// Cancels the tunnel's worker and waits for it to unwind.
+            #[napi]
+            pub async fn stop(&self) -> Result<()> {
+                self.inner.stop().await.map_err(to_napi)
+            }
+        }
+    };
 }
+
+tunnel_class!(Registration wrapping sdk::Registration);
+tunnel_class!(Connection wrapping sdk::Connection);
 
 #[napi]
 pub struct Admin {
@@ -384,7 +471,7 @@ impl Admin {
             None => self.inner.list_keys_all().await.map_err(to_napi)?,
             Some(page) => {
                 self.inner
-                    .list_keys(page, page_size.unwrap_or(100) as u16)
+                    .list_keys(page, narrow_page_size(page_size)?)
                     .await
                     .map_err(to_napi)?
                     .items
@@ -395,11 +482,9 @@ impl Admin {
 
     #[napi]
     pub async fn revoke_key(&self, key_id: i64) -> Result<JsKeyMetadata> {
-        if key_id < 0 {
-            return Err(Error::from_reason("key_id must be non-negative"));
-        }
+        let key_id = as_u64("keyId", key_id)?;
         self.inner
-            .revoke_key(key_id as u64)
+            .revoke_key(key_id)
             .await
             .map(JsKeyMetadata::from)
             .map_err(to_napi)
@@ -407,11 +492,9 @@ impl Admin {
 
     #[napi]
     pub async fn show_key(&self, key_id: i64) -> Result<JsIssuedKey> {
-        if key_id < 0 {
-            return Err(Error::from_reason("key_id must be non-negative"));
-        }
+        let key_id = as_u64("keyId", key_id)?;
         self.inner
-            .show_key(key_id as u64)
+            .show_key(key_id)
             .await
             .map(JsIssuedKey::from)
             .map_err(to_napi)
@@ -419,11 +502,9 @@ impl Admin {
 
     #[napi]
     pub async fn reveal_key(&self, key_id: i64) -> Result<JsIssuedKey> {
-        if key_id < 0 {
-            return Err(Error::from_reason("key_id must be non-negative"));
-        }
+        let key_id = as_u64("keyId", key_id)?;
         self.inner
-            .reveal_key(key_id as u64)
+            .reveal_key(key_id)
             .await
             .map(JsIssuedKey::from)
             .map_err(to_napi)
@@ -431,11 +512,9 @@ impl Admin {
 
     #[napi]
     pub async fn renew_key(&self, key_id: i64, ttl_seconds: u32) -> Result<JsIssuedKey> {
-        if key_id < 0 {
-            return Err(Error::from_reason("key_id must be non-negative"));
-        }
+        let key_id = as_u64("keyId", key_id)?;
         self.inner
-            .renew_key(key_id as u64, Duration::from_secs(u64::from(ttl_seconds)))
+            .renew_key(key_id, Duration::from_secs(u64::from(ttl_seconds)))
             .await
             .map(JsIssuedKey::from)
             .map_err(to_napi)
@@ -462,21 +541,11 @@ impl Admin {
 
     #[napi]
     pub async fn auth_status(&self) -> Result<JsAuthStatus> {
-        let status = self.inner.auth_status().await.map_err(to_napi)?;
-        Ok(JsAuthStatus {
-            schema_version: status.schema_version as u32,
-            safe_mode: status.safe_mode,
-            capacity: status.capacity as i64,
-            active_keys: status.active_keys as i64,
-            expired_keys: status.expired_keys as i64,
-            revoked_keys: status.revoked_keys as i64,
-            legacy_protocol: match status.legacy_protocol {
-                sdk::LegacyProtocol::Allow => "allow".into(),
-                sdk::LegacyProtocol::Deny => "deny".into(),
-            },
-            active_legacy_connections: status.active_legacy_connections as i64,
-            server_instance_id: status.server_instance_id,
-        })
+        self.inner
+            .auth_status()
+            .await
+            .map(JsAuthStatus::from)
+            .map_err(to_napi)
     }
 
     #[napi]
@@ -498,13 +567,7 @@ impl Admin {
 
     #[napi]
     pub async fn list_services(&self, key_id: Option<i64>) -> Result<Vec<JsServiceInfo>> {
-        let key_id = match key_id {
-            Some(id) if id < 0 => {
-                return Err(Error::from_reason("key_id must be non-negative"));
-            }
-            Some(id) => Some(id as u64),
-            None => None,
-        };
+        let key_id = as_opt_u64("keyId", key_id)?;
         Ok(self
             .inner
             .list_services_all(key_id)
@@ -517,13 +580,7 @@ impl Admin {
 
     #[napi]
     pub async fn list_connections(&self, key_id: Option<i64>) -> Result<Vec<JsConnectionInfo>> {
-        let key_id = match key_id {
-            Some(id) if id < 0 => {
-                return Err(Error::from_reason("key_id must be non-negative"));
-            }
-            Some(id) => Some(id as u64),
-            None => None,
-        };
+        let key_id = as_opt_u64("keyId", key_id)?;
         Ok(self
             .inner
             .list_connections_all(key_id)
@@ -532,31 +589,5 @@ impl Admin {
             .into_iter()
             .map(JsConnectionInfo::from)
             .collect())
-    }
-}
-
-async fn wait_ready_registration(
-    registration: &sdk::Registration,
-    timeout_ms: Option<u32>,
-) -> Result<()> {
-    match timeout_ms {
-        Some(ms) => registration
-            .wait_ready_timeout(Duration::from_millis(u64::from(ms)))
-            .await
-            .map_err(to_napi),
-        None => registration.wait_ready().await.map_err(to_napi),
-    }
-}
-
-async fn wait_ready_connection(
-    connection: &sdk::Connection,
-    timeout_ms: Option<u32>,
-) -> Result<()> {
-    match timeout_ms {
-        Some(ms) => connection
-            .wait_ready_timeout(Duration::from_millis(u64::from(ms)))
-            .await
-            .map_err(to_napi),
-        None => connection.wait_ready().await.map_err(to_napi),
     }
 }

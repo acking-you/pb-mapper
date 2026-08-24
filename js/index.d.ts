@@ -33,17 +33,47 @@ export declare class Client {
   admin(): Admin
 }
 
+/** A live `connect` tunnel: a local listener forwarding to a registered service. */
 export declare class Connection {
+  /** The service key this tunnel is bound to. */
   key(): string
+  /**
+   * The tunnel's latest status: `starting`, `connected`, `retrying`,
+   * `stopped`, or `failed:<reason>`.
+   */
   status(): string
+  /**
+   * Resolves once the tunnel is connected, and rejects if it fails or
+   * is stopped first.
+   *
+   * Without `timeoutMs` this waits indefinitely, which is only safe
+   * because a tunnel the relay refuses permanently settles as failed
+   * rather than retrying forever.
+   */
   waitReady(timeoutMs?: number | undefined | null): Promise<void>
+  /** Cancels the tunnel's worker and waits for it to unwind. */
   stop(): Promise<void>
 }
 
+/** A live `register` tunnel: a local service published on the relay. */
 export declare class Registration {
+  /** The service key this tunnel is bound to. */
   key(): string
+  /**
+   * The tunnel's latest status: `starting`, `connected`, `retrying`,
+   * `stopped`, or `failed:<reason>`.
+   */
   status(): string
+  /**
+   * Resolves once the tunnel is connected, and rejects if it fails or
+   * is stopped first.
+   *
+   * Without `timeoutMs` this waits indefinitely, which is only safe
+   * because a tunnel the relay refuses permanently settles as failed
+   * rather than retrying forever.
+   */
   waitReady(timeoutMs?: number | undefined | null): Promise<void>
+  /** Cancels the tunnel's worker and waits for it to unwind. */
   stop(): Promise<void>
 }
 
@@ -56,6 +86,13 @@ export interface JsAuthStatus {
   revokedKeys: number
   legacyProtocol: string
   activeLegacyConnections: number
+  /**
+   * Unix seconds of the most recent legacy (protocol-v1) connection, or
+   * `null` if the server has never seen one.
+   */
+  lastLegacyConnectionAt?: number
+  authSuccesses: number
+  authFailures: number
   serverInstanceId: string
 }
 

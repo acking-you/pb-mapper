@@ -1,3 +1,10 @@
+//! The session object: [`Client`], its request types, and the tunnel spawner.
+//!
+//! Everything a caller starts goes through here. `register` and `connect` are
+//! the same shape — resolve both endpoints, open a status channel, spawn the
+//! transport's worker — so that lifecycle lives in one place (`TunnelWorker`)
+//! and each call site is left with only the worker it invokes.
+
 use std::sync::{Arc, RwLock};
 
 use pb_mapper_core::checksum::{Credential, parse_credential};
@@ -17,8 +24,8 @@ use super::admin::Admin;
 use super::error::{AddressSnafu, ConnectSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
+use crate::client::run_client_side_cli_with_shutdown;
 use crate::client::status::get_status_with_credential;
-use crate::client::{ClientStatusCallback, run_client_side_cli_with_shutdown};
 use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_with_shutdown};
 
 /// Configuration for a [`Client`] session.
@@ -129,14 +136,14 @@ impl Client {
         })
     }
 
+    /// Publish a local service on the relay under `request.key`.
+    ///
+    /// Returns as soon as the worker is spawned; the handle's
+    /// [`Registration::wait_ready`] is what waits for the relay to accept it.
     pub async fn register(&self, request: RegisterRequest) -> Result<Registration> {
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
         }
-        let local_addr = resolve(&request.local_addr).await?;
-        let remote_addr = resolve(&self.inner.server).await?;
-        let credential = self.credential();
-        let key = request.key.clone();
         let options = ServerTunnelOptions {
             need_codec: request.codec,
             is_datagram: request.transport.is_datagram(),
@@ -144,100 +151,79 @@ impl Client {
             namespace: self.inner.namespace,
             force_namespace: request.force_namespace,
         };
-
-        let (status_tx, status_rx) = watch::channel(TunnelStatus::Starting);
-        let shutdown = CancellationToken::new();
-        let worker_shutdown = shutdown.clone();
-        let worker_key: std::sync::Arc<str> = key.clone().into();
+        let worker = self
+            .prepare_worker(&request.key, &request.local_addr)
+            .await?;
+        let credential = self.credential();
         let handle = match request.transport {
-            Transport::Tcp => tokio::spawn(async move {
-                let callback = watch_callback(status_tx.clone());
+            Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_with_shutdown::<TcpStreamProvider, _>(
-                    local_addr,
-                    remote_addr,
-                    worker_key,
+                    context.local_addr,
+                    context.remote_addr,
+                    context.key,
                     options,
-                    Some(callback),
+                    Some(context.status_callback),
                     credential,
-                    worker_shutdown,
+                    context.shutdown,
                 )
-                .await;
-                settle_stopped(&status_tx);
             }),
-            Transport::Udp => tokio::spawn(async move {
-                let callback = watch_callback(status_tx.clone());
+            Transport::Udp => worker.spawn(move |context| {
                 run_server_side_cli_with_shutdown::<UdpStreamProvider, _>(
-                    local_addr,
-                    remote_addr,
-                    worker_key,
+                    context.local_addr,
+                    context.remote_addr,
+                    context.key,
                     options,
-                    Some(callback),
+                    Some(context.status_callback),
                     credential,
-                    worker_shutdown,
+                    context.shutdown,
                 )
-                .await;
-                settle_stopped(&status_tx);
             }),
         };
-
-        Ok(Registration::new(
-            LiveTunnel::new(shutdown, handle, status_rx),
-            key,
-        ))
+        Ok(Registration::new(handle, request.key))
     }
 
+    /// Subscribe to a registered service and forward it from a local listener.
+    ///
+    /// Returns as soon as the worker is spawned; the handle's
+    /// [`Connection::wait_ready`] is what waits for the local listener to bind
+    /// and the relay to confirm the service.
     pub async fn connect(&self, request: ConnectRequest) -> Result<Connection> {
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
         }
-        let local_addr = resolve(&request.local_addr).await?;
-        let remote_addr = resolve(&self.inner.server).await?;
+        let worker = self
+            .prepare_worker(&request.key, &request.local_addr)
+            .await?;
         let credential = self.credential();
-        let key = request.key.clone();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
-
-        let (status_tx, status_rx) = watch::channel(TunnelStatus::Starting);
-        let shutdown = CancellationToken::new();
-        let worker_shutdown = shutdown.clone();
-        let worker_key: std::sync::Arc<str> = key.clone().into();
         let handle = match request.transport {
-            Transport::Tcp => tokio::spawn(async move {
-                let callback = client_watch_callback(status_tx.clone());
+            Transport::Tcp => worker.spawn(move |context| {
                 run_client_side_cli_with_shutdown::<TcpListenerProvider, _>(
-                    local_addr,
-                    remote_addr,
-                    worker_key,
+                    context.local_addr,
+                    context.remote_addr,
+                    context.key,
                     keep_alive,
                     namespace,
-                    Some(callback),
+                    Some(context.status_callback),
                     Some(credential),
-                    worker_shutdown,
+                    context.shutdown,
                 )
-                .await;
-                settle_stopped(&status_tx);
             }),
-            Transport::Udp => tokio::spawn(async move {
-                let callback = client_watch_callback(status_tx.clone());
+            Transport::Udp => worker.spawn(move |context| {
                 run_client_side_cli_with_shutdown::<UdpListenerProvider, _>(
-                    local_addr,
-                    remote_addr,
-                    worker_key,
+                    context.local_addr,
+                    context.remote_addr,
+                    context.key,
                     keep_alive,
                     namespace,
-                    Some(callback),
+                    Some(context.status_callback),
                     Some(credential),
-                    worker_shutdown,
+                    context.shutdown,
                 )
-                .await;
-                settle_stopped(&status_tx);
             }),
         };
-
-        Ok(Connection::new(
-            LiveTunnel::new(shutdown, handle, status_rx),
-            key,
-        ))
+        Ok(Connection::new(handle, request.key))
     }
 
     /// Service keys visible to this credential's namespace.
@@ -268,6 +254,24 @@ impl Client {
 
     pub async fn remote_id(&self) -> Result<RemoteId> {
         RemoteId::from_status(self.status_request(PbConnStatusReq::RemoteId).await?)
+    }
+
+    /// Resolve both ends of a tunnel and set up its status channel.
+    ///
+    /// Shared by `register` and `connect`: the two differ only in which worker
+    /// they hand the resolved context to.
+    async fn prepare_worker(&self, key: &str, local_addr: &str) -> Result<TunnelWorker> {
+        let local_addr = resolve(local_addr).await?;
+        let remote_addr = resolve(&self.inner.server).await?;
+        let (status_tx, status_rx) = watch::channel(TunnelStatus::Starting);
+        Ok(TunnelWorker {
+            local_addr,
+            remote_addr,
+            key: Arc::from(key),
+            shutdown: CancellationToken::new(),
+            status_tx,
+            status_rx,
+        })
     }
 
     async fn status_request(&self, request: PbConnStatusReq) -> Result<PbConnStatusResp> {
@@ -315,16 +319,69 @@ fn settle_stopped(tx: &watch::Sender<TunnelStatus>) {
     });
 }
 
+/// Bridge the worker's string status callback onto the handle's watch channel.
+///
+/// `StatusCallback` and `ClientStatusCallback` are the same boxed closure type,
+/// so both tunnel directions share this.
 fn watch_callback(tx: watch::Sender<TunnelStatus>) -> StatusCallback {
     Box::new(move |status: &str| {
         let _ = tx.send(TunnelStatus::from_callback(status));
     })
 }
 
-fn client_watch_callback(tx: watch::Sender<TunnelStatus>) -> ClientStatusCallback {
-    Box::new(move |status: &str| {
-        let _ = tx.send(TunnelStatus::from_callback(status));
-    })
+/// What a spawned tunnel worker is given: its resolved endpoints, its key, the
+/// callback that publishes its status, and the token that stops it.
+struct WorkerContext {
+    local_addr: std::net::SocketAddr,
+    remote_addr: std::net::SocketAddr,
+    key: Arc<str>,
+    status_callback: StatusCallback,
+    shutdown: CancellationToken,
+}
+
+/// A tunnel resolved and wired up, waiting only for the transport-specific
+/// worker that will drive it.
+///
+/// Register and connect, over TCP and UDP, are four workers with four different
+/// signatures but one lifecycle: spawn, publish status, settle as `Stopped`.
+/// This owns that lifecycle so each call site is left with just its own call.
+struct TunnelWorker {
+    local_addr: std::net::SocketAddr,
+    remote_addr: std::net::SocketAddr,
+    key: Arc<str>,
+    shutdown: CancellationToken,
+    status_tx: watch::Sender<TunnelStatus>,
+    status_rx: watch::Receiver<TunnelStatus>,
+}
+
+impl TunnelWorker {
+    fn spawn<F, Fut>(self, start: F) -> LiveTunnel
+    where
+        F: FnOnce(WorkerContext) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let Self {
+            local_addr,
+            remote_addr,
+            key,
+            shutdown,
+            status_tx,
+            status_rx,
+        } = self;
+        let worker_shutdown = shutdown.clone();
+        let join = tokio::spawn(async move {
+            start(WorkerContext {
+                local_addr,
+                remote_addr,
+                key,
+                status_callback: watch_callback(status_tx.clone()),
+                shutdown: worker_shutdown,
+            })
+            .await;
+            settle_stopped(&status_tx);
+        });
+        LiveTunnel::new(shutdown, join, status_rx)
+    }
 }
 
 #[cfg(test)]

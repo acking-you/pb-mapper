@@ -20,8 +20,8 @@ use better_mimalloc_rs::MiMalloc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use pb_mapper_auth::{
     AuthConfig, KeyPage, LegacyProtocolPolicy, MAX_TEMP_KEY_CAPACITY, MAX_TEMP_KEY_TTL,
-    MIN_TEMP_KEY_TTL, acquire_state_dir_lock, generate_admin_key, initialize_admin_key,
-    write_admin_key_file,
+    MIN_TEMP_KEY_TTL, acquire_state_dir_lock, discard_staged_admin_key, generate_admin_key,
+    initialize_admin_key, stage_admin_key_candidate, write_admin_key_file,
 };
 use pb_mapper_client::client::{
     handle_status_cli_scoped, run_client_side_cli_with_callback_scoped,

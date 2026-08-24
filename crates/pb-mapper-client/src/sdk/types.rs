@@ -1,3 +1,9 @@
+//! Small value types shared across the SDK surface, and their conversions from
+//! the wire types in `pb-mapper-protocol`.
+//!
+//! Keeping owned mirrors here is what lets a caller depend on the SDK alone: the
+//! protocol crate stays an implementation detail.
+
 use pb_mapper_auth::LegacyProtocolPolicy;
 use pb_mapper_protocol::command::{PbConnStatusResp, PbServiceConnStatus};
 

@@ -96,6 +96,16 @@ test.skipIf(!hasRelay)(
       const status = await admin.authStatus();
       expect(status.capacity).toBeGreaterThan(0);
       expect(status.serverInstanceId).toBeTruthy();
+      // The protocol counters the relay reports: a fresh relay has seen no
+      // legacy connection, and its successes are already non-zero because this
+      // very call authenticated.
+      expect(status.authSuccesses).toBeGreaterThan(0);
+      expect(status.authFailures).toBe(0);
+      expect(status.lastLegacyConnectionAt ?? null).toBe(null);
+
+      // A page size wider than the wire type must be rejected, not silently
+      // narrowed to a one-item page.
+      await expect(admin.listKeys(0, 65537)).rejects.toThrow(/out of range/);
 
       const issued = await admin.issueKey(600, "napi-e2e");
       expect(issued.credential.startsWith("pbmt1_")).toBe(true);

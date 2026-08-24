@@ -135,7 +135,9 @@ let registration = client.register(RegisterRequest {
 registration.wait_ready().await?;
 ```
 
-The CLI binary remains `cargo install` / `make build-pb-mapper` (`pb-mapper-cli`).
+The CLI binary lives in `pb-mapper-cli`, which is not published to crates.io.
+Build it from a checkout with `make build-pb-mapper` (or `cargo build --release
+--bin pb-mapper`).
 
 ### TypeScript (Node-API)
 

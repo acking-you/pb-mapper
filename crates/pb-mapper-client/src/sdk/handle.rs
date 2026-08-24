@@ -1,3 +1,9 @@
+//! Handles for a running tunnel: [`Registration`] and [`Connection`].
+//!
+//! Both wrap the same `LiveTunnel` — a cancellation token, the worker's join
+//! handle, and the status channel it publishes to. A handle observes and stops
+//! its tunnel; it never drives the traffic itself.
+
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -95,75 +101,64 @@ async fn wait_for_connected(status: &mut watch::Receiver<TunnelStatus>) -> Resul
     }
 }
 
-/// A live `register` tunnel: local service published on the relay.
-pub struct Registration {
-    inner: LiveTunnel,
-    key: String,
+/// Declares one end of a live tunnel as a public handle.
+///
+/// [`Registration`] and [`Connection`] share a lifecycle down to the last method:
+/// the same status, the same readiness wait, the same stop. They stay distinct
+/// types so neither can be passed where the other is meant, and this macro is
+/// what keeps the two from drifting apart.
+macro_rules! tunnel_handle {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        pub struct $name {
+            inner: LiveTunnel,
+            key: String,
+        }
+
+        impl $name {
+            pub(crate) fn new(inner: LiveTunnel, key: String) -> Self {
+                Self { inner, key }
+            }
+
+            /// The service key this tunnel is bound to.
+            pub fn key(&self) -> &str {
+                &self.key
+            }
+
+            /// The latest status its worker reported.
+            pub fn status(&self) -> TunnelStatus {
+                self.inner.status()
+            }
+
+            /// Subscribe to status changes. Useful for N-API event bridges.
+            pub fn subscribe(&self) -> watch::Receiver<TunnelStatus> {
+                self.inner.subscribe()
+            }
+
+            /// Resolve once the tunnel is connected, or fails, or stops.
+            pub async fn wait_ready(&self) -> Result<()> {
+                self.inner.wait_ready().await
+            }
+
+            /// [`Self::wait_ready`], bounded by `timeout`.
+            pub async fn wait_ready_timeout(&self, timeout: Duration) -> Result<()> {
+                self.inner.wait_ready_timeout(timeout).await
+            }
+
+            /// Cancel the worker and wait for it to unwind.
+            pub async fn stop(&self) -> Result<()> {
+                self.inner.stop().await
+            }
+        }
+    };
 }
 
-impl Registration {
-    pub(crate) fn new(inner: LiveTunnel, key: String) -> Self {
-        Self { inner, key }
-    }
+tunnel_handle!(
+    /// A live `register` tunnel: a local service published on the relay.
+    Registration
+);
 
-    pub fn key(&self) -> &str {
-        &self.key
-    }
-
-    pub fn status(&self) -> TunnelStatus {
-        self.inner.status()
-    }
-
-    /// Subscribe to status changes. Useful for N-API event bridges.
-    pub fn subscribe(&self) -> watch::Receiver<TunnelStatus> {
-        self.inner.subscribe()
-    }
-
-    pub async fn wait_ready(&self) -> Result<()> {
-        self.inner.wait_ready().await
-    }
-
-    pub async fn wait_ready_timeout(&self, timeout: Duration) -> Result<()> {
-        self.inner.wait_ready_timeout(timeout).await
-    }
-
-    pub async fn stop(&self) -> Result<()> {
-        self.inner.stop().await
-    }
-}
-
-/// A live `connect` tunnel: local listener forwarding to a registered service.
-pub struct Connection {
-    inner: LiveTunnel,
-    key: String,
-}
-
-impl Connection {
-    pub(crate) fn new(inner: LiveTunnel, key: String) -> Self {
-        Self { inner, key }
-    }
-
-    pub fn key(&self) -> &str {
-        &self.key
-    }
-
-    pub fn status(&self) -> TunnelStatus {
-        self.inner.status()
-    }
-
-    pub fn subscribe(&self) -> watch::Receiver<TunnelStatus> {
-        self.inner.subscribe()
-    }
-
-    pub async fn wait_ready(&self) -> Result<()> {
-        self.inner.wait_ready().await
-    }
-
-    pub async fn wait_ready_timeout(&self, timeout: Duration) -> Result<()> {
-        self.inner.wait_ready_timeout(timeout).await
-    }
-
-    pub async fn stop(&self) -> Result<()> {
-        self.inner.stop().await
-    }
-}
+tunnel_handle!(
+    /// A live `connect` tunnel: a local listener forwarding to a registered service.
+    Connection
+);

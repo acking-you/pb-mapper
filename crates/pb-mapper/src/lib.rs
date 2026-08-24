@@ -36,6 +36,8 @@
 //! # }
 //! ```
 //!
-//! The CLI binary still lives in `pb-mapper-cli` (`cargo install pb-mapper-cli`).
+//! The CLI binary still lives in `pb-mapper-cli`. That crate is `publish =
+//! false`, so build it from a checkout — `make build-pb-mapper`, or `cargo
+//! build --release --bin pb-mapper` — rather than installing it from a registry.
 
 pub use pb_mapper_client::sdk::*;
