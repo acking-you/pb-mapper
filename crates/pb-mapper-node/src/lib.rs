@@ -370,18 +370,27 @@ impl Admin {
             .map_err(to_napi)
     }
 
+    /// Temporary credentials. Pages through the whole inventory when neither
+    /// argument is given, matching `listServices` and `listConnections`; a
+    /// truncated credential list with no way to see that it was truncated is
+    /// worse than a slower call. Pass `page` to fetch exactly one page.
     #[napi]
     pub async fn list_keys(
         &self,
         page: Option<u32>,
         page_size: Option<u32>,
     ) -> Result<Vec<JsKeyMetadata>> {
-        let page = self
-            .inner
-            .list_keys(page.unwrap_or(0), page_size.unwrap_or(100) as u16)
-            .await
-            .map_err(to_napi)?;
-        Ok(page.items.into_iter().map(JsKeyMetadata::from).collect())
+        let items = match page {
+            None => self.inner.list_keys_all().await.map_err(to_napi)?,
+            Some(page) => {
+                self.inner
+                    .list_keys(page, page_size.unwrap_or(100) as u16)
+                    .await
+                    .map_err(to_napi)?
+                    .items
+            }
+        };
+        Ok(items.into_iter().map(JsKeyMetadata::from).collect())
     }
 
     #[napi]

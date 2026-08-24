@@ -68,7 +68,12 @@ jobs:
               js/*) node=true ;;
               # The Node-API addon is a workspace crate; SDK changes must also
               # run the JS e2e, because the addon is a thin wrap over it.
+              # Its transitive dependencies count too: the JS e2e runs against a
+              # real relay, so a change to any layer below the SDK — or to the
+              # server that relay is — can break the JS path or the addon size
+              # while every Rust check still passes.
               crates/pb-mapper-node/*|crates/pb-mapper-client/*|crates/pb-mapper/*) rust=true; node=true ;;
+              crates/pb-mapper-core/*|crates/pb-mapper-auth/*|crates/pb-mapper-protocol/*|crates/pb-mapper-server/*) rust=true; node=true ;;
               crates/*|src/*|tests/*|examples/*) rust=true ;;
               # The addon is built from this workspace, and `bun run
               # build:release` consumes the root `release-node` profile — a

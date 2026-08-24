@@ -216,7 +216,21 @@ impl Admin {
         }
     }
 
+    /// Rotate the relay's administrator key, returning the key now in force.
+    ///
+    /// Generates a key when `new_key` is `None`. Rotation is not idempotent, so a
+    /// caller who never learns the outcome cannot retry safely: if the relay
+    /// committed the change and the response was lost, only the new key still
+    /// authenticates. When the SDK generated that key, losing it locks the
+    /// operator out — so any inconclusive result is reported as
+    /// [`Error::RootRotationUncertain`], which carries the candidate. A caller
+    /// who supplied `new_key` already holds it and gets the underlying error
+    /// unchanged.
+    ///
+    /// Prefer [`Admin::rotate_root_key_to_file`], which persists the candidate
+    /// before the request is ever sent.
     pub async fn rotate_root_key(&self, new_key: Option<String>) -> Result<String> {
+        let caller_supplied = new_key.is_some();
         let new_key = new_key.unwrap_or_else(generate_admin_key);
         let parsed = parse_credential(new_key.trim()).map_err(Error::invalid_config)?;
         if !parsed.is_admin() {
@@ -224,12 +238,24 @@ impl Admin {
                 "root rotation requires a 32-byte administrator key",
             ));
         }
-        match self
+        // A generated key exists nowhere but this frame, so every exit that
+        // leaves the relay's state unknown has to hand it back.
+        let preserve = |error: Error| {
+            if caller_supplied {
+                return error;
+            }
+            Error::RootRotationUncertain {
+                candidate: new_key.clone(),
+                message: error.to_string(),
+            }
+        };
+        let response = self
             .request(AdminRequest::RootKeyRotate {
                 new_admin_key: new_key.clone(),
             })
-            .await?
-        {
+            .await
+            .map_err(preserve)?;
+        match response {
             AdminResponse::Ok { .. } => {
                 *self
                     .inner
@@ -238,7 +264,9 @@ impl Admin {
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = parsed;
                 Ok(new_key)
             }
-            other => unexpected("Ok", &other),
+            // A response that is not `Ok` still came from the relay, but nothing
+            // here proves the rotation did not take effect.
+            other => unexpected::<String>("Ok", &other).map_err(preserve),
         }
     }
 

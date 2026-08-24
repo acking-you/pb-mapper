@@ -2,6 +2,12 @@
 /* eslint-disable */
 export declare class Admin {
   issueKey(ttlSeconds: number, label?: string | undefined | null): Promise<JsIssuedKey>
+  /**
+   * Temporary credentials. Pages through the whole inventory when neither
+   * argument is given, matching `listServices` and `listConnections`; a
+   * truncated credential list with no way to see that it was truncated is
+   * worse than a slower call. Pass `page` to fetch exactly one page.
+   */
   listKeys(page?: number | undefined | null, pageSize?: number | undefined | null): Promise<Array<JsKeyMetadata>>
   revokeKey(keyId: number): Promise<JsKeyMetadata>
   showKey(keyId: number): Promise<JsIssuedKey>

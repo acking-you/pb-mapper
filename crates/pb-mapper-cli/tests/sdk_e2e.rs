@@ -414,3 +414,44 @@ async fn sdk_stop_closes_established_forwarded_stream() {
 
     registration.stop().await.unwrap();
 }
+
+/// A registration the relay rejects permanently must surface as `Failed`, not
+/// loop as `Retrying`: a caller awaiting `wait_ready()` with no timeout would
+/// otherwise wait forever on a tunnel that can never come up.
+#[tokio::test]
+async fn sdk_register_reports_permanent_rejection_as_failed() {
+    let relay = Relay::start("sdk-reject").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+
+    // Holds the name as TCP, so the UDP registration below is a transport
+    // mismatch — one of the relay's non-retryable rejections.
+    let (registration, _) = register_echo(&client, "echo-clash", Transport::Tcp, false).await;
+
+    let udp_echo = spawn_udp_echo().await;
+    let clashing = client
+        .register(RegisterRequest {
+            key: "echo-clash".into(),
+            local_addr: udp_echo.to_string(),
+            transport: Transport::Udp,
+            codec: false,
+            force_namespace: false,
+        })
+        .await
+        .unwrap();
+
+    let ready = clashing.wait_ready_timeout(READY_TIMEOUT).await;
+    let error = ready.expect_err("a transport mismatch can never become ready");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("service_transport_mismatch"),
+        "the rejection reason should reach the caller, got: {rendered}"
+    );
+    assert!(
+        matches!(clashing.status(), TunnelStatus::Failed(_)),
+        "a permanent rejection must be Failed, not Retrying: {:?}",
+        clashing.status()
+    );
+
+    let _ = clashing.stop().await;
+    registration.stop().await.unwrap();
+}

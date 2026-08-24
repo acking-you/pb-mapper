@@ -57,6 +57,11 @@ enum Status {
     SendPing,
     ConnectRemote,
     Cancelled,
+    /// The relay refused the registration for a reason reconnecting cannot fix —
+    /// a namespace the credential does not own, a malformed service name. Retrying
+    /// would loop forever while the caller's `wait_ready` never resolves, so this
+    /// ends the worker instead.
+    Rejected(String),
 }
 
 enum LocalControlWrite {
@@ -482,6 +487,19 @@ async fn run_server_side_cli_worker<LocalStream, A>(
         };
         match status {
             Status::Cancelled => break 'outer,
+            Status::Rejected(reason) => {
+                tracing::error!(
+                    event = "local_server_registration_rejected_permanently",
+                    key = %key,
+                    worker_index,
+                    reason = %reason,
+                    "pb server permanently rejected this registration; not reconnecting"
+                );
+                if let Some(ref callback) = status_callback {
+                    callback(&format!("failed: {reason}"));
+                }
+                break 'outer;
+            }
             Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
                 let retry_interval = retry_backoff.next_delay();
                 tracing::info!(
@@ -683,6 +701,12 @@ where
                     message = %error.message,
                     "pb server rejected service registration"
                 );
+                if !error.retryable {
+                    return Err(Status::Rejected(format!(
+                        "{}: {}",
+                        error.code, error.message
+                    )));
+                }
                 snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail())
             }
             _ => snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail()),

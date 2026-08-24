@@ -44,6 +44,20 @@ pub enum Error {
     Io { source: std::io::Error },
     #[snafu(display("{message}"))]
     AuthFile { message: String },
+    /// A root rotation whose outcome the caller could not learn, carrying the
+    /// candidate the SDK generated on their behalf.
+    ///
+    /// The rotation is not idempotent: if the relay committed it and the
+    /// response was lost, the candidate is the relay's active administrator key
+    /// and the only one that still authenticates. It is repeated in the display
+    /// text deliberately — the Node binding flattens errors to a string, and a
+    /// key that only lives in a structured field would be lost there, locking
+    /// the operator out of their own relay.
+    #[snafu(display(
+        "root rotation did not report success, and the relay may already have installed the \
+         generated administrator key `{candidate}`; treat it as the active key: {message}"
+    ))]
+    RootRotationUncertain { candidate: String, message: String },
 }
 
 impl Error {

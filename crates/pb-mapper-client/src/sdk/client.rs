@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use pb_mapper_core::checksum::{Credential, parse_credential};
-use pb_mapper_core::config::get_sockaddr_async;
+use pb_mapper_core::config::{control_io_timeout, get_sockaddr_async};
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -273,9 +273,21 @@ impl Client {
     async fn status_request(&self, request: PbConnStatusReq) -> Result<PbConnStatusResp> {
         let addr = resolve(&self.inner.server).await?;
         let credential = self.credential();
-        let mut stream = TcpStream::connect(addr).await.context(ConnectSnafu {
-            addr: addr.to_string(),
-        })?;
+        // The connect is inside the timeout, not just the exchange that follows it.
+        // A relay that drops SYNs silently leaves `TcpStream::connect` waiting on
+        // the OS timeout — minutes — so the SDK's own bound has to cover it, the
+        // way the administrator path already does.
+        let io_timeout = control_io_timeout();
+        let mut stream = match tokio::time::timeout(io_timeout, TcpStream::connect(addr)).await {
+            Ok(result) => result.context(ConnectSnafu {
+                addr: addr.to_string(),
+            })?,
+            Err(_) => {
+                return Err(Error::TimedOut {
+                    timeout: io_timeout,
+                });
+            }
+        };
         get_status_with_credential(&mut stream, request, self.inner.namespace, &credential)
             .await
             .context(StatusSnafu)

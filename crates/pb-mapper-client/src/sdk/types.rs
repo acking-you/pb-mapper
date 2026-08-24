@@ -27,10 +27,17 @@ pub enum TunnelStatus {
 impl TunnelStatus {
     pub(crate) fn from_callback(status: &str) -> Self {
         match status {
-            "connected" => Self::Connected,
-            "retrying" => Self::Retrying,
-            "failed" => Self::Failed("failed".into()),
-            _ => Self::Retrying,
+            "connected" => return Self::Connected,
+            "retrying" => return Self::Retrying,
+            "failed" => return Self::Failed("failed".into()),
+            _ => {}
+        }
+        // A permanent rejection arrives as `failed: <reason>`; the reason is the
+        // only description of it the caller ever gets, so it has to survive here
+        // rather than collapsing into `Retrying` and hanging `wait_ready`.
+        match status.strip_prefix("failed:") {
+            Some(reason) => Self::Failed(reason.trim().to_string()),
+            None => Self::Retrying,
         }
     }
 }
