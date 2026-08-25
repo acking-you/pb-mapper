@@ -426,7 +426,7 @@ pub async fn run_server_on_listener(
             }
             ManagerTask::DeRegisterServerConn { key, conn_id } => {
                 let removed_from_service_map =
-                    remove_server_conn(&mut server_conn_map, &key, conn_id);
+                    remove_server_conn(&mut server_conn_map, &key, conn_id).is_some();
                 let removed_from_active_map = manager.drop_conn_sender(conn_id);
                 // Recycled here and only here, whether or not the sender was still
                 // registered: this task comes from the socket's own guard, so its
@@ -540,6 +540,7 @@ pub async fn run_server_on_listener(
                 need_codec,
                 is_datagram,
                 protocol_version,
+                retire_token,
             } => {
                 let namespace = split_scoped_service_key(&key).0;
                 let existing = server_conn_map.get(&key);
@@ -601,6 +602,7 @@ pub async fn run_server_on_listener(
                             is_datagram,
                             protocol_version,
                             last_rx_at: now,
+                            retire_token,
                         });
                     }
                     hashbrown::hash_map::Entry::Vacant(v) => {
@@ -612,6 +614,7 @@ pub async fn run_server_on_listener(
                             is_datagram,
                             protocol_version,
                             last_rx_at: now,
+                            retire_token,
                         }]);
                     }
                 }
@@ -838,10 +841,16 @@ pub async fn run_server_on_listener(
                 }
                 let mut selected = false;
                 let mut candidates = Vec::new();
-                candidates.extend(server_conn_id_list.iter().rev().copied().filter(|info| {
-                    info.health == ServerConnHealth::Healthy
-                        && !excluded_server_conns.contains(&(info.conn_id, info.generation))
-                }));
+                candidates.extend(
+                    server_conn_id_list
+                        .iter()
+                        .rev()
+                        .filter(|info| {
+                            info.health == ServerConnHealth::Healthy
+                                && !excluded_server_conns.contains(&(info.conn_id, info.generation))
+                        })
+                        .cloned(),
+                );
                 for server_info in candidates {
                     let ServerConnInfo {
                         conn_id: server_conn_id,
@@ -851,6 +860,7 @@ pub async fn run_server_on_listener(
                         is_datagram,
                         protocol_version: _,
                         last_rx_at: _,
+                        retire_token: _,
                     } = server_info;
                     let Some(server_conn_sender) = manager.get_conn_sender_chan(&server_conn_id)
                     else {
@@ -862,7 +872,7 @@ pub async fn run_server_on_listener(
                             reason = "sender_not_found",
                             "subscribe skipped stale server connection"
                         );
-                        remove_server_conn(&mut server_conn_map, &key, server_conn_id);
+                        cancel_and_remove_server_conn(&mut server_conn_map, &key, server_conn_id);
                         let _ = manager.drop_conn_sender(server_conn_id);
                         continue;
                     };
@@ -888,7 +898,7 @@ pub async fn run_server_on_listener(
                             error = %report,
                             "failed to send stream request to registered server"
                         );
-                        remove_server_conn(&mut server_conn_map, &key, server_conn_id);
+                        cancel_and_remove_server_conn(&mut server_conn_map, &key, server_conn_id);
                         let _ = manager.drop_conn_sender(server_conn_id);
                         continue;
                     }
@@ -1014,9 +1024,14 @@ pub async fn run_server_on_listener(
 /// unresponsive, and the lease sweep — so an operator reads one `server_conn_retired`
 /// record with one shape regardless of which noticed.
 ///
-/// The `ConnTask::Retire` notification is best-effort: a task whose queue is full or
-/// already gone is a task that is not going to serve traffic either way, and the maps
-/// have already been unwound by the time it is sent.
+/// Teardown happens twice over, because the work queue alone cannot be trusted to
+/// deliver it. `ConnTask::Retire` is the graceful path: the writer sees it between
+/// writes and unwinds, its guard deregisters, and the ID is recycled. But a
+/// registration that has stopped reading leaves the writer blocked inside a single
+/// `write_msg` with no timeout, and a task queued behind that is never observed —
+/// so the connection's `retire_token` is cancelled as well, which interrupts the
+/// write itself and drops the socket. The notification stays best-effort on top of
+/// that: a task whose queue is full is not going to serve traffic either way.
 fn retire_server_conn(
     manager: &mut ServerMananger,
     server_conn_map: &mut ServerConnMap,
@@ -1027,7 +1042,8 @@ fn retire_server_conn(
     reason: &str,
 ) {
     let conn_sender = manager.get_conn_sender_chan(&conn_id);
-    let removed_from_service_map = remove_server_conn(server_conn_map, key, conn_id);
+    let removed = remove_server_conn(server_conn_map, key, conn_id);
+    let removed_from_service_map = removed.is_some();
     // The sender goes, but the ID does not come back yet: the socket task is still
     // running and still holds a guard that will deregister when it unwinds.
     // Recycling here would let a newly accepted socket register under the same ID,
@@ -1051,6 +1067,13 @@ fn retire_server_conn(
                 .ok()
         })
         .is_some();
+    // Cancelled unconditionally, and after the notification: a writer that is
+    // responsive takes the graceful path first, and one that is wedged mid-write
+    // needs this to ever unwind at all. Without it a half-open registration keeps
+    // its socket task alive forever, and with it the ID it is holding.
+    if let Some(info) = &removed {
+        info.retire_token.cancel();
+    }
     tracing::warn!(
         event = "server_conn_retired",
         key = %key,
@@ -1059,6 +1082,7 @@ fn retire_server_conn(
         removed_from_service_map,
         removed_from_active_map,
         retire_notified,
+        socket_cancelled = removed_from_service_map,
         registered_services = server_conn_map.len(),
         server_connections = registered_server_conn_count(server_conn_map),
         active_connections = manager.active_conn_count(),
@@ -1110,6 +1134,7 @@ mod tests {
             is_datagram: false,
             protocol_version: CONTROL_PROTOCOL_V2,
             last_rx_at: Instant::now(),
+            retire_token: CancellationToken::new(),
         }
     }
 
@@ -1168,7 +1193,8 @@ mod tests {
         manager.sign_up_conn_sender(replacement, replacement_sender);
         server_conn_map.insert(key.clone(), vec![server_conn_info(replacement.into(), 2)]);
 
-        let removed_from_service_map = remove_server_conn(&mut server_conn_map, &key, retired);
+        let removed_from_service_map =
+            remove_server_conn(&mut server_conn_map, &key, retired).is_some();
         let removed_from_active_map = manager.drop_conn_sender(retired);
         manager.recycle_conn_id(retired);
 
