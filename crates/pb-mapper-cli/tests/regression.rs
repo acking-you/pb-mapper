@@ -23,6 +23,10 @@ use pb_mapper_protocol::{
     MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
 };
 use pb_mapper_server::run_server_with_auth_config;
+// Only the hand-rolled v2 registration helper: this file sets the process
+// credential itself, so it must not touch anything in the testkit that runs
+// `init_test_env` — `Relay` and `Tunnel` — which would write it a second time.
+use pb_mapper_testkit::{V2ControlSpec, register_v2_control};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -276,39 +280,6 @@ async fn register_control_conn_parts(
         panic!("unexpected register response");
     };
     conn_id
-}
-
-async fn register_v2_control_conn_parts(
-    reader: &mut impl MessageReader,
-    writer: &mut impl MessageWriter,
-    key: &str,
-) -> (u32, u64) {
-    let request = PbConnRequest::Register {
-        need_codec: false,
-        is_datagram: false,
-        key: key.to_string(),
-        protocol_version: Some(2),
-        client_instance_id: Some("regression-test-client".to_string()),
-        heartbeat_interval_ms: Some(50),
-        heartbeat_tolerance_ms: Some(150),
-    }
-    .encode()
-    .unwrap();
-    writer.write_msg(&request).await.unwrap();
-
-    let response = timeout(Duration::from_secs(1), reader.read_msg())
-        .await
-        .expect("register v2 response timed out")
-        .unwrap();
-    let PbConnResponse::RegisterV2 {
-        conn_id,
-        generation,
-        ..
-    } = PbConnResponse::decode(response).unwrap()
-    else {
-        panic!("unexpected register v2 response");
-    };
-    (conn_id, generation)
 }
 
 async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
@@ -719,7 +690,15 @@ async fn status_service_reports_registered_v2_control_connection() {
     let (mut reader_stream, mut writer_stream) = control.into_split();
     let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
     let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-    let (conn_id, generation) = register_v2_control_conn_parts(&mut reader, &mut writer, key).await;
+    let (conn_id, generation) = register_v2_control(
+        &mut reader,
+        &mut writer,
+        key,
+        V2ControlSpec::new()
+            .instance_id("regression-test-client")
+            .response_timeout(Duration::from_secs(1)),
+    )
+    .await;
 
     let mut status = wait_for_server(server_addr).await;
     let request = PbConnRequest::Status(PbConnStatusReq::Service {

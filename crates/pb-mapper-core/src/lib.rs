@@ -13,6 +13,7 @@ pub mod config;
 pub mod conn_id;
 pub mod durable_file;
 pub mod error;
+pub mod paging;
 pub mod test_support;
 pub mod timeout;
 

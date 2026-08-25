@@ -93,10 +93,9 @@ pub async fn run_server_on_listener(
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
     // represent the mapping of the `key` to the id of the server-side conn
     let mut server_conn_map = ServerConnMap::new();
-    let mut pending_streams =
-        hashbrown::HashMap::<RemoteConnId, (RemoteConnId, u64, ImutableKey)>::new();
+    let mut pending_streams = PendingStreamMap::new();
     let mut namespace_stream_counts = hashbrown::HashMap::<u64, usize>::new();
-    let mut namespace_rate_limits = hashbrown::HashMap::<u64, NamespaceRateLimit>::new();
+    let mut namespace_rate_limits = NamespaceRateLimitMap::new();
     let max_services_per_namespace = env_limit("PB_MAPPER_MAX_SERVICES_PER_NAMESPACE", 256);
     let max_register_connections_per_service =
         env_limit("PB_MAPPER_MAX_REGISTER_CONNECTIONS_PER_SERVICE", 16);
@@ -195,8 +194,6 @@ pub async fn run_server_on_listener(
                 page_size,
                 response_sender,
             } => {
-                let page_size = page_size.clamp(1, 1000) as usize;
-                let start = (page as usize).saturating_mul(page_size);
                 let mut all = server_conn_map
                     .iter()
                     .filter_map(|(key, connections)| {
@@ -220,9 +217,7 @@ pub async fn run_server_on_listener(
                         .cmp(&right.namespace)
                         .then_with(|| left.service_name.cmp(&right.service_name))
                 });
-                let items = all.iter().skip(start).take(page_size).cloned().collect();
-                let next_page =
-                    (start.saturating_add(page_size) < all.len()).then_some(page.saturating_add(1));
+                let (items, next_page) = paginate(&all, page, page_size);
                 let _ = response_sender.send(AdminServicePage {
                     schema_version: 1,
                     items,
@@ -236,8 +231,6 @@ pub async fn run_server_on_listener(
                 response_sender,
             } => {
                 let now = Instant::now();
-                let page_size = page_size.clamp(1, 1000) as usize;
-                let start = (page as usize).saturating_mul(page_size);
                 let mut all = server_conn_map
                     .iter()
                     .flat_map(|(key, connections)| {
@@ -271,9 +264,7 @@ pub async fn run_server_on_listener(
                         .then_with(|| left.service_name.cmp(&right.service_name))
                         .then_with(|| left.conn_id.cmp(&right.conn_id))
                 });
-                let items = all.iter().skip(start).take(page_size).cloned().collect();
-                let next_page =
-                    (start.saturating_add(page_size) < all.len()).then_some(page.saturating_add(1));
+                let (items, next_page) = paginate(&all, page, page_size);
                 let _ = response_sender.send(AdminConnectionPage {
                     schema_version: 1,
                     items,
@@ -300,10 +291,12 @@ pub async fn run_server_on_listener(
                     .unwrap_or_default();
                 for target in &targets {
                     retire_server_conn(
-                        &mut manager,
-                        &mut server_conn_map,
-                        &pending_streams,
-                        &mut namespace_rate_limits,
+                        RoutingState {
+                            manager: &mut manager,
+                            server_conn_map: &mut server_conn_map,
+                            pending_streams: &pending_streams,
+                            namespace_rate_limits: &mut namespace_rate_limits,
+                        },
                         &key,
                         *target,
                         "retired by administrator",
@@ -469,10 +462,12 @@ pub async fn run_server_on_listener(
                 reason,
             } => {
                 retire_server_conn(
-                    &mut manager,
-                    &mut server_conn_map,
-                    &pending_streams,
-                    &mut namespace_rate_limits,
+                    RoutingState {
+                        manager: &mut manager,
+                        server_conn_map: &mut server_conn_map,
+                        pending_streams: &pending_streams,
+                        namespace_rate_limits: &mut namespace_rate_limits,
+                    },
                     &key,
                     conn_id,
                     &reason,
@@ -984,10 +979,12 @@ pub async fn run_server_on_listener(
                         stale.idle_for, stale.protocol_version
                     );
                     retire_server_conn(
-                        &mut manager,
-                        &mut server_conn_map,
-                        &pending_streams,
-                        &mut namespace_rate_limits,
+                        RoutingState {
+                            manager: &mut manager,
+                            server_conn_map: &mut server_conn_map,
+                            pending_streams: &pending_streams,
+                            namespace_rate_limits: &mut namespace_rate_limits,
+                        },
                         &stale.key,
                         stale.conn_id,
                         &reason,
@@ -1017,6 +1014,18 @@ pub async fn run_server_on_listener(
     Ok(())
 }
 
+/// The routing state a retirement has to unwind, borrowed as one unit.
+///
+/// These four maps are always touched together and always in the same
+/// combination, so passing them individually meant four borrows repeated at
+/// every call site with nothing naming what they mean as a group.
+struct RoutingState<'a> {
+    manager: &'a mut ServerMananger,
+    server_conn_map: &'a mut ServerConnMap,
+    pending_streams: &'a PendingStreamMap,
+    namespace_rate_limits: &'a mut NamespaceRateLimitMap,
+}
+
 /// Drop one registered control connection from every map that tracks it, and tell
 /// its socket task to unwind.
 ///
@@ -1033,14 +1042,17 @@ pub async fn run_server_on_listener(
 /// write itself and drops the socket. The notification stays best-effort on top of
 /// that: a task whose queue is full is not going to serve traffic either way.
 fn retire_server_conn(
-    manager: &mut ServerMananger,
-    server_conn_map: &mut ServerConnMap,
-    pending_streams: &hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>,
-    namespace_rate_limits: &mut hashbrown::HashMap<u64, NamespaceRateLimit>,
+    state: RoutingState<'_>,
     key: &ImutableKey,
     conn_id: RemoteConnId,
     reason: &str,
 ) {
+    let RoutingState {
+        manager,
+        server_conn_map,
+        pending_streams,
+        namespace_rate_limits,
+    } = state;
     let conn_sender = manager.get_conn_sender_chan(&conn_id);
     let removed = remove_server_conn(server_conn_map, key, conn_id);
     let removed_from_service_map = removed.is_some();
@@ -1162,10 +1174,12 @@ mod tests {
         server_conn_map.insert(key.clone(), vec![server_conn_info(retired.into(), 1)]);
 
         retire_server_conn(
-            &mut manager,
-            &mut server_conn_map,
-            &pending_streams,
-            &mut namespace_rate_limits,
+            RoutingState {
+                manager: &mut manager,
+                server_conn_map: &mut server_conn_map,
+                pending_streams: &pending_streams,
+                namespace_rate_limits: &mut namespace_rate_limits,
+            },
             &key,
             retired,
             "retired by administrator",

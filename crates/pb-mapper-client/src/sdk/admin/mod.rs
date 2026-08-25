@@ -17,6 +17,11 @@ use pb_mapper_auth::{
 };
 use pb_mapper_core::checksum::parse_credential;
 use pb_mapper_core::config::control_io_timeout;
+// The largest page the relay will serve, taken from the relay's own definition
+// rather than restated here: an oversized request is rejected locally so it fails
+// with a clear message instead of a protocol error, and that check has to agree
+// with what the relay clamps to.
+use pb_mapper_core::paging::MAX_PAGE_SIZE;
 use pb_mapper_protocol::command::{AdminRequest, AdminResponse};
 
 use self::transport::send_admin_request;
@@ -30,10 +35,6 @@ pub use self::types::{
     AuthStatusInfo, ConnectionInfo, ConnectionPage, IssuedKey, KeyListPage, KeyMetadata,
     ServiceInfo, ServicePage,
 };
-
-/// Largest page the relay will serve. Rejected locally so an oversized request
-/// fails with a clear message instead of a protocol error from the relay.
-const MAX_PAGE_SIZE: u16 = 1000;
 
 /// Page size used by the `*_all` helpers, which page on the caller's behalf.
 ///

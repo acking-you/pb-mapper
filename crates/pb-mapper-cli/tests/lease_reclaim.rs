@@ -13,16 +13,15 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use pb_mapper_client::sdk::Client;
 use pb_mapper_core::config::{
     PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL, PB_MAPPER_SERVER_LEASE_TIMEOUT,
 };
-use pb_mapper_protocol::command::{
-    MessageSerializer, PbConnRequest, PbConnResponse, PbServerRequest,
-};
+use pb_mapper_protocol::command::{MessageSerializer, PbServerRequest};
 use pb_mapper_protocol::{
     MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
 };
-use pb_mapper_testkit::{Relay, admin_credential};
+use pb_mapper_testkit::{Relay, V2ControlSpec, admin_credential, register_v2_control};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, timeout};
 
@@ -64,46 +63,27 @@ fn short_lease_env() {
     *ENV;
 }
 
-/// Register a protocol-v2 control connection over the given framing pair.
+/// Register a v2 control connection and wait for the relay to publish it.
 ///
-/// Plain framing carrying `protocol_version: 2`, which is what makes the relay
-/// record the registration as v2 — and so put it on the lease timeout rather than
-/// the eleven-minute legacy grace — without this file having to drive a secure
-/// first flight.
-///
-/// The reader is the caller's and must outlive every frame on the connection: the
-/// header codec is a counter nonce sequence, so a second reader would restart at
-/// zero and fail to decrypt. The writer is the opposite — the relay reads the
-/// initial frame and its continuation frames through two separate decoders, each
-/// starting at zero, so the caller has to build a **fresh** writer after this
-/// returns before sending anything else.
-async fn register_v2_control(
+/// The heartbeat is far under the defaults to match this binary's short lease,
+/// and the wait is this file's own readiness requirement rather than part of
+/// registering — a case here starts timing sweeps from the moment the relay
+/// reports the key.
+async fn register_and_await_v2_control(
     relay: &Relay,
     reader: &mut impl MessageReader,
     writer: &mut impl MessageWriter,
     key: &str,
 ) {
-    let request = PbConnRequest::Register {
-        need_codec: false,
-        is_datagram: false,
-        key: key.to_string(),
-        protocol_version: Some(2),
-        client_instance_id: Some("lease-reclaim-test".to_string()),
-        heartbeat_interval_ms: Some(20),
-        heartbeat_tolerance_ms: Some(60),
-    }
-    .encode()
-    .unwrap();
-    writer.write_msg(&request).await.unwrap();
-
-    let response = timeout(Duration::from_secs(2), reader.read_msg())
-        .await
-        .expect("register response timed out")
-        .unwrap();
-    assert!(matches!(
-        PbConnResponse::decode(response).unwrap(),
-        PbConnResponse::RegisterV2 { .. }
-    ));
+    register_v2_control(
+        reader,
+        writer,
+        key,
+        V2ControlSpec::new()
+            .instance_id("lease-reclaim-test")
+            .heartbeat(20, 60),
+    )
+    .await;
     relay
         .wait_for_registration(key, admin_credential(), None)
         .await;
@@ -129,7 +109,7 @@ async fn sweep_reclaims_a_registration_that_reads_but_never_renews() {
     let mut reader = get_header_msg_reader(&mut read_half).unwrap();
     {
         let mut writer = get_header_msg_writer(&mut write_half).unwrap();
-        register_v2_control(&relay, &mut reader, &mut writer, key).await;
+        register_and_await_v2_control(&relay, &mut reader, &mut writer, key).await;
     }
     let mut writer = get_header_msg_writer(&mut write_half).unwrap();
 
@@ -167,7 +147,7 @@ async fn sweep_leaves_a_registration_that_keeps_pinging() {
     let mut reader = get_header_msg_reader(&mut read_half).unwrap();
     {
         let mut writer = get_header_msg_writer(&mut write_half).unwrap();
-        register_v2_control(&relay, &mut reader, &mut writer, key).await;
+        register_and_await_v2_control(&relay, &mut reader, &mut writer, key).await;
     }
     let mut writer = get_header_msg_writer(&mut write_half).unwrap();
 
@@ -191,4 +171,106 @@ async fn sweep_leaves_a_registration_that_keeps_pinging() {
         is_registered(&relay, key).await,
         "the sweep retired a registration that was renewing its lease"
     );
+}
+
+/// `admin connection retire` unwinds the whole socket task, not just the routing
+/// entry.
+///
+/// The incident this guards: a registration the relay could not tell was dead held
+/// a slot in a full per-service quota for seventeen hours. Retirement has to reach
+/// the socket task, because that task is what holds the connection ID — removing the
+/// routing entry alone leaves the ID checked out for as long as the process lives.
+///
+/// The registration here never drains its socket, so the relay's pongs pile up and
+/// nothing this side does can end the connection, and it keeps pinging, so its lease
+/// is renewed and the sweep has no reason to act. Retirement is then the only thing
+/// left that can close it. Both halves of the chain are asserted: the connection
+/// leaving the admin listing is the routing state unwinding, and this side's writes
+/// beginning to fail is the socket task itself unwinding — the half
+/// `pb-mapper-server`'s unit coverage stops short of, since it ends at the writer
+/// returning `Ok(())`.
+#[tokio::test]
+async fn admin_retire_unwinds_a_registration_that_never_reads() {
+    short_lease_env();
+    let relay = Relay::start("admin-retire-unwind").await;
+    let key = "quota-hog";
+
+    let control = TcpStream::connect(relay.addr()).await.unwrap();
+    let (mut read_half, mut write_half) = control.into_split();
+    // Read once, for the register response, and never again.
+    let mut reader = get_header_msg_reader(&mut read_half).unwrap();
+    let conn_id = {
+        let mut writer = get_header_msg_writer(&mut write_half).unwrap();
+        let (conn_id, _) = register_v2_control(
+            &mut reader,
+            &mut writer,
+            key,
+            V2ControlSpec::new()
+                .instance_id("admin-retire-unwind")
+                .heartbeat(20, 60),
+        )
+        .await;
+        conn_id
+    };
+    relay
+        .wait_for_registration(key, admin_credential(), None)
+        .await;
+
+    // Pings from their own task, so the lease keeps being renewed while the
+    // administrator's request is in flight: without them the sweep would reclaim the
+    // registration on its own and the case would pass without testing retirement.
+    // The task returns when a write fails, which is this side observing that the
+    // relay dropped the socket.
+    let pinger = tokio::spawn(async move {
+        let mut writer = get_header_msg_writer(&mut write_half).unwrap();
+        for seq in 0.. {
+            let request = PbServerRequest::PingV2 { seq }.encode().unwrap();
+            if writer.write_msg(&request).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(CONTROL_FRAME_INTERVAL).await;
+        }
+    });
+
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let admin = client.admin().unwrap();
+    assert!(
+        admin
+            .list_connections_all(None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|conn| conn.service_name == key && conn.conn_id == conn_id),
+        "the registration should be listed before it is retired"
+    );
+
+    let retired = admin
+        .retire_connections(None, key.to_string(), Some(conn_id))
+        .await
+        .unwrap();
+    assert_eq!(retired, 1, "the administrator named one connection");
+
+    let deadline = Instant::now() + RECLAIM_TIMEOUT;
+    loop {
+        let live = admin.list_connections_all(None).await.unwrap();
+        if !live
+            .iter()
+            .any(|conn| conn.service_name == key && conn.conn_id == conn_id)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "conn {conn_id} was still listed after retirement: {live:?}"
+        );
+        tokio::time::sleep(CONTROL_FRAME_INTERVAL).await;
+    }
+
+    // The socket task, not just the entry. A retirement that unwound only the routing
+    // state would leave this task pinging a connection the relay still holds open,
+    // and the ID that task is holding checked out for good.
+    timeout(RECLAIM_TIMEOUT, pinger)
+        .await
+        .expect("the retired connection's socket was never closed")
+        .unwrap();
 }

@@ -597,8 +597,8 @@ pub(super) fn decrement_namespace_stream_count(
 pub(super) fn release_namespace_rate_limit_if_idle(
     namespace: u64,
     server_conn_map: &ServerConnMap,
-    pending_streams: &hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>,
-    namespace_rate_limits: &mut hashbrown::HashMap<u64, NamespaceRateLimit>,
+    pending_streams: &PendingStreamMap,
+    namespace_rate_limits: &mut NamespaceRateLimitMap,
 ) {
     let has_registered_service = server_conn_map
         .keys()

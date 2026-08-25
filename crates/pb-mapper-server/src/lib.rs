@@ -47,6 +47,7 @@ use pb_mapper_core::config::{
     control_io_timeout, keep_alive_from_env, server_lease_sweep_interval, server_lease_timeout,
 };
 use pb_mapper_core::conn_id::{ConnIdProvider, RemoteConnId};
+use pb_mapper_core::paging::paginate;
 use pb_mapper_core::{snafu_error_get_or_continue, snafu_error_handle};
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
@@ -228,6 +229,14 @@ pub struct ServerConnInfo {
 }
 
 pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<ServerConnInfo>>;
+
+/// A subscriber's stream, from its own connection ID to the server connection it
+/// was routed to, that connection's generation, and the service key it asked for.
+pub(crate) type PendingStreamMap =
+    hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>;
+
+/// Per-namespace new-stream rate limiters, keyed by the namespace's key ID.
+pub(crate) type NamespaceRateLimitMap = hashbrown::HashMap<u64, NamespaceRateLimit>;
 
 struct NamespaceRateLimit {
     tokens: f64,
