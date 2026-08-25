@@ -15,18 +15,16 @@ permissions:
 
 jobs:
   release-preflight:
-    name: Verify registry credentials
+    name: Verify crates.io credentials
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - name: Require both registry tokens before publishing either SDK
+      - name: Require crates.io token
         shell: bash
         run: |
           set -euo pipefail
           test -n "$CARGO_REGISTRY_TOKEN"
-          test -n "$NODE_AUTH_TOKEN"
 
   rust-quality:
     name: Validate Rust SDK packages
@@ -49,6 +47,14 @@ jobs:
           node_version="$(node -p "require('./js/package.json').version")"
           test "$GITHUB_REF_NAME" = "v${cargo_version}"
           test "$GITHUB_REF_NAME" = "v${node_version}"
+          node -e '
+            const manifest = require("./js/package.json")
+            for (const [name, version] of Object.entries(manifest.optionalDependencies)) {
+              if (version !== manifest.version) {
+                throw new Error(`${name} is ${version}; expected ${manifest.version}`)
+              }
+            }
+          '
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -194,7 +200,6 @@ jobs:
     needs: [release-preflight, rust-quality, node-bindings]
     runs-on: ubuntu-latest
     env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       NPM_CONFIG_PROVENANCE: "true"
     steps:
       - uses: actions/checkout@v4
@@ -203,6 +208,9 @@ jobs:
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@latest
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -222,11 +230,52 @@ jobs:
       - name: Assemble platform packages
         working-directory: js
         run: |
+          set -euo pipefail
           bunx napi create-npm-dirs
           bun run artifacts
-          bunx napi prepublish -t npm --no-gh-release --dry-run
+          cp artifacts/pb-mapper.win32-x64-msvc.node .
+          for package_dir in \
+            linux-x64-gnu \
+            linux-arm64-gnu \
+            darwin-x64 \
+            darwin-arm64
+          do
+            npm pack --dry-run --ignore-scripts "./npm/${package_dir}"
+          done
           npm pack --dry-run --ignore-scripts
 
       - name: Publish platform packages and root package
         working-directory: js
-        run: npm publish --access public
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          publish_if_missing() {
+            local package_dir="$1"
+            local package_name
+            local package_version
+            package_name="$(node -p "require('./npm/${package_dir}/package.json').name")"
+            package_version="$(node -p "require('./npm/${package_dir}/package.json').version")"
+            if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
+              echo "${package_name}@${package_version} already exists; skipping"
+              return 0
+            fi
+            npm publish "./npm/${package_dir}" --access public
+          }
+
+          for package_dir in \
+            linux-x64-gnu \
+            linux-arm64-gnu \
+            darwin-x64 \
+            darwin-arm64
+          do
+            publish_if_missing "$package_dir"
+          done
+
+          root_name="$(node -p "require('./package.json').name")"
+          root_version="$(node -p "require('./package.json').version")"
+          if npm view "${root_name}@${root_version}" version >/dev/null 2>&1; then
+            echo "${root_name}@${root_version} already exists; skipping"
+          else
+            npm publish --access public --ignore-scripts
+          fi

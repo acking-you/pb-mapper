@@ -32,7 +32,10 @@ Satisfy these preconditions before releasing:
   - `git tag --list 'vX.Y.Z'`
   - `git ls-remote --tags origin 'vX.Y.Z'`
 - Confirm the matching versions do not already exist on crates.io or npm.
-- Configure `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN` as GitHub Actions secrets.
+- Configure `CARGO_REGISTRY_TOKEN` as a GitHub Actions secret.
+- Configure npm Trusted Publishing for `release-sdk.yml` on `pb-mapper` and
+  each published platform package. The SDK workflow uses GitHub OIDC and does
+  not store an npm access token.
 
 ## Versioning Rule
 

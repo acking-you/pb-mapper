@@ -7,6 +7,12 @@
       "devDependencies": {
         "@napi-rs/cli": "^3.3.0",
       },
+      "optionalDependencies": {
+        "pb-mapper-darwin-arm64": "0.5.0",
+        "pb-mapper-darwin-x64": "0.5.0",
+        "pb-mapper-linux-arm64-gnu": "0.5.0",
+        "pb-mapper-linux-x64-gnu": "0.5.0",
+      },
     },
   },
   "packages": {
@@ -213,6 +219,14 @@
     "mute-stream": ["mute-stream@3.0.0", "", {}, "sha512-dkEJPVvun4FryqBmZ5KhDo0K9iDXAwn08tMLDinNdRBNPcYEDiWYysLcc6k3mjTMlbP9KyylvRpd4wFtwrT9rw=="],
 
     "obug": ["obug@2.1.4", "", {}, "sha512-4a+OsYv9UktOJKE+l1A4OufDgdRF9PifWj+tJnHURo/P+WOxpG4GzUFL9qCalmWauao6ogiG+QvnCovwPoyAWA=="],
+
+    "pb-mapper-darwin-arm64": ["pb-mapper-darwin-arm64@0.5.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-4o8xz/ZlMiqMje/0I+RRcFDvqmYIcV133jPczMPk8Ge4n4Y+xQ6AHh1Y/C5kthpdV/AyfA8qtjcFZW+8amQegw=="],
+
+    "pb-mapper-darwin-x64": ["pb-mapper-darwin-x64@0.5.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-K+vEvl6sRaowQ0CiKYQetgMg1fDg8rbIaOaa6P9iahEWZiQp2PAtNbYROdKk4yPP27saemmeakBPCVkvqdGJAw=="],
+
+    "pb-mapper-linux-arm64-gnu": ["pb-mapper-linux-arm64-gnu@0.5.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-C7RpZ4hyCsZ4eByCExEdHMTHmTMQdvjDor2DIHj46FIWC/1wP7kUcSMIEUp1wslNNlThlxcstoZDKYptGCROkA=="],
+
+    "pb-mapper-linux-x64-gnu": ["pb-mapper-linux-x64-gnu@0.5.0", "", { "os": "linux", "cpu": "x64" }, "sha512-ifHwMZEG6IccAzHAO6dn0agpFbR1fpSZqkj1W6NW1WMF/Wg35GqSNwEENinFSSev2Im8lKmFuXBnsyndtmh6BQ=="],
 
     "safer-buffer": ["safer-buffer@2.1.2", "", {}, "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg=="],
 
