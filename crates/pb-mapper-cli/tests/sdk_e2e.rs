@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use pb_mapper_auth::MIN_TEMP_KEY_TTL;
 use pb_mapper_client::sdk::{
-    Client, ClientConfig, ConnectRequest, RegisterRequest, Transport, TunnelStatus,
+    Admin, Client, ClientConfig, ConnectRequest, ConnectionInfo, RegisterRequest, Transport,
+    TunnelStatus,
 };
 use pb_mapper_testkit::{
     READY_TIMEOUT, Relay, admin_credential, reserve_addr, run_raw_tcp_echo, run_udp_datagram_echo,
@@ -15,6 +16,32 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
 const LONG_TTL: Duration = Duration::from_secs(600);
+
+/// Wait until every worker in a registration's control-connection pool is
+/// visible in the relay inventory. `Registration::wait_ready` intentionally
+/// resolves after the first healthy worker, which is sufficient for traffic
+/// but too early for tests that operate on the whole pool.
+async fn wait_for_control_pool(admin: &Admin, service_name: &str) -> Vec<ConnectionInfo> {
+    let expected = pb_mapper_core::config::control_conn_pool_size();
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        let connections: Vec<_> = admin
+            .list_connections_all(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|connection| connection.service_name == service_name)
+            .collect();
+        if connections.len() >= expected {
+            return connections;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected {expected} control connections for {service_name}, got {connections:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
 
 async fn spawn_tcp_echo() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -515,12 +542,8 @@ async fn sdk_admin_retires_registered_connections() {
     let (registration, _) = register_echo(&client, "echo-retire", Transport::Tcp, false).await;
     let admin = client.admin().unwrap();
 
-    let before = admin.list_connections_all(None).await.unwrap();
-    let registered = before
-        .iter()
-        .filter(|conn| conn.service_name == "echo-retire")
-        .count();
-    assert!(registered > 0, "the registration should be listed");
+    let before = wait_for_control_pool(&admin, "echo-retire").await;
+    let registered = before.len();
 
     let retired = admin
         .retire_connections(None, "echo-retire".into(), None)
@@ -546,11 +569,8 @@ async fn sdk_admin_retires_registered_connections() {
     // waiting on it would return immediately and pass even if the service never
     // came back. Replacement conn_ids are proof it did, since the counter only
     // moves forward.
-    let retired_ids: std::collections::HashSet<u32> = before
-        .iter()
-        .filter(|conn| conn.service_name == "echo-retire")
-        .map(|conn| conn.conn_id)
-        .collect();
+    let retired_ids: std::collections::HashSet<u32> =
+        before.iter().map(|conn| conn.conn_id).collect();
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     loop {
         let now = admin.list_connections_all(None).await.unwrap();
@@ -598,10 +618,9 @@ async fn sdk_admin_retires_a_single_connection_by_id() {
     let (registration, _) = register_echo(&client, "echo-retire-one", Transport::Tcp, false).await;
     let admin = client.admin().unwrap();
 
-    let before = admin.list_connections_all(None).await.unwrap();
-    let mut ours: Vec<u32> = before
+    let mut ours: Vec<u32> = wait_for_control_pool(&admin, "echo-retire-one")
+        .await
         .iter()
-        .filter(|conn| conn.service_name == "echo-retire-one")
         .map(|conn| conn.conn_id)
         .collect();
     ours.sort_unstable();
