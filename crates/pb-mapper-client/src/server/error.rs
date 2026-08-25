@@ -31,8 +31,6 @@ pub enum Error {
     ConnectRemoteStream { source: std::io::Error },
     #[snafu(display("write pb conn stream request error"))]
     WritePbConnStreamReq { source: common::error::Error },
-    #[snafu(display("read pb conn stream response error"))]
-    ReadPbConnStreamResp { source: common::error::Error },
     #[snafu(display("decode pb conn stream response error"))]
     DecodePbConnStreamResp { source: common::error::Error },
     #[snafu(display("we expected `PbConnResponse::Stream`,but actual response is `{resp}`"))]

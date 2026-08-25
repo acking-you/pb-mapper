@@ -23,12 +23,57 @@ use pb_mapper_protocol::{
     MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
 };
 use pb_mapper_server::run_server_with_auth_config;
+// Only the hand-rolled v2 registration helper: this file sets the process
+// credential itself, so it must not touch anything in the testkit that runs
+// `init_test_env` — `Relay` and `Tunnel` — which would write it a second time.
+use pb_mapper_testkit::{V2ControlSpec, register_v2_control};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uni_stream::stream::{TcpListenerProvider, TcpStreamProvider};
+
+/// Serialises the tests that override process-global configuration.
+///
+/// The environment is one namespace shared by every test in this binary, and
+/// several of these tests override the *same* variable —
+/// `PB_MAPPER_CONTROL_CONN_POOL_SIZE`, so that one control worker serves the
+/// registration and its retries are countable. Run concurrently, one test's
+/// guard restores the variable while another test's tunnel is still reading it,
+/// and that tunnel silently gets the default two-worker pool: two register
+/// attempts where the test asserts one.
+static ENV_OVERRIDE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// A set of environment overrides held for the duration of one test.
+///
+/// Restores every previous value on drop, and releases the lock only then, so no
+/// two overriding tests overlap.
+struct EnvOverrides {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    vars: Vec<EnvVarGuard>,
+}
+
+impl EnvOverrides {
+    async fn set(overrides: &[(&'static str, &'static str)]) -> Self {
+        let lock = ENV_OVERRIDE_LOCK.lock().await;
+        let vars = overrides
+            .iter()
+            .map(|(key, value)| EnvVarGuard::set(key, value))
+            .collect();
+        Self { _lock: lock, vars }
+    }
+}
+
+impl Drop for EnvOverrides {
+    fn drop(&mut self) {
+        // Explicit, so the ordering against the lock guard is stated rather than
+        // left to field order: every variable is restored before the next test
+        // that overrides one can start.
+        self.vars.clear();
+    }
+}
 
 struct EnvVarGuard {
     key: &'static str,
@@ -39,8 +84,9 @@ impl EnvVarGuard {
     /// # Safety note
     ///
     /// Mutating the environment is unsafe in edition 2024 because it races
-    /// concurrent readers. The tests that use this guard set a variable no
-    /// other test reads, and the guard restores the previous value on drop.
+    /// concurrent readers. Callers reach this through [`EnvOverrides`], which
+    /// holds [`ENV_OVERRIDE_LOCK`] for as long as the values are in place, and
+    /// the guard restores the previous value on drop.
     fn set(key: &'static str, value: &'static str) -> Self {
         let old_value = std::env::var(key).ok();
         unsafe { std::env::set_var(key, value) };
@@ -234,39 +280,6 @@ async fn register_control_conn_parts(
         panic!("unexpected register response");
     };
     conn_id
-}
-
-async fn register_v2_control_conn_parts(
-    reader: &mut impl MessageReader,
-    writer: &mut impl MessageWriter,
-    key: &str,
-) -> (u32, u64) {
-    let request = PbConnRequest::Register {
-        need_codec: false,
-        is_datagram: false,
-        key: key.to_string(),
-        protocol_version: Some(2),
-        client_instance_id: Some("regression-test-client".to_string()),
-        heartbeat_interval_ms: Some(50),
-        heartbeat_tolerance_ms: Some(150),
-    }
-    .encode()
-    .unwrap();
-    writer.write_msg(&request).await.unwrap();
-
-    let response = timeout(Duration::from_secs(1), reader.read_msg())
-        .await
-        .expect("register v2 response timed out")
-        .unwrap();
-    let PbConnResponse::RegisterV2 {
-        conn_id,
-        generation,
-        ..
-    } = PbConnResponse::decode(response).unwrap()
-    else {
-        panic!("unexpected register v2 response");
-    };
-    (conn_id, generation)
 }
 
 async fn read_status_keys(server_addr: SocketAddr) -> Vec<String> {
@@ -677,7 +690,15 @@ async fn status_service_reports_registered_v2_control_connection() {
     let (mut reader_stream, mut writer_stream) = control.into_split();
     let mut reader = get_header_msg_reader(&mut reader_stream).unwrap();
     let mut writer = get_header_msg_writer(&mut writer_stream).unwrap();
-    let (conn_id, generation) = register_v2_control_conn_parts(&mut reader, &mut writer, key).await;
+    let (conn_id, generation) = register_v2_control(
+        &mut reader,
+        &mut writer,
+        key,
+        V2ControlSpec::new()
+            .instance_id("regression-test-client")
+            .response_timeout(Duration::from_secs(1)),
+    )
+    .await;
 
     let mut status = wait_for_server(server_addr).await;
     let request = PbConnRequest::Status(PbConnStatusReq::Service {
@@ -715,11 +736,14 @@ async fn status_service_reports_registered_v2_control_connection() {
 
 #[tokio::test]
 async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_status() {
-    let _pool_size = EnvVarGuard::set("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1");
-    let _heartbeat = EnvVarGuard::set("PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL", "20ms");
-    let _tolerance = EnvVarGuard::set("PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE", "50ms");
-    let _grace = EnvVarGuard::set("PB_MAPPER_CONTROL_SUSPECT_GRACE", "20ms");
-    let _probe_timeout = EnvVarGuard::set("PB_MAPPER_REGISTRATION_PROBE_TIMEOUT", "50ms");
+    let _env = EnvOverrides::set(&[
+        ("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1"),
+        ("PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL", "20ms"),
+        ("PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE", "50ms"),
+        ("PB_MAPPER_CONTROL_SUSPECT_GRACE", "20ms"),
+        ("PB_MAPPER_REGISTRATION_PROBE_TIMEOUT", "50ms"),
+    ])
+    .await;
 
     let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_addr = remote_listener.local_addr().unwrap();
@@ -865,9 +889,12 @@ async fn client_closes_initial_status_probe_after_key_check() {
 
 #[tokio::test]
 async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
-    let _health_interval = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL", "20ms");
-    let _health_timeout = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT", "200ms");
-    let _health_threshold = EnvVarGuard::set("PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD", "3");
+    let _env = EnvOverrides::set(&[
+        ("PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL", "20ms"),
+        ("PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT", "200ms"),
+        ("PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD", "3"),
+    ])
+    .await;
 
     let local_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = local_probe.local_addr().unwrap();
@@ -1500,4 +1527,190 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
     stale_task.abort();
     shutdown_token.cancel();
     server.await.unwrap();
+}
+
+/// A fake relay that refuses every registration with one error.
+///
+/// Returns the timestamps of the register attempts it saw, which is what the two
+/// cases below actually assert on: how long the client waited before trying
+/// again, and whether it tried again at all.
+fn spawn_rejecting_relay(
+    listener: TcpListener,
+    remote_addr: SocketAddr,
+    code: &'static str,
+    retryable: bool,
+) -> (
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Vec<tokio::time::Instant>>>,
+) {
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let relay_attempts = attempts.clone();
+    let relay = tokio::spawn(async move {
+        let security = ServerSecurity::new(
+            AuthRuntime::from_process(auth_config(remote_addr))
+                .await
+                .unwrap(),
+        );
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let attempts = relay_attempts.clone();
+            let security = security.clone();
+            tokio::spawn(async move {
+                let (request, session) = read_secure_request(&security, &mut stream).await;
+                let response = match request {
+                    PbConnRequest::Register { .. } | PbConnRequest::RegisterScoped { .. } => {
+                        attempts.lock().unwrap().push(tokio::time::Instant::now());
+                        PbConnResponse::error(code, "refused by the test relay", retryable)
+                    }
+                    // The registration probe, which the client runs against a
+                    // relay it has not registered with yet.
+                    PbConnRequest::Status(PbConnStatusReq::Service { key }) => {
+                        PbConnResponse::Status(PbConnStatusResp::Service {
+                            key,
+                            connections: Vec::new(),
+                        })
+                    }
+                    PbConnRequest::Status(PbConnStatusReq::Keys) => {
+                        PbConnResponse::Status(PbConnStatusResp::Keys(Vec::new()))
+                    }
+                    _ => return,
+                };
+                let mut writer = session.response_writer(&mut stream).unwrap();
+                writer.write_msg(&response.encode().unwrap()).await.unwrap();
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+    (relay, attempts)
+}
+
+/// Wait until the fake relay has seen `count` register attempts.
+async fn wait_for_register_attempts(
+    attempts: &Arc<Mutex<Vec<tokio::time::Instant>>>,
+    count: usize,
+    within: Duration,
+) -> Vec<tokio::time::Instant> {
+    timeout(within, async {
+        loop {
+            let seen = attempts.lock().unwrap().clone();
+            if seen.len() >= count {
+                return seen;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("relay saw fewer than {count} register attempts"))
+}
+
+#[tokio::test]
+async fn retryable_registration_rejection_waits_on_the_slow_ladder() {
+    let _env = EnvOverrides::set(&[
+        ("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1"),
+        ("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN", "400ms"),
+        ("PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX", "800ms"),
+    ])
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = listener.local_addr().unwrap();
+    let (relay, attempts) = spawn_rejecting_relay(
+        listener,
+        remote_addr,
+        "service_connection_limit_exceeded",
+        true,
+    );
+
+    let status_changes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let callback_status_changes = status_changes.clone();
+    let local_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let local_server = tokio::spawn(run_server_side_cli_with_callback::<TcpStreamProvider, _>(
+        local_addr,
+        remote_addr,
+        Arc::from("sf-backend"),
+        ServerTunnelOptions {
+            need_codec: false,
+            is_datagram: false,
+            keep_alive: false,
+            namespace: None,
+            force_namespace: false,
+        },
+        Some(Box::new(move |status| {
+            callback_status_changes
+                .lock()
+                .unwrap()
+                .push(status.to_string());
+        })),
+    ));
+
+    let seen = wait_for_register_attempts(&attempts, 2, Duration::from_secs(5)).await;
+    let gap = seen[1].duration_since(seen[0]);
+    // The transport ladder's first delay is 100ms, so anything under the reject
+    // ladder's 400ms minimum means the rejection was retried as a transport
+    // failure — which is what turned one refusal into thousands a minute.
+    assert!(
+        gap >= Duration::from_millis(300),
+        "a retryable rejection retried after {gap:?}, far quicker than the reject ladder"
+    );
+    assert!(
+        !status_changes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s == "connected"),
+        "a refused registration reported itself connected: {:?}",
+        status_changes.lock().unwrap()
+    );
+
+    local_server.abort();
+    relay.abort();
+}
+
+#[tokio::test]
+async fn terminal_registration_rejection_stops_the_worker() {
+    let _env = EnvOverrides::set(&[("PB_MAPPER_CONTROL_CONN_POOL_SIZE", "1")]).await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = listener.local_addr().unwrap();
+    let (relay, attempts) =
+        spawn_rejecting_relay(listener, remote_addr, "service_transport_mismatch", false);
+
+    let status_changes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let callback_status_changes = status_changes.clone();
+    let local_addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let local_server = tokio::spawn(run_server_side_cli_with_callback::<TcpStreamProvider, _>(
+        local_addr,
+        remote_addr,
+        Arc::from("sf-backend"),
+        ServerTunnelOptions {
+            need_codec: false,
+            is_datagram: false,
+            keep_alive: false,
+            namespace: None,
+            force_namespace: false,
+        },
+        Some(Box::new(move |status| {
+            callback_status_changes
+                .lock()
+                .unwrap()
+                .push(status.to_string());
+        })),
+    ));
+
+    // The pool returns once its only worker gives up, which is the whole point:
+    // a permanent rejection has to end the tunnel rather than retry it forever.
+    timeout(Duration::from_secs(5), local_server)
+        .await
+        .expect("a permanently rejected registration kept retrying")
+        .unwrap();
+    assert_eq!(attempts.lock().unwrap().len(), 1);
+    let statuses = status_changes.lock().unwrap().clone();
+    assert!(
+        statuses
+            .last()
+            .is_some_and(|status| status.starts_with("failed: service_transport_mismatch")),
+        "a permanent rejection was not reported to the caller: {statuses:?}"
+    );
+
+    relay.abort();
 }

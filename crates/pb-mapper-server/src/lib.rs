@@ -20,7 +20,7 @@ mod status;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use error::Result;
 use snafu::{OptionExt, ResultExt};
@@ -34,23 +34,26 @@ use self::error::{
     TaskCenterInitRequestTimeoutSnafu, TaskCenterSendListenerSnafu, TaskCenterSendStatusRespSnafu,
     TaskCenterSendStreamRespToManagerSnafu, TaskCenterSetKeepAliveSnafu,
 };
-use self::server::{ServerRegistration, handle_server_conn};
+use self::server::{LEGACY_SERVER_IDLE_TIMEOUT, ServerRegistration, handle_server_conn};
 use self::status::handle_show_status;
 use crate::error::{
     ServerListenSnafu, TaskCenterClientSendStreamSnafu, TaskCenterSendRegisterRespSnafu,
     TaskCenterSendStreamRespToClientSnafu, TaskCenterSendSubcribeRespSnafu,
     TaskCenterStreamConnIdNotExistSnafu,
 };
-use crate::manager::{ForwardMessage, SenderChan, TaskManager};
+use crate::manager::{ForwardMessage, ReceiverChan, SenderChan, TaskManager};
 use pb_mapper_auth::{ADMIN_KEY_ID, AuthConfig, AuthContext, AuthRuntime};
-use pb_mapper_core::config::{control_io_timeout, keep_alive_from_env, server_lease_timeout};
+use pb_mapper_core::config::{
+    control_io_timeout, keep_alive_from_env, server_lease_sweep_interval, server_lease_timeout,
+};
 use pb_mapper_core::conn_id::{ConnIdProvider, RemoteConnId};
+use pb_mapper_core::paging::paginate;
 use pb_mapper_core::{snafu_error_get_or_continue, snafu_error_handle};
 use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{
     AdminConnectionInfo, AdminConnectionPage, AdminServiceInfo, AdminServicePage,
-    MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq, PbConnStatusResp,
-    PbServiceConnStatus,
+    CONTROL_PROTOCOL_V2, MessageSerializer, PbConnRequest, PbConnResponse, PbConnStatusReq,
+    PbConnStatusResp, PbServiceConnStatus,
 };
 use pb_mapper_protocol::secure::{HeaderProtocol, ServerHeaderSession, ServerSecurity};
 use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay};
@@ -67,6 +70,14 @@ pub enum ManagerTask {
         is_datagram: bool,
         protocol_version: u16,
         conn_sender: ConnTaskSender,
+        /// Cancelled to tear the control connection's socket down.
+        ///
+        /// Separate from `conn_sender` because the two fail independently: a
+        /// registration that has stopped reading leaves the writer blocked inside
+        /// a single `write_msg`, and a `ConnTask` queued behind it is not observed
+        /// until that write returns — which, for a half-open socket, may be never.
+        /// Retirement has to reach the socket without going through the work queue.
+        retire_token: CancellationToken,
     },
     ServerConnActivity {
         key: ImutableKey,
@@ -112,6 +123,12 @@ pub enum ManagerTask {
         page_size: u16,
         response_sender: tokio::sync::oneshot::Sender<AdminConnectionPage>,
     },
+    AdminConnectionRetire {
+        key: ImutableKey,
+        /// Absent retires every connection registered under `key`.
+        conn_id: Option<RemoteConnId>,
+        response_sender: tokio::sync::oneshot::Sender<u32>,
+    },
     DeRegisterServerConn {
         key: ImutableKey,
         conn_id: RemoteConnId,
@@ -121,6 +138,12 @@ pub enum ManagerTask {
         conn_id: RemoteConnId,
         reason: String,
     },
+    /// Look for registrations that stopped renewing their lease, and retire them.
+    ///
+    /// Sent by a ticker task rather than driven by a timer inside the manager loop:
+    /// that loop's single await is a channel receive, and racing it against a tick
+    /// in `tokio::select!` would drop a task the receive had already taken.
+    SweepServerLeases,
     DeRegisterClientConn {
         server_id: Option<RemoteConnId>,
         client_id: RemoteConnId,
@@ -177,6 +200,7 @@ pub enum ConnTask {
 
 pub(crate) type ManagerTaskSender = SenderChan<ManagerTask>;
 pub(crate) type ConnTaskSender = SenderChan<ConnTask>;
+pub(crate) type ConnTaskReceiver = ReceiverChan<ConnTask>;
 
 pub type ImutableKey = Arc<str>;
 
@@ -186,7 +210,7 @@ pub enum ServerConnHealth {
     Suspect,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ServerConnInfo {
     pub conn_id: RemoteConnId,
     pub generation: u64,
@@ -195,9 +219,24 @@ pub struct ServerConnInfo {
     pub is_datagram: bool,
     pub protocol_version: u16,
     pub last_rx_at: Instant,
+    /// Cancelled to tear this connection's socket down; see
+    /// [`ManagerTask::Register::retire_token`].
+    ///
+    /// Held here rather than in the task manager's sender map so that retiring a
+    /// connection reaches the socket even when its work queue is wedged. This is
+    /// also why the struct is `Clone` and no longer `Copy`.
+    pub retire_token: CancellationToken,
 }
 
 pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<ServerConnInfo>>;
+
+/// A subscriber's stream, from its own connection ID to the server connection it
+/// was routed to, that connection's generation, and the service key it asked for.
+pub(crate) type PendingStreamMap =
+    hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>;
+
+/// Per-namespace new-stream rate limiters, keyed by the namespace's key ID.
+pub(crate) type NamespaceRateLimitMap = hashbrown::HashMap<u64, NamespaceRateLimit>;
 
 struct NamespaceRateLimit {
     tokens: f64,
@@ -246,21 +285,67 @@ pub struct ServerStatusInfo {
     pub uptime_seconds: u64,
 }
 
+/// How long a registered control connection may go quiet before the relay treats
+/// it as gone.
+///
+/// Two very different numbers, because the two protocol versions keep their
+/// registrations alive in very different ways. A v2 client renews a lease it was
+/// told the length of, every [`control_heartbeat_interval`] — 2s against a 15s
+/// lease. A v1 client has no lease and pings on a schedule of its own, minutes
+/// apart, so its threshold has to be generous enough that jitter never costs it a
+/// healthy registration.
+///
+/// Both the per-connection reader timeout and the periodic sweep read the
+/// threshold from here: they are two views of one rule, and a sweep stricter than
+/// the reader would retire connections that are behaving exactly as designed.
+///
+/// [`control_heartbeat_interval`]: pb_mapper_core::config::control_heartbeat_interval
+pub(crate) fn server_conn_idle_timeout(protocol_version: u16) -> Duration {
+    if protocol_version >= CONTROL_PROTOCOL_V2 {
+        server_lease_timeout()
+    } else {
+        LEGACY_SERVER_IDLE_TIMEOUT
+    }
+}
+
+/// Drop one connection from the service map, returning what was registered.
+///
+/// The removed [`ServerConnInfo`] is returned rather than a bare `bool` because it
+/// carries the connection's [`ServerConnInfo::retire_token`], and the map is the
+/// only place that holds it — a caller tearing the connection down needs it after
+/// the entry is gone.
 fn remove_server_conn(
     server_conn_map: &mut ServerConnMap,
     key: &ImutableKey,
     conn_id: RemoteConnId,
-) -> bool {
-    if let Some(ids) = server_conn_map.get_mut(key)
-        && let Some(idx) = ids.iter().position(|info| info.conn_id == conn_id)
-    {
-        ids.remove(idx);
-        if ids.is_empty() {
-            server_conn_map.remove(key);
-        }
-        return true;
+) -> Option<ServerConnInfo> {
+    let ids = server_conn_map.get_mut(key)?;
+    let idx = ids.iter().position(|info| info.conn_id == conn_id)?;
+    let removed = ids.remove(idx);
+    if ids.is_empty() {
+        server_conn_map.remove(key);
     }
-    false
+    Some(removed)
+}
+
+/// Drop a connection from the service map and tear its socket down.
+///
+/// For the callers that found a registration unusable and have nothing further to
+/// say to it — a subscribe whose sender was gone, or whose stream request would not
+/// send. Removing the entry alone would leave the socket task running until its own
+/// reader timed out, holding its connection ID and its slot in the service's quota.
+fn cancel_and_remove_server_conn(
+    server_conn_map: &mut ServerConnMap,
+    key: &ImutableKey,
+    conn_id: RemoteConnId,
+) -> bool {
+    match remove_server_conn(server_conn_map, key, conn_id) {
+        Some(info) => {
+            info.retire_token.cancel();
+            true
+        }
+        None => false,
+    }
 }
 
 fn registered_server_conn_count(server_conn_map: &ServerConnMap) -> usize {
@@ -291,6 +376,58 @@ fn service_status_connections(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// One registration the sweep decided to retire.
+struct StaleServerConn {
+    key: ImutableKey,
+    conn_id: RemoteConnId,
+    protocol_version: u16,
+    idle_for: Duration,
+}
+
+/// Advance every registration's health by one sweep, and report the ones that ran
+/// out of grace.
+///
+/// Two stages, because retiring on the first sweep would be both premature and
+/// less useful:
+///
+/// 1. A [`ServerConnHealth::Healthy`] connection past its idle threshold becomes
+///    [`ServerConnHealth::Suspect`]. It stays registered but drops out of the
+///    subscribe candidate filter, so a subscriber stops being handed a
+///    registration that has gone quiet — the fix that matters most, and the one
+///    that costs nothing if the connection turns out to be alive.
+/// 2. A connection still `Suspect` and still past its threshold on a later sweep
+///    is returned for retirement.
+///
+/// Any activity resets health to `Healthy` (see [`record_server_conn_activity`]),
+/// so a connection only reaches stage 2 by being quiet across the whole span. That
+/// span also gives the connection's own reader timeout a chance to fire first,
+/// which is the tidier teardown: the socket task unwinds and deregisters itself.
+/// The sweep exists for the case where it does not — a task wedged on a socket
+/// that will never return, which is how three services sat at a full 16/16
+/// connection quota for seventeen hours.
+fn sweep_server_conn_leases(server_conn_map: &mut ServerConnMap) -> Vec<StaleServerConn> {
+    let now = Instant::now();
+    let mut stale = Vec::new();
+    for (key, infos) in server_conn_map.iter_mut() {
+        for info in infos.iter_mut() {
+            let idle_for = now.duration_since(info.last_rx_at);
+            if idle_for <= server_conn_idle_timeout(info.protocol_version) {
+                continue;
+            }
+            match info.health {
+                ServerConnHealth::Healthy => info.health = ServerConnHealth::Suspect,
+                ServerConnHealth::Suspect => stale.push(StaleServerConn {
+                    key: key.clone(),
+                    conn_id: info.conn_id,
+                    protocol_version: info.protocol_version,
+                    idle_for,
+                }),
+            }
+        }
+    }
+    stale
 }
 
 fn record_server_conn_activity(
@@ -381,6 +518,108 @@ pub use runtime::{
 };
 mod connection;
 use connection::{
-    decrement_namespace_stream_count, handle_conn, handle_listener,
-    release_namespace_rate_limit_if_idle, split_scoped_service_key,
+    compose_service_key, decrement_namespace_stream_count, handle_conn, handle_listener,
+    release_namespace_rate_limit_if_idle, split_scoped_service_key, validate_service_name,
 };
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    fn conn(conn_id: u32, protocol_version: u16, idle_for: Duration) -> ServerConnInfo {
+        ServerConnInfo {
+            conn_id: RemoteConnId::from(conn_id),
+            generation: 1,
+            health: ServerConnHealth::Healthy,
+            need_codec: false,
+            is_datagram: false,
+            protocol_version,
+            last_rx_at: Instant::now() - idle_for,
+            retire_token: CancellationToken::new(),
+        }
+    }
+
+    fn map(infos: Vec<ServerConnInfo>) -> ServerConnMap {
+        let mut map = ServerConnMap::new();
+        map.insert(ImutableKey::from("sf-backend"), infos);
+        map
+    }
+
+    fn health(map: &ServerConnMap, conn_id: u32) -> ServerConnHealth {
+        map.values()
+            .flatten()
+            .find(|info| info.conn_id == RemoteConnId::from(conn_id))
+            .expect("connection is still registered")
+            .health
+    }
+
+    #[test]
+    fn sweep_leaves_a_registration_that_is_renewing_its_lease() {
+        let mut map = map(vec![conn(1, CONTROL_PROTOCOL_V2, Duration::from_secs(2))]);
+
+        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert_eq!(health(&map, 1), ServerConnHealth::Healthy);
+    }
+
+    #[test]
+    fn sweep_marks_before_it_retires() {
+        let mut map = map(vec![conn(1, CONTROL_PROTOCOL_V2, Duration::from_secs(60))]);
+
+        // First sweep only withdraws it from the subscribe candidates.
+        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert_eq!(health(&map, 1), ServerConnHealth::Suspect);
+
+        let stale = sweep_server_conn_leases(&mut map);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].conn_id, RemoteConnId::from(1));
+        assert_eq!(stale[0].protocol_version, CONTROL_PROTOCOL_V2);
+    }
+
+    #[test]
+    fn activity_between_sweeps_clears_suspicion() {
+        let key = ImutableKey::from("sf-backend");
+        let mut map = map(vec![conn(1, CONTROL_PROTOCOL_V2, Duration::from_secs(60))]);
+
+        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert!(record_server_conn_activity(
+            &mut map,
+            &key,
+            RemoteConnId::from(1)
+        ));
+
+        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert_eq!(health(&map, 1), ServerConnHealth::Healthy);
+    }
+
+    #[test]
+    fn a_legacy_registration_keeps_its_far_longer_grace() {
+        // Well past a v2 lease, nowhere near the v1 ping interval.
+        let idle_for = Duration::from_secs(60);
+        let mut map = map(vec![
+            conn(1, 1, idle_for),
+            conn(2, CONTROL_PROTOCOL_V2, idle_for),
+        ]);
+
+        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        assert_eq!(health(&map, 1), ServerConnHealth::Healthy);
+        assert_eq!(health(&map, 2), ServerConnHealth::Suspect);
+    }
+
+    #[test]
+    fn sweep_reports_every_stale_connection_of_a_service() {
+        let idle_for = Duration::from_secs(60);
+        let mut map = map(vec![
+            conn(1, CONTROL_PROTOCOL_V2, idle_for),
+            conn(2, CONTROL_PROTOCOL_V2, idle_for),
+            conn(3, CONTROL_PROTOCOL_V2, Duration::from_secs(1)),
+        ]);
+
+        assert!(sweep_server_conn_leases(&mut map).is_empty());
+        let mut stale: Vec<u32> = sweep_server_conn_leases(&mut map)
+            .into_iter()
+            .map(|stale| stale.conn_id.into())
+            .collect();
+        stale.sort_unstable();
+        assert_eq!(stale, vec![1, 2]);
+    }
+}

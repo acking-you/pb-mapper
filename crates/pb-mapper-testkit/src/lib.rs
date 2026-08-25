@@ -47,11 +47,13 @@ use pb_mapper_auth::{AuthConfig, LegacyProtocolPolicy};
 use pb_mapper_core::checksum::{Credential, set_process_msg_header_key};
 use pb_mapper_core::config::init_tracing;
 
+mod control;
 mod echo;
 mod relay;
 mod traffic;
 mod tunnel;
 
+pub use control::{V2ControlSpec, register_v2_control};
 pub use relay::Relay;
 pub use traffic::{
     TimerTickGuard, connected_udp_socket, gen_random_msg, probe_udp_socket, raw_tcp_probe,

@@ -217,10 +217,19 @@ pb-mapper admin --server "your-server:7666" key list
 pb-mapper admin --server "your-server:7666" key reveal 4294967296
 pb-mapper admin --server "your-server:7666" service list --all
 pb-mapper admin --server "your-server:7666" connection list --all
+pb-mapper admin --server "your-server:7666" connection retire my-service --all
 ```
 
 Use `--output json` for one JSON document or `--output ndjson` for streaming
 automation. Page size defaults to 100 and is capped at 1000.
+
+`connection retire` drops the control connections the relay is still holding for
+a service. Reach for it when a service refuses to register with
+`service_connection_limit_exceeded` even though nothing is serving it: the quota
+is full of connections that should have gone away. `--all` retires every
+connection, which also interrupts the healthy ones; `--conn-id` retires exactly
+one, as reported by `connection list`. The relay sweeps expired leases on its
+own, so this is the manual override, not the routine path.
 
 ## Run (GUI)
 
@@ -256,6 +265,8 @@ flutter run
 - `PB_MAPPER_CONTROL_SUSPECT_GRACE`: additional grace after a failed remote registration probe before reconnecting, default `2s`
 - `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`: timeout for each register-role remote registration status probe, default `1s`
 - `PB_MAPPER_SERVER_LEASE_TIMEOUT`: server-side idle lease timeout for V2 registered control connections, default `15s`
+- `PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL`: how often the server sweeps registered control connections whose lease has expired, default `5s`. A zero falls back to the default: each sweep scans every registration, so a zero period would starve the traffic it protects
+- `PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN` / `_MAX`: how long the register role waits after the server *refuses* a registration — a full connection quota, say — as opposed to failing to reach it, default `5s` and `80s`. A zero at either end falls back to that default; a maximum below the minimum collapses the ladder to a fixed delay
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`: how often the client-side local listener rechecks that the remote service key is still registered, default `15s`
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`: timeout for each client-side remote key health check, default `5s`
 - `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`: consecutive failed health checks required before restarting the client-side local listener, default `3`

@@ -501,3 +501,130 @@ async fn sdk_connect_reports_permanent_rejection_as_failed() {
 
     let _ = connection.stop().await;
 }
+
+/// `admin connection retire` frees a service's registered connections, and the
+/// registration's own client notices and comes back.
+///
+/// The operator's escape hatch from the outage that motivated it: a service whose
+/// per-service connection quota was full of connections the relay could not tell
+/// were dead. Retiring them empties the quota without restarting the relay.
+#[tokio::test]
+async fn sdk_admin_retires_registered_connections() {
+    let relay = Relay::start("sdk-retire").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let (registration, _) = register_echo(&client, "echo-retire", Transport::Tcp, false).await;
+    let admin = client.admin().unwrap();
+
+    let before = admin.list_connections_all(None).await.unwrap();
+    let registered = before
+        .iter()
+        .filter(|conn| conn.service_name == "echo-retire")
+        .count();
+    assert!(registered > 0, "the registration should be listed");
+
+    let retired = admin
+        .retire_connections(None, "echo-retire".into(), None)
+        .await
+        .unwrap();
+    assert_eq!(retired as usize, registered, "every connection was named");
+
+    // Naming a service the relay no longer holds is not an error, it is zero.
+    assert_eq!(
+        admin
+            .retire_connections(None, "echo-no-such-service".into(), None)
+            .await
+            .unwrap(),
+        0
+    );
+
+    // The client treats retirement as a reconnect, so the service comes back on
+    // its own. That is the whole point: an operator clears the quota without
+    // taking the service down.
+    //
+    // Asserted on the relay's own view, not on `wait_ready_timeout`: the tunnel's
+    // status may still read Connected from the pool that was just retired, so
+    // waiting on it would return immediately and pass even if the service never
+    // came back. Replacement conn_ids are proof it did, since the counter only
+    // moves forward.
+    let retired_ids: std::collections::HashSet<u32> = before
+        .iter()
+        .filter(|conn| conn.service_name == "echo-retire")
+        .map(|conn| conn.conn_id)
+        .collect();
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        let now = admin.list_connections_all(None).await.unwrap();
+        let replaced = now
+            .iter()
+            .filter(|conn| conn.service_name == "echo-retire")
+            .any(|conn| !retired_ids.contains(&conn.conn_id));
+        if replaced {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the service never re-registered after retirement: {now:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !matches!(registration.status(), TunnelStatus::Failed(_)),
+        "retirement is a reconnect, not a permanent failure: {:?}",
+        registration.status()
+    );
+
+    // And the tunnel still carries traffic, which no connection count can show.
+    let listen_addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    let connection = client
+        .connect(ConnectRequest {
+            key: "echo-retire".into(),
+            local_addr: listen_addr.to_string(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+    connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    run_raw_tcp_echo(listen_addr, 2, None).await;
+
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+/// Retiring one connection by id leaves the service's other connections alone.
+#[tokio::test]
+async fn sdk_admin_retires_a_single_connection_by_id() {
+    let relay = Relay::start("sdk-retire-one").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let (registration, _) = register_echo(&client, "echo-retire-one", Transport::Tcp, false).await;
+    let admin = client.admin().unwrap();
+
+    let before = admin.list_connections_all(None).await.unwrap();
+    let mut ours: Vec<u32> = before
+        .iter()
+        .filter(|conn| conn.service_name == "echo-retire-one")
+        .map(|conn| conn.conn_id)
+        .collect();
+    ours.sort_unstable();
+    // A register opens a pool of control connections, so this is the interesting
+    // case rather than a degenerate one.
+    assert!(
+        ours.len() > 1,
+        "expected a control-connection pool, got {ours:?}"
+    );
+
+    let retired = admin
+        .retire_connections(None, "echo-retire-one".into(), Some(ours[0]))
+        .await
+        .unwrap();
+    assert_eq!(retired, 1);
+
+    let after = admin.list_connections_all(None).await.unwrap();
+    assert!(
+        !after
+            .iter()
+            .any(|conn| conn.service_name == "echo-retire-one" && conn.conn_id == ours[0]),
+        "the named connection should be gone"
+    );
+
+    registration.stop().await.unwrap();
+}

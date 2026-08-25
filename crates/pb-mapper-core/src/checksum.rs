@@ -21,7 +21,6 @@ pub type ChecksumType = u32;
 pub const ENV_MSG_HEADER_KEY: &str = "MSG_HEADER_KEY";
 /// Fixed file path used to persist a machine-derived key for operators to reuse.
 pub const MACHINE_MSG_HEADER_KEY_PATH: &str = "/var/lib/pb-mapper-server/msg_header_key";
-pub const ADMIN_KEY_PATH: &str = "/var/lib/pb-mapper/auth/admin.key";
 pub const TEMP_CREDENTIAL_PREFIX: &str = "pbmt1_";
 pub const ADMIN_KEY_LEN: usize = 32;
 

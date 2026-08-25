@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use snafu::ResultExt;
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use super::error::{
@@ -11,8 +12,7 @@ use super::error::{
     ServerConnSendRegisterSnafu, ServerConnSendStreamAckSnafu, ServerConnWritePongRespSnafu,
     ServerConnWriteRegisteredOkSnafu, ServerConnWriteStreamRequestSnafu,
 };
-use super::{ConnTask, ImutableKey, ManagerTask, ManagerTaskSender, Result};
-use pb_mapper_core::config::server_lease_timeout;
+use super::{ConnTask, ConnTaskReceiver, ImutableKey, ManagerTask, ManagerTaskSender, Result};
 use pb_mapper_core::conn_id::RemoteConnId;
 use pb_mapper_protocol::command::{
     CONTROL_PROTOCOL_V2, LocalServer, MessageSerializer, PbConnResponse, PbServerRequest,
@@ -123,9 +123,11 @@ impl Drop for ServerConnGuard {
 }
 
 const DEFAULT_SERVER_CHAN_CAP: usize = 32 * 4;
-// Must be greater than the local server ping interval (5 minutes). Equal values race
-// under scheduler/network jitter and can drop a healthy registration.
-const SERVER_TIMEOUT: Duration = Duration::from_secs(60 * 11);
+/// Idle threshold for a protocol-v1 registration, which has no lease to renew.
+///
+/// Must be greater than the local server ping interval (5 minutes). Equal values race
+/// under scheduler/network jitter and can drop a healthy registration.
+pub(super) const LEGACY_SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 11);
 
 enum ServerControlWrite {
     Pong(Vec<u8>),
@@ -156,6 +158,11 @@ pub async fn handle_server_conn(
         conn_id,
     } = registration;
     let (tx, rx) = kanal::bounded_async(DEFAULT_SERVER_CHAN_CAP);
+    // Handed to the manager so a retirement can cancel this connection's socket
+    // directly. Queuing `ConnTask::Retire` is not enough on its own: the writer
+    // observes that only between writes, and a registration that has stopped
+    // reading leaves it blocked inside one.
+    let retire_token = CancellationToken::new();
 
     // register metadate
     task_sender
@@ -166,6 +173,7 @@ pub async fn handle_server_conn(
             is_datagram,
             protocol_version,
             conn_sender: tx,
+            retire_token: retire_token.clone(),
         })
         .await
         .map_err(|_| kanal::SendError(()))
@@ -259,6 +267,7 @@ pub async fn handle_server_conn(
         })?;
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<ServerControlWrite>();
         let writer_key = key.clone();
+        let writer_retire_token = retire_token.clone();
         let mut writer_handle = tokio::spawn(async move {
             let mut msg_writer = session
                 .response_writer(&mut writer)
@@ -280,58 +289,20 @@ pub async fn handle_server_conn(
                 lease_ttl_ms,
                 "server register response written to local server"
             );
-            loop {
-                tokio::select! {
-                    req = rx.recv() => {
-                        let req = req.context(ServerConnRecvConnTaskSnafu)?;
-                        match req {
-                            ConnTask::Retire { reason } => {
-                                tracing::warn!(
-                                    event = "server_conn_retire_requested",
-                                    key = %writer_key,
-                                    conn_id = %conn_id,
-                                    reason = %reason,
-                                    "server control connection writer is closing"
-                                );
-                                break Ok(());
-                            }
-                            req => {
-                                handle_stream_req(
-                                    req,
-                                    &mut msg_writer,
-                                    writer_key.clone(),
-                                    conn_id
-                                ).await?;
-                            }
-                        }
-                    }
-                    cmd = write_rx.recv() => {
-                        let Some(cmd) = cmd else {
-                            break Ok(());
-                        };
-                        match cmd {
-                            ServerControlWrite::Pong(resp) => {
-                                msg_writer
-                                    .write_msg(&resp)
-                                    .await
-                                    .context(ServerConnWritePongRespSnafu {
-                                        key: writer_key.clone(),
-                                        conn_id,
-                                    })?;
-                            }
-                        }
-                    }
-                }
-            }
+            run_control_writer(
+                &mut msg_writer,
+                &rx,
+                &mut write_rx,
+                &writer_retire_token,
+                writer_key,
+                conn_id,
+            )
+            .await
         });
 
         let reader_result = async {
             loop {
-                let idle_timeout = if protocol_version >= CONTROL_PROTOCOL_V2 {
-                    server_lease_timeout()
-                } else {
-                    SERVER_TIMEOUT
-                };
+                let idle_timeout = crate::server_conn_idle_timeout(protocol_version);
                 let msg = match tokio::time::timeout(idle_timeout, msg_reader.read_msg()).await {
                     Ok(Ok(msg)) => msg,
                     Ok(Err(e)) => {
@@ -524,6 +495,83 @@ async fn handle_control_message(
     }
 }
 
+/// Serve one registered control connection's writes until it is told to stop.
+///
+/// Ends on a retirement, on either channel closing, or on a write failing.
+///
+/// `retire_token` exists alongside the `ConnTask::Retire` message because the two
+/// arrive by different means. The message is queued on `task_rx`, which this loop
+/// only looks at between writes: a registration that has stopped reading leaves a
+/// write outstanding with no timeout above it, and the message then waits behind a
+/// write that may never return. So the token races the loop as a whole rather than
+/// sitting in its `select!`, and cancellation abandons the in-flight write.
+///
+/// Dropping a write half-way is safe here: the borrowed writer is the only handle
+/// to the socket's write side, so the caller drops it immediately after, and a
+/// truncated control frame on a connection being torn down has no reader left to
+/// mislead.
+async fn run_control_writer<T: MessageWriter>(
+    msg_writer: &mut T,
+    task_rx: &ConnTaskReceiver,
+    write_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ServerControlWrite>,
+    retire_token: &CancellationToken,
+    key: ImutableKey,
+    conn_id: RemoteConnId,
+) -> Result<()> {
+    let writer_loop = async {
+        loop {
+            tokio::select! {
+                req = task_rx.recv() => {
+                    let req = req.context(ServerConnRecvConnTaskSnafu)?;
+                    match req {
+                        ConnTask::Retire { reason } => {
+                            tracing::warn!(
+                                event = "server_conn_retire_requested",
+                                key = %key,
+                                conn_id = %conn_id,
+                                reason = %reason,
+                                "server control connection writer is closing"
+                            );
+                            break Ok(());
+                        }
+                        req => {
+                            handle_stream_req(req, msg_writer, key.clone(), conn_id).await?;
+                        }
+                    }
+                }
+                cmd = write_rx.recv() => {
+                    let Some(cmd) = cmd else {
+                        break Ok(());
+                    };
+                    match cmd {
+                        ServerControlWrite::Pong(resp) => {
+                            msg_writer
+                                .write_msg(&resp)
+                                .await
+                                .context(ServerConnWritePongRespSnafu {
+                                    key: key.clone(),
+                                    conn_id,
+                                })?;
+                        }
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! {
+        () = retire_token.cancelled() => {
+            tracing::warn!(
+                event = "server_conn_writer_cancelled",
+                key = %key,
+                conn_id = %conn_id,
+                "server control connection writer cancelled mid-flight"
+            );
+            Ok(())
+        }
+        result = writer_loop => result,
+    }
+}
+
 #[instrument(skip(req, writer))]
 async fn handle_stream_req<T: MessageWriter>(
     req: ConnTask,
@@ -577,38 +625,91 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::time::Instant;
-
     use crate::ManagerTask;
     use pb_mapper_core::conn_id::RemoteConnId;
+    use pb_mapper_protocol::MessageWriter;
+    use tokio_util::sync::CancellationToken;
 
-    use super::{SERVER_TIMEOUT, ServerConnGuard};
+    use super::{
+        ConnTask, LEGACY_SERVER_IDLE_TIMEOUT, ServerConnGuard, ServerControlWrite,
+        run_control_writer,
+    };
+
+    /// A writer whose every write blocks forever.
+    ///
+    /// Stands in for a registration that has stopped reading: the socket's send
+    /// buffer fills, and `write_msg` never returns. Nothing above it bounds the
+    /// wait — the server applies no timeout to a control write.
+    struct WedgedWriter;
+
+    impl MessageWriter for WedgedWriter {
+        async fn write_msg(&mut self, _msg: &[u8]) -> pb_mapper_core::error::Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    /// Retirement must reach a writer that is already blocked inside a write.
+    ///
+    /// The bug this pins: `ConnTask::Retire` travels on the same queue the writer
+    /// only reads between writes, so a writer stuck in one never sees it. The
+    /// manager would meanwhile drop the registration and report it retired while
+    /// the socket task stayed alive — and since its connection ID is not recycled
+    /// until that task's guard deregisters, the ID leaked with it.
+    #[tokio::test]
+    async fn cancelling_the_retire_token_unwinds_a_writer_blocked_mid_write() {
+        let (task_tx, task_rx) = kanal::bounded_async(4);
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel();
+        let retire_token = CancellationToken::new();
+        let key: Arc<str> = Arc::from("wedged-service");
+        let conn_id = RemoteConnId::from(3);
+
+        let mut writer = WedgedWriter;
+        let mut control = std::pin::pin!(run_control_writer(
+            &mut writer,
+            &task_rx,
+            &mut write_rx,
+            &retire_token,
+            key,
+            conn_id,
+        ));
+
+        // Wedge the writer first. Queuing the retirement alongside it would race:
+        // `select!` polls its arms in a random order, and could take the retirement
+        // before the write ever started.
+        write_tx
+            .send(ServerControlWrite::Pong(b"pong".to_vec()))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut control)
+                .await
+                .is_err(),
+            "the writer should still be inside its write"
+        );
+
+        // Now the retirement, behind a write that will never return.
+        task_tx
+            .send(ConnTask::Retire {
+                reason: "retired by administrator".to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut control)
+                .await
+                .is_err(),
+            "a queued retirement was somehow observed during a blocked write"
+        );
+
+        retire_token.cancel();
+        tokio::time::timeout(Duration::from_millis(200), control)
+            .await
+            .expect("cancelling the retire token did not unwind the blocked writer")
+            .expect("an interrupted write should not surface as an error");
+    }
 
     #[test]
     fn server_timeout_has_slack_over_local_server_ping_interval() {
-        assert!(SERVER_TIMEOUT > Duration::from_secs(5 * 60));
-    }
-
-    #[tokio::test]
-    async fn test_sleep() {
-        let expired_time = Instant::now();
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let mut cnt = 0;
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep_until(expired_time)=>{
-                    println!("end");
-                    return;
-                }
-                _ = tokio::time::sleep(Duration::from_secs(3)) =>{
-                    cnt += 1;
-                    if cnt > 3 {
-                        break;
-                    }
-                    println!("never print this: {cnt}");
-                }
-            }
-        }
+        assert!(LEGACY_SERVER_IDLE_TIMEOUT > Duration::from_secs(5 * 60));
     }
 
     #[tokio::test]

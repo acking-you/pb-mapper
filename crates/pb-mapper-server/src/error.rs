@@ -48,8 +48,6 @@ pub enum Error {
         conn_id: RemoteConnId,
         source: kanal::SendError<()>,
     },
-    #[snafu(display("The target `dst_id:{conn_id}` that stream needs to send does not exist"))]
-    TaskCenterStreamTaskConnIdNotExist { conn_id: RemoteConnId },
     #[snafu(display(
         "send server status response error with `conn_id:{conn_id}`, type:{source:?} \
          detail:{source}"
@@ -69,16 +67,6 @@ pub enum Error {
     },
     #[snafu(display("failed to process stream task, `dst_id:{conn_id}` does not exist"))]
     TaskCenterStreamConnIdNotExist { conn_id: RemoteConnId },
-    #[snafu(display("subcribe server conn key not exist, `key:{key}` `client_id:{conn_id}`"))]
-    TaskCenterSubcribeServerConnKeyNotExist {
-        key: Arc<str>,
-        conn_id: RemoteConnId,
-    },
-    #[snafu(display("subcribe server conn id not exist, `key:{key}` `server_id:{conn_id}`"))]
-    TaskCenterSubcribeServerConnIdNotExist {
-        key: Arc<str>,
-        conn_id: RemoteConnId,
-    },
     #[snafu(display(
         "send client subcriber response error with `key:{key}` `conn_id:{conn_id}`, \
          type:{source:?} detail:{source}"
@@ -214,15 +202,6 @@ pub enum Error {
         key: Arc<str>,
         conn_id: RemoteConnId,
         source: kanal::ReceiveError,
-    },
-    #[snafu(display(
-        "timed out waiting for server stream with `key:{key}` `client_id:{conn_id}` after \
-         {timeout:?}"
-    ))]
-    ClientConnRecvStreamTimeout {
-        key: Arc<str>,
-        conn_id: RemoteConnId,
-        timeout: Duration,
     },
     #[snafu(display(
         "received conn task not match! we expected subcribe response.  `key:{key}` \

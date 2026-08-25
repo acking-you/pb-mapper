@@ -157,6 +157,23 @@ pub enum AdminRequest {
         #[serde(default = "default_page_size")]
         page_size: u16,
     },
+    /// Drop registered control connections the relay is still holding.
+    ///
+    /// The manual counterpart to the relay's own lease sweep, for the case an
+    /// operator can see but the relay cannot: a registration that answers its
+    /// heartbeat yet no longer forwards, or a service whose connection quota is
+    /// full of connections that should have gone away.
+    ConnectionRetire {
+        /// Namespace owning the service. Absent means the unscoped namespace,
+        /// which is where an administrator's own registrations live.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_id: Option<u64>,
+        service_name: String,
+        /// Retire only this connection. Absent retires every connection the
+        /// service has, which is what frees a full quota in one call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conn_id: Option<u32>,
+    },
 }
 
 impl AdminRequest {
@@ -170,6 +187,7 @@ impl AdminRequest {
                 | Self::AuthStateReset { .. }
                 | Self::RootKeyRotate { .. }
                 | Self::LegacyProtocolSet { .. }
+                | Self::ConnectionRetire { .. }
         )
     }
 }
@@ -231,11 +249,20 @@ pub enum AdminResponse {
     KeyShown(IssuedTemporaryKey),
     KeyRenewed(IssuedTemporaryKey),
     KeyRevoked(TemporaryKeyMetadata),
-    KeyGc { removed: u64 },
+    KeyGc {
+        removed: u64,
+    },
     AuthStatus(AuthStatus),
     Services(AdminServicePage),
     Connections(AdminConnectionPage),
-    Ok { action: String },
+    /// How many registered connections `ConnectionRetire` actually dropped. Zero
+    /// is a normal answer: the target may have unwound on its own first.
+    ConnectionsRetired {
+        retired: u32,
+    },
+    Ok {
+        action: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

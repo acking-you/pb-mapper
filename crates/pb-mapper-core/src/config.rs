@@ -176,22 +176,6 @@ pub async fn resolve_addrs_async(addr: &str) -> Result<ResolvedAddrs> {
     ResolvedAddrs::new(addr, addrs, parse_error)
 }
 
-/// The first address `addr` resolves to.
-///
-/// Prefer [`resolve_addrs`] wherever the result is dialled: this keeps only one
-/// candidate, so a hostname with several records loses the ones that work.
-#[inline]
-pub fn get_sockaddr(addr: &str) -> Result<SocketAddr> {
-    resolve_addrs(addr).map(|addrs| addrs.primary())
-}
-
-/// The first address `addr` resolves to, for Tokio contexts.
-///
-/// Same caveat as [`get_sockaddr`]: prefer [`resolve_addrs_async`] when dialling.
-pub async fn get_sockaddr_async(addr: &str) -> Result<SocketAddr> {
-    resolve_addrs_async(addr).await.map(|addrs| addrs.primary())
-}
-
 const PB_MAPPER_SERVER: &str = "PB_MAPPER_SERVER";
 
 /// Env to control whether the keep-alive option of TCP is enabled
@@ -205,7 +189,12 @@ pub const PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL: &str = "PB_MAPPER_CONTROL_HEARTB
 pub const PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE: &str = "PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE";
 pub const PB_MAPPER_CONTROL_SUSPECT_GRACE: &str = "PB_MAPPER_CONTROL_SUSPECT_GRACE";
 pub const PB_MAPPER_REGISTRATION_PROBE_TIMEOUT: &str = "PB_MAPPER_REGISTRATION_PROBE_TIMEOUT";
+pub const PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN: &str =
+    "PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN";
+pub const PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX: &str =
+    "PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX";
 pub const PB_MAPPER_SERVER_LEASE_TIMEOUT: &str = "PB_MAPPER_SERVER_LEASE_TIMEOUT";
+pub const PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL: &str = "PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL";
 pub const PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL: &str = "PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL";
 pub const PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT: &str = "PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT";
 pub const PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD: &str =
@@ -220,7 +209,10 @@ const DEFAULT_CONTROL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_CONTROL_HEARTBEAT_TOLERANCE: Duration = Duration::from_secs(6);
 const DEFAULT_CONTROL_SUSPECT_GRACE: Duration = Duration::from_secs(2);
 const DEFAULT_REGISTRATION_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN: Duration = Duration::from_secs(5);
+const DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX: Duration = Duration::from_secs(80);
 const DEFAULT_SERVER_LEASE_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_SERVER_LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_CLIENT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_CLIENT_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CLIENT_HEALTH_FAILURE_THRESHOLD: usize = 3;
@@ -290,6 +282,31 @@ pub fn duration_from_env(name: &str, default: Duration) -> Duration {
         .unwrap_or(default)
 }
 
+/// Read a duration that has to be positive, falling back to `default` on a zero.
+///
+/// Zero is never a usable value for these settings: a period of zero panics
+/// `tokio::time::interval`, and a zero minimum trips [`RetryBackoff::new`]'s
+/// assertion. Clamping a zero up to a millisecond avoids the panic, but trades it
+/// for a hot loop — a rejected registration retried a thousand times a second, or
+/// a full registration scan queued into the routing loop every millisecond. The
+/// default is the only value that is both safe and useful, so a zero selects it
+/// and says so once.
+///
+/// [`RetryBackoff::new`]: crate::timeout::RetryBackoff::new
+fn positive_duration_from_env(name: &str, default: Duration) -> Duration {
+    let value = duration_from_env(name, default);
+    if value.is_zero() {
+        tracing::warn!(
+            event = "config_zero_duration_ignored",
+            variable = name,
+            default = ?default,
+            "ignoring a zero duration and using the default instead"
+        );
+        return default;
+    }
+    value
+}
+
 pub fn control_io_timeout() -> Duration {
     duration_from_env(PB_MAPPER_CONTROL_IO_TIMEOUT, DEFAULT_CONTROL_IO_TIMEOUT)
 }
@@ -346,8 +363,63 @@ pub fn registration_probe_timeout() -> Duration {
     )
 }
 
+/// The retry ladder for a registration the relay rejected but marked retryable.
+///
+/// Separate from the transport ladder, and far slower. A transport failure means
+/// the relay could not be reached, so retrying quickly is how the tunnel comes
+/// back. A retryable rejection is the opposite: the relay answered, and refused —
+/// a per-service connection quota that is full, a namespace at its service limit.
+/// Reconnecting a few times a second adds load to the very condition that has to
+/// clear, and it produced thousands of identical reject lines a minute in
+/// production. So the ladder starts at 5s and settles at 80s.
+///
+/// Both ends come back together because they are only valid as a pair: a zero
+/// falls back to its default, and the maximum is then raised to the minimum,
+/// rather than letting an environment typo reach [`RetryBackoff::new`]'s
+/// assertions, which would abort the process at start-up.
+///
+/// Raising the maximum, but defaulting a zero minimum, because the two failures
+/// are different. An inverted range is a legible request — wait exactly this long
+/// — and collapsing it to a fixed delay honours it. A zero minimum is not: it
+/// asks for no wait at all, and since [`RetryBackoff`] caps its multiplier at
+/// 1024, a millisecond minimum would never climb past about a second no matter
+/// how high the maximum, hammering the very quota the ladder exists to let clear.
+///
+/// [`RetryBackoff`]: crate::timeout::RetryBackoff
+/// [`RetryBackoff::new`]: crate::timeout::RetryBackoff::new
+pub fn registration_reject_backoff() -> (Duration, Duration) {
+    let min = positive_duration_from_env(
+        PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN,
+        DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
+    );
+    let max = positive_duration_from_env(
+        PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX,
+        DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX,
+    )
+    .max(min);
+    (min, max)
+}
+
 pub fn server_lease_timeout() -> Duration {
     duration_from_env(PB_MAPPER_SERVER_LEASE_TIMEOUT, DEFAULT_SERVER_LEASE_TIMEOUT)
+}
+
+/// How often the relay looks for registrations that stopped renewing their lease.
+///
+/// A third of [`server_lease_timeout`] by default, which bounds two things at
+/// once: how long an expired registration can keep attracting subscribers, and —
+/// because the sweep needs two passes to retire one — how much grace a live
+/// connection gets to notice its own idle timeout first.
+///
+/// A zero falls back to the default: `tokio::time::interval` panics on a zero
+/// period, and each tick queues a scan over every registration through the single
+/// routing loop, so sweeping as fast as the timer allows would starve the traffic
+/// the sweep exists to protect.
+pub fn server_lease_sweep_interval() -> Duration {
+    positive_duration_from_env(
+        PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL,
+        DEFAULT_SERVER_LEASE_SWEEP_INTERVAL,
+    )
 }
 
 pub fn client_health_check_interval() -> Duration {
@@ -427,19 +499,6 @@ pub async fn resolve_pb_mapper_server_async(addr: Option<&str>) -> Result<Resolv
             resolve_addrs_async(&addr).await
         }
     }
-}
-
-/// The relay's first address. See [`get_sockaddr`] for when to prefer the list.
-#[inline]
-pub fn get_pb_mapper_server(addr: Option<&str>) -> Result<SocketAddr> {
-    resolve_pb_mapper_server(addr).map(|addrs| addrs.primary())
-}
-
-/// The relay's first address, for Tokio contexts.
-pub async fn get_pb_mapper_server_async(addr: Option<&str>) -> Result<SocketAddr> {
-    resolve_pb_mapper_server_async(addr)
-        .await
-        .map(|addrs| addrs.primary())
 }
 
 pub fn init_tracing() {
@@ -614,6 +673,108 @@ mod tests {
     fn resolve_addrs_fails_when_nothing_can_be_resolved() {
         assert!(resolve_addrs("127.0.0.1").is_err(), "no port");
         assert!(resolve_addrs("localhost").is_err(), "no port");
+    }
+
+    /// One test for all three variables, for the same reason as
+    /// `keep_alive_reads_the_environment_every_time`: the environment is
+    /// process-global and the runner threads these.
+    #[test]
+    fn reject_backoff_and_sweep_interval_survive_a_bad_environment() {
+        let names = [
+            PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN,
+            PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX,
+            PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL,
+        ];
+        let restore = names.map(|name| (name, std::env::var(name).ok()));
+
+        // SAFETY: mutating the environment is unsafe in edition 2024 because it
+        // is process-global. This is the only test that touches these three
+        // names — which is why it is one test and not three — and it restores
+        // their original values before returning.
+        unsafe {
+            for name in names {
+                std::env::remove_var(name);
+            }
+        }
+        assert_eq!(
+            registration_reject_backoff(),
+            (
+                DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
+                DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX
+            ),
+            "absent means the defaults"
+        );
+        assert_eq!(
+            server_lease_sweep_interval(),
+            DEFAULT_SERVER_LEASE_SWEEP_INTERVAL
+        );
+
+        unsafe {
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "30s");
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "2m");
+        }
+        assert_eq!(
+            registration_reject_backoff(),
+            (Duration::from_secs(30), Duration::from_secs(120)),
+            "both ends come from the environment"
+        );
+
+        // A zero is not a usable setting at either end: `RetryBackoff::new`
+        // asserts on a zero minimum, and a millisecond minimum would retry a
+        // thousand times a second. Both fall back to their defaults instead.
+        unsafe {
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "0s");
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "0s");
+        }
+        assert_eq!(
+            registration_reject_backoff(),
+            (
+                DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
+                DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX
+            ),
+            "a zero at either end selects the default, not a millisecond"
+        );
+
+        // A zero minimum with a usable maximum still defaults the minimum, and
+        // the maximum given is kept.
+        unsafe {
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "0ms");
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "3m");
+        }
+        assert_eq!(
+            registration_reject_backoff(),
+            (
+                DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
+                Duration::from_secs(180)
+            )
+        );
+
+        unsafe {
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "1m");
+            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "1s");
+        }
+        let (min, max) = registration_reject_backoff();
+        assert_eq!(min, Duration::from_secs(60));
+        assert_eq!(max, min, "an inverted range collapses to a fixed delay");
+
+        unsafe {
+            std::env::set_var(PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL, "0s");
+        }
+        assert_eq!(
+            server_lease_sweep_interval(),
+            DEFAULT_SERVER_LEASE_SWEEP_INTERVAL,
+            "a zero period would panic `tokio::time::interval`, and a millisecond \
+             one would queue a full scan every millisecond"
+        );
+
+        unsafe {
+            for (name, value) in restore {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 
     /// The async path is the one the tunnels use, and has to agree with the

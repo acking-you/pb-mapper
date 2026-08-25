@@ -19,6 +19,14 @@ export declare class Admin {
   authStatus(): Promise<JsAuthStatus>
   setLegacyProtocol(policy: string): Promise<void>
   listServices(keyId?: number | undefined | null): Promise<Array<JsServiceInfo>>
+  /**
+   * Drops registered control connections the relay is still holding for a
+   * service, and resolves with how many it dropped.
+   *
+   * Omit `connId` to retire every connection the service has, which is what
+   * frees a connection quota filled by connections that should have gone away.
+   */
+  retireConnections(serviceName: string, keyId?: number | undefined | null, connId?: number | undefined | null): Promise<number>
   listConnections(keyId?: number | undefined | null): Promise<Array<JsConnectionInfo>>
 }
 

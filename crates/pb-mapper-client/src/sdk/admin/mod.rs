@@ -17,6 +17,11 @@ use pb_mapper_auth::{
 };
 use pb_mapper_core::checksum::parse_credential;
 use pb_mapper_core::config::control_io_timeout;
+// The largest page the relay will serve, taken from the relay's own definition
+// rather than restated here: an oversized request is rejected locally so it fails
+// with a clear message instead of a protocol error, and that check has to agree
+// with what the relay clamps to.
+use pb_mapper_core::paging::MAX_PAGE_SIZE;
 use pb_mapper_protocol::command::{AdminRequest, AdminResponse};
 
 use self::transport::send_admin_request;
@@ -30,10 +35,6 @@ pub use self::types::{
     AuthStatusInfo, ConnectionInfo, ConnectionPage, IssuedKey, KeyListPage, KeyMetadata,
     ServiceInfo, ServicePage,
 };
-
-/// Largest page the relay will serve. Rejected locally so an oversized request
-/// fails with a clear message instead of a protocol error from the relay.
-const MAX_PAGE_SIZE: u16 = 1000;
 
 /// Page size used by the `*_all` helpers, which page on the caller's behalf.
 ///
@@ -209,6 +210,19 @@ impl Admin {
             page_size: validate_page_size(page_size)?,
         },
         response: Connections(page) => ConnectionPage::from(page)
+    );
+
+    admin_rpc_struct!(
+        /// Drop registered control connections the relay is still holding for a
+        /// service, returning how many it dropped.
+        ///
+        /// `conn_id` of `None` retires every connection the service has, which is
+        /// what frees a connection quota filled by connections that should have
+        /// gone away. A registration whose client is still healthy simply
+        /// reconnects, so this is a nudge rather than a shutdown.
+        retire_connections(key_id: Option<u64>, service_name: String, conn_id: Option<u32>) -> u32,
+        request: AdminRequest::ConnectionRetire { key_id, service_name, conn_id },
+        response: ConnectionsRetired { retired } => retired
     );
 
     /// Every temporary credential, paging until the relay stops handing back a

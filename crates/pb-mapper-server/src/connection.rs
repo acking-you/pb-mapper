@@ -518,13 +518,7 @@ fn scoped_service_key(
     namespace: u64,
     service_name: &str,
 ) -> std::result::Result<ImutableKey, pb_mapper_auth::AuthFailure> {
-    if service_name.is_empty() || service_name.len() > 1024 || service_name.contains('\0') {
-        return Err(pb_mapper_auth::AuthFailure::new(
-            "service_name_invalid",
-            "service names must be 1-1024 bytes and must not contain NUL",
-            false,
-        ));
-    }
+    validate_service_name(service_name)?;
     if !context.is_admin
         && (service_name.len() > 128
             || !service_name
@@ -537,10 +531,40 @@ fn scoped_service_key(
             false,
         ));
     }
+    Ok(compose_service_key(namespace, service_name))
+}
+
+/// Reject a service name that cannot become an unambiguous routing key.
+///
+/// NUL is the separator [`compose_service_key`] writes between the namespace
+/// prefix and the name, so a name containing one could spell out another
+/// namespace's key. Every path that takes a name from the wire checks this,
+/// including an administrator naming a service to retire: the name would
+/// otherwise reach a different service than the one the audit record names.
+pub(super) fn validate_service_name(
+    service_name: &str,
+) -> std::result::Result<(), pb_mapper_auth::AuthFailure> {
+    if service_name.is_empty() || service_name.len() > 1024 || service_name.contains('\0') {
+        return Err(pb_mapper_auth::AuthFailure::new(
+            "service_name_invalid",
+            "service names must be 1-1024 bytes and must not contain NUL",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+/// Build the routing-map key for a service without validating the name.
+///
+/// The inverse of [`split_scoped_service_key`], and the one place the scoped-key
+/// format is written. Callers that accept a service name from the wire go through
+/// [`scoped_service_key`] instead, which validates it first; this is for callers
+/// naming a service that is already registered — an administrator retiring one.
+pub(super) fn compose_service_key(namespace: u64, service_name: &str) -> ImutableKey {
     if namespace == 0 {
-        Ok(Arc::from(service_name))
+        Arc::from(service_name)
     } else {
-        Ok(Arc::from(format!("@{namespace:016x}\u{0}{service_name}")))
+        Arc::from(format!("@{namespace:016x}\u{0}{service_name}"))
     }
 }
 
@@ -573,8 +597,8 @@ pub(super) fn decrement_namespace_stream_count(
 pub(super) fn release_namespace_rate_limit_if_idle(
     namespace: u64,
     server_conn_map: &ServerConnMap,
-    pending_streams: &hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>,
-    namespace_rate_limits: &mut hashbrown::HashMap<u64, NamespaceRateLimit>,
+    pending_streams: &PendingStreamMap,
+    namespace_rate_limits: &mut NamespaceRateLimitMap,
 ) {
     let has_registered_service = server_conn_map
         .keys()

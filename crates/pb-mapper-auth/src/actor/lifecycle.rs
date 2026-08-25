@@ -4,6 +4,7 @@ use super::{
     audit, ensure_store_available, key_not_active, key_not_found, key_not_renewable,
     slot_state_name, validate_slot_identity,
 };
+use pb_mapper_core::paging::paginate;
 
 fn validate_ttl(config: &AuthConfig, ttl: Duration) -> Result<u64, AuthFailure> {
     if ttl < MIN_TEMP_KEY_TTL {
@@ -151,8 +152,6 @@ pub(super) fn actor_list(
     page: u32,
     page_size: u16,
 ) -> Result<KeyPage, AuthFailure> {
-    let page_size = page_size.clamp(1, 1000) as usize;
-    let start = (page as usize).saturating_mul(page_size);
     let slots = inner.slots();
     let cold = inner.cold();
     let mut all = slots
@@ -181,8 +180,7 @@ pub(super) fn actor_list(
             .map(high_slot_metadata),
     );
     all.sort_by_key(|item| std::cmp::Reverse(item.issued_at));
-    let items = all.iter().skip(start).take(page_size).cloned().collect();
-    let next_page = (start.saturating_add(page_size) < all.len()).then_some(page.saturating_add(1));
+    let (items, next_page) = paginate(&all, page, page_size);
     Ok(KeyPage {
         schema_version: 1,
         items,

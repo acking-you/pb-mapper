@@ -197,6 +197,7 @@ pb-mapper admin --server relay.example.com:7666 key show 4294967296
 pb-mapper admin --server relay.example.com:7666 key reveal 4294967296
 pb-mapper admin --server relay.example.com:7666 service list --key-id 4294967296
 pb-mapper admin --server relay.example.com:7666 connection list --all
+pb-mapper admin --server relay.example.com:7666 connection retire echo --all
 pb-mapper admin --server relay.example.com:7666 legacy-protocol set deny
 pb-mapper admin --server relay.example.com:7666 auth-state reset --confirm
 pb-mapper admin --server relay.example.com:7666 root-key rotate
