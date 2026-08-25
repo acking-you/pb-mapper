@@ -101,7 +101,7 @@ pb-mapper 使用预共享凭据，不提供公钥身份体系。如果还需要�
 ### Rust SDK
 
 ```toml
-pb-mapper = { git = "https://github.com/acking-you/pb-mapper" }
+pb-mapper = "0.5"
 ```
 
 填入已部署的 relay 地址和凭据后即可 register、connect、查 status，以及用管理员凭据调用全部 admin 接口。示例见 `crates/pb-mapper/examples/`。
@@ -109,7 +109,7 @@ pb-mapper = { git = "https://github.com/acking-you/pb-mapper" }
 ### TypeScript（Node-API）
 
 ```bash
-cd js && bun install && bun run build
+npm install pb-mapper
 ```
 
 ```ts
@@ -127,7 +127,7 @@ const admin = client.admin();
 
 - 基于现有 `pb-mapper-suite` 工作流扩展更多 harness 专用 adapter 与凭据自动化；
 - 继续压缩 client-only Node 插件（linux-x64 上 `release-node` + strip 已经低于 **5 MB**）；
-- 在 `uni-stream` 进入 crates.io 后发布 SDK；
+- 面向无法加载原生 Node-API 插件的浏览器与 edge runtime adapter；
 - 面向远程模型 runtime、tool server、私有 API、开发机与浏览器控制端点的
   harness adapter 和示例。
 

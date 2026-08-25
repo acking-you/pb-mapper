@@ -1,0 +1,232 @@
+name: Publish pb-mapper SDKs
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: release-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release-preflight:
+    name: Verify registry credentials
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Require both registry tokens before publishing either SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CARGO_REGISTRY_TOKEN"
+          test -n "$NODE_AUTH_TOKEN"
+
+  rust-quality:
+    name: Validate Rust SDK packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: clippy, rustfmt
+
+      - name: Verify tag and package versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version="$(sed -n '/^\[workspace.package\]$/,/^\[/ s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+          node_version="$(node -p "require('./js/package.json').version")"
+          test "$GITHUB_REF_NAME" = "v${cargo_version}"
+          test "$GITHUB_REF_NAME" = "v${node_version}"
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+      - name: Verify public Rust SDK MSRV
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check --locked -p pb-mapper
+
+      # On the first registry release, Cargo cannot package a higher layer
+      # before its lower path dependency exists on crates.io. The workspace
+      # build above validates the whole local graph; package the root of the
+      # publish graph here, then the publish job verifies every higher layer in
+      # dependency order as each lower crate reaches the index.
+      - name: Validate foundational crate archive
+        run: cargo package --locked -p pb-mapper-core
+
+  node-bindings:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            node-arch: x64
+            full-e2e: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            node-arch: arm64
+            full-e2e: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            node-arch: x64
+            full-e2e: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            node-arch: arm64
+            full-e2e: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            node-arch: x64
+            full-e2e: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.target }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          architecture: ${{ matrix.node-arch }}
+
+      - name: Install Node dependencies
+        working-directory: js
+        run: bun install --frozen-lockfile
+
+      - name: Build native addon
+        working-directory: js
+        run: bun run build:release -- --target ${{ matrix.target }}
+
+      - name: Load native addon with Node.js
+        run: node -e "const addon = require('./js'); if (typeof addon.Client !== 'function') process.exit(1)"
+
+      - name: Build relay for full N-API end-to-end tests
+        if: matrix.full-e2e
+        run: cargo build --bin pb-mapper
+
+      - name: Run full N-API end-to-end tests
+        if: matrix.full-e2e
+        working-directory: js
+        env:
+          CI: true
+          PB_MAPPER_BIN: ${{ github.workspace }}/target/debug/pb-mapper
+        run: bun test
+
+      - name: Upload native addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: binding-${{ matrix.target }}
+          path: js/pb-mapper.*.node
+          if-no-files-found: error
+
+  publish-rust:
+    name: Publish Rust SDK to crates.io
+    needs: [publish-node]
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - name: Publish crates in dependency order
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+
+          wait_for_crate() {
+            local package="$1"
+            for attempt in $(seq 1 30); do
+              if cargo info --registry crates-io "${package}@${version}" >/dev/null 2>&1; then
+                return 0
+              fi
+              echo "Waiting for ${package}@${version} in the crates.io index (${attempt}/30)"
+              sleep 10
+            done
+            echo "::error::${package}@${version} did not reach the crates.io index"
+            return 1
+          }
+
+          for package in \
+            pb-mapper-core \
+            pb-mapper-auth \
+            pb-mapper-protocol \
+            pb-mapper-client \
+            pb-mapper
+          do
+            cargo publish --locked --registry crates-io -p "$package"
+            wait_for_crate "$package"
+          done
+
+  publish-node:
+    name: Publish Node SDK to npm
+    needs: [release-preflight, rust-quality, node-bindings]
+    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      NPM_CONFIG_PROVENANCE: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+
+      - name: Install Node dependencies
+        working-directory: js
+        run: bun install --frozen-lockfile
+
+      - name: Download native addons
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binding-*
+          path: js/artifacts
+          merge-multiple: true
+
+      - name: Assemble platform packages
+        working-directory: js
+        run: |
+          bunx napi create-npm-dirs
+          bun run artifacts
+          bunx napi prepublish -t npm --no-gh-release --dry-run
+          npm pack --dry-run --ignore-scripts
+
+      - name: Publish platform packages and root package
+        working-directory: js
+        run: npm publish --access public

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-08-25
+- Added the public `pb-mapper` Rust SDK for register, connect, status, and administrator operations, with handle-based readiness and shutdown.
+- Added the `pb-mapper` TypeScript/JavaScript package through Node-API, including generated types and end-to-end tunnel and credential-lifecycle coverage.
+- Reclaimed stale registration leases, backed off on relay registration rejections, and made administrator connection retirement cancel wedged sockets unconditionally.
+- Switched the client stack from the Git checkout of `uni-stream` 0.3.2 to the crates.io release 0.3.5, including its stable Hickory 0.26 resolver fix.
+- Added coordinated crates.io and multi-platform npm publication for the Rust and Node SDKs alongside the existing CLI, UI, and Docker tag releases.
+
 ## [0.4.0] - 2026-08-22
 This is also the first published release to carry the 0.3.0 changes below: 0.3.0 was never tagged, so its single-CLI consolidation ships here.
 - Added a sole administrator credential plus renewable, expiring, and immediately revocable `pbmt1_` temporary credentials with fixed-slot O(1) lookup and isolated per-key service namespaces.

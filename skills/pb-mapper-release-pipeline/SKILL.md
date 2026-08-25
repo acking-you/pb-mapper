@@ -1,6 +1,6 @@
 ---
 name: pb-mapper-release-pipeline
-description: Execute the pb-mapper release process end-to-end for the unified CLI and Flutter UI, including changelog updates, strict local validation, semantic version tagging, GitHub workflow triggering, and release monitoring.
+description: Execute the pb-mapper release process end-to-end for the unified CLI, Flutter UI, Docker images, Rust SDK, and Node SDK, including changelog updates, strict local validation, semantic version tagging, registry publication, and release monitoring.
 ---
 
 # Pb Mapper Release Pipeline
@@ -8,7 +8,7 @@ description: Execute the pb-mapper release process end-to-end for the unified CL
 ## Overview
 
 Run the repository's official release flow in a deterministic way.  
-Validate locally, update `CHANGELOG.md`, push commit and annotated tag, then monitor both GitHub release workflows until artifacts are published.
+Validate locally, update `CHANGELOG.md`, push commit and annotated tag, then monitor every GitHub and registry release until artifacts are published.
 
 ## Use This Workflow
 
@@ -16,8 +16,10 @@ Follow this workflow for all official releases in this repository:
 
 - unified CLI release (`.github/workflows/release.yml`)
 - UI release (`.github/workflows/release-ui.yml`)
+- Docker release (`.github/workflows/docker-publish.yml`)
+- Rust and Node SDK release (`.github/workflows/release-sdk.yml`)
 
-Tagging `vX.Y.Z` triggers both workflows. The UI workflow publishes to `vX.Y.Z-ui`.
+Tagging `vX.Y.Z` triggers every release workflow. The UI workflow publishes to `vX.Y.Z-ui`.
 
 ## Preconditions
 
@@ -29,6 +31,8 @@ Satisfy these preconditions before releasing:
 - Confirm the version does not already exist:
   - `git tag --list 'vX.Y.Z'`
   - `git ls-remote --tags origin 'vX.Y.Z'`
+- Confirm the matching versions do not already exist on crates.io or npm.
+- Configure `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN` as GitHub Actions secrets.
 
 ## Versioning Rule
 
@@ -59,6 +63,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 flutter analyze
+cd js && bun install --frozen-lockfile && bun run build:release && bun test
 ```
 
 Run `flutter analyze` from `ui/` or with `--project-dir ui`.
@@ -70,6 +75,7 @@ python - <<'PY'
 import yaml
 yaml.safe_load(open('.github/workflows/release.yml', 'r', encoding='utf-8'))
 yaml.safe_load(open('.github/workflows/release-ui.yml', 'r', encoding='utf-8'))
+yaml.safe_load(open('.github/workflows/release-sdk.yml', 'r', encoding='utf-8'))
 print('release workflows OK')
 PY
 ```
@@ -97,14 +103,18 @@ This push triggers:
 
 - `Build and release pb-mapper CLI` (one CLI artifact per target)
 - `Release pb-mapper UI` (UI artifacts and `vX.Y.Z-ui` release)
+- `Build and Push pb-mapper Docker Images`
+- `Publish pb-mapper SDKs` (crates.io and npm)
 
 ## Step 5: Monitor Workflows
 
-Track both workflow runs:
+Track every workflow run:
 
 ```bash
 gh run list --workflow "Build and release pb-mapper CLI" --limit 5
 gh run list --workflow "Release pb-mapper UI" --limit 5
+gh run list --workflow "Build and Push pb-mapper Docker Images" --limit 5
+gh run list --workflow "Publish pb-mapper SDKs" --limit 5
 ```
 
 Inspect an active run:
@@ -129,6 +139,8 @@ Check that:
 - one `pb-mapper` archive and checksum exist for every expected CLI target
 - UI assets exist for Windows/Linux/macOS/Android/iOS jobs that succeeded
 - UI release body contains the current version changelog section
+- `cargo info pb-mapper@X.Y.Z` succeeds and a fresh project compiles
+- `npm view pb-mapper@X.Y.Z version` succeeds and fresh Node installs load the native addon
 
 ## UI Changelog Notes Behavior
 

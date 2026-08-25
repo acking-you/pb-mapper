@@ -2,14 +2,17 @@
 name = "pb-mapper"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "Client SDK for exposing and consuming keyed TCP/UDP services through a pb-mapper relay"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/pb-mapper"
 readme = "README.md"
 keywords = ["proxy", "tunnel", "nat", "tcp", "udp"]
 categories = ["network-programming"]
+publish = ["crates-io"]
 
 [dependencies]
 pb-mapper-client.workspace = true

@@ -2,6 +2,14 @@
 
 TypeScript/JavaScript bindings for a deployed pb-mapper relay, built with Node-API (napi-rs).
 
+```bash
+npm install pb-mapper
+```
+
+The package ships prebuilt native addons for 64-bit glibc Linux, macOS, and
+Windows. It supports Node.js 18+ and Bun 1.1+. Browsers and edge runtimes cannot
+load Node-API addons.
+
 ```ts
 import { Client } from "pb-mapper";
 
@@ -25,7 +33,7 @@ await admin.revokeKey(issued.keyId);
 await reg.stop();
 ```
 
-Build the native addon from this directory:
+Build the native addon from a source checkout:
 
 ```bash
 bun install

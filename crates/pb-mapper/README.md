@@ -3,7 +3,7 @@
 Client SDK for a deployed [pb-mapper](https://github.com/acking-you/pb-mapper) relay.
 
 ```toml
-pb-mapper = { git = "https://github.com/acking-you/pb-mapper" }
+pb-mapper = "0.5"
 ```
 
 ```rust,no_run

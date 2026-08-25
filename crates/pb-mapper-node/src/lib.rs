@@ -4,7 +4,7 @@
 //!
 //! * **Numbers narrow.** JavaScript has no `u64`, so napi maps the SDK's
 //!   unsigned ids and timestamps to `i64` and its page sizes to `u32`. Every
-//!   inbound narrowing is checked — see [`as_u64`] and [`narrow_page_size`] —
+//!   inbound narrowing is checked — see `as_u64` and `narrow_page_size` —
 //!   because a silent `as` cast turns a caller's mistake into wrong data
 //!   instead of an error.
 //! * **Enums become strings.** `"tcp"`, `"connected"`, `"allow"`: idiomatic on

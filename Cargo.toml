@@ -10,9 +10,10 @@ resolver = "3"
 [workspace.package]
 # `version` must stay the first key here: `release.yml` and `docker-publish.yml`
 # both parse it positionally with awk to check the tag against it.
-version = "0.4.0"
+version = "0.5.0"
 authors = ["L_B__"]
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/acking-you/pb-mapper"
 homepage = "https://github.com/acking-you/pb-mapper"
@@ -22,11 +23,11 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 [workspace.dependencies]
-pb-mapper-auth = { path = "crates/pb-mapper-auth" }
-pb-mapper = { path = "crates/pb-mapper" }
-pb-mapper-client = { path = "crates/pb-mapper-client" }
-pb-mapper-core = { path = "crates/pb-mapper-core" }
-pb-mapper-protocol = { path = "crates/pb-mapper-protocol" }
+pb-mapper-auth = { path = "crates/pb-mapper-auth", version = "0.5.0" }
+pb-mapper = { path = "crates/pb-mapper", version = "0.5.0" }
+pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.5.0" }
+pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.5.0" }
+pb-mapper-protocol = { path = "crates/pb-mapper-protocol", version = "0.5.0" }
 pb-mapper-server = { path = "crates/pb-mapper-server" }
 # Test support only; never a dependency of a shipped crate.
 pb-mapper-testkit = { path = "crates/pb-mapper-testkit" }
@@ -54,7 +55,7 @@ tracing-subscriber = { version = "0.3.18", features = [
     "fmt",
     "json",
 ], default-features = true }
-uni-stream = { git = "https://github.com/acking-you/uni-stream.git", branch = "master" }
+uni-stream = "0.3.5"
 
 # Used by `js/` (`napi build --profile release-node --strip`) to keep the
 # Node-API cdylib small. The default `release` profile is left alone so the

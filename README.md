@@ -113,7 +113,7 @@ identity or protection against traffic analysis. See the
 ### Rust SDK
 
 ```toml
-pb-mapper = { git = "https://github.com/acking-you/pb-mapper" }
+pb-mapper = "0.5"
 ```
 
 ```rust,ignore
@@ -142,7 +142,7 @@ Build it from a checkout with `make build-pb-mapper` (or `cargo build --release
 ### TypeScript (Node-API)
 
 ```bash
-cd js && bun install && bun run build
+npm install pb-mapper
 ```
 
 ```ts
@@ -165,7 +165,7 @@ Node-API package. Remaining work:
   `pb-mapper-suite` workflow;
 - further shrinking the client-only Node addon (release-node + strip is already
   under **5 MB** on linux-x64);
-- crates.io publish once `uni-stream` is a registry dependency rather than git;
+- browser and edge adapters for runtimes that cannot load a native Node-API addon;
 - harness adapters and examples for remote model runtimes, tool servers,
   private APIs, development machines, and browser-control endpoints.
 

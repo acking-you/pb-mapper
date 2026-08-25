@@ -2,11 +2,13 @@
 name = "pb-mapper-client"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Register, connect, status, and admin client implementation for pb-mapper"
+publish = ["crates-io"]
 
 [dependencies]
 pb-mapper-auth.workspace = true
