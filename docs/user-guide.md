@@ -65,6 +65,19 @@ Download prebuilt binaries from GitHub Releases and extract them:
 
 Each target has one archive, named `pb-mapper-<target>.tar.gz` on Unix-like systems or `pb-mapper-<target>.zip` on Windows. After extracting, add `pb-mapper` to your PATH or run it from the extracted folder.
 
+### Install with Cargo
+
+If a Rust toolchain is already available, install the same unified executable
+directly from crates.io:
+
+```bash
+cargo install pb-mapper-cli --locked
+```
+
+The crate is named `pb-mapper-cli`, while the installed executable is named
+`pb-mapper`. It includes the relay server and every client/admin role, so this
+single command is sufficient for both relay and client machines.
+
 ## Build from source (optional)
 
 ### Rust binaries

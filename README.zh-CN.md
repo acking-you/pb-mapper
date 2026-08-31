@@ -106,6 +106,21 @@ pb-mapper = "0.5"
 
 填入已部署的 relay 地址和凭据后即可 register、connect、查 status，以及用管理员凭据调用全部 admin 接口。示例见 `crates/pb-mapper/examples/`。
 
+### CLI 与 Relay Server
+
+可以直接从 crates.io 安装统一 CLI：
+
+```bash
+cargo install pb-mapper-cli --locked
+```
+
+crate 名称是 `pb-mapper-cli`，安装后的可执行文件名为 `pb-mapper`。它同时包含
+`server`、`register`、`connect`、`status` 和 `admin` 角色，无需另外安装
+server 可执行文件。
+
+Relay 实现也以 `pb-mapper-server` library crate 形式发布，便于需要内嵌
+relay 的 Rust 应用使用。
+
 ### TypeScript（Node-API）
 
 ```bash

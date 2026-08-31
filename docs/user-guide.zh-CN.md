@@ -65,6 +65,18 @@ sequenceDiagram
 
 每个平台只有一份产物：类 Unix 系统为 `pb-mapper-<target>.tar.gz`，Windows 为 `pb-mapper-<target>.zip`。解压后将 `pb-mapper` 添加到 PATH，或从解压目录直接运行。
 
+### 通过 Cargo 安装
+
+如果机器上已有 Rust 工具链，可以直接从 crates.io 安装同一个统一可执行文件：
+
+```bash
+cargo install pb-mapper-cli --locked
+```
+
+crate 名称是 `pb-mapper-cli`，安装后的可执行文件名为 `pb-mapper`。它已包含
+relay server 以及全部 client/admin 角色，因此 relay 和客户端机器都只需执行
+这一条安装命令。
+
 ## 从源码编译（可选）
 
 ### Rust 二进制
