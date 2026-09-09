@@ -5,8 +5,8 @@ use tokio::net::TcpStream;
 use tracing::{info_span, instrument};
 
 use super::error::{
-    ConnectRemoteStreamSnafu, DecodeSubcribeRespSnafu, EncodeSubcribeReqSnafu, Result,
-    SubcribeRespNotMatchSnafu, WriteSubcribeReqSnafu,
+    ConnectRemoteStreamSnafu, ControlIoTimeoutSnafu, DecodeSubcribeRespSnafu,
+    EncodeSubcribeReqSnafu, Result, SubcribeRespNotMatchSnafu, WriteSubcribeReqSnafu,
 };
 use crate::client::error::CreateHeaderToolSnafu;
 use pb_mapper_core::checksum::Credential;
@@ -18,7 +18,7 @@ use pb_mapper_protocol::secure::ClientHeaderSession;
 use uni_stream::addr::each_addr;
 use uni_stream::stream::{NetworkStream, set_tcp_keep_alive, set_tcp_nodelay};
 
-#[instrument(skip(local_stream))]
+#[instrument(skip(local_stream, credential))]
 pub async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
     mut local_stream: LocalStream,
     key: Arc<str>,
@@ -27,9 +27,20 @@ pub async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
     namespace: Option<u64>,
     credential: Credential,
 ) -> Result<()> {
-    let mut remote_stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
-        .await
-        .context(ConnectRemoteStreamSnafu)?;
+    let timeout = control_io_timeout();
+    let mut remote_stream = match tokio::time::timeout(
+        timeout,
+        each_addr(remote_addr.as_slice(), TcpStream::connect),
+    )
+    .await
+    {
+        Ok(result) => result.context(ConnectRemoteStreamSnafu)?,
+        Err(_) => ControlIoTimeoutSnafu {
+            action: "connect remote stream",
+            timeout,
+        }
+        .fail()?,
+    };
 
     if keep_alive {
         snafu_error_handle!(
@@ -41,7 +52,6 @@ pub async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
 
     // start subcribe
     let (codec_key, client_id, server_id) = {
-        let timeout = control_io_timeout();
         // handle request
         let request = match namespace {
             Some(namespace) => PbConnRequest::SubcribeScoped {
