@@ -579,6 +579,12 @@ impl StreamForward for TcpStreamImpl {
         W: AsyncWriteExt + Unpin + Send + 'a,
     {
         Box::pin(async move {
+            // Both the accepted subscriber socket and the publisher's target
+            // socket pass here. Small RPC frames must not wait for Nagle's
+            // coalescing after the relay legs have already disabled it.
+            if let Err(error) = local_reader.as_ref().set_nodelay(true) {
+                tracing::warn!(%error, "failed to disable Nagle on local TCP stream");
+            }
             let mut local_reader = local_reader;
             let mut local_writer = local_writer;
             let mut remote_reader = remote_reader;
@@ -681,6 +687,46 @@ impl StreamForward for UdpStreamImpl {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn tcp_forward_disables_nagle_on_the_local_leg() {
+        use tokio::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (local, accepted) = tokio::join!(
+            TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept()
+        );
+        let socket = local.unwrap().into_std().unwrap();
+        let observer = socket.try_clone().unwrap();
+        assert!(!observer.nodelay().unwrap());
+        let mut local = TcpStreamImpl::new(TcpStream::from_std(socket).unwrap());
+        let (mut peer, _) = accepted.unwrap();
+        let (remote, mut echo) = tokio::io::duplex(64);
+        let forwarding = tokio::spawn(async move {
+            let (reader, writer) = local.split();
+            let (remote_reader, remote_writer) = tokio::io::split(remote);
+            TcpStreamImpl::forward_local_to_remote(
+                None,
+                [0; 32],
+                reader,
+                writer,
+                remote_reader,
+                remote_writer,
+            )
+            .await
+            .unwrap();
+        });
+        peer.write_all(b"x").await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), echo.read_u8())
+                .await
+                .unwrap()
+                .unwrap(),
+            b'x'
+        );
+        assert!(observer.nodelay().unwrap());
+        forwarding.abort();
+    }
+
     use std::collections::VecDeque;
     use std::io;
     use std::sync::Arc;

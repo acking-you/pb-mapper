@@ -116,9 +116,15 @@ where
     };
 
     // start forward network traffic
-    let mut local_stream = LocalStream::from_addr(local_addr.as_slice())
-        .await
-        .context(ConnectLocalStreamSnafu)?;
+    let mut local_stream =
+        match tokio::time::timeout(timeout, LocalStream::from_addr(local_addr.as_slice())).await {
+            Ok(result) => result.context(ConnectLocalStreamSnafu)?,
+            Err(_) => ControlIoTimeoutSnafu {
+                action: "connect local stream",
+                timeout,
+            }
+            .fail()?,
+        };
 
     let (client_reader, client_writer) = remote_stream.split();
     let (server_reader, server_writer) = local_stream.split();
