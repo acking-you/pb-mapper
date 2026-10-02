@@ -135,9 +135,20 @@ let registration = client.register(RegisterRequest {
 registration.wait_ready().await?;
 ```
 
-The CLI binary lives in `pb-mapper-cli`, which is not published to crates.io.
-Build it from a checkout with `make build-pb-mapper` (or `cargo build --release
---bin pb-mapper`).
+### CLI and relay server
+
+Install the unified CLI directly from crates.io:
+
+```bash
+cargo install pb-mapper-cli --locked
+```
+
+The package is named `pb-mapper-cli`, and it installs one executable named
+`pb-mapper`. That executable contains the `server`, `register`, `connect`,
+`status`, and `admin` roles, so a separate server executable is not required.
+
+The relay implementation is also published as the `pb-mapper-server` library
+for applications that need to embed it.
 
 ### TypeScript (Node-API)
 

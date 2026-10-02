@@ -1,9 +1,18 @@
 [package]
 name = "pb-mapper-server"
-publish = false
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Relay server implementation for pb-mapper"
+documentation = "https://docs.rs/pb-mapper-server"
+readme = "README.md"
+keywords = ["proxy", "tunnel", "relay", "tcp", "udp"]
+categories = ["network-programming"]
+publish = ["crates-io"]
 
 [dependencies]
 pb-mapper-auth.workspace = true

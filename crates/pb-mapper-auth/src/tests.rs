@@ -735,7 +735,7 @@ fn platform_default_auth_state_dir_is_writable_outside_linux_system_paths() {
     {
         assert!(
             dir.ends_with("Library/Application Support/pb-mapper/auth")
-                || dir == PathBuf::from("/Library/Application Support/pb-mapper/auth"),
+                || dir == std::path::Path::new("/Library/Application Support/pb-mapper/auth"),
             "macos default auth dir should be under Application Support: {}",
             dir.display()
         );

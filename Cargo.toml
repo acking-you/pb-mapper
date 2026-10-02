@@ -28,7 +28,7 @@ pb-mapper = { path = "crates/pb-mapper", version = "0.5.0" }
 pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.5.0" }
 pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.5.0" }
 pb-mapper-protocol = { path = "crates/pb-mapper-protocol", version = "0.5.0" }
-pb-mapper-server = { path = "crates/pb-mapper-server" }
+pb-mapper-server = { path = "crates/pb-mapper-server", version = "0.5.0" }
 # Test support only; never a dependency of a shipped crate.
 pb-mapper-testkit = { path = "crates/pb-mapper-testkit" }
 
@@ -39,7 +39,9 @@ clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0.0"
 hashbrown = { version = "0.17.1" }
 hickory-resolver = { version = "0.26.1" }
-kanal = { git = "https://github.com/acking-you/kanal.git", branch = "dev/pb-mapper" }
+# The published fork is source-equivalent to the former Git dependency. Keep
+# the local crate name so server code does not need to know the package name.
+kanal = { package = "kanal-plus", version = "0.2.0" }
 parking_lot = "0.12"
 rand = "0.10"
 ring = "0.17.14"

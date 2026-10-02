@@ -2,8 +2,17 @@
 name = "pb-mapper-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
-publish = false
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Unified CLI and relay server for pb-mapper"
+documentation = "https://docs.rs/pb-mapper-cli"
+readme = "README.md"
+keywords = ["proxy", "tunnel", "relay", "tcp", "udp"]
+categories = ["command-line-utilities", "network-programming"]
+publish = ["crates-io"]
 
 # The binary keeps the name `pb-mapper`, discovered from
 # `src/bin/pb-mapper.rs`. Release workflows, both Dockerfiles, and the install
