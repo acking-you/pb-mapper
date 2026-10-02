@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use snafu::ResultExt;
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -28,7 +27,7 @@ use pb_mapper_core::config::{
 use pb_mapper_core::timeout::RetryBackoff;
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
 use pb_mapper_protocol::forward::StreamForward;
-use uni_stream::addr::{ToSocketAddrs, each_addr};
+use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{ListenerProvider, StreamAccept};
 
 // Callback for notifying status changes to external systems
@@ -476,7 +475,7 @@ async fn fetch_remote_status(
     namespace: Option<u64>,
     credential: Credential,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
-    let mut stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
+    let mut stream = crate::addr::connect_tcp(remote_addr)
         .await
         .map_err(|error| {
             ProbeFailure::transient(format!("connect remote stream failed: {error}"))
@@ -503,7 +502,7 @@ pub async fn show_status_scoped<A: ToSocketAddrs>(
     namespace: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let remote_addr = resolve_all(remote_addr).await?;
-    let mut stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
+    let mut stream = crate::addr::connect_tcp(&remote_addr)
         .await
         .map_err(|error| format!("get status stream: {error}"))?;
     let status = get_status_scoped(&mut stream, req, namespace).await?;

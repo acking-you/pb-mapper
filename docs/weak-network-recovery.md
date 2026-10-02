@@ -78,6 +78,11 @@ must not hold the only copy of partial-frame state in a discarded future.
 - Relay routing uses nonblocking mailbox sends. One stalled socket cannot block
   the shared manager, status queries, or retirement timers. A saturated control
   mailbox is removed from routing so another candidate can serve the request.
+- Relay TCP dials race at most two address candidates, starting the second after
+  250 ms and bounding each multi-address attempt to two seconds inside the
+  existing overall setup deadline. Losing/abandoned attempts are cancelled.
+- An admitted subscription reuses its namespace slot and rate token during
+  failover; recovery cannot reject itself merely because the namespace is full.
 - At most one confirmation timer per relay control connection. Owned task sets
   reap completed work; dropping a worker also aborts its writer and probes.
 - The new frame reader retains bounded progress and one existing payload buffer;
@@ -137,3 +142,24 @@ cause or duration of an unobserved production outage.
 - `crates/pb-mapper-server/src/client.rs`: candidate fallback and whole-setup deadline.
 - `crates/pb-mapper-server/src/runtime.rs`: suspicion confirmation and ACK budgets.
 - `crates/pb-mapper-cli/tests/network_recovery.rs`: fault proxy and end-to-end cases.
+
+## Additional SDK review for 0.5.1
+
+- Concurrent `stop()` calls wait for the same worker cleanup. Cancelling a stop
+  future leaves the worker owned by the handle, so dropping the handle still
+  aborts it instead of detaching it.
+- Administrator writes become non-retryable before the first write is polled.
+  A timeout after a partial write is ambiguous and cannot safely replay a
+  credential issuance or root-key rotation. Explicit replay-salt rejection is
+  still eligible for one fresh-session retry.
+- Raw `Credential` and `ClientConfig` debug output redact key bytes and unparsed
+  credentials, including nested registration tracing fields.
+- The release workflow publishes all seven public Rust crates in dependency
+  order, including `pb-mapper-server` and `pb-mapper-cli`.
+
+Focused regressions in `pb-mapper-client` cover blackholed address candidates,
+bounded candidate concurrency and cancellation, concurrent/cancelled SDK stop,
+partial administrator writes, and debug credential redaction. The relay
+regression runs with one namespace stream slot and one rate token; its first
+control deliberately withholds ACK while a second control supplies the stream.
+It fails before the admission-accounting fix and passes afterward.

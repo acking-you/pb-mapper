@@ -10,8 +10,6 @@ use pb_mapper_protocol::command::{
 };
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use snafu::ResultExt;
-use tokio::net::TcpStream;
-use uni_stream::addr::each_addr;
 
 use super::super::Error;
 use super::super::error::{ConnectSnafu, Result};
@@ -112,24 +110,63 @@ impl Exchange {
         credential: &Credential,
         encoded: &[u8],
     ) -> Result<PbConnResponse> {
-        let mut stream = each_addr(addrs.as_slice(), TcpStream::connect)
+        let mut stream = crate::addr::connect_tcp(addrs)
             .await
             .context(ConnectSnafu {
                 addr: addrs.to_string(),
             })?;
         let session = ClientHeaderSession::new_v2(credential).map_err(protocol)?;
-        session
-            .write_initial(&mut stream, encoded)
-            .await
-            .map_err(protocol)?;
-        self.sent = true;
+        self.write_request(&mut stream, &session, encoded).await?;
         let mut reader = session.response_reader(&mut stream).map_err(protocol)?;
         let message = reader.read_msg().await.map_err(protocol)?;
         PbConnResponse::decode(message).map_err(protocol)
+    }
+
+    async fn write_request<T: tokio::io::AsyncWriteExt + Unpin>(
+        &mut self,
+        stream: &mut T,
+        session: &ClientHeaderSession,
+        encoded: &[u8],
+    ) -> Result<()> {
+        // A failed or cancelled write can have reached the relay. Mark the
+        // mutation ambiguous before its first byte, not after write completion.
+        self.sent = true;
+        session
+            .write_initial(stream, encoded)
+            .await
+            .map_err(protocol)
     }
 }
 
 /// Flatten a framing or session failure into the SDK's protocol error.
 fn protocol(error: impl std::fmt::Display) -> Error {
     Error::protocol(error.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_partial_admin_write_must_not_be_retried() {
+        let credential = Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv");
+        let session = ClientHeaderSession::new_v2(&credential).unwrap();
+        let (mut writer, mut reader) = tokio::io::duplex(1);
+        let mut exchange = Exchange::new();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                exchange.write_request(&mut writer, &session, b"mutation")
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            exchange.sent,
+            "a partial mutation write is not safe to retry"
+        );
+        assert!(reader.read_u8().await.is_ok());
+    }
 }

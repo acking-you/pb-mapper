@@ -861,11 +861,15 @@ pub async fn run_server_on_listener(
                 excluded_server_conns,
             } => {
                 let namespace = split_scoped_service_key(&key).0;
-                if namespace_stream_counts
-                    .get(&namespace)
-                    .copied()
-                    .unwrap_or_default()
-                    >= max_streams_per_namespace
+                // Fallback belongs to an already admitted subscription. It must
+                // keep its slot/token even when the namespace is now full.
+                let is_new_subscription = !pending_streams.contains_key(&conn_id);
+                if is_new_subscription
+                    && namespace_stream_counts
+                        .get(&namespace)
+                        .copied()
+                        .unwrap_or_default()
+                        >= max_streams_per_namespace
                 {
                     let _ = conn_sender.try_send(ConnTask::SubcribeFailed {
                         code: "namespace_stream_limit_exceeded".to_string(),
@@ -892,12 +896,13 @@ pub async fn run_server_on_listener(
                     }
                     continue;
                 };
-                if !namespace_rate_limits
-                    .entry(namespace)
-                    .or_insert_with(|| {
-                        NamespaceRateLimit::new(new_streams_per_second, new_streams_burst)
-                    })
-                    .allow()
+                if is_new_subscription
+                    && !namespace_rate_limits
+                        .entry(namespace)
+                        .or_insert_with(|| {
+                            NamespaceRateLimit::new(new_streams_per_second, new_streams_burst)
+                        })
+                        .allow()
                 {
                     let _ = conn_sender.try_send(ConnTask::SubcribeFailed {
                         code: "namespace_stream_rate_exceeded".to_string(),

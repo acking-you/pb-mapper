@@ -18,7 +18,6 @@ use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
-use uni_stream::addr::each_addr;
 use uni_stream::stream::{NetworkStream, set_tcp_keep_alive, set_tcp_nodelay};
 
 pub(super) struct StreamSetup {
@@ -122,7 +121,7 @@ async fn subscribe(
     u32,
     u32,
 )> {
-    let mut remote_stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
+    let mut remote_stream = crate::addr::connect_tcp(&remote_addr)
         .await
         .context(ConnectRemoteStreamSnafu)?;
 

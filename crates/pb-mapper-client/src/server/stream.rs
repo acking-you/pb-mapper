@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use snafu::ResultExt;
-use tokio::net::TcpStream;
 use tracing::info_span;
 
 use super::error::{
@@ -16,7 +15,6 @@ use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnResponse};
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
-use uni_stream::addr::each_addr;
 use uni_stream::stream::{StreamProvider, StreamSplit, set_tcp_keep_alive, set_tcp_nodelay};
 
 /// Where one forwarded session dials, both ends resolved.
@@ -73,19 +71,15 @@ where
 
     let timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut remote_stream = match tokio::time::timeout_at(
-        deadline,
-        each_addr(remote_addr.as_slice(), TcpStream::connect),
-    )
-    .await
-    {
-        Ok(result) => result.context(ConnectRemoteStreamSnafu)?,
-        Err(_) => ControlIoTimeoutSnafu {
-            action: "connect remote stream",
-            timeout,
-        }
-        .fail()?,
-    };
+    let mut remote_stream =
+        match tokio::time::timeout_at(deadline, crate::addr::connect_tcp(&remote_addr)).await {
+            Ok(result) => result.context(ConnectRemoteStreamSnafu)?,
+            Err(_) => ControlIoTimeoutSnafu {
+                action: "connect remote stream",
+                timeout,
+            }
+            .fail()?,
+        };
     if keep_alive {
         snafu_error_handle!(
             set_tcp_keep_alive(&remote_stream),

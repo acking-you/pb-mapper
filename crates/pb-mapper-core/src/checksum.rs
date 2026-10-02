@@ -46,10 +46,23 @@ struct MsgHeaderKeyState {
     hash: AtomicU32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Credential {
     Admin(AesKeyType),
     Temporary { key_id: u64, key: AesKeyType },
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admin(_) => f.debug_tuple("Admin").field(&"[redacted]").finish(),
+            Self::Temporary { key_id, .. } => f
+                .debug_struct("Temporary")
+                .field("key_id", key_id)
+                .field("key", &"[redacted]")
+                .finish(),
+        }
+    }
 }
 
 impl Credential {
@@ -549,6 +562,19 @@ pub fn gen_random_key() -> [u8; 32] {
 // This was missing its `#[cfg(test)]`, so it compiled into release builds.
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credential_debug_never_prints_key_bytes() {
+        let key = *b"0123456789abcdefghijklmnopqrstuv";
+        assert_eq!(
+            format!("{:?}", super::Credential::Admin(key)),
+            "Admin(\"[redacted]\")"
+        );
+        assert_eq!(
+            format!("{:?}", super::Credential::Temporary { key_id: 7, key }),
+            "Temporary { key_id: 7, key: \"[redacted]\" }"
+        );
+    }
+
     #[test]
     fn test_random_checksum() {
         use super::*;

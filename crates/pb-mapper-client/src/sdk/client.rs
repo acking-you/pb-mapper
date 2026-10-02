@@ -10,10 +10,8 @@ use std::sync::{Arc, RwLock};
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout, resolve_addrs_async};
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
-use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use uni_stream::addr::each_addr;
 use uni_stream::stream::{
     TcpListenerProvider, TcpStreamProvider, UdpListenerProvider, UdpStreamProvider,
 };
@@ -30,7 +28,7 @@ use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_with_shutdown};
 
 /// Configuration for a [`Client`] session.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ClientConfig {
     /// Relay address (`host:port`).
     pub server: String,
@@ -40,6 +38,17 @@ pub struct ClientConfig {
     /// Administrator-only target namespace. Temporary credentials always use
     /// their own key id when this is `None`.
     pub namespace: Option<u64>,
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("server", &self.server)
+            .field("credential", &"[redacted]")
+            .field("keep_alive", &self.keep_alive)
+            .field("namespace", &self.namespace)
+            .finish()
+    }
 }
 
 /// Register a local TCP/UDP service with the relay.
@@ -286,7 +295,7 @@ impl Client {
         // Every candidate, under one shared bound: `each_addr` moves on to the next
         // address when one refuses, and the timeout covers the whole sequence so a
         // list of blackholed addresses cannot multiply the wait by its length.
-        let connect = each_addr(addrs.as_slice(), TcpStream::connect);
+        let connect = crate::addr::connect_tcp(&addrs);
         let mut stream = match tokio::time::timeout(io_timeout, connect).await {
             Ok(result) => result.context(ConnectSnafu {
                 addr: addrs.to_string(),
@@ -397,6 +406,19 @@ impl TunnelWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_debug_redacts_credentials() {
+        let config = ClientConfig {
+            server: "localhost:7666".into(),
+            credential: "0123456789abcdefghijklmnopqrstuv".into(),
+            keep_alive: false,
+            namespace: None,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(&config.credential));
+        assert!(debug.contains("[redacted]"));
+    }
 
     #[test]
     fn admin_requires_administrator_credential() {

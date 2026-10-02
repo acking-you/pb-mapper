@@ -1289,23 +1289,47 @@ async fn subscribe_missing_key_closes_without_hanging() {
 
 #[tokio::test]
 async fn subscribe_bypasses_unacked_stale_control_connection() {
+    bypass_unacked_control(false).await;
+}
+
+#[tokio::test]
+async fn subscribe_failover_reuses_its_namespace_slot_and_rate_token() {
+    bypass_unacked_control(true).await;
+}
+
+async fn bypass_unacked_control(at_capacity: bool) {
     let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = probe_listener.local_addr().unwrap();
     drop(probe_listener);
 
-    let shutdown_token = CancellationToken::new();
-    let server_shutdown = shutdown_token.clone();
-    let server = tokio::spawn(async move {
-        run_server_with_auth_config(
-            server_addr,
-            server_shutdown,
-            None,
-            false,
-            auth_config(server_addr),
+    let config = auth_config(server_addr);
+    // Limits belong only to this relay process, not the parallel test runner.
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_pb-mapper"))
+        .args([
+            "server",
+            "--port",
+            &server_addr.port().to_string(),
+            "--legacy-protocol",
+            "allow",
+        ])
+        .arg("--auth-state-dir")
+        .arg(&config.state_dir)
+        .env("MSG_HEADER_KEY", TEST_ADMIN_KEY)
+        .env(
+            "PB_MAPPER_MAX_STREAMS_PER_NAMESPACE",
+            if at_capacity { "1" } else { "1024" },
         )
-        .await
+        .env(
+            "PB_MAPPER_NEW_STREAMS_BURST",
+            if at_capacity { "1" } else { "200" },
+        )
+        .env("PB_MAPPER_NEW_STREAMS_PER_SECOND", "1")
+        .env("RUST_LOG", "error")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
         .unwrap();
-    });
 
     let key = "sf-backend";
     let (healthy_ready_tx, healthy_ready_rx) = tokio::sync::oneshot::channel();
@@ -1394,8 +1418,9 @@ async fn subscribe_bypasses_unacked_stale_control_connection() {
     drop(stream);
     healthy_task.abort();
     stale_task.abort();
-    shutdown_token.cancel();
-    server.await.unwrap();
+    server.kill().await.unwrap();
+    server.wait().await.unwrap();
+    let _ = std::fs::remove_dir_all(config.state_dir);
 }
 
 #[tokio::test]

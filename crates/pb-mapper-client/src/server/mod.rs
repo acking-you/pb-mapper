@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use snafu::ResultExt;
-use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -38,7 +37,7 @@ use pb_mapper_protocol::command::{
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use pb_mapper_protocol::{MessageReader, MessageWriter};
-use uni_stream::addr::{ToSocketAddrs, each_addr};
+use uni_stream::addr::ToSocketAddrs;
 use uni_stream::stream::{StreamProvider, set_tcp_keep_alive, set_tcp_nodelay};
 
 fn get_ping_message(protocol_version: u16, seq: u64) -> error::Result<Vec<u8>> {
@@ -335,7 +334,7 @@ async fn probe_remote_registration(
 ) -> RegistrationProbeResult {
     let timeout = registration_probe_timeout();
     let result = tokio::time::timeout(timeout, async {
-        let mut stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
+        let mut stream = crate::addr::connect_tcp(&remote_addr)
             .await
             .map_err(|e| format!("connect remote status stream failed: {e}"))?;
         crate::client::status::get_status_with_credential(
@@ -727,7 +726,7 @@ where
     let deadline = started + timeout;
     let mut manager_stream = tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
-        result = tokio::time::timeout_at(deadline, each_addr(remote_addr.as_slice(), TcpStream::connect)) => {
+        result = tokio::time::timeout_at(deadline, crate::addr::connect_tcp(&remote_addr)) => {
             match result {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {

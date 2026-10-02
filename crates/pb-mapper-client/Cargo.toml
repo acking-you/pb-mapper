@@ -23,6 +23,9 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uni-stream.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [features]
 udp-timeout = ["uni-stream/udp-timeout", "pb-mapper-protocol/udp-timeout"]
 

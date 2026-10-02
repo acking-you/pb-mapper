@@ -4,10 +4,9 @@
 //! handle, and the status channel it publishes to. A handle observes and stops
 //! its tunnel; it never drives the traffic itself.
 
-use std::sync::Mutex;
 use std::time::Duration;
 
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -53,16 +52,15 @@ impl LiveTunnel {
 
     pub(crate) async fn stop(&self) -> Result<()> {
         self.shutdown.cancel();
-        let handle = self
-            .join
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(mut handle) = handle {
-            match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
+        // Retain ownership while awaiting: cancellation of stop must not detach
+        // the worker, and concurrent stop calls must observe the same cleanup.
+        let mut slot = self.join.lock().await;
+        if let Some(handle) = slot.as_mut() {
+            match tokio::time::timeout(Duration::from_secs(5), &mut *handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(join_error)) if join_error.is_cancelled() => {}
                 Ok(Err(join_error)) => {
+                    slot.take();
                     return Err(Error::protocol(format!("tunnel task failed: {join_error}")));
                 }
                 Err(_) => {
@@ -70,6 +68,7 @@ impl LiveTunnel {
                     let _ = handle.await;
                 }
             }
+            slot.take();
         }
         Ok(())
     }
@@ -78,12 +77,7 @@ impl LiveTunnel {
 impl Drop for LiveTunnel {
     fn drop(&mut self) {
         self.shutdown.cancel();
-        if let Some(handle) = self
-            .join
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
+        if let Some(handle) = self.join.get_mut().take() {
             handle.abort();
         }
     }
@@ -162,3 +156,59 @@ tunnel_handle!(
     /// A live `connect` tunnel: a local listener forwarding to a registered service.
     Connection
 );
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::{future::Future, task::Poll};
+
+    async fn poll_pending(future: &mut std::pin::Pin<Box<impl Future>>) {
+        std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_keeps_worker_owned_until_handle_drop() {
+        let (tx, mut rx) = watch::channel(TunnelStatus::Starting);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _tx = tx;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let tunnel = LiveTunnel::new(CancellationToken::new(), worker, rx.clone());
+        started_rx.await.unwrap();
+        let mut stopping = Box::pin(tunnel.stop());
+        poll_pending(&mut stopping).await;
+        drop(stopping);
+        drop(tunnel);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), rx.changed())
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_stop_calls_both_wait_for_cleanup() {
+        let (tx, rx) = watch::channel(TunnelStatus::Starting);
+        let (release, released) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _tx = tx;
+            let _ = released.await;
+        });
+        let tunnel = LiveTunnel::new(CancellationToken::new(), worker, rx);
+        let mut first = Box::pin(tunnel.stop());
+        let mut second = Box::pin(tunnel.stop());
+        poll_pending(&mut first).await;
+        poll_pending(&mut second).await;
+        release.send(()).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+}

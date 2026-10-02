@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "pb-mapper-client",
  "tokio",
@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-auth"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "parking_lot",
  "pb-mapper-core",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "better_mimalloc_rs",
  "clap",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-client"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "pb-mapper-auth",
  "pb-mapper-core",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64",
  "clap",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-node"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-protocol"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-server"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "hashbrown 0.17.1",
  "kanal-plus",
@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-testkit"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "pb-mapper-auth",
  "pb-mapper-client",

@@ -189,7 +189,9 @@ jobs:
             pb-mapper-auth \
             pb-mapper-protocol \
             pb-mapper-client \
-            pb-mapper
+            pb-mapper \
+            pb-mapper-server \
+            pb-mapper-cli
           do
             cargo publish --locked --registry crates-io -p "$package"
             wait_for_crate "$package"

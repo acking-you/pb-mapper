@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-10-03
+- Recover registrations and new subscriptions through bounded, jittered setup attempts, adaptive latency budgets, independent control watchdogs, and cancellation-safe legacy/v2 frame reads.
+- Keep connect listeners and healthy data streams alive during transient relay probe/control failures; bound pending setup and control queues so one stalled service cannot block the relay.
+- Allow late authenticated activity to clear a suspect control connection before retirement, and cover simultaneous multi-service outages with repeated fault-injection recovery tests.
+- Race up to two relay address candidates so an unresponsive first IPv4/IPv6 address cannot hide a working alternative; cancel losing and abandoned attempts.
+- Keep SDK workers owned across cancelled/concurrent stop calls, prevent administrator mutation retries after partial writes, and redact raw credentials and SDK configuration in debug/tracing output.
+- Reuse an admitted subscription's namespace slot and rate token during control-connection failover, including at the namespace capacity limit.
+- Preserve the existing local TCP_NODELAY latency fix and publish the CLI/server crates alongside the Rust and Node SDKs.
+
 ## [0.5.0] - 2026-08-25
 - Added the public `pb-mapper` Rust SDK for register, connect, status, and administrator operations, with handle-based readiness and shutdown.
 - Added the `pb-mapper` TypeScript/JavaScript package through Node-API, including generated types and end-to-end tunnel and credential-lifecycle coverage.
