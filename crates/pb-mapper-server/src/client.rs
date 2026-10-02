@@ -149,29 +149,40 @@ pub async fn handle_client_conn(
 ) -> Result<()> {
     let prev_time = Instant::now();
     let mut guard = ClientConnGuard::new(conn_id, None, task_sender.clone(), key.clone());
-    let (mut server_stream, server_session, server_id, codec_key, is_datagram) =
-        match get_server_stream(
+    let setup_timeout = pb_mapper_core::config::control_io_timeout().min(Duration::from_secs(5));
+    let setup_result = timeout(
+        setup_timeout,
+        get_server_stream(
             &mut conn,
             &session,
             key.clone(),
             conn_id,
             task_sender.clone(),
-        )
-        .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                tracing::warn!(
-                    event = "client_stream_setup_failed",
-                    key = %key,
-                    client_conn_id = %conn_id,
-                    error = %e,
-                    "failed to prepare server stream for client connection"
-                );
-                guard.deregister().await;
-                return Err(e);
-            }
-        };
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(super::error::Error::ClientConnSetupTimeout {
+            key: key.clone(),
+            conn_id,
+            timeout: setup_timeout,
+        })
+    });
+    let (mut server_stream, server_session, server_id, codec_key, is_datagram) = match setup_result
+    {
+        Ok(res) => res,
+        Err(e) => {
+            tracing::warn!(
+                event = "client_stream_setup_failed",
+                key = %key,
+                client_conn_id = %conn_id,
+                error = %e,
+                "failed to prepare server stream for client connection"
+            );
+            guard.deregister().await;
+            return Err(e);
+        }
+    };
     guard.set_server_id(server_id);
     let server_cancellation = server_session
         .context()
@@ -338,27 +349,25 @@ pub async fn handle_client_conn(
     result
 }
 
-async fn retire_server_conn(
+async fn suspect_server_conn(
     task_sender: &ManagerTaskSender,
     key: ImutableKey,
     conn_id: RemoteConnId,
-    reason: impl Into<String>,
+    generation: u64,
 ) {
-    let reason = reason.into();
     if task_sender
-        .send(ManagerTask::RetireServerConn {
+        .send(ManagerTask::SuspectServerConn {
             key,
             conn_id,
-            reason: reason.clone(),
+            generation,
         })
         .await
         .is_err()
     {
         tracing::debug!(
-            event = "server_retire_skipped",
+            event = "server_suspect_check_skipped",
             conn_id = %conn_id,
-            reason = %reason,
-            "skip server retire because manager channel is closed"
+            "skip server suspect check because manager channel is closed"
         );
     }
 }
@@ -418,9 +427,12 @@ async fn get_server_stream(
     bool,
 )> {
     let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
-    let ack_timeout = stream_ack_timeout();
     let ready_timeout = stream_ready_timeout();
-    let recovery_timeout = stream_recovery_timeout();
+    let recovery_timeout = stream_recovery_timeout().max(
+        pb_mapper_core::config::control_suspect_grace()
+            + stream_ack_timeout()
+            + Duration::from_millis(200),
+    );
     let recovery_deadline = Instant::now() + recovery_timeout;
     let mut excluded_server_conns = Vec::new();
 
@@ -446,21 +458,35 @@ async fn get_server_stream(
             "subscribe task sent to manager"
         );
 
-        let resp = match timeout(CLIENT_CONN_CONTROL_TIMEOUT, rx.recv()).await {
-            Ok(resp) => resp.context(ClientConnRecvSubcribeRespSnafu {
-                key: key.clone(),
-                conn_id,
-            })?,
-            Err(_) => ClientConnRecvSubcribeRespTimeoutSnafu {
-                key: key.clone(),
-                conn_id,
-                timeout: CLIENT_CONN_CONTROL_TIMEOUT,
+        let response_deadline = tokio::time::Instant::now() + CLIENT_CONN_CONTROL_TIMEOUT;
+        let resp = loop {
+            let resp = match tokio::time::timeout_at(response_deadline, rx.recv()).await {
+                Ok(resp) => resp.context(ClientConnRecvSubcribeRespSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?,
+                Err(_) => ClientConnRecvSubcribeRespTimeoutSnafu {
+                    key: key.clone(),
+                    conn_id,
+                    timeout: CLIENT_CONN_CONTROL_TIMEOUT,
+                }
+                .fail()?,
+            };
+            // An ACK/data socket from the previous candidate can arrive while
+            // the next selection is queued. It cannot become that selection's
+            // response; dropping it preserves the generation boundary.
+            if matches!(
+                resp,
+                ConnTask::StreamAck { .. } | ConnTask::StreamResp { .. }
+            ) {
+                continue;
             }
-            .fail()?,
+            break resp;
         };
 
-        let (codec_key, is_datagram, server_conn_id, server_generation) = match resp {
+        let (codec_key, is_datagram, server_conn_id, server_generation, ack_timeout) = match resp {
             ConnTask::SubcribeResp {
+                ack_timeout,
                 need_codec,
                 is_datagram,
                 server_conn_id,
@@ -482,7 +508,13 @@ async fn get_server_stream(
                     codec_enabled = codec_key.is_some(),
                     "subscribe response received from manager"
                 );
-                (codec_key, is_datagram, server_conn_id, server_generation)
+                (
+                    codec_key,
+                    is_datagram,
+                    server_conn_id,
+                    server_generation,
+                    ack_timeout,
+                )
             }
             ConnTask::SubcribeFailed {
                 code,
@@ -555,15 +587,8 @@ async fn get_server_stream(
                     timeout = ?ack_timeout,
                     "timed out waiting for server stream ack"
                 );
-                retire_server_conn(
-                    &task_sender,
-                    key.clone(),
-                    server_conn_id,
-                    format!(
-                        "timed out waiting for stream ack for client {conn_id} after {ack_timeout:?}"
-                    ),
-                )
-                .await;
+                suspect_server_conn(&task_sender, key.clone(), server_conn_id, server_generation)
+                    .await;
                 excluded_server_conns.push((server_conn_id, server_generation));
                 continue 'attempt;
             }
@@ -615,6 +640,7 @@ async fn get_server_stream(
             }
         }
 
+        let ready_timeout = ready_timeout.max(ack_timeout.saturating_mul(2));
         let resp = match timeout(ready_timeout, rx.recv()).await {
             Ok(resp) => resp.context(ClientConnRecvStreamSnafu {
                 key: key.clone(),
@@ -630,15 +656,8 @@ async fn get_server_stream(
                     timeout = ?ready_timeout,
                     "timed out waiting for server stream after ack"
                 );
-                retire_server_conn(
-                    &task_sender,
-                    key.clone(),
-                    server_conn_id,
-                    format!(
-                        "timed out waiting for stream connection for client {conn_id} after {ready_timeout:?}"
-                    ),
-                )
-                .await;
+                suspect_server_conn(&task_sender, key.clone(), server_conn_id, server_generation)
+                    .await;
                 excluded_server_conns.push((server_conn_id, server_generation));
                 continue 'attempt;
             }

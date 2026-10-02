@@ -8,15 +8,17 @@ use std::time::Duration;
 
 use snafu::ResultExt;
 use tokio::net::TcpStream;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::MissedTickBehavior;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uni_stream::udp::set_custom_timeout;
 
 use self::error::{AcceptLocalStreamSnafu, BindLocalListenerSnafu};
 use self::status::{get_status_scoped, get_status_with_credential};
-use self::stream::handle_local_stream;
+use self::stream::{StreamSetup, handle_local_stream};
 use crate::addr::{resolve_all, resolve_tunnel_ends};
+use crate::recovery::{RecoveryTiming, jitter};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_core::config::{
@@ -205,267 +207,143 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
         },
     };
 
-    let mut retry_backoff = RetryBackoff::default();
-    // Accepted local streams are tracked rather than detached, so a cancelled
-    // tunnel takes its in-flight forwarding sessions down with it instead of
-    // leaving them forwarding after `stop()` has returned. The set is declared
-    // outside the loop: a listener restart is not a reason to drop live sessions.
+    let mut retry_backoff = RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2));
     let mut stream_tasks = JoinSet::new();
+    let setup_slots = Arc::new(Semaphore::new(64));
+    let timing = Arc::new(Mutex::new(RecoveryTiming::default()));
 
     'outer: loop {
-        if shutdown.is_cancelled() {
-            break 'outer;
-        }
-        tracing::debug!(
-            event = "client_probe_start",
-            key = %key,
-            local_addr = %local_addr,
-            remote_addr = %remote_addr,
-            retry_count = retry_backoff.failures(),
-            "client probing remote server"
-        );
-
-        if let Err(failure) =
-            probe_remote_key(&remote_addr, key.as_ref(), namespace, credential).await
-        {
-            // A refusal the relay marks permanent — a namespace this credential
-            // does not own, an invalid service name — cannot be fixed by trying
-            // again. Looping on it would leave the caller's `wait_ready` pending
-            // forever with nothing but "retrying" to show for it, so the reason is
-            // reported and the loop ends. Mirrors the register side's
-            // `Status::Rejected`.
-            if failure.permanent {
-                tracing::error!(
-                    event = "client_remote_probe_rejected_permanently",
-                    key = %key,
-                    local_addr = %local_addr,
-                    remote_addr = %remote_addr,
-                    reason = %failure,
-                    "pb server permanently refused this subscription; not retrying"
-                );
-                if let Some(ref callback) = status_callback {
-                    callback(&format!("failed: {failure}"));
+        // Listener lifetime follows the local endpoint, not a remote health
+        // snapshot. Only a local bind/accept error requires replacing it.
+        let listener = tokio::select! {
+            () = shutdown.cancelled() => break,
+            result = LocalListener::bind(local_addr.as_slice()) => match result.context(BindLocalListenerSnafu) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::warn!(event = "client_local_bind_failed", %key, %local_addr, %error);
+                    if let Some(callback) = &status_callback { callback("retrying"); }
+                    tokio::select! {
+                        () = shutdown.cancelled() => break,
+                        () = tokio::time::sleep(jitter(retry_backoff.next_delay())) => {}
+                    }
+                    continue;
                 }
-                break 'outer;
-            }
-            let retry_delay = retry_backoff.next_delay();
-            tracing::warn!(
-                event = "client_remote_probe_failed",
-                key = %key,
-                local_addr = %local_addr,
-                remote_addr = %remote_addr,
-                reason = %failure,
-                retry_delay = ?retry_delay,
-                retry_count = retry_backoff.failures(),
-                "client remote probe failed; retrying"
-            );
-            if let Some(ref callback) = status_callback {
-                callback("retrying");
-            }
-            tokio::select! {
-                () = shutdown.cancelled() => break 'outer,
-                () = tokio::time::sleep(retry_delay) => {}
-            }
-            continue;
-        }
-
-        tracing::info!(
-            event = "client_key_available",
-            key = %key,
-            local_addr = %local_addr,
-            remote_addr = %remote_addr,
-            "remote server key is available; local listener will start"
-        );
-
-        retry_backoff.reset();
-
-        // The listener binds before "connected" is reported: that status is what
-        // drives readiness for external callers, and a caller told the tunnel is
-        // up must be able to reach the local endpoint. Reporting it on the remote
-        // probe alone would call an occupied local address ready.
-        let listener = match LocalListener::bind(local_addr.as_slice())
-            .await
-            .context(BindLocalListenerSnafu)
-        {
-            Ok(listener) => listener,
-            Err(e) => {
-                tracing::error!(
-                    event = "client_local_bind_failed",
-                    key = %key,
-                    local_addr = %local_addr,
-                    error = %e,
-                    "failed to bind local listener"
-                );
-                if let Some(ref callback) = status_callback {
-                    callback("retrying");
-                }
-                let retry_delay = retry_backoff.next_delay();
-                tokio::select! {
-                    () = shutdown.cancelled() => break 'outer,
-                    () = tokio::time::sleep(retry_delay) => {}
-                }
-                continue;
             }
         };
-
-        tracing::info!(
-            event = "client_local_listener_bound",
-            key = %key,
-            local_addr = %local_addr,
-            remote_addr = %remote_addr,
-            "local listener bound; tunnel is ready"
-        );
-
-        if let Some(ref callback) = status_callback {
-            callback("connected");
-        }
-
-        let (stream_failure_tx, mut stream_failure_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut health_interval = tokio::time::interval(client_health_check_interval());
-        let health_failure_threshold = client_health_failure_threshold();
+        tracing::info!(event = "client_local_listener_bound", %key, %local_addr, "local listener bound; checking remote service");
+        let mut probes = JoinSet::new();
+        let mut next_probe = Instant::now();
+        let mut last_success = None;
+        let mut connected = false;
         let mut consecutive_health_failures = 0usize;
-        health_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        health_interval.tick().await;
+        let (stream_event_tx, mut stream_event_rx) = tokio::sync::mpsc::channel(1);
 
         loop {
             tokio::select! {
-                () = shutdown.cancelled() => {
-                    tracing::info!(
-                        event = "client_listener_cancelled",
-                        key = %key,
-                        local_addr = %local_addr,
-                        "client listener loop cancelled"
-                    );
-                    break 'outer;
-                }
-                accepted = listener.accept() => {
-                    let (stream, peer_addr) = match accepted.context(AcceptLocalStreamSnafu) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            tracing::error!(
-                                event = "client_local_accept_failed",
-                                key = %key,
-                                local_addr = %local_addr,
-                                error = %e,
-                                "failed to accept local stream"
-                            );
+                () = shutdown.cancelled() => break 'outer,
+                accepted = async {
+                    // Backpressure stays in the listener backlog while setup is
+                    // saturated. Established forwarding releases its permit.
+                    let permit = setup_slots.clone().acquire_owned().await;
+                    (permit, listener.accept().await)
+                } => {
+                    let (Ok(permit), accepted) = accepted else { break 'outer; };
+                    let (stream, _) = match accepted.context(AcceptLocalStreamSnafu) {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            tracing::warn!(event = "client_local_accept_failed", %key, %local_addr, %error);
                             break;
                         }
                     };
-                    tracing::debug!(
-                        event = "client_local_stream_accepted",
-                        key = %key,
-                        local_addr = %local_addr,
-                        peer_addr = ?peer_addr,
-                        "accepted local client stream"
-                    );
-                    let key = key.clone();
-                    let failure_tx = stream_failure_tx.clone();
-                    let stream_shutdown = shutdown.clone();
+                    let stream_key = key.clone();
                     let stream_remote = remote_addr.clone();
+                    let stream_shutdown = shutdown.clone();
+                    let event_tx = stream_event_tx.clone();
+                    let setup = StreamSetup { permit, timing: timing.clone(), events: event_tx.clone() };
                     stream_tasks.spawn(async move {
-                        let forward = handle_local_stream(stream, key, stream_remote.clone(), keep_alive, namespace, credential);
-                        let forward = tokio::select! {
+                        let result = tokio::select! {
                             () = stream_shutdown.cancelled() => return,
-                            result = forward => result,
+                            result = handle_local_stream(stream, stream_key, stream_remote, keep_alive, namespace, credential, setup) => result,
                         };
-                        if let Err(e) = forward
-                        {
-                            let reason = snafu::Report::from_error(e).to_string();
-                            tracing::warn!(
-                                event = "client_local_stream_failed_before_forward",
-                                remote_addr = %stream_remote,
-                                reason = %reason,
-                                "local client stream failed before forwarding started"
-                            );
-                            let _ = failure_tx.send(reason);
+                        if let Err(error) = result {
+                            tracing::warn!(event = "client_local_stream_failed_before_forward", reason = %snafu::Report::from_error(error));
+                            let _ = event_tx.try_send(false);
                         }
                     });
                 }
-                _ = health_interval.tick() => {
-                    if let Err(reason) = probe_remote_key(&remote_addr, key.as_ref(), namespace, credential).await {
-                        consecutive_health_failures = consecutive_health_failures.saturating_add(1);
-                        if consecutive_health_failures < health_failure_threshold {
-                            tracing::warn!(
-                                event = "client_remote_health_check_missed",
-                                key = %key,
-                                local_addr = %local_addr,
-                                remote_addr = %remote_addr,
-                                reason = %reason,
-                                consecutive_failures = consecutive_health_failures,
-                                failure_threshold = health_failure_threshold,
-                                "client remote health check failed; listener remains active"
-                            );
-                            continue;
+                () = tokio::time::sleep_until(next_probe), if probes.is_empty() => {
+                    let probe_remote = remote_addr.clone();
+                    let probe_key = key.clone();
+                    let budget = timing.lock().await.timeout().min(client_health_check_timeout());
+                    probes.spawn(async move {
+                        let started = Instant::now();
+                        let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget).await;
+                        (started, started.elapsed(), result)
+                    });
+                }
+                Some(result) = probes.join_next() => {
+                    let (started, elapsed, result) = match result {
+                        Ok(result) => result,
+                        Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string()))),
+                    };
+                    match result {
+                        Ok(()) => {
+                            timing.lock().await.record(elapsed);
+                            last_success = Some(Instant::now());
+                            consecutive_health_failures = 0;
+                            retry_backoff.reset();
+                            next_probe = Instant::now() + client_health_check_interval();
+                            if !connected {
+                                connected = true;
+                                if let Some(callback) = &status_callback { callback("connected"); }
+                            }
                         }
-                        tracing::warn!(
-                            event = "client_remote_health_check_failed",
-                            key = %key,
-                            local_addr = %local_addr,
-                            remote_addr = %remote_addr,
-                            reason = %reason,
-                            consecutive_failures = consecutive_health_failures,
-                            failure_threshold = health_failure_threshold,
-                            "client remote health checks failed repeatedly; listener will restart"
-                        );
-                        if let Some(ref callback) = status_callback {
-                            callback("retrying");
+                        Err(failure) if failure.permanent => {
+                            if let Some(callback) = &status_callback { callback(&format!("failed: {failure}")); }
+                            break 'outer;
                         }
-                        break;
+                        Err(_) if last_success.is_some_and(|success| success > started) => {
+                            // Actual traffic completed after this probe began.
+                            next_probe = Instant::now() + client_health_check_interval();
+                        }
+                        Err(failure) => {
+                            timing.lock().await.timed_out();
+                            consecutive_health_failures = consecutive_health_failures.saturating_add(1);
+                            if !connected || consecutive_health_failures >= client_health_failure_threshold() {
+                                connected = false;
+                                if let Some(callback) = &status_callback { callback("retrying"); }
+                            }
+                            let delay = jitter(retry_backoff.next_delay());
+                            next_probe = Instant::now() + delay;
+                            tracing::warn!(event = "client_remote_probe_failed", %key, reason = %failure, consecutive_health_failures, retry_delay = ?delay, "remote probe failed; listener remains active");
+                        }
                     }
-                    consecutive_health_failures = 0;
-                    retry_backoff.reset();
                 }
-                Some(_) = stream_tasks.join_next() => {
-                    // Reap finished sessions so the set does not grow for the
-                    // lifetime of the process. Failures are already reported
-                    // through `stream_failure_tx`.
-                }
-                Some(stream_failure) = stream_failure_rx.recv() => {
-                    tracing::warn!(
-                        event = "client_stream_failure_reported",
-                        key = %key,
-                        local_addr = %local_addr,
-                        remote_addr = %remote_addr,
-                        stream_failure = %stream_failure,
-                        "local stream failure reported; probing remote key"
-                    );
-                    if let Err(reason) = probe_remote_key(&remote_addr, key.as_ref(), namespace, credential).await {
-                        tracing::warn!(
-                            event = "client_remote_probe_failed_after_stream_error",
-                            key = %key,
-                            local_addr = %local_addr,
-                            remote_addr = %remote_addr,
-                            reason = %reason,
-                            "remote key probe failed after local stream error; listener will restart"
-                        );
-                        if let Some(ref callback) = status_callback {
-                            callback("retrying");
+                Some(success) = stream_event_rx.recv() => {
+                    if success {
+                        last_success = Some(Instant::now());
+                        consecutive_health_failures = 0;
+                        retry_backoff.reset();
+                        if !connected {
+                            connected = true;
+                            if let Some(callback) = &status_callback { callback("connected"); }
                         }
-                        break;
+                    } else if probes.is_empty() {
+                        // Coalesce failures and rate limit probes independently
+                        // of the number of callers arriving during an outage.
+                        next_probe = next_probe.min(Instant::now() + Duration::from_millis(100));
                     }
-                    consecutive_health_failures = 0;
-                    retry_backoff.reset();
                 }
+                Some(_) = stream_tasks.join_next() => {}
             }
         }
-
-        if shutdown.is_cancelled() {
-            break 'outer;
+        drop(probes);
+        if let Some(callback) = &status_callback {
+            callback("retrying");
         }
-        let retry_delay = retry_backoff.next_delay();
-        tracing::info!(
-            event = "client_listener_restart_scheduled",
-            key = %key,
-            local_addr = %local_addr,
-            remote_addr = %remote_addr,
-            retry_delay = ?retry_delay,
-            retry_count = retry_backoff.failures(),
-            "client listener stopped; remote probe will retry"
-        );
         tokio::select! {
-            () = shutdown.cancelled() => break 'outer,
-            () = tokio::time::sleep(retry_delay) => {}
+            () = shutdown.cancelled() => break,
+            () = tokio::time::sleep(jitter(retry_backoff.next_delay())) => {}
         }
     }
 
@@ -518,8 +396,8 @@ async fn probe_remote_key(
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
+    timeout: Duration,
 ) -> std::result::Result<(), ProbeFailure> {
-    let timeout = client_health_check_timeout();
     match tokio::time::timeout(
         timeout,
         probe_remote_key_once(remote_addr, key, namespace, credential),

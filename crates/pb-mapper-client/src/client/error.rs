@@ -49,6 +49,12 @@ pub enum Error {
         // Structured representation of response
         resp: String,
     },
+    #[snafu(display("relay refused subscription: {code}: {message}"))]
+    SubscribeRemoteError {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
     #[snafu(display("header msg tool:`{action}` create failed!"))]
     CreateHeaderTool {
         // Must be `reader/writer`

@@ -50,7 +50,7 @@ sequenceDiagram
     C-->>U: forward service bytes
 ```
 
-控制连接使用租约机制，而不是因为一次没收到 heartbeat 就直接误判断开。如果 register 进程在容忍窗口内没有收到控制面入站消息，它会打开一条独立 status 探测连接，确认中继注册表里是否还存在精确的 `conn_id` 和 `generation`。如果注册已经丢失，或探测失败超过 suspect 宽限窗口，该进程会主动重连并重新注册。中继也会回收空闲的 V2 控制连接，subscribe 选择连接时会跳过 unhealthy 或 stale 的注册。
+控制连接同时使用租约和接收超时。register 超过容忍窗口后会独立探测精确的 `conn_id` 和 `generation`；注册丢失会触发重连。超过容忍窗口加宽限期仍没有入站控制消息，也会触发重连，即使 status 中还存在这条连接。relay 对单次慢 ACK 先标记 suspect，并等待宽限期内的认证消息确认，不立即注销整个服务。connect 的本地监听持续保留，健康探测在后台进行，控制连接重建也不关闭仍健康的数据流。具体期限、资源上限和故障测试见[弱网恢复设计](weak-network-recovery.md)。
 
 ## 环境准备
 
@@ -246,21 +246,21 @@ flutter run
 - `PB_MAPPER_NEW_STREAMS_BURST`：每命名空间新建 stream 突发量，默认 `200`
 - `PB_MAPPER_KEEP_ALIVE`：启用 TCP keep-alive（设置为 `ON`）
 - `PB_MAPPER_LOG_FORMAT`：tracing 输出格式，可选 `pretty`（默认）、`compact` 或 `json`
-- `PB_MAPPER_CONTROL_IO_TIMEOUT`：控制面握手卡住后的关闭时间，默认 `30s`
-- `PB_MAPPER_STREAM_ACK_TIMEOUT`：等待已注册服务控制连接确认 stream 请求的时间，超时后尝试其它控制连接，默认 `300ms`
-- `PB_MAPPER_STREAM_READY_TIMEOUT`：收到 stream ack 后等待服务端数据流到达的时间，超时后尝试其它控制连接，默认 `1s`
-- `PB_MAPPER_STREAM_RECOVERY_TIMEOUT`：退休旧控制连接并等待替代控制连接注册时，单个 subscribe 最多保持打开的时间，默认 `2s`
+- `PB_MAPPER_CONTROL_IO_TIMEOUT`：通用控制 I/O 超时，默认 `30s`；恢复建连采用更短的自适应/总期限，上限 `5s`，配置更小值仍然生效
+- `PB_MAPPER_STREAM_ACK_TIMEOUT`：stream ACK 的初始/最小等待预算，默认 `300ms`；各控制连接根据实测延迟和超时调整预算，再切换候选
+- `PB_MAPPER_STREAM_READY_TIMEOUT`：收到 ACK 后的最小数据流等待时间，默认 `1s`；至少覆盖自适应 ACK 预算的两倍，并受建流总期限约束
+- `PB_MAPPER_STREAM_RECOVERY_TIMEOUT`：等待替代注册的最小窗口，默认 `2s`；同时覆盖 suspect 宽限期 + 初始 ACK 预算 + `200ms`，并受 `5s` 建流总期限约束
 - `PB_MAPPER_CONTROL_CONN_POOL_SIZE`：每个注册服务并行保持的服务端控制连接数量，默认 `2`，最大 `16`
 - `PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL`：register 角色控制连接心跳间隔，默认 `2s`
 - `PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE`：已注册控制连接多久没有收到入站控制消息后进入 suspect 并触发远端注册探测，默认 `6s`
-- `PB_MAPPER_CONTROL_SUSPECT_GRACE`：远端注册探测失败后的额外宽限时间，超过后主动重连，默认 `2s`
+- `PB_MAPPER_CONTROL_SUSPECT_GRACE`：控制连接持续无入站消息时的额外宽限期，也是 relay 确认失效的最小宽限期，默认 `2s`；status 中仍有记录不能延后接收期限
 - `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`：register 角色每次远端注册状态探测的超时时间，默认 `1s`
 - `PB_MAPPER_SERVER_LEASE_TIMEOUT`：server 侧 V2 已注册控制连接的空闲租约超时，默认 `15s`
 - `PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL`：server 回收租约已过期的已注册控制连接的扫描间隔，默认 `5s`。填 0 会回退到默认值：每次扫描都要遍历全部注册，周期为 0 反而会拖垮它本该保护的流量
 - `PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN` / `_MAX`：register 角色被服务器*拒绝*注册（例如连接配额已满）后的重试等待时间，区别于连不上服务器时的传输重试，默认 `5s` 与 `80s`。任一端填 0 都会回退到默认值；上限低于下限时退化为固定间隔
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`：client 侧本地 listener 重新确认远端 service key 仍已注册的间隔，默认 `15s`
-- `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`：client 侧每次远端 key 健康检查的超时时间，默认 `5s`
-- `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`：连续多少次健康检查失败后才重启 client 侧本地 listener，默认 `3`
+- `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`：client 后台 key 健康检查的最长等待时间，默认 `5s`；自适应建连预算可以缩短该期限
+- `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`：连续多少次健康检查失败后将状态标记为 `retrying`，默认 `3`；本地 listener 保持监听
 - `PB_MAPPER_TUNNEL_IDLE_TIMEOUT`：TCP 隧道双向完全空闲后的关闭时间，默认 `1h`
 - `PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT`：TCP 隧道半关闭后另一方向无数据时的关闭时间，默认 `60s`
 - `RUST_LOG`：日志级别，例如 `info` 或 `debug`

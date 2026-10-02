@@ -187,6 +187,7 @@ pub async fn run_server_on_listener(
             }
         };
 
+        while connection_tasks.try_join_next().is_some() {}
         match task {
             ManagerTask::AdminServiceList {
                 key_id,
@@ -348,7 +349,7 @@ pub async fn run_server_on_listener(
                             .collect::<Vec<_>>();
                         let client_ids = pending_streams
                             .iter()
-                            .filter_map(|(client_id, (_, _, key))| {
+                            .filter_map(|(client_id, (_, _, key, _))| {
                                 (split_scoped_service_key(key).0 == namespace).then_some(*client_id)
                             })
                             .collect::<Vec<_>>();
@@ -385,8 +386,7 @@ pub async fn run_server_on_listener(
                 };
                 snafu_error_get_or_continue!(
                     conn_sender
-                        .send(ConnTask::StatusResp(resp))
-                        .await
+                        .try_send(ConnTask::StatusResp(resp))
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendStatusRespSnafu { conn_id })
                 );
@@ -473,11 +473,83 @@ pub async fn run_server_on_listener(
                     &reason,
                 );
             }
+            ManagerTask::SuspectServerConn {
+                key,
+                conn_id,
+                generation,
+            } => {
+                let Some(info) = server_conn_map.get_mut(&key).and_then(|infos| {
+                    infos
+                        .iter_mut()
+                        .find(|info| info.conn_id == conn_id && info.generation == generation)
+                }) else {
+                    continue;
+                };
+                info.stream_ack_budget = info
+                    .stream_ack_budget
+                    .saturating_mul(2)
+                    .min(Duration::from_secs(5).max(pb_mapper_core::config::stream_ack_timeout()));
+                // A timeout affects candidate selection immediately, but a late
+                // authenticated ACK/heartbeat can restore it without a reconnect.
+                info.health = ServerConnHealth::Suspect;
+                if info.suspect_check.is_some() {
+                    continue;
+                }
+                let observed_at = Instant::now();
+                info.suspect_check = Some(observed_at);
+                let grace =
+                    pb_mapper_core::config::control_suspect_grace().max(info.stream_ack_budget);
+                tracing::warn!(event = "server_conn_suspected", %key, %conn_id, generation, ?grace, ack_budget = ?info.stream_ack_budget, "stream was slow; waiting for authenticated control activity before retirement");
+                let sender = manager.get_task_sender();
+                connection_tasks.spawn(async move {
+                    tokio::time::sleep(grace).await;
+                    let _ = sender
+                        .send(ManagerTask::ConfirmServerConn {
+                            key,
+                            conn_id,
+                            generation,
+                            observed_at,
+                        })
+                        .await;
+                });
+            }
+            ManagerTask::ConfirmServerConn {
+                key,
+                conn_id,
+                generation,
+                observed_at,
+            } => {
+                let Some(info) = server_conn_map.get_mut(&key).and_then(|infos| {
+                    infos.iter_mut().find(|info| {
+                        info.conn_id == conn_id
+                            && info.generation == generation
+                            && info.suspect_check == Some(observed_at)
+                    })
+                }) else {
+                    continue;
+                };
+                info.suspect_check = None;
+                if info.last_rx_at > observed_at {
+                    tracing::debug!(event = "server_conn_suspect_cleared", %key, %conn_id, generation, "control activity cancelled retirement");
+                    continue;
+                }
+                retire_server_conn(
+                    RoutingState {
+                        manager: &mut manager,
+                        server_conn_map: &mut server_conn_map,
+                        pending_streams: &pending_streams,
+                        namespace_rate_limits: &mut namespace_rate_limits,
+                    },
+                    &key,
+                    conn_id,
+                    "stream timeout followed by silent control connection",
+                );
+            }
             ManagerTask::DeRegisterClientConn {
                 server_id,
                 client_id,
             } => {
-                let removed_namespace = pending_streams.remove(&client_id).map(|(_, _, key)| {
+                let removed_namespace = pending_streams.remove(&client_id).map(|(_, _, key, _)| {
                     let namespace = split_scoped_service_key(&key).0;
                     decrement_namespace_stream_count(&mut namespace_stream_counts, namespace);
                     namespace
@@ -573,13 +645,11 @@ pub async fn run_server_on_listener(
                     None
                 };
                 if let Some((code, reason, retryable)) = failure {
-                    let _ = conn_sender
-                        .send(ConnTask::RegisterFailed {
-                            code: code.to_string(),
-                            reason: reason.to_string(),
-                            retryable,
-                        })
-                        .await;
+                    let _ = conn_sender.try_send(ConnTask::RegisterFailed {
+                        code: code.to_string(),
+                        reason: reason.to_string(),
+                        retryable,
+                    });
                     continue;
                 }
                 let generation = next_server_generation;
@@ -597,6 +667,8 @@ pub async fn run_server_on_listener(
                             is_datagram,
                             protocol_version,
                             last_rx_at: now,
+                            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
+                            suspect_check: None,
                             retire_token,
                         });
                     }
@@ -609,6 +681,8 @@ pub async fn run_server_on_listener(
                             is_datagram,
                             protocol_version,
                             last_rx_at: now,
+                            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
+                            suspect_check: None,
                             retire_token,
                         }]);
                     }
@@ -632,12 +706,11 @@ pub async fn run_server_on_listener(
                 );
                 snafu_error_get_or_continue!(
                     conn_sender
-                        .send(ConnTask::RegisterResp {
+                        .try_send(ConnTask::RegisterResp {
                             generation,
                             protocol_version,
                             lease_ttl_ms: server_lease_timeout().as_millis() as u64,
                         })
-                        .await
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendRegisterRespSnafu { key, conn_id })
                 );
@@ -650,7 +723,7 @@ pub async fn run_server_on_listener(
                 client_id,
                 server_generation,
             } => {
-                let Some((expected_control_conn_id, expected_generation, expected_key)) =
+                let Some((expected_control_conn_id, expected_generation, expected_key, _)) =
                     pending_streams.get(&client_id).cloned()
                 else {
                     tracing::warn!(
@@ -711,13 +784,12 @@ pub async fn run_server_on_listener(
                 );
                 snafu_error_handle!(
                     client_sender
-                        .send(ConnTask::StreamResp {
+                        .try_send(ConnTask::StreamResp {
                             server_id,
                             server_generation: expected_generation,
                             stream,
                             session,
                         })
-                        .await
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id })
                 );
@@ -729,7 +801,7 @@ pub async fn run_server_on_listener(
             } => {
                 let recorded_activity =
                     record_server_conn_activity_by_conn_id(&mut server_conn_map, server_id);
-                let Some((expected_server_id, expected_generation, _)) =
+                let Some((expected_server_id, expected_generation, _, requested_at)) =
                     pending_streams.get(&client_id).cloned()
                 else {
                     tracing::warn!(
@@ -761,6 +833,11 @@ pub async fn run_server_on_listener(
                     .find(|info| info.conn_id == server_id && info.generation == server_generation)
                 {
                     info.health = ServerConnHealth::Healthy;
+                    let sample_budget = requested_at.elapsed().saturating_mul(3);
+                    info.stream_ack_budget = (info.stream_ack_budget.mul_f64(0.75)
+                        + sample_budget.mul_f64(0.25))
+                    .max(pb_mapper_core::config::stream_ack_timeout())
+                    .min(Duration::from_secs(5).max(pb_mapper_core::config::stream_ack_timeout()));
                 }
                 let client_sender = snafu_error_get_or_continue!(
                     manager
@@ -769,11 +846,10 @@ pub async fn run_server_on_listener(
                 );
                 snafu_error_handle!(
                     client_sender
-                        .send(ConnTask::StreamAck {
+                        .try_send(ConnTask::StreamAck {
                             server_id,
                             server_generation,
                         })
-                        .await
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendStreamRespToClientSnafu { conn_id: client_id })
                 );
@@ -791,13 +867,11 @@ pub async fn run_server_on_listener(
                     .unwrap_or_default()
                     >= max_streams_per_namespace
                 {
-                    let _ = conn_sender
-                        .send(ConnTask::SubcribeFailed {
-                            code: "namespace_stream_limit_exceeded".to_string(),
-                            reason: "the namespace has reached its active stream limit".to_string(),
-                            retryable: true,
-                        })
-                        .await;
+                    let _ = conn_sender.try_send(ConnTask::SubcribeFailed {
+                        code: "namespace_stream_limit_exceeded".to_string(),
+                        reason: "the namespace has reached its active stream limit".to_string(),
+                        retryable: true,
+                    });
                     continue;
                 }
                 let Some(server_conn_id_list) = server_conn_map.get(&key).cloned() else {
@@ -825,13 +899,11 @@ pub async fn run_server_on_listener(
                     })
                     .allow()
                 {
-                    let _ = conn_sender
-                        .send(ConnTask::SubcribeFailed {
-                            code: "namespace_stream_rate_exceeded".to_string(),
-                            reason: "the namespace new-stream rate limit was exceeded".to_string(),
-                            retryable: true,
-                        })
-                        .await;
+                    let _ = conn_sender.try_send(ConnTask::SubcribeFailed {
+                        code: "namespace_stream_rate_exceeded".to_string(),
+                        reason: "the namespace new-stream rate limit was exceeded".to_string(),
+                        retryable: true,
+                    });
                     continue;
                 }
                 let mut selected = false;
@@ -855,6 +927,8 @@ pub async fn run_server_on_listener(
                         is_datagram,
                         protocol_version: _,
                         last_rx_at: _,
+                        stream_ack_budget,
+                        suspect_check: _,
                         retire_token: _,
                     } = server_info;
                     let Some(server_conn_sender) = manager.get_conn_sender_chan(&server_conn_id)
@@ -871,13 +945,15 @@ pub async fn run_server_on_listener(
                         let _ = manager.drop_conn_sender(server_conn_id);
                         continue;
                     };
+                    // The routing manager must never await a stalled socket's
+                    // bounded mailbox: that would also block every other service,
+                    // heartbeat and retirement timer.
                     // 1. Send a request to get server stream
                     if let Err(e) = server_conn_sender
-                        .send(ConnTask::StreamReq {
+                        .try_send(ConnTask::StreamReq {
                             client_id: conn_id,
                             server_generation,
                         })
-                        .await
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterClientSendStreamSnafu {
                             key: key.clone(),
@@ -902,20 +978,28 @@ pub async fn run_server_on_listener(
                         manager.sign_up_conn_sender(conn_id, conn_sender.clone());
                     }
                     let is_new_stream = pending_streams
-                        .insert(conn_id, (server_conn_id, server_generation, key.clone()))
+                        .insert(
+                            conn_id,
+                            (
+                                server_conn_id,
+                                server_generation,
+                                key.clone(),
+                                Instant::now(),
+                            ),
+                        )
                         .is_none();
                     if is_new_stream {
                         *namespace_stream_counts.entry(namespace).or_default() += 1;
                     }
                     // 2. Response subcribe ok
                     if let Err(e) = conn_sender
-                        .send(ConnTask::SubcribeResp {
+                        .try_send(ConnTask::SubcribeResp {
+                            ack_timeout: stream_ack_budget,
                             server_conn_id,
                             server_generation,
                             need_codec,
                             is_datagram,
                         })
-                        .await
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendSubcribeRespSnafu {
                             key: key.clone(),
@@ -1146,6 +1230,8 @@ mod tests {
             is_datagram: false,
             protocol_version: CONTROL_PROTOCOL_V2,
             last_rx_at: Instant::now(),
+            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
+            suspect_check: None,
             retire_token: CancellationToken::new(),
         }
     }

@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
+use crate::recovery::RecoveryTiming;
 use snafu::ResultExt;
 use tokio::net::TcpStream;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, mpsc};
+use tokio::time::Instant;
 use tracing::{info_span, instrument};
 
 use super::error::{
@@ -18,15 +21,107 @@ use pb_mapper_protocol::secure::ClientHeaderSession;
 use uni_stream::addr::each_addr;
 use uni_stream::stream::{NetworkStream, set_tcp_keep_alive, set_tcp_nodelay};
 
-#[instrument(skip(local_stream))]
-pub async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
+pub(super) struct StreamSetup {
+    pub permit: OwnedSemaphorePermit,
+    pub timing: Arc<Mutex<RecoveryTiming>>,
+    pub events: mpsc::Sender<bool>,
+}
+
+#[instrument(skip(local_stream, credential, setup))]
+pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
     mut local_stream: LocalStream,
     key: Arc<str>,
     remote_addr: ResolvedAddrs,
     keep_alive: bool,
     namespace: Option<u64>,
     credential: Credential,
+    setup: StreamSetup,
 ) -> Result<()> {
+    let started = Instant::now();
+    // Retry only setup: no application byte is read until a subscription has
+    // succeeded. A fresh socket/session avoids replaying payload or crypto state.
+    let budget = std::time::Duration::from_secs(5).min(control_io_timeout());
+    let deadline = started + budget;
+    let mut retry = pb_mapper_core::timeout::RetryBackoff::default();
+    let ((mut remote_stream, codec_key, client_id, server_id), setup_latency) = loop {
+        let attempt_started = Instant::now();
+        let attempt_budget = setup
+            .timing
+            .lock()
+            .await
+            .timeout()
+            .max(std::time::Duration::from_secs(3));
+        let attempt_deadline = (Instant::now() + attempt_budget).min(deadline);
+        let result = tokio::time::timeout_at(
+            attempt_deadline,
+            subscribe(&key, remote_addr.clone(), keep_alive, namespace, credential),
+        )
+        .await;
+        match result {
+            Ok(Ok(ready)) => break (ready, attempt_started.elapsed()),
+            Ok(Err(error)) => {
+                let retryable = matches!(
+                    &error,
+                    super::error::Error::ConnectRemoteStream { .. }
+                        | super::error::Error::WriteSubcribeReq { .. }
+                        | super::error::Error::SubscribeRemoteError {
+                            retryable: true,
+                            ..
+                        }
+                );
+                if !retryable || Instant::now() >= deadline {
+                    return Err(error);
+                }
+            }
+            Err(_) => {
+                setup.timing.lock().await.timed_out();
+                if Instant::now() >= deadline {
+                    return super::error::ControlIoTimeoutSnafu {
+                        action: "subscribe",
+                        timeout: budget,
+                    }
+                    .fail();
+                }
+            }
+        }
+        tokio::time::sleep_until(
+            (Instant::now() + crate::recovery::jitter(retry.next_delay())).min(deadline),
+        )
+        .await;
+    };
+    setup.timing.lock().await.record(setup_latency);
+    let _ = setup.events.try_send(true);
+    drop(setup.permit);
+    let span = info_span!("forward", "client:{client_id} <-> server_id:{server_id}");
+    let _enter = span.enter();
+    let (client_reader, client_writer) = local_stream.split();
+    let (server_reader, server_writer) = remote_stream.split();
+    snafu_error_handle!(
+        <LocalStream as StreamForward>::forward_local_to_remote(
+            codec_key,
+            *credential.key(),
+            client_reader,
+            client_writer,
+            server_reader,
+            server_writer,
+        )
+        .await
+    );
+    Ok(())
+}
+
+async fn subscribe(
+    key: &str,
+    remote_addr: ResolvedAddrs,
+    keep_alive: bool,
+    namespace: Option<u64>,
+    credential: Credential,
+) -> Result<(
+    TcpStream,
+    Option<pb_mapper_core::checksum::AesKeyType>,
+    u32,
+    u32,
+)> {
     let mut remote_stream = each_addr(remote_addr.as_slice(), TcpStream::connect)
         .await
         .context(ConnectRemoteStreamSnafu)?;
@@ -66,8 +161,10 @@ pub async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
                 client_id,
                 server_id,
             } => (codec_key, client_id, server_id),
-            PbConnResponse::Error(error) => SubcribeRespNotMatchSnafu {
-                resp: format!("{}: {}", error.code, error.message),
+            PbConnResponse::Error(error) => super::error::SubscribeRemoteSnafu {
+                code: error.code,
+                message: error.message,
+                retryable: error.retryable,
             }
             .fail()?,
             resp => SubcribeRespNotMatchSnafu {
@@ -76,23 +173,5 @@ pub async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
             .fail()?,
         }
     };
-    let span = info_span!("forward", "client:{client_id} <-> server_id:{server_id}");
-    let _enter = span.enter();
-    // start forward
-    let (client_reader, client_writer) = local_stream.split();
-    let (server_reader, server_writer) = remote_stream.split();
-
-    snafu_error_handle!(
-        <LocalStream as StreamForward>::forward_local_to_remote(
-            codec_key,
-            *credential.key(),
-            client_reader,
-            client_writer,
-            server_reader,
-            server_writer,
-        )
-        .await
-    );
-
-    Ok(())
+    Ok((remote_stream, codec_key, client_id, server_id))
 }

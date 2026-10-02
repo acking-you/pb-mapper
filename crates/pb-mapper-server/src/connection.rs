@@ -605,7 +605,7 @@ pub(super) fn release_namespace_rate_limit_if_idle(
         .any(|key| split_scoped_service_key(key).0 == namespace);
     let has_pending_stream = pending_streams
         .values()
-        .any(|(_, _, key)| split_scoped_service_key(key).0 == namespace);
+        .any(|(_, _, key, _)| split_scoped_service_key(key).0 == namespace);
     if !has_registered_service && !has_pending_stream {
         namespace_rate_limits.remove(&namespace);
     }

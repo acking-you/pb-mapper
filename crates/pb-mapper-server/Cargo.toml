@@ -14,7 +14,7 @@ hashbrown.workspace = true
 kanal.workspace = true
 snafu.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uni-stream.workspace = true
 

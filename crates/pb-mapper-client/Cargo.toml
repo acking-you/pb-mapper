@@ -11,6 +11,7 @@ description = "Register, connect, status, and admin client implementation for pb
 publish = ["crates-io"]
 
 [dependencies]
+rand.workspace = true
 pb-mapper-auth.workspace = true
 pb-mapper-core.workspace = true
 pb-mapper-protocol.workspace = true
@@ -18,7 +19,7 @@ pb-mapper-protocol.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uni-stream.workspace = true
 

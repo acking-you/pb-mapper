@@ -1146,7 +1146,8 @@ async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection
             LocalServer::Stream { .. }
         ));
 
-        let retired = timeout(Duration::from_secs(2), reader.read_msg())
+        // A missed stream ACK first receives a two-second confirmation grace.
+        let retired = timeout(Duration::from_secs(3), reader.read_msg())
             .await
             .expect("stale control was not retired by the server");
         if let Ok(bytes) = retired {

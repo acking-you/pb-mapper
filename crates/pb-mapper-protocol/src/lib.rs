@@ -9,6 +9,7 @@
 pub mod buffer;
 pub mod command;
 pub mod forward;
+mod frame_read;
 pub mod secure;
 use snafu::{ResultExt, ensure};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,9 +23,8 @@ use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec, Decryptor, Encry
 use pb_mapper_core::error::MsgDatalenExceededSnafu;
 use pb_mapper_core::error::{
     self, MsgDatalenValidateSnafu, MsgNetworkReadBodySnafu, MsgNetworkReadCheckSumSnafu,
-    MsgNetworkReadDatalenSnafu, MsgNetworkWriteBodySnafu, MsgNetworkWriteCheckSumSnafu,
-    MsgNetworkWriteCodecMsgSnafu, MsgNetworkWriteCodecTagSnafu, MsgNetworkWriteDatalenSnafu,
-    Result,
+    MsgNetworkWriteBodySnafu, MsgNetworkWriteCheckSumSnafu, MsgNetworkWriteCodecMsgSnafu,
+    MsgNetworkWriteCodecTagSnafu, MsgNetworkWriteDatalenSnafu, Result,
 };
 
 /// This message protocol contains header and body, and the header
@@ -82,24 +82,6 @@ const MAX_MSG_LEN: DataLenType = MAX_PLAINTEXT_LEN + CODEC_TAG_LEN;
 // as unrelated at the crate boundary.
 pub use pb_mapper_core::DataLenType;
 
-macro_rules! gen_read_network_with_error {
-    ($func_name:ident, $read_method:ident, $error:expr, $return_ty:ty) => {
-        #[inline]
-        async fn $func_name<T: AsyncReadExt + Unpin>(reader: &mut T) -> Result<$return_ty> {
-            reader.$read_method().await.context($error)
-        }
-    };
-    ($func_name:ident, $read_method:ident, $error:expr, $input_type:ty, $return_type:ty) => {
-        #[inline]
-        async fn $func_name<T: AsyncReadExt + Unpin>(
-            reader: &mut T,
-            input_type: $input_type,
-        ) -> Result<$return_type> {
-            reader.$read_method(input_type).await.context($error)
-        }
-    };
-}
-
 macro_rules! gen_write_network_with_error {
     ($func_name:ident, $write_method:ident, $error:expr, $input_type:ty) => {
         #[inline]
@@ -112,21 +94,9 @@ macro_rules! gen_write_network_with_error {
     };
 }
 
-gen_read_network_with_error!(read_checksum, read_u32, MsgNetworkReadCheckSumSnafu, u32);
-
-gen_read_network_with_error!(read_datalen, read_u32, MsgNetworkReadDatalenSnafu, u32);
-
 gen_write_network_with_error!(write_checksum, write_u32, MsgNetworkWriteCheckSumSnafu, u32);
 
 gen_write_network_with_error!(write_datalen, write_u32, MsgNetworkWriteDatalenSnafu, u32);
-
-gen_read_network_with_error!(
-    read_msg_body,
-    read_exact,
-    MsgNetworkReadBodySnafu,
-    &mut [u8],
-    usize
-);
 
 gen_write_network_with_error!(write_msg_body, write_all, MsgNetworkWriteBodySnafu, &[u8]);
 
@@ -175,27 +145,6 @@ fn checksum_for(len: DataLenType, key: Option<&[u8]>) -> Result<u32> {
 }
 
 #[inline]
-async fn get_msg_len<T: AsyncReadExt + Unpin>(
-    reader: &mut T,
-    checksum_key: Option<&[u8]>,
-) -> Result<DataLenType> {
-    let checksum = read_checksum(reader).await?;
-    let datalen = read_datalen(reader).await?;
-    if checksum_matches(datalen, checksum, checksum_key) {
-        ensure!(
-            datalen <= MAX_MSG_LEN,
-            MsgDatalenExceededSnafu {
-                actual: datalen,
-                max: MAX_MSG_LEN
-            }
-        );
-        Ok(datalen)
-    } else {
-        MsgDatalenValidateSnafu { datalen, checksum }.fail()?
-    }
-}
-
-#[inline]
 async fn set_msg_len<T: AsyncWriteExt + Unpin>(
     writer: &mut T,
     len: DataLenType,
@@ -208,6 +157,7 @@ async fn set_msg_len<T: AsyncWriteExt + Unpin>(
 pub struct NormalMessageReader<'a, T: AsyncReadExt + Unpin> {
     reader: &'a mut T,
     buffer: CommonBuffer,
+    frame: frame_read::FrameRead<8>,
     checksum_key: Option<AesKeyType>,
 }
 
@@ -216,6 +166,7 @@ impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
         Self {
             reader,
             buffer: CommonBuffer::new(),
+            frame: frame_read::FrameRead::new(),
             checksum_key: None,
         }
     }
@@ -226,10 +177,31 @@ impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
     }
 
     async fn read_msg_inner(&mut self) -> Result<&'_ [u8]> {
-        let datalen = get_msg_len(&mut self.reader, checksum_key_bytes(&self.checksum_key)).await?;
+        self.frame
+            .header(self.reader)
+            .await
+            .context(MsgNetworkReadCheckSumSnafu)?;
+        let header = self.frame.header;
+        let checksum = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let datalen = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        ensure!(
+            checksum_matches(datalen, checksum, checksum_key_bytes(&self.checksum_key)),
+            MsgDatalenValidateSnafu { datalen, checksum }
+        );
+        ensure!(
+            datalen <= MAX_MSG_LEN,
+            MsgDatalenExceededSnafu {
+                actual: datalen,
+                max: MAX_MSG_LEN
+            }
+        );
         self.buffer.fixed_resize(datalen as usize);
-        let n = read_msg_body(&mut self.reader, self.buffer.buffer_mut()).await?;
-        Ok(&self.buffer.buffer()[0..n])
+        self.frame
+            .body(self.reader, self.buffer.buffer_mut())
+            .await
+            .context(MsgNetworkReadBodySnafu)?;
+        self.frame.finish();
+        Ok(self.buffer.buffer())
     }
 }
 

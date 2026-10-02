@@ -16,6 +16,76 @@ use pb_mapper_core::checksum::{
 };
 use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
 
+// A heartbeat/select branch may cancel a read at any byte boundary. The next
+// read must resume that frame, including its authenticated counter.
+async fn cancel_partial_read(reader: &mut impl MessageReader) {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let mut read = std::pin::pin!(reader.read_msg());
+    poll_fn(|cx| {
+        assert!(read.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn v2_fragmented_frame_survives_read_cancellation() {
+    let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
+    let mut wire = Vec::new();
+    let mut writer =
+        V2MessageWriter::new(&mut wire, material.clone(), DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+    writer.write_msg(b"first fragmented message").await.unwrap();
+    writer.write_msg(b"next message").await.unwrap();
+    let first_len = FRAME_HEADER_LEN + b"first fragmented message".len() + AES_256_GCM.tag_len();
+    for split in 1..first_len {
+        let (mut tx, mut rx) = tokio::io::duplex(4096);
+        let mut reader =
+            V2MessageReader::new(&mut rx, material.clone(), DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+        tx.write_all(&wire[..split]).await.unwrap();
+        cancel_partial_read(&mut reader).await;
+        tx.write_all(&wire[split..]).await.unwrap();
+        drop(tx);
+        assert_eq!(
+            reader.read_msg().await.unwrap(),
+            b"first fragmented message",
+            "split {split}"
+        );
+        assert_eq!(
+            reader.read_msg().await.unwrap(),
+            b"next message",
+            "split {split}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_fragmented_frame_survives_read_cancellation() {
+    let mut wire = Vec::new();
+    let mut writer = crate::NormalMessageWriter::new(&mut wire).with_checksum_key([7; 32]);
+    writer.write_msg(b"first fragmented message").await.unwrap();
+    writer.write_msg(b"next message").await.unwrap();
+    for split in 1..8 + b"first fragmented message".len() {
+        let (mut tx, mut rx) = tokio::io::duplex(4096);
+        let mut reader = crate::NormalMessageReader::new(&mut rx).with_checksum_key([7; 32]);
+        tx.write_all(&wire[..split]).await.unwrap();
+        cancel_partial_read(&mut reader).await;
+        tx.write_all(&wire[split..]).await.unwrap();
+        drop(tx);
+        assert_eq!(
+            reader.read_msg().await.unwrap(),
+            b"first fragmented message",
+            "split {split}"
+        );
+        assert_eq!(
+            reader.read_msg().await.unwrap(),
+            b"next message",
+            "split {split}"
+        );
+    }
+}
+
 fn temp_config() -> AuthConfig {
     let mut random = [0_u8; 8];
     let mut rng = rand::rng();

@@ -138,6 +138,19 @@ pub enum ManagerTask {
         conn_id: RemoteConnId,
         reason: String,
     },
+    /// A single slow stream requests confirmation, not immediate deregistration.
+    SuspectServerConn {
+        key: ImutableKey,
+        conn_id: RemoteConnId,
+        generation: u64,
+    },
+    /// Retire only if no authenticated activity followed the suspicion.
+    ConfirmServerConn {
+        key: ImutableKey,
+        conn_id: RemoteConnId,
+        generation: u64,
+        observed_at: Instant,
+    },
     /// Look for registrations that stopped renewing their lease, and retire them.
     ///
     /// Sent by a ticker task rather than driven by a timer inside the manager loop:
@@ -165,6 +178,7 @@ pub enum ConnTask {
         retryable: bool,
     },
     SubcribeResp {
+        ack_timeout: Duration,
         server_conn_id: RemoteConnId,
         server_generation: u64,
         need_codec: bool,
@@ -219,6 +233,10 @@ pub struct ServerConnInfo {
     pub is_datagram: bool,
     pub protocol_version: u16,
     pub last_rx_at: Instant,
+    /// Stream acknowledgement budget learned from completed requests and timeouts.
+    pub stream_ack_budget: Duration,
+    /// At most one outstanding confirmation timer per control connection.
+    pub suspect_check: Option<Instant>,
     /// Cancelled to tear this connection's socket down; see
     /// [`ManagerTask::Register::retire_token`].
     ///
@@ -233,7 +251,7 @@ pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<ServerConnInfo>>;
 /// A subscriber's stream, from its own connection ID to the server connection it
 /// was routed to, that connection's generation, and the service key it asked for.
 pub(crate) type PendingStreamMap =
-    hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey)>;
+    hashbrown::HashMap<RemoteConnId, (RemoteConnId, u64, ImutableKey, Instant)>;
 
 /// Per-namespace new-stream rate limiters, keyed by the namespace's key ID.
 pub(crate) type NamespaceRateLimitMap = hashbrown::HashMap<u64, NamespaceRateLimit>;
@@ -470,12 +488,11 @@ async fn send_subcribe_failed(
 ) {
     let reason = reason.into();
     if conn_sender
-        .send(ConnTask::SubcribeFailed {
+        .try_send(ConnTask::SubcribeFailed {
             code: "service_not_available".to_string(),
             reason: reason.clone(),
             retryable: true,
         })
-        .await
         .is_err()
     {
         tracing::debug!(
@@ -496,10 +513,9 @@ async fn send_subcribe_retry(
 ) {
     let reason = reason.into();
     if conn_sender
-        .send(ConnTask::SubcribeRetry {
+        .try_send(ConnTask::SubcribeRetry {
             reason: reason.clone(),
         })
-        .await
         .is_err()
     {
         tracing::debug!(
@@ -535,6 +551,8 @@ mod lease_tests {
             is_datagram: false,
             protocol_version,
             last_rx_at: Instant::now() - idle_for,
+            stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
+            suspect_check: None,
             retire_token: CancellationToken::new(),
         }
     }

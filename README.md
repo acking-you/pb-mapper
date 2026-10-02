@@ -179,6 +179,7 @@ cargo test
 ```
 
 - User guide: [`docs/user-guide.md`](docs/user-guide.md)
+- Weak-network recovery: [deadlines, resource bounds, and fault tests](docs/weak-network-recovery.md)
 - Authentication and protocol v2: [`docs/authentication-v2.md`](docs/authentication-v2.md)
 - Docker server guide: [`DOCKER_README.md`](DOCKER_README.md)
 - Chinese documentation: [`README.zh-CN.md`](README.zh-CN.md), [`docs/user-guide.zh-CN.md`](docs/user-guide.zh-CN.md)

@@ -1139,6 +1139,7 @@ dependencies = [
  "pb-mapper-auth",
  "pb-mapper-core",
  "pb-mapper-protocol",
+ "rand",
  "serde_json",
  "snafu",
  "tokio",
@@ -1747,6 +1748,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

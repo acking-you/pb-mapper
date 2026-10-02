@@ -50,7 +50,7 @@ sequenceDiagram
     C-->>U: forward service bytes
 ```
 
-Control connections are leased rather than guessed from a single missing heartbeat. If a register process stops receiving control-plane activity for longer than the tolerance window, it opens a separate status probe and verifies that the exact `conn_id` and `generation` are still present on the relay. If that registration is missing, or if the probe keeps failing past the suspect grace window, the process reconnects and registers a fresh control connection. The relay also expires idle V2 control connections, and subscribe requests skip unhealthy or stale registrations.
+Control connections use leases and a receive watchdog. After the tolerance window, a register worker probes the exact `conn_id` and `generation`; a missing registration triggers reconnection. No inbound control activity beyond tolerance plus grace also triggers reconnection, even if the status probe still lists the socket. A single slow stream ACK first marks a relay candidate suspect; authenticated activity during its confirmation grace preserves the registration. Connect listeners stay bound while one background probe checks reachability, and healthy data streams survive control reconnection. See [weak-network recovery](weak-network-recovery.md) for deadlines, resource bounds, and fault tests.
 
 ## Prerequisites
 
@@ -255,21 +255,21 @@ flutter run
 - `PB_MAPPER_NEW_STREAMS_BURST`: new-stream burst per namespace, default `200`
 - `PB_MAPPER_KEEP_ALIVE`: enable TCP keep-alive (set to `ON`)
 - `PB_MAPPER_LOG_FORMAT`: tracing output format, one of `pretty` (default), `compact`, or `json`
-- `PB_MAPPER_CONTROL_IO_TIMEOUT`: close stalled control-plane handshakes after this duration, default `30s`
-- `PB_MAPPER_STREAM_ACK_TIMEOUT`: wait for a registered server control connection to acknowledge a stream request before trying another connection, default `300ms`
-- `PB_MAPPER_STREAM_READY_TIMEOUT`: wait after a stream ack for the server-side data stream to arrive before trying another connection, default `1s`
-- `PB_MAPPER_STREAM_RECOVERY_TIMEOUT`: keep a client subscribe open while stale control connections are retired and replacement control connections register, default `2s`
+- `PB_MAPPER_CONTROL_IO_TIMEOUT`: general control I/O timeout, default `30s`; recovery setup applies shorter adaptive/total deadlines (at most `5s`), and a smaller configured value still applies
+- `PB_MAPPER_STREAM_ACK_TIMEOUT`: initial/minimum stream ACK budget, default `300ms`; each control connection adapts it to latency/timeouts before trying another candidate
+- `PB_MAPPER_STREAM_READY_TIMEOUT`: minimum data-ready wait after a stream ACK, default `1s`; increased to at least twice the adaptive ACK budget, within the total setup deadline
+- `PB_MAPPER_STREAM_RECOVERY_TIMEOUT`: minimum replacement-registration window, default `2s`; also allows suspect grace + initial ACK budget + `200ms`, within the `5s` whole-setup deadline
 - `PB_MAPPER_CONTROL_CONN_POOL_SIZE`: number of parallel server-side control connections per registered service, default `2`, maximum `16`
 - `PB_MAPPER_CONTROL_HEARTBEAT_INTERVAL`: interval between register-role control heartbeats, default `2s`
 - `PB_MAPPER_CONTROL_HEARTBEAT_TOLERANCE`: how long a registered control connection may go without inbound control activity before it becomes suspect and is probed, default `6s`
-- `PB_MAPPER_CONTROL_SUSPECT_GRACE`: additional grace after a failed remote registration probe before reconnecting, default `2s`
+- `PB_MAPPER_CONTROL_SUSPECT_GRACE`: additional control silence tolerated before reconnecting, and minimum relay confirmation grace, default `2s`; inventory presence cannot extend the receive deadline
 - `PB_MAPPER_REGISTRATION_PROBE_TIMEOUT`: timeout for each register-role remote registration status probe, default `1s`
 - `PB_MAPPER_SERVER_LEASE_TIMEOUT`: server-side idle lease timeout for V2 registered control connections, default `15s`
 - `PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL`: how often the server sweeps registered control connections whose lease has expired, default `5s`. A zero falls back to the default: each sweep scans every registration, so a zero period would starve the traffic it protects
 - `PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN` / `_MAX`: how long the register role waits after the server *refuses* a registration — a full connection quota, say — as opposed to failing to reach it, default `5s` and `80s`. A zero at either end falls back to that default; a maximum below the minimum collapses the ladder to a fixed delay
 - `PB_MAPPER_CLIENT_HEALTH_CHECK_INTERVAL`: how often the client-side local listener rechecks that the remote service key is still registered, default `15s`
-- `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`: timeout for each client-side remote key health check, default `5s`
-- `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`: consecutive failed health checks required before restarting the client-side local listener, default `3`
+- `PB_MAPPER_CLIENT_HEALTH_CHECK_TIMEOUT`: maximum duration of each background key health check, default `5s`; the adaptive setup budget may shorten it
+- `PB_MAPPER_CLIENT_HEALTH_FAILURE_THRESHOLD`: consecutive failed health checks before reporting `retrying`, default `3`; the local listener remains bound
 - `PB_MAPPER_TUNNEL_IDLE_TIMEOUT`: close a fully idle TCP tunnel after this duration, default `1h`
 - `PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT`: close a half-closed TCP tunnel after this idle duration, default `60s`
 - `RUST_LOG`: logging level, for example `info` or `debug`

@@ -19,6 +19,7 @@ use self::error::{
 };
 use self::stream::{StreamConnect, handle_stream};
 use crate::addr::resolve_tunnel_ends;
+use crate::recovery::{RecoveryTiming, jitter};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
 use pb_mapper_core::config::{
     ResolvedAddrs, control_conn_pool_size, control_heartbeat_interval, control_heartbeat_tolerance,
@@ -93,13 +94,15 @@ struct ControlBackoff {
     /// The relay answered and refused, for something that may clear. Retry
     /// slowly; see [`registration_reject_backoff`].
     reject: RetryBackoff,
+    timing: RecoveryTiming,
 }
 
 impl ControlBackoff {
     fn new() -> Self {
         let (reject_min, reject_max) = registration_reject_backoff();
         Self {
-            transport: RetryBackoff::default(),
+            transport: RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2)),
+            timing: RecoveryTiming::default(),
             reject: RetryBackoff::new(reject_min, reject_max),
         }
     }
@@ -602,6 +605,7 @@ async fn run_server_side_cli_worker<LocalStream>(
     // here rather than inside the attempt: a reconnect is not a reason to drop
     // streams that are still healthy. It is drained before this worker returns.
     let mut stream_tasks = JoinSet::new();
+    let setup_slots = Arc::new(tokio::sync::Semaphore::new(64));
     'outer: loop {
         if shutdown.is_cancelled() {
             break 'outer;
@@ -612,6 +616,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             &report,
             shutdown.clone(),
             &mut stream_tasks,
+            &setup_slots,
         )
         .await
         {
@@ -655,9 +660,10 @@ async fn run_server_side_cli_worker<LocalStream>(
                 );
                 (interval, backoff.reject.failures())
             }
-            Status::ReadMsg | Status::SendPing | Status::ConnectRemote => {
-                (backoff.transport.next_delay(), backoff.transport.failures())
-            }
+            Status::ReadMsg | Status::SendPing | Status::ConnectRemote => (
+                jitter(backoff.transport.next_delay()),
+                backoff.transport.failures(),
+            ),
         };
         tracing::info!(
             event = "local_server_control_reconnect_scheduled",
@@ -689,13 +695,14 @@ async fn run_server_side_cli_worker<LocalStream>(
 
 // `backoff` is skipped: it is mutable retry state, and recording it would
 // print two ladders' internals on every span the worker enters.
-#[instrument(skip(backoff, report, shutdown, stream_tasks))]
+#[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     backoff: &mut ControlBackoff,
     config: ServerCliRunConfig,
     report: &impl Fn(WorkerStatus),
     shutdown: CancellationToken,
     stream_tasks: &mut JoinSet<()>,
+    setup_slots: &Arc<tokio::sync::Semaphore>,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,
@@ -715,11 +722,26 @@ where
         worker_index,
         credential,
     } = config;
-    let mut manager_stream = snafu_error_get_or_return!(
-        each_addr(remote_addr.as_slice(), TcpStream::connect).await,
-        "[connect remote stream]",
-        Err(Status::ConnectRemote)
-    );
+    let started = tokio::time::Instant::now();
+    let timeout = backoff.timing.timeout();
+    let deadline = started + timeout;
+    let mut manager_stream = tokio::select! {
+        () = shutdown.cancelled() => return Err(Status::Cancelled),
+        result = tokio::time::timeout_at(deadline, each_addr(remote_addr.as_slice(), TcpStream::connect)) => {
+            match result {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    tracing::warn!(event = "local_server_dial_failed", %error, %key, worker_index);
+                    return Err(Status::ConnectRemote);
+                }
+                Err(_) => {
+                    backoff.timing.timed_out();
+                    tracing::warn!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "dial");
+                    return Err(Status::ConnectRemote);
+                }
+            }
+        }
+    };
     tracing::info!(
         event = "local_server_connected_remote",
         key = %key,
@@ -752,7 +774,6 @@ where
             return Err(Status::ConnectRemote);
         }
     };
-    let timeout = control_io_timeout();
     let heartbeat_interval = control_heartbeat_interval();
     let heartbeat_tolerance = control_heartbeat_tolerance();
     let request = match namespace {
@@ -778,15 +799,18 @@ where
         },
     };
     let msg = snafu_error_get_or_return_ok!(request.encode().context(EncodeRegisterReqSnafu));
-    match tokio::time::timeout(timeout, session.write_initial(&mut manager_stream, &msg)).await {
-        Ok(result) => snafu_error_get_or_return_ok!(result.context(SendRegisterReqSnafu)),
-        Err(_) => snafu_error_get_or_return_ok!(
-            ControlIoTimeoutSnafu {
-                action: "send register request",
-                timeout,
+    tokio::select! {
+        () = shutdown.cancelled() => return Err(Status::Cancelled),
+        result = tokio::time::timeout_at(deadline, session.write_initial(&mut manager_stream, &msg)) => {
+            match result {
+                Ok(result) => snafu_error_get_or_return_ok!(result.context(SendRegisterReqSnafu)),
+                Err(_) => {
+                    backoff.timing.timed_out();
+                    tracing::warn!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "write");
+                    return Err(Status::ConnectRemote);
+                }
             }
-            .fail()
-        ),
+        }
     }
     let (mut reader, mut writer) = manager_stream.into_split();
     let mut msg_reader = match session.response_reader(&mut reader) {
@@ -798,16 +822,18 @@ where
     };
     // read register resp to indicate that register has finished
     let (key, registration) = {
-        let timeout = control_io_timeout();
-        let msg = match tokio::time::timeout(timeout, msg_reader.read_msg()).await {
-            Ok(result) => snafu_error_get_or_return_ok!(result.context(ReadRegisterRespSnafu)),
-            Err(_) => snafu_error_get_or_return_ok!(
-                ControlIoTimeoutSnafu {
-                    action: "read register response",
-                    timeout,
+        let msg = tokio::select! {
+            () = shutdown.cancelled() => return Err(Status::Cancelled),
+            result = tokio::time::timeout_at(deadline, msg_reader.read_msg()) => {
+                match result {
+                    Ok(result) => snafu_error_get_or_return_ok!(result.context(ReadRegisterRespSnafu)),
+                    Err(_) => {
+                        backoff.timing.timed_out();
+                        tracing::warn!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "response");
+                        return Err(Status::ConnectRemote);
+                    }
                 }
-                .fail()
-            ),
+            }
         };
         let resp = snafu_error_get_or_return_ok!(
             PbConnResponse::decode(msg).context(DecodeRegisterRespSnafu)
@@ -872,12 +898,14 @@ where
         (key, registration)
     };
 
+    backoff.timing.record(started.elapsed());
+    tracing::debug!(event = "local_server_setup_latency", elapsed_ms = duration_to_millis(started.elapsed()), next_timeout_ms = duration_to_millis(backoff.timing.timeout()), %key, worker_index);
     backoff.reset();
-    let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<LocalControlWrite>();
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<LocalControlWrite>(64);
     let lease_state = Arc::new(tokio::sync::Mutex::new(ControlLeaseState::new()));
     let writer_key = key.clone();
     let writer_registration = registration;
-    let mut writer_handle = tokio::spawn(async move {
+    let mut writer_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let mut msg_writer = match session.continuation_writer(&mut writer) {
             Ok(writer) => writer,
             Err(e) => {
@@ -925,7 +953,7 @@ where
                 }
             }
         }
-    });
+    }));
 
     let heartbeat_interval = control_heartbeat_interval();
     let heartbeat_tolerance = control_heartbeat_tolerance();
@@ -933,10 +961,9 @@ where
     let mut heartbeat = tokio::time::interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     heartbeat.tick().await;
-    let (probe_tx, mut probe_rx) =
-        tokio::sync::mpsc::unbounded_channel::<RegistrationProbeResult>();
-    let mut probe_in_flight = false;
+    let mut probes = JoinSet::new();
     let mut ping_seq = 0_u64;
+    let mut control_deadline = tokio::time::Instant::now() + heartbeat_tolerance + suspect_grace;
 
     let result = loop {
         tokio::select! {
@@ -956,6 +983,7 @@ where
                     }
                 };
                 lease_state.lock().await.record_rx();
+                control_deadline = tokio::time::Instant::now() + heartbeat_tolerance + suspect_grace;
                 snafu_error_get_or_continue!(
                     handle_request::<LocalStream>(
                         msg,
@@ -972,6 +1000,7 @@ where
                         lease_state.clone(),
                         stream_tasks,
                         &shutdown,
+                        setup_slots,
                     )
                     .await
                 );
@@ -998,14 +1027,14 @@ where
             }
             _ = heartbeat.tick() => {
                 ping_seq = ping_seq.wrapping_add(1);
-                if write_tx.send(LocalControlWrite::Ping { seq: ping_seq }).is_err() {
+                if write_tx.try_send(LocalControlWrite::Ping { seq: ping_seq }).is_err() {
                     break Err(Status::SendPing);
                 }
 
                 let last_rx_age = lease_state.lock().await.last_rx_age();
                 if registration.protocol_version >= CONTROL_PROTOCOL_V2
                     && last_rx_age >= heartbeat_tolerance
-                    && !probe_in_flight
+                    && probes.is_empty()
                 {
                     tracing::warn!(
                         event = "local_server_lease_suspect",
@@ -1017,20 +1046,17 @@ where
                         heartbeat_tolerance_ms = duration_to_millis(heartbeat_tolerance),
                         "local server control lease is suspect; probing remote registration"
                     );
-                    probe_in_flight = true;
-                    let probe_tx = probe_tx.clone();
                     let probe_key = key.clone();
                     let probe_remote = remote_addr.clone();
-                    tokio::spawn(async move {
-                        let result = probe_remote_registration(
+                    probes.spawn(async move {
+                        probe_remote_registration(
                             probe_remote,
                             probe_key,
                             registration,
                             namespace,
                             credential,
                         )
-                        .await;
-                        let _ = probe_tx.send(result);
+                        .await
                     });
                 }
             }
@@ -1045,8 +1071,12 @@ where
                 );
                 break Err(Status::Cancelled);
             }
-            Some(probe_result) = probe_rx.recv() => {
-                probe_in_flight = false;
+            () = tokio::time::sleep_until(control_deadline) => {
+                tracing::warn!(event = "local_server_control_unresponsive", %key, worker_index, "control socket received no reply past grace; reconnecting");
+                break Err(Status::ReadMsg);
+            }
+            Some(probe_result) = probes.join_next() => {
+                let probe_result = probe_result.unwrap_or_else(|error| RegistrationProbeResult::Failed(error.to_string()));
                 let last_rx_age = lease_state.lock().await.last_rx_age();
                 match probe_result {
                     RegistrationProbeResult::Present => {
@@ -1139,17 +1169,26 @@ async fn handle_ping_interval<T: MessageWriter>(
     }
 }
 
-#[instrument(skip(msg, write_tx, lease_state, stream_tasks, shutdown))]
+#[instrument(skip(
+    msg,
+    target,
+    write_tx,
+    lease_state,
+    stream_tasks,
+    shutdown,
+    setup_slots
+))]
 #[allow(clippy::too_many_arguments)]
 async fn handle_request<LocalStream: StreamProvider>(
     msg: &[u8],
     target: StreamConnect,
     key: Arc<str>,
     conn_id: u32,
-    write_tx: &tokio::sync::mpsc::UnboundedSender<LocalControlWrite>,
+    write_tx: &tokio::sync::mpsc::Sender<LocalControlWrite>,
     lease_state: Arc<tokio::sync::Mutex<ControlLeaseState>>,
     stream_tasks: &mut JoinSet<()>,
     shutdown: &CancellationToken,
+    setup_slots: &Arc<tokio::sync::Semaphore>,
 ) -> error::Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -1169,8 +1208,12 @@ where
                 server_generation,
                 "local server received stream request"
             );
+            let Ok(permit) = setup_slots.clone().try_acquire_owned() else {
+                tracing::warn!(event = "local_server_setup_saturated", %key, client_id, "stream setup capacity reached; relay can select another worker");
+                return Ok(());
+            };
             write_tx
-                .send(LocalControlWrite::StreamAck {
+                .try_send(LocalControlWrite::StreamAck {
                     client_id,
                     server_generation,
                 })
@@ -1184,7 +1227,7 @@ where
             // stream of this tunnel is still moving bytes.
             stream_tasks.spawn(async move {
                 let forward =
-                    handle_stream::<LocalStream>(key, client_id, server_generation, target);
+                    handle_stream::<LocalStream>(key, client_id, server_generation, target, permit);
                 tokio::select! {
                     () = stream_shutdown.cancelled() => {}
                     result = forward => snafu_error_handle!(result),

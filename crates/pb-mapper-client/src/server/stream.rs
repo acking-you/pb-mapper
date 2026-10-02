@@ -40,6 +40,7 @@ pub async fn handle_stream<LocalStream: StreamProvider>(
     client_id: u32,
     server_generation: u64,
     connect: StreamConnect,
+    setup_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -70,9 +71,10 @@ where
     };
     let msg = request.encode().context(EncodePbConnStreamReqSnafu)?;
 
-    let timeout = control_io_timeout();
-    let mut remote_stream = match tokio::time::timeout(
-        timeout,
+    let timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut remote_stream = match tokio::time::timeout_at(
+        deadline,
         each_addr(remote_addr.as_slice(), TcpStream::connect),
     )
     .await
@@ -98,7 +100,11 @@ where
         let session = ClientHeaderSession::new_v2(&credential)
             .context(CreateHeaderToolSnafu { action: "session" })?;
         let response = session
-            .exchange(&mut remote_stream, &msg, timeout)
+            .exchange(
+                &mut remote_stream,
+                &msg,
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
             .await
             .context(WritePbConnStreamReqSnafu)?;
         let resp = PbConnResponse::decode(&response).context(DecodePbConnStreamRespSnafu)?;
@@ -116,9 +122,22 @@ where
     };
 
     // start forward network traffic
-    let mut local_stream = LocalStream::from_addr(local_addr.as_slice())
-        .await
-        .context(ConnectLocalStreamSnafu)?;
+    let mut local_stream = match tokio::time::timeout_at(
+        deadline,
+        LocalStream::from_addr(local_addr.as_slice()),
+    )
+    .await
+    {
+        Ok(result) => result.context(ConnectLocalStreamSnafu)?,
+        Err(_) => {
+            return ControlIoTimeoutSnafu {
+                action: "connect local service",
+                timeout,
+            }
+            .fail();
+        }
+    };
+    drop(setup_permit);
 
     let (client_reader, client_writer) = remote_stream.split();
     let (server_reader, server_writer) = local_stream.split();

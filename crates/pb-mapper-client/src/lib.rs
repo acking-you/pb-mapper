@@ -3,3 +3,4 @@ pub mod sdk;
 pub mod server;
 
 mod addr;
+mod recovery;

@@ -10,6 +10,12 @@ use pb_mapper_core as common;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(super)))]
 pub enum Error {
+    #[snafu(display("stream setup exceeded {timeout:?} for key {key}, client {conn_id}"))]
+    ClientConnSetupTimeout {
+        key: Arc<str>,
+        conn_id: RemoteConnId,
+        timeout: Duration,
+    },
     #[snafu(display("administrator operation failed: {detail}"))]
     AdminOperation { detail: String },
     #[snafu(display(

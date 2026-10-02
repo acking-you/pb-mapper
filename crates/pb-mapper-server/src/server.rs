@@ -265,40 +265,41 @@ pub async fn handle_server_conn(
             key: key.clone(),
             conn_id,
         })?;
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<ServerControlWrite>();
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<ServerControlWrite>(64);
         let writer_key = key.clone();
         let writer_retire_token = retire_token.clone();
-        let mut writer_handle = tokio::spawn(async move {
-            let mut msg_writer = session
-                .response_writer(&mut writer)
-                .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
-            msg_writer.write_msg(&register_response).await.context(
-                ServerConnWriteRegisteredOkSnafu {
-                    key: writer_key.clone(),
+        let mut writer_handle =
+            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let mut msg_writer = session
+                    .response_writer(&mut writer)
+                    .context(ServerConnCreateHeaderToolSnafu { tool: "writer" })?;
+                msg_writer.write_msg(&register_response).await.context(
+                    ServerConnWriteRegisteredOkSnafu {
+                        key: writer_key.clone(),
+                        conn_id,
+                    },
+                )?;
+                tracing::info!(
+                    event = "server_register_response_written",
+                    key = %writer_key,
+                    conn_id = %conn_id,
+                    need_codec,
+                    is_datagram,
+                    generation,
+                    protocol_version,
+                    lease_ttl_ms,
+                    "server register response written to local server"
+                );
+                run_control_writer(
+                    &mut msg_writer,
+                    &rx,
+                    &mut write_rx,
+                    &writer_retire_token,
+                    writer_key,
                     conn_id,
-                },
-            )?;
-            tracing::info!(
-                event = "server_register_response_written",
-                key = %writer_key,
-                conn_id = %conn_id,
-                need_codec,
-                is_datagram,
-                generation,
-                protocol_version,
-                lease_ttl_ms,
-                "server register response written to local server"
-            );
-            run_control_writer(
-                &mut msg_writer,
-                &rx,
-                &mut write_rx,
-                &writer_retire_token,
-                writer_key,
-                conn_id,
-            )
-            .await
-        });
+                )
+                .await
+            }));
 
         let reader_result = async {
             loop {
@@ -376,7 +377,7 @@ pub async fn handle_server_conn(
 #[instrument(skip(msg, write_tx))]
 async fn handle_control_message(
     msg: &[u8],
-    write_tx: &tokio::sync::mpsc::UnboundedSender<ServerControlWrite>,
+    write_tx: &tokio::sync::mpsc::Sender<ServerControlWrite>,
     task_sender: ManagerTaskSender,
     key: ImutableKey,
     conn_id: RemoteConnId,
@@ -429,7 +430,7 @@ async fn handle_control_message(
                 "received ping from local server"
             );
             write_tx
-                .send(ServerControlWrite::Pong(resp))
+                .try_send(ServerControlWrite::Pong(resp))
                 .map_err(|_| super::error::Error::ServerConnControlWriterClosed { key, conn_id })
         }
         PbServerRequest::PingV2 { seq } => {
@@ -467,7 +468,7 @@ async fn handle_control_message(
                 "received ping v2 from local server"
             );
             write_tx
-                .send(ServerControlWrite::Pong(resp))
+                .try_send(ServerControlWrite::Pong(resp))
                 .map_err(|_| super::error::Error::ServerConnControlWriterClosed { key, conn_id })
         }
         PbServerRequest::StreamAck {
@@ -513,16 +514,20 @@ async fn handle_control_message(
 async fn run_control_writer<T: MessageWriter>(
     msg_writer: &mut T,
     task_rx: &ConnTaskReceiver,
-    write_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ServerControlWrite>,
+    write_rx: &mut tokio::sync::mpsc::Receiver<ServerControlWrite>,
     retire_token: &CancellationToken,
     key: ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
     let writer_loop = async {
+        // Keep the kanal receive future alive when a Pong wins select. A send
+        // can already have transferred ownership before the receiver is polled.
+        let mut request = std::pin::pin!(task_rx.recv());
         loop {
             tokio::select! {
-                req = task_rx.recv() => {
+                req = &mut request => {
                     let req = req.context(ServerConnRecvConnTaskSnafu)?;
+                    request.set(task_rx.recv());
                     match req {
                         ConnTask::Retire { reason } => {
                             tracing::warn!(
@@ -658,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_the_retire_token_unwinds_a_writer_blocked_mid_write() {
         let (task_tx, task_rx) = kanal::bounded_async(4);
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(64);
         let retire_token = CancellationToken::new();
         let key: Arc<str> = Arc::from("wedged-service");
         let conn_id = RemoteConnId::from(3);
@@ -677,7 +682,7 @@ mod tests {
         // `select!` polls its arms in a random order, and could take the retirement
         // before the write ever started.
         write_tx
-            .send(ServerControlWrite::Pong(b"pong".to_vec()))
+            .try_send(ServerControlWrite::Pong(b"pong".to_vec()))
             .unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut control)
