@@ -716,6 +716,7 @@ pub async fn run_server_on_listener(
                 );
             }
             ManagerTask::Stream {
+                data_protocol,
                 key,
                 stream,
                 session,
@@ -785,6 +786,7 @@ pub async fn run_server_on_listener(
                 snafu_error_handle!(
                     client_sender
                         .try_send(ConnTask::StreamResp {
+                            data_protocol,
                             server_id,
                             server_generation: expected_generation,
                             stream,

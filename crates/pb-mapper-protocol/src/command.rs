@@ -78,10 +78,14 @@ pub enum PbConnRequest {
     },
     Subcribe {
         key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_protocol: Option<u16>,
     },
     SubcribeScoped {
         key: String,
         namespace: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_protocol: Option<u16>,
     },
     Status(PbConnStatusReq),
     StatusScoped {
@@ -90,12 +94,16 @@ pub enum PbConnRequest {
     },
     Stream {
         key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_protocol: Option<u16>,
         dst_id: u32,
         #[serde(default)]
         server_generation: u64,
     },
     StreamScoped {
         key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_protocol: Option<u16>,
         namespace: u64,
         dst_id: u32,
         #[serde(default)]
@@ -275,11 +283,15 @@ pub enum PbConnResponse {
     },
     Subcribe {
         codec_key: Option<AesKeyType>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_protocol: Option<u16>,
         client_id: u32,
         server_id: u32,
     },
     Stream {
         codec_key: Option<AesKeyType>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_protocol: Option<u16>,
     },
     Status(PbConnStatusResp),
     Admin(AdminResponse),

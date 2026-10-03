@@ -142,6 +142,7 @@ pub struct V2MessageWriter<'a, T: AsyncWriteExt + Unpin> {
     key: LessSafeKey,
     direction: u8,
     counter: u64,
+    poisoned: bool,
 }
 
 impl<'a, T: AsyncWriteExt + Unpin> V2MessageWriter<'a, T> {
@@ -162,12 +163,18 @@ impl<'a, T: AsyncWriteExt + Unpin> V2MessageWriter<'a, T> {
             key,
             direction,
             counter,
+            poisoned: false,
         })
     }
 }
 
 impl<T: AsyncWriteExt + Unpin> MessageWriter for V2MessageWriter<'_, T> {
     async fn write_msg(&mut self, message: &[u8]) -> Result<()> {
+        if self.poisoned {
+            return Err(protocol_error(
+                "protocol-v2 writer interrupted; close the connection",
+            ));
+        }
         let encrypted_len = message
             .len()
             .checked_add(AES_256_GCM.tag_len())
@@ -179,6 +186,13 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for V2MessageWriter<'_, T> {
             ));
         }
         let counter = self.counter;
+        // Reserve before sealing or awaiting I/O. Cancellation leaves a
+        // terminal writer; restarting a frame would desynchronize the stream.
+        self.counter = self
+            .counter
+            .checked_add(1)
+            .ok_or_else(|| protocol_error("protocol-v2 send counter exhausted"))?;
+        self.poisoned = true;
         let aad = frame_aad(&self.material, self.direction, counter, encrypted_len);
         let mut encrypted = message.to_vec();
         self.key
@@ -196,10 +210,7 @@ impl<T: AsyncWriteExt + Unpin> MessageWriter for V2MessageWriter<'_, T> {
             .write_all(&encrypted)
             .await
             .map_err(|error| protocol_error(format!("failed to write v2 frame body: {error}")))?;
-        self.counter = self
-            .counter
-            .checked_add(1)
-            .ok_or_else(|| protocol_error("protocol-v2 send counter exhausted"))?;
+        self.poisoned = false;
         Ok(())
     }
 }

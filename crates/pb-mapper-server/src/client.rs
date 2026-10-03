@@ -20,15 +20,15 @@ use crate::error::{
 use pb_mapper_core::checksum::{AesKeyType, gen_random_key};
 use pb_mapper_core::config::{stream_ack_timeout, stream_ready_timeout, stream_recovery_timeout};
 use pb_mapper_core::conn_id::RemoteConnId;
-use pb_mapper_core::snafu_error_get_or_return_ok;
+use pb_mapper_protocol::MessageWriter;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnResponse};
+use pb_mapper_protocol::data::DataCodec;
 use pb_mapper_protocol::forward::{
     CodecDatagramReader, CodecDatagramWriter, CodecForwardReader, CodecForwardWriter,
     NormalDatagramReader, NormalDatagramWriter, NormalForwardReader, NormalForwardWriter,
     start_datagram_forward, start_forward,
 };
 use pb_mapper_protocol::secure::ServerHeaderSession;
-use pb_mapper_protocol::{MessageWriter, get_decodec, get_encodec};
 
 /// Ensure that client-side connections are properly deregistered before a normal connection is
 /// disconnected or an exception occurs
@@ -146,7 +146,13 @@ pub async fn handle_client_conn(
     task_sender: ManagerTaskSender,
     mut conn: TcpStream,
     session: ServerHeaderSession,
+    data_protocol: Option<u16>,
 ) -> Result<()> {
+    DataCodec::validate_offer(data_protocol, session.protocol()).context(
+        ClientConnCreateHeaderToolSnafu {
+            tool: "data protocol",
+        },
+    )?;
     let prev_time = Instant::now();
     let mut guard = ClientConnGuard::new(conn_id, None, task_sender.clone(), key.clone());
     let setup_timeout = pb_mapper_core::config::control_io_timeout().min(Duration::from_secs(5));
@@ -168,8 +174,14 @@ pub async fn handle_client_conn(
             timeout: setup_timeout,
         })
     });
-    let (mut server_stream, server_session, server_id, codec_key, is_datagram) = match setup_result
-    {
+    let ReadyStream {
+        mut server_stream,
+        server_session,
+        server_id,
+        codec_key,
+        is_datagram,
+        data_protocol: server_data_protocol,
+    } = match setup_result {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -184,6 +196,31 @@ pub async fn handle_client_conn(
         }
     };
     guard.set_server_id(server_id);
+    DataCodec::validate_offer(server_data_protocol, server_session.protocol()).context(
+        ClientConnCreateHeaderToolSnafu {
+            tool: "server data protocol",
+        },
+    )?;
+    let client_codec = codec_key
+        .map(|key| DataCodec::negotiate(key, data_protocol, session.protocol()))
+        .transpose()
+        .context(ClientConnCreateHeaderToolSnafu {
+            tool: "client data codec",
+        })?;
+    // Each leg gets independent random material, even when one or both peers
+    // need the legacy format. Re-encryption must never repeat the other leg's key.
+    let server_codec = codec_key
+        .map(|_| {
+            DataCodec::negotiate(
+                gen_random_key(),
+                server_data_protocol,
+                server_session.protocol(),
+            )
+        })
+        .transpose()
+        .context(ClientConnCreateHeaderToolSnafu {
+            tool: "server data codec",
+        })?;
     let server_cancellation = server_session
         .context()
         .map_err(|error| super::error::Error::ClientConnAuthInactive {
@@ -194,127 +231,149 @@ pub async fn handle_client_conn(
             detail: error.to_string(),
         })?;
 
-    let forwarding = async {
-        let duration = Instant::now() - prev_time;
+    let forwarding =
+        async {
+            let duration = Instant::now() - prev_time;
 
-        tracing::info!(
-            event = "client_stream_setup_finished",
-            key = %key,
-            client_conn_id = %conn_id,
-            server_conn_id = %server_id,
-            setup_elapsed_ms = duration.as_millis(),
-            is_datagram,
-            codec_enabled = codec_key.is_some(),
-            "server stream is ready; start forwarding client traffic"
-        );
+            tracing::info!(
+                event = "client_stream_setup_finished",
+                key = %key,
+                client_conn_id = %conn_id,
+                server_conn_id = %server_id,
+                setup_elapsed_ms = duration.as_millis(),
+                is_datagram,
+                codec_enabled = codec_key.is_some(),
+                "server stream is ready; start forwarding client traffic"
+            );
 
-        let (mut client_reader, mut client_writer) = conn.split();
-        let (mut server_reader, mut server_writer) = server_stream.split();
+            timeout(setup_timeout.saturating_sub(prev_time.elapsed()), async {
+                write_subscribe_response(
+                    &mut conn,
+                    &session,
+                    &key,
+                    conn_id,
+                    server_id,
+                    client_codec,
+                    is_datagram,
+                )
+                .await?;
 
-        // response message to server to indicate that stream handling has finished
-        {
-            let mut msg_writer = server_session
-                .response_writer(&mut server_writer)
-                .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
-            let msg = PbConnResponse::Stream { codec_key }.encode().context(
-                ClientConnEncodeStreamRespSnafu {
+                // response message to server to indicate that stream handling has finished
+                {
+                    let mut msg_writer = server_session
+                        .response_writer(&mut server_stream)
+                        .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
+                    let msg = PbConnResponse::Stream {
+                        codec_key: server_codec.map(DataCodec::key),
+                        data_protocol: server_codec.and_then(DataCodec::protocol),
+                    }
+                    .encode()
+                    .context(ClientConnEncodeStreamRespSnafu {
+                        key: key.clone(),
+                        conn_id,
+                    })?;
+                    msg_writer
+                        .write_msg(&msg)
+                        .await
+                        .context(ClientConnWriteStreamRespSnafu {
+                            key: key.clone(),
+                            conn_id,
+                        })?;
+                }
+
+                Ok(())
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(super::error::Error::ClientConnSetupTimeout {
                     key: key.clone(),
                     conn_id,
-                },
-            )?;
-            msg_writer
-                .write_msg(&msg)
-                .await
-                .context(ClientConnWriteStreamRespSnafu {
-                    key: key.clone(),
-                    conn_id,
-                })?;
-        }
+                    timeout: setup_timeout,
+                })
+            })?;
+            let (mut client_reader, mut client_writer) = conn.split();
+            let (mut server_reader, mut server_writer) = server_stream.split();
 
-        let client_framing = session.framing_key();
-        let server_framing = server_session.framing_key();
-        if is_datagram {
-            match codec_key {
-                Some(key) => {
-                    start_datagram_forward(
-                        CodecDatagramReader::new(
-                            &mut client_reader,
-                            snafu_error_get_or_return_ok!(get_decodec(&key)),
+            let client_framing = session.framing_key();
+            let server_framing = server_session.framing_key();
+            if is_datagram {
+                match client_codec.zip(server_codec) {
+                    Some((client_codec, server_codec)) => {
+                        let (client_decoder, client_encoder) = client_codec
+                            .relay_codecs()
+                            .context(ClientConnCreateHeaderToolSnafu {
+                                tool: "client codecs",
+                            })?;
+                        let (server_decoder, server_encoder) = server_codec
+                            .relay_codecs()
+                            .context(ClientConnCreateHeaderToolSnafu {
+                                tool: "server codecs",
+                            })?;
+                        start_datagram_forward(
+                            CodecDatagramReader::new(&mut client_reader, client_decoder)
+                                .with_checksum_key(client_framing),
+                            CodecDatagramWriter::new(&mut client_writer, client_encoder)
+                                .with_checksum_key(client_framing),
+                            CodecDatagramReader::new(&mut server_reader, server_decoder)
+                                .with_checksum_key(server_framing),
+                            CodecDatagramWriter::new(&mut server_writer, server_encoder)
+                                .with_checksum_key(server_framing),
                         )
-                        .with_checksum_key(client_framing),
-                        CodecDatagramWriter::new(
-                            &mut client_writer,
-                            snafu_error_get_or_return_ok!(get_encodec(&key)),
+                        .await;
+                    }
+                    None => {
+                        start_datagram_forward(
+                            NormalDatagramReader::new(&mut client_reader)
+                                .with_checksum_key(client_framing),
+                            NormalDatagramWriter::new(&mut client_writer)
+                                .with_checksum_key(client_framing),
+                            NormalDatagramReader::new(&mut server_reader)
+                                .with_checksum_key(server_framing),
+                            NormalDatagramWriter::new(&mut server_writer)
+                                .with_checksum_key(server_framing),
                         )
-                        .with_checksum_key(client_framing),
-                        CodecDatagramReader::new(
-                            &mut server_reader,
-                            snafu_error_get_or_return_ok!(get_decodec(&key)),
-                        )
-                        .with_checksum_key(server_framing),
-                        CodecDatagramWriter::new(
-                            &mut server_writer,
-                            snafu_error_get_or_return_ok!(get_encodec(&key)),
-                        )
-                        .with_checksum_key(server_framing),
-                    )
-                    .await;
+                        .await;
+                    }
                 }
-                None => {
-                    start_datagram_forward(
-                        NormalDatagramReader::new(&mut client_reader)
-                            .with_checksum_key(client_framing),
-                        NormalDatagramWriter::new(&mut client_writer)
-                            .with_checksum_key(client_framing),
-                        NormalDatagramReader::new(&mut server_reader)
-                            .with_checksum_key(server_framing),
-                        NormalDatagramWriter::new(&mut server_writer)
-                            .with_checksum_key(server_framing),
-                    )
-                    .await;
+            } else {
+                match client_codec.zip(server_codec) {
+                    Some((client_codec, server_codec)) => {
+                        let (client_decoder, client_encoder) = client_codec
+                            .relay_codecs()
+                            .context(ClientConnCreateHeaderToolSnafu {
+                                tool: "client codecs",
+                            })?;
+                        let (server_decoder, server_encoder) = server_codec
+                            .relay_codecs()
+                            .context(ClientConnCreateHeaderToolSnafu {
+                                tool: "server codecs",
+                            })?;
+                        start_forward(
+                            CodecForwardReader::new(&mut client_reader, client_decoder)
+                                .with_checksum_key(client_framing),
+                            CodecForwardWriter::new(&mut client_writer, client_encoder)
+                                .with_checksum_key(client_framing),
+                            CodecForwardReader::new(&mut server_reader, server_decoder)
+                                .with_checksum_key(server_framing),
+                            CodecForwardWriter::new(&mut server_writer, server_encoder)
+                                .with_checksum_key(server_framing),
+                        )
+                        .await;
+                    }
+                    None => {
+                        start_forward(
+                            NormalForwardReader::new(&mut client_reader),
+                            NormalForwardWriter::new(&mut client_writer),
+                            NormalForwardReader::new(&mut server_reader),
+                            NormalForwardWriter::new(&mut server_writer),
+                        )
+                        .await;
+                    }
                 }
             }
-        } else {
-            match codec_key {
-                Some(key) => {
-                    start_forward(
-                        CodecForwardReader::new(
-                            &mut client_reader,
-                            snafu_error_get_or_return_ok!(get_decodec(&key)),
-                        )
-                        .with_checksum_key(client_framing),
-                        CodecForwardWriter::new(
-                            &mut client_writer,
-                            snafu_error_get_or_return_ok!(get_encodec(&key)),
-                        )
-                        .with_checksum_key(client_framing),
-                        CodecForwardReader::new(
-                            &mut server_reader,
-                            snafu_error_get_or_return_ok!(get_decodec(&key)),
-                        )
-                        .with_checksum_key(server_framing),
-                        CodecForwardWriter::new(
-                            &mut server_writer,
-                            snafu_error_get_or_return_ok!(get_encodec(&key)),
-                        )
-                        .with_checksum_key(server_framing),
-                    )
-                    .await;
-                }
-                None => {
-                    start_forward(
-                        NormalForwardReader::new(&mut client_reader),
-                        NormalForwardWriter::new(&mut client_writer),
-                        NormalForwardReader::new(&mut server_reader),
-                        NormalForwardWriter::new(&mut server_writer),
-                    )
-                    .await;
-                }
-            }
-        }
 
-        Ok(())
-    };
+            Ok(())
+        };
     let result = tokio::select! {
             result = forwarding => result,
             _ = server_cancellation.cancelled() => {
@@ -378,14 +437,15 @@ async fn write_subscribe_response(
     key: &ImutableKey,
     conn_id: RemoteConnId,
     server_id: RemoteConnId,
-    codec_key: Option<AesKeyType>,
+    codec: Option<DataCodec>,
     is_datagram: bool,
 ) -> Result<()> {
     let mut msg_writer = session
         .response_writer(conn)
         .context(ClientConnCreateHeaderToolSnafu { tool: "writer" })?;
     let msg = PbConnResponse::Subcribe {
-        codec_key,
+        codec_key: codec.map(DataCodec::key),
+        data_protocol: codec.and_then(DataCodec::protocol),
         client_id: conn_id.into(),
         server_id: server_id.into(),
     }
@@ -407,10 +467,20 @@ async fn write_subscribe_response(
         client_conn_id = %conn_id,
         server_conn_id = %server_id,
         is_datagram,
-        codec_enabled = codec_key.is_some(),
+        codec_enabled = codec.is_some(),
+        data_protocol = codec.and_then(DataCodec::protocol),
         "subscribe response written to client"
     );
     Ok(())
+}
+
+struct ReadyStream {
+    server_stream: TcpStream,
+    server_session: ServerHeaderSession,
+    server_id: RemoteConnId,
+    codec_key: Option<AesKeyType>,
+    is_datagram: bool,
+    data_protocol: Option<u16>,
 }
 
 async fn get_server_stream(
@@ -419,13 +489,7 @@ async fn get_server_stream(
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
-) -> Result<(
-    TcpStream,
-    ServerHeaderSession,
-    RemoteConnId,
-    Option<AesKeyType>,
-    bool,
-)> {
+) -> Result<ReadyStream> {
     let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
     let ready_timeout = stream_ready_timeout();
     let recovery_timeout = stream_recovery_timeout().max(
@@ -596,22 +660,20 @@ async fn get_server_stream(
 
         match resp {
             ConnTask::StreamResp {
+                data_protocol,
                 server_id,
                 server_generation: response_generation,
                 stream,
                 session: stream_session,
             } if response_generation == server_generation => {
-                write_subscribe_response(
-                    conn,
-                    session,
-                    &key,
-                    conn_id,
+                return Ok(ReadyStream {
+                    server_stream: stream,
+                    server_session: stream_session,
                     server_id,
                     codec_key,
                     is_datagram,
-                )
-                .await?;
-                return Ok((stream, stream_session, server_id, codec_key, is_datagram));
+                    data_protocol,
+                });
             }
             ConnTask::StreamAck {
                 server_id,
@@ -664,6 +726,7 @@ async fn get_server_stream(
         };
 
         if let ConnTask::StreamResp {
+            data_protocol,
             server_id,
             server_generation: response_generation,
             stream,
@@ -671,17 +734,14 @@ async fn get_server_stream(
         } = resp
         {
             if response_generation == server_generation {
-                write_subscribe_response(
-                    conn,
-                    session,
-                    &key,
-                    conn_id,
+                return Ok(ReadyStream {
+                    server_stream: stream,
+                    server_session: stream_session,
                     server_id,
                     codec_key,
                     is_datagram,
-                )
-                .await?;
-                return Ok((stream, stream_session, server_id, codec_key, is_datagram));
+                    data_protocol,
+                });
             }
             tracing::warn!(
                 event = "server_stream_generation_mismatch",

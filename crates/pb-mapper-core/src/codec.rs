@@ -1,23 +1,31 @@
-use std::mem::size_of;
-
 use ring::aead::{
     AES_256_GCM, Aad, BoundKey, NONCE_LEN, Nonce, NonceSequence, OpeningKey, SealingKey, Tag,
     UnboundKey,
 };
 
-#[derive(Clone, Copy, Default)]
-struct Counter(u32);
+#[derive(Clone, Copy)]
+struct Counter(u64, u64);
+
+impl Default for Counter {
+    fn default() -> Self {
+        Self(0, u64::from(u32::MAX))
+    }
+}
 
 impl Counter {
-    fn advance(&mut self) {
+    fn advance(&mut self) -> RingResult<()> {
+        if self.0 >= self.1 {
+            return Err(ring::error::Unspecified);
+        }
         self.0 += 1;
+        Ok(())
     }
 
     const fn size() -> usize {
-        size_of::<u32>()
+        8
     }
 
-    fn to_bytes(self) -> [u8; 4] {
+    fn to_bytes(self) -> [u8; 8] {
         self.0.to_be_bytes()
     }
 }
@@ -35,7 +43,7 @@ impl NonceSequence for CounterNonceSequence {
         let bytes = self.0.to_bytes();
         nonce_bytes[NONCE_LEN - Counter::size()..].copy_from_slice(&bytes);
 
-        self.0.advance(); // advance the counter
+        self.0.advance()?;
         Ok(Nonce::assume_unique_for_key(*nonce_bytes))
     }
 }
@@ -76,6 +84,17 @@ pub struct Aes256GcmEnCodec {
 }
 
 impl Aes256GcmEnCodec {
+    /// Construct a negotiated data-v2 codec with a directional key and a
+    /// checked 64-bit counter. Legacy constructors retain their 32-bit limit.
+    pub fn try_new_data_v2(key: &[u8]) -> RingResult<Self> {
+        Ok(Self {
+            seal: SealingKey::new(
+                UnboundKey::new(&AES_256_GCM, key)?,
+                CounterNonceSequence(Counter(0, u64::MAX), [0; NONCE_LEN]),
+            ),
+        })
+    }
+
     pub fn try_new(key: &[u8]) -> RingResult<Self> {
         let counter = CounterNonceSequence::default();
         Ok(Self {
@@ -103,6 +122,16 @@ pub struct Aes256GcmDeCodec {
 }
 
 impl Aes256GcmDeCodec {
+    /// Construct the receiving half of a negotiated data-v2 codec.
+    pub fn try_new_data_v2(key: &[u8]) -> RingResult<Self> {
+        Ok(Self {
+            open: OpeningKey::new(
+                UnboundKey::new(&AES_256_GCM, key)?,
+                CounterNonceSequence(Counter(0, u64::MAX), [0; NONCE_LEN]),
+            ),
+        })
+    }
+
     pub fn try_new(key: &[u8]) -> RingResult<Self> {
         let counter = CounterNonceSequence::default();
         Ok(Self {
@@ -149,10 +178,30 @@ pub trait Decryptor {
 
 #[cfg(test)]
 mod tests {
+    use super::{Counter, CounterNonceSequence};
+    use ring::aead::NonceSequence;
     use std::slice::from_raw_parts_mut;
     use std::time::Instant;
 
     use crate::codec::Aes256GcmCodec;
+
+    #[test]
+    fn legacy_nonces_keep_their_bytes_and_both_counter_widths_fail_closed() {
+        for limit in [u64::from(u32::MAX), u64::MAX] {
+            let mut seq = CounterNonceSequence(Counter(limit - 1, limit), [0; 12]);
+            let nonce = seq.advance().unwrap();
+            assert_eq!(&nonce.as_ref()[..4], &[0; 4]);
+            assert_eq!(&nonce.as_ref()[4..], &(limit - 1).to_be_bytes());
+            assert!(seq.advance().is_err());
+            assert!(seq.advance().is_err());
+        }
+        let mut seq = CounterNonceSequence::default();
+        assert_eq!(seq.advance().unwrap().as_ref(), &[0; 12]);
+        assert_eq!(
+            seq.advance().unwrap().as_ref(),
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+    }
 
     struct Timer {
         ins: Instant,

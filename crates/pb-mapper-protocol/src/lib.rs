@@ -8,6 +8,7 @@
 
 pub mod buffer;
 pub mod command;
+pub mod data;
 pub mod forward;
 mod frame_read;
 pub mod secure;

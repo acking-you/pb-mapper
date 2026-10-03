@@ -688,7 +688,7 @@ fn legacy_message_writer<'a, T: AsyncWriteExt + Unpin>(
     ))
 }
 
-fn protocol_error(detail: impl Into<String>) -> Error {
+pub(crate) fn protocol_error(detail: impl Into<String>) -> Error {
     Error::MsgProtocol {
         detail: detail.into(),
     }

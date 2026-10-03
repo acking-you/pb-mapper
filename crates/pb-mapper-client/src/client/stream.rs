@@ -18,6 +18,7 @@ use pb_mapper_core::checksum::Credential;
 use pb_mapper_core::config::control_io_timeout;
 use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnResponse};
+use pb_mapper_protocol::data::{DATA_PROTOCOL_V2, DataCodec};
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use uni_stream::stream::{NetworkStream, set_tcp_keep_alive, set_tcp_nodelay};
@@ -68,7 +69,7 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
             () = wake.network_changed(), if Instant::now() < deadline => continue,
             result = tokio::time::timeout_at(
             attempt_deadline,
-            subscribe(&key, remote_addr.clone(), keep_alive, namespace, credential),
+            subscribe(&key, remote_addr.clone(), keep_alive, namespace, credential, LocalStream::supports_data_v2()),
         ) => result,
         };
         match result {
@@ -122,7 +123,7 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     let (client_reader, client_writer) = local_stream.split();
     let (server_reader, server_writer) = remote_stream.split();
     snafu_error_handle!(
-        <LocalStream as StreamForward>::forward_local_to_remote(
+        <LocalStream as StreamForward>::forward_local_to_remote_with_codec(
             codec_key,
             *credential.key(),
             client_reader,
@@ -142,12 +143,8 @@ async fn subscribe(
     keep_alive: bool,
     namespace: Option<u64>,
     credential: Credential,
-) -> Result<(
-    TcpStream,
-    Option<pb_mapper_core::checksum::AesKeyType>,
-    u32,
-    u32,
-)> {
+    offered_v2: bool,
+) -> Result<(TcpStream, Option<DataCodec>, u32, u32)> {
     let mut remote_stream = remote_addr
         .connect()
         .await
@@ -167,10 +164,12 @@ async fn subscribe(
         // handle request
         let request = match namespace {
             Some(namespace) => PbConnRequest::SubcribeScoped {
+                data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
                 key: key.to_string(),
                 namespace,
             },
             None => PbConnRequest::Subcribe {
+                data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
                 key: key.to_string(),
             },
         };
@@ -184,10 +183,19 @@ async fn subscribe(
         let resp = PbConnResponse::decode(&response).context(DecodeSubcribeRespSnafu)?;
         match resp {
             PbConnResponse::Subcribe {
+                data_protocol,
                 codec_key,
                 client_id,
                 server_id,
-            } => (codec_key, client_id, server_id),
+            } => (
+                DataCodec::from_response(codec_key, data_protocol, offered_v2).context(
+                    CreateHeaderToolSnafu {
+                        action: "data codec",
+                    },
+                )?,
+                client_id,
+                server_id,
+            ),
             PbConnResponse::Error(error) => super::error::SubscribeRemoteSnafu {
                 code: error.code,
                 message: error.message,

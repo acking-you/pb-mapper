@@ -99,6 +99,14 @@ key, persistent server instance ID, and key ID; the relay stores lifecycle
 metadata rather than a copy of each temporary secret. Optional AES-256-GCM data
 encryption is enabled with `--codec` when registering a service.
 
+Data encryption now negotiates independently on the subscriber and publisher
+legs. Updated peers use separate directional keys and 64-bit counters; an older
+peer keeps its existing format. New relays generate independent keys for both
+legs, so register/connect clients can be upgraded separately. An authenticated
+old relay response remains compatible; authentication failures never trigger a
+protocol downgrade. See [data encryption compatibility](docs/data-encryption-compatibility.md)
+for the mixed-version security boundary and reproducible tests.
+
 pb-mapper uses pre-shared credentials, not public-key identity. Use TLS or
 another application protocol when you also need certificate-based endpoint
 identity or protection against traffic analysis. See the

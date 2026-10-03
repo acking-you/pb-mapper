@@ -145,15 +145,20 @@ pub(super) async fn handle_conn(
                 heartbeat_tolerance_ms,
             }
         }
-        PbConnRequest::SubcribeScoped { key, namespace } => {
+        PbConnRequest::SubcribeScoped {
+            key,
+            namespace,
+            data_protocol,
+        } => {
             requested_namespace = Some(namespace);
-            PbConnRequest::Subcribe { key }
+            PbConnRequest::Subcribe { key, data_protocol }
         }
         PbConnRequest::StatusScoped { status, namespace } => {
             requested_namespace = Some(namespace);
             PbConnRequest::Status(status)
         }
         PbConnRequest::StreamScoped {
+            data_protocol,
             key,
             namespace,
             dst_id,
@@ -161,6 +166,7 @@ pub(super) async fn handle_conn(
         } => {
             requested_namespace = Some(namespace);
             PbConnRequest::Stream {
+                data_protocol,
                 key,
                 dst_id,
                 server_generation,
@@ -258,7 +264,7 @@ pub(super) async fn handle_conn(
             )
             .await?;
         }
-        PbConnRequest::Subcribe { key } => {
+        PbConnRequest::Subcribe { key, data_protocol } => {
             tracing::info!(
                 event = "init_request",
                 request = "subscribe",
@@ -285,12 +291,20 @@ pub(super) async fn handle_conn(
                 conn_id,
                 "subscribed data connection",
                 |conn, session| {
-                    handle_client_conn(key, conn_id, manager_task_sender, conn, session)
+                    handle_client_conn(
+                        key,
+                        conn_id,
+                        manager_task_sender,
+                        conn,
+                        session,
+                        data_protocol,
+                    )
                 },
             )
             .await?;
         }
         PbConnRequest::Stream {
+            data_protocol,
             key,
             dst_id,
             server_generation,
@@ -318,6 +332,7 @@ pub(super) async fn handle_conn(
             };
             manager_task_sender
                 .send(ManagerTask::Stream {
+                    data_protocol,
                     key: key.clone(),
                     stream: conn,
                     session,

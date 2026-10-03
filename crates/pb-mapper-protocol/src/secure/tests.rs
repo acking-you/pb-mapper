@@ -31,6 +31,42 @@ async fn cancel_partial_read(reader: &mut impl MessageReader) {
 }
 
 #[tokio::test]
+async fn interrupted_v2_writer_cannot_reuse_a_nonce_or_restart_a_partial_frame() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
+    let (mut tx, mut rx) = tokio::io::duplex(1);
+    {
+        let mut writer =
+            V2MessageWriter::new(&mut tx, material, DIRECTION_SERVER_TO_CLIENT, 0).unwrap();
+        {
+            let mut pending = std::pin::pin!(writer.write_msg(b"cancelled frame"));
+            poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+        }
+        assert!(writer.write_msg(b"different frame").await.is_err());
+    }
+    drop(tx);
+    let mut wire = Vec::new();
+    rx.read_to_end(&mut wire).await.unwrap();
+    assert_eq!(wire.len(), 1);
+}
+
+#[tokio::test]
+async fn exhausted_v2_writer_fails_before_emitting_any_ciphertext() {
+    let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
+    let mut wire = Vec::new();
+    let mut writer =
+        V2MessageWriter::new(&mut wire, material, DIRECTION_SERVER_TO_CLIENT, u64::MAX).unwrap();
+    assert!(writer.write_msg(b"overflow").await.is_err());
+    assert!(writer.write_msg(b"retry").await.is_err());
+    assert!(wire.is_empty());
+}
+
+#[tokio::test]
 async fn v2_fragmented_frame_survives_read_cancellation() {
     let material = derive_material(ADMIN_KEY_ID, &[7; 32], [3; CONNECTION_SALT_LEN]).unwrap();
     let mut wire = Vec::new();

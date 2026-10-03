@@ -90,6 +90,7 @@ pub enum ManagerTask {
         excluded_server_conns: Vec<(RemoteConnId, u64)>,
     },
     Stream {
+        data_protocol: Option<u16>,
         key: ImutableKey,
         stream: TcpStream,
         session: ServerHeaderSession,
@@ -204,6 +205,7 @@ pub enum ConnTask {
         server_generation: u64,
     },
     StreamResp {
+        data_protocol: Option<u16>,
         server_id: RemoteConnId,
         server_generation: u64,
         stream: TcpStream,

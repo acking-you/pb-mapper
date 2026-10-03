@@ -554,6 +554,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         .write_initial(
             &mut subscriber,
             &PbConnRequest::Subcribe {
+                data_protocol: None,
                 key: service.to_string(),
             }
             .encode()
@@ -594,6 +595,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
         .write_initial(
             &mut provider,
             &PbConnRequest::StreamScoped {
+                data_protocol: None,
                 key: service.to_string(),
                 namespace: issued.metadata.key_id.as_u64(),
                 dst_id: client_id,
@@ -1080,6 +1082,7 @@ async fn subscribe_retires_unacked_control_connection() {
 
     let mut client = wait_for_server(server_addr).await;
     let request = PbConnRequest::Subcribe {
+        data_protocol: None,
         key: key.to_string(),
     }
     .encode()
@@ -1191,6 +1194,7 @@ async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection
 
         let mut stream = TcpStream::connect(server_addr).await.unwrap();
         let request = PbConnRequest::Stream {
+            data_protocol: None,
             key: replacement_key,
             dst_id: client_id,
             server_generation,
@@ -1205,6 +1209,7 @@ async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection
 
     let mut client = wait_for_server(server_addr).await;
     let request = PbConnRequest::Subcribe {
+        data_protocol: None,
         key: key.to_string(),
     }
     .encode()
@@ -1264,6 +1269,7 @@ async fn subscribe_missing_key_closes_without_hanging() {
     .expect("server did not start");
 
     let request = PbConnRequest::Subcribe {
+        data_protocol: None,
         key: "missing-key".to_string(),
     }
     .encode()
@@ -1367,6 +1373,7 @@ async fn bypass_unacked_control(at_capacity: bool) {
 
         let mut stream = TcpStream::connect(server_addr).await.unwrap();
         let request = PbConnRequest::Stream {
+            data_protocol: None,
             key: healthy_key,
             dst_id: client_id,
             server_generation,
@@ -1395,6 +1402,7 @@ async fn bypass_unacked_control(at_capacity: bool) {
 
     let mut client = wait_for_server(server_addr).await;
     let request = PbConnRequest::Subcribe {
+        data_protocol: None,
         key: key.to_string(),
     }
     .encode()
@@ -1479,6 +1487,7 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
 
         let mut stream = TcpStream::connect(server_addr).await.unwrap();
         let request = PbConnRequest::Stream {
+            data_protocol: None,
             key: healthy_key,
             dst_id: client_id,
             server_generation,
@@ -1528,6 +1537,7 @@ async fn subscribe_bypasses_acked_control_connection_without_stream() {
 
     let mut client = wait_for_server(server_addr).await;
     let request = PbConnRequest::Subcribe {
+        data_protocol: None,
         key: key.to_string(),
     }
     .encode()

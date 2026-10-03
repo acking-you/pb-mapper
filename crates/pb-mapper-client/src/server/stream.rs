@@ -13,6 +13,7 @@ use pb_mapper_core::checksum::Credential;
 use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout};
 use pb_mapper_core::snafu_error_handle;
 use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnResponse};
+use pb_mapper_protocol::data::{DATA_PROTOCOL_V2, DataCodec};
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use uni_stream::stream::{StreamProvider, StreamSplit, set_tcp_keep_alive, set_tcp_nodelay};
@@ -52,14 +53,17 @@ where
         credential,
     } = connect;
 
+    let offered_v2 = <LocalStream::Item as StreamForward>::supports_data_v2();
     let request = match namespace {
         Some(namespace) => PbConnRequest::StreamScoped {
+            data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
             key: key.to_string(),
             namespace,
             dst_id: client_id,
             server_generation,
         },
         None => PbConnRequest::Stream {
+            data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
             key: key.to_string(),
             dst_id: client_id,
             server_generation,
@@ -101,7 +105,14 @@ where
             .context(WritePbConnStreamReqSnafu)?;
         let resp = PbConnResponse::decode(&response).context(DecodePbConnStreamRespSnafu)?;
         match resp {
-            PbConnResponse::Stream { codec_key } => codec_key,
+            PbConnResponse::Stream {
+                codec_key,
+                data_protocol,
+            } => DataCodec::from_response(codec_key, data_protocol, offered_v2).context(
+                CreateHeaderToolSnafu {
+                    action: "data codec",
+                },
+            )?,
             PbConnResponse::Error(error) => PbConnStreamRespNotMatchSnafu {
                 resp: format!("{}: {}", error.code, error.message),
             }
@@ -135,7 +146,7 @@ where
     let (server_reader, server_writer) = local_stream.split();
 
     snafu_error_handle!(
-        <LocalStream::Item as StreamForward>::forward_local_to_remote(
+        <LocalStream::Item as StreamForward>::forward_local_to_remote_with_codec(
             codec_key,
             *credential.key(),
             server_reader,
