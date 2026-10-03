@@ -33,6 +33,8 @@ export declare class Admin {
 export declare class Client {
   constructor(config: JsClientConfig)
   server(): string
+  /** Wake recovering tunnels after a host network or resume notification. */
+  notifyNetworkChange(): void
   register(request: JsRegisterRequest): Promise<Registration>
   connect(request: JsConnectRequest): Promise<Connection>
   listKeys(): Promise<Array<string>>
@@ -50,6 +52,8 @@ export declare class Connection {
    * `stopped`, or `failed:<reason>`.
    */
   status(): string
+  /** Inspect the running SDK version, failure phase and bounded setup load. */
+  diagnostics(): JsTunnelDiagnostics
   /**
    * Resolves once the tunnel is connected, and rejects if it fails or
    * is stopped first.
@@ -72,6 +76,8 @@ export declare class Registration {
    * `stopped`, or `failed:<reason>`.
    */
   status(): string
+  /** Inspect the running SDK version, failure phase and bounded setup load. */
+  diagnostics(): JsTunnelDiagnostics
   /**
    * Resolves once the tunnel is connected, and rejects if it fails or
    * is stopped first.
@@ -176,4 +182,20 @@ export interface JsServiceInfo {
   transport: string
   codecEnabled: boolean
   connectionCount: number
+}
+
+/** Recovery counters from the running SDK, with no credential or payload data. */
+export interface JsTunnelDiagnostics {
+  sdkVersion: string
+  lastAttemptPhase: string
+  attempts: number
+  consecutiveFailures: number
+  lastFailure?: string
+  lastSuccessAgeMs?: number
+  lastSetupLatencyMs?: number
+  nextRetryInMs?: number
+  dnsAgeMs?: number
+  networkGeneration: number
+  activeControlSetups: number
+  activeDataSetups: number
 }

@@ -1,3 +1,5 @@
+use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
+use crate::endpoint::{RecoveryWake, RelayEndpoint};
 pub mod error;
 mod stream;
 
@@ -66,6 +68,9 @@ enum Status {
     ReadMsg,
     SendPing,
     ConnectRemote,
+    Resolve,
+    Timeout,
+    NetworkChanged,
     Cancelled,
     /// The relay refused the registration for a reason reconnecting cannot fix —
     /// a namespace the credential does not own, a malformed service name. Retrying
@@ -292,7 +297,8 @@ pub struct ServerTunnelOptions {
 #[derive(Clone)]
 struct ServerCliRunConfig {
     local_addr: ResolvedAddrs,
-    remote_addr: ResolvedAddrs,
+    remote_addr: RelayEndpoint,
+    diagnostics: Diagnostics,
     key: Arc<str>,
     options: ServerTunnelOptions,
     worker_index: usize,
@@ -524,10 +530,38 @@ async fn run_server_side_cli_pool<LocalStream>(
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
 {
+    run_server_side_cli_recovering::<LocalStream>(
+        local_addr,
+        RelayEndpoint::fixed(remote_addr),
+        key,
+        options,
+        status_callback,
+        pinned_credential,
+        shutdown,
+        Diagnostics::default(),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
+    local_addr: ResolvedAddrs,
+    remote_addr: RelayEndpoint,
+    key: Arc<str>,
+    options: ServerTunnelOptions,
+    status_callback: Option<StatusCallback>,
+    pinned_credential: Option<Credential>,
+    shutdown: CancellationToken,
+    diagnostics: Diagnostics,
+) where
+    LocalStream: StreamProvider + Send + 'static,
+    LocalStream::Item: StreamForward,
+{
     let Some(credential) = resolve_registration_credential(pinned_credential, &shutdown).await
     else {
         return;
     };
+    remote_addr.start();
     let pool_size = control_conn_pool_size().max(1);
     tracing::info!(
         event = "local_server_control_pool_starting",
@@ -547,6 +581,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         let worker_shutdown = shutdown.clone();
         let worker_local = local_addr.clone();
         let worker_remote = remote_addr.clone();
+        let worker_diagnostics = diagnostics.clone();
         workers.spawn(async move {
             run_server_side_cli_worker::<LocalStream>(
                 worker_local,
@@ -557,6 +592,7 @@ async fn run_server_side_cli_pool<LocalStream>(
                 worker_index,
                 credential,
                 worker_shutdown,
+                worker_diagnostics,
             )
             .await;
         });
@@ -575,13 +611,14 @@ async fn run_server_side_cli_pool<LocalStream>(
 #[allow(clippy::too_many_arguments)]
 async fn run_server_side_cli_worker<LocalStream>(
     local_addr: ResolvedAddrs,
-    remote_addr: ResolvedAddrs,
+    remote_addr: RelayEndpoint,
     key: Arc<str>,
     options: ServerTunnelOptions,
     pool_status: Option<Arc<PoolStatus>>,
     worker_index: usize,
     credential: Credential,
     shutdown: CancellationToken,
+    diagnostics: Diagnostics,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -595,6 +632,7 @@ async fn run_server_side_cli_worker<LocalStream>(
     let run_config = ServerCliRunConfig {
         local_addr: local_addr.clone(),
         remote_addr: remote_addr.clone(),
+        diagnostics: diagnostics.clone(),
         key: key.clone(),
         options,
         worker_index,
@@ -604,11 +642,14 @@ async fn run_server_side_cli_worker<LocalStream>(
     // here rather than inside the attempt: a reconnect is not a reason to drop
     // streams that are still healthy. It is drained before this worker returns.
     let mut stream_tasks = JoinSet::new();
-    let setup_slots = Arc::new(tokio::sync::Semaphore::new(64));
+    let setup_slots = remote_addr.data_slots();
+    let mut wake = remote_addr.wake();
     'outer: loop {
         if shutdown.is_cancelled() {
             break 'outer;
         }
+        wake.acknowledge();
+        diagnostics.attempt();
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream>(
             &mut backoff,
             run_config.clone(),
@@ -616,6 +657,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             shutdown.clone(),
             &mut stream_tasks,
             &setup_slots,
+            &mut wake,
         )
         .await
         {
@@ -632,10 +674,27 @@ async fn run_server_side_cli_worker<LocalStream>(
             );
             Status::ReadMsg
         };
+        if matches!(status, Status::Cancelled) {
+            break 'outer;
+        }
         // Every non-terminal outcome retries; only the ladder differs.
+        let failure = match &status {
+            Status::Resolve => RecoveryFailure::Dns,
+            Status::Timeout => RecoveryFailure::Timeout,
+            Status::Rejected(_) | Status::RejectedRetryable(_) => RecoveryFailure::Rejected,
+            Status::NetworkChanged => RecoveryFailure::NetworkChanged,
+            _ => RecoveryFailure::Transport,
+        };
+        if matches!(
+            failure,
+            RecoveryFailure::Transport | RecoveryFailure::Timeout | RecoveryFailure::Dns
+        ) {
+            remote_addr.transport_failed();
+        }
         let (retry_interval, retry_count) = match status {
             Status::Cancelled => break 'outer,
             Status::Rejected(reason) => {
+                diagnostics.failed(RecoveryFailure::Rejected, Duration::ZERO);
                 tracing::error!(
                     event = "local_server_registration_rejected_permanently",
                     key = %key,
@@ -648,7 +707,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             }
             Status::RejectedRetryable(ref reason) => {
                 let interval = backoff.reject.next_delay();
-                tracing::warn!(
+                tracing::debug!(
                     event = "local_server_registration_rejected_retryable",
                     key = %key,
                     worker_index,
@@ -659,28 +718,38 @@ async fn run_server_side_cli_worker<LocalStream>(
                 );
                 (interval, backoff.reject.failures())
             }
-            Status::ReadMsg | Status::SendPing | Status::ConnectRemote => (
+            Status::NetworkChanged => {
+                backoff.transport.reset();
+                (Duration::ZERO, 0)
+            }
+            Status::ReadMsg
+            | Status::SendPing
+            | Status::ConnectRemote
+            | Status::Resolve
+            | Status::Timeout => (
                 jitter(backoff.transport.next_delay()),
                 backoff.transport.failures(),
             ),
         };
-        tracing::info!(
-            event = "local_server_control_reconnect_scheduled",
-            key = %key,
-            worker_index,
-            local_addr = ?local_addr,
-            remote_addr = ?remote_addr,
-            status = ?status,
-            retry_delay = ?retry_interval,
-            retry_count,
-            "local server control connection will reconnect"
-        );
-
+        if diagnostics.failed(failure, retry_interval) {
+            tracing::info!(
+                event = "local_server_control_reconnect_scheduled",
+                key = %key,
+                worker_index,
+                local_addr = ?local_addr,
+                remote_addr = ?remote_addr,
+                status = ?status,
+                retry_delay = ?retry_interval,
+                retry_count,
+                "local server control connection will reconnect"
+            );
+        }
         report(WorkerStatus::Retrying);
 
         tokio::select! {
             () = shutdown.cancelled() => break 'outer,
-            () = tokio::time::sleep(retry_interval) => {}
+            () = tokio::time::sleep(retry_interval) => {},
+            () = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => { backoff.transport.reset(); }
         }
         if shutdown.is_cancelled() {
             break 'outer;
@@ -694,7 +763,7 @@ async fn run_server_side_cli_worker<LocalStream>(
 
 // `backoff` is skipped: it is mutable retry state, and recording it would
 // print two ladders' internals on every span the worker enters.
-#[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots))]
+#[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots, wake))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     backoff: &mut ControlBackoff,
     config: ServerCliRunConfig,
@@ -702,6 +771,7 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     shutdown: CancellationToken,
     stream_tasks: &mut JoinSet<()>,
     setup_slots: &Arc<tokio::sync::Semaphore>,
+    wake: &mut RecoveryWake,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,
@@ -709,6 +779,7 @@ where
     let ServerCliRunConfig {
         local_addr,
         remote_addr,
+        diagnostics,
         key,
         options:
             ServerTunnelOptions {
@@ -721,27 +792,43 @@ where
         worker_index,
         credential,
     } = config;
+    let control_permit = tokio::select! {
+        () = shutdown.cancelled() => return Err(Status::Cancelled),
+        () = wake.network_changed() => return Err(Status::NetworkChanged),
+        permit = remote_addr.control_permit() => permit,
+    };
     let started = tokio::time::Instant::now();
     let timeout = backoff.timing.timeout();
     let deadline = started + timeout;
+    diagnostics.phase(RecoveryPhase::Resolving);
+    let addresses = tokio::select! {
+        () = shutdown.cancelled() => return Err(Status::Cancelled),
+        () = wake.network_changed() => return Err(Status::NetworkChanged),
+        result = tokio::time::timeout_at(deadline, remote_addr.addresses()) => match result {
+            Ok(Ok(addresses)) => addresses,
+            _ => return Err(Status::Resolve),
+        },
+    };
+    diagnostics.phase(RecoveryPhase::Connecting);
     let mut manager_stream = tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
-        result = tokio::time::timeout_at(deadline, crate::addr::connect_tcp(&remote_addr)) => {
+        () = wake.network_changed() => return Err(Status::NetworkChanged),
+        result = tokio::time::timeout_at(deadline, crate::addr::connect_tcp(&addresses)) => {
             match result {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
-                    tracing::warn!(event = "local_server_dial_failed", %error, %key, worker_index);
+                    tracing::debug!(event = "local_server_dial_failed", %error, %key, worker_index);
                     return Err(Status::ConnectRemote);
                 }
                 Err(_) => {
                     backoff.timing.timed_out();
-                    tracing::warn!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "dial");
-                    return Err(Status::ConnectRemote);
+                    tracing::debug!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "dial");
+                    return Err(Status::Timeout);
                 }
             }
         }
     };
-    tracing::info!(
+    tracing::debug!(
         event = "local_server_connected_remote",
         key = %key,
         worker_index,
@@ -763,6 +850,11 @@ where
         "manager stream set tcp nodelay"
     );
 
+    let registered_addr = manager_stream
+        .peer_addr()
+        .map(ResolvedAddrs::from)
+        .unwrap_or(addresses);
+    diagnostics.phase(RecoveryPhase::Handshake);
     // Start registration with a protocol-v2 first frame. The session is reused for all
     // subsequent control messages on this TCP connection. The credential is pinned
     // when the worker starts so a later process-key change cannot retarget reconnects.
@@ -800,13 +892,14 @@ where
     let msg = snafu_error_get_or_return_ok!(request.encode().context(EncodeRegisterReqSnafu));
     tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
+        () = wake.network_changed() => return Err(Status::NetworkChanged),
         result = tokio::time::timeout_at(deadline, session.write_initial(&mut manager_stream, &msg)) => {
             match result {
                 Ok(result) => snafu_error_get_or_return_ok!(result.context(SendRegisterReqSnafu)),
                 Err(_) => {
                     backoff.timing.timed_out();
-                    tracing::warn!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "write");
-                    return Err(Status::ConnectRemote);
+                    tracing::debug!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "write");
+                    return Err(Status::Timeout);
                 }
             }
         }
@@ -823,13 +916,14 @@ where
     let (key, registration) = {
         let msg = tokio::select! {
             () = shutdown.cancelled() => return Err(Status::Cancelled),
+            () = wake.network_changed() => return Err(Status::NetworkChanged),
             result = tokio::time::timeout_at(deadline, msg_reader.read_msg()) => {
                 match result {
                     Ok(result) => snafu_error_get_or_return_ok!(result.context(ReadRegisterRespSnafu)),
                     Err(_) => {
                         backoff.timing.timed_out();
-                        tracing::warn!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "response");
-                        return Err(Status::ConnectRemote);
+                        tracing::debug!(event = "local_server_setup_timeout", %key, worker_index, ?timeout, phase = "response");
+                        return Err(Status::Timeout);
                     }
                 }
             }
@@ -837,6 +931,9 @@ where
         let resp = snafu_error_get_or_return_ok!(
             PbConnResponse::decode(msg).context(DecodeRegisterRespSnafu)
         );
+        remote_addr.protocol_succeeded();
+        diagnostics.responded(started.elapsed());
+        backoff.timing.record(started.elapsed());
         let registration = match resp {
             PbConnResponse::RegisterV2 {
                 conn_id,
@@ -860,7 +957,7 @@ where
             // transport ladder, which is how a refused registration turned into
             // thousands of reject lines a minute.
             PbConnResponse::Error(error) => {
-                tracing::error!(
+                tracing::debug!(
                     event = "local_server_registration_rejected",
                     key = %key,
                     worker_index,
@@ -897,6 +994,9 @@ where
         (key, registration)
     };
 
+    drop(control_permit);
+    diagnostics.succeeded(started.elapsed());
+    remote_addr.protocol_succeeded();
     backoff.timing.record(started.elapsed());
     tracing::debug!(event = "local_server_setup_latency", elapsed_ms = duration_to_millis(started.elapsed()), next_timeout_ms = duration_to_millis(backoff.timing.timeout()), %key, worker_index);
     backoff.reset();
@@ -981,6 +1081,8 @@ where
                         break Err(Status::ReadMsg);
                     }
                 };
+                remote_addr.protocol_succeeded();
+                diagnostics.heard();
                 lease_state.lock().await.record_rx();
                 control_deadline = tokio::time::Instant::now() + heartbeat_tolerance + suspect_grace;
                 snafu_error_get_or_continue!(
@@ -988,7 +1090,7 @@ where
                         msg,
                         StreamConnect {
                             local_addr: local_addr.clone(),
-                            remote_addr: remote_addr.clone(),
+                            remote_addr: registered_addr.clone(),
                             keep_alive,
                             namespace,
                             credential,
@@ -1046,8 +1148,10 @@ where
                         "local server control lease is suspect; probing remote registration"
                     );
                     let probe_key = key.clone();
-                    let probe_remote = remote_addr.clone();
+                    let probe_remote = registered_addr.clone();
+                    let probe_endpoint = remote_addr.clone();
                     probes.spawn(async move {
+                        let _permit = probe_endpoint.control_permit().await;
                         probe_remote_registration(
                             probe_remote,
                             probe_key,

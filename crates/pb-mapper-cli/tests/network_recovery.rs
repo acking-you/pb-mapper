@@ -137,8 +137,13 @@ async fn delayed_copy(
     }
 }
 
+// Network notifications are process-wide. Fault-injection cases must not wake
+// unrelated cases that measure retry rates or setup concurrency.
+static NETWORK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn registered_but_one_way_control_socket_is_replaced_without_dropping_live_data() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-one-way").await;
     let proxy = FaultProxy::start(relay.addr(), 0).await;
@@ -217,6 +222,7 @@ async fn registered_but_one_way_control_socket_is_replaced_without_dropping_live
 
 #[tokio::test]
 async fn delayed_control_ack_does_not_unregister_a_live_service() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-delayed-ack").await;
     let proxy = FaultProxy::start(relay.addr(), 0).await;
@@ -332,6 +338,7 @@ async fn round_trip(stream: &mut TcpStream) {
 
 #[tokio::test]
 async fn registration_replaces_blackholed_handshake_after_network_recovers() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-blackhole").await;
     let proxy = FaultProxy::start(relay.addr(), 1).await;
@@ -382,6 +389,7 @@ async fn registration_replaces_blackholed_handshake_after_network_recovers() {
 
 #[tokio::test]
 async fn stalled_health_probe_does_not_block_new_or_existing_traffic() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-health-probe").await;
     let register_client =
@@ -435,6 +443,7 @@ async fn stalled_health_probe_does_not_block_new_or_existing_traffic() {
 
 #[tokio::test]
 async fn offline_registration_limits_attempts_and_stops_promptly() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-offline").await;
     let proxy = FaultProxy::start(relay.addr(), 1).await;
@@ -460,6 +469,7 @@ async fn offline_registration_limits_attempts_and_stops_promptly() {
 
 #[tokio::test]
 async fn connection_burst_has_bounded_setup_and_probe_concurrency() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-setup-capacity").await;
     let host = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
@@ -511,6 +521,7 @@ async fn connection_burst_has_bounded_setup_and_probe_concurrency() {
 
 #[tokio::test]
 async fn services_missing_from_relay_recover_together_without_blocking_another_host() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-multiple-services").await;
     let proxy = FaultProxy::start(relay.addr(), 0).await;
@@ -676,6 +687,7 @@ async fn services_missing_from_relay_recover_together_without_blocking_another_h
 
 #[tokio::test]
 async fn repeated_brief_jitter_preserves_control_and_existing_streams() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     test_env();
     let relay = Relay::start("recovery-repeated-jitter").await;
     let proxy = FaultProxy::start(relay.addr(), 0).await;
@@ -750,5 +762,126 @@ async fn repeated_brief_jitter_preserves_control_and_existing_streams() {
     }
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn network_hint_replaces_stalled_setup_and_real_payload_recovers_promptly() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
+    test_env();
+    let relay = Relay::start("recovery-hint").await;
+    let proxy = FaultProxy::start(relay.addr(), 1).await;
+    let host = Client::from_credential(
+        format!("localhost:{}", proxy.addr.port()),
+        admin_credential(),
+        false,
+        None,
+    );
+    let direct = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let (echo, echo_task) = echo_server().await;
+    let registration = register(&host, echo).await;
+    proxy.wait_blackholed(2).await;
+    let local = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    let connection = direct
+        .connect(ConnectRequest {
+            key: "echo".into(),
+            local_addr: local.to_string(),
+            transport: Transport::Tcp,
+        })
+        .await
+        .unwrap();
+    let restored = Instant::now();
+    proxy.mode.store(0, Ordering::SeqCst);
+    host.notify_network_change();
+    timeout(Duration::from_secs(2), async {
+        registration.wait_ready().await.unwrap();
+        connection.wait_ready().await.unwrap();
+        round_trip(&mut TcpStream::connect(local).await.unwrap()).await;
+    })
+    .await
+    .unwrap();
+    eprintln!(
+        "network hint to encrypted payload: {:?}",
+        restored.elapsed()
+    );
+    timeout(Duration::from_secs(2), async {
+        while direct.service_status("echo").await.unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before: Vec<_> = direct
+        .service_status("echo")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.conn_id, c.generation))
+        .collect();
+    let mut existing = TcpStream::connect(local).await.unwrap();
+    round_trip(&mut existing).await;
+    // Hints may be noisy: they must not replace healthy controls or forwarding.
+    for _ in 0..100 {
+        host.notify_network_change();
+        tokio::task::yield_now().await;
+    }
+    timeout(Duration::from_secs(2), round_trip(&mut existing))
+        .await
+        .unwrap();
+    let after: Vec<_> = direct
+        .service_status("echo")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.conn_id, c.generation))
+        .collect();
+    assert_eq!(before, after);
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+    assert_eq!(registration.diagnostics().active_control_setups, 0);
+    assert_eq!(registration.diagnostics().active_data_setups, 0);
+    echo_task.abort();
+}
+
+#[tokio::test]
+async fn many_mappings_share_setup_budget_and_cancel_without_stranded_slots() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
+    test_env();
+    let relay = Relay::start("recovery-shared-budget").await;
+    let proxy = FaultProxy::start(relay.addr(), 1).await;
+    let host = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
+    let (echo, echo_task) = echo_server().await;
+    let mut registrations = Vec::new();
+    for i in 0..20 {
+        registrations.push(
+            host.register(RegisterRequest {
+                key: format!("mapping-{i}"),
+                local_addr: echo.to_string(),
+                transport: Transport::Tcp,
+                codec: true,
+                force_namespace: false,
+            })
+            .await
+            .unwrap(),
+        );
+    }
+    proxy.wait_blackholed(8).await;
+    assert_eq!(registrations[0].diagnostics().active_control_setups, 8);
+    assert_eq!(
+        proxy.blackholed.load(Ordering::SeqCst),
+        8,
+        "separate services must not each allocate eight sockets"
+    );
+    for registration in &registrations {
+        registration.stop().await.unwrap();
+    }
+    assert_eq!(registrations[0].diagnostics().active_control_setups, 0);
+    proxy.mode.store(0, Ordering::SeqCst);
+    let recovered = register(&host, echo).await;
+    recovered
+        .wait_ready_timeout(Duration::from_secs(2))
+        .await
+        .unwrap();
+    recovered.stop().await.unwrap();
     echo_task.abort();
 }

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Client } from "../index.js";
+import manifest from "../package.json";
 import {
   ADMIN_KEY,
   echoRoundTrip,
@@ -50,6 +51,13 @@ test.skipIf(!hasRelay)(
       try {
         await registration.waitReady(READY_MS);
         expect(registration.status()).toBe("connected");
+        const diagnostics = registration.diagnostics();
+        expect(diagnostics.sdkVersion).toBe(manifest.version);
+        expect(diagnostics.attempts).toBeGreaterThan(0);
+        expect(diagnostics.lastSuccessAgeMs).toBeGreaterThanOrEqual(0);
+        expect(diagnostics.activeControlSetups).toBeLessThanOrEqual(8);
+        expect(JSON.stringify(diagnostics)).not.toContain(relay.adminKey);
+        client.notifyNetworkChange();
         const keys = await client.listKeys();
         expect(keys).toContain("echo");
         const conns = await client.serviceStatus("echo");

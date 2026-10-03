@@ -18,3 +18,7 @@ pub use client::{Client, ClientConfig, ConnectRequest, RegisterRequest};
 pub use error::{Error, Result};
 pub use handle::{Connection, Registration};
 pub use types::{LegacyProtocol, RemoteId, ServiceConnection, Transport, TunnelStatus};
+
+/// The SDK version compiled into this process.
+pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub use crate::diagnostics::{RecoveryFailure, RecoveryPhase, TunnelDiagnostics};

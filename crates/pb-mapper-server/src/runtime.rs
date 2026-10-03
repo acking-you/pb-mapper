@@ -116,7 +116,7 @@ pub async fn run_server_on_listener(
     let task_sender = manager.get_task_sender();
     let shutdown_token_clone = shutdown_token.clone();
 
-    let listener_handle = tokio::spawn(async move {
+    let listener_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         tokio::select! {
             result = handle_listener(task_sender, listener, keep_alive) => {
                 if let Err(e) = result {
@@ -127,13 +127,13 @@ pub async fn run_server_on_listener(
                 tracing::info!("Listener shutdown requested");
             }
         }
-    });
+    }));
 
     let start_time = std::time::Instant::now();
 
     let status_forward_handle = status_channel.map(|mut receiver| {
         let status_sender = manager.get_task_sender();
-        tokio::spawn(async move {
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             while let Some(response_sender) = receiver.recv().await {
                 if status_sender
                     .send(ManagerTask::StatusQuery { response_sender })
@@ -143,15 +143,15 @@ pub async fn run_server_on_listener(
                     break;
                 }
             }
-        })
+        }))
     });
 
     let shutdown_handle = {
         let shutdown_sender = manager.get_task_sender();
-        tokio::spawn(async move {
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             shutdown_token.cancelled().await;
             let _ = shutdown_sender.send(ManagerTask::Shutdown).await;
-        })
+        }))
     };
 
     // Drives lease expiry. A tick is a request to sweep, not a deadline: it is
@@ -161,7 +161,7 @@ pub async fn run_server_on_listener(
     let sweep_handle = {
         let sweep_sender = manager.get_task_sender();
         let sweep_interval = server_lease_sweep_interval();
-        tokio::spawn(async move {
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let mut ticker = tokio::time::interval(sweep_interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -175,7 +175,7 @@ pub async fn run_server_on_listener(
                     break;
                 }
             }
-        })
+        }))
     };
 
     loop {
@@ -407,7 +407,7 @@ pub async fn run_server_on_listener(
                     idle_connections = manager.idle_conn_count(),
                     "accepted pb connection"
                 );
-                let manager_task_sender = manager.get_task_sender();
+                let manager_task_sender = manager.get_task_sender().for_connection();
                 let security = security.clone();
                 while connection_tasks.try_join_next().is_some() {}
                 connection_tasks.spawn(async move {
@@ -1192,7 +1192,9 @@ fn retire_server_conn(
     );
 }
 
-async fn abort_and_wait(handles: impl IntoIterator<Item = tokio::task::JoinHandle<()>>) {
+async fn abort_and_wait(
+    handles: impl IntoIterator<Item = tokio_util::task::AbortOnDropHandle<()>>,
+) {
     let handles: Vec<_> = handles.into_iter().collect();
     for handle in &handles {
         handle.abort();
@@ -1353,5 +1355,54 @@ mod tests {
         drop(restarted);
         tokio::time::sleep(Duration::from_millis(20)).await;
         let _ = std::fs::remove_dir_all(state_dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cancellation_audit {
+    use super::*;
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    #[tokio::test]
+    async fn dropping_relay_future_must_release_its_listener() {
+        let config = AuthConfig {
+            state_dir: std::env::temp_dir()
+                .join(format!("pb-audit-abort-{}", rand::random::<u64>())),
+            ..AuthConfig::default()
+        };
+        let auth = AuthRuntime::from_isolated_state(config).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let mut relay = Box::pin(run_server_on_listener(
+            listener,
+            shutdown.clone(),
+            None,
+            false,
+            auth.clone(),
+        ));
+        poll_fn(|cx| {
+            assert!(relay.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(relay);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let rebound = TcpListener::bind(addr).await;
+        let leaked = rebound.is_err();
+        shutdown.cancel();
+        auth.shutdown_actor().await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !leaked,
+            "relay future dropped, but detached listener task still owns {addr}"
+        );
     }
 }

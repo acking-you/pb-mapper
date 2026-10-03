@@ -51,6 +51,10 @@ application-level authentication and authorization.
   self-hosted products and real game-server traffic. The end-to-end suite covers
   the transport/encryption matrix and credential lifecycle.
 
+Recovery behavior, resource bounds and fault-injection coverage are documented in
+[Weak-network recovery](docs/weak-network-recovery.md). Version 0.5.2 adds shared
+DNS recovery, network hints, bounded setup admission and live SDK diagnostics.
+
 ## One relay, many private services
 
 ![pb-mapper architecture](docs/assets/architecture-flow.svg)

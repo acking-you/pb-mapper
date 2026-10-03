@@ -2,6 +2,8 @@ pub mod error;
 pub mod status;
 mod stream;
 
+use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
+use crate::endpoint::RelayEndpoint;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
@@ -190,6 +192,36 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
+    run_client_side_cli_recovering::<LocalListener>(
+        local_addr,
+        RelayEndpoint::fixed(remote_addr),
+        key,
+        keep_alive,
+        namespace,
+        status_callback,
+        pinned_credential,
+        shutdown,
+        Diagnostics::default(),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvider>(
+    local_addr: ResolvedAddrs,
+    remote_addr: RelayEndpoint,
+    key: Arc<str>,
+    keep_alive: bool,
+    namespace: Option<u64>,
+    status_callback: Option<ClientStatusCallback>,
+    pinned_credential: Option<pb_mapper_core::checksum::Credential>,
+    shutdown: CancellationToken,
+    diagnostics: Diagnostics,
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
+    remote_addr.start();
+    let mut wake = remote_addr.wake();
     set_custom_timeout(Duration::from_secs(120));
 
     let credential = match pinned_credential {
@@ -240,6 +272,11 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break 'outer,
+                () = wake.changed() => {
+                    probes.abort_all();
+                    next_probe = Instant::now();
+                    retry_backoff.reset();
+                },
                 accepted = async {
                     // Backpressure stays in the listener backlog while setup is
                     // saturated. Established forwarding releases its permit.
@@ -258,7 +295,7 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
                     let stream_remote = remote_addr.clone();
                     let stream_shutdown = shutdown.clone();
                     let event_tx = stream_event_tx.clone();
-                    let setup = StreamSetup { permit, timing: timing.clone(), events: event_tx.clone() };
+                    let setup = StreamSetup { permit, timing: timing.clone(), events: event_tx.clone(), diagnostics: diagnostics.clone() };
                     stream_tasks.spawn(async move {
                         let result = tokio::select! {
                             () = stream_shutdown.cancelled() => return,
@@ -271,10 +308,13 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
                     });
                 }
                 () = tokio::time::sleep_until(next_probe), if probes.is_empty() => {
+                    diagnostics.attempt();
+                    diagnostics.phase(RecoveryPhase::Handshake);
                     let probe_remote = remote_addr.clone();
                     let probe_key = key.clone();
                     let budget = timing.lock().await.timeout().min(client_health_check_timeout());
                     probes.spawn(async move {
+                        let _permit = probe_remote.control_permit().await;
                         let started = Instant::now();
                         let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget).await;
                         (started, started.elapsed(), result)
@@ -283,11 +323,14 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
                 Some(result) = probes.join_next() => {
                     let (started, elapsed, result) = match result {
                         Ok(result) => result,
+                        Err(error) if error.is_cancelled() => continue,
                         Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string()))),
                     };
                     match result {
                         Ok(()) => {
                             timing.lock().await.record(elapsed);
+                            remote_addr.protocol_succeeded();
+                            diagnostics.succeeded(elapsed);
                             last_success = Some(Instant::now());
                             consecutive_health_failures = 0;
                             retry_backoff.reset();
@@ -298,6 +341,11 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
                             }
                         }
                         Err(failure) if failure.permanent => {
+                            if failure.protocol_replied {
+                                remote_addr.protocol_succeeded();
+                                diagnostics.responded(elapsed);
+                            }
+                            diagnostics.failed(failure.kind, Duration::ZERO);
                             if let Some(callback) = &status_callback { callback(&format!("failed: {failure}")); }
                             break 'outer;
                         }
@@ -306,7 +354,11 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
                             next_probe = Instant::now() + client_health_check_interval();
                         }
                         Err(failure) => {
-                            timing.lock().await.timed_out();
+                            failure.update_timing(&mut *timing.lock().await, elapsed);
+                            if failure.protocol_replied {
+                                remote_addr.protocol_succeeded();
+                                diagnostics.responded(elapsed);
+                            } else { remote_addr.transport_failed(); }
                             consecutive_health_failures = consecutive_health_failures.saturating_add(1);
                             if !connected || consecutive_health_failures >= client_health_failure_threshold() {
                                 connected = false;
@@ -314,7 +366,9 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
                             }
                             let delay = jitter(retry_backoff.next_delay());
                             next_probe = Instant::now() + delay;
+                            if diagnostics.failed(failure.kind, delay) {
                             tracing::warn!(event = "client_remote_probe_failed", %key, reason = %failure, consecutive_health_failures, retry_delay = ?delay, "remote probe failed; listener remains active");
+                            }
                         }
                     }
                 }
@@ -361,15 +415,27 @@ async fn run_client_side_cli_loop<LocalListener: ListenerProvider>(
 struct ProbeFailure {
     reason: String,
     permanent: bool,
+    kind: RecoveryFailure,
+    protocol_replied: bool,
 }
 
 impl ProbeFailure {
+    fn update_timing(&self, timing: &mut RecoveryTiming, elapsed: Duration) {
+        if self.kind == RecoveryFailure::Timeout {
+            timing.timed_out();
+        } else if self.protocol_replied {
+            timing.record(elapsed);
+        }
+    }
+
     /// A failure worth retrying: a transport error, or a service that is simply
     /// not registered yet.
     fn transient(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
             permanent: false,
+            kind: RecoveryFailure::Transport,
+            protocol_replied: false,
         }
     }
 
@@ -377,9 +443,16 @@ impl ProbeFailure {
     /// is the only party that knows whether the refusal is final.
     fn from_status_error(context: &str, error: crate::client::error::Error) -> Self {
         let permanent = error.remote_retryable() == Some(false);
+        let protocol_replied = error.remote_retryable().is_some();
         Self {
             reason: format!("{context}: {}", snafu::Report::from_error(error)),
             permanent,
+            kind: if protocol_replied {
+                RecoveryFailure::Rejected
+            } else {
+                RecoveryFailure::Transport
+            },
+            protocol_replied,
         }
     }
 }
@@ -391,22 +464,33 @@ impl std::fmt::Display for ProbeFailure {
 }
 
 async fn probe_remote_key(
-    remote_addr: &ResolvedAddrs,
+    remote_addr: &RelayEndpoint,
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
     timeout: Duration,
 ) -> std::result::Result<(), ProbeFailure> {
-    match tokio::time::timeout(
-        timeout,
-        probe_remote_key_once(remote_addr, key, namespace, credential),
-    )
+    match tokio::time::timeout(timeout, async {
+        let addresses = remote_addr
+            .addresses()
+            .await
+            .map_err(|error| ProbeFailure {
+                reason: error.to_string(),
+                permanent: false,
+                kind: RecoveryFailure::Dns,
+                protocol_replied: false,
+            })?;
+        probe_remote_key_once(&addresses, key, namespace, credential).await
+    })
     .await
     {
         Ok(result) => result,
-        Err(_) => Err(ProbeFailure::transient(format!(
-            "remote key probe timed out after {timeout:?}"
-        ))),
+        Err(_) => Err(ProbeFailure {
+            reason: format!("remote key probe timed out after {timeout:?}"),
+            permanent: false,
+            kind: RecoveryFailure::Timeout,
+            protocol_replied: false,
+        }),
     }
 }
 
@@ -430,9 +514,12 @@ async fn probe_remote_key_once(
             if connections.iter().any(|conn| conn.healthy) {
                 return Ok(());
             }
-            return Err(ProbeFailure::transient(format!(
-                "client key `{key}` has no healthy remote server connections"
-            )));
+            return Err(ProbeFailure {
+                reason: format!("client key `{key}` has no healthy remote server connections"),
+                permanent: false,
+                kind: RecoveryFailure::ServiceUnavailable,
+                protocol_replied: true,
+            });
         }
         Ok(status_resp) => {
             return Err(ProbeFailure::transient(format!(
@@ -463,9 +550,12 @@ async fn probe_remote_key_once(
     if keys.iter().any(|candidate| candidate == key) {
         Ok(())
     } else {
-        Err(ProbeFailure::transient(format!(
-            "client key `{key}` is not registered on remote server; valid keys: {keys:?}"
-        )))
+        Err(ProbeFailure {
+            reason: format!("client key `{key}` is not registered on remote server"),
+            permanent: false,
+            kind: RecoveryFailure::ServiceUnavailable,
+            protocol_replied: true,
+        })
     }
 }
 
@@ -509,4 +599,86 @@ pub async fn show_status_scoped<A: ToSocketAddrs>(
     let status = serde_json::to_string_pretty(&status)?;
     println!("Status:{status}");
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cancellation_audit {
+    use std::{
+        future::Future,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Wake, Waker},
+        time::Duration,
+    };
+    struct Notified(AtomicBool);
+    impl Wake for Notified {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_udp_accept_must_preserve_the_delivered_peer() {
+        let listener = uni_stream::udp::UdpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let notified = Arc::new(Notified(AtomicBool::new(false)));
+        let waker = Waker::from(notified.clone());
+        let mut accept = Box::pin(listener.accept());
+        assert!(
+            accept
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        client.send_to(b"first datagram", addr).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !notified.0.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(accept);
+        let delivered = tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+        assert!(
+            delivered.is_ok(),
+            "UDP peer/first datagram disappeared when a competing select branch cancelled accept"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn absent_service_learns_response_latency_without_inflating_timeout() {
+        let mut timing = RecoveryTiming::default();
+        let missing = ProbeFailure {
+            reason: String::new(),
+            permanent: false,
+            kind: RecoveryFailure::ServiceUnavailable,
+            protocol_replied: true,
+        };
+        for _ in 0..20 {
+            missing.update_timing(&mut timing, Duration::from_millis(40));
+        }
+        assert_eq!(timing.timeout(), Duration::from_secs(1));
+        let refusal = ProbeFailure::transient("connection refused");
+        refusal.update_timing(&mut timing, Duration::from_millis(1));
+        assert_eq!(timing.timeout(), Duration::from_secs(1));
+        let timeout = ProbeFailure {
+            kind: RecoveryFailure::Timeout,
+            ..refusal
+        };
+        timeout.update_timing(&mut timing, Duration::from_secs(1));
+        assert_eq!(timing.timeout(), Duration::from_secs(2));
+    }
 }

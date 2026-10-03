@@ -1,6 +1,6 @@
 use snafu::ResultExt;
 use tokio::net::TcpStream;
-use tracing::info_span;
+use tracing::{Instrument, info_span};
 
 use super::error::{
     Result, StatusConnTaskNotMatchSnafu, StatusCreateHeaderToolSnafu, StatusEncodeRespSnafu,
@@ -94,7 +94,6 @@ pub async fn handle_show_status(
 ) -> Result<()> {
     let info_span = info_span!("show status", "{status:?},{conn_id:?}");
     let mut guard = StatusConnGuard::new(conn_id, manager_sender.clone());
-    let _enter = info_span.enter();
     let result = async {
         let (tx, rx) = kanal::bounded_async(5);
         let req = ManagerTask::Status {
@@ -123,7 +122,51 @@ pub async fn handle_show_status(
             StatusConnTaskNotMatchSnafu {}.fail()
         }
     }
+    .instrument(info_span)
     .await;
     guard.deregister().await;
     result
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cancellation_audit {
+    use super::*;
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    #[tokio::test]
+    async fn cancelled_pending_deregister_delivers_exactly_one_cleanup() {
+        let (sender, mut receiver) = crate::manager::task_channel(1);
+        sender.send(ManagerTask::SweepServerLeases).await.unwrap();
+        let mut guard = StatusConnGuard::new(7_u32.into(), sender.clone());
+        let mut deregister = Box::pin(guard.deregister());
+        poll_fn(|cx| {
+            assert!(deregister.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ManagerTask::SweepServerLeases
+        ));
+        assert!(
+            receiver.is_empty(),
+            "a pending send must not deliver before it is polled"
+        );
+        drop(deregister);
+        drop(guard);
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(delivered);
+        let duplicate =
+            tokio::time::timeout(std::time::Duration::from_millis(20), receiver.recv()).await;
+        assert!(
+            duplicate.is_err(),
+            "cancelling cleanup after channel delivery emitted a second deregistration"
+        );
+    }
 }

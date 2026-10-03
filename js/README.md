@@ -40,3 +40,12 @@ bun install
 bun run build:release   # LTO + strip; linux-x64 is ~2 MB
 bun test                # smoke + e2e (e2e needs `cargo build --bin pb-mapper`)
 ```
+
+### Recovery diagnostics
+
+`registration.diagnostics()` and `connection.diagnostics()` report the running
+SDK version, latest attempt phase, failure reason, timing and shared setup counts.
+`client.notifyNetworkChange()` wakes pending recovery after a host network/resume
+notification; healthy forwarding stays open. Workers retry initial DNS failures,
+refresh relay addresses through the OS resolver, and share bounded setup capacity.
+See [recovery design](../docs/weak-network-recovery.md) for bounds and limitations.

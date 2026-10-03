@@ -29,6 +29,45 @@ use pb_mapper_client::sdk::{
 /// Default page size for the `list*` calls that take an explicit page.
 const DEFAULT_PAGE_SIZE: u32 = 100;
 
+/// Recovery counters from the running SDK, with no credential or payload data.
+#[napi(object)]
+pub struct JsTunnelDiagnostics {
+    pub sdk_version: String,
+    pub last_attempt_phase: String,
+    pub attempts: f64,
+    pub consecutive_failures: f64,
+    pub last_failure: Option<String>,
+    pub last_success_age_ms: Option<f64>,
+    pub last_setup_latency_ms: Option<f64>,
+    pub next_retry_in_ms: Option<f64>,
+    pub dns_age_ms: Option<f64>,
+    pub network_generation: f64,
+    pub active_control_setups: u32,
+    pub active_data_setups: u32,
+}
+
+impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
+    fn from(value: sdk::TunnelDiagnostics) -> Self {
+        let number = |value: u64| value.min((1_u64 << 53) - 1) as f64;
+        Self {
+            sdk_version: value.sdk_version.to_string(),
+            last_attempt_phase: value.last_attempt_phase.as_str().to_string(),
+            attempts: number(value.attempts),
+            consecutive_failures: number(value.consecutive_failures),
+            last_failure: value
+                .last_failure
+                .map(|failure| failure.as_str().to_string()),
+            last_success_age_ms: value.last_success_age_ms.map(number),
+            last_setup_latency_ms: value.last_setup_latency_ms.map(number),
+            next_retry_in_ms: value.next_retry_in_ms.map(number),
+            dns_age_ms: value.dns_age_ms.map(number),
+            network_generation: number(value.network_generation),
+            active_control_setups: value.active_control_setups as u32,
+            active_data_setups: value.active_data_setups as u32,
+        }
+    }
+}
+
 fn to_napi(error: sdk::Error) -> Error {
     Error::from_reason(error.to_string())
 }
@@ -297,6 +336,12 @@ impl Client {
         self.inner.server().to_string()
     }
 
+    /// Wake recovering tunnels after a host network or resume notification.
+    #[napi]
+    pub fn notify_network_change(&self) {
+        self.inner.notify_network_change();
+    }
+
     #[napi]
     pub async fn register(&self, request: JsRegisterRequest) -> Result<Registration> {
         let registration = self
@@ -409,6 +454,12 @@ macro_rules! tunnel_class {
             #[napi]
             pub fn status(&self) -> String {
                 status_label(&self.inner.status())
+            }
+
+            /// Inspect the running SDK version, failure phase and bounded setup load.
+            #[napi]
+            pub fn diagnostics(&self) -> JsTunnelDiagnostics {
+                self.inner.diagnostics().into()
             }
 
             /// Resolves once the tunnel is connected, and rejects if it fails or

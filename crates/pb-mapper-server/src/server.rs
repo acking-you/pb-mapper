@@ -719,7 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_conn_guard_does_not_drop_deregister_when_manager_queue_is_full() {
-        let (sender, receiver) = kanal::bounded_async(1);
+        let (sender, mut receiver) = crate::manager::task_channel(1);
         sender.send(ManagerTask::Shutdown).await.unwrap();
         let key: Arc<str> = Arc::from("sf-backend");
 
@@ -741,5 +741,48 @@ mod tests {
             task,
             ManagerTask::DeRegisterServerConn { conn_id, .. } if conn_id == RemoteConnId::from(7)
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cancellation_audit {
+    use super::*;
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    #[tokio::test]
+    async fn cancelled_pending_deregister_delivers_exactly_one_cleanup() {
+        let (sender, mut receiver) = crate::manager::task_channel(1);
+        sender.send(ManagerTask::SweepServerLeases).await.unwrap();
+        let mut guard = ServerConnGuard::new("audit".into(), 7_u32.into(), sender.clone());
+        let mut deregister = Box::pin(guard.deregister());
+        poll_fn(|cx| {
+            assert!(deregister.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ManagerTask::SweepServerLeases
+        ));
+        assert!(
+            receiver.is_empty(),
+            "a pending send must not deliver before it is polled"
+        );
+        drop(deregister);
+        drop(guard);
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(delivered);
+        let duplicate =
+            tokio::time::timeout(std::time::Duration::from_millis(20), receiver.recv()).await;
+        assert!(
+            duplicate.is_err(),
+            "cancelling cleanup after channel delivery emitted a second deregistration"
+        );
     }
 }

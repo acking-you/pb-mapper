@@ -4,6 +4,8 @@
 //! handle, and the status channel it publishes to. A handle observes and stops
 //! its tunnel; it never drives the traffic itself.
 
+use crate::diagnostics::{Diagnostics, TunnelDiagnostics};
+use crate::endpoint::RelayEndpoint;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
@@ -16,6 +18,8 @@ pub(crate) struct LiveTunnel {
     shutdown: CancellationToken,
     join: Mutex<Option<JoinHandle<()>>>,
     status: watch::Receiver<TunnelStatus>,
+    endpoint: RelayEndpoint,
+    diagnostics: Diagnostics,
 }
 
 impl LiveTunnel {
@@ -23,11 +27,15 @@ impl LiveTunnel {
         shutdown: CancellationToken,
         join: JoinHandle<()>,
         status: watch::Receiver<TunnelStatus>,
+        endpoint: RelayEndpoint,
+        diagnostics: Diagnostics,
     ) -> Self {
         Self {
             shutdown,
             join: Mutex::new(Some(join)),
             status,
+            endpoint,
+            diagnostics,
         }
     }
 
@@ -124,6 +132,11 @@ macro_rules! tunnel_handle {
                 self.inner.status()
             }
 
+            /// Credential-free recovery counters, running SDK version and shared relay load.
+            pub fn diagnostics(&self) -> TunnelDiagnostics {
+                self.inner.diagnostics.snapshot(&self.inner.endpoint)
+            }
+
             /// Subscribe to status changes. Useful for N-API event bridges.
             pub fn subscribe(&self) -> watch::Receiver<TunnelStatus> {
                 self.inner.subscribe()
@@ -180,7 +193,13 @@ mod tests {
             let _ = started_tx.send(());
             std::future::pending::<()>().await;
         });
-        let tunnel = LiveTunnel::new(CancellationToken::new(), worker, rx.clone());
+        let tunnel = LiveTunnel::new(
+            CancellationToken::new(),
+            worker,
+            rx.clone(),
+            RelayEndpoint::shared("127.0.0.1:1"),
+            Diagnostics::default(),
+        );
         started_rx.await.unwrap();
         let mut stopping = Box::pin(tunnel.stop());
         poll_pending(&mut stopping).await;
@@ -202,7 +221,13 @@ mod tests {
             let _tx = tx;
             let _ = released.await;
         });
-        let tunnel = LiveTunnel::new(CancellationToken::new(), worker, rx);
+        let tunnel = LiveTunnel::new(
+            CancellationToken::new(),
+            worker,
+            rx,
+            RelayEndpoint::shared("127.0.0.1:1"),
+            Diagnostics::default(),
+        );
         let mut first = Box::pin(tunnel.stop());
         let mut second = Box::pin(tunnel.stop());
         poll_pending(&mut first).await;

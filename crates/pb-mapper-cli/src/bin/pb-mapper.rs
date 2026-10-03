@@ -23,25 +23,21 @@ use pb_mapper_auth::{
     MIN_TEMP_KEY_TTL, acquire_state_dir_lock, discard_staged_admin_key, generate_admin_key,
     initialize_admin_key, stage_admin_key_candidate, write_admin_key_file,
 };
-use pb_mapper_client::client::{
-    handle_status_cli_scoped, run_client_side_cli_with_callback_scoped,
+use pb_mapper_client::client::handle_status_cli_scoped;
+use pb_mapper_client::sdk::{
+    Client, ConnectRequest, RegisterRequest, TunnelDiagnostics, TunnelStatus,
 };
-use pb_mapper_client::server::{ServerTunnelOptions, run_server_side_cli_with_pinned_credential};
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
 use pb_mapper_core::config::{
-    ResolvedAddrs, StatusOp, init_tracing, keep_alive_from_env, pb_mapper_server_addr,
-    resolve_addrs_async, resolve_pb_mapper_server_async,
+    StatusOp, init_tracing, keep_alive_from_env, pb_mapper_server_addr,
+    resolve_pb_mapper_server_async,
 };
 use pb_mapper_protocol::command::{
     AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage,
 };
-use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_server::run_server_with_shutdown;
 use tokio_util::sync::CancellationToken;
-use uni_stream::stream::{
-    StreamProvider, TcpListenerProvider, TcpStreamProvider, UdpListenerProvider, UdpStreamProvider,
-};
 
 #[global_allocator]
 static GLOBAL_MIMALLOC: MiMalloc = MiMalloc;
@@ -329,89 +325,77 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
+fn tunnel_client(relay: &RelayArgs, namespace: Option<u64>) -> Result<Client, Box<dyn Error>> {
     let credential = pb_mapper_core::checksum::get_process_credential().map_err(|error| {
-        std::io::Error::other(format!("registration credential is required: {error}"))
+        std::io::Error::other(format!("tunnel credential is required: {error}"))
     })?;
-    let local_addr = resolve_addrs_async(&args.addr).await?;
-    let remote_addr = resolve_pb_mapper_server_async(args.relay.server.as_deref()).await?;
-    let options = ServerTunnelOptions {
-        need_codec: args.codec,
-        is_datagram: args.transport == Transport::Udp,
-        keep_alive: args.relay.keep_alive || keep_alive_from_env(),
-        namespace: args.namespace,
-        force_namespace: args.force,
-    };
-
-    match args.transport {
-        Transport::Tcp => {
-            register::<TcpStreamProvider>(local_addr, remote_addr, args.key, options, credential)
-                .await
-        }
-        Transport::Udp => {
-            register::<UdpStreamProvider>(local_addr, remote_addr, args.key, options, credential)
-                .await
-        }
-    }
-    Ok(())
+    Ok(Client::from_credential(
+        pb_mapper_server_addr(relay.server.as_deref())?,
+        credential,
+        relay.keep_alive || keep_alive_from_env(),
+        namespace,
+    ))
 }
 
-async fn register<LocalStream: StreamProvider + Send + 'static>(
-    local_addr: ResolvedAddrs,
-    remote_addr: ResolvedAddrs,
-    key: String,
-    options: ServerTunnelOptions,
-    credential: pb_mapper_core::checksum::Credential,
-) where
-    LocalStream::Item: StreamForward,
-{
-    run_server_side_cli_with_pinned_credential::<LocalStream, _>(
-        local_addr.as_slice(),
-        remote_addr.as_slice(),
-        key.into(),
-        options,
-        None,
-        credential,
-    )
-    .await;
+fn sdk_transport(transport: Transport) -> pb_mapper_client::sdk::Transport {
+    match transport {
+        Transport::Tcp => pb_mapper_client::sdk::Transport::Tcp,
+        Transport::Udp => pb_mapper_client::sdk::Transport::Udp,
+    }
+}
+
+async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
+    let client = tunnel_client(&args.relay, args.namespace)?;
+    let registration = client
+        .register(RegisterRequest {
+            key: args.key,
+            local_addr: args.addr,
+            transport: sdk_transport(args.transport),
+            codec: args.codec,
+            force_namespace: args.force,
+        })
+        .await?;
+    monitor_tunnel(registration.subscribe(), || registration.diagnostics()).await?;
+    registration.stop().await?;
+    Ok(())
 }
 
 async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
-    let credential = pb_mapper_core::checksum::get_process_credential().map_err(|error| {
-        std::io::Error::other(format!("client credential is required: {error}"))
-    })?;
-    let local_addr = resolve_addrs_async(&args.addr).await?;
-    let remote_addr = resolve_pb_mapper_server_async(args.relay.server.as_deref()).await?;
-    let key = args.key.into();
-    let keep_alive = args.relay.keep_alive || keep_alive_from_env();
+    let client = tunnel_client(&args.relay, args.namespace)?;
+    let connection = client
+        .connect(ConnectRequest {
+            key: args.key,
+            local_addr: args.addr,
+            transport: sdk_transport(args.transport),
+        })
+        .await?;
+    monitor_tunnel(connection.subscribe(), || connection.diagnostics()).await?;
+    connection.stop().await?;
+    Ok(())
+}
 
-    match args.transport {
-        Transport::Tcp => {
-            run_client_side_cli_with_callback_scoped::<TcpListenerProvider, _>(
-                local_addr.as_slice(),
-                remote_addr.as_slice(),
-                key,
-                keep_alive,
-                args.namespace,
-                None,
-                Some(credential),
-            )
-            .await;
+async fn monitor_tunnel(
+    mut status: tokio::sync::watch::Receiver<TunnelStatus>,
+    diagnostics: impl Fn() -> TunnelDiagnostics,
+) -> Result<(), Box<dyn Error>> {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let state = status.borrow_and_update().clone();
+        match state {
+            TunnelStatus::Failed(reason) => return Err(std::io::Error::other(reason).into()),
+            TunnelStatus::Stopped => return Ok(()),
+            _ => {}
         }
-        Transport::Udp => {
-            run_client_side_cli_with_callback_scoped::<UdpListenerProvider, _>(
-                local_addr.as_slice(),
-                remote_addr.as_slice(),
-                key,
-                keep_alive,
-                args.namespace,
-                None,
-                Some(credential),
-            )
-            .await;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => { result?; return Ok(()); },
+            result = status.changed() => { if result.is_err() { return Ok(()); } },
+            _ = interval.tick() => {
+                let snapshot = diagnostics();
+                tracing::info!(event = "tunnel_diagnostics", status = ?state, diagnostics = %serde_json::to_string(&snapshot)?, "tunnel recovery snapshot");
+            },
         }
     }
-    Ok(())
 }
 
 async fn run_status(args: StatusArgs) -> Result<(), Box<dyn Error>> {

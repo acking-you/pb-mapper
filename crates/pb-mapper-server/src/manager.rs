@@ -1,4 +1,8 @@
 use snafu::{ResultExt, Snafu};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tracing::instrument;
 
 use pb_mapper_core::conn_id::{ConnId, ConnIdProvider, ConnIdTrait};
@@ -27,12 +31,122 @@ pub struct ForwardMessage {
 pub type SenderChan<T> = kanal::AsyncSender<T>;
 pub type ReceiverChan<T> = kanal::AsyncReceiver<T>;
 
+/// Tasks whose completion releases a connection's reusable routing ID.
+pub trait ManagedTask {
+    fn ends_connection(&self) -> bool;
+}
+
+struct Envelope<T> {
+    task: T,
+    scope: Option<Arc<AtomicBool>>,
+}
+
+/// Bounded manager mailbox with an unambiguous, cancellation-safe send boundary.
+pub struct TaskSender<T> {
+    sender: tokio::sync::mpsc::Sender<Envelope<T>>,
+    scope: Option<Arc<AtomicBool>>,
+}
+
+impl<T> std::fmt::Debug for TaskSender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskSender")
+            .field("connection_scoped", &self.scope.is_some())
+            .finish()
+    }
+}
+
+impl<T> Clone for TaskSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            scope: self.scope.clone(),
+        }
+    }
+}
+
+impl<T> TaskSender<T> {
+    /// A fresh connection incarnation; clones share its one-time cleanup fence.
+    pub(crate) fn for_connection(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            scope: Some(Arc::new(AtomicBool::new(true))),
+        }
+    }
+
+    pub async fn send(&self, task: T) -> Result<(), kanal::SendError<T>> {
+        self.sender
+            .send(Envelope {
+                task,
+                scope: self.scope.clone(),
+            })
+            .await
+            .map_err(|error| kanal::SendError(error.0.task))
+    }
+
+    pub fn try_send(&self, task: T) -> Result<(), kanal::SendTimeoutError<T>> {
+        self.sender
+            .try_send(Envelope {
+                task,
+                scope: self.scope.clone(),
+            })
+            .map_err(|error| match error {
+                tokio::sync::mpsc::error::TrySendError::Full(message) => {
+                    kanal::SendTimeoutError::Timeout(message.task)
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(message) => {
+                    kanal::SendTimeoutError::Closed(message.task)
+                }
+            })
+    }
+}
+
+pub(crate) struct TaskReceiver<T>(tokio::sync::mpsc::Receiver<Envelope<T>>);
+
+impl<T: ManagedTask> TaskReceiver<T> {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) async fn recv(&mut self) -> Result<T, kanal::ReceiveError> {
+        while let Some(message) = self.0.recv().await {
+            if let Some(scope) = message.scope {
+                let valid = if message.task.ends_connection() {
+                    scope.swap(false, Ordering::AcqRel)
+                } else {
+                    scope.load(Ordering::Acquire)
+                };
+                if !valid {
+                    tracing::debug!(
+                        event = "stale_connection_task_ignored",
+                        "ignored a task from a closed connection incarnation"
+                    );
+                    continue;
+                }
+            }
+            return Ok(message.task);
+        }
+        Err(kanal::ReceiveError())
+    }
+}
+
+pub(crate) fn task_channel<T>(capacity: usize) -> (TaskSender<T>, TaskReceiver<T>) {
+    let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
+    (
+        TaskSender {
+            sender,
+            scope: None,
+        },
+        TaskReceiver(receiver),
+    )
+}
+
 /// hashmap for index(`ConnId`) to `SenderChan`
 pub type ConnMap<K, V> = hashbrown::HashMap<K, SenderChan<V>>;
 
 pub struct TaskManager<ManagerTaskType, ConnTaskType, ConnIdType, ConnIdProviderType> {
     conn_id_provider: ConnIdProviderType,
-    manager_chan: (SenderChan<ManagerTaskType>, ReceiverChan<ManagerTaskType>),
+    manager_chan: (TaskSender<ManagerTaskType>, TaskReceiver<ManagerTaskType>),
     idle_conn_id_list: Vec<ConnIdType>,
     active_conn_map: ConnMap<ConnIdType, ConnTaskType>,
 }
@@ -40,7 +154,7 @@ pub struct TaskManager<ManagerTaskType, ConnTaskType, ConnIdType, ConnIdProvider
 const DEFAULT_CHAN_CAP: usize = 1024;
 
 impl<
-    MangerChanType,
+    MangerChanType: ManagedTask,
     ConnChanType,
     ConnIdType: ConnIdTrait,
     ConnIdProviderType: ConnIdProvider<ConnIdType>,
@@ -49,7 +163,7 @@ impl<
     pub fn new(
         conn_id_provider: ConnIdProviderType,
     ) -> TaskManager<MangerChanType, ConnChanType, ConnIdType, ConnIdProviderType> {
-        let manager_chan = kanal::bounded_async(DEFAULT_CHAN_CAP);
+        let manager_chan = task_channel(DEFAULT_CHAN_CAP);
         Self {
             conn_id_provider,
             manager_chan,
@@ -59,7 +173,7 @@ impl<
     }
 
     #[inline]
-    pub async fn wait_for_task(&self) -> Result<MangerChanType> {
+    pub async fn wait_for_task(&mut self) -> Result<MangerChanType> {
         self.manager_chan
             .1
             .recv()
@@ -67,7 +181,7 @@ impl<
             .context(MngWaitForTaskSnafu)
     }
 
-    pub fn get_task_sender(&self) -> SenderChan<MangerChanType> {
+    pub fn get_task_sender(&self) -> TaskSender<MangerChanType> {
         self.manager_chan.0.clone()
     }
 
@@ -154,6 +268,12 @@ mod tests {
     use std::fmt;
 
     use super::*;
+
+    impl ManagedTask for () {
+        fn ends_connection(&self) -> bool {
+            false
+        }
+    }
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct TestConnId(u32);
@@ -269,5 +389,36 @@ mod tests {
 
         assert_eq!(manager.active_conn_count(), 0);
         assert_eq!(manager.idle_conn_count(), 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn old_connection_cannot_clean_up_or_update_a_reused_id() {
+        use crate::ManagerTask;
+        let (sender, mut receiver) = task_channel(8);
+        let old = sender.for_connection();
+        let replacement = sender.for_connection();
+        let cleanup = |key: &str| ManagerTask::DeRegisterServerConn {
+            key: key.into(),
+            conn_id: 7_u32.into(),
+        };
+        old.send(cleanup("old")).await.unwrap();
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ManagerTask::DeRegisterServerConn { .. }
+        ));
+        // The routing ID may now be recycled. Its new scope must remain usable.
+        old.send(cleanup("old")).await.unwrap();
+        old.send(ManagerTask::ServerConnActivity {
+            key: "old".into(),
+            conn_id: 7_u32.into(),
+        })
+        .await
+        .unwrap();
+        replacement.send(cleanup("new")).await.unwrap();
+        assert!(
+            matches!(receiver.recv().await.unwrap(), ManagerTask::DeRegisterServerConn { key, .. } if key.as_ref() == "new")
+        );
+        assert!(receiver.is_empty());
     }
 }

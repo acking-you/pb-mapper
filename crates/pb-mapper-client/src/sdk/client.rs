@@ -1,10 +1,12 @@
 //! The session object: [`Client`], its request types, and the tunnel spawner.
 //!
 //! Everything a caller starts goes through here. `register` and `connect` are
-//! the same shape — resolve both endpoints, open a status channel, spawn the
+//! the same shape — resolve the local endpoint, open a status channel, spawn the
 //! transport's worker — so that lifecycle lives in one place (`TunnelWorker`)
 //! and each call site is left with only the worker it invokes.
 
+use crate::diagnostics::{Diagnostics, RecoveryPhase};
+use crate::endpoint::RelayEndpoint;
 use std::sync::{Arc, RwLock};
 
 use pb_mapper_core::checksum::{Credential, parse_credential};
@@ -23,9 +25,9 @@ use super::admin::Admin;
 use super::error::{AddressSnafu, ConnectSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use crate::client::run_client_side_cli_with_shutdown;
+use crate::client::run_client_side_cli_recovering;
 use crate::client::status::get_status_with_credential;
-use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_with_shutdown};
+use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
 
 /// Configuration for a [`Client`] session.
 #[derive(Clone)]
@@ -71,6 +73,7 @@ pub struct ConnectRequest {
 
 pub(crate) struct ClientInner {
     pub(crate) server: String,
+    pub(crate) endpoint: RelayEndpoint,
     pub(crate) credential: RwLock<Credential>,
     pub(crate) keep_alive: bool,
     pub(crate) namespace: Option<u64>,
@@ -110,14 +113,22 @@ impl Client {
         keep_alive: bool,
         namespace: Option<u64>,
     ) -> Self {
+        let server = server.into();
+        let endpoint = RelayEndpoint::shared(&server);
         Self {
             inner: Arc::new(ClientInner {
-                server: server.into(),
+                server,
+                endpoint,
                 credential: RwLock::new(credential),
                 keep_alive,
                 namespace,
             }),
         }
+    }
+
+    /// Notify workers after a host network/resume event. This does not mark services healthy.
+    pub fn notify_network_change(&self) {
+        self.inner.endpoint.notify_network_change();
     }
 
     pub fn server(&self) -> &str {
@@ -167,25 +178,27 @@ impl Client {
         let credential = self.credential();
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
-                run_server_side_cli_with_shutdown::<TcpStreamProvider>(
+                run_server_side_cli_recovering::<TcpStreamProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
                     options,
                     Some(context.status_callback),
-                    credential,
+                    Some(credential),
                     context.shutdown,
+                    context.diagnostics,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
-                run_server_side_cli_with_shutdown::<UdpStreamProvider>(
+                run_server_side_cli_recovering::<UdpStreamProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
                     options,
                     Some(context.status_callback),
-                    credential,
+                    Some(credential),
                     context.shutdown,
+                    context.diagnostics,
                 )
             }),
         };
@@ -209,7 +222,7 @@ impl Client {
         let namespace = self.inner.namespace;
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
-                run_client_side_cli_with_shutdown::<TcpListenerProvider>(
+                run_client_side_cli_recovering::<TcpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -218,10 +231,11 @@ impl Client {
                     Some(context.status_callback),
                     Some(credential),
                     context.shutdown,
+                    context.diagnostics,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
-                run_client_side_cli_with_shutdown::<UdpListenerProvider>(
+                run_client_side_cli_recovering::<UdpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -230,6 +244,7 @@ impl Client {
                     Some(context.status_callback),
                     Some(credential),
                     context.shutdown,
+                    context.diagnostics,
                 )
             }),
         };
@@ -266,13 +281,18 @@ impl Client {
         RemoteId::from_status(self.status_request(PbConnStatusReq::RemoteId).await?)
     }
 
-    /// Resolve both ends of a tunnel and set up its status channel.
+    /// Resolve the local endpoint and set up a recovering relay worker.
     ///
     /// Shared by `register` and `connect`: the two differ only in which worker
-    /// they hand the resolved context to.
+    /// they hand the context to. Relay DNS remains retryable inside that worker.
     async fn prepare_worker(&self, key: &str, local_addr: &str) -> Result<TunnelWorker> {
+        if !self.inner.endpoint.validate() {
+            return Err(Error::invalid_config(
+                "relay must be host:port or an IP socket address",
+            ));
+        }
         let local_addr = resolve(local_addr).await?;
-        let remote_addr = resolve(&self.inner.server).await?;
+        let remote_addr = self.inner.endpoint.clone();
         let (status_tx, status_rx) = watch::channel(TunnelStatus::Starting);
         Ok(TunnelWorker {
             local_addr,
@@ -281,34 +301,38 @@ impl Client {
             shutdown: CancellationToken::new(),
             status_tx,
             status_rx,
+            diagnostics: Diagnostics::default(),
         })
     }
 
     async fn status_request(&self, request: PbConnStatusReq) -> Result<PbConnStatusResp> {
-        let addrs = resolve(&self.inner.server).await?;
         let credential = self.credential();
-        // The connect is inside the timeout, not just the exchange that follows it.
-        // A relay that drops SYNs silently leaves `TcpStream::connect` waiting on
-        // the OS timeout — minutes — so the SDK's own bound has to cover it, the
-        // way the administrator path already does.
-        let io_timeout = control_io_timeout();
-        // Every candidate, under one shared bound: `each_addr` moves on to the next
-        // address when one refuses, and the timeout covers the whole sequence so a
-        // list of blackholed addresses cannot multiply the wait by its length.
-        let connect = crate::addr::connect_tcp(&addrs);
-        let mut stream = match tokio::time::timeout(io_timeout, connect).await {
-            Ok(result) => result.context(ConnectSnafu {
-                addr: addrs.to_string(),
-            })?,
-            Err(_) => {
-                return Err(Error::TimedOut {
-                    timeout: io_timeout,
-                });
-            }
-        };
-        get_status_with_credential(&mut stream, request, self.inner.namespace, &credential)
-            .await
-            .context(StatusSnafu)
+        // Queries share admission with recovery. A stalled status consumer must
+        // not occupy that budget for the legacy 30-second control I/O timeout.
+        let io_timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
+        let endpoint = &self.inner.endpoint;
+        let result = tokio::time::timeout(io_timeout, async {
+            let _permit = endpoint.control_permit().await;
+            let addresses = endpoint.addresses().await.context(ConnectSnafu {
+                addr: self.inner.server.clone(),
+            })?;
+            let mut stream = crate::addr::connect_tcp(&addresses)
+                .await
+                .context(ConnectSnafu {
+                    addr: self.inner.server.clone(),
+                })?;
+            get_status_with_credential(&mut stream, request, self.inner.namespace, &credential)
+                .await
+                .context(StatusSnafu)
+        })
+        .await
+        .map_err(|_| Error::TimedOut {
+            timeout: io_timeout,
+        })?;
+        if result.is_ok() {
+            endpoint.protocol_succeeded();
+        }
+        result
     }
 }
 
@@ -352,10 +376,11 @@ fn watch_callback(tx: watch::Sender<TunnelStatus>) -> StatusCallback {
 /// callback that publishes its status, and the token that stops it.
 struct WorkerContext {
     local_addr: ResolvedAddrs,
-    remote_addr: ResolvedAddrs,
+    remote_addr: RelayEndpoint,
     key: Arc<str>,
     status_callback: StatusCallback,
     shutdown: CancellationToken,
+    diagnostics: Diagnostics,
 }
 
 /// A tunnel resolved and wired up, waiting only for the transport-specific
@@ -366,11 +391,12 @@ struct WorkerContext {
 /// This owns that lifecycle so each call site is left with just its own call.
 struct TunnelWorker {
     local_addr: ResolvedAddrs,
-    remote_addr: ResolvedAddrs,
+    remote_addr: RelayEndpoint,
     key: Arc<str>,
     shutdown: CancellationToken,
     status_tx: watch::Sender<TunnelStatus>,
     status_rx: watch::Receiver<TunnelStatus>,
+    diagnostics: Diagnostics,
 }
 
 impl TunnelWorker {
@@ -386,8 +412,11 @@ impl TunnelWorker {
             shutdown,
             status_tx,
             status_rx,
+            diagnostics,
         } = self;
         let worker_shutdown = shutdown.clone();
+        let worker_diagnostics = diagnostics.clone();
+        let endpoint = remote_addr.clone();
         let join = tokio::spawn(async move {
             start(WorkerContext {
                 local_addr,
@@ -395,11 +424,13 @@ impl TunnelWorker {
                 key,
                 status_callback: watch_callback(status_tx.clone()),
                 shutdown: worker_shutdown,
+                diagnostics: worker_diagnostics.clone(),
             })
             .await;
+            worker_diagnostics.phase(RecoveryPhase::Stopped);
             settle_stopped(&status_tx);
         });
-        LiveTunnel::new(shutdown, join, status_rx)
+        LiveTunnel::new(shutdown, join, status_rx, endpoint, diagnostics)
     }
 }
 

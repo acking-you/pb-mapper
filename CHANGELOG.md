@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-10-03
+- Make relay manager admission cancellation-safe, fence commands from closed connection lifetimes, and abort owned relay helpers on parent cancellation.
+- Retain relay hostnames, retry initial DNS failures, coalesce OS-resolver refresh and bound outstanding lookups without bypassing VPN/TUN DNS.
+- Wake recovery from network-address hints and authenticated relay recovery while preserving healthy controls and forwarded data.
+- Share per-relay setup budgets across SDK mappings and distinguish timeout, DNS, service absence and permanent rejection in timing/backoff decisions.
+- Expose running SDK versions and bounded recovery diagnostics in Rust, Node and CLI logs; prevent async tracing spans from leaking into unrelated tasks.
+- Add cancellation, stale-ID, DNS, prolonged-outage, notification-burst and shared-capacity regressions alongside encrypted fault-injection coverage.
+
 ## [0.5.1] - 2026-10-03
 - Recover registrations and new subscriptions through bounded, jittered setup attempts, adaptive latency budgets, independent control watchdogs, and cancellation-safe legacy/v2 frame reads.
 - Keep connect listeners and healthy data streams alive during transient relay probe/control failures; bound pending setup and control queues so one stalled service cannot block the relay.

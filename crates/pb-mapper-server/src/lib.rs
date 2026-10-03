@@ -212,7 +212,16 @@ pub enum ConnTask {
     StatusResp(PbConnResponse),
 }
 
-pub(crate) type ManagerTaskSender = SenderChan<ManagerTask>;
+impl manager::ManagedTask for ManagerTask {
+    fn ends_connection(&self) -> bool {
+        matches!(
+            self,
+            Self::DeRegisterServerConn { .. } | Self::DeRegisterClientConn { .. }
+        )
+    }
+}
+
+pub(crate) type ManagerTaskSender = manager::TaskSender<ManagerTask>;
 pub(crate) type ConnTaskSender = SenderChan<ConnTask>;
 pub(crate) type ConnTaskReceiver = ReceiverChan<ConnTask>;
 

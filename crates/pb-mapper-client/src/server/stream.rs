@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use snafu::ResultExt;
-use tracing::info_span;
+use tracing::instrument;
 
 use super::error::{
     ConnectLocalStreamSnafu, ConnectRemoteStreamSnafu, ControlIoTimeoutSnafu,
@@ -33,6 +33,7 @@ pub struct StreamConnect {
 /// Handle a stream connection and establish a forward network traffic forwarding.
 /// This function handles both local and remote streams, sets up message writers and readers,
 /// and starts forwarding network traffic between the two endpoints.
+#[instrument(skip(connect, setup_permit), fields(key = %key))]
 pub async fn handle_stream<LocalStream: StreamProvider>(
     key: Arc<str>,
     client_id: u32,
@@ -50,9 +51,6 @@ where
         namespace,
         credential,
     } = connect;
-    let key_ref = key.as_ref();
-    let client_id_span = info_span!("client_id", key_ref, client_id);
-    let _enter = client_id_span.enter();
 
     let request = match namespace {
         Some(namespace) => PbConnRequest::StreamScoped {

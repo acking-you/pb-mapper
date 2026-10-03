@@ -163,3 +163,51 @@ partial administrator writes, and debug credential redaction. The relay
 regression runs with one namespace stream slot and one rate token; its first
 control deliberately withholds ACK while a second control supplies the stream.
 It fails before the admission-accounting fix and passes afterward.
+
+## Recovery hardening in 0.5.2
+
+- The manager mailbox uses cancellation-safe admission: a pending send has not
+  delivered a command. Each socket's commands carry a lifetime token; after its
+  first cleanup, duplicate cleanup and late activity cannot touch a reused ID.
+  Accepted administrator mutations report their actual outcome. Dropping a relay
+  aborts its owned listener, sweep, shutdown and status tasks.
+- SDK and CLI workers retain the configured relay hostname. Initial DNS failure
+  remains retryable. They coalesce refreshes, refresh on network/transport failure,
+  cache for 60 seconds, and retain last-known candidates if lookup fails. Refresh
+  attempts are at least two seconds apart; routine TTL refresh runs in the
+  background. The OS resolver remains authoritative for hosts, VPN and TUN DNS.
+  Each endpoint owns at most one lookup; eight process-wide permits bound actual
+  OS lookups, including ones whose caller was cancelled. A blocking OS lookup
+  cannot be forcibly cancelled and keeps its permit until completion.
+- A shared watcher observes interface address changes (native notifications on
+  Linux/Windows; a single two-second poller elsewhere). Host integrations can also
+  call `Client::notify_network_change()` / Node `notifyNetworkChange()`. Notifications
+  are hints, never proof of connectivity, and bursts are coalesced. The initial
+  address inventory does not count as a change. WSL may not expose a physical
+  Wi-Fi interruption as an interface event; existing protocol deadlines remain
+  the fallback. Authenticated recovery on the same configured relay wakes workers
+  waiting to retry, without cancelling another worker's healthy handshake.
+- Admission is shared by all mappings to one configured relay address in a
+  process: at most eight control setups and 64 data setups. Successful forwarding
+  releases its setup permit. Existing CLI processes have separate budgets; these
+  are not machine-wide limits. Public status RPCs have a five-second maximum
+  including admission, preventing them from consuming recovery capacity for 30 seconds.
+- Only actual timeouts expand the setup deadline. A relay that answers "service
+  unavailable" supplies a latency sample and remains distinguishable from DNS,
+  transport, timeout, rejection and network-change failures. Queue wait is not
+  measured as relay latency. Repeated recovery logs are sampled at powers of two.
+- Rust and Node handles expose `diagnostics()`: the **running SDK** version,
+  latest attempt phase, attempt/failure counters, authenticated reply age, setup
+  latency, retry/DNS ages and shared setup use. No credentials or business payloads
+  are included. Pool diagnostics describe the latest worker attempt; aggregate
+  readiness remains the handle's `status()`. CLI workers emit a snapshot every
+  30 seconds. Healthy control/data sockets survive network hints.
+
+Regression coverage includes a pending-send/cancel cleanup race, a completed
+mutation concurrent with revocation, parent relay cancellation, stale commands
+following ID reuse, failed/changed DNS and cancelled waiters, a simulated
+130-second outage, delayed ACKs, repeated jitter, 20 mappings sharing admission,
+and encrypted end-to-end recovery after a stalled handshake. Fault injection is
+isolated from production interfaces. These changes shorten software recovery
+once connectivity returns; they cannot carry traffic through an unavailable Wi-Fi
+link or resume arbitrary application bytes after their data socket is lost.

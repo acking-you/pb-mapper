@@ -22,6 +22,11 @@ tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uni-stream.workspace = true
+serde = { workspace = true, features = ["derive"] }
+if-addrs = { version = "0.15", features = ["link-local"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+if-watch = { version = "3.2.2", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

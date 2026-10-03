@@ -10,7 +10,7 @@ resolver = "3"
 [workspace.package]
 # `version` must stay the first key here: `release.yml` and `docker-publish.yml`
 # both parse it positionally with awk to check the tag against it.
-version = "0.5.1"
+version = "0.5.2"
 authors = ["L_B__"]
 edition = "2024"
 rust-version = "1.88"
@@ -23,12 +23,12 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 [workspace.dependencies]
-pb-mapper-auth = { path = "crates/pb-mapper-auth", version = "0.5.1" }
-pb-mapper = { path = "crates/pb-mapper", version = "0.5.1" }
-pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.5.1" }
-pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.5.1" }
-pb-mapper-protocol = { path = "crates/pb-mapper-protocol", version = "0.5.1" }
-pb-mapper-server = { path = "crates/pb-mapper-server", version = "0.5.1" }
+pb-mapper-auth = { path = "crates/pb-mapper-auth", version = "0.5.2" }
+pb-mapper = { path = "crates/pb-mapper", version = "0.5.2" }
+pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.5.2" }
+pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.5.2" }
+pb-mapper-protocol = { path = "crates/pb-mapper-protocol", version = "0.5.2" }
+pb-mapper-server = { path = "crates/pb-mapper-server", version = "0.5.2" }
 # Test support only; never a dependency of a shipped crate.
 pb-mapper-testkit = { path = "crates/pb-mapper-testkit" }
 

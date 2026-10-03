@@ -308,8 +308,9 @@ async fn apply_mutation<T>(
 /// Authorize the caller, then hand the task to the manager.
 ///
 /// Returns the administrator lease's cancellation token, since a caller that
-/// still has waiting left to do needs it. Racing the cancellation here is safe
-/// for a mutation too: a task that was never sent was never applied.
+/// still has waiting left to do needs it. The bounded Tokio mailbox guarantees
+/// that a Pending send has not delivered anything. Once send completes, mutation
+/// callers await the manager's outcome without racing credential cancellation.
 async fn send_manager_task(
     authorization: &AuthContext,
     manager: &ManagerTaskSender,
@@ -431,7 +432,7 @@ mod tests {
                 page_size: 100,
             }
         };
-        let (manager, receiver) = kanal::unbounded_async();
+        let (manager, mut receiver) = crate::manager::task_channel(1024);
         let request_admin = admin.clone();
         let request_runtime = runtime.clone();
         let pending = tokio::spawn(async move {
@@ -517,7 +518,7 @@ mod tests {
         let admin = runtime
             .authenticate_presented(ADMIN_KEY_ID, &old_key)
             .expect("old administrator key should authenticate");
-        let (manager, receiver) = kanal::unbounded_async();
+        let (manager, mut receiver) = crate::manager::task_channel(1024);
         let request_admin = admin.clone();
         let request_runtime = runtime.clone();
         let pending = tokio::spawn(async move {
@@ -590,7 +591,7 @@ mod tests {
         let admin = runtime
             .authenticate_presented(ADMIN_KEY_ID, &key)
             .expect("administrator key should authenticate");
-        let (manager, receiver) = kanal::unbounded_async();
+        let (manager, receiver) = crate::manager::task_channel(1024);
 
         let failure = execute(
             AdminRequest::ConnectionRetire {
@@ -613,5 +614,68 @@ mod tests {
         drop(runtime);
         tokio::time::sleep(Duration::from_millis(20)).await;
         let _ = std::fs::remove_dir_all(state_dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cancellation_audit {
+    use super::*;
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    #[tokio::test]
+    async fn applied_mutation_must_not_be_reported_as_cancelled() {
+        let config = pb_mapper_auth::AuthConfig {
+            state_dir: std::env::temp_dir()
+                .join(format!("pb-audit-admin-{}", rand::random::<u64>())),
+            ..pb_mapper_auth::AuthConfig::default()
+        };
+        let auth = AuthRuntime::from_isolated_state(config).await.unwrap();
+        let admin = auth
+            .authenticate_presented(pb_mapper_auth::ADMIN_KEY_ID, &auth.admin_key().unwrap())
+            .unwrap();
+        let cancellation = admin.admin_cancellation_token().unwrap();
+        let (sender, mut receiver) = crate::manager::task_channel(1);
+        sender.send(ManagerTask::SweepServerLeases).await.unwrap();
+        let (response, reply) = tokio::sync::oneshot::channel();
+        let task = ManagerTask::AdminConnectionRetire {
+            key: "audit".into(),
+            conn_id: None,
+            response_sender: response,
+        };
+        let mut mutation = Box::pin(apply_mutation(&admin, &sender, task, reply, "audit"));
+        poll_fn(|cx| {
+            assert!(mutation.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            ManagerTask::SweepServerLeases
+        ));
+        assert!(
+            receiver.is_empty(),
+            "Pending admission cannot already have applied the mutation"
+        );
+        poll_fn(|cx| {
+            assert!(mutation.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        match receiver.recv().await.unwrap() {
+            ManagerTask::AdminConnectionRetire {
+                response_sender, ..
+            } => response_sender.send(1).unwrap(),
+            _ => panic!("wrong manager task"),
+        }
+        cancellation.cancel();
+        let result = mutation.await;
+        auth.shutdown_actor().await;
+        assert!(
+            matches!(result, Ok(1)),
+            "already-applied mutation reported {result:?}"
+        );
     }
 }

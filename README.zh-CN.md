@@ -172,3 +172,10 @@ cargo test
 ## 许可证
 
 基于 [MIT License](LICENSE) 发布。
+
+### 弱网恢复与诊断
+
+0.5.2 增加保留域名的 DNS 刷新、网络变化提示、同进程同 relay 的共享建连预算，
+并修复取消期间重复清理和后台任务遗留问题。Rust/Node 隧道句柄可通过
+`diagnostics()` 查询实际运行的 SDK 版本、失败原因、时延与资源占用。
+行为边界及测试见 [弱网恢复设计](docs/weak-network-recovery.md)。
