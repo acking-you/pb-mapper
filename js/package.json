@@ -1,6 +1,6 @@
 {
   "name": "pb-mapper",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Node-API client for a deployed pb-mapper relay",
   "main": "index.js",
   "types": "index.d.ts",
@@ -56,10 +56,10 @@
     "@napi-rs/cli": "^3.3.0"
   },
   "optionalDependencies": {
-    "pb-mapper-darwin-arm64": "0.5.2",
-    "pb-mapper-darwin-x64": "0.5.2",
-    "pb-mapper-linux-arm64-gnu": "0.5.2",
-    "pb-mapper-linux-x64-gnu": "0.5.2"
+    "pb-mapper-darwin-arm64": "0.6.0",
+    "pb-mapper-darwin-x64": "0.6.0",
+    "pb-mapper-linux-arm64-gnu": "0.6.0",
+    "pb-mapper-linux-x64-gnu": "0.6.0"
   },
   "engines": {
     "node": ">= 18",

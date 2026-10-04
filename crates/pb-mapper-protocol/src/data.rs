@@ -1,14 +1,27 @@
 //! Optional data encryption, negotiated independently on each relay leg.
 //! The authenticated setup response selects a format before application I/O.
+//!
+//! ```text
+//!                  one shared key K per relay leg
+//! Endpoint  ---- nonce = 00000000 | counter:u64be ----> Relay
+//! Endpoint  <--- nonce = 00000001 | counter:u64be ----- Relay
+//!                        4 bytes       8 bytes
+//!
+//! Setup:    install K and a fixed prefix; no data-key derivation or extra RTT.
+//! Per frame: increment the local counter, then one AES-GCM operation.
+//! Wire:     checksum:u32 | length:u32 | ciphertext | tag[16] (unchanged).
+//! ```
+//!
+//! Counters start at zero independently. Prefixes keep their nonce spaces
+//! disjoint under K. The other relay leg has its own fresh key and counters.
 
 use pb_mapper_core::checksum::AesKeyType;
 use pb_mapper_core::codec::{Aes256GcmDeCodec, Aes256GcmEnCodec};
 use pb_mapper_core::error::Result;
-use ring::hkdf::{HKDF_SHA256, KeyType, Salt};
 
 use crate::secure::{HeaderProtocol, protocol_error};
 
-/// Version with distinct directional keys and checked 64-bit nonce counters.
+/// Version with disjoint directional nonce prefixes and checked 64-bit counters.
 pub const DATA_PROTOCOL_V2: u16 = 2;
 
 /// Negotiated key material for exactly one endpoint-to-relay connection.
@@ -87,37 +100,19 @@ impl DataCodec {
                 crate::get_encodec(&self.key)?,
             ));
         }
-        let to_relay = self.derive(b"pb-mapper-data-v2-endpoint-to-relay")?;
-        let to_endpoint = self.derive(b"pb-mapper-data-v2-relay-to-endpoint")?;
-        let (read, write) = if relay {
-            (to_relay, to_endpoint)
+        // Both directions reuse the per-leg key. Disjoint nonce prefixes avoid
+        // key derivation at setup and leave the per-frame encryption path intact.
+        let (read_prefix, write_prefix) = if relay {
+            ([0; 4], [0, 0, 0, 1])
         } else {
-            (to_endpoint, to_relay)
+            ([0, 0, 0, 1], [0; 4])
         };
         Ok((
-            Aes256GcmDeCodec::try_new_data_v2(&read)
+            Aes256GcmDeCodec::try_new_data_v2(&self.key, read_prefix)
                 .map_err(|_| protocol_error("invalid data-v2 read key"))?,
-            Aes256GcmEnCodec::try_new_data_v2(&write)
+            Aes256GcmEnCodec::try_new_data_v2(&self.key, write_prefix)
                 .map_err(|_| protocol_error("invalid data-v2 write key"))?,
         ))
-    }
-
-    fn derive(self, label: &'static [u8]) -> Result<AesKeyType> {
-        struct KeyLen;
-        impl KeyType for KeyLen {
-            fn len(&self) -> usize {
-                32
-            }
-        }
-        let prk = Salt::new(HKDF_SHA256, b"pb-mapper-data-v2").extract(&self.key);
-        let info = [label];
-        let okm = prk
-            .expand(&info, KeyLen)
-            .map_err(|_| protocol_error("data key derivation failed"))?;
-        let mut key = [0; 32];
-        okm.fill(&mut key)
-            .map_err(|_| protocol_error("data key derivation failed"))?;
-        Ok(key)
     }
 }
 
@@ -135,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn data_keys_separate_both_directions_and_both_relay_legs() {
+    fn nonce_prefixes_separate_directions_and_keys_separate_relay_legs() {
         let mut ciphertexts = Vec::new();
         for secret in [[41; 32], [42; 32]] {
             let codec = DataCodec::negotiate(secret, Some(2), HeaderProtocol::V2).unwrap();
@@ -159,6 +154,31 @@ mod tests {
             for right in &ciphertexts[i + 1..] {
                 assert_ne!(left, right);
             }
+        }
+    }
+
+    #[test]
+    fn data_v2_wire_vectors_reuse_the_leg_key_with_direction_prefixes() {
+        // Independently generated AES-256-GCM vectors: key = [41; 32],
+        // plaintext = "same bytes", counter = 0, empty additional data.
+        let codec = DataCodec::negotiate([41; 32], Some(2), HeaderProtocol::V2).unwrap();
+        let (_, mut endpoint) = codec.endpoint_codecs().unwrap();
+        let (_, mut relay) = codec.relay_codecs().unwrap();
+        for (writer, expected) in [
+            (
+                &mut endpoint,
+                "c510ef0e480d4056924b6e20a9b85e00b219337e7a0a7efa4764",
+            ),
+            (
+                &mut relay,
+                "11bab01eb9f5caa4320d07b0ca94af01960d51d3873d8e7a09be",
+            ),
+        ] {
+            let actual: String = seal(writer, b"same bytes")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            assert_eq!(actual, expected);
         }
     }
 

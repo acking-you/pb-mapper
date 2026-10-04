@@ -100,7 +100,7 @@ metadata rather than a copy of each temporary secret. Optional AES-256-GCM data
 encryption is enabled with `--codec` when registering a service.
 
 Data encryption now negotiates independently on the subscriber and publisher
-legs. Updated peers use separate directional keys and 64-bit counters; an older
+legs. Updated peers reuse each leg's key with disjoint directional nonce prefixes and 64-bit counters; an older
 peer keeps its existing format. New relays generate independent keys for both
 legs, so register/connect clients can be upgraded separately. An authenticated
 old relay response remains compatible; authentication failures never trigger a

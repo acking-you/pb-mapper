@@ -84,13 +84,16 @@ pub struct Aes256GcmEnCodec {
 }
 
 impl Aes256GcmEnCodec {
-    /// Construct a negotiated data-v2 codec with a directional key and a
+    /// Construct a negotiated data-v2 codec with a directional nonce prefix and a
     /// checked 64-bit counter. Legacy constructors retain their 32-bit limit.
-    pub fn try_new_data_v2(key: &[u8]) -> RingResult<Self> {
+    /// Peers sharing a key must use disjoint prefixes for opposite directions.
+    pub fn try_new_data_v2(key: &[u8], prefix: [u8; 4]) -> RingResult<Self> {
+        let mut nonce = [0; NONCE_LEN];
+        nonce[..4].copy_from_slice(&prefix);
         Ok(Self {
             seal: SealingKey::new(
                 UnboundKey::new(&AES_256_GCM, key)?,
-                CounterNonceSequence(Counter(0, u64::MAX), [0; NONCE_LEN]),
+                CounterNonceSequence(Counter(0, u64::MAX), nonce),
             ),
         })
     }
@@ -123,11 +126,13 @@ pub struct Aes256GcmDeCodec {
 
 impl Aes256GcmDeCodec {
     /// Construct the receiving half of a negotiated data-v2 codec.
-    pub fn try_new_data_v2(key: &[u8]) -> RingResult<Self> {
+    pub fn try_new_data_v2(key: &[u8], prefix: [u8; 4]) -> RingResult<Self> {
+        let mut nonce = [0; NONCE_LEN];
+        nonce[..4].copy_from_slice(&prefix);
         Ok(Self {
             open: OpeningKey::new(
                 UnboundKey::new(&AES_256_GCM, key)?,
-                CounterNonceSequence(Counter(0, u64::MAX), [0; NONCE_LEN]),
+                CounterNonceSequence(Counter(0, u64::MAX), nonce),
             ),
         })
     }

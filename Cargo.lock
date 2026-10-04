@@ -1246,7 +1246,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pb-mapper"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "pb-mapper-client",
  "tokio",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-auth"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "parking_lot",
  "pb-mapper-core",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-cli"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "better_mimalloc_rs",
  "clap",
@@ -1290,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-client"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "if-addrs",
  "if-watch",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-core"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "base64",
  "clap",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-node"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "napi",
  "napi-build",
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-protocol"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-server"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "hashbrown 0.17.1",
  "kanal-plus",
@@ -1393,7 +1393,7 @@ dependencies = [
 
 [[package]]
 name = "pb-mapper-testkit"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "pb-mapper-auth",
  "pb-mapper-client",

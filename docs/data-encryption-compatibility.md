@@ -35,19 +35,40 @@ not relax that authentication policy.
 
 ## Key and nonce ownership
 
-The relay generates a fresh random 32-byte data secret for **each leg** of every
-subscription, including legacy legs. For v2, HKDF-SHA256 uses salt
-`pb-mapper-data-v2` and separate info labels
-`pb-mapper-data-v2-endpoint-to-relay` and
-`pb-mapper-data-v2-relay-to-endpoint`. This gives four independent traffic keys
-for the two legs and directions. A subscriber's outbound ciphertext cannot be
-reused as the publisher's inbound ciphertext, even when payloads are identical.
+The relay generates a fresh random 32-byte data key for **each leg** of every
+subscription, including legacy legs. Both directions on a v2 leg share that key.
+They use disjoint nonce prefixes, so their counters can each start at zero
+without reusing a nonce under the same key. There is **no data-key HKDF**.
 
-The data frame remains `checksum:u32 | length:u32 | ciphertext | GCM-tag[16]`.
-The v2 nonce is `zero[4] | counter:u64be`, starting at zero for each directional
-key. Counters reserve their value during encryption, before any socket write,
-and fail before exhaustion rather than wrap. There is no additional per-frame
-overhead. Legacy counter bytes stay identical; updated legacy codecs also fail
+```mermaid
+flowchart LR
+    C[Connect endpoint] -->|"K1 / prefix 00000000 / counter C"| R[Relay]
+    R -->|"K1 / prefix 00000001 / counter R1"| C
+    P[Register endpoint] -->|"K2 / prefix 00000000 / counter P"| R
+    R -->|"K2 / prefix 00000001 / counter R2"| P
+```
+
+```text
+nonce (12 bytes, computed locally; not transmitted):
++---------------------------+----------------------------------+
+| direction prefix: 4 bytes | independent counter: 8 bytes BE  |
++---------------------------+----------------------------------+
+  endpoint -> relay: 0         0, 1, 2, ... (checked, no wrap)
+  relay -> endpoint: 1         0, 1, 2, ... (checked, no wrap)
+
+wire frame (unchanged):
++--------------+------------+------------------+---------------+
+| checksum: 4B | length: 4B | ciphertext: nB   | GCM tag: 16B  |
++--------------+------------+------------------+---------------+
+```
+
+Setup installs the existing per-leg key with the selected prefix. Compared with
+legacy encryption there is no additional key derivation, network round trip or
+per-frame allocation. Negotiation adds an optional JSON field only to existing
+setup messages. Each data frame still performs one AES-GCM operation per
+sender/receiver, using the same nonce-update path as the legacy codec. Counters
+reserve their value before sealing or socket writes and fail before exhaustion.
+Legacy counter bytes stay identical; updated legacy codecs also fail
 at their original 32-bit limit. Control-v2 writers reserve before sealing and
 become terminal after an interrupted write, preventing nonce reuse and a partial
 frame restart. None of these counter fixes change successful legacy frames.
@@ -76,7 +97,7 @@ wire compatibility; account for it before publishing a semver release.
 real TCP and UDP relay forwarding. It asserts independent root keys, selected
 versions, byte integrity, datagram boundaries and both directions. Existing
 tunnel tests cover unencrypted/encrypted local TCP/UDP and long-lived bursts.
-Unit tests cover old JSON shapes/readers, invalid negotiation, key separation,
+Unit tests cover old JSON shapes/readers, invalid negotiation, nonce-domain separation,
 replay, cancellation and counter exhaustion.
 
 The local validation used the 0.5.2 relay revision `3e325a8`, an installed
@@ -97,3 +118,20 @@ The script checks all eight relay/register/connect version combinations over
 TCP/UDP with encryption on/off (32 cases). It owns its child processes and
 temporary authentication directories; no installed binary or existing process
 is replaced, and no system network settings are changed.
+
+The unpublished directional-HKDF prototype was replaced before 0.6.0. Its
+data-v2 format was never released and must not be used with this version.
+
+## Performance check
+
+The release-mode `data_codec_bench` example alternates legacy/v2 order over nine
+samples, with warmup and preallocated buffers. On the local Linux/WSL2 machine
+(2026-10-04), median setup of one endpoint's read/write codecs was 213.32 ns
+legacy and 213.73 ns v2 (+0.19%). Encrypt/decrypt of 256 bytes was 129.34 / 129.16
+ns (-0.14%); 16 KiB was 2455.38 / 2457.81 ns (+0.10%). These differences do not
+establish a measurable regression; they are local microbenchmarks, not WAN
+latency or whole-tunnel throughput guarantees. Reproduce with:
+
+```sh
+cargo run --release -p pb-mapper-protocol --example data_codec_bench
+```

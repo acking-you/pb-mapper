@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-10-04
+- Negotiate authenticated data-v2 independently on each relay leg, with independent per-leg keys and disjoint directional nonce prefixes with checked counters; no data-key derivation, extra round trip or per-frame bytes.
+- Preserve rolling wire upgrades with 0.5.2 across TCP/UDP and encrypted/plain traffic. Existing credentials, service keys and the default unencrypted mode are unchanged.
+- Make interrupted control-v2 writes terminal so cancellation cannot reuse a nonce or restart a partial frame.
+- Keep high-level Rust and Node SDK calls compatible. Low-level Rust request/response enum constructors must initialize the new optional `data_protocol` field, which requires this minor version bump.
+- Full data-v2 protection requires an updated relay and both endpoints; old peers continue using the legacy data format on their leg.
+
 ## [0.5.2] - 2026-10-03
 - Make relay manager admission cancellation-safe, fence commands from closed connection lifetimes, and abort owned relay helpers on parent cancellation.
 - Retain relay hostnames, retry initial DNS failures, coalesce OS-resolver refresh and bound outstanding lookups without bypassing VPN/TUN DNS.
