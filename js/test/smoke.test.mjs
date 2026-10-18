@@ -29,3 +29,16 @@ test("admin() refuses a temporary-looking non-admin key", () => {
       }),
   ).toThrow(/32 bytes/);
 });
+
+test("idle deadline rejects invalid JS numbers and UDP before spawning a worker", async () => {
+  const client = new Client({
+    server: "127.0.0.1:7666",
+    credential: "0123456789abcdefghijklmnopqrstuv",
+  });
+  const request = { key: "probe", localAddr: "127.0.0.1:1", transport: "tcp" };
+  for (const value of [-1, 0.5, NaN, Infinity, 2 ** 53]) {
+    await expect(client.registerWithIdleTimeout(request, value)).rejects.toThrow(/safe integer/);
+  }
+  await expect(client.registerWithIdleTimeout({ ...request, transport: "udp" }, 0))
+    .rejects.toThrow(/requires TCP/);
+});

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { once } from "node:events";
+import net from "node:net";
 import { Client } from "../index.js";
 import manifest from "../package.json";
 import {
@@ -36,6 +38,51 @@ function clientFor(relay, credential = relay.adminKey) {
     credential,
   });
 }
+
+test.skipIf(!hasRelay)(
+  "napi publisher reclaims an abandoned encrypted TCP probe",
+  async () => {
+    await withRelay(async (relay) => {
+      const client = clientFor(relay);
+      const echo = await startEchoServer();
+      const registration = await client.registerWithIdleTimeout({
+        key: "idle-probe",
+        localAddr: echo.address,
+        transport: "tcp",
+        codec: true,
+      }, 300);
+      let connection;
+      let socket;
+      try {
+        await registration.waitReady(READY_MS);
+        const address = await reserveListenAddress();
+        connection = await client.connect({
+          key: "idle-probe",
+          localAddr: address,
+          transport: "tcp",
+        });
+        await connection.waitReady(READY_MS);
+        const [host, port] = address.split(":");
+        socket = net.connect({ host, port: Number(port) });
+        socket.setTimeout(5_000, () => socket.destroy(new Error("idle probe not reclaimed")));
+        const echoed = once(socket, "data");
+        socket.write("probe");
+        const [payload] = await echoed;
+        expect(payload.toString()).toBe("probe");
+        // Keep both the socket and subscription alive: only the publisher can close it.
+        await once(socket, "close");
+        expect(registration.status()).toBe("connected");
+        expect((await echoRoundTrip(address, Buffer.from("fresh"))).toString()).toBe("fresh");
+      } finally {
+        socket?.destroy();
+        await connection?.stop();
+        await registration.stop();
+        await echo.close();
+      }
+    });
+  },
+  30_000,
+);
 
 test.skipIf(!hasRelay)(
   "napi tcp tunnel round-trips and appears in status",

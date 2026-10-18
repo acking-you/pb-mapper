@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1] - 2026-10-19
+- Add per-registration TCP idle deadlines to the Rust SDK (`register_with_idle_timeout`) and Node API (`registerWithIdleTimeout`) so publishers can reclaim abandoned data connections.
+- Reset the deadline on traffic in either direction; preserve ordinary registration defaults, control connections, half-close draining, and zero-as-disabled behavior. Reject UDP for this TCP-only policy.
+- Regenerate Node loader version checks and TypeScript declarations alongside the native addon.
+- Keep the existing wire protocol and compatibility with deployed relays and subscribers; upgrading the publishing application is sufficient to adopt the new policy.
+- Verify encrypted idle reclamation through Rust and Node end-to-end tests, and isolate stale-control recovery tests from concurrent timeout overrides while waiting for confirmed manager cleanup.
+
 ## [0.6.0] - 2026-10-04
 - Negotiate authenticated data-v2 independently on each relay leg, with independent per-leg keys and disjoint directional nonce prefixes with checked counters; no data-key derivation, extra round trip or per-frame bytes.
 - Preserve rolling wire upgrades with 0.5.2 across TCP/UDP and encrypted/plain traffic. Existing credentials, service keys and the default unencrypted mode are unchanged.

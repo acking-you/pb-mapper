@@ -36,6 +36,11 @@ export declare class Client {
   /** Wake recovering tunnels after a host network or resume notification. */
   notifyNetworkChange(): void
   register(request: JsRegisterRequest): Promise<Registration>
+  /**
+   * Publish TCP with an idle deadline in milliseconds; zero disables it.
+   * Traffic in either direction resets it. Other registrations are unaffected.
+   */
+  registerWithIdleTimeout(request: JsRegisterRequest, idleTimeoutMs: number): Promise<Registration>
   connect(request: JsConnectRequest): Promise<Connection>
   listKeys(): Promise<Array<string>>
   serviceStatus(key: string): Promise<Array<JsServiceConnection>>

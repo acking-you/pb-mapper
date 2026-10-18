@@ -101,7 +101,7 @@ pb-mapper 使用预共享凭据，不提供公钥身份体系。如果还需要�
 ### Rust SDK
 
 ```toml
-pb-mapper = "0.5"
+pb-mapper = "0.6.1"
 ```
 
 填入已部署的 relay 地址和凭据后即可 register、connect、查 status，以及用管理员凭据调用全部 admin 接口。示例见 `crates/pb-mapper/examples/`。
