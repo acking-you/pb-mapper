@@ -3,7 +3,7 @@
 Client SDK for a deployed [pb-mapper](https://github.com/acking-you/pb-mapper) relay.
 
 ```toml
-pb-mapper = "0.5"
+pb-mapper = "0.6.1"
 ```
 
 ```rust,no_run
@@ -33,3 +33,10 @@ registration.stop().await?;
 ```
 
 Requires a Tokio runtime. The unified CLI is a separate package (`pb-mapper-cli`).
+
+For TCP services with application heartbeats, use
+`client.register_with_idle_timeout(request, std::time::Duration::from_secs(90))`
+to reclaim abandoned data connections on the publisher. Activity in either
+direction resets the deadline; `Duration::ZERO` disables it. UDP is rejected.
+Ordinary `register` calls, other registrations, and control connections keep
+their existing behavior. No relay or subscriber upgrade is required.

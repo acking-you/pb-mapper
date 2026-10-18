@@ -139,6 +139,20 @@ pub struct JsRegisterRequest {
     pub force_namespace: Option<bool>,
 }
 
+impl TryFrom<JsRegisterRequest> for RegisterRequest {
+    type Error = Error;
+
+    fn try_from(request: JsRegisterRequest) -> Result<Self> {
+        Ok(Self {
+            key: request.key,
+            local_addr: request.local_addr,
+            transport: parse_transport(&request.transport)?,
+            codec: request.codec.unwrap_or(false),
+            force_namespace: request.force_namespace.unwrap_or(false),
+        })
+    }
+}
+
 #[napi(object)]
 pub struct JsConnectRequest {
     pub key: String,
@@ -346,13 +360,33 @@ impl Client {
     pub async fn register(&self, request: JsRegisterRequest) -> Result<Registration> {
         let registration = self
             .inner
-            .register(RegisterRequest {
-                key: request.key,
-                local_addr: request.local_addr,
-                transport: parse_transport(&request.transport)?,
-                codec: request.codec.unwrap_or(false),
-                force_namespace: request.force_namespace.unwrap_or(false),
-            })
+            .register(request.try_into()?)
+            .await
+            .map_err(to_napi)?;
+        Ok(Registration::new(registration))
+    }
+
+    /// Publish TCP with an idle deadline in milliseconds; zero disables it.
+    /// Traffic in either direction resets it. Other registrations are unaffected.
+    #[napi]
+    pub async fn register_with_idle_timeout(
+        &self,
+        request: JsRegisterRequest,
+        idle_timeout_ms: f64,
+    ) -> Result<Registration> {
+        if !(0.0..=9_007_199_254_740_991.0).contains(&idle_timeout_ms)
+            || idle_timeout_ms.fract() != 0.0
+        {
+            return Err(invalid_argument(
+                "idleTimeoutMs must be a non-negative safe integer",
+            ));
+        }
+        let registration = self
+            .inner
+            .register_with_idle_timeout(
+                request.try_into()?,
+                Duration::from_millis(idle_timeout_ms as u64),
+            )
             .await
             .map_err(to_napi)?;
         Ok(Registration::new(registration))

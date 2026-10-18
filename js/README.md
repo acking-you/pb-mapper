@@ -41,6 +41,18 @@ bun run build:release   # LTO + strip; linux-x64 is ~2 MB
 bun test                # smoke + e2e (e2e needs `cargo build --bin pb-mapper`)
 ```
 
+### TCP idle connection reclamation
+
+Use `client.registerWithIdleTimeout(request, idleTimeoutMs)` to reclaim abandoned
+data connections on the publishing device. The timeout is a non-negative safe
+integer in milliseconds; zero disables it. Traffic in either direction resets
+the deadline. UDP is rejected. `register(request)` keeps the existing default,
+and other registrations and control connections are unaffected.
+
+Choose a deadline longer than the service's legitimate quiet periods, or use
+application heartbeats. This is a publisher SDK policy, not a relay protocol
+change: existing compatible relays and subscribers do not need an upgrade.
+
 ### Recovery diagnostics
 
 `registration.diagnostics()` and `connection.diagnostics()` report the running

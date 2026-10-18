@@ -125,7 +125,7 @@ identity or protection against traffic analysis. See the
 ### Rust SDK
 
 ```toml
-pb-mapper = "0.5"
+pb-mapper = "0.6.1"
 ```
 
 ```rust,ignore

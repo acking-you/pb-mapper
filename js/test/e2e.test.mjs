@@ -38,6 +38,33 @@ function clientFor(relay, credential = relay.adminKey) {
 }
 
 test.skipIf(!hasRelay)(
+  "napi idle policy preserves registration lifecycle with a zero deadline",
+  async () => {
+    await withRelay(async (relay) => {
+      const client = clientFor(relay);
+      const echo = await startEchoServer();
+      const registration = await client.registerWithIdleTimeout({
+        key: "idle-policy",
+        localAddr: echo.address,
+        transport: "tcp",
+        codec: true,
+      }, 0);
+      try {
+        await registration.waitReady(READY_MS);
+        expect(registration.status()).toBe("connected");
+        expect(registration.diagnostics().sdkVersion).toBe(manifest.version);
+        expect(await client.listKeys()).toContain("idle-policy");
+      } finally {
+        await registration.stop();
+        await echo.close();
+      }
+      expect(registration.status()).toBe("stopped");
+    });
+  },
+  30_000,
+);
+
+test.skipIf(!hasRelay)(
   "napi tcp tunnel round-trips and appears in status",
   async () => {
     await withRelay(async (relay) => {

@@ -34,7 +34,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uni_stream::stream::{TcpListenerProvider, TcpStreamProvider};
 
-/// Serialises the tests that override process-global configuration.
+/// Serialises tests that override or require default process-global configuration.
 ///
 /// The environment is one namespace shared by every test in this binary, and
 /// several of these tests override the *same* variable —
@@ -1040,6 +1040,7 @@ async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
 
 #[tokio::test]
 async fn subscribe_retires_unacked_control_connection() {
+    let _config_guard = ENV_OVERRIDE_LOCK.lock().await;
     let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = probe_listener.local_addr().unwrap();
     drop(probe_listener);
@@ -1098,11 +1099,18 @@ async fn subscribe_retires_unacked_control_connection() {
         .expect("subscribe did not finish after stale control timed out");
     assert!(result.is_err());
 
-    let keys = read_status_keys(server_addr).await;
-    assert!(
-        !keys.iter().any(|candidate| candidate == key),
-        "unacked stale control connection kept key registered: {keys:?}"
-    );
+    // Subscribe failure and the manager's suspect sweep complete independently.
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let keys = read_status_keys(server_addr).await;
+            if !keys.iter().any(|candidate| candidate == key) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("unacked stale control connection kept key registered");
 
     stale_task.abort();
     shutdown_token.cancel();
@@ -1111,6 +1119,7 @@ async fn subscribe_retires_unacked_control_connection() {
 
 #[tokio::test]
 async fn subscribe_waits_for_replacement_after_retiring_stale_control_connection() {
+    let _config_guard = ENV_OVERRIDE_LOCK.lock().await;
     let probe_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = probe_listener.local_addr().unwrap();
     drop(probe_listener);

@@ -8,7 +8,7 @@ Applications embedding the relay can depend on the library directly:
 
 ```toml
 [dependencies]
-pb-mapper-server = "0.5"
+pb-mapper-server = "0.6.1"
 ```
 
 To install and run the ready-made server program, install the unified CLI:
