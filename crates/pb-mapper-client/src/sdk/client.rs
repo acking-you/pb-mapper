@@ -162,6 +162,26 @@ impl Client {
     /// Returns as soon as the worker is spawned; the handle's
     /// [`Registration::wait_ready`] is what waits for the relay to accept it.
     pub async fn register(&self, request: RegisterRequest) -> Result<Registration> {
+        self.register_inner(request, None).await
+    }
+
+    /// Publish with an idle deadline for each forwarded data connection.
+    ///
+    /// Traffic in either direction resets the deadline; control connections and
+    /// other registrations are unaffected. Zero disables the idle deadline.
+    pub async fn register_with_idle_timeout(
+        &self,
+        request: RegisterRequest,
+        idle_timeout: std::time::Duration,
+    ) -> Result<Registration> {
+        self.register_inner(request, Some(idle_timeout)).await
+    }
+
+    async fn register_inner(
+        &self,
+        request: RegisterRequest,
+        idle_timeout: Option<std::time::Duration>,
+    ) -> Result<Registration> {
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
         }
@@ -187,6 +207,7 @@ impl Client {
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
+                    idle_timeout,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -199,6 +220,7 @@ impl Client {
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
+                    idle_timeout,
                 )
             }),
         };

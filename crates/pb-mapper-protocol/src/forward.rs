@@ -43,6 +43,19 @@ const DEFAULT_HALF_CLOSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PB_MAPPER_TUNNEL_IDLE_TIMEOUT: &str = "PB_MAPPER_TUNNEL_IDLE_TIMEOUT";
 const PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT: &str = "PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT";
 
+tokio::task_local! {
+    static TUNNEL_IDLE_OVERRIDE: Duration;
+}
+
+/// Apply an idle deadline to forwarding polled by this future only.
+///
+/// Activity in either direction resets the deadline. This does not change
+/// process-wide defaults, half-close draining, or independently spawned tasks.
+/// A zero duration disables the idle deadline.
+pub async fn with_tunnel_idle_timeout<F: Future>(timeout: Duration, forward: F) -> F::Output {
+    TUNNEL_IDLE_OVERRIDE.scope(timeout, forward).await
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ForwardTimeoutConfig {
     tunnel_idle_timeout: Duration,
@@ -52,10 +65,11 @@ struct ForwardTimeoutConfig {
 impl ForwardTimeoutConfig {
     fn from_env() -> Self {
         Self {
-            tunnel_idle_timeout: duration_from_env(
-                PB_MAPPER_TUNNEL_IDLE_TIMEOUT,
-                DEFAULT_TUNNEL_IDLE_TIMEOUT,
-            ),
+            tunnel_idle_timeout: TUNNEL_IDLE_OVERRIDE
+                .try_with(|timeout| *timeout)
+                .unwrap_or_else(|_| {
+                    duration_from_env(PB_MAPPER_TUNNEL_IDLE_TIMEOUT, DEFAULT_TUNNEL_IDLE_TIMEOUT)
+                }),
             half_close_idle_timeout: duration_from_env(
                 PB_MAPPER_HALF_CLOSE_IDLE_TIMEOUT,
                 DEFAULT_HALF_CLOSE_IDLE_TIMEOUT,

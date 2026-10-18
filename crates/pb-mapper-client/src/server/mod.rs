@@ -303,6 +303,7 @@ struct ServerCliRunConfig {
     options: ServerTunnelOptions,
     worker_index: usize,
     credential: Credential,
+    idle_timeout: Option<Duration>,
 }
 
 impl Debug for ServerCliRunConfig {
@@ -539,6 +540,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         pinned_credential,
         shutdown,
         Diagnostics::default(),
+        None,
     )
     .await;
 }
@@ -553,6 +555,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     pinned_credential: Option<Credential>,
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
+    idle_timeout: Option<Duration>,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -593,6 +596,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
                 credential,
                 worker_shutdown,
                 worker_diagnostics,
+                idle_timeout,
             )
             .await;
         });
@@ -619,6 +623,7 @@ async fn run_server_side_cli_worker<LocalStream>(
     credential: Credential,
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
+    idle_timeout: Option<Duration>,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -637,6 +642,7 @@ async fn run_server_side_cli_worker<LocalStream>(
         options,
         worker_index,
         credential,
+        idle_timeout,
     };
     // Forwarded sessions outlive a single control connection, so the set lives
     // here rather than inside the attempt: a reconnect is not a reason to drop
@@ -791,6 +797,7 @@ where
             },
         worker_index,
         credential,
+        idle_timeout,
     } = config;
     let control_permit = tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
@@ -1094,6 +1101,7 @@ where
                             keep_alive,
                             namespace,
                             credential,
+                            idle_timeout,
                         },
                         key.clone(),
                         registration.conn_id,

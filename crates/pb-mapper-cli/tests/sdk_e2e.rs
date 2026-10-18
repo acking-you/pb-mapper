@@ -647,3 +647,88 @@ async fn sdk_admin_retires_a_single_connection_by_id() {
 
     registration.stop().await.unwrap();
 }
+
+/// An old subscriber can leave a probe socket open forever. Reclaim it on the
+/// publisher while preserving traffic, the registration and unrelated services.
+#[tokio::test]
+async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
+    let relay = Relay::start("sdk-idle-policy").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let echo = spawn_tcp_echo().await;
+    let registration = client
+        .register_with_idle_timeout(
+            RegisterRequest {
+                key: "bounded".into(),
+                local_addr: echo.to_string(),
+                transport: Transport::Tcp,
+                codec: true,
+                force_namespace: false,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    registration
+        .wait_ready_timeout(READY_TIMEOUT)
+        .await
+        .unwrap();
+    let (unbounded, _) = register_echo(&client, "default", Transport::Tcp, true).await;
+    let mut connections = Vec::new();
+    let mut addresses = Vec::new();
+    for key in ["bounded", "default"] {
+        let addr = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+        let connection = client
+            .connect(ConnectRequest {
+                key: key.into(),
+                local_addr: addr.to_string(),
+                transport: Transport::Tcp,
+            })
+            .await
+            .unwrap();
+        connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+        connections.push(connection);
+        addresses.push(addr);
+    }
+    async fn ping(stream: &mut tokio::net::TcpStream) {
+        stream.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        tokio::time::timeout(READY_TIMEOUT, stream.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"ping");
+    }
+    let mut idle = Vec::new();
+    for _ in 0..12 {
+        let mut stream = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+        ping(&mut stream).await;
+        idle.push(stream);
+    }
+    let mut active = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+    let mut unchanged = tokio::net::TcpStream::connect(addresses[1]).await.unwrap();
+    ping(&mut unchanged).await;
+    for _ in 0..12 {
+        ping(&mut active).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    for mut stream in idle {
+        let mut byte = [0];
+        let result = tokio::time::timeout(READY_TIMEOUT, stream.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Ok(0) | Err(_)),
+            "idle probe still forwarded: {result:?}"
+        );
+    }
+    ping(&mut unchanged).await;
+    ping(&mut active).await;
+    assert_eq!(registration.status(), TunnelStatus::Connected);
+    let mut fresh = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+    ping(&mut fresh).await;
+    for connection in connections {
+        connection.stop().await.unwrap();
+    }
+    registration.stop().await.unwrap();
+    unbounded.stop().await.unwrap();
+}
