@@ -165,15 +165,21 @@ impl Client {
         self.register_inner(request, None).await
     }
 
-    /// Publish with an idle deadline for each forwarded data connection.
+    /// Publish with an idle deadline for each forwarded TCP data connection.
     ///
     /// Traffic in either direction resets the deadline; control connections and
     /// other registrations are unaffected. Zero disables the idle deadline.
+    /// UDP requests are rejected because datagram lifetime has a separate policy.
     pub async fn register_with_idle_timeout(
         &self,
         request: RegisterRequest,
         idle_timeout: std::time::Duration,
     ) -> Result<Registration> {
+        if request.transport.is_datagram() {
+            return Err(Error::invalid_config(
+                "a registration idle deadline requires TCP",
+            ));
+        }
         self.register_inner(request, Some(idle_timeout)).await
     }
 

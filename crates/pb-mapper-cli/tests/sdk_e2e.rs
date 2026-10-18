@@ -654,6 +654,21 @@ async fn sdk_admin_retires_a_single_connection_by_id() {
 async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
     let relay = Relay::start("sdk-idle-policy").await;
     let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    assert!(
+        client
+            .register_with_idle_timeout(
+                RegisterRequest {
+                    key: "unsupported-udp".into(),
+                    local_addr: "127.0.0.1:1".into(),
+                    transport: Transport::Udp,
+                    codec: true,
+                    force_namespace: false,
+                },
+                Duration::from_secs(1)
+            )
+            .await
+            .is_err()
+    );
     let echo = spawn_tcp_echo().await;
     let registration = client
         .register_with_idle_timeout(
