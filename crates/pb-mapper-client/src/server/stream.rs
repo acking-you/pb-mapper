@@ -29,6 +29,7 @@ pub struct StreamConnect {
     pub keep_alive: bool,
     pub namespace: Option<u64>,
     pub credential: Credential,
+    pub idle_timeout: Option<std::time::Duration>,
 }
 
 /// Handle a stream connection and establish a forward network traffic forwarding.
@@ -51,6 +52,7 @@ where
         keep_alive,
         namespace,
         credential,
+        idle_timeout,
     } = connect;
 
     let offered_v2 = <LocalStream::Item as StreamForward>::supports_data_v2();
@@ -145,17 +147,21 @@ where
     let (client_reader, client_writer) = remote_stream.split();
     let (server_reader, server_writer) = local_stream.split();
 
-    snafu_error_handle!(
-        <LocalStream::Item as StreamForward>::forward_local_to_remote_with_codec(
-            codec_key,
-            *credential.key(),
-            server_reader,
-            server_writer,
-            client_reader,
-            client_writer,
-        )
-        .await
+    let forward = <LocalStream::Item as StreamForward>::forward_local_to_remote_with_codec(
+        codec_key,
+        *credential.key(),
+        server_reader,
+        server_writer,
+        client_reader,
+        client_writer,
     );
+    let result = match idle_timeout {
+        Some(timeout) => {
+            pb_mapper_protocol::forward::with_tunnel_idle_timeout(timeout, forward).await
+        }
+        None => forward.await,
+    };
+    snafu_error_handle!(result);
 
     Ok(())
 }

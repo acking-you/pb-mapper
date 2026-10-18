@@ -647,3 +647,164 @@ async fn sdk_admin_retires_a_single_connection_by_id() {
 
     registration.stop().await.unwrap();
 }
+
+/// An old subscriber can leave a probe socket open forever. Reclaim it on the
+/// publisher while preserving traffic, the registration and unrelated services.
+#[tokio::test]
+async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
+    let relay = Relay::start("sdk-idle-policy").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    assert!(
+        client
+            .register_with_idle_timeout(
+                RegisterRequest {
+                    key: "unsupported-udp".into(),
+                    local_addr: "127.0.0.1:1".into(),
+                    transport: Transport::Udp,
+                    codec: true,
+                    force_namespace: false,
+                },
+                Duration::from_secs(1)
+            )
+            .await
+            .is_err()
+    );
+    let echo = spawn_tcp_echo().await;
+    let registration = client
+        .register_with_idle_timeout(
+            RegisterRequest {
+                key: "bounded".into(),
+                local_addr: echo.to_string(),
+                transport: Transport::Tcp,
+                codec: true,
+                force_namespace: false,
+            },
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    registration
+        .wait_ready_timeout(READY_TIMEOUT)
+        .await
+        .unwrap();
+    let (unbounded, _) = register_echo(&client, "default", Transport::Tcp, true).await;
+    let disabled = client
+        .register_with_idle_timeout(
+            RegisterRequest {
+                key: "disabled".into(),
+                local_addr: echo.to_string(),
+                transport: Transport::Tcp,
+                codec: true,
+                force_namespace: false,
+            },
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+    disabled.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
+    let mut subscribers = tokio::task::JoinSet::new();
+    let mut addresses = Vec::new();
+    for key in ["bounded", "default", "disabled"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let relay_addr = relay.addr();
+        subscribers.spawn(async move {
+            BOUND_SUBSCRIBER
+                .scope(std::cell::RefCell::new(Some(listener)), async move {
+                    pb_mapper_client::client::run_client_side_cli_with_pinned_credential::<
+                        BoundSubscriber,
+                        _,
+                    >(
+                        addr,
+                        relay_addr,
+                        key.into(),
+                        false,
+                        None,
+                        admin_credential(),
+                    )
+                    .await;
+                })
+                .await;
+        });
+        addresses.push(addr);
+    }
+    async fn ping(stream: &mut tokio::net::TcpStream) {
+        stream.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        tokio::time::timeout(READY_TIMEOUT, stream.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"ping");
+    }
+    let mut idle = Vec::new();
+    for _ in 0..12 {
+        let mut stream = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+        ping(&mut stream).await;
+        idle.push(stream);
+    }
+    let mut active = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+    let mut unchanged = tokio::net::TcpStream::connect(addresses[1]).await.unwrap();
+    let mut no_deadline = tokio::net::TcpStream::connect(addresses[2]).await.unwrap();
+    ping(&mut unchanged).await;
+    ping(&mut no_deadline).await;
+    for _ in 0..12 {
+        ping(&mut active).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    for mut stream in idle {
+        let mut byte = [0];
+        let result = tokio::time::timeout(READY_TIMEOUT, stream.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Ok(0) | Err(_)),
+            "idle probe still forwarded: {result:?}"
+        );
+    }
+    ping(&mut unchanged).await;
+    ping(&mut no_deadline).await;
+    ping(&mut active).await;
+    assert_eq!(registration.status(), TunnelStatus::Connected);
+    let mut fresh = tokio::net::TcpStream::connect(addresses[0]).await.unwrap();
+    ping(&mut fresh).await;
+    subscribers.shutdown().await;
+    registration.stop().await.unwrap();
+    unbounded.stop().await.unwrap();
+    disabled.stop().await.unwrap();
+}
+
+// Hand the already bound socket to the production subscriber loop through its
+// listener-provider seam. Each task owns its socket throughout setup, with no
+// process-global port reservation and no drop/rebind window.
+tokio::task_local! {
+    static BOUND_SUBSCRIBER: std::cell::RefCell<Option<TcpListener>>;
+}
+
+struct BoundSubscriber;
+struct BoundSubscriberListener(TcpListener);
+
+impl uni_stream::stream::ListenerProvider for BoundSubscriber {
+    type Listener = BoundSubscriberListener;
+
+    async fn bind<A: uni_stream::addr::ToSocketAddrs + Send>(
+        _addr: A,
+    ) -> std::io::Result<Self::Listener> {
+        BOUND_SUBSCRIBER.with(|listener| {
+            listener
+                .borrow_mut()
+                .take()
+                .map(BoundSubscriberListener)
+                .ok_or_else(|| std::io::Error::other("subscriber listener already taken"))
+        })
+    }
+}
+
+impl uni_stream::stream::StreamAccept for BoundSubscriberListener {
+    type Item = uni_stream::stream::TcpStreamImpl;
+
+    async fn accept(&self) -> std::io::Result<(Self::Item, std::net::SocketAddr)> {
+        let (stream, addr) = self.0.accept().await?;
+        Ok((uni_stream::stream::TcpStreamImpl::new(stream), addr))
+    }
+}
