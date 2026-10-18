@@ -658,6 +658,21 @@ async fn publisher_idle_policy_reclaims_abandoned_encrypted_probes() {
         client
             .register_with_idle_timeout(
                 RegisterRequest {
+                    key: "overflow".into(),
+                    local_addr: "127.0.0.1:1".into(),
+                    transport: Transport::Tcp,
+                    codec: true,
+                    force_namespace: false,
+                },
+                Duration::MAX
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .register_with_idle_timeout(
+                RegisterRequest {
                     key: "unsupported-udp".into(),
                     local_addr: "127.0.0.1:1".into(),
                     transport: Transport::Udp,

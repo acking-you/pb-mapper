@@ -170,6 +170,7 @@ impl Client {
     /// Traffic in either direction resets the deadline; control connections and
     /// other registrations are unaffected. Zero disables the idle deadline.
     /// UDP requests are rejected because datagram lifetime has a separate policy.
+    /// Durations that cannot be represented as a timer deadline are rejected.
     pub async fn register_with_idle_timeout(
         &self,
         request: RegisterRequest,
@@ -179,6 +180,12 @@ impl Client {
             return Err(Error::invalid_config(
                 "a registration idle deadline requires TCP",
             ));
+        }
+        if tokio::time::Instant::now()
+            .checked_add(idle_timeout)
+            .is_none()
+        {
+            return Err(Error::invalid_config("idle timeout exceeds timer range"));
         }
         self.register_inner(request, Some(idle_timeout)).await
     }
