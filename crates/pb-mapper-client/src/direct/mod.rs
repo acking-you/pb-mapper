@@ -6,7 +6,10 @@ mod provider;
 mod reports;
 mod socket;
 
-use crate::{diagnostics::Diagnostics, endpoint::RelayEndpoint};
+use crate::{
+    diagnostics::{Diagnostics, DirectStage},
+    endpoint::RelayEndpoint,
+};
 use control::{Control, io_error};
 use endpoint::Network;
 use pb_mapper_core::checksum::Credential;
@@ -121,6 +124,7 @@ impl Consumer {
     ) -> io::Result<Option<Prepared>> {
         // Before a grant arrives no endpoint can have committed, so a failed
         // capability/control/discovery attempt can use the ordinary relay path.
+        let mut attempt = self.diagnostics.direct_attempt();
         let negotiation = async {
             let Some(control) = self.control(key).await? else {
                 return Ok(None);
@@ -130,6 +134,7 @@ impl Consumer {
                 .get_or_try_init(|| async { Network::new(false) })
                 .await?
                 .clone();
+            attempt.stage(DirectStage::Discovering);
             let peer = network.peer(control.capability.stun_addr).await;
             let Some(grant) = control.open(key.into(), self.is_datagram, peer).await? else {
                 return Ok(None);
@@ -142,8 +147,7 @@ impl Consumer {
         )
         .await
         else {
-            self.diagnostics
-                .path_fallback("direct_negotiation_unavailable");
+            attempt.fell_back("direct_negotiation_unavailable");
             return Ok(None);
         };
         let deadline = deadline.min(Instant::now() + Duration::from_millis(grant.ttl_ms));
@@ -166,6 +170,7 @@ impl Consumer {
             id: grant.id,
             completed: false,
         };
+        attempt.stage(DirectStage::Punching);
         let direct_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
         let candidate = tokio::time::timeout_at(direct_deadline, async {
             let connection = network.connect(&grant, direct_deadline).await?;
@@ -185,6 +190,7 @@ impl Consumer {
         if let Ok(Ok((connection, mut send, mut recv))) = candidate {
             // From this point on, timeout/cancellation/ACK loss MUST NOT select relay.
             pending.completed = true;
+            attempt.stage(DirectStage::Committing);
             send.write_all(&[2]).await.map_err(io_error)?;
             if recv.read_u8().await? != 3 {
                 return Err(io::Error::other(
@@ -192,6 +198,7 @@ impl Consumer {
                 ));
             }
             let framing_key = endpoint::framing_key(&connection.0, &grant)?;
+            attempt.established();
             tracing::info!(event = "session_path_selected", path = "direct", service = %key, peer = %connection.0.remote_address());
             Ok(Some(Prepared {
                 path: DataPath::Quic {
@@ -207,8 +214,7 @@ impl Consumer {
             }))
         } else {
             tracing::debug!(reason = ?candidate.as_ref().map(|r| r.as_ref().map(|_| ())), "direct attempt failed before commit");
-            self.diagnostics
-                .path_fallback("direct_timeout_or_unreachable");
+            attempt.fell_back("direct_timeout_or_unreachable");
             control.relay(grant.id).await?;
             let ready = crate::client::stream::subscribe_request(
                 PbConnRequest::DirectRelay {

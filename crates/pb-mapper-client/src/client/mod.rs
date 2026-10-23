@@ -254,6 +254,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
 {
     remote_addr.start();
     let mut wake = remote_addr.wake();
+    diagnostics.network_seen(remote_addr.network_generation());
     set_custom_timeout(Duration::from_secs(120));
 
     let credential = match pinned_credential {
@@ -318,6 +319,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             tokio::select! {
                 () = shutdown.cancelled() => break 'outer,
                 () = wake.changed() => {
+                    diagnostics.network_changed(remote_addr.network_generation());
                     #[cfg(feature = "p2p")]
                     if let Some(direct) = &direct { direct.invalidate(); }
                     probes.abort_all();

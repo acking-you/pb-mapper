@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Show recovery as it unfolds in `TunnelDiagnostics`: `direct.attempt` gives the stage of the direct attempt in flight (negotiating, discovering, punching, committing), and `events` keeps the last 16 relay-ready, relay-failed, network-changed, direct-established and direct-fallback events, the fallback naming the stage it left. Consecutive repeats fold into one entry. Both are written only on control-path transitions; the data path and wire protocol are unchanged.
 
 ## [0.7.0] - 2026-10-23
 - Add opt-in direct connections: a relay `--enable-direct` UDP service, publisher `--allow-direct`, and per-connect `--path auto` try UDP hole punching plus mutually authenticated QUIC. Defaults keep the existing relay protocol and control behavior.

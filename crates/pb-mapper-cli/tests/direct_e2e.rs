@@ -2,7 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, PathPolicy, RegisterOptions, RegisterRequest, Transport,
+    Client, ConnectOptions, ConnectRequest, DirectStage, PathPolicy, RegisterOptions,
+    RegisterRequest, Transport, TunnelEventKind,
 };
 use pb_mapper_server::DirectServerConfig;
 use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_credential, reserve_addr};
@@ -98,6 +99,14 @@ async fn direct_tcp_survives_server_restart_and_local_stop_closes_it() {
     let mut socket = TcpStream::connect(addr).await.unwrap();
     roundtrip(&mut socket).await;
     assert_eq!(connection.diagnostics().direct.unwrap().active_direct, 1);
+    // The attempt has settled, and the history says how the session travels.
+    let seen = connection.diagnostics();
+    assert_eq!(seen.direct.as_ref().unwrap().attempt, None);
+    assert!(
+        seen.events
+            .iter()
+            .any(|event| matches!(event.kind, TunnelEventKind::DirectEstablished { .. }))
+    );
     assert_eq!(registration.diagnostics().direct.unwrap().active_direct, 1);
     assert_eq!(
         count.load(Ordering::Relaxed),
@@ -343,6 +352,20 @@ async fn either_side_can_keep_connections_on_the_existing_relay_path() {
         let mut socket = TcpStream::connect(addr).await.unwrap();
         roundtrip(&mut socket).await;
         assert_eq!(connection.diagnostics().direct.unwrap().direct_sessions, 0);
+        // The attempt ends where the offer is missing: at the relay while
+        // negotiating, at the publisher when asking for a grant.
+        let stage = if server_direct {
+            DirectStage::Discovering
+        } else {
+            DirectStage::Negotiating
+        };
+        let seen = connection.diagnostics();
+        assert_eq!(seen.direct.as_ref().unwrap().attempt, None);
+        assert!(
+            seen.events
+                .iter()
+                .any(|event| event.kind == TunnelEventKind::DirectFallback { stage })
+        );
         assert!(registration.diagnostics().direct.is_none());
         assert_eq!(count.load(Ordering::Relaxed), 1);
         connection.stop().await.unwrap();

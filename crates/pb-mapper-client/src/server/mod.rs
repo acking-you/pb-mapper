@@ -682,6 +682,7 @@ async fn run_server_side_cli_worker<LocalStream>(
     let mut stream_tasks = JoinSet::new();
     let setup_slots = remote_addr.data_slots();
     let mut wake = remote_addr.wake();
+    diagnostics.network_seen(remote_addr.network_generation());
     'outer: loop {
         if shutdown.is_cancelled() {
             break 'outer;
@@ -766,6 +767,7 @@ async fn run_server_side_cli_worker<LocalStream>(
                 (interval, backoff.reject.failures())
             }
             Status::NetworkChanged => {
+                diagnostics.network_changed(remote_addr.network_generation());
                 backoff.transport.reset();
                 (Duration::ZERO, 0)
             }
@@ -796,7 +798,10 @@ async fn run_server_side_cli_worker<LocalStream>(
         tokio::select! {
             () = shutdown.cancelled() => break 'outer,
             () = tokio::time::sleep(retry_interval) => {},
-            () = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => { backoff.transport.reset(); }
+            () = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => {
+                diagnostics.network_changed(remote_addr.network_generation());
+                backoff.transport.reset();
+            }
         }
         if shutdown.is_cancelled() {
             break 'outer;
