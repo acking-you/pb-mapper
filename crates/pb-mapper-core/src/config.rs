@@ -11,11 +11,12 @@ use crate::error::{CfgPbServerEnvNotExistSnafu, Result};
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum StatusOp {
-    Sessions,
     /// Get active remote connection IDs.
     RemoteId,
     /// Get registered service keys.
     Keys,
+    /// Get direct-session observations reported by endpoints in this namespace.
+    Sessions,
 }
 
 /// Every address a name resolved to, in the order the resolver returned them.
