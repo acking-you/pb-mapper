@@ -531,17 +531,23 @@ impl DirectState {
             {
                 return;
             }
-            if session.server_instance == self.instance {
-                let Some(entry) = self.entries.get(&session.id) else {
-                    return;
-                };
-                if secret != entry.grant.secret || session != SessionSummary::from(&entry.grant) {
-                    return;
-                }
+            let known = self
+                .entries
+                .get(&session.id)
+                .filter(|_| session.server_instance == self.instance);
+            if let Some(entry) = known
+                && (secret != entry.grant.secret || session != SessionSummary::from(&entry.grant))
+            {
+                return;
             }
+            // A control outage can outlive both the setup and observation TTL
+            // without interrupting direct data. Restore an authenticated claim
+            // even in this incarnation, but never recreate setup authority.
+            let restored = known.is_none();
             self.observations.insert(
                 identity,
                 Observation {
+                    restored,
                     session: session.clone(),
                     secret,
                     consumer: None,
@@ -592,7 +598,7 @@ impl DirectState {
                     });
                 SessionObservation {
                     server_instance: o.session.server_instance,
-                    restored: o.session.server_instance != self.instance,
+                    restored: o.restored,
                     id: o.session.id,
                     service: o.session.service.clone(),
                     is_datagram: o.session.is_datagram,
@@ -606,6 +612,7 @@ impl DirectState {
     }
 }
 struct Observation {
+    restored: bool,
     session: SessionSummary,
     secret: SessionSecret,
     consumer: Option<(SessionReport, Instant)>,
@@ -808,6 +815,13 @@ mod tests {
                 .state,
             SessionState::Active
         );
+        // A long control outage on the same server must recover observations
+        // after retention expires, without recovering the expired attach token.
+        state.entries.clear();
+        state.observations.clear();
+        state.observe(&admin, 0, update.clone(), true);
+        assert!(state.observations(0)[0].restored);
+        assert!(state.relay(&admin, 0, grant.id, grant.secret).is_none());
         let mut restarted = DirectState::new(state.capability.clone());
         restarted.observe(&admin, 0, update, true);
         let restored = restarted.observations(0);

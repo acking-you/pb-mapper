@@ -204,7 +204,7 @@ pub struct ObservedReport {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionObservation {
     pub server_instance: SessionId,
-    /// Restored endpoint observation after a relay restart, without setup authority.
+    /// Restored endpoint claim after restart or retention expiry, without setup authority.
     pub restored: bool,
     pub id: SessionId,
     pub service: String,
