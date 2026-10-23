@@ -277,6 +277,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             credential,
             namespace,
             is_datagram,
+            keep_alive,
             diagnostics.clone(),
         )
     });
@@ -386,7 +387,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                                 if let Some(callback) = &status_callback { callback("connected"); }
                             }
                         }
-                        Err(failure) if failure.permanent && path == crate::sdk::PathPolicy::Auto => {
+                        Err(failure) if failure.permanent && diagnostics.has_active_direct() => {
                             diagnostics.failed(failure.kind, Duration::ZERO);
                             if let Some(callback) = &status_callback { callback("retrying"); }
                             next_probe = Instant::now() + Duration::from_secs(30);

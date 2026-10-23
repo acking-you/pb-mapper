@@ -69,6 +69,7 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
         credential,
         None,
         false,
+        true,
         diagnostics,
     );
     let network = Network::new(false).unwrap();

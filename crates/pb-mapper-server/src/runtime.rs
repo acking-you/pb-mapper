@@ -236,24 +236,23 @@ pub async fn run_server_on_listener_with_direct(
                                 peer,
                             },
                     } => {
-                        let admitted =
-                            direct_state.namespace(connection).is_some_and(|namespace| {
-                                direct_state.pending_in(namespace)
-                                    + namespace_stream_counts
-                                        .get(&namespace)
-                                        .copied()
-                                        .unwrap_or_default()
-                                    < max_streams_per_namespace
-                                    && namespace_rate_limits
-                                        .entry(namespace)
-                                        .or_insert_with(|| {
-                                            NamespaceRateLimit::new(
-                                                new_streams_per_second,
-                                                new_streams_burst,
-                                            )
-                                        })
-                                        .allow()
-                            });
+                        let admit = |namespace, pending| {
+                            pending
+                                + namespace_stream_counts
+                                    .get(&namespace)
+                                    .copied()
+                                    .unwrap_or_default()
+                                < max_streams_per_namespace
+                                && namespace_rate_limits
+                                    .entry(namespace)
+                                    .or_insert_with(|| {
+                                        NamespaceRateLimit::new(
+                                            new_streams_per_second,
+                                            new_streams_burst,
+                                        )
+                                    })
+                                    .allow()
+                        };
                         direct_state.open(
                             connection,
                             request,
@@ -262,7 +261,7 @@ pub async fn run_server_on_listener_with_direct(
                             peer,
                             &server_conn_map,
                             route,
-                            admitted,
+                            admit,
                         );
                     }
                     DirectTask::Client {

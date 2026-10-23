@@ -30,6 +30,7 @@ pub(crate) struct Consumer {
     credential: Credential,
     namespace: Option<u64>,
     is_datagram: bool,
+    keep_alive: bool,
     control: Arc<Mutex<Option<Arc<Control>>>>,
     reports: Arc<reports::Latest>,
     report_wake: Arc<tokio::sync::Notify>,
@@ -43,6 +44,7 @@ impl Consumer {
         credential: Credential,
         namespace: Option<u64>,
         is_datagram: bool,
+        keep_alive: bool,
         diagnostics: Diagnostics,
     ) -> Arc<Self> {
         let control = Arc::new(Mutex::new(None::<Arc<Control>>));
@@ -61,6 +63,7 @@ impl Consumer {
             credential,
             namespace,
             is_datagram,
+            keep_alive,
             control,
             reports,
             report_wake,
@@ -215,7 +218,7 @@ impl Consumer {
                     data_protocol: Some(pb_mapper_protocol::data::DATA_PROTOCOL_V2),
                 },
                 self.remote.clone(),
-                false,
+                self.keep_alive,
                 self.credential,
                 true,
             )

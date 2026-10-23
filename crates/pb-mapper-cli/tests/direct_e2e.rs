@@ -255,6 +255,30 @@ async fn udp_direct_preserves_datagrams_and_revocation_leaves_active_session_own
         Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
     assert!(outsider.sessions().await.unwrap().is_empty());
     relay.revoke(id).await;
+    // Auto mode preserves an established direct session, but a new tunnel with
+    // the revoked credential must still report a terminal authentication error.
+    let rejected = client
+        .connect_with_options(
+            ConnectRequest {
+                key: "udp".into(),
+                local_addr: "127.0.0.1:0".into(),
+                transport: Transport::Udp,
+            },
+            ConnectOptions {
+                path: PathPolicy::Auto,
+            },
+        )
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(READY_TIMEOUT, rejected.wait_ready())
+        .await
+        .expect("permanent authentication failure must terminate readiness")
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        pb_mapper_client::sdk::Error::TunnelFailed { .. }
+    ));
+    rejected.stop().await.unwrap();
     application.send(b"still direct").await.unwrap();
     let mut response = [0; 100];
     let len = tokio::time::timeout(READY_TIMEOUT, application.recv(&mut response))

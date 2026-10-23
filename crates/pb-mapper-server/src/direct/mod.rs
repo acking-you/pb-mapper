@@ -192,7 +192,7 @@ impl DirectState {
         peer: PeerInfo,
         registrations: &ServerConnMap,
         route: impl Fn(RemoteConnId) -> Option<ConnTaskSender>,
-        admitted: bool,
+        mut admit: impl FnMut(u64, usize) -> bool,
     ) {
         let Some(consumer) = self.consumers.get(&connection) else {
             return;
@@ -201,7 +201,6 @@ impl DirectState {
             || !peer.valid()
             || key.is_empty()
             || key.len() > 1024
-            || !admitted
             || self.entries.len() >= 4096
         {
             self.send(
@@ -250,6 +249,18 @@ impl DirectState {
             self.send(connection, DirectEvent::LegacyRelay { request });
             return;
         };
+        // Legacy fallback is charged by the ordinary subscription path. Only
+        // consume a setup token once a direct-capable provider has been found.
+        if !admit(consumer.namespace, self.pending_in(consumer.namespace)) {
+            self.send(
+                connection,
+                DirectEvent::Rejected {
+                    request,
+                    reason: "direct setup capacity exhausted".into(),
+                },
+            );
+            return;
+        }
         let id = random_session_id();
         let grant = SessionGrant {
             id,
@@ -297,9 +308,6 @@ impl DirectState {
                 deadline: Instant::now() + Duration::from_millis(SETUP_TTL_MS),
             },
         );
-    }
-    pub fn namespace(&self, connection: RemoteConnId) -> Option<u64> {
-        self.consumers.get(&connection).map(|c| c.namespace)
     }
     pub fn client(
         &mut self,
@@ -756,6 +764,23 @@ mod tests {
             secret: SessionSecret::random(),
             ttl_ms: SETUP_TTL_MS,
         };
+        let (sender, mut events) = mpsc::channel(8);
+        state.connect(1.into(), 0, admin.clone(), sender);
+        assert!(matches!(events.recv().await, Some(DirectEvent::Ready(_))));
+        state.open(
+            1.into(),
+            1,
+            "echo".into(),
+            false,
+            grant.consumer.clone(),
+            &ServerConnMap::default(),
+            |_| None,
+            |_, _| panic!("legacy fallback must leave admission to the ordinary subscription"),
+        );
+        assert!(matches!(
+            events.recv().await,
+            Some(DirectEvent::LegacyRelay { request: 1 })
+        ));
         state.entries.insert(
             grant.id,
             Entry {

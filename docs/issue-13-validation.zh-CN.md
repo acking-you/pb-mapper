@@ -1,12 +1,12 @@
 # Issue #13 验收记录
 
-测试日期：2026-10-23。实现与边界见 [设计说明](issue-13-direct-connect-design.zh-CN.md)。没有对生产 7666 服务做替换或重启。测试完成后已停止临时进程、删除独立凭据和认证目录、清理 network namespace/bridge 及专用防火墙规则，12111/10811 监听释放；生产 7666 仍在监听。
+测试日期：2026-10-23。实现与边界见 [设计说明](issue-13-direct-connect-design.zh-CN.md)。没有对生产 7666 服务做替换或重启。双 NAT 和公网回退测试完成后，已停止对应临时进程、删除独立凭据和认证目录、清理 network namespace/bridge 及专用防火墙规则。随后按用户要求重新使用 12111/10811 启动独立 HTTP 演示，保留运行供用户查看；生产 7666 始终保留。
 
 ## 本地核心验收
 
-- `direct_e2e.rs`：TCP 32 KiB 双向往返、独立连接的 256 KiB 半关闭排空、UDP 1/1200/8000 字节边界；服务端关闭后继续传输，重启后恢复两端观测，本地 stop 关闭已有直连；撤销凭据不关闭已有直连，其他 namespace 看不到观测。
+- `direct_e2e.rs`：TCP 32 KiB 双向往返、独立连接的 256 KiB 半关闭排空、UDP 1/1200/8000 字节边界；服务端关闭后继续传输，重启后恢复两端观测，本地 stop 关闭已有直连；撤销凭据不关闭已有直连，但同凭据新建 auto 连接的 readiness 必须立即报错，其他 namespace 看不到观测。
 - 客户端 direct 单元集成测试：丢弃 QUIC 包时走真实中继、payload 往返且只拨一次后端；相互证书与 TLS exporter 绑定；Ready 阶段不拨后端，StartDirect 后丢失 Started、迟到 RelaySelect 不再确认中继或重复拨后端。
-- 服务端状态测试：跨 namespace、错误 secret、一用 relay attach、乱序报告、报告不能授予中继权限，重启后的观测不能恢复许可。
+- 服务端状态测试：跨 namespace、错误 secret、一用 relay attach、乱序报告、报告不能授予中继权限，重启后的观测不能恢复许可；无直连提供端时不提前消费中继订阅的限流额度。
 - 默认消息精确编码检查、现有 data-v2/旧 codec 和凭据撤销回归；关闭服务端能力或提供端不允许直连时使用原有中继。
 - Node 同一进程默认 connect 与 `path: "auto"` 分别选择中继和直连，注册 `allowDirect`、诊断和 sessions 查询通过；原有用例保留。
 
@@ -41,6 +41,12 @@
 | 启用直连的同一服务器，显式 relay-only | 原有中继往返成功 |
 
 本机成功取得 STUN 映射，但这条公网链路没有选中直连。尚未确定限制来自哪一层 NAT/防火墙，不将此结果表述为公网打洞成功；它验证的是真实网络下有界回退。双 NAT 成功也不代表所有目的地址相关映射或 UDP 封锁都能穿透。
+
+## 本机 HTTP 演示
+
+本机 Python HTTP 服务 → 本机 `register tcp --allow-direct` → QUIC → 本机 `connect tcp --path auto` → 浏览器 `http://127.0.0.1:18081/`。线上测试服务只负责协调、STUN 和失败时的中继。所有演示进程、凭据和日志独立保存于被 Git 忽略的 `target/direct-http-demo/`，其中 `stop.py` 可停止本机与远端的演示进程。
+
+消费端日志确认 `session_path_selected path=direct`，选择本机网卡候选地址。浏览器下载 1,048,576 字节并校验 SHA-256，一次实测为 56.9 ms。初次请求曾回退到 relay，之后请求选中 direct；演示页面直接读取日志并展示计数，不隐藏回退记录。两端在同一台机器，因此这项验收证明 HTTP 经过真实 QUIC 直连传输，不作为跨公网 NAT 打洞成功的证据。
 
 ## 构建与回归
 

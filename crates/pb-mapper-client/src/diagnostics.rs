@@ -124,6 +124,14 @@ impl Default for Diagnostics {
 }
 
 impl Diagnostics {
+    pub(crate) fn has_active_direct(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .direct
+            .as_ref()
+            .is_some_and(|p| p.active_direct != 0)
+    }
     #[cfg(feature = "p2p")]
     pub(crate) fn path_started(&self, path: pb_mapper_protocol::direct::SessionPath) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());

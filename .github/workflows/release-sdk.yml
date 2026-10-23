@@ -160,6 +160,8 @@ jobs:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -188,9 +190,9 @@ jobs:
             pb-mapper-core \
             pb-mapper-auth \
             pb-mapper-protocol \
+            pb-mapper-server \
             pb-mapper-client \
             pb-mapper \
-            pb-mapper-server \
             pb-mapper-cli
           do
             cargo publish --locked --registry crates-io -p "$package"
