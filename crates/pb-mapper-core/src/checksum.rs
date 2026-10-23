@@ -608,21 +608,6 @@ mod tests {
         assert!(!is_env_safe_admin_key(b"short"));
     }
 
-    #[tokio::test]
-    async fn clearing_the_process_credential_fails_closed_for_checksums() {
-        use super::*;
-        use crate::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
-
-        let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
-        set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv")).unwrap();
-        let checksum = get_checksum(32);
-        assert!(valid_checksum(32, checksum));
-        set_process_msg_header_key(None).unwrap();
-        assert!(!valid_checksum(32, checksum));
-        assert!(!valid_checksum(32, 32));
-        assert!(get_process_credential().is_err());
-    }
-
     #[test]
     fn administrator_credentials_reject_nul_and_whitespace() {
         use super::*;

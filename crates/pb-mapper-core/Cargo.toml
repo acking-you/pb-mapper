@@ -10,6 +10,10 @@ homepage.workspace = true
 description = "Credentials, checksums, addressing, and shared primitives for pb-mapper"
 publish = ["crates-io"]
 
+[[test]]
+name = "process_environment"
+harness = false
+
 [dependencies]
 base64.workspace = true
 clap.workspace = true
