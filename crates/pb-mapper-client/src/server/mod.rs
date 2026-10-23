@@ -120,8 +120,9 @@ impl ControlBackoff {
 }
 
 pub(crate) enum LocalControlWrite {
+    /// Boxed so it does not widen every ping and stream acknowledgement.
     #[cfg(feature = "p2p")]
-    Direct(pb_mapper_protocol::direct::DirectProviderMessage),
+    Direct(Box<pb_mapper_protocol::direct::DirectProviderMessage>),
     Ping {
         seq: u64,
     },
@@ -1081,7 +1082,7 @@ where
             match cmd {
                 #[cfg(feature = "p2p")]
                 LocalControlWrite::Direct(message) => {
-                    let payload = PbServerRequest::Direct(message)
+                    let payload = PbServerRequest::Direct(*message)
                         .encode()
                         .map_err(|_| Status::SendPing)?;
                     tokio::time::timeout(control_io_timeout(), msg_writer.write_msg(&payload))

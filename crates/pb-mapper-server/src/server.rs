@@ -601,12 +601,13 @@ async fn handle_stream_req<T: MessageWriter>(
     conn_id: RemoteConnId,
 ) -> Result<()> {
     if let ConnTask::Direct(event) = req {
-        let msg = LocalServer::Direct(Box::new(event)).encode().context(
-            ServerConnDecodeStreamRequestSnafu {
-                key: key.clone(),
-                conn_id,
-            },
-        )?;
+        let msg =
+            LocalServer::Direct(event)
+                .encode()
+                .context(ServerConnDecodeStreamRequestSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
         writer
             .write_msg(&msg)
             .await

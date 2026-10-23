@@ -1,5 +1,5 @@
 use crate::endpoint::RelayEndpoint;
-use pb_mapper_core::checksum::Credential;
+use pb_mapper_core::{checksum::Credential, config::control_io_timeout};
 use pb_mapper_protocol::{
     MessageReader, MessageWriter,
     command::{MessageSerializer, PbConnRequest, PbConnResponse},
@@ -105,8 +105,9 @@ impl Control {
             }
             drop(cleanup);
         }));
-        let capability = ready_rx
+        let capability = tokio::time::timeout(control_io_timeout(), ready_rx)
             .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct control not ready"))?
             .map_err(|_| io::Error::other("direct control closed before ready"))?;
         Ok(Arc::new(Self {
             tx,

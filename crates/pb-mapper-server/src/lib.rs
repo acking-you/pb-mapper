@@ -172,7 +172,8 @@ pub enum ManagerTask {
 
 #[derive(Debug)]
 pub enum ConnTask {
-    Direct(pb_mapper_protocol::direct::DirectEvent),
+    /// Boxed: rare and large, it must not widen every relay mailbox slot.
+    Direct(Box<pb_mapper_protocol::direct::DirectEvent>),
     Forward(ForwardMessage),
     RegisterResp {
         generation: u64,

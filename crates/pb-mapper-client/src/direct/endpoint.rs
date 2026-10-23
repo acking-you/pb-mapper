@@ -1,4 +1,7 @@
-use super::{identity::Identity, socket::Socket};
+use super::{
+    identity::Identity,
+    socket::{self, Socket},
+};
 use pb_mapper_protocol::direct::{MAX_CANDIDATES, PeerInfo, SessionGrant, valid_candidate};
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
@@ -38,7 +41,7 @@ impl Network {
                 None
             };
             let endpoint = quinn::Endpoint::new_with_abstract_socket(
-                quinn::EndpointConfig::default(),
+                socket::endpoint_config(),
                 config,
                 socket.quic(),
                 Arc::new(quinn::TokioRuntime),
@@ -51,12 +54,19 @@ impl Network {
                     loop {
                         tokio::select! {
                             incoming = ep.accept() => {
-                                let Some(incoming) = incoming else { break; };
-                                if handshakes.len() >= 64 { incoming.refuse(); continue; }
+                                let Some(incoming) = incoming else { break };
+                                if handshakes.len() >= 64 {
+                                    incoming.refuse();
+                                    continue;
+                                }
                                 let tx = tx.clone();
                                 handshakes.spawn(async move {
                                     match tokio::time::timeout(Duration::from_secs(3), incoming).await {
-                                        Ok(Ok(connection)) => { if let Err(error) = tx.try_send(connection) { error.into_inner().close(0u32.into(), b"accept capacity"); } },
+                                        Ok(Ok(connection)) => {
+                                            if let Err(error) = tx.try_send(connection) {
+                                                error.into_inner().close(0u32.into(), b"accept capacity");
+                                            }
+                                        }
                                         result => tracing::debug!(?result, "direct TLS accept failed"),
                                     }
                                 });
@@ -92,7 +102,6 @@ impl Network {
             if socket
                 .local_addr()
                 .is_ok_and(|a| a.is_ipv4() == stun.is_ipv4())
-                && socket.alive()
             {
                 match socket.mapped_addr(stun).await {
                     Ok(addr) => candidates.push(addr),
@@ -159,19 +168,16 @@ impl Network {
             socket.forget(id);
         }
     }
-    pub async fn probe(&self, grant: &SessionGrant, provider: bool) -> Vec<SocketAddr> {
+    pub fn probe(&self, grant: &SessionGrant, provider: bool) -> Vec<SocketAddr> {
         let peer = if provider {
             &grant.consumer
         } else {
             &grant.provider
         };
-        let mut learned = Vec::new();
-        for (socket, _) in &self.transports {
-            if let Ok(addrs) = socket.probe(grant.id, &peer.candidates).await {
-                learned.extend(addrs);
-            }
-        }
-        learned
+        self.transports
+            .iter()
+            .flat_map(|(socket, _)| socket.probe(grant.id, &peer.candidates))
+            .collect()
     }
     pub async fn accept(&self) -> Option<quinn::Connection> {
         self.incoming.lock().await.recv().await
@@ -180,10 +186,10 @@ impl Network {
         for (_, endpoint) in &self.transports {
             endpoint.close(0u32.into(), b"local tunnel stopped");
         }
-        // Keep the UDP receive owner alive while Quinn sends/retransmits CLOSE.
-        // Dropping it with the last session can otherwise leave the peer waiting
-        // for its idle timeout. Bound draining so an unreachable peer cannot
-        // prevent a local stop.
+        // Keep the endpoints, and so their drivers, alive while Quinn sends and
+        // retransmits CLOSE; dropping them with the last session can leave the
+        // peer waiting for its idle timeout. Bound draining so an unreachable
+        // peer cannot prevent a local stop.
         let _ = tokio::time::timeout(Duration::from_secs(3), async {
             for (_, endpoint) in &self.transports {
                 endpoint.wait_idle().await;
@@ -202,22 +208,36 @@ impl Network {
         let mut probe = tokio::time::interval(Duration::from_millis(120));
         loop {
             tokio::select! {
-                () = tokio::time::sleep_until(deadline) => return Err(io::Error::new(io::ErrorKind::TimedOut, "direct path timed out")),
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "direct path timed out"));
+                }
                 _ = probe.tick() => {
                     // Only race paths that answered our authenticated probe.
                     // Blind QUIC flights to stale interface addresses can fill
                     // one shared UDP socket's send queue and stall healthy sessions.
-                    let candidates = self.probe(grant, false).await;
+                    let candidates = self.probe(grant, false);
+                    // At most 16 handshakes per setup: an attempt is bounded
+                    // work, and the setup deadline ends the search anyway.
                     for addr in candidates {
-                        if tried.contains(&addr) || tried.len() >= 16 { continue; } tried.push(addr);
-                        if let Some((_,ep)) = self.transports.iter().find(|(socket,_)| socket.local_addr().is_ok_and(|a| a.is_ipv4() == addr.is_ipv4()))
-                            && let Ok(connecting) = ep.connect_with(config.clone(), addr, "pb-mapper.invalid") {
-                                attempts.spawn(connecting);
-                            }
+                        if tried.contains(&addr) || tried.len() >= 16 {
+                            continue;
+                        }
+                        tried.push(addr);
+                        let endpoint = self.transports.iter().find(|(socket, _)| {
+                            socket.local_addr().is_ok_and(|a| a.is_ipv4() == addr.is_ipv4())
+                        });
+                        if let Some((_, endpoint)) = endpoint
+                            && let Ok(connecting) =
+                                endpoint.connect_with(config.clone(), addr, "pb-mapper.invalid")
+                        {
+                            attempts.spawn(connecting);
+                        }
                     }
                 }
                 Some(result) = attempts.join_next(), if !attempts.is_empty() => {
-                    if let Ok(Ok(connection)) = result { return Ok(connection); }
+                    if let Ok(Ok(connection)) = result {
+                        return Ok(connection);
+                    }
                 }
             }
         }
@@ -225,8 +245,7 @@ impl Network {
 }
 impl Drop for Network {
     fn drop(&mut self) {
-        for (socket, ep) in &self.transports {
-            socket.closing();
+        for (_, ep) in &self.transports {
             ep.close(0u32.into(), b"local tunnel stopped");
         }
         self.acceptors.clear();

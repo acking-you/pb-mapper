@@ -65,6 +65,10 @@ pub(crate) async fn bind(
 
 pub type RelaySelection = (ImutableKey, RemoteConnId, u64);
 
+fn conn_task(event: DirectEvent) -> ConnTask {
+    ConnTask::Direct(Box::new(event))
+}
+
 pub enum DirectTask {
     Connect {
         connection: RemoteConnId,
@@ -224,28 +228,21 @@ impl DirectState {
             );
             return;
         };
-        let selected = registrations.get(&key).and_then(|all| {
-            all.iter()
-                .rev()
-                .find(|p| p.health == ServerConnHealth::Healthy)
+        // Newest first, like the relay. A relay-only or revoked registration
+        // must not hide an older direct-capable one of the same service.
+        let selected = self.capability.as_ref().and_then(|capability| {
+            registrations.get(&key)?.iter().rev().find_map(|provider| {
+                let auth = provider.direct.as_ref()?;
+                if provider.health != ServerConnHealth::Healthy
+                    || provider.is_datagram != is_datagram
+                    || auth.ensure_active().is_err()
+                {
+                    return None;
+                }
+                Some((capability, provider, auth, route(provider.conn_id)?))
+            })
         });
-        let Some(provider) = selected.filter(|p| p.is_datagram == is_datagram) else {
-            self.send(connection, DirectEvent::LegacyRelay { request });
-            return;
-        };
-        let Some(provider_auth) = provider
-            .direct
-            .as_ref()
-            .filter(|a| a.ensure_active().is_ok())
-        else {
-            self.send(connection, DirectEvent::LegacyRelay { request });
-            return;
-        };
-        let Some(capability) = &self.capability else {
-            self.send(connection, DirectEvent::LegacyRelay { request });
-            return;
-        };
-        let Some(sender) = route(provider.conn_id) else {
+        let Some((capability, provider, provider_auth, sender)) = selected else {
             self.send(connection, DirectEvent::LegacyRelay { request });
             return;
         };
@@ -280,7 +277,7 @@ impl DirectState {
             ttl_ms: SETUP_TTL_MS,
         };
         if sender
-            .try_send(ConnTask::Direct(DirectEvent::Offer {
+            .try_send(conn_task(DirectEvent::Offer {
                 grant: grant.clone(),
                 stun_addr: capability.stun_addr,
             }))
@@ -333,8 +330,7 @@ impl DirectState {
             {
                 entry.phase = Phase::Closed;
                 if let Some(sender) = route(entry.provider) {
-                    let _ = sender
-                        .try_send(ConnTask::Direct(DirectEvent::Cancel { id: entry.grant.id }));
+                    let _ = sender.try_send(conn_task(DirectEvent::Cancel { id: entry.grant.id }));
                 }
             }
             return;
@@ -362,7 +358,7 @@ impl DirectState {
             {
                 entry.phase = Phase::SelectingRelay;
                 if let Some(sender) = route(entry.provider) {
-                    let _ = sender.try_send(ConnTask::Direct(DirectEvent::RelaySelect { id }));
+                    let _ = sender.try_send(conn_task(DirectEvent::RelaySelect { id }));
                 }
             }
             DirectClientMessage::RelaySelect { .. } if entry.phase == Phase::RelaySelected => {
@@ -371,7 +367,7 @@ impl DirectState {
             DirectClientMessage::Cancel { .. } if entry.pending() => {
                 entry.phase = Phase::Closed;
                 if let Some(sender) = route(entry.provider) {
-                    let _ = sender.try_send(ConnTask::Direct(DirectEvent::Cancel { id }));
+                    let _ = sender.try_send(conn_task(DirectEvent::Cancel { id }));
                 }
             }
             _ => {}
@@ -425,7 +421,7 @@ impl DirectState {
                     grant: entry.grant.clone(),
                 };
                 if let Some(sender) = route(connection) {
-                    let _ = sender.try_send(ConnTask::Direct(event.clone()));
+                    let _ = sender.try_send(conn_task(event.clone()));
                 }
                 self.send(consumer, event);
             }
@@ -481,8 +477,7 @@ impl DirectState {
         {
             entry.phase = Phase::Closed;
             if let Some(sender) = route(entry.provider) {
-                let _ =
-                    sender.try_send(ConnTask::Direct(DirectEvent::Cancel { id: entry.grant.id }));
+                let _ = sender.try_send(conn_task(DirectEvent::Cancel { id: entry.grant.id }));
             }
         }
     }
@@ -491,8 +486,7 @@ impl DirectState {
             if entry.pending() && Instant::now() >= entry.deadline {
                 entry.phase = Phase::Closed;
                 if let Some(sender) = route(entry.provider) {
-                    let _ = sender
-                        .try_send(ConnTask::Direct(DirectEvent::Cancel { id: entry.grant.id }));
+                    let _ = sender.try_send(conn_task(DirectEvent::Cancel { id: entry.grant.id }));
                 }
             }
         }
@@ -810,6 +804,45 @@ mod tests {
             events.recv().await,
             Some(DirectEvent::LegacyRelay { request: 1 })
         ));
+        // A newer relay-only registration must not hide an older direct one.
+        let registration =
+            |conn_id: u32, direct: Option<AuthContext>| super::super::ServerConnInfo {
+                direct,
+                conn_id: conn_id.into(),
+                generation: u64::from(conn_id),
+                health: ServerConnHealth::Healthy,
+                need_codec: false,
+                is_datagram: false,
+                protocol_version: 2,
+                last_rx_at: Instant::now(),
+                stream_ack_budget: Duration::from_secs(1),
+                suspect_check: None,
+                retire_token: tokio_util::sync::CancellationToken::new(),
+            };
+        let mut registrations = ServerConnMap::default();
+        registrations.insert(
+            "echo".into(),
+            vec![registration(3, Some(admin.clone())), registration(4, None)],
+        );
+        let (provider, offers) = kanal::bounded_async(1);
+        state.open(
+            1.into(),
+            2,
+            "echo".into(),
+            false,
+            grant.consumer.clone(),
+            &registrations,
+            |id| (id == 3.into()).then(|| provider.clone()),
+            |_, _| true,
+        );
+        let Ok(Some(ConnTask::Direct(offer))) = offers.try_recv() else {
+            panic!("the direct-capable registration must receive the offer");
+        };
+        let DirectEvent::Offer { grant: offered, .. } = *offer else {
+            panic!("expected an offer");
+        };
+        assert_eq!(offered.generation, 3);
+        state.entries.clear();
         state.entries.insert(
             grant.id,
             Entry {

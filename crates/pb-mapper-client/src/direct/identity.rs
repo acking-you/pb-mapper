@@ -73,11 +73,20 @@ impl Identity {
         Ok(config)
     }
 }
+/// Flow-control window of the single stream a direct connection carries.
+/// Quinn's 1.25 MB default caps one stream at window/RTT, about 100 Mbit/s at
+/// 100 ms; 8 MiB keeps long paths bandwidth-limited rather than window-limited.
+/// Memory is only committed while the local application reads slower than
+/// the peer sends.
+const STREAM_WINDOW: u32 = 8 << 20;
+
 fn transport() -> io::Result<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
     config
         .max_concurrent_bidi_streams(1u32.into())
-        .max_concurrent_uni_streams(0u32.into());
+        .max_concurrent_uni_streams(0u32.into())
+        .stream_receive_window(STREAM_WINDOW.into())
+        .send_window(u64::from(STREAM_WINDOW));
     config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
     config.max_idle_timeout(Some(
         std::time::Duration::from_secs(60)

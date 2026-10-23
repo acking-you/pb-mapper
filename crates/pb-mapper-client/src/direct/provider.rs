@@ -116,6 +116,8 @@ async fn run<L: StreamProvider + Send + 'static>(
 {
     let mut network: Option<Arc<Network>> = None;
     let reports = Arc::new(ProviderReports::default());
+    // Every setup and committed session, keyed by grant: the per-registration
+    // session cap counts committed data, not only pending setup.
     let mut sessions = HashMap::<SessionId, mpsc::Sender<SessionEvent>>::new();
     let mut tasks = JoinSet::new();
     let mut arrivals = JoinSet::new();
@@ -123,49 +125,67 @@ async fn run<L: StreamProvider + Send + 'static>(
         tokio::select! {
             () = shutdown.cancelled() => break,
             envelope = rx.recv() => {
-                let Some(Envelope { event, reply }) = envelope else { break; };
+                let Some(Envelope { event, reply }) = envelope else { break };
                 reports.connected(reply.clone());
-                let Some(event) = event else { continue; };
-                match event {
-                    DirectEvent::Offer { grant, stun_addr } => {
-                        if sessions.contains_key(&grant.id) { continue; }
-                        if sessions.len() >= 64 || !grant.consumer.valid() || grant.service != key.as_ref() || grant.is_datagram != is_datagram || grant.ttl_ms == 0 || grant.ttl_ms > SETUP_TTL_MS {
-                            send(&reply, DirectProviderMessage::Reject { id:grant.id, reason:"invalid offer or provider capacity reached".into() }); continue;
+                let (id, event) = match event {
+                    Some(DirectEvent::Offer { grant, stun_addr }) => {
+                        if sessions.contains_key(&grant.id) {
+                            continue;
                         }
-                        let net = match &network { Some(net) => net.clone(), None => match Network::new(true) { Ok(net) => { network=Some(net.clone()); net }, Err(error) => { send(&reply,DirectProviderMessage::Reject { id:grant.id, reason:error.to_string() });continue; } } };
-                        let (tx, rx) = mpsc::channel(8); let id=grant.id; sessions.insert(id,tx);
-                        let local=local.clone();let active=active.clone();let diagnostics=diagnostics.clone();let reports=reports.clone();
+                        let admitted =
+                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply);
+                        let Some(net) = admitted else { continue };
+                        let (tx, rx) = mpsc::channel(8);
+                        let id = grant.id;
+                        sessions.insert(id, tx);
+                        let session = session::<L>(
+                            net, grant, stun_addr, reply, rx, local.clone(), idle,
+                            diagnostics.clone(), active.clone(), reports.clone(),
+                        );
                         tasks.spawn(async move {
-                            let result = session::<L>(net, grant, stun_addr, reply, rx, local, idle, diagnostics, active, reports).await;
-                            if let Err(error)=result { tracing::debug!(%error, "provider direct session ended"); }
+                            if let Err(error) = session.await {
+                                tracing::debug!(%error, "provider direct session ended");
+                            }
                             id
                         });
+                        continue;
                     }
-                    DirectEvent::Granted { grant, .. } => { if let Some(tx)=sessions.get(&grant.id) { let _=tx.try_send(SessionEvent::Granted); } }
-                    DirectEvent::RelaySelect { id } => { if let Some(tx)=sessions.get(&id) { let _=tx.try_send(SessionEvent::Relay); } }
-                    DirectEvent::Cancel { id } => { if let Some(tx)=sessions.get(&id) { let _=tx.try_send(SessionEvent::Cancel); } }
-                    _ => {}
+                    Some(DirectEvent::Granted { grant, .. }) => (grant.id, SessionEvent::Granted),
+                    Some(DirectEvent::RelaySelect { id }) => (id, SessionEvent::Relay),
+                    Some(DirectEvent::Cancel { id }) => (id, SessionEvent::Cancel),
+                    _ => continue,
+                };
+                if let Some(tx) = sessions.get(&id) {
+                    let _ = tx.try_send(event);
                 }
             }
-            connection = async { match &network { Some(net) => net.accept().await, None => std::future::pending().await } } => {
-                if let Some(connection)=connection {
-                    tracing::debug!(peer=%connection.remote_address(), "direct TLS accepted");
-                    if arrivals.len() >= 64 { connection.close(0u32.into(),b"session capacity");continue; }
-                    arrivals.spawn(async move {
-                        let connection=QuicGuard(connection);
-                        tokio::time::timeout(Duration::from_secs(2),async {
-                            let (send,mut recv)=connection.0.accept_bi().await.map_err(io_error)?;
-                            let mut id=[0;16];recv.read_exact(&mut id).await.map_err(io_error)?;
-                            let mut tag=[0;32];recv.read_exact(&mut tag).await.map_err(io_error)?;
-                            Ok::<_,io::Error>((id,Incoming { connection,send,recv,tag }))
-                        }).await
-                    });
+            connection = async {
+                match &network {
+                    Some(net) => net.accept().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(connection) = connection else { continue };
+                tracing::debug!(peer = %connection.remote_address(), "direct TLS accepted");
+                if arrivals.len() >= 64 {
+                    connection.close(0u32.into(), b"session capacity");
+                    continue;
+                }
+                let bind = session_bind(QuicGuard(connection));
+                arrivals.spawn(tokio::time::timeout(Duration::from_secs(2), bind));
+            }
+            Some(result) = arrivals.join_next(), if !arrivals.is_empty() => {
+                if let Ok(Ok(Ok((id, incoming)))) = result
+                    && let Some(tx) = sessions.get(&id)
+                {
+                    let _ = tx.try_send(SessionEvent::Incoming(incoming));
                 }
             }
-            Some(result)=arrivals.join_next(), if !arrivals.is_empty() => {
-                if let Ok(Ok(Ok((id,incoming))))=result && let Some(tx)=sessions.get(&id) { let _=tx.try_send(SessionEvent::Incoming(incoming)); }
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                if let Ok(id) = result {
+                    sessions.remove(&id);
+                }
             }
-            Some(result)=tasks.join_next(), if !tasks.is_empty() => { if let Ok(id)=result { sessions.remove(&id); } }
         }
     }
     tasks.shutdown().await;
@@ -174,8 +194,62 @@ async fn run<L: StreamProvider + Send + 'static>(
         network.shutdown().await;
     }
 }
+/// Validate an offer and lazily create the shared endpoint, or reject it.
+fn admit_offer(
+    grant: &SessionGrant,
+    key: &str,
+    is_datagram: bool,
+    sessions: usize,
+    network: &mut Option<Arc<Network>>,
+    reply: &Reply,
+) -> Option<Arc<Network>> {
+    let reject = |reason: String| {
+        send(
+            reply,
+            DirectProviderMessage::Reject {
+                id: grant.id,
+                reason,
+            },
+        );
+        None
+    };
+    if sessions >= 64
+        || !grant.consumer.valid()
+        || grant.service != key
+        || grant.is_datagram != is_datagram
+        || grant.ttl_ms == 0
+        || grant.ttl_ms > SETUP_TTL_MS
+    {
+        return reject("invalid offer or provider capacity reached".into());
+    }
+    if let Some(network) = network {
+        return Some(network.clone());
+    }
+    match Network::new(true) {
+        Ok(created) => Some(network.insert(created).clone()),
+        Err(error) => reject(error.to_string()),
+    }
+}
+/// The first bytes on an accepted connection name the grant they claim.
+/// Identity and binding are verified by the session that owns that grant.
+async fn session_bind(connection: QuicGuard) -> io::Result<(SessionId, Incoming)> {
+    let (send, mut recv) = connection.0.accept_bi().await.map_err(io_error)?;
+    let mut id = [0; 16];
+    recv.read_exact(&mut id).await.map_err(io_error)?;
+    let mut tag = [0; 32];
+    recv.read_exact(&mut tag).await.map_err(io_error)?;
+    Ok((
+        id,
+        Incoming {
+            connection,
+            send,
+            recv,
+            tag,
+        },
+    ))
+}
 fn send(reply: &Reply, message: DirectProviderMessage) {
-    let _ = reply.try_send(LocalControlWrite::Direct(message));
+    let _ = reply.try_send(LocalControlWrite::Direct(Box::new(message)));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -216,17 +290,30 @@ where
             break;
         }
         tokio::select! {
-            ()=tokio::time::sleep_until(deadline)=>return Err(io::Error::new(io::ErrorKind::TimedOut,"provider setup expired")),
-            _=probes.tick()=>{network.probe(&grant,true).await;},
-            event=events.recv()=>match event {
-                Some(SessionEvent::Granted)=>{tracing::debug!(id=?grant.id,"direct grant accepted by provider");granted=true;},
-                Some(SessionEvent::Incoming(candidate)) if incoming.is_none()=> {
-                    tracing::debug!(id=?grant.id,"direct session bind received");
-                    match verify(&candidate,&grant) { Ok(()) => { incoming=Some(candidate); }, Err(error) => tracing::debug!(%error, "direct session binding rejected") }
+            () = tokio::time::sleep_until(deadline) => {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "provider setup expired"));
+            }
+            _ = probes.tick() => {
+                network.probe(&grant, true);
+            }
+            event = events.recv() => match event {
+                Some(SessionEvent::Granted) => {
+                    tracing::debug!(id = ?grant.id, "direct grant accepted by provider");
+                    granted = true;
                 }
-                Some(SessionEvent::Relay)=>{send(&reply,DirectProviderMessage::RelaySelected{id:grant.id});return Ok(());}
-                Some(SessionEvent::Cancel)|None=>return Ok(()),
-                _=>{}
+                Some(SessionEvent::Incoming(candidate)) if incoming.is_none() => {
+                    tracing::debug!(id = ?grant.id, "direct session bind received");
+                    match verify(&candidate, &grant) {
+                        Ok(()) => incoming = Some(candidate),
+                        Err(error) => tracing::debug!(%error, "direct session binding rejected"),
+                    }
+                }
+                Some(SessionEvent::Relay) => {
+                    send(&reply, DirectProviderMessage::RelaySelected { id: grant.id });
+                    return Ok(());
+                }
+                Some(SessionEvent::Cancel) | None => return Ok(()),
+                _ => {}
             }
         }
     }
@@ -240,12 +327,22 @@ where
         tokio::pin!(start);
         loop {
             tokio::select! {
-                ()=tokio::time::sleep_until(deadline)=>return Err(io::Error::new(io::ErrorKind::TimedOut,"direct commit expired")),
-                result=&mut start=>{if result?!=2{return Err(io::Error::other("invalid direct commit"));}break;}
-                event=events.recv()=>match event {
-                    Some(SessionEvent::Relay)=>{send(&reply,DirectProviderMessage::RelaySelected{id:grant.id});return Ok(());}
-                    Some(SessionEvent::Cancel)|None=>return Ok(()),
-                    _=>{}
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "direct commit expired"));
+                }
+                result = &mut start => {
+                    if result? != 2 {
+                        return Err(io::Error::other("invalid direct commit"));
+                    }
+                    break;
+                }
+                event = events.recv() => match event {
+                    Some(SessionEvent::Relay) => {
+                        send(&reply, DirectProviderMessage::RelaySelected { id: grant.id });
+                        return Ok(());
+                    }
+                    Some(SessionEvent::Cancel) | None => return Ok(()),
+                    _ => {}
                 }
             }
         }
@@ -278,7 +375,10 @@ where
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     tick.tick().await;
     loop {
-        tokio::select! {result=&mut forwarding=>return result.map_err(io_error),_=tick.tick()=>report.tick()}
+        tokio::select! {
+            result = &mut forwarding => return result.map_err(io_error),
+            _ = tick.tick() => report.tick(),
+        }
     }
 }
 fn verify(incoming: &Incoming, grant: &SessionGrant) -> io::Result<()> {
@@ -329,14 +429,12 @@ impl ProviderReports {
     fn put(&self, update: SessionUpdate) {
         self.latest.put(update.clone());
         let routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut message =
+            LocalControlWrite::Direct(Box::new(DirectProviderMessage::Report(update)));
         for route in routes.iter() {
-            if route
-                .try_send(LocalControlWrite::Direct(DirectProviderMessage::Report(
-                    update.clone(),
-                )))
-                .is_ok()
-            {
-                break;
+            match route.try_send(message) {
+                Ok(()) => break,
+                Err(error) => message = error.into_inner(),
             }
         }
     }
@@ -432,9 +530,10 @@ mod tests {
             active.clone(),
             Arc::new(ProviderReports::default()),
         )));
-        let LocalControlWrite::Direct(DirectProviderMessage::Accept { peer, .. }) =
-            reply_rx.recv().await.unwrap()
-        else {
+        let Some(LocalControlWrite::Direct(accepted)) = reply_rx.recv().await else {
+            panic!("expected accepted offer");
+        };
+        let DirectProviderMessage::Accept { peer, .. } = *accepted else {
             panic!("expected accepted offer");
         };
         grant.provider = peer;
@@ -489,7 +588,8 @@ mod tests {
         while let Ok(message) = reply_rx.try_recv() {
             assert!(!matches!(
                 message,
-                LocalControlWrite::Direct(DirectProviderMessage::RelaySelected { .. })
+                LocalControlWrite::Direct(message)
+                    if matches!(*message, DirectProviderMessage::RelaySelected { .. })
             ));
         }
         assert_eq!(active.load(Ordering::Acquire), 0);

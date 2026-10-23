@@ -980,8 +980,11 @@ pub async fn run_server_on_listener_with_direct(
             } => {
                 let namespace = split_scoped_service_key(&key).0;
                 // Fallback belongs to an already admitted subscription. It must
-                // keep its slot/token even when the namespace is now full.
-                let is_new_subscription = !pending_streams.contains_key(&conn_id);
+                // keep its slot/token even when the namespace is now full. A
+                // pinned DirectRelay is the same: its grant held a setup slot
+                // and a rate token until this subscription replaced it.
+                let is_new_subscription =
+                    !pending_streams.contains_key(&conn_id) && pinned_provider.is_none();
                 if is_new_subscription
                     && namespace_stream_counts
                         .get(&namespace)
@@ -1014,11 +1017,7 @@ pub async fn run_server_on_listener_with_direct(
                     }
                     continue;
                 };
-                // DirectRelay already consumed its rate token when its grant
-                // was admitted. The pinned, one-use selection cannot be reused
-                // to admit an unrelated subscription.
                 if is_new_subscription
-                    && pinned_provider.is_none()
                     && !namespace_rate_limits
                         .entry(namespace)
                         .or_insert_with(|| {
