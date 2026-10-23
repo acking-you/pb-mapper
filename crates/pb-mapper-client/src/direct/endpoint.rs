@@ -235,8 +235,12 @@ impl Network {
                     }
                 }
                 Some(result) = attempts.join_next(), if !attempts.is_empty() => {
-                    if let Ok(Ok(connection)) = result {
-                        return Ok(connection);
+                    match result {
+                        Ok(Ok(connection)) => return Ok(connection),
+                        // A systematic identity or config mismatch must be
+                        // distinguishable from an unreachable path.
+                        Ok(Err(error)) => tracing::debug!(%error, "direct QUIC attempt failed"),
+                        Err(error) => tracing::debug!(%error, "direct QUIC attempt aborted"),
                     }
                 }
             }
