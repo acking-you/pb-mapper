@@ -48,6 +48,15 @@
 
 消费端日志确认 `session_path_selected path=direct`，选择本机网卡候选地址。浏览器下载 1,048,576 字节并校验 SHA-256，一次实测为 56.9 ms。初次请求曾回退到 relay，之后请求选中 direct；演示页面直接读取日志并展示计数，不隐藏回退记录。两端在同一台机器，因此这项验收证明 HTTP 经过真实 QUIC 直连传输，不作为跨公网 NAT 打洞成功的证据。
 
+## 合并前复查（第二轮）
+
+- 服务端选择提供端：较新的仅中继注册不再遮住较旧的可直连注册（服务端状态测试覆盖）；已获准的回退中继在 namespace 满额时仍保留原有槽位。
+- 进程凭据更新只修改进程内状态，不再写环境变量；运行中的根密钥轮换与 UI 改配置不会与 DNS 等线程的环境读取竞争。相关测试不再需要修改环境。
+- 直连收包改为 Quinn 驱动原地分流，GRO 拼包中夹杂的控制包有单元测试覆盖；新增 relay 邮箱变体装箱，ConnTask 回到 master 的 240 字节。
+- 本机 `cargo test` 覆盖 core/auth/server/client 全部单元测试，以及 CLI 的 direct_e2e、regression、sdk_e2e、temporary_credential_e2e、network_recovery、data_compatibility、test_delay。
+
+本机回环吞吐（macOS ARM64、release、三个角色同一进程、单连接写 512 MiB 共 3 次）：直连约 140–180 MiB/s，新旧两种收包实现差异在噪声范围内；同环境 TCP 中继约 1.0–1.6 GiB/s。采样显示直连瓶颈是 macOS 上每个 QUIC 包一次 `sendmsg`/`recvmsg`（无 GSO/GRO），Quinn 的 `fast-apple-datapath` 也没有改善。新收包路径的收益在支持批量接收与 GRO 的 Linux 上，本次未测量。这是回环数据，不代表公网链路；直连在公网上的价值是绕开 relay 这一跳及其带宽，而不是回环吞吐更高。
+
 ## 构建与回归
 
 - Rust 1.99.1；`cargo fmt --all`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`。

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/poster.png" alt="pb-mapper — remote control infrastructure for the agent harness era" width="800" />
+<img src="docs/assets/poster.png" alt="pb-mapper — pull a virtual network cable to any service: direct end to end when chosen, relay when direct cannot connect" width="800" />
 
 <p>
   <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
@@ -22,38 +22,48 @@
 
 ---
 
-> **Remote control infrastructure for the agent harness era.**
+> **Pull a virtual network cable to any service.**
 
-Agent harnesses can write code, run tools, and coordinate long workflows. They
-still need a narrow, durable path into private runtimes. **pb-mapper** provides
-that network primitive: expose one relay port, register any number of keyed
-TCP/UDP services behind it, and delegate access without publishing every
-service or sharing the relay's root credential.
+**pb-mapper** is a connection coordination layer. Run `register` next to a
+private TCP or UDP service, run `connect` wherever you need it, and that service
+appears on a local port, as if a cable ran between the two machines. One public
+relay port authenticates both ends, scopes them to a namespace and decides how
+their bytes travel.
+
+- **Relay by default.** Every connection works through the relay: Rust on
+  Tokio, TCP and UDP, optional AES-256-GCM per leg. Nothing new is negotiated
+  unless you ask for it.
+- **Direct when you choose it.** A connection that opts in first tries an
+  end-to-end path: UDP hole punching on one socket, then mutually authenticated
+  QUIC. Its bytes then bypass the relay, and the session belongs to the two
+  endpoints: losing the coordinator does not cut it.
+- **Relay again when direct cannot connect.** If no direct path is ready within
+  the setup budget, the same connection falls back to the relay before any
+  application byte is sent, pinned to the publisher that was selected, so the
+  backend is never dialed twice.
 
 pb-mapper transports bytes. The service behind a tunnel still owns its
 application-level authentication and authorization.
 
-## Why it fits an agent harness
+## Why use it
 
-- **Compact and easy to embed** — one Rust binary contains the relay, register,
-  connect, status, and administrator roles. Linux releases are distributed as a
-  small, self-contained archive with no language runtime to install.
-- **One public port, many control paths** — registration, subscription, status,
-  and administration all enter through the same relay port. Adding another
-  remote-control endpoint does not require another public listener.
+- **One public port, many services** — registration, subscription, status and
+  administration all enter through the same relay port. Adding a service does
+  not require another public listener.
 - **Delegate access instead of the root key** — keep one 32-byte administrator
-  key on the relay and issue renewable, expiring `pbmt1_` credentials to
-  harnesses or workloads. Each credential receives an isolated namespace.
-- **Revoke live access** — expiry, revocation, auth-state reset, and root-key
-  rotation close affected live control and data connections.
-- **Native performance, production experience** — the data path is implemented
-  in Rust on Tokio, supports TCP and UDP, and has been exercised by long-running
-  self-hosted products and real game-server traffic. The end-to-end suite covers
-  the transport/encryption matrix and credential lifecycle.
+  key on the relay and issue renewable, expiring `pbmt1_` credentials. Each
+  credential receives an isolated namespace.
+- **Revoke live access** — expiry, revocation, auth-state reset and root-key
+  rotation close affected relay connections and refuse new direct setups.
+- **Compact and embeddable** — one Rust binary holds the relay, register,
+  connect, status and administrator roles; Rust and Node SDKs embed the same
+  client.
+- **Built for remote control** — agent harnesses, coding sessions, private APIs,
+  model gateways, development machines and game servers reach private runtimes
+  through it today.
 
-Recovery behavior, resource bounds and fault-injection coverage are documented in
-[Weak-network recovery](docs/weak-network-recovery.md). Version 0.5.2 adds shared
-DNS recovery, network hints, bounded setup admission and live SDK diagnostics.
+Recovery behavior, resource bounds and fault-injection coverage are documented
+in [Weak-network recovery](docs/weak-network-recovery.md).
 
 ## One relay, many private services
 
@@ -61,22 +71,59 @@ DNS recovery, network hints, bounded setup admission and live SDK diagnostics.
 
 ```text
  private runtime A ── register "app" ──┐
- private runtime B ── register "shell" ├──► pb-mapper relay :7666 ◄── agent harnesses
+ private runtime B ── register "shell" ├──► pb-mapper relay :7666 ◄── connect
  private runtime C ── register "tools" ┘          one public port
 ```
 
-- `pb-mapper register` runs beside a private TCP/UDP service and publishes a
-  service name to the relay.
-- `pb-mapper connect` runs beside an agent or operator and exposes that service
-  on a local address.
-- The relay matches both sides by namespace and service name, then forwards data
-  bidirectionally.
+- The relay matches both sides by namespace and service name.
 - Different temporary credentials can reuse the same service names without
   seeing or colliding with each other.
 
-This makes a relay a useful rendezvous layer for remote agent runtimes, coding
-harnesses, private APIs, model gateways, browser-control endpoints, development
-machines, and operational tools.
+## How a connection picks its path
+
+Direct is decided per connection, and only when all three sides agree:
+
+| Relay server | `register` | `connect` | Path |
+| --- | --- | --- | --- |
+| default | any | any | relay |
+| `--enable-direct` | default | any | relay |
+| `--enable-direct` | `--allow-direct` | default (`--path relay-only`) | relay |
+| `--enable-direct` | `--allow-direct` | `--path auto` | direct first, relay fallback before commit |
+
+```sh
+pb-mapper server --port 7666 --enable-direct \
+  --direct-listen 0.0.0.0:10811 --direct-advertise PUBLIC_IP:10811
+pb-mapper register tcp --key demo --addr 127.0.0.1:8080 \
+  --server relay.example.com:7666 --allow-direct
+pb-mapper connect tcp --key demo --addr 127.0.0.1:9090 \
+  --server relay.example.com:7666 --path auto
+pb-mapper status sessions --server relay.example.com:7666
+```
+
+Open the advertised UDP port in addition to the TCP relay port. Credentials are
+configured as before, and an omitted option keeps the original protocol and
+control behavior, so existing clients and deployments are unaffected.
+
+What to expect:
+
+- **Fallback has one boundary.** The publisher dials its backend only after the
+  consumer commits to direct. Before that point any failure falls back to the
+  relay; after it, nothing is replayed onto the relay, since that could
+  duplicate the backend's side effects.
+- **Direct sessions belong to the endpoints.** Stopping the relay or revoking a
+  credential blocks new setups but does not close an established direct
+  session; stopping the local tunnel does. `status sessions` reports endpoint
+  observations with age and staleness, not proof of liveness.
+- **Not every network can be punched through.** Symmetric NATs, UDP blocking
+  and similar paths use the relay. Validation so far: direct TCP and UDP
+  across two independent Linux NATs, relay fallback with UDP blocked and no
+  duplicate backend connection, and a macOS-to-Internet run that fell back to
+  the relay. See the [validation record](docs/issue-13-validation.zh-CN.md) and
+  the [design](docs/issue-13-direct-connect-design.zh-CN.md).
+
+Rust SDK users enable the `p2p` feature and call `register_with_options` /
+`connect_with_options`; Node exposes `allowDirect`, `path` and `sessionsJson()`.
+The Flutter UI and its C ABI keep using the relay.
 
 ## Install the agent Skill
 
@@ -120,12 +167,12 @@ identity or protection against traffic analysis. See the
 | Agent Skills | Complete installation, relay, register/connect, and verification through `pb-mapper-suite`, plus a separate release workflow |
 | Operations | Linux systemd units, install scripts, Docker image, status and administrator inventory |
 | Native embedding | Rust crate `pb-mapper` (`Client` for register/connect/status/admin), C ABI for the Flutter UI, Node-API package under `js/` |
-| Networking | TCP and UDP, per-tunnel keep-alive, optional forwarded-data encryption |
+| Networking | TCP and UDP, opt-in direct QUIC with relay fallback, per-tunnel keep-alive, optional forwarded-data encryption |
 
 ### Rust SDK
 
 ```toml
-pb-mapper = "0.6.1"
+pb-mapper = "0.7"
 ```
 
 ```rust,ignore
@@ -178,40 +225,6 @@ const client = new Client({
 const admin = client.admin();
 const issued = await admin.issueKey(3600, "agent");
 ```
-
-## Optional direct connections
-
-The CLI includes direct support; runtime defaults remain relay-only. Explicitly
-start the server's UDP discovery service, opt the publisher in, and choose a
-path for each connect:
-
-```sh
-pb-mapper server --port 7666 --enable-direct \
-  --direct-listen 0.0.0.0:10811 --direct-advertise PUBLIC_IP:10811
-pb-mapper register tcp --key demo --addr 127.0.0.1:8080 \
-  --server relay.example.com:7666 --allow-direct
-pb-mapper connect tcp --key demo --addr 127.0.0.1:9090 \
-  --server relay.example.com:7666 --path auto
-pb-mapper status sessions --server relay.example.com:7666
-```
-
-Use the existing credential configuration. Open the advertised UDP port separately
-from the TCP relay port. `auto` tries authenticated UDP hole punching and mutual-TLS
-QUIC, then uses the existing relay if setup fails before commit. Omit `--path`
-or choose `relay-only` to keep the original protocol and control behavior.
-TCP and UDP services are supported; UDP preserves the existing framed-stream semantics.
-
-Established direct sessions belong to the endpoints: stopping the coordinator
-or revoking a credential prevents new authorization but does not terminate
-already committed direct traffic. Stop the local tunnel to close it. Session
-status is an endpoint observation with age/staleness, not proof of liveness.
-There is no seamless replay to relay after direct commit.
-
-Rust SDK users enable the `p2p` feature and use `register_with_options` /
-`connect_with_options`. Node exposes `allowDirect` / `path` and `sessionsJson()`.
-The existing Flutter/C ABI entry points keep using relay-only.
-See the [implementation design](docs/issue-13-direct-connect-design.zh-CN.md)
-and [validation evidence](docs/issue-13-validation.zh-CN.md).
 
 ## Roadmap: harness-native remote control
 

@@ -123,7 +123,7 @@ Rust 已升级到官方 [1.99.1](https://doc.rust-lang.org/releases.html#version
 
 只有 `auto` 发送 `Status(Service { direct_query: Some(true) })`。收到 `DirectCapability { version: 1, stun_addr }` 后建立 `DirectControl`；每个 connect 句柄复用一个持久 reader/writer，AEAD 计数不重置。能力缺失或许可前协商失败时走原有订阅。提供端未声明能力时，server 返回 `LegacyRelay`。
 
-`SessionGrant` 包含随机 128 位 id/server_instance、所选注册 generation、namespace、服务名、传输类型、两端凭据 key ID、两端证书与候选、随机 256 位 secret、剩余 setup TTL。提供端选择沿用健康注册、namespace 和配额检查。许可通过 PBM2 交付，不把候选地址当作身份。
+`SessionGrant` 包含随机 128 位 id/server_instance、所选注册 generation、namespace、服务名、传输类型、两端凭据 key ID、两端证书与候选、随机 256 位 secret、剩余 setup TTL。提供端从同一服务的健康注册中按新到旧选择第一个声明直连、凭据有效且控制路由在线的注册；较新的仅中继注册不会遮住较旧的可直连注册。namespace 和配额检查沿用原有规则。许可通过 PBM2 交付，不把候选地址当作身份。
 
 ```mermaid
 sequenceDiagram
@@ -156,11 +156,11 @@ sequenceDiagram
 
 消费端在交给 QUIC 第一个 StartDirect 字节之前即标记已提交。此后写取消、Started 丢失或连接错误只结束当前连接，绝不重放到 relay。提供端收到 StartDirect 才拨本地后端；探测和 Ready 阶段不建立后端连接。RelaySelected 之后退出待选直连任务，迟到探测不会再次激活它。
 
-`DirectRelay` 只能消费一次已经由提供端确认的选择。server 再验证凭据、namespace、secret、deadline 和提供端注册 generation；沿用原有中继配对与 codec，不另建第二套中继。授权时已消耗的速率令牌不重复收取。注册退役或控制面在回退时失联会使该次 setup 失败；不能重新选择另一提供端冒险重复交付。
+`DirectRelay` 只能消费一次已经由提供端确认的选择。server 再验证凭据、namespace、secret、deadline 和提供端注册 generation；沿用原有中继配对与 codec，不另建第二套中继。授权时已占用的 setup 槽位与速率令牌直接转给这次订阅，不重复收取，也不会在 namespace 满额时把已获准的回退拒之门外。注册退役或控制面在回退时失联会使该次 setup 失败；不能重新选择另一提供端冒险重复交付。
 
 ## 5. 网络、身份和资源边界
 
-每个本地句柄按 IPv4/IPv6 共享 UDP endpoint，每条业务流独立 QUIC connection。唯一收包驱动保留源/目的地址与 ECN，拆分原生 GRO 包，再把单段交给 Quinn。STUN 校验来源、transaction ID、cookie、method/class、长度和地址族；HMAC probe 校验 id、nonce、类型和许可时限。只向收到认证 Pong 的路径发送 QUIC 握手，避免无效接口候选填满共享发送队列。探测发送不等待拥塞候选；重试 tick 驱动后续探测。
+每个本地句柄按 IPv4/IPv6 共享 UDP endpoint，每条业务流独立 QUIC connection。Quinn 的 endpoint 驱动是 socket 唯一的读者：在它的批量接收缓冲区内原地识别并移除 STUN/探测包，QUIC 包不经额外任务、通道、分配或拷贝直接交给 Quinn，保留批量接收、GRO、ECN 与源/目的地址。端点不广告 QUIC bit greasing（RFC 9287），所有 QUIC 包都带固定位，而 STUN 与探测包从不设置它，分流因此是精确的。Windows 在 ICMP 不可达后报告的 `ConnectionReset` 交给 Quinn 按其规则忽略，不会停止整个端点。STUN 校验来源、transaction ID、cookie、method/class、长度和地址族；HMAC probe 校验 id、nonce、类型和许可时限。只向收到认证 Pong 的路径发送 QUIC 握手，避免无效接口候选填满共享发送队列。探测发送不等待拥塞候选；重试 tick 驱动后续探测。
 
 TLS 1.3 使用 `quinn::rustls`，双方验证许可中的证书、证书有效期/EKU和握手签名，关闭 0-RTT。SessionBind 的 HMAC 绑定 TLS exporter、服务、namespace、角色 key ID、generation、两端证书摘要，阻止跨会话混用。QUIC 始终加密；`--codec` 仍决定现有中继加密，不关闭 QUIC TLS。UDP 使用原有带长度边界的可靠流封装，未改成 QUIC DATAGRAM。
 
@@ -175,8 +175,9 @@ TLS 1.3 使用 `quinn::rustls`，双方验证许可中的证书、证书有效�
 | HMAC 探测 | 每 120 ms 重试；收包驱动最多回复 128 个/秒 |
 | STUN 服务 | 每 IP 20 个/秒、总计 1000 个/秒，来源表最多 1024 项，包小于 1024 字节 |
 | 提供端会话 / TLS 待握手 | 每注册句柄最多 64 / 每地址族最多 64 |
-| QUIC 数据 | 每连接一个双向流、无单向流和 DATAGRAM；15 秒保活，60 秒无网络响应超时 |
+| QUIC 数据 | 每连接一个双向流、无单向流和 DATAGRAM；流控窗口 8 MiB（默认 1.25 MB 在 100 ms RTT 下把单流限制在约 100 Mbit/s），只有本地读得比对端发得慢时才实际占用；15 秒保活，60 秒无网络响应超时 |
 | server 授权 / 观测 | 各最多 4096 条；授权到期即释放；观测每 namespace 最多 1024 条，120 秒无更新清理，满额时优先淘汰已关闭历史 |
+| namespace 配额 | 直连 setup 计入活跃流上限并消耗新流速率令牌；提交后的直连不经过 relay，也无法被 relay 权威跟踪，因此不占活跃中继流额度，其并发由速率令牌与每注册句柄 64 个会话约束 |
 
 相同 LAN 和本地 IPv6 候选均保留；未指定、多播、广播、link-local 候选拒绝。没有 UPnP、端口预测、公共发现服务或 iroh 运行时依赖。目的地址相关映射、UDP 封锁等网络可能无法穿透，提交前按预算回退；不承诺运行中把 TCP 字节流无损迁到中继。
 

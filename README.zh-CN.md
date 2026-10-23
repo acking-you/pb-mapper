@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/poster.png" alt="pb-mapper — Agent Harness 时代的 Remote Control 基础设施" width="800" />
+<img src="docs/assets/poster.png" alt="pb-mapper — 随手拉一根虚拟网线：选择直连时端到端优先，无法直连时回退中继" width="800" />
 
 <p>
   <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
@@ -22,29 +22,36 @@
 
 ---
 
-> **Agent Harness 时代的 Remote Control 基础设施。**
+> **随手拉一根虚拟网线，接到任何服务。**
 
-Agent harness 已经可以写代码、调用工具并持续执行长流程，但它仍然需要一条
-狭窄、持久且可治理的通道进入私有运行环境。**pb-mapper** 提供的正是这层网络
-原语：只暴露一个公网 relay 端口，在端口背后注册任意多项带 key 的 TCP/UDP
-服务，并在不公开每项服务、不下发 relay 根密钥的前提下委派访问能力。
+**pb-mapper** 是一层连接协调层。在私有 TCP/UDP 服务旁运行 `register`，在需要
+使用它的地方运行 `connect`，这项服务就出现在本地端口上，就像两台机器之间拉了
+一根网线。一个公网 relay 端口负责认证两端、按命名空间隔离，并决定字节怎么走。
+
+- **默认走中继。** 所有连接都可以经 relay 转发：Rust + Tokio 实现，支持 TCP 与
+  UDP，每段可选 AES-256-GCM。不主动选择，就不协商任何新能力。
+- **选择直连时端到端优先。** 选择直连的连接先尝试端到端路径：在同一个 UDP
+  socket 上打洞，再建立双向认证的 QUIC。之后业务字节不经过 relay，会话归两端
+  持有，协调服务掉线不会切断它。
+- **无法直连时回退中继。** 如果在建连预算内没有可用的直连路径，同一连接会在
+  发送任何业务字节之前回退到 relay，并锁定已选中的提供端，后端不会被重复拨号。
 
 pb-mapper 负责传输字节；隧道后的服务仍然负责自身的应用层认证与授权。
 
-## 为什么适合 Agent Harness
+## 为什么使用它
 
-- **紧凑、易于嵌入**：一个 Rust 二进制同时包含 relay、register、connect、
-  status 与 admin 角色；Linux 版本以小型自包含压缩包分发，不依赖语言运行时。
-- **一个公网端口，多条控制路径**：注册、订阅、状态查询与管理请求都进入同一个
-  relay 端口；新增一项 remote-control endpoint 不需要再开放一个公网监听端口。
-- **委派权限，而不是下发根密钥**：唯一的 32 字节管理员密钥留在 relay 上，
-  relay 为 harness 或 workload 签发可续期、可过期的 `pbmt1_` 凭据；每把凭据
-  都拥有隔离的命名空间。
-- **可以中止实时访问**：凭据过期、吊销、认证状态重置与根密钥轮换都会关闭受影响
-  的在线控制连接和数据连接。
-- **原生性能，真实生产经验**：数据路径由 Rust + Tokio 实现，支持 TCP 与 UDP，
-  已长期用于自身产品和真实游戏服务器流量；端到端测试覆盖传输/加密组合与完整凭据
-  生命周期。
+- **一个公网端口，多项服务**：注册、订阅、状态查询与管理请求都进入同一个 relay
+  端口；新增服务不需要再开放公网监听端口。
+- **委派权限，而不是下发根密钥**：唯一的 32 字节管理员密钥留在 relay 上，为每个
+  使用方签发可续期、可过期的 `pbmt1_` 凭据；每把凭据拥有隔离的命名空间。
+- **可以中止实时访问**：凭据过期、吊销、认证状态重置与根密钥轮换会关闭受影响的
+  中继连接，并拒绝新的直连建立。
+- **紧凑、易于嵌入**：一个 Rust 二进制包含 relay、register、connect、status 与
+  admin 角色；Rust 与 Node SDK 内嵌同一套客户端。
+- **适合远程控制场景**：agent harness、编码会话、私有 API、模型网关、开发机与
+  游戏服务器都在通过它进入私有运行环境。
+
+弱网恢复行为、资源边界与故障注入覆盖见 [弱网恢复设计](docs/weak-network-recovery.md)。
 
 ## 一个 Relay，连接多项私有服务
 
@@ -52,17 +59,51 @@ pb-mapper 负责传输字节；隧道后的服务仍然负责自身的应用层�
 
 ```text
  私有环境 A ── register "app" ──┐
- 私有环境 B ── register "shell" ├──► pb-mapper relay :7666 ◄── agent harnesses
+ 私有环境 B ── register "shell" ├──► pb-mapper relay :7666 ◄── connect
  私有环境 C ── register "tools" ┘             一个公网端口
 ```
 
-- `pb-mapper register` 运行在私有 TCP/UDP 服务旁，把 service name 注册到 relay。
-- `pb-mapper connect` 运行在 agent 或操作者一侧，把已注册服务暴露到本地地址。
-- relay 按命名空间与 service name 匹配两端，再进行双向数据转发。
+- relay 按命名空间与 service name 匹配两端。
 - 不同临时凭据可以使用相同的 service name，彼此不可见，也不会发生冲突。
 
-因此，一台 relay 可以同时作为远程 agent runtime、coding harness、私有 API、
-模型网关、浏览器控制端点、开发机和运维工具的会合层。
+## 连接如何选择路径
+
+是否直连按每次连接决定，并且三方都同意才会尝试：
+
+| Relay 服务端 | `register` | `connect` | 路径 |
+| --- | --- | --- | --- |
+| 默认 | 任意 | 任意 | 中继 |
+| `--enable-direct` | 默认 | 任意 | 中继 |
+| `--enable-direct` | `--allow-direct` | 默认（`--path relay-only`） | 中继 |
+| `--enable-direct` | `--allow-direct` | `--path auto` | 直连优先，提交前失败回退中继 |
+
+```sh
+pb-mapper server --port 7666 --enable-direct \
+  --direct-listen 0.0.0.0:10811 --direct-advertise 公网IP:10811
+pb-mapper register tcp --key demo --addr 127.0.0.1:8080 \
+  --server relay.example.com:7666 --allow-direct
+pb-mapper connect tcp --key demo --addr 127.0.0.1:9090 \
+  --server relay.example.com:7666 --path auto
+pb-mapper status sessions --server relay.example.com:7666
+```
+
+除 TCP relay 端口外，还需放行公布的 UDP 端口。凭据配置方式不变；省略这些选项
+即保持原有协议和控制方式，已有客户端和部署不受影响。
+
+需要了解的边界：
+
+- **回退只有一个边界。** 提供端只有在消费端提交直连后才拨号后端。提交前任何
+  失败都回退中继；提交后绝不把业务重放到中继，避免后端副作用重复。
+- **直连会话归两端所有。** 停止 relay 或吊销凭据只阻止新的建连，不关闭已建立的
+  直连；停止本地隧道才会关闭。`status sessions` 返回带时间与 stale 标记的端点
+  观测，而不是存活证明。
+- **并非所有网络都能打通。** 对称 NAT、UDP 封锁等网络使用中继。目前已验证：
+  两层独立 Linux NAT 之间 TCP、UDP 直连成功；阻断 UDP 后回退中继且后端没有重复
+  连接；一次 macOS 到公网服务器的测试回退到了中继。详见 [验收记录](docs/issue-13-validation.zh-CN.md)
+  与 [设计说明](docs/issue-13-direct-connect-design.zh-CN.md)。
+
+Rust SDK 开启 `p2p` feature 后使用 `register_with_options` / `connect_with_options`；
+Node 提供 `allowDirect`、`path` 与 `sessionsJson()`。Flutter UI 及其 C ABI 继续使用中继。
 
 ## 安装 Agent Skill
 
@@ -96,12 +137,12 @@ pb-mapper 使用预共享凭据，不提供公钥身份体系。如果还需要�
 | Agent Skills | 通过 `pb-mapper-suite` 完成安装、relay、register/connect 与验收，release 工作流保持独立 |
 | 运维能力 | Linux systemd、安装脚本、Docker 镜像、状态查询与管理员级服务/连接清单 |
 | 原生嵌入 | Rust crate `pb-mapper`（`Client`：register / connect / status / admin）、Flutter 使用的 C ABI、`js/` 下的 Node-API 包 |
-| 网络能力 | TCP、UDP、按隧道 keep-alive、可选的转发数据加密 |
+| 网络能力 | TCP、UDP、可选 QUIC 直连与中继回退、按隧道 keep-alive、可选的转发数据加密 |
 
 ### Rust SDK
 
 ```toml
-pb-mapper = "0.6.1"
+pb-mapper = "0.7"
 ```
 
 填入已部署的 relay 地址和凭据后即可 register、connect、查 status，以及用管理员凭据调用全部 admin 接口。示例见 `crates/pb-mapper/examples/`。
@@ -172,18 +213,3 @@ cargo test
 ## 许可证
 
 基于 [MIT License](LICENSE) 发布。
-
-### 弱网恢复与诊断
-
-0.5.2 增加保留域名的 DNS 刷新、网络变化提示、同进程同 relay 的共享建连预算，
-并修复取消期间重复清理和后台任务遗留问题。Rust/Node 隧道句柄可通过
-`diagnostics()` 查询实际运行的 SDK 版本、失败原因、时延与资源占用。
-行为边界及测试见 [弱网恢复设计](docs/weak-network-recovery.md)。
-
-## 可选打洞直连
-
-运行默认仍为仅中继。服务端显式启用 `--enable-direct --direct-listen 0.0.0.0:10811 --direct-advertise 公网IP:10811`，开放相应 UDP 端口；提供端 `register --allow-direct`，消费端每次 `connect --path auto` 即可尝试直连，提交前失败自动中继。省略 `--path` 或选择 `relay-only` 保持原有协议和控制方式。TCP/UDP 业务均支持。
-
-`status sessions` 查看带时间和 stale/conflicting 标记的观测。已有直连由两端持有：协调服务停止、凭据撤销不关闭已提交的数据流，本地 stop 才关闭对应隧道；提交后失败不会把业务重放到中继。Rust SDK 的 `p2p` feature 默认关闭，通过 `register_with_options` / `connect_with_options` 选择；Node 使用 `allowDirect` / `path`。现有 Flutter/C ABI 入口继续仅中继。
-
-完整配置、设计与测试见 [实现说明](docs/issue-13-direct-connect-design.zh-CN.md) 和 [验收记录](docs/issue-13-validation.zh-CN.md)。
