@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "Client SDK for exposing and consuming keyed TCP/UDP services through a pb-mapper relay"
+description = "Client SDK for pb-mapper: reach private TCP/UDP services through a relay, or end to end with opt-in direct QUIC and relay fallback"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -16,6 +16,9 @@ publish = ["crates-io"]
 
 [dependencies]
 pb-mapper-client.workspace = true
+
+[features]
+p2p = ["pb-mapper-client/p2p"]
 
 [dev-dependencies]
 tokio.workspace = true

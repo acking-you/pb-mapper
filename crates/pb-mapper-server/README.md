@@ -2,13 +2,15 @@
 
 `pb-mapper-server` is the relay-server library used by pb-mapper. It accepts
 authenticated service registrations and client subscriptions, then routes TCP
-or UDP traffic between them.
+or UDP traffic between them. With its optional UDP service enabled
+(`run_server_on_listener_with_direct`, `p2p` feature), it also coordinates
+direct sessions between endpoints that opt in, and stays their relay fallback.
 
 Applications embedding the relay can depend on the library directly:
 
 ```toml
 [dependencies]
-pb-mapper-server = "0.6.1"
+pb-mapper-server = "0.7"
 ```
 
 To install and run the ready-made server program, install the unified CLI:

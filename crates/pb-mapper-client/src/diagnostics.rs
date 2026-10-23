@@ -64,6 +64,8 @@ impl RecoveryFailure {
 /// A point-in-time view of this tunnel and its process-shared relay budget.
 #[derive(Clone, Debug, Serialize)]
 pub struct TunnelDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct: Option<PathDiagnostics>,
     pub sdk_version: &'static str,
     /// Most recent worker phase; use tunnel status for aggregate readiness.
     pub last_attempt_phase: RecoveryPhase,
@@ -82,7 +84,18 @@ pub struct TunnelDiagnostics {
     pub active_data_setups: usize,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PathDiagnostics {
+    pub direct_sessions: u64,
+    pub relay_sessions: u64,
+    pub active_direct: u64,
+    pub active_relay: u64,
+    pub fallbacks: u64,
+    pub last_fallback: Option<String>,
+}
+
 struct State {
+    direct: Option<PathDiagnostics>,
     phase: RecoveryPhase,
     attempts: u64,
     failures: u64,
@@ -98,6 +111,7 @@ pub(crate) struct Diagnostics(Arc<Mutex<State>>);
 impl Default for Diagnostics {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(State {
+            direct: None,
             phase: RecoveryPhase::Starting,
             attempts: 0,
             failures: 0,
@@ -110,6 +124,50 @@ impl Default for Diagnostics {
 }
 
 impl Diagnostics {
+    pub(crate) fn has_active_direct(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .direct
+            .as_ref()
+            .is_some_and(|p| p.active_direct != 0)
+    }
+    #[cfg(feature = "p2p")]
+    pub(crate) fn path_started(&self, path: pb_mapper_protocol::direct::SessionPath) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let p = state.direct.get_or_insert_default();
+        match path {
+            pb_mapper_protocol::direct::SessionPath::Direct => {
+                p.direct_sessions += 1;
+                p.active_direct += 1;
+            }
+            pb_mapper_protocol::direct::SessionPath::Relay => {
+                p.relay_sessions += 1;
+                p.active_relay += 1;
+            }
+        }
+    }
+    #[cfg(feature = "p2p")]
+    pub(crate) fn path_closed(&self, path: pb_mapper_protocol::direct::SessionPath) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let p = state.direct.get_or_insert_default();
+        match path {
+            pb_mapper_protocol::direct::SessionPath::Direct => {
+                p.active_direct = p.active_direct.saturating_sub(1)
+            }
+            pb_mapper_protocol::direct::SessionPath::Relay => {
+                p.active_relay = p.active_relay.saturating_sub(1)
+            }
+        }
+    }
+    #[cfg(feature = "p2p")]
+    pub(crate) fn path_fallback(&self, reason: &str) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let p = state.direct.get_or_insert_default();
+        p.fallbacks += 1;
+        p.last_fallback = Some(reason.into());
+    }
+
     pub(crate) fn heard(&self) {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).success = Some(Instant::now());
     }
@@ -149,6 +207,7 @@ impl Diagnostics {
         let ms = |time: Duration| time.as_millis().min(u128::from(u64::MAX)) as u64;
         let (active_control_setups, active_data_setups) = endpoint.active_setups();
         TunnelDiagnostics {
+            direct: state.direct.clone(),
             sdk_version: env!("CARGO_PKG_VERSION"),
             last_attempt_phase: state.phase,
             attempts: state.attempts,
@@ -164,5 +223,14 @@ impl Diagnostics {
             active_control_setups,
             active_data_setups,
         }
+    }
+}
+
+#[cfg(feature = "p2p")]
+pub(crate) struct PathUsage(pub Diagnostics, pub pb_mapper_protocol::direct::SessionPath);
+#[cfg(feature = "p2p")]
+impl Drop for PathUsage {
+    fn drop(&mut self) {
+        self.0.path_closed(self.1);
     }
 }

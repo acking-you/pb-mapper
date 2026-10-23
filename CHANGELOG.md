@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [0.7.0] - 2026-10-23
+- Add opt-in direct connections: a relay `--enable-direct` UDP service, publisher `--allow-direct`, and per-connect `--path auto` try UDP hole punching plus mutually authenticated QUIC. Defaults keep the existing relay protocol and control behavior.
+- Fall back to the existing relay before direct commit, through a one-use grant pinned to the selected publisher and generation; a committed connection is never replayed after acknowledgement loss. An admitted fallback keeps its namespace slot, a setup that ends before its grant pays for its relay fallback, coordination replies wait for control-queue space, and an older direct-capable registration is no longer hidden by a newer relay-only one.
+- Keep established direct sessions owned by the endpoints across coordinator outages and credential revocation; expose namespace-scoped observations and restore them after coordinator restart.
+- Receive direct traffic in place inside Quinn's batched, GRO-aware receive path with no extra task, copy or allocation per packet; raise the per-stream QUIC window to 8 MiB for long paths; tolerate Windows ICMP resets. Rare direct messages are boxed so relay mailboxes keep their previous size.
+- `set_process_msg_header_key` no longer writes `MSG_HEADER_KEY` into the process environment, which raced other threads' environment reads during root-key rotation and UI configuration changes; the credential lives in process state only.
+- Add Rust SDK options (`p2p` feature) and Node `allowDirect` / `path` / `sessionsJson()`; build Quinn, rcgen and stun-proto from maintained fork submodules. Low-level wire enum constructors need the new optional fields. The toolchain and Rust SDK minimum version move to 1.99.1.
+
 ## [0.6.1] - 2026-10-19
 - Add per-registration TCP idle deadlines to the Rust SDK (`register_with_idle_timeout`) and Node API (`registerWithIdleTimeout`) so publishers can reclaim abandoned data connections.
 - Reset the deadline on traffic in either direction; preserve ordinary registration defaults, control connections, half-close draining, and zero-as-disabled behavior. Reject UDP and unrepresentable timer deadlines before starting a worker.

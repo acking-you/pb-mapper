@@ -28,6 +28,8 @@ pub(super) struct StreamSetup {
     pub timing: Arc<Mutex<RecoveryTiming>>,
     pub events: mpsc::Sender<bool>,
     pub diagnostics: Diagnostics,
+    #[cfg(feature = "p2p")]
+    pub direct: Option<Arc<crate::direct::Consumer>>,
 }
 
 #[instrument(skip(local_stream, credential, setup))]
@@ -44,6 +46,12 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     // Retry only setup: no application byte is read until a subscription has
     // succeeded. A fresh socket/session avoids replaying payload or crypto state.
     let budget = std::time::Duration::from_secs(5).min(control_io_timeout());
+    #[cfg(feature = "p2p")]
+    let budget = if setup.direct.is_some() {
+        std::time::Duration::from_secs(8).min(control_io_timeout())
+    } else {
+        budget
+    };
     let deadline = started + budget;
     let global_permit = tokio::time::timeout_at(deadline, remote_addr.data_slots().acquire_owned())
         .await
@@ -53,6 +61,31 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
             action: "setup admission",
             timeout: budget,
         })?;
+    #[cfg(feature = "p2p")]
+    if let Some(direct) = &setup.direct {
+        let prepared = tokio::time::timeout_at(deadline, direct.prepare(&key, deadline))
+            .await
+            .map_err(|_| super::error::Error::ControlIoTimeout {
+                action: "direct setup",
+                timeout: budget,
+            })?
+            .map_err(|error| super::error::Error::DirectSetup {
+                detail: error.to_string(),
+            })?;
+        if let Some(prepared) = prepared {
+            drop(global_permit);
+            setup.diagnostics.succeeded(started.elapsed());
+            setup.timing.lock().await.record(started.elapsed());
+            let _ = setup.events.try_send(true);
+            drop(setup.permit);
+            return prepared
+                .forward(local_stream, credential)
+                .await
+                .map_err(|error| super::error::Error::DirectSetup {
+                    detail: error.to_string(),
+                });
+        }
+    }
     let mut wake = remote_addr.wake();
     let mut retry = pb_mapper_core::timeout::RetryBackoff::default();
     let ((mut remote_stream, codec_key, client_id, server_id), setup_latency) = loop {
@@ -119,6 +152,12 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     setup.timing.lock().await.record(setup_latency);
     let _ = setup.events.try_send(true);
     drop(setup.permit);
+    #[cfg(feature = "p2p")]
+    let _path = setup.direct.as_ref().map(|_| {
+        let path = pb_mapper_protocol::direct::SessionPath::Relay;
+        setup.diagnostics.path_started(path);
+        crate::diagnostics::PathUsage(setup.diagnostics.clone(), path)
+    });
     let span = info_span!("forward", "client:{client_id} <-> server_id:{server_id}");
     let (client_reader, client_writer) = local_stream.split();
     let (server_reader, server_writer) = remote_stream.split();
@@ -145,6 +184,27 @@ async fn subscribe(
     credential: Credential,
     offered_v2: bool,
 ) -> Result<(TcpStream, Option<DataCodec>, u32, u32)> {
+    let request = match namespace {
+        Some(namespace) => PbConnRequest::SubcribeScoped {
+            data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
+            key: key.to_string(),
+            namespace,
+        },
+        None => PbConnRequest::Subcribe {
+            data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
+            key: key.to_string(),
+        },
+    };
+    subscribe_request(request, remote_addr, keep_alive, credential, offered_v2).await
+}
+
+pub(crate) async fn subscribe_request(
+    request: PbConnRequest,
+    remote_addr: RelayEndpoint,
+    keep_alive: bool,
+    credential: Credential,
+    offered_v2: bool,
+) -> Result<(TcpStream, Option<DataCodec>, u32, u32)> {
     let mut remote_stream = remote_addr
         .connect()
         .await
@@ -162,17 +222,6 @@ async fn subscribe(
     let (codec_key, client_id, server_id) = {
         let timeout = control_io_timeout();
         // handle request
-        let request = match namespace {
-            Some(namespace) => PbConnRequest::SubcribeScoped {
-                data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
-                key: key.to_string(),
-                namespace,
-            },
-            None => PbConnRequest::Subcribe {
-                data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
-                key: key.to_string(),
-            },
-        };
         let msg = request.encode().context(EncodeSubcribeReqSnafu)?;
         let session = ClientHeaderSession::new_v2(&credential)
             .context(CreateHeaderToolSnafu { action: "session" })?;

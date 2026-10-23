@@ -9,6 +9,8 @@ use pb_mapper_core as common;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(super)))]
 pub enum Error {
+    #[snafu(display("direct setup failed: {detail}"))]
+    DirectSetup { detail: String },
     #[snafu(display("bind local listener error"))]
     BindLocalListener { source: std::io::Error },
     #[snafu(display("accept local listener error"))]

@@ -79,7 +79,7 @@ jobs:
               # build:release` consumes the root `release-node` profile — a
               # profile or lockfile change that pushes it past the size limit
               # has to be caught here, not after release.
-              Cargo.toml|Cargo.lock|rust-toolchain.toml) rust=true; node=true ;;
+              Cargo.toml|Cargo.lock|rust-toolchain.toml|deps/*|.gitmodules) rust=true; node=true ;;
               rustfmt.toml) rust=true ;;
               # Per-crate manifests. `case` patterns match the whole path, so
               # the unanchored entry above only ever catches the root manifest.
@@ -110,7 +110,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.98.0
+          toolchain: 1.99.1
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
@@ -147,7 +147,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.98.0
+          toolchain: 1.99.1
 
       - name: Cache Rust dependencies
         uses: actions/cache@v3

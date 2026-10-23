@@ -116,7 +116,7 @@ export async function echoRoundTrip(address, payload, timeoutMs = 5_000) {
   });
 }
 
-export async function startRelay() {
+export async function startRelay({ direct = false } = {}) {
   const bin = findPbMapperBinary();
   if (!bin) {
     return null;
@@ -127,7 +127,12 @@ export async function startRelay() {
   });
   const port = await reservePort();
   const logs = [];
-  const child = spawn(bin, ["server", "--port", String(port)], {
+  const args = ["server", "--port", String(port)];
+  if (direct) {
+    args.push("--enable-direct", "--direct-listen", "127.0.0.1:0",
+      "--direct-advertise", "127.0.0.1:0");
+  }
+  const child = spawn(bin, args, {
     env: {
       ...process.env,
       MSG_HEADER_KEY: ADMIN_KEY,

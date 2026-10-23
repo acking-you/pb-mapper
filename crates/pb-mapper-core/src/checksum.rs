@@ -150,30 +150,30 @@ pub fn get_msg_header_key() -> Result<Vec<u8>, String> {
     get_process_credential().map(|credential| credential.key().to_vec())
 }
 
-/// Set process `MSG_HEADER_KEY` and update runtime checksum/key state.
+/// Replace the process credential and its checksum state.
 ///
 /// - `Some(non-empty)` => validate an admin or temporary credential and apply it immediately.
 /// - `None` or empty => remove the credential. Subsequent network operations fail closed.
+///
+/// `MSG_HEADER_KEY` is read once, when the state is first used. This never
+/// writes the environment: callers include a running relay rotating its root
+/// key and the UI changing settings, and a `setenv` racing any other thread's
+/// `getenv` (DNS resolution reads the environment) is undefined behavior.
 pub fn set_process_msg_header_key(msg_header_key: Option<&str>) -> Result<(), String> {
     let normalized = msg_header_key.map(str::trim).unwrap_or("");
-    if normalized.is_empty() {
-        // SAFETY: edition 2024 makes these unsafe because the environment is
-        // process-global and another thread reading it concurrently is a data
-        // race. Here the environment is only a mirror for child processes and
-        // for the initial read at startup; the credential every operation
-        // actually consults is `MSG_HEADER_KEY_STATE`, behind an `RwLock`, and
-        // it is updated immediately below.
-        unsafe { std::env::remove_var(ENV_MSG_HEADER_KEY) };
-        update_runtime_credential(None);
-        return Ok(());
-    }
-
-    let credential = parse_credential(normalized)?;
-
-    // SAFETY: as above.
-    unsafe { std::env::set_var(ENV_MSG_HEADER_KEY, normalized) };
-    update_runtime_credential(Some(credential));
+    let credential = if normalized.is_empty() {
+        None
+    } else {
+        Some(parse_credential(normalized)?)
+    };
+    update_runtime_credential(credential);
     Ok(())
+}
+
+/// Whether a process credential was supplied, valid or not.
+pub fn process_credential_configured() -> bool {
+    MSG_HEADER_KEY_STATE.load_error.read().is_some()
+        || MSG_HEADER_KEY_STATE.credential.read().is_some()
 }
 
 pub fn parse_credential(raw: &str) -> Result<Credential, String> {
@@ -614,13 +614,21 @@ mod tests {
         use crate::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
 
         let _guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+        let environment = std::env::var_os(ENV_MSG_HEADER_KEY);
         set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv")).unwrap();
         let checksum = get_checksum(32);
         assert!(valid_checksum(32, checksum));
+        assert!(process_credential_configured());
         set_process_msg_header_key(None).unwrap();
         assert!(!valid_checksum(32, checksum));
         assert!(!valid_checksum(32, 32));
         assert!(get_process_credential().is_err());
+        assert!(!process_credential_configured());
+        assert_eq!(
+            std::env::var_os(ENV_MSG_HEADER_KEY),
+            environment,
+            "runtime updates must not race environment readers"
+        );
     }
 
     #[test]

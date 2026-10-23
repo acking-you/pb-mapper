@@ -68,9 +68,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use pb_mapper_core::checksum::{
-    AesKeyType, Credential, ENV_MSG_HEADER_KEY, MACHINE_MSG_HEADER_KEY_PATH,
-    encode_temporary_credential, env_safe_admin_key_error, get_process_credential,
-    is_env_safe_admin_key, parse_credential, set_process_msg_header_key,
+    AesKeyType, Credential, MACHINE_MSG_HEADER_KEY_PATH, encode_temporary_credential,
+    env_safe_admin_key_error, get_process_credential, is_env_safe_admin_key, parse_credential,
+    process_credential_configured, set_process_msg_header_key,
 };
 
 /// The namespace administrator connections operate in. Tenant namespaces are the

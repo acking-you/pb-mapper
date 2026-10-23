@@ -34,6 +34,7 @@ async fn check_pair(datagram: bool, subscriber_v2: bool, publisher_v2: bool) {
         .write_initial(
             &mut control,
             &PbConnRequest::Register {
+                direct: None,
                 need_codec: true,
                 is_datagram: datagram,
                 key: "mixed".into(),
@@ -145,4 +146,50 @@ async fn read_selection(
     DataCodec::from_response(key, version, offered)
         .unwrap()
         .unwrap()
+}
+
+#[cfg(feature = "p2p")]
+#[tokio::test]
+async fn legacy_authentication_cannot_opt_a_publisher_into_direct_grants() {
+    let relay = Relay::start_with_direct(
+        "legacy-direct-rejected",
+        Some(pb_mapper_server::DirectServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            advertise: "127.0.0.1:0".parse().unwrap(),
+        }),
+    )
+    .await;
+    let mut socket = TcpStream::connect(relay.addr()).await.unwrap();
+    let request = PbConnRequest::Register {
+        key: "legacy-direct".into(),
+        need_codec: false,
+        is_datagram: false,
+        protocol_version: Some(2),
+        client_instance_id: None,
+        heartbeat_interval_ms: None,
+        heartbeat_tolerance_ms: None,
+        direct: Some(pb_mapper_protocol::direct::DIRECT_VERSION),
+    };
+    let key = admin_key_bytes();
+    CodecMessageWriter::for_session_key(
+        &mut socket,
+        pb_mapper_protocol::get_encodec(&key).unwrap(),
+        key,
+    )
+    .write_msg(&request.encode().unwrap())
+    .await
+    .unwrap();
+    let mut reader = CodecMessageReader::for_session_key(
+        &mut socket,
+        pb_mapper_protocol::get_decodec(&key).unwrap(),
+        key,
+    );
+    let response = tokio::time::timeout(pb_mapper_testkit::READY_TIMEOUT, reader.read_msg())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        PbConnResponse::decode(response).unwrap(),
+        PbConnResponse::RegisterV2 { direct: None, .. }
+    ));
 }

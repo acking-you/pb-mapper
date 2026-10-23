@@ -119,7 +119,10 @@ impl ControlBackoff {
     }
 }
 
-enum LocalControlWrite {
+pub(crate) enum LocalControlWrite {
+    /// Boxed so it does not widen every ping and stream acknowledgement.
+    #[cfg(feature = "p2p")]
+    Direct(Box<pb_mapper_protocol::direct::DirectProviderMessage>),
     Ping {
         seq: u64,
     },
@@ -304,6 +307,8 @@ struct ServerCliRunConfig {
     worker_index: usize,
     credential: Credential,
     idle_timeout: Option<Duration>,
+    #[cfg(feature = "p2p")]
+    direct: Option<Arc<crate::direct::Provider>>,
 }
 
 impl Debug for ServerCliRunConfig {
@@ -347,6 +352,7 @@ async fn probe_remote_registration(
         crate::client::status::get_status_with_credential(
             &mut stream,
             PbConnStatusReq::Service {
+                direct_query: None,
                 key: key.to_string(),
             },
             namespace,
@@ -541,6 +547,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         shutdown,
         Diagnostics::default(),
         None,
+        false,
     )
     .await;
 }
@@ -556,6 +563,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
     idle_timeout: Option<Duration>,
+    allow_direct: bool,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -572,6 +580,19 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
         pool_size,
         "starting local server control connection pool"
     );
+    #[cfg(feature = "p2p")]
+    let direct = allow_direct.then(|| {
+        crate::direct::Provider::spawn::<LocalStream>(
+            local_addr.clone(),
+            key.clone(),
+            options.is_datagram,
+            shutdown.clone(),
+            idle_timeout,
+            diagnostics.clone(),
+        )
+    });
+    #[cfg(not(feature = "p2p"))]
+    let _ = allow_direct;
     let mut workers = JoinSet::new();
     // Every worker reports here, and the pool's aggregate is what the caller is
     // told: one healthy control connection is a reachable service, whichever
@@ -585,6 +606,8 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
         let worker_local = local_addr.clone();
         let worker_remote = remote_addr.clone();
         let worker_diagnostics = diagnostics.clone();
+        #[cfg(feature = "p2p")]
+        let worker_direct = direct.clone();
         workers.spawn(async move {
             run_server_side_cli_worker::<LocalStream>(
                 worker_local,
@@ -597,6 +620,8 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
                 worker_shutdown,
                 worker_diagnostics,
                 idle_timeout,
+                #[cfg(feature = "p2p")]
+                worker_direct,
             )
             .await;
         });
@@ -609,6 +634,10 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
                 "local server control worker join failed"
             );
         }
+    }
+    #[cfg(feature = "p2p")]
+    if let Some(direct) = direct {
+        direct.stop().await;
     }
 }
 
@@ -624,6 +653,7 @@ async fn run_server_side_cli_worker<LocalStream>(
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
     idle_timeout: Option<Duration>,
+    #[cfg(feature = "p2p")] direct: Option<Arc<crate::direct::Provider>>,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -643,6 +673,8 @@ async fn run_server_side_cli_worker<LocalStream>(
         worker_index,
         credential,
         idle_timeout,
+        #[cfg(feature = "p2p")]
+        direct: direct.clone(),
     };
     // Forwarded sessions outlive a single control connection, so the set lives
     // here rather than inside the attempt: a reconnect is not a reason to drop
@@ -699,6 +731,15 @@ async fn run_server_side_cli_worker<LocalStream>(
         }
         let (retry_interval, retry_count) = match status {
             Status::Cancelled => break 'outer,
+            #[cfg(feature = "p2p")]
+            Status::Rejected(_)
+                if direct
+                    .as_ref()
+                    .is_some_and(|provider| provider.has_active()) =>
+            {
+                // Revocation closes the control plane, not endpoint-owned direct sessions.
+                (Duration::from_secs(30), 0)
+            }
             Status::Rejected(reason) => {
                 diagnostics.failed(RecoveryFailure::Rejected, Duration::ZERO);
                 tracing::error!(
@@ -798,6 +839,8 @@ where
         worker_index,
         credential,
         idle_timeout,
+        #[cfg(feature = "p2p")]
+        direct,
     } = config;
     let control_permit = tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
@@ -874,8 +917,15 @@ where
     };
     let heartbeat_interval = control_heartbeat_interval();
     let heartbeat_tolerance = control_heartbeat_tolerance();
+    #[cfg(feature = "p2p")]
+    let direct_version = direct
+        .as_ref()
+        .map(|_| pb_mapper_protocol::direct::DIRECT_VERSION);
+    #[cfg(not(feature = "p2p"))]
+    let direct_version = None;
     let request = match namespace {
         Some(namespace) => PbConnRequest::RegisterScoped {
+            direct: direct_version,
             key: key.to_string(),
             namespace,
             force_namespace,
@@ -887,6 +937,7 @@ where
             heartbeat_tolerance_ms: Some(duration_to_millis(heartbeat_tolerance)),
         },
         None => PbConnRequest::Register {
+            direct: direct_version,
             key: key.to_string(),
             need_codec,
             is_datagram,
@@ -946,6 +997,7 @@ where
                 conn_id,
                 generation,
                 lease_ttl_ms,
+                ..
             } => ControlRegistration {
                 conn_id,
                 generation,
@@ -1008,6 +1060,10 @@ where
     tracing::debug!(event = "local_server_setup_latency", elapsed_ms = duration_to_millis(started.elapsed()), next_timeout_ms = duration_to_millis(backoff.timing.timeout()), %key, worker_index);
     backoff.reset();
     let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<LocalControlWrite>(64);
+    #[cfg(feature = "p2p")]
+    if let Some(direct) = &direct {
+        direct.connected(write_tx.clone());
+    }
     let lease_state = Arc::new(tokio::sync::Mutex::new(ControlLeaseState::new()));
     let writer_key = key.clone();
     let writer_registration = registration;
@@ -1024,6 +1080,16 @@ where
                 return Ok(());
             };
             match cmd {
+                #[cfg(feature = "p2p")]
+                LocalControlWrite::Direct(message) => {
+                    let payload = PbServerRequest::Direct(*message)
+                        .encode()
+                        .map_err(|_| Status::SendPing)?;
+                    tokio::time::timeout(control_io_timeout(), msg_writer.write_msg(&payload))
+                        .await
+                        .map_err(|_| Status::SendPing)?
+                        .map_err(|_| Status::SendPing)?;
+                }
                 LocalControlWrite::Ping { seq } => {
                     snafu_error_get_or_return!(
                         handle_ping_interval(
@@ -1110,6 +1176,8 @@ where
                         stream_tasks,
                         &shutdown,
                         setup_slots,
+                        #[cfg(feature = "p2p")]
+                        direct.as_ref(),
                     )
                     .await
                 );
@@ -1280,15 +1348,7 @@ async fn handle_ping_interval<T: MessageWriter>(
     }
 }
 
-#[instrument(skip(
-    msg,
-    target,
-    write_tx,
-    lease_state,
-    stream_tasks,
-    shutdown,
-    setup_slots
-))]
+#[instrument(skip_all, fields(%key, conn_id))]
 #[allow(clippy::too_many_arguments)]
 async fn handle_request<LocalStream: StreamProvider>(
     msg: &[u8],
@@ -1300,6 +1360,7 @@ async fn handle_request<LocalStream: StreamProvider>(
     stream_tasks: &mut JoinSet<()>,
     shutdown: &CancellationToken,
     setup_slots: &Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "p2p")] direct: Option<&Arc<crate::direct::Provider>>,
 ) -> error::Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -1307,6 +1368,14 @@ where
     let req = LocalServer::decode(msg).context(DecodeStreamReqSnafu)?;
 
     match req {
+        LocalServer::Direct(event) => {
+            #[cfg(feature = "p2p")]
+            if let Some(direct) = direct {
+                direct.event(*event, write_tx.clone());
+            }
+            #[cfg(not(feature = "p2p"))]
+            let _ = event;
+        }
         LocalServer::Stream {
             client_id,
             server_generation,

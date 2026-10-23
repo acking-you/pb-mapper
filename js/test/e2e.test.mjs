@@ -232,3 +232,49 @@ test.skipIf(!hasRelay)(
   },
   15_000,
 );
+
+
+test.skipIf(!hasRelay)(
+  "napi chooses direct per connect while the default remains relay-only",
+  async () => {
+    const relay = await startRelay({ direct: true });
+    const echo = await startEchoServer();
+    const client = clientFor(relay);
+    const registration = await client.register({
+      key: "direct", localAddr: echo.address, transport: "tcp", allowDirect: true,
+    });
+    const connections = [];
+    try {
+      await registration.waitReady(READY_MS);
+      for (const path of [undefined, "auto"]) {
+        const localAddr = await reserveListenAddress();
+        const connection = await client.connect({
+          key: "direct", localAddr, transport: "tcp", path,
+        });
+        connections.push(connection);
+        await connection.waitReady(READY_MS);
+        const payload = Buffer.alloc(32_000, 0x37);
+        expect((await echoRoundTrip(localAddr, payload)).equals(payload)).toBe(true);
+        if (path === "auto") {
+          expect(connection.diagnostics().direct.directSessions).toBe(1);
+          const deadline = Date.now() + READY_MS;
+          let observations;
+          do {
+            observations = JSON.parse(await client.sessionsJson());
+            if (observations.length) break;
+            await Bun.sleep(20);
+          } while (Date.now() < deadline);
+          expect(observations.some((s) => s.service === "direct")).toBe(true);
+        } else {
+          expect(connection.diagnostics().direct ?? null).toBe(null);
+        }
+      }
+    } finally {
+      for (const connection of connections) await connection.stop();
+      await registration.stop();
+      await echo.close();
+      await relay.stop();
+    }
+  },
+  30_000,
+);

@@ -2,7 +2,10 @@
 
 `pb-mapper-cli` provides the unified `pb-mapper` executable for running a
 relay, registering private TCP/UDP services, connecting to them, inspecting
-status, and administering credentials.
+status, and administering credentials. Connections use the relay by default;
+with `server --enable-direct`, `register --allow-direct` and
+`connect --path auto` they try a direct QUIC path first and fall back to the
+relay when it cannot connect.
 
 ## Install
 

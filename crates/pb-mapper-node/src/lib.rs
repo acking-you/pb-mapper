@@ -31,7 +31,18 @@ const DEFAULT_PAGE_SIZE: u32 = 100;
 
 /// Recovery counters from the running SDK, with no credential or payload data.
 #[napi(object)]
+pub struct JsPathDiagnostics {
+    pub direct_sessions: f64,
+    pub relay_sessions: f64,
+    pub active_direct: f64,
+    pub active_relay: f64,
+    pub fallbacks: f64,
+    pub last_fallback: Option<String>,
+}
+
+#[napi(object)]
 pub struct JsTunnelDiagnostics {
+    pub direct: Option<JsPathDiagnostics>,
     pub sdk_version: String,
     pub last_attempt_phase: String,
     pub attempts: f64,
@@ -50,6 +61,14 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
     fn from(value: sdk::TunnelDiagnostics) -> Self {
         let number = |value: u64| value.min((1_u64 << 53) - 1) as f64;
         Self {
+            direct: value.direct.map(|d| JsPathDiagnostics {
+                direct_sessions: number(d.direct_sessions),
+                relay_sessions: number(d.relay_sessions),
+                active_direct: number(d.active_direct),
+                active_relay: number(d.active_relay),
+                fallbacks: number(d.fallbacks),
+                last_fallback: d.last_fallback,
+            }),
             sdk_version: value.sdk_version.to_string(),
             last_attempt_phase: value.last_attempt_phase.as_str().to_string(),
             attempts: number(value.attempts),
@@ -132,6 +151,7 @@ pub struct JsClientConfig {
 
 #[napi(object)]
 pub struct JsRegisterRequest {
+    pub allow_direct: Option<bool>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -155,6 +175,8 @@ impl TryFrom<JsRegisterRequest> for RegisterRequest {
 
 #[napi(object)]
 pub struct JsConnectRequest {
+    /// "relay-only" (default) or "auto".
+    pub path: Option<String>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -358,9 +380,13 @@ impl Client {
 
     #[napi]
     pub async fn register(&self, request: JsRegisterRequest) -> Result<Registration> {
+        let options = sdk::RegisterOptions {
+            allow_direct: request.allow_direct.unwrap_or(false),
+            ..Default::default()
+        };
         let registration = self
             .inner
-            .register(request.try_into()?)
+            .register_with_options(request.try_into()?, options)
             .await
             .map_err(to_napi)?;
         Ok(Registration::new(registration))
@@ -381,12 +407,13 @@ impl Client {
                 "idleTimeoutMs must be a non-negative safe integer",
             ));
         }
+        let options = sdk::RegisterOptions {
+            allow_direct: request.allow_direct.unwrap_or(false),
+            idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
+        };
         let registration = self
             .inner
-            .register_with_idle_timeout(
-                request.try_into()?,
-                Duration::from_millis(idle_timeout_ms as u64),
-            )
+            .register_with_options(request.try_into()?, options)
             .await
             .map_err(to_napi)?;
         Ok(Registration::new(registration))
@@ -394,13 +421,21 @@ impl Client {
 
     #[napi]
     pub async fn connect(&self, request: JsConnectRequest) -> Result<Connection> {
+        let path = match request.path.as_deref().unwrap_or("relay-only") {
+            "relay-only" => sdk::PathPolicy::RelayOnly,
+            "auto" => sdk::PathPolicy::Auto,
+            _ => return Err(invalid_argument("path must be relay-only or auto")),
+        };
         let connection = self
             .inner
-            .connect(ConnectRequest {
-                key: request.key,
-                local_addr: request.local_addr,
-                transport: parse_transport(&request.transport)?,
-            })
+            .connect_with_options(
+                ConnectRequest {
+                    key: request.key,
+                    local_addr: request.local_addr,
+                    transport: parse_transport(&request.transport)?,
+                },
+                sdk::ConnectOptions { path },
+            )
             .await
             .map_err(to_napi)?;
         Ok(Connection::new(connection))
@@ -421,6 +456,13 @@ impl Client {
             .into_iter()
             .map(JsServiceConnection::from)
             .collect())
+    }
+
+    /// Namespace-scoped endpoint observations, serialized without credentials.
+    #[napi]
+    pub async fn sessions_json(&self) -> Result<String> {
+        serde_json::to_string(&self.inner.sessions().await.map_err(to_napi)?)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     #[napi]

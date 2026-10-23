@@ -139,6 +139,7 @@ pub struct ServerRegistration {
     pub is_datagram: bool,
     pub protocol_version: u16,
     pub conn_id: RemoteConnId,
+    pub direct: Option<pb_mapper_auth::AuthContext>,
 }
 
 /// Maintaining a connection to the server.
@@ -156,6 +157,7 @@ pub async fn handle_server_conn(
         is_datagram,
         protocol_version,
         conn_id,
+        direct,
     } = registration;
     let (tx, rx) = kanal::bounded_async(DEFAULT_SERVER_CHAN_CAP);
     // Handed to the manager so a retirement can cancel this connection's socket
@@ -174,6 +176,7 @@ pub async fn handle_server_conn(
             protocol_version,
             conn_sender: tx,
             retire_token: retire_token.clone(),
+            direct,
         })
         .await
         .map_err(|_| kanal::SendError(()))
@@ -204,6 +207,7 @@ pub async fn handle_server_conn(
             generation,
             protocol_version,
             lease_ttl_ms,
+            direct,
         } = response
         else {
             if let ConnTask::RegisterFailed {
@@ -256,6 +260,7 @@ pub async fn handle_server_conn(
                 conn_id: conn_id.into(),
                 generation,
                 lease_ttl_ms,
+                direct,
             }
         } else {
             PbConnResponse::Register(conn_id.into())
@@ -397,6 +402,17 @@ async fn handle_control_message(
     };
 
     match req {
+        PbServerRequest::Direct(message) => task_sender
+            .send(super::ManagerTask::Direct(
+                super::direct::DirectTask::Provider {
+                    connection: conn_id,
+                    key: key.clone(),
+                    message,
+                },
+            ))
+            .await
+            .map_err(|_| kanal::SendError(()))
+            .context(ServerConnSendStreamAckSnafu { key, conn_id }),
         PbServerRequest::Ping => {
             task_sender
                 .send(ManagerTask::ServerConnActivity {
@@ -584,7 +600,19 @@ async fn handle_stream_req<T: MessageWriter>(
     key: ImutableKey,
     conn_id: RemoteConnId,
 ) -> Result<()> {
-    if let ConnTask::StreamReq {
+    if let ConnTask::Direct(event) = req {
+        let msg =
+            LocalServer::Direct(event)
+                .encode()
+                .context(ServerConnDecodeStreamRequestSnafu {
+                    key: key.clone(),
+                    conn_id,
+                })?;
+        writer
+            .write_msg(&msg)
+            .await
+            .context(ServerConnWriteStreamRequestSnafu { key, conn_id })?;
+    } else if let ConnTask::StreamReq {
         client_id: client_conn_id,
         server_generation,
     } = req

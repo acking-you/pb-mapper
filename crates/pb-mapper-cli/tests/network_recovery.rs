@@ -62,7 +62,7 @@ impl FaultProxy {
                     accepted = listener.accept() => {
                         let (mut downstream, _) = accepted.unwrap();
                         let id = proxy_accepted.fetch_add(1, Ordering::SeqCst) + 1;
-                        let mode = proxy_mode.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| Some(if m == 2 { 0 } else { m })).unwrap();
+                        let mode = proxy_mode.try_update(Ordering::SeqCst, Ordering::SeqCst, |m| Some(if m == 2 { 0 } else { m })).unwrap();
                         if mode != 0 { proxy_blackholed.fetch_add(1, Ordering::SeqCst); }
                         let delay = proxy_delay.clone();
                         let discard_requests = proxy_discard_requests.clone();

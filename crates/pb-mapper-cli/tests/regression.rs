@@ -133,6 +133,8 @@ async fn explicit_invalid_msg_header_key_fails_server_startup() {
         .arg("--auth-state-dir")
         .arg(&state_dir)
         .env("MSG_HEADER_KEY", "invalid")
+        // The assertion reads the error log; an inherited filter must not hide it.
+        .env("RUST_LOG", "error")
         .kill_on_drop(true);
 
     let output = timeout(Duration::from_secs(3), command.output())
@@ -145,7 +147,11 @@ async fn explicit_invalid_msg_header_key_fails_server_startup() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(logs.contains("administrator_key_invalid"), "logs: {logs}");
+    assert!(
+        logs.contains("administrator_key_invalid"),
+        "status: {}, logs: {logs}",
+        output.status
+    );
     assert!(!state_dir.join("admin.key").exists());
     let _ = std::fs::remove_dir_all(state_dir);
 }
@@ -260,6 +266,7 @@ async fn register_control_conn_parts(
     key: &str,
 ) -> u32 {
     let request = PbConnRequest::Register {
+        direct: None,
         need_codec: false,
         is_datagram: false,
         key: key.to_string(),
@@ -371,6 +378,7 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
     let first_credential = parse_credential(&first.credential).unwrap();
     let second_credential = parse_credential(&second.credential).unwrap();
     let register_request = |service: &str| PbConnRequest::Register {
+        direct: None,
         need_codec: false,
         is_datagram: false,
         key: service.to_string(),
@@ -402,6 +410,7 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
     assert_ne!(first_conn_id, second_conn_id);
 
     let status_request = PbConnRequest::Status(PbConnStatusReq::Service {
+        direct_query: None,
         key: "same-name".to_string(),
     });
     for (credential, expected_conn_id) in [
@@ -523,6 +532,7 @@ async fn revoking_subscriber_credential_closes_cross_credential_data_stream() {
     let mut control = wait_for_server(server_addr).await;
     let control_session = ClientHeaderSession::new_v2(&admin_credential).unwrap();
     let register = PbConnRequest::RegisterScoped {
+        direct: None,
         need_codec: false,
         is_datagram: false,
         key: service.to_string(),
@@ -704,6 +714,7 @@ async fn status_service_reports_registered_v2_control_connection() {
 
     let mut status = wait_for_server(server_addr).await;
     let request = PbConnRequest::Status(PbConnStatusReq::Service {
+        direct_query: None,
         key: key.to_string(),
     })
     .encode()
@@ -719,6 +730,7 @@ async fn status_service_reports_registered_v2_control_connection() {
         .expect("service status response timed out")
         .unwrap();
     let PbConnResponse::Status(PbConnStatusResp::Service {
+        direct: _,
         key: status_key,
         connections,
     }) = PbConnResponse::decode(response).unwrap()
@@ -772,6 +784,7 @@ async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_sta
                     PbConnRequest::Register { key, .. } => {
                         let count = register_count.fetch_add(1, Ordering::SeqCst) + 1;
                         let response = PbConnResponse::RegisterV2 {
+                            direct: None,
                             conn_id: count as u32,
                             generation: count as u64,
                             lease_ttl_ms: 150,
@@ -788,8 +801,12 @@ async fn local_server_reconnects_when_registered_conn_is_missing_from_remote_sta
                         tracing::debug!(key, count, "fake server accepted register");
                         std::future::pending::<()>().await;
                     }
-                    PbConnRequest::Status(PbConnStatusReq::Service { key }) => {
+                    PbConnRequest::Status(PbConnStatusReq::Service {
+                        direct_query: _,
+                        key,
+                    }) => {
                         let response = PbConnResponse::Status(PbConnStatusResp::Service {
+                            direct: None,
                             key,
                             connections: Vec::new(),
                         })
@@ -848,11 +865,16 @@ async fn client_closes_initial_status_probe_after_key_check() {
     let fake_server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let (request, session) = read_secure_request(&security, &mut stream).await;
-        let PbConnRequest::Status(PbConnStatusReq::Service { key }) = request else {
+        let PbConnRequest::Status(PbConnStatusReq::Service {
+            direct_query: _,
+            key,
+        }) = request
+        else {
             panic!("client did not use service status for initial key check");
         };
 
         let response = PbConnResponse::Status(PbConnStatusResp::Service {
+            direct: None,
             key,
             connections: vec![PbServiceConnStatus {
                 conn_id: 1,
@@ -924,10 +946,13 @@ async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
             tokio::spawn(async move {
                 let (request, session) = read_secure_request(&security, &mut stream).await;
                 match request {
-                    PbConnRequest::Status(PbConnStatusReq::Service { key }) => {
+                    PbConnRequest::Status(PbConnStatusReq::Service {
+                        direct_query: _,
+                        key,
+                    }) => {
                         status_count.fetch_add(1, Ordering::SeqCst);
                         let should_fail = failed_status_responses
-                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                                 remaining.checked_sub(1)
                             })
                             .is_ok();
@@ -942,17 +967,20 @@ async fn client_tolerates_one_failed_health_check_while_listener_is_active() {
                                 last_rx_age_ms: 0,
                             }]
                         };
-                        let response =
-                            PbConnResponse::Status(PbConnStatusResp::Service { key, connections })
-                                .encode()
-                                .unwrap();
+                        let response = PbConnResponse::Status(PbConnStatusResp::Service {
+                            direct: None,
+                            key,
+                            connections,
+                        })
+                        .encode()
+                        .unwrap();
                         let mut writer = session.response_writer(&mut stream).unwrap();
                         writer.write_msg(&response).await.unwrap();
                     }
                     PbConnRequest::Status(PbConnStatusReq::Keys) => {
                         status_count.fetch_add(1, Ordering::SeqCst);
                         let should_fail = failed_status_responses
-                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                                 remaining.checked_sub(1)
                             })
                             .is_ok();
@@ -1609,12 +1637,14 @@ fn spawn_rejecting_relay(
                     }
                     // The registration probe, which the client runs against a
                     // relay it has not registered with yet.
-                    PbConnRequest::Status(PbConnStatusReq::Service { key }) => {
-                        PbConnResponse::Status(PbConnStatusResp::Service {
-                            key,
-                            connections: Vec::new(),
-                        })
-                    }
+                    PbConnRequest::Status(PbConnStatusReq::Service {
+                        direct_query: _,
+                        key,
+                    }) => PbConnResponse::Status(PbConnStatusResp::Service {
+                        direct: None,
+                        key,
+                        connections: Vec::new(),
+                    }),
                     PbConnRequest::Status(PbConnStatusReq::Keys) => {
                         PbConnResponse::Status(PbConnStatusResp::Keys(Vec::new()))
                     }

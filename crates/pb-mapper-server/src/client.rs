@@ -139,14 +139,35 @@ const CLIENT_CONN_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 1. Request server stream
 /// 2. Forward the traffic between client stream and server stream
-#[instrument(skip(task_sender, conn, session))]
 pub async fn handle_client_conn(
+    key: ImutableKey,
+    conn_id: RemoteConnId,
+    task_sender: ManagerTaskSender,
+    conn: TcpStream,
+    session: ServerHeaderSession,
+    data_protocol: Option<u16>,
+) -> Result<()> {
+    handle_client_conn_selected(
+        key,
+        conn_id,
+        task_sender,
+        conn,
+        session,
+        data_protocol,
+        None,
+    )
+    .await
+}
+
+#[instrument(skip(task_sender, conn, session))]
+pub(super) async fn handle_client_conn_selected(
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
     mut conn: TcpStream,
     session: ServerHeaderSession,
     data_protocol: Option<u16>,
+    selected: Option<(RemoteConnId, u64)>,
 ) -> Result<()> {
     DataCodec::validate_offer(data_protocol, session.protocol()).context(
         ClientConnCreateHeaderToolSnafu {
@@ -164,6 +185,7 @@ pub async fn handle_client_conn(
             key.clone(),
             conn_id,
             task_sender.clone(),
+            selected,
         ),
     )
     .await
@@ -489,6 +511,7 @@ async fn get_server_stream(
     key: ImutableKey,
     conn_id: RemoteConnId,
     task_sender: ManagerTaskSender,
+    selected: Option<(RemoteConnId, u64)>,
 ) -> Result<ReadyStream> {
     let (tx, rx) = kanal::bounded_async(DEFAULT_CLIENT_CHAN_CAP);
     let ready_timeout = stream_ready_timeout();
@@ -507,6 +530,7 @@ async fn get_server_stream(
                 conn_id,
                 conn_sender: tx.clone(),
                 excluded_server_conns: excluded_server_conns.clone(),
+                selected,
             })
             .await
             .map_err(|_| kanal::SendError(()))

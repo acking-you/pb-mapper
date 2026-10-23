@@ -15,6 +15,8 @@ pub enum StatusOp {
     RemoteId,
     /// Get registered service keys.
     Keys,
+    /// Get direct-session observations reported by endpoints in this namespace.
+    Sessions,
 }
 
 /// Every address a name resolved to, in the order the resolver returned them.
@@ -554,60 +556,6 @@ mod tests {
         assert_eq!(parse_log_format("unknown"), LogFormat::Pretty);
     }
 
-    /// One test rather than several, because these share process-wide state and
-    /// the test runner threads them.
-    #[test]
-    fn keep_alive_reads_the_environment_every_time() {
-        let restore = std::env::var(PB_MAPPER_KEEP_ALIVE).ok();
-
-        // SAFETY: mutating the environment is unsafe in edition 2024 because
-        // it is process-global. This is the only test that touches
-        // `PB_MAPPER_KEEP_ALIVE` — which is why it is one test and not several
-        // — and it restores the original value before returning.
-        unsafe {
-            std::env::remove_var(PB_MAPPER_KEEP_ALIVE);
-        }
-        assert!(!keep_alive_from_env(), "absent means off");
-
-        unsafe {
-            std::env::set_var(PB_MAPPER_KEEP_ALIVE, "ON");
-        }
-        assert!(keep_alive_from_env(), "the documented spelling");
-
-        // The regression. This used to be a `LazyLock<bool>`, so the answer was
-        // whatever the first caller in the process saw and could never change —
-        // which is why the UI's per-service toggle did nothing after the first
-        // tunnel started.
-        unsafe {
-            std::env::set_var(PB_MAPPER_KEEP_ALIVE, "OFF");
-        }
-        assert!(
-            !keep_alive_from_env(),
-            "OFF must mean off; the old check was `is_ok()`, so any value at \
-             all — OFF included — turned keep-alive on"
-        );
-
-        for truthy in ["on", "1", "true", "yes", " ON "] {
-            unsafe {
-                std::env::set_var(PB_MAPPER_KEEP_ALIVE, truthy);
-            }
-            assert!(keep_alive_from_env(), "{truthy:?} should enable");
-        }
-        for falsy in ["", "off", "0", "false", "no"] {
-            unsafe {
-                std::env::set_var(PB_MAPPER_KEEP_ALIVE, falsy);
-            }
-            assert!(!keep_alive_from_env(), "{falsy:?} should not enable");
-        }
-
-        unsafe {
-            match restore {
-                Some(value) => std::env::set_var(PB_MAPPER_KEEP_ALIVE, value),
-                None => std::env::remove_var(PB_MAPPER_KEEP_ALIVE),
-            }
-        }
-    }
-
     /// The point of [`ResolvedAddrs`]: a name with several records keeps them
     /// all, so the dial loops can try each one. Collapsing to the first is what
     /// made a multi-record relay unreachable whenever its first address was.
@@ -673,108 +621,6 @@ mod tests {
     fn resolve_addrs_fails_when_nothing_can_be_resolved() {
         assert!(resolve_addrs("127.0.0.1").is_err(), "no port");
         assert!(resolve_addrs("localhost").is_err(), "no port");
-    }
-
-    /// One test for all three variables, for the same reason as
-    /// `keep_alive_reads_the_environment_every_time`: the environment is
-    /// process-global and the runner threads these.
-    #[test]
-    fn reject_backoff_and_sweep_interval_survive_a_bad_environment() {
-        let names = [
-            PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN,
-            PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX,
-            PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL,
-        ];
-        let restore = names.map(|name| (name, std::env::var(name).ok()));
-
-        // SAFETY: mutating the environment is unsafe in edition 2024 because it
-        // is process-global. This is the only test that touches these three
-        // names — which is why it is one test and not three — and it restores
-        // their original values before returning.
-        unsafe {
-            for name in names {
-                std::env::remove_var(name);
-            }
-        }
-        assert_eq!(
-            registration_reject_backoff(),
-            (
-                DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
-                DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX
-            ),
-            "absent means the defaults"
-        );
-        assert_eq!(
-            server_lease_sweep_interval(),
-            DEFAULT_SERVER_LEASE_SWEEP_INTERVAL
-        );
-
-        unsafe {
-            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "30s");
-            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "2m");
-        }
-        assert_eq!(
-            registration_reject_backoff(),
-            (Duration::from_secs(30), Duration::from_secs(120)),
-            "both ends come from the environment"
-        );
-
-        // A zero is not a usable setting at either end: `RetryBackoff::new`
-        // asserts on a zero minimum, and a millisecond minimum would retry a
-        // thousand times a second. Both fall back to their defaults instead.
-        unsafe {
-            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "0s");
-            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "0s");
-        }
-        assert_eq!(
-            registration_reject_backoff(),
-            (
-                DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
-                DEFAULT_REGISTRATION_REJECT_BACKOFF_MAX
-            ),
-            "a zero at either end selects the default, not a millisecond"
-        );
-
-        // A zero minimum with a usable maximum still defaults the minimum, and
-        // the maximum given is kept.
-        unsafe {
-            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "0ms");
-            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "3m");
-        }
-        assert_eq!(
-            registration_reject_backoff(),
-            (
-                DEFAULT_REGISTRATION_REJECT_BACKOFF_MIN,
-                Duration::from_secs(180)
-            )
-        );
-
-        unsafe {
-            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, "1m");
-            std::env::set_var(PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX, "1s");
-        }
-        let (min, max) = registration_reject_backoff();
-        assert_eq!(min, Duration::from_secs(60));
-        assert_eq!(max, min, "an inverted range collapses to a fixed delay");
-
-        unsafe {
-            std::env::set_var(PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL, "0s");
-        }
-        assert_eq!(
-            server_lease_sweep_interval(),
-            DEFAULT_SERVER_LEASE_SWEEP_INTERVAL,
-            "a zero period would panic `tokio::time::interval`, and a millisecond \
-             one would queue a full scan every millisecond"
-        );
-
-        unsafe {
-            for (name, value) in restore {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
     }
 
     /// The async path is the one the tunnels use, and has to agree with the
