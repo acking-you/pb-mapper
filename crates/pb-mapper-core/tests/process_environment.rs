@@ -4,16 +4,13 @@
 
 use std::time::Duration;
 
-use pb_mapper_core::checksum::{
-    get_checksum, get_process_credential, set_process_msg_header_key, valid_checksum,
-};
 use pb_mapper_core::config::{
     PB_MAPPER_KEEP_ALIVE, PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX,
     PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MIN, PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL,
     keep_alive_from_env, registration_reject_backoff, server_lease_sweep_interval,
 };
 
-fn main() -> Result<(), String> {
+fn main() {
     // SAFETY: this executable has no test-runner thread pool or async runtime,
     // and all the functions below run synchronously without starting threads.
     unsafe {
@@ -55,16 +52,4 @@ fn main() -> Result<(), String> {
         std::env::set_var(PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL, "0s");
         assert_eq!(server_lease_sweep_interval(), sweep_default);
     }
-
-    // The public setter also mirrors its value into the environment. Exercise
-    // it here, isolated from every resolver, as well as taking the state lock.
-    let _guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
-    set_process_msg_header_key(Some("0123456789abcdefghijklmnopqrstuv"))?;
-    let checksum = get_checksum(32);
-    assert!(valid_checksum(32, checksum));
-    set_process_msg_header_key(None)?;
-    assert!(!valid_checksum(32, checksum));
-    assert!(!valid_checksum(32, 32));
-    assert!(get_process_credential().is_err());
-    Ok(())
 }

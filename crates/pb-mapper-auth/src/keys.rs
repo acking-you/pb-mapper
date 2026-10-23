@@ -118,7 +118,7 @@ pub(super) fn load_server_admin_credential(state_dir: &Path) -> Result<Credentia
     let path = state_dir.join("admin.key");
     let raw = if let Some(raw) = read_admin_key(&path)? {
         raw
-    } else if std::env::var_os(ENV_MSG_HEADER_KEY).is_some() {
+    } else if process_credential_configured() {
         let credential = get_process_credential()
             .map_err(|error| AuthFailure::new("administrator_key_invalid", error, false))?;
         let Credential::Admin(key) = credential else {

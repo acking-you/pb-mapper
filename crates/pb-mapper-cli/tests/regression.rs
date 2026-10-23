@@ -133,6 +133,8 @@ async fn explicit_invalid_msg_header_key_fails_server_startup() {
         .arg("--auth-state-dir")
         .arg(&state_dir)
         .env("MSG_HEADER_KEY", "invalid")
+        // The assertion reads the error log; an inherited filter must not hide it.
+        .env("RUST_LOG", "error")
         .kill_on_drop(true);
 
     let output = timeout(Duration::from_secs(3), command.output())
@@ -145,7 +147,11 @@ async fn explicit_invalid_msg_header_key_fails_server_startup() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(logs.contains("administrator_key_invalid"), "logs: {logs}");
+    assert!(
+        logs.contains("administrator_key_invalid"),
+        "status: {}, logs: {logs}",
+        output.status
+    );
     assert!(!state_dir.join("admin.key").exists());
     let _ = std::fs::remove_dir_all(state_dir);
 }
