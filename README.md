@@ -39,8 +39,8 @@ their bytes travel.
   endpoints: losing the coordinator does not cut it.
 - **Relay again when direct cannot connect.** If no direct path is ready within
   the setup budget, the same connection falls back to the relay before any
-  application byte is sent, pinned to the publisher that was selected, so the
-  backend is never dialed twice.
+  application byte is sent. Once a publisher has been granted, the fallback is
+  pinned to it, and its backend is dialed exactly once.
 
 pb-mapper transports bytes. The service behind a tunnel still owns its
 application-level authentication and authorization.
