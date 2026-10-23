@@ -7,7 +7,7 @@ use crate::{diagnostics::Diagnostics, server::LocalControlWrite};
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_protocol::{direct::*, forward::StreamForward};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     sync::{
         Arc,
@@ -121,9 +121,12 @@ async fn run<L: StreamProvider + Send + 'static>(
     let mut sessions = HashMap::<SessionId, mpsc::Sender<SessionEvent>>::new();
     let mut tasks = JoinSet::new();
     let mut arrivals = JoinSet::new();
+    // Only polled while a report is undelivered, so it costs nothing otherwise.
+    let mut report_retry = tokio::time::interval(Duration::from_millis(500));
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
+            _ = report_retry.tick(), if reports.has_unsent() => reports.retry(),
             envelope = rx.recv() => {
                 let Some(Envelope { event, reply }) = envelope else { break };
                 reports.connected(reply.clone());
@@ -248,8 +251,25 @@ async fn session_bind(connection: QuicGuard) -> io::Result<(SessionId, Incoming)
         },
     ))
 }
-fn send(reply: &Reply, message: DirectProviderMessage) {
-    let _ = reply.try_send(LocalControlWrite::Direct(Box::new(message)));
+/// Best effort: the consumer falls back without it once its wait expires.
+fn send(reply: &Reply, message: DirectProviderMessage) -> bool {
+    reply
+        .try_send(LocalControlWrite::Direct(Box::new(message)))
+        .is_ok()
+}
+/// Replies the coordinator waits on. A dropped `RelaySelected` would leave
+/// the consumer waiting for a fallback that cannot start, so these wait for
+/// room in the control writer, bounded by the setup deadline.
+async fn send_until(
+    reply: &Reply,
+    message: DirectProviderMessage,
+    deadline: Instant,
+) -> io::Result<()> {
+    let write = reply.send(LocalControlWrite::Direct(Box::new(message)));
+    tokio::time::timeout_at(deadline, write)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "coordination reply timed out"))?
+        .map_err(|_| io::Error::other("coordination route closed"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -275,13 +295,11 @@ where
     };
     grant.provider = network.peer(stun_addr).await;
     network.authorize(&grant, true, deadline)?;
-    send(
-        &reply,
-        DirectProviderMessage::Accept {
-            id: grant.id,
-            peer: grant.provider.clone(),
-        },
-    );
+    let accept = DirectProviderMessage::Accept {
+        id: grant.id,
+        peer: grant.provider.clone(),
+    };
+    send_until(&reply, accept, deadline).await?;
     let mut incoming: Option<Incoming> = None;
     let mut granted = false;
     let mut probes = tokio::time::interval(Duration::from_millis(120));
@@ -309,8 +327,8 @@ where
                     }
                 }
                 Some(SessionEvent::Relay) => {
-                    send(&reply, DirectProviderMessage::RelaySelected { id: grant.id });
-                    return Ok(());
+                    let selected = DirectProviderMessage::RelaySelected { id: grant.id };
+                    return send_until(&reply, selected, deadline).await;
                 }
                 Some(SessionEvent::Cancel) | None => return Ok(()),
                 _ => {}
@@ -338,8 +356,8 @@ where
                 }
                 event = events.recv() => match event {
                     Some(SessionEvent::Relay) => {
-                        send(&reply, DirectProviderMessage::RelaySelected { id: grant.id });
-                        return Ok(());
+                        let selected = DirectProviderMessage::RelaySelected { id: grant.id };
+                        return send_until(&reply, selected, deadline).await;
                     }
                     Some(SessionEvent::Cancel) | None => return Ok(()),
                     _ => {}
@@ -412,6 +430,9 @@ struct ProviderReports {
     // Alternative pooled control connections to ONE coordinator. A report
     // needs one live route, not broadcast copies on every worker connection.
     routes: std::sync::Mutex<Vec<Reply>>,
+    /// Sessions whose newest report no route accepted. A final `Closed` has
+    /// no later tick to carry it, so these are retried until delivered.
+    unsent: std::sync::Mutex<HashSet<SessionId>>,
 }
 impl ProviderReports {
     fn connected(&self, reply: Reply) {
@@ -421,21 +442,67 @@ impl ProviderReports {
             if routes.len() < 64 {
                 routes.push(reply.clone());
             }
+            drop(routes);
             for update in self.latest.snapshot() {
-                send(&reply, DirectProviderMessage::Report(update));
+                let id = update.report.id;
+                if !send(&reply, DirectProviderMessage::Report(update)) {
+                    self.mark(id, false);
+                }
             }
         }
     }
     fn put(&self, update: SessionUpdate) {
         self.latest.put(update.clone());
+        let id = update.report.id;
+        let delivered = self.deliver(update);
+        self.mark(id, delivered);
+    }
+    fn deliver(&self, update: SessionUpdate) -> bool {
         let routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
         let mut message =
             LocalControlWrite::Direct(Box::new(DirectProviderMessage::Report(update)));
         for route in routes.iter() {
             match route.try_send(message) {
-                Ok(()) => break,
+                Ok(()) => return true,
                 Err(error) => message = error.into_inner(),
             }
+        }
+        false
+    }
+    fn mark(&self, id: SessionId, delivered: bool) {
+        let mut unsent = self.unsent.lock().unwrap_or_else(|e| e.into_inner());
+        if delivered {
+            unsent.remove(&id);
+        } else if unsent.len() < 1024 {
+            unsent.insert(id);
+        }
+    }
+    fn has_unsent(&self) -> bool {
+        !self
+            .unsent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+    /// Resend the newest report of each undelivered session, stopping while
+    /// every route is still full.
+    fn retry(&self) {
+        let ids: Vec<_> = self
+            .unsent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        for id in ids {
+            let Some(update) = self.latest.get(&id) else {
+                self.mark(id, true);
+                continue;
+            };
+            if !self.deliver(update) {
+                return;
+            }
+            self.mark(id, true);
         }
     }
 }
@@ -491,6 +558,52 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_util::task::AbortOnDropHandle;
     use uni_stream::stream::TcpStreamProvider;
+
+    #[tokio::test]
+    async fn reports_refused_by_a_full_route_are_retried() {
+        let reports = ProviderReports::default();
+        let (route, mut writes) = mpsc::channel(1);
+        reports.connected(route);
+        let update = |state| {
+            let id = random_session_id();
+            SessionUpdate {
+                session: SessionSummary {
+                    server_instance: id,
+                    id,
+                    namespace: 0,
+                    service: "svc".into(),
+                    is_datagram: false,
+                    consumer_key: 0,
+                    provider_key: 0,
+                },
+                secret: SessionSecret::random(),
+                report: SessionReport {
+                    id,
+                    seq: 1,
+                    path: SessionPath::Direct,
+                    state,
+                    reason: None,
+                },
+            }
+        };
+        reports.put(update(SessionState::Active));
+        let closed = update(SessionState::Closed);
+        let closed_id = closed.report.id;
+        reports.put(closed);
+        assert!(
+            reports.has_unsent(),
+            "a full route must not lose the final report"
+        );
+        reports.retry();
+        assert!(reports.has_unsent(), "still full");
+        let _ = writes.recv().await;
+        reports.retry();
+        assert!(!reports.has_unsent());
+        let Some(LocalControlWrite::Direct(message)) = writes.recv().await else {
+            panic!("expected the retried report");
+        };
+        assert!(matches!(*message, DirectProviderMessage::Report(u) if u.report.id == closed_id));
+    }
 
     #[tokio::test]
     async fn committed_direct_cannot_acknowledge_relay_or_dial_backend_twice() {

@@ -135,8 +135,51 @@ pub(crate) struct DirectState {
     instance: SessionId,
     consumers: HashMap<RemoteConnId, Consumer>,
     entries: HashMap<SessionId, Entry>,
+    fallback_credits: FallbackCredits,
     observations: HashMap<(SessionId, SessionId), Observation>,
 }
+
+/// Rate tokens charged for direct setups that ended before a grant. The
+/// consumer then falls back to an ordinary subscription of the same service,
+/// which spends one of these instead of a second token; capacity is still
+/// checked. An unused credit expires with the setup deadline it came from.
+#[derive(Default)]
+struct FallbackCredits {
+    by_key: HashMap<ImutableKey, Vec<Instant>>,
+    total: usize,
+}
+impl FallbackCredits {
+    const CAPACITY: usize = 4096;
+    fn add(&mut self, key: ImutableKey, until: Instant) {
+        if self.total < Self::CAPACITY {
+            self.by_key.entry(key).or_default().push(until);
+            self.total += 1;
+        }
+    }
+    fn take(&mut self, key: &ImutableKey) -> bool {
+        let Some(credits) = self.by_key.get_mut(key) else {
+            return false;
+        };
+        let held = credits.len();
+        let now = Instant::now();
+        credits.retain(|until| *until > now);
+        let taken = credits.pop().is_some();
+        self.total -= held - credits.len();
+        if credits.is_empty() {
+            self.by_key.remove(key);
+        }
+        taken
+    }
+    fn sweep(&mut self) {
+        let now = Instant::now();
+        self.by_key.retain(|_, credits| {
+            credits.retain(|until| *until > now);
+            !credits.is_empty()
+        });
+        self.total = self.by_key.values().map(Vec::len).sum();
+    }
+}
+
 impl DirectState {
     pub fn new(capability: Option<DirectCapability>) -> Self {
         let mut instance = [0; 16];
@@ -148,8 +191,13 @@ impl DirectState {
             instance,
             consumers: HashMap::new(),
             entries: HashMap::new(),
+            fallback_credits: FallbackCredits::default(),
             observations: HashMap::new(),
         }
+    }
+    /// Spend a credit left by a direct setup that ended before its grant.
+    pub fn take_fallback_credit(&mut self, key: &ImutableKey) -> bool {
+        self.fallback_credits.take(key)
     }
     pub fn pending_in(&self, namespace: u64) -> usize {
         self.entries
@@ -283,6 +331,8 @@ impl DirectState {
             }))
             .is_err()
         {
+            let until = Instant::now() + Duration::from_millis(SETUP_TTL_MS);
+            self.fallback_credits.add(key, until);
             self.send(
                 connection,
                 DirectEvent::Rejected {
@@ -328,6 +378,9 @@ impl DirectState {
                 .values_mut()
                 .filter(|e| e.consumer == connection && e.request == request && e.pending())
             {
+                if entry.phase == Phase::Offered {
+                    self.fallback_credits.add(entry.key.clone(), entry.deadline);
+                }
                 entry.phase = Phase::Closed;
                 if let Some(sender) = route(entry.provider) {
                     let _ = sender.try_send(conn_task(DirectEvent::Cancel { id: entry.grant.id }));
@@ -426,6 +479,9 @@ impl DirectState {
                 self.send(consumer, event);
             }
             DirectProviderMessage::Reject { reason, .. } if entry.pending() => {
+                if entry.phase == Phase::Offered {
+                    self.fallback_credits.add(entry.key.clone(), entry.deadline);
+                }
                 entry.phase = Phase::Closed;
                 let request = entry.request;
                 self.send(
@@ -475,6 +531,9 @@ impl DirectState {
             .values_mut()
             .filter(|e| e.consumer == connection && e.pending())
         {
+            if entry.phase == Phase::Offered {
+                self.fallback_credits.add(entry.key.clone(), entry.deadline);
+            }
             entry.phase = Phase::Closed;
             if let Some(sender) = route(entry.provider) {
                 let _ = sender.try_send(conn_task(DirectEvent::Cancel { id: entry.grant.id }));
@@ -492,6 +551,7 @@ impl DirectState {
         }
         self.entries
             .retain(|_, entry| entry.deadline > Instant::now());
+        self.fallback_credits.sweep();
         self.observations
             .retain(|_, observation| observation.touched.elapsed() < Duration::from_secs(120));
     }
@@ -842,6 +902,16 @@ mod tests {
             panic!("expected an offer");
         };
         assert_eq!(offered.generation, 3);
+        // Abandoned before its grant, the setup's token pays for the ordinary
+        // subscription the consumer falls back to, exactly once.
+        state.client(
+            1.into(),
+            DirectClientMessage::CancelOpen { request: 2 },
+            |_| None,
+        );
+        let service = ImutableKey::from("echo");
+        assert!(state.take_fallback_credit(&service));
+        assert!(!state.take_fallback_credit(&service));
         state.entries.clear();
         state.entries.insert(
             grant.id,

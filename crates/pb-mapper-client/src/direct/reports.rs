@@ -33,6 +33,10 @@ impl Latest {
         }
         reports.insert(update.report.id, (update, Instant::now()));
     }
+    pub fn get(&self, id: &SessionId) -> Option<SessionUpdate> {
+        let reports = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        reports.get(id).map(|(update, _)| update.clone())
+    }
     pub fn snapshot(&self) -> Vec<SessionUpdate> {
         let mut reports = self.0.lock().unwrap_or_else(|e| e.into_inner());
         prune(&mut reports);

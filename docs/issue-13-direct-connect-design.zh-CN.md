@@ -154,6 +154,8 @@ sequenceDiagram
     end
 ```
 
+许可下发前失败（提供端拒绝、协调队列满、协商超时）时，server 为该服务记一次与 setup 同期限的回退额度，消费端随后的普通订阅用它代替第二个速率令牌，仍检查容量。提供端的 Accept 与 RelaySelected 在 setup 截止前等待控制写队列空位，不会因队列满被丢弃；状态报告仍尽力投递，未送达的会话在有积压时重试。
+
 消费端在交给 QUIC 第一个 StartDirect 字节之前即标记已提交。此后写取消、Started 丢失或连接错误只结束当前连接，绝不重放到 relay。提供端收到 StartDirect 才拨本地后端；探测和 Ready 阶段不建立后端连接。RelaySelected 之后退出待选直连任务，迟到探测不会再次激活它。
 
 `DirectRelay` 只能消费一次已经由提供端确认的选择。server 再验证凭据、namespace、secret、deadline 和提供端注册 generation；沿用原有中继配对与 codec，不另建第二套中继。授权时已占用的 setup 槽位与速率令牌直接转给这次订阅，不重复收取，也不会在 namespace 满额时把已获准的回退拒之门外。注册退役或控制面在回退时失联会使该次 setup 失败；不能重新选择另一提供端冒险重复交付。

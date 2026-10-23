@@ -1017,7 +1017,10 @@ pub async fn run_server_on_listener_with_direct(
                     }
                     continue;
                 };
+                // A direct setup that ended before its grant already paid for
+                // the ordinary subscription its consumer falls back to.
                 if is_new_subscription
+                    && !direct_state.take_fallback_credit(&key)
                     && !namespace_rate_limits
                         .entry(namespace)
                         .or_insert_with(|| {
