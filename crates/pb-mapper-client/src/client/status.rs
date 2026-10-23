@@ -84,21 +84,24 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn get_status_times_out_when_peer_stalls_after_request() {
-        // SAFETY: no other thread in this test reads the environment.
-        unsafe { std::env::set_var("PB_MAPPER_CONTROL_IO_TIMEOUT", "20ms") };
         let (mut client, _server) = tokio::io::duplex(1024);
+        let credential = Credential::Admin([17; 32]);
+        let budget = control_io_timeout();
+        let started = tokio::time::Instant::now();
 
         let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            get_status(&mut client, PbConnStatusReq::Keys),
+            budget + Duration::from_secs(1),
+            get_status_with_credential(&mut client, PbConnStatusReq::Keys, None, &credential),
         )
         .await
-        .expect("get_status ignored PB_MAPPER_CONTROL_IO_TIMEOUT");
+        .expect("status exchange ignored its control I/O timeout");
 
-        // SAFETY: as above.
-        unsafe { std::env::remove_var("PB_MAPPER_CONTROL_IO_TIMEOUT") };
         assert!(result.is_err());
+        assert!(
+            started.elapsed() >= budget,
+            "must reach the stalled peer timeout"
+        );
     }
 }
