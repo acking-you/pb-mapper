@@ -17,3 +17,15 @@
 [submodule "local-tools/index-tts-vllm"]
 	path = local-tools/index-tts-vllm
 	url = https://github.com/acking-you/index-tts-vllm.git
+[submodule "deps/quinn"]
+	path = deps/quinn
+	url = https://github.com/acking-you/quinn.git
+	branch = codex/pb-mapper-issue-13
+[submodule "deps/rcgen"]
+	path = deps/rcgen
+	url = https://github.com/acking-you/rcgen.git
+	branch = codex/pb-mapper-issue-13
+[submodule "deps/stun-proto"]
+	path = deps/stun-proto
+	url = https://github.com/acking-you/stun-proto.git
+	branch = codex/pb-mapper-issue-13

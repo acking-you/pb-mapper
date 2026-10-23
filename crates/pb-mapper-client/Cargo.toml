@@ -11,6 +11,10 @@ description = "Register, connect, status, and admin client implementation for pb
 publish = ["crates-io"]
 
 [dependencies]
+quinn = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+stun-proto = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
 rand.workspace = true
 pb-mapper-auth.workspace = true
 pb-mapper-core.workspace = true
@@ -29,9 +33,11 @@ if-addrs = { version = "0.15", features = ["link-local"] }
 if-watch = { version = "3.2.2", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
+pb-mapper-server = { workspace = true, features = ["p2p"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]
+p2p = ["dep:quinn", "dep:rcgen", "dep:stun-proto", "dep:ring"]
 udp-timeout = ["uni-stream/udp-timeout", "pb-mapper-protocol/udp-timeout"]
 
 [lints]

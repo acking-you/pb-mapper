@@ -132,6 +132,7 @@ pub(super) async fn handle_conn(
             client_instance_id,
             heartbeat_interval_ms,
             heartbeat_tolerance_ms,
+            direct,
         } => {
             requested_namespace = Some(namespace);
             force_register_namespace = force_namespace;
@@ -143,6 +144,7 @@ pub(super) async fn handle_conn(
                 client_instance_id,
                 heartbeat_interval_ms,
                 heartbeat_tolerance_ms,
+                direct,
             }
         }
         PbConnRequest::SubcribeScoped {
@@ -171,6 +173,14 @@ pub(super) async fn handle_conn(
                 dst_id,
                 server_generation,
             }
+        }
+        request @ (PbConnRequest::DirectControl { .. } | PbConnRequest::DirectRelay { .. }) => {
+            requested_namespace = match &request {
+                PbConnRequest::DirectControl { namespace }
+                | PbConnRequest::DirectRelay { namespace, .. } => *namespace,
+                _ => None,
+            };
+            request
         }
         request => request,
     };
@@ -206,6 +216,83 @@ pub(super) async fn handle_conn(
         }
     };
     match init_request {
+        PbConnRequest::DirectControl { .. } => {
+            if session.protocol() != HeaderProtocol::V2 {
+                return Ok(());
+            }
+            if let Err(error) = direct::handle_control(
+                conn_id,
+                effective_namespace,
+                conn,
+                session,
+                manager_task_sender,
+            )
+            .await
+            {
+                tracing::debug!(%error, "direct control closed");
+            }
+        }
+        PbConnRequest::DirectRelay {
+            id,
+            secret,
+            data_protocol,
+            ..
+        } => {
+            if session.protocol() != HeaderProtocol::V2 {
+                return Ok(());
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let sent = manager_task_sender
+                .send(ManagerTask::Direct(direct::DirectTask::Relay {
+                    auth: auth_context.clone(),
+                    namespace: effective_namespace,
+                    id,
+                    secret,
+                    response: tx,
+                }))
+                .await;
+            let selected = if sent.is_ok() {
+                tokio::time::timeout(timeout, rx)
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten()
+            } else {
+                None
+            };
+            let Some((key, provider, generation)) = selected else {
+                write_protocol_error(
+                    &mut conn,
+                    &session,
+                    &pb_mapper_auth::AuthFailure::new(
+                        "direct_relay_denied",
+                        "invalid or expired relay selection",
+                        false,
+                    ),
+                )
+                .await;
+                return Ok(());
+            };
+            run_while_credential_active(
+                conn,
+                session,
+                &auth_context,
+                conn_id,
+                "direct fallback relay",
+                |conn, session| {
+                    client::handle_client_conn_selected(
+                        key,
+                        conn_id,
+                        manager_task_sender,
+                        conn,
+                        session,
+                        data_protocol,
+                        Some((provider, generation)),
+                    )
+                },
+            )
+            .await?;
+        }
         PbConnRequest::Register {
             key,
             need_codec,
@@ -214,6 +301,7 @@ pub(super) async fn handle_conn(
             client_instance_id,
             heartbeat_interval_ms,
             heartbeat_tolerance_ms,
+            direct,
         } => {
             let protocol_version = protocol_version.unwrap_or(1);
             tracing::info!(
@@ -255,6 +343,13 @@ pub(super) async fn handle_conn(
                             is_datagram,
                             protocol_version,
                             conn_id,
+                            direct: direct
+                                .filter(|v| {
+                                    *v == pb_mapper_protocol::direct::DIRECT_VERSION
+                                        && session.protocol() == HeaderProtocol::V2
+                                        && protocol_version >= CONTROL_PROTOCOL_V2
+                                })
+                                .map(|_| auth_context.clone()),
                         },
                         manager_task_sender,
                         conn,
@@ -528,7 +623,7 @@ fn resolve_namespace(
     Ok(namespace)
 }
 
-fn scoped_service_key(
+pub(super) fn scoped_service_key(
     context: &AuthContext,
     namespace: u64,
     service_name: &str,

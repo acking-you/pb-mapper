@@ -89,6 +89,29 @@ pub async fn run_server_on_listener(
     keep_alive: bool,
     auth: AuthRuntime,
 ) -> std::io::Result<()> {
+    run_server_on_listener_with_direct(
+        listener,
+        shutdown_token,
+        status_channel,
+        keep_alive,
+        auth,
+        None,
+    )
+    .await
+}
+
+pub async fn run_server_on_listener_with_direct(
+    listener: TcpListener,
+    shutdown_token: CancellationToken,
+    status_channel: Option<
+        tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<ServerStatusInfo>>,
+    >,
+    keep_alive: bool,
+    auth: AuthRuntime,
+    direct_config: Option<DirectServerConfig>,
+) -> std::io::Result<()> {
+    let (capability, stun_task) = direct::bind(direct_config).await?;
+    let mut direct_state = direct::DirectState::new(capability);
     let security = ServerSecurity::new(auth);
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
     // represent the mapping of the `key` to the id of the server-side conn
@@ -188,7 +211,89 @@ pub async fn run_server_on_listener(
         };
 
         while connection_tasks.try_join_next().is_some() {}
+        if stun_task.as_ref().is_some_and(|task| task.is_finished()) {
+            direct_state.capability = None;
+        }
         match task {
+            ManagerTask::Direct(task) => {
+                use direct::DirectTask;
+                use pb_mapper_protocol::direct::DirectClientMessage;
+                let route = |id| manager.get_conn_sender_chan(&id);
+                match task {
+                    DirectTask::Connect {
+                        connection,
+                        namespace,
+                        auth,
+                        sender,
+                    } => direct_state.connect(connection, namespace, auth, sender),
+                    DirectTask::Client {
+                        connection,
+                        message:
+                            DirectClientMessage::Open {
+                                request,
+                                key,
+                                is_datagram,
+                                peer,
+                            },
+                    } => {
+                        let admitted =
+                            direct_state.namespace(connection).is_some_and(|namespace| {
+                                direct_state.pending_in(namespace)
+                                    + namespace_stream_counts
+                                        .get(&namespace)
+                                        .copied()
+                                        .unwrap_or_default()
+                                    < max_streams_per_namespace
+                                    && namespace_rate_limits
+                                        .entry(namespace)
+                                        .or_insert_with(|| {
+                                            NamespaceRateLimit::new(
+                                                new_streams_per_second,
+                                                new_streams_burst,
+                                            )
+                                        })
+                                        .allow()
+                            });
+                        direct_state.open(
+                            connection,
+                            request,
+                            key,
+                            is_datagram,
+                            peer,
+                            &server_conn_map,
+                            route,
+                            admitted,
+                        );
+                    }
+                    DirectTask::Client {
+                        connection,
+                        message,
+                    } => direct_state.client(connection, message, route),
+                    DirectTask::Provider {
+                        connection,
+                        key,
+                        message,
+                    } => {
+                        let auth = server_conn_map
+                            .get(&key)
+                            .and_then(|all| all.iter().find(|p| p.conn_id == connection))
+                            .and_then(|p| p.direct.clone());
+                        direct_state.provider(connection, &key, message, auth, route);
+                    }
+                    DirectTask::Disconnect { connection } => {
+                        direct_state.disconnect(connection, route)
+                    }
+                    DirectTask::Relay {
+                        auth,
+                        namespace,
+                        id,
+                        secret,
+                        response,
+                    } => {
+                        let _ = response.send(direct_state.relay(&auth, namespace, id, secret));
+                    }
+                }
+            }
             ManagerTask::AdminServiceList {
                 key_id,
                 page,
@@ -335,6 +440,9 @@ pub async fn run_server_on_listener(
                 conn_id,
             } => {
                 let resp = match status {
+                    PbConnStatusReq::Sessions => PbConnResponse::Status(
+                        PbConnStatusResp::Sessions(direct_state.observations(namespace)),
+                    ),
                     PbConnStatusReq::RemoteId => {
                         let scoped = server_conn_map
                             .iter()
@@ -371,7 +479,7 @@ pub async fn run_server_on_listener(
                             })
                             .collect(),
                     )),
-                    PbConnStatusReq::Service { key } => {
+                    PbConnStatusReq::Service { key, direct_query } => {
                         let display_key = key.clone();
                         let key: ImutableKey = if namespace == 0 {
                             key.into()
@@ -381,6 +489,9 @@ pub async fn run_server_on_listener(
                         PbConnResponse::Status(PbConnStatusResp::Service {
                             key: display_key,
                             connections: service_status_connections(&server_conn_map, &key),
+                            direct: direct_query
+                                .filter(|q| *q)
+                                .and(direct_state.capability.clone()),
                         })
                     }
                 };
@@ -608,7 +719,9 @@ pub async fn run_server_on_listener(
                 is_datagram,
                 protocol_version,
                 retire_token,
+                direct,
             } => {
+                let direct = direct.filter(|_| direct_state.capability.is_some());
                 let namespace = split_scoped_service_key(&key).0;
                 let existing = server_conn_map.get(&key);
                 let failure = if existing.is_some_and(|connections| {
@@ -670,6 +783,7 @@ pub async fn run_server_on_listener(
                             stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
                             suspect_check: None,
                             retire_token,
+                            direct: direct.clone(),
                         });
                     }
                     hashbrown::hash_map::Entry::Vacant(v) => {
@@ -684,6 +798,7 @@ pub async fn run_server_on_listener(
                             stream_ack_budget: pb_mapper_core::config::stream_ack_timeout(),
                             suspect_check: None,
                             retire_token,
+                            direct: direct.clone(),
                         }]);
                     }
                 }
@@ -710,6 +825,7 @@ pub async fn run_server_on_listener(
                             generation,
                             protocol_version,
                             lease_ttl_ms: server_lease_timeout().as_millis() as u64,
+                            direct: direct.as_ref().and(direct_state.capability.clone()),
                         })
                         .map_err(|_| kanal::SendError(()))
                         .context(TaskCenterSendRegisterRespSnafu { key, conn_id })
@@ -861,6 +977,7 @@ pub async fn run_server_on_listener(
                 conn_id,
                 conn_sender,
                 excluded_server_conns,
+                selected: pinned_provider,
             } => {
                 let namespace = split_scoped_service_key(&key).0;
                 // Fallback belongs to an already admitted subscription. It must
@@ -898,7 +1015,11 @@ pub async fn run_server_on_listener(
                     }
                     continue;
                 };
+                // DirectRelay already consumed its rate token when its grant
+                // was admitted. The pinned, one-use selection cannot be reused
+                // to admit an unrelated subscription.
                 if is_new_subscription
+                    && pinned_provider.is_none()
                     && !namespace_rate_limits
                         .entry(namespace)
                         .or_insert_with(|| {
@@ -922,6 +1043,8 @@ pub async fn run_server_on_listener(
                         .filter(|info| {
                             info.health == ServerConnHealth::Healthy
                                 && !excluded_server_conns.contains(&(info.conn_id, info.generation))
+                                && pinned_provider
+                                    .is_none_or(|p| p == (info.conn_id, info.generation))
                         })
                         .cloned(),
                 );
@@ -937,6 +1060,7 @@ pub async fn run_server_on_listener(
                         stream_ack_budget,
                         suspect_check: _,
                         retire_token: _,
+                        direct: _,
                     } = server_info;
                     let Some(server_conn_sender) = manager.get_conn_sender_chan(&server_conn_id)
                     else {
@@ -1061,6 +1185,7 @@ pub async fn run_server_on_listener(
                 }
             }
             ManagerTask::SweepServerLeases => {
+                direct_state.sweep(|id| manager.get_conn_sender_chan(&id));
                 // Retire in place rather than queueing `RetireServerConn` back into
                 // the manager channel: this loop is that channel's only consumer, so
                 // a full queue would have it waiting on itself.
@@ -1232,6 +1357,7 @@ mod tests {
 
     fn server_conn_info(conn_id: u32, generation: u64) -> ServerConnInfo {
         ServerConnInfo {
+            direct: None,
             conn_id: RemoteConnId::from(conn_id),
             generation,
             health: ServerConnHealth::Healthy,

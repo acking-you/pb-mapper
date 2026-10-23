@@ -15,7 +15,8 @@ workspace = true
 [dependencies]
 napi = { version = "3.12.2", default-features = false, features = ["napi8", "async"] }
 napi-derive = "3.6.3"
-pb-mapper-client.workspace = true
+pb-mapper-client = { workspace = true, features = ["p2p"] }
+serde_json.workspace = true
 
 [build-dependencies]
 napi-build = "2.4.1"

@@ -25,7 +25,8 @@ use super::admin::Admin;
 use super::error::{AddressSnafu, ConnectSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use crate::client::run_client_side_cli_recovering;
+use super::{ConnectOptions, PathPolicy, RegisterOptions};
+use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
 
@@ -162,7 +163,7 @@ impl Client {
     /// Returns as soon as the worker is spawned; the handle's
     /// [`Registration::wait_ready`] is what waits for the relay to accept it.
     pub async fn register(&self, request: RegisterRequest) -> Result<Registration> {
-        self.register_inner(request, None).await
+        self.register_inner(request, None, false).await
     }
 
     /// Publish with an idle deadline for each forwarded TCP data connection.
@@ -187,13 +188,36 @@ impl Client {
         {
             return Err(Error::invalid_config("idle timeout exceeds timer range"));
         }
-        self.register_inner(request, Some(idle_timeout)).await
+        self.register_inner(request, Some(idle_timeout), false)
+            .await
+    }
+
+    /// Publish a service with explicitly enabled direct capability.
+    pub async fn register_with_options(
+        &self,
+        request: RegisterRequest,
+        options: RegisterOptions,
+    ) -> Result<Registration> {
+        if options.allow_direct && !cfg!(feature = "p2p") {
+            return Err(Error::invalid_config("built without p2p support"));
+        }
+        if let Some(timeout) = options.idle_timeout
+            && (request.transport.is_datagram()
+                || tokio::time::Instant::now().checked_add(timeout).is_none())
+        {
+            return Err(Error::invalid_config(
+                "idle deadline requires TCP and a representable duration",
+            ));
+        }
+        self.register_inner(request, options.idle_timeout, options.allow_direct)
+            .await
     }
 
     async fn register_inner(
         &self,
         request: RegisterRequest,
         idle_timeout: Option<std::time::Duration>,
+        allow_direct: bool,
     ) -> Result<Registration> {
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
@@ -221,6 +245,7 @@ impl Client {
                     context.shutdown,
                     context.diagnostics,
                     idle_timeout,
+                    allow_direct,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -234,6 +259,7 @@ impl Client {
                     context.shutdown,
                     context.diagnostics,
                     idle_timeout,
+                    allow_direct,
                 )
             }),
         };
@@ -246,6 +272,20 @@ impl Client {
     /// [`Connection::wait_ready`] is what waits for the local listener to bind
     /// and the relay to confirm the service.
     pub async fn connect(&self, request: ConnectRequest) -> Result<Connection> {
+        self.connect_with_options(request, ConnectOptions::default())
+            .await
+    }
+
+    /// Select direct-first or the unchanged relay protocol for this tunnel only.
+    pub async fn connect_with_options(
+        &self,
+        request: ConnectRequest,
+        options: ConnectOptions,
+    ) -> Result<Connection> {
+        if options.path == PathPolicy::Auto && !cfg!(feature = "p2p") {
+            return Err(Error::invalid_config("built without p2p support"));
+        }
+        let is_datagram = request.transport.is_datagram();
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
         }
@@ -257,7 +297,7 @@ impl Client {
         let namespace = self.inner.namespace;
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
-                run_client_side_cli_recovering::<TcpListenerProvider>(
+                run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -267,10 +307,12 @@ impl Client {
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
+                    options.path,
+                    is_datagram,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
-                run_client_side_cli_recovering::<UdpListenerProvider>(
+                run_client_side_cli_recovering_with_path::<UdpListenerProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
@@ -280,6 +322,8 @@ impl Client {
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
+                    options.path,
+                    is_datagram,
                 )
             }),
         };
@@ -296,10 +340,23 @@ impl Client {
         }
     }
 
+    /// Endpoint observations; stale or conflicting reports do not control sessions.
+    pub async fn sessions(&self) -> Result<Vec<pb_mapper_protocol::direct::SessionObservation>> {
+        match self.status_request(PbConnStatusReq::Sessions).await? {
+            PbConnStatusResp::Sessions(sessions) => Ok(sessions),
+            other => Err(Error::protocol(format!(
+                "expected sessions status, got {other:?}"
+            ))),
+        }
+    }
+
     pub async fn service_status(&self, key: impl Into<String>) -> Result<Vec<ServiceConnection>> {
         let key = key.into();
         match self
-            .status_request(PbConnStatusReq::Service { key })
+            .status_request(PbConnStatusReq::Service {
+                direct_query: None,
+                key,
+            })
             .await?
         {
             PbConnStatusResp::Service { connections, .. } => Ok(connections

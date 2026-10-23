@@ -78,6 +78,7 @@ pub async fn register_v2_control(
     spec: V2ControlSpec,
 ) -> (u32, u64) {
     let request = PbConnRequest::Register {
+        direct: None,
         need_codec: false,
         is_datagram: false,
         key: key.to_string(),

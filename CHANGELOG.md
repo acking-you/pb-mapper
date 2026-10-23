@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+- Align the development toolchain, Rust SDK minimum version, and CI with Rust 1.99.1. Update deprecated atomic test helpers without changing runtime protocol behavior.
+- Add opt-in STUN/QUIC direct connections: explicit server UDP service, publisher `--allow-direct`, and per-connect `--path auto`; defaults preserve the existing relay protocol and control behavior.
+- Fall back to the existing relay before direct commit, with a one-use grant pinned to the selected publisher. Never replay a committed connection after acknowledgement loss.
+- Keep established direct data owned by endpoints across coordinator outages or credential revocation; expose namespace-scoped observations and restore them after coordinator restart.
+- Add Rust SDK options and Node bindings, and build Quinn, rcgen and stun-proto from maintained fork submodules. Low-level wire enum constructors need the new optional fields; existing high-level request structs remain unchanged.
+
 ## [0.6.1] - 2026-10-19
 - Add per-registration TCP idle deadlines to the Rust SDK (`register_with_idle_timeout`) and Node API (`registerWithIdleTimeout`) so publishers can reclaim abandoned data connections.
 - Reset the deadline on traffic in either direction; preserve ordinary registration defaults, control connections, half-close draining, and zero-as-disabled behavior. Reject UDP and unrepresentable timer deadlines before starting a worker.

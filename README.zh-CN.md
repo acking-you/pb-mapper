@@ -179,3 +179,11 @@ cargo test
 并修复取消期间重复清理和后台任务遗留问题。Rust/Node 隧道句柄可通过
 `diagnostics()` 查询实际运行的 SDK 版本、失败原因、时延与资源占用。
 行为边界及测试见 [弱网恢复设计](docs/weak-network-recovery.md)。
+
+## 可选打洞直连
+
+运行默认仍为仅中继。服务端显式启用 `--enable-direct --direct-listen 0.0.0.0:10811 --direct-advertise 公网IP:10811`，开放相应 UDP 端口；提供端 `register --allow-direct`，消费端每次 `connect --path auto` 即可尝试直连，提交前失败自动中继。省略 `--path` 或选择 `relay-only` 保持原有协议和控制方式。TCP/UDP 业务均支持。
+
+`status sessions` 查看带时间和 stale/conflicting 标记的观测。已有直连由两端持有：协调服务停止、凭据撤销不关闭已提交的数据流，本地 stop 才关闭对应隧道；提交后失败不会把业务重放到中继。Rust SDK 的 `p2p` feature 默认关闭，通过 `register_with_options` / `connect_with_options` 选择；Node 使用 `allowDirect` / `path`。现有 Flutter/C ABI 入口继续仅中继。
+
+完整配置、设计与测试见 [实现说明](docs/issue-13-direct-connect-design.zh-CN.md) 和 [验收记录](docs/issue-13-validation.zh-CN.md)。

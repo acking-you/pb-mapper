@@ -11,6 +11,7 @@ use crate::error::{CfgPbServerEnvNotExistSnafu, Result};
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum StatusOp {
+    Sessions,
     /// Get active remote connection IDs.
     RemoteId,
     /// Get registered service keys.

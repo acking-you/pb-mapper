@@ -121,3 +121,22 @@ impl From<LegacyProtocolPolicy> for LegacyProtocol {
         }
     }
 }
+
+/// Per-connect path policy. The default preserves the legacy relay protocol.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PathPolicy {
+    #[default]
+    RelayOnly,
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConnectOptions {
+    pub path: PathPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegisterOptions {
+    pub allow_direct: bool,
+    pub idle_timeout: Option<std::time::Duration>,
+}

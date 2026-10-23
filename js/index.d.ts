@@ -44,6 +44,8 @@ export declare class Client {
   connect(request: JsConnectRequest): Promise<Connection>
   listKeys(): Promise<Array<string>>
   serviceStatus(key: string): Promise<Array<JsServiceConnection>>
+  /** Namespace-scoped endpoint observations, serialized without credentials. */
+  sessionsJson(): Promise<string>
   remoteId(): Promise<JsRemoteId>
   admin(): Admin
 }
@@ -136,6 +138,8 @@ export interface JsConnectionInfo {
 }
 
 export interface JsConnectRequest {
+  /** "relay-only" (default) or "auto". */
+  path?: string
   key: string
   localAddr: string
   transport: string
@@ -158,7 +162,18 @@ export interface JsKeyMetadata {
   label?: string
 }
 
+/** Recovery counters from the running SDK, with no credential or payload data. */
+export interface JsPathDiagnostics {
+  directSessions: number
+  relaySessions: number
+  activeDirect: number
+  activeRelay: number
+  fallbacks: number
+  lastFallback?: string
+}
+
 export interface JsRegisterRequest {
+  allowDirect?: boolean
   key: string
   localAddr: string
   transport: string
@@ -189,8 +204,8 @@ export interface JsServiceInfo {
   connectionCount: number
 }
 
-/** Recovery counters from the running SDK, with no credential or payload data. */
 export interface JsTunnelDiagnostics {
+  direct?: JsPathDiagnostics
   sdkVersion: string
   lastAttemptPhase: string
   attempts: number

@@ -10,7 +10,7 @@ use pb_mapper_auth::{
 use pb_mapper_client::client::status::get_status_with_credential;
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
-use pb_mapper_server::run_server_on_listener;
+use pb_mapper_server::{DirectServerConfig, run_server_on_listener_with_direct};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
@@ -27,7 +27,7 @@ use crate::{READY_TIMEOUT, admin_key_bytes, auth_config, init_test_env};
 /// makes it cancel every outstanding lease — so a live relay has to hold one.
 pub struct Relay {
     addr: SocketAddr,
-    auth: AuthRuntime,
+    auth: Option<AuthRuntime>,
     admin: AuthContext,
     shutdown: CancellationToken,
     task: JoinHandle<()>,
@@ -37,6 +37,10 @@ pub struct Relay {
 impl Relay {
     /// Start a relay. `label` only shows up in the state directory's name.
     pub async fn start(label: &str) -> Self {
+        Self::start_with_direct(label, None).await
+    }
+
+    pub async fn start_with_direct(label: &str, direct: Option<DirectServerConfig>) -> Self {
         init_test_env();
         let config = auth_config(label);
         let _ = std::fs::remove_dir_all(&config.state_dir);
@@ -56,8 +60,15 @@ impl Relay {
         let server_auth = auth.clone();
         let server_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
-            if let Err(error) =
-                run_server_on_listener(listener, server_shutdown, None, false, server_auth).await
+            if let Err(error) = run_server_on_listener_with_direct(
+                listener,
+                server_shutdown,
+                None,
+                false,
+                server_auth,
+                direct,
+            )
+            .await
             {
                 tracing::error!("relay stopped: {error}");
             }
@@ -65,12 +76,49 @@ impl Relay {
 
         Self {
             addr,
-            auth,
+            auth: Some(auth),
             admin,
             shutdown,
             task,
             state_dir,
         }
+    }
+
+    pub async fn stop_server(&mut self) {
+        self.shutdown.cancel();
+        let _ = (&mut self.task).await;
+    }
+
+    /// Reopen the same persisted auth state and TCP address after a shutdown.
+    pub async fn restart_server(&mut self, direct: Option<DirectServerConfig>) {
+        if !self.task.is_finished() {
+            self.stop_server().await;
+        }
+        drop(self.auth.take());
+        self.auth = Some(
+            AuthRuntime::start(
+                admin_key_bytes(),
+                pb_mapper_auth::AuthConfig {
+                    state_dir: self.state_dir.clone(),
+                    ..pb_mapper_auth::AuthConfig::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        self.admin = self
+            .auth()
+            .authenticate_presented(ADMIN_KEY_ID, &admin_key_bytes())
+            .unwrap();
+        let listener = TcpListener::bind(self.addr).await.unwrap();
+        self.shutdown = CancellationToken::new();
+        let shutdown = self.shutdown.clone();
+        let auth = self.auth().clone();
+        self.task = tokio::spawn(async move {
+            run_server_on_listener_with_direct(listener, shutdown, None, false, auth, direct)
+                .await
+                .unwrap();
+        });
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -83,7 +131,9 @@ impl Relay {
     }
 
     pub fn auth(&self) -> &AuthRuntime {
-        &self.auth
+        self.auth
+            .as_ref()
+            .expect("relay authentication is initialized")
     }
 
     /// Issue a temporary credential and return it ready to authenticate with.
@@ -99,7 +149,7 @@ impl Relay {
 
     /// Issue a temporary credential, keeping the lifecycle metadata.
     pub async fn issue(&self, ttl: Duration, label: &str) -> IssuedTemporaryKey {
-        self.auth
+        self.auth()
             .issue(&self.admin, ttl, Some(label.to_string()))
             .await
             .unwrap()
@@ -107,12 +157,12 @@ impl Relay {
 
     /// Extend a credential's lifetime. The credential text does not change.
     pub async fn renew(&self, key_id: KeyId, ttl: Duration) -> IssuedTemporaryKey {
-        self.auth.renew(&self.admin, key_id, ttl).await.unwrap()
+        self.auth().renew(&self.admin, key_id, ttl).await.unwrap()
     }
 
     /// Revoke a credential, cancelling its lease and every connection under it.
     pub async fn revoke(&self, key_id: KeyId) -> TemporaryKeyMetadata {
-        self.auth.revoke(&self.admin, key_id).await.unwrap()
+        self.auth().revoke(&self.admin, key_id).await.unwrap()
     }
 
     /// Build a tunnel — echo server, `register`, and `connect` — against this relay.

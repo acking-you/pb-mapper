@@ -37,7 +37,7 @@ Build the native addon from a source checkout:
 
 ```bash
 bun install
-bun run build:release   # LTO + strip; linux-x64 is ~2 MB
+bun run build:release   # LTO + strip
 bun test                # smoke + e2e (e2e needs `cargo build --bin pb-mapper`)
 ```
 
@@ -61,3 +61,28 @@ SDK version, latest attempt phase, failure reason, timing and shared setup count
 notification; healthy forwarding stays open. Workers retry initial DNS failures,
 refresh relay addresses through the OS resolver, and share bounded setup capacity.
 See [recovery design](../docs/weak-network-recovery.md) for bounds and limitations.
+
+### Optional direct connections
+
+The server must enable its UDP discovery service. The publisher opts in once;
+each connect independently chooses `"auto"` or `"relay-only"` (the default):
+
+```ts
+const reg = await client.register({
+  key: "echo", localAddr: "127.0.0.1:8080", transport: "tcp", allowDirect: true,
+});
+const conn = await client.connect({
+  key: "echo", localAddr: "127.0.0.1:9090", transport: "tcp", path: "auto",
+});
+await conn.waitReady();
+console.log(conn.diagnostics().direct); // populated after path selection
+console.log(JSON.parse(await client.sessionsJson()));
+await conn.stop();
+await reg.stop();
+```
+
+`auto` falls back to relay before direct commit. After commit, a failed connection
+closes without replay. Established direct connections survive coordinator loss
+or credential revocation; local `stop()` closes them. Session reports include
+ages, `stale`, `conflicting`, and `restored` and do not authorize a new connection.
+Existing calls with neither option keep their relay behavior.

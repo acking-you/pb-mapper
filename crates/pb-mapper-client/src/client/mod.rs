@@ -1,6 +1,6 @@
 pub mod error;
 pub mod status;
-mod stream;
+pub(crate) mod stream;
 
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
@@ -220,6 +220,38 @@ pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvid
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
+    run_client_side_cli_recovering_with_path::<LocalListener>(
+        local_addr,
+        remote_addr,
+        key,
+        keep_alive,
+        namespace,
+        status_callback,
+        pinned_credential,
+        shutdown,
+        diagnostics,
+        crate::sdk::PathPolicy::RelayOnly,
+        false,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: ListenerProvider>(
+    local_addr: ResolvedAddrs,
+    remote_addr: RelayEndpoint,
+    key: Arc<str>,
+    keep_alive: bool,
+    namespace: Option<u64>,
+    status_callback: Option<ClientStatusCallback>,
+    pinned_credential: Option<Credential>,
+    shutdown: CancellationToken,
+    diagnostics: Diagnostics,
+    path: crate::sdk::PathPolicy,
+    is_datagram: bool,
+) where
+    <LocalListener::Listener as StreamAccept>::Item: StreamForward,
+{
     remote_addr.start();
     let mut wake = remote_addr.wake();
     set_custom_timeout(Duration::from_secs(120));
@@ -238,6 +270,18 @@ pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvid
         },
     };
 
+    #[cfg(feature = "p2p")]
+    let direct = (path == crate::sdk::PathPolicy::Auto).then(|| {
+        crate::direct::Consumer::new(
+            remote_addr.clone(),
+            credential,
+            namespace,
+            is_datagram,
+            diagnostics.clone(),
+        )
+    });
+    #[cfg(not(feature = "p2p"))]
+    let _ = (path, is_datagram);
     let mut retry_backoff = RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2));
     let mut stream_tasks = JoinSet::new();
     let setup_slots = Arc::new(Semaphore::new(64));
@@ -273,6 +317,8 @@ pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvid
             tokio::select! {
                 () = shutdown.cancelled() => break 'outer,
                 () = wake.changed() => {
+                    #[cfg(feature = "p2p")]
+                    if let Some(direct) = &direct { direct.invalidate(); }
                     probes.abort_all();
                     next_probe = Instant::now();
                     retry_backoff.reset();
@@ -295,7 +341,7 @@ pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvid
                     let stream_remote = remote_addr.clone();
                     let stream_shutdown = shutdown.clone();
                     let event_tx = stream_event_tx.clone();
-                    let setup = StreamSetup { permit, timing: timing.clone(), events: event_tx.clone(), diagnostics: diagnostics.clone() };
+                    let setup = StreamSetup { permit, timing: timing.clone(), events: event_tx.clone(), diagnostics: diagnostics.clone(), #[cfg(feature = "p2p")] direct: direct.clone() };
                     stream_tasks.spawn(async move {
                         let result = tokio::select! {
                             () = stream_shutdown.cancelled() => return,
@@ -339,6 +385,11 @@ pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvid
                                 connected = true;
                                 if let Some(callback) = &status_callback { callback("connected"); }
                             }
+                        }
+                        Err(failure) if failure.permanent && path == crate::sdk::PathPolicy::Auto => {
+                            diagnostics.failed(failure.kind, Duration::ZERO);
+                            if let Some(callback) = &status_callback { callback("retrying"); }
+                            next_probe = Instant::now() + Duration::from_secs(30);
                         }
                         Err(failure) if failure.permanent => {
                             if failure.protocol_replied {
@@ -503,6 +554,7 @@ async fn probe_remote_key_once(
     match fetch_remote_status(
         remote_addr,
         PbConnStatusReq::Service {
+            direct_query: None,
             key: key.to_string(),
         },
         namespace,
@@ -581,6 +633,7 @@ pub async fn handle_status_cli_scoped<A: ToSocketAddrs>(
     namespace: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match op {
+        StatusOp::Sessions => show_status_scoped(addr, PbConnStatusReq::Sessions, namespace).await,
         StatusOp::RemoteId => show_status_scoped(addr, PbConnStatusReq::RemoteId, namespace).await,
         StatusOp::Keys => show_status_scoped(addr, PbConnStatusReq::Keys, namespace).await,
     }

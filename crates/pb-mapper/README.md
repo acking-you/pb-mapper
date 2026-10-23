@@ -40,3 +40,16 @@ to reclaim abandoned data connections on the publisher. Activity in either
 direction resets the deadline; `Duration::ZERO` disables it. UDP is rejected.
 Ordinary `register` calls, other registrations, and control connections keep
 their existing behavior. No relay or subscriber upgrade is required.
+
+
+For optional direct connections, enable the `p2p` Cargo feature. The relay must
+explicitly enable its UDP discovery service. Use
+`register_with_options(request, RegisterOptions { allow_direct: true, ..Default::default() })`
+and `connect_with_options(request, ConnectOptions { path: PathPolicy::Auto })`.
+Existing `register`/`connect` calls retain relay-only behavior and request structs.
+`client.sessions()` returns namespace-scoped observations; `diagnostics().direct`
+reports local path selection and fallback counts.
+
+Direct setup failure falls back before commit. Established direct sessions
+survive coordinator loss and credential revocation; call the local handle's
+`stop()` to close them. Data is never replayed onto relay after direct commit.

@@ -180,6 +180,7 @@ async fn get_service_conns_with_addr(
     let status_resp = get_status(
         &mut stream,
         PbConnStatusReq::Service {
+            direct_query: None,
             key: service_key.to_string(),
         },
     )

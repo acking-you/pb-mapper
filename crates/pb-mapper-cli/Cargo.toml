@@ -40,6 +40,8 @@ pb-mapper-testkit.workspace = true
 rand.workspace = true
 
 [features]
+default = ["p2p"]
+p2p = ["pb-mapper-client/p2p", "pb-mapper-server/p2p"]
 udp-timeout = [
     "uni-stream/udp-timeout",
     "pb-mapper-protocol/udp-timeout",

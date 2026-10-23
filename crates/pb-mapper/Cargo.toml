@@ -17,6 +17,9 @@ publish = ["crates-io"]
 [dependencies]
 pb-mapper-client.workspace = true
 
+[features]
+p2p = ["pb-mapper-client/p2p"]
+
 [dev-dependencies]
 tokio.workspace = true
 

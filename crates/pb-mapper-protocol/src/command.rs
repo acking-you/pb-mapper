@@ -20,11 +20,17 @@ pub trait MessageSerializer {
 pub enum PbConnStatusReq {
     RemoteId,
     Keys,
-    Service { key: String },
+    Service {
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct_query: Option<bool>,
+    },
+    Sessions,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnStatusResp {
+    Sessions(Vec<crate::direct::SessionObservation>),
     RemoteId {
         server_map: String,
         active: String,
@@ -34,6 +40,8 @@ pub enum PbConnStatusResp {
     Service {
         key: String,
         connections: Vec<PbServiceConnStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct: Option<crate::direct::DirectCapability>,
     },
 }
 
@@ -48,6 +56,15 @@ pub struct PbServiceConnStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub enum PbConnRequest {
+    DirectControl {
+        namespace: Option<u64>,
+    },
+    DirectRelay {
+        id: crate::direct::SessionId,
+        secret: crate::direct::SessionSecret,
+        namespace: Option<u64>,
+        data_protocol: Option<u16>,
+    },
     Register {
         need_codec: bool,
         is_datagram: bool,
@@ -60,6 +77,8 @@ pub enum PbConnRequest {
         heartbeat_interval_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heartbeat_tolerance_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct: Option<u16>,
     },
     RegisterScoped {
         need_codec: bool,
@@ -75,6 +94,8 @@ pub enum PbConnRequest {
         heartbeat_interval_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heartbeat_tolerance_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct: Option<u16>,
     },
     Subcribe {
         key: String,
@@ -275,11 +296,14 @@ pub enum AdminResponse {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnResponse {
+    Direct(crate::direct::DirectEvent),
     Register(u32),
     RegisterV2 {
         conn_id: u32,
         generation: u64,
         lease_ttl_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct: Option<crate::direct::DirectCapability>,
     },
     Subcribe {
         codec_key: Option<AesKeyType>,
@@ -314,6 +338,7 @@ impl PbConnResponse {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbServerRequest {
+    Direct(crate::direct::DirectProviderMessage),
     Ping,
     PingV2 {
         seq: u64,
@@ -327,6 +352,7 @@ pub enum PbServerRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum LocalServer {
+    Direct(Box<crate::direct::DirectEvent>),
     /// pb server makes a stream request to local server
     Stream {
         client_id: u32,
@@ -383,6 +409,7 @@ mod tests {
     #[test]
     fn test_serde_mapper_header() {
         let mapper = PbConnRequest::Register {
+            direct: None,
             key: "test".into(),
             need_codec: false,
             is_datagram: false,

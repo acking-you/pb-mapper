@@ -12,6 +12,8 @@
 
 mod admin;
 mod client;
+pub mod direct;
+pub use direct::DirectServerConfig;
 mod error;
 // Moved here from `common`: the routing runtime is its only caller.
 pub mod manager;
@@ -59,6 +61,7 @@ use pb_mapper_protocol::secure::{HeaderProtocol, ServerHeaderSession, ServerSecu
 use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay};
 
 pub enum ManagerTask {
+    Direct(direct::DirectTask),
     Accept {
         stream: TcpStream,
         peer_addr: SocketAddr,
@@ -78,6 +81,7 @@ pub enum ManagerTask {
         /// until that write returns — which, for a half-open socket, may be never.
         /// Retirement has to reach the socket without going through the work queue.
         retire_token: CancellationToken,
+        direct: Option<AuthContext>,
     },
     ServerConnActivity {
         key: ImutableKey,
@@ -88,6 +92,7 @@ pub enum ManagerTask {
         conn_id: RemoteConnId,
         conn_sender: ConnTaskSender,
         excluded_server_conns: Vec<(RemoteConnId, u64)>,
+        selected: Option<(RemoteConnId, u64)>,
     },
     Stream {
         data_protocol: Option<u16>,
@@ -167,11 +172,13 @@ pub enum ManagerTask {
 
 #[derive(Debug)]
 pub enum ConnTask {
+    Direct(pb_mapper_protocol::direct::DirectEvent),
     Forward(ForwardMessage),
     RegisterResp {
         generation: u64,
         protocol_version: u16,
         lease_ttl_ms: u64,
+        direct: Option<pb_mapper_protocol::direct::DirectCapability>,
     },
     RegisterFailed {
         code: String,
@@ -255,6 +262,7 @@ pub struct ServerConnInfo {
     /// connection reaches the socket even when its work queue is wedged. This is
     /// also why the struct is `Clone` and no longer `Copy`.
     pub retire_token: CancellationToken,
+    pub direct: Option<AuthContext>,
 }
 
 pub type ServerConnMap = hashbrown::HashMap<ImutableKey, Vec<ServerConnInfo>>;
@@ -541,7 +549,8 @@ async fn send_subcribe_retry(
 
 mod runtime;
 pub use runtime::{
-    run_server, run_server_on_listener, run_server_with_auth_config, run_server_with_shutdown,
+    run_server, run_server_on_listener, run_server_on_listener_with_direct,
+    run_server_with_auth_config, run_server_with_shutdown,
 };
 mod connection;
 use connection::{
@@ -555,6 +564,7 @@ mod lease_tests {
 
     fn conn(conn_id: u32, protocol_version: u16, idle_for: Duration) -> ServerConnInfo {
         ServerConnInfo {
+            direct: None,
             conn_id: RemoteConnId::from(conn_id),
             generation: 1,
             health: ServerConnHealth::Healthy,

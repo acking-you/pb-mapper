@@ -12,7 +12,7 @@
 //! pagination, wire requests, and output rendering live in the `admin` module.
 
 use std::error::Error;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -25,7 +25,8 @@ use pb_mapper_auth::{
 };
 use pb_mapper_client::client::handle_status_cli_scoped;
 use pb_mapper_client::sdk::{
-    Client, ConnectRequest, RegisterRequest, TunnelDiagnostics, TunnelStatus,
+    Client, ConnectOptions, ConnectRequest, PathPolicy, RegisterOptions, RegisterRequest,
+    TunnelDiagnostics, TunnelStatus,
 };
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
@@ -74,6 +75,15 @@ struct ServerArgs {
     /// Port exposed to registering services and connecting clients.
     #[arg(short, long, visible_alias = "pb-mapper-port", default_value_t = 7666)]
     port: u16,
+    /// Enable authenticated peer coordination and the UDP STUN service.
+    #[arg(long, requires_all = ["direct_listen", "direct_advertise"])]
+    enable_direct: bool,
+    /// UDP address to bind for STUN (for example 0.0.0.0:10811).
+    #[arg(long, requires = "enable_direct")]
+    direct_listen: Option<SocketAddr>,
+    /// Public IP and UDP port advertised to direct-capable clients.
+    #[arg(long, requires = "enable_direct")]
+    direct_advertise: Option<SocketAddr>,
     /// Listen on IPv6 (::) instead of IPv4 (0.0.0.0).
     #[arg(long, visible_alias = "use-ipv6", default_value_t = false)]
     ipv6: bool,
@@ -114,6 +124,9 @@ mod admin;
 use admin::AdminArgs;
 #[derive(Debug, Args)]
 struct RegisterArgs {
+    /// Allow authenticated direct connections to this service.
+    #[arg(long)]
+    allow_direct: bool,
     /// Transport used by the local service.
     #[arg(value_enum)]
     transport: Transport,
@@ -138,6 +151,9 @@ struct RegisterArgs {
 
 #[derive(Debug, Args)]
 struct ConnectArgs {
+    /// Select relay-only or try direct with automatic relay fallback.
+    #[arg(long, value_enum, default_value_t = PathArg::RelayOnly)]
+    path: PathArg,
     /// Transport exposed by the local listener.
     #[arg(value_enum)]
     transport: Transport,
@@ -175,6 +191,12 @@ struct RelayArgs {
     /// Enable TCP keep-alive. PB_MAPPER_KEEP_ALIVE=ON is also supported.
     #[arg(long, default_value_t = false)]
     keep_alive: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PathArg {
+    RelayOnly,
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -315,13 +337,29 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     } else {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     };
-    run_server_with_shutdown(
-        (ip_addr, args.port),
-        CancellationToken::new(),
-        None,
-        args.keep_alive || keep_alive_from_env(),
-    )
-    .await?;
+    let shutdown = CancellationToken::new();
+    let keep_alive = args.keep_alive || keep_alive_from_env();
+    if args.enable_direct {
+        let config = pb_mapper_server::DirectServerConfig {
+            listen: args.direct_listen.ok_or("--direct-listen is required")?,
+            advertise: args
+                .direct_advertise
+                .ok_or("--direct-advertise is required")?,
+        };
+        let auth = pb_mapper_auth::AuthRuntime::from_process(auth_config).await?;
+        let listener = tokio::net::TcpListener::bind((ip_addr, args.port)).await?;
+        pb_mapper_server::run_server_on_listener_with_direct(
+            listener,
+            shutdown,
+            None,
+            keep_alive,
+            auth,
+            Some(config),
+        )
+        .await?;
+    } else {
+        run_server_with_shutdown((ip_addr, args.port), shutdown, None, keep_alive).await?;
+    }
     Ok(())
 }
 
@@ -347,13 +385,19 @@ fn sdk_transport(transport: Transport) -> pb_mapper_client::sdk::Transport {
 async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
     let client = tunnel_client(&args.relay, args.namespace)?;
     let registration = client
-        .register(RegisterRequest {
-            key: args.key,
-            local_addr: args.addr,
-            transport: sdk_transport(args.transport),
-            codec: args.codec,
-            force_namespace: args.force,
-        })
+        .register_with_options(
+            RegisterRequest {
+                key: args.key,
+                local_addr: args.addr,
+                transport: sdk_transport(args.transport),
+                codec: args.codec,
+                force_namespace: args.force,
+            },
+            RegisterOptions {
+                allow_direct: args.allow_direct,
+                ..Default::default()
+            },
+        )
         .await?;
     monitor_tunnel(registration.subscribe(), || registration.diagnostics()).await?;
     registration.stop().await?;
@@ -363,11 +407,19 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
 async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
     let client = tunnel_client(&args.relay, args.namespace)?;
     let connection = client
-        .connect(ConnectRequest {
-            key: args.key,
-            local_addr: args.addr,
-            transport: sdk_transport(args.transport),
-        })
+        .connect_with_options(
+            ConnectRequest {
+                key: args.key,
+                local_addr: args.addr,
+                transport: sdk_transport(args.transport),
+            },
+            ConnectOptions {
+                path: match args.path {
+                    PathArg::RelayOnly => PathPolicy::RelayOnly,
+                    PathArg::Auto => PathPolicy::Auto,
+                },
+            },
+        )
         .await?;
     monitor_tunnel(connection.subscribe(), || connection.diagnostics()).await?;
     connection.stop().await?;

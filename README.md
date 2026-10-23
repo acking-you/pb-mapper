@@ -179,6 +179,40 @@ const admin = client.admin();
 const issued = await admin.issueKey(3600, "agent");
 ```
 
+## Optional direct connections
+
+The CLI includes direct support; runtime defaults remain relay-only. Explicitly
+start the server's UDP discovery service, opt the publisher in, and choose a
+path for each connect:
+
+```sh
+pb-mapper server --port 7666 --enable-direct \
+  --direct-listen 0.0.0.0:10811 --direct-advertise PUBLIC_IP:10811
+pb-mapper register tcp --key demo --addr 127.0.0.1:8080 \
+  --server relay.example.com:7666 --allow-direct
+pb-mapper connect tcp --key demo --addr 127.0.0.1:9090 \
+  --server relay.example.com:7666 --path auto
+pb-mapper status sessions --server relay.example.com:7666
+```
+
+Use the existing credential configuration. Open the advertised UDP port separately
+from the TCP relay port. `auto` tries authenticated UDP hole punching and mutual-TLS
+QUIC, then uses the existing relay if setup fails before commit. Omit `--path`
+or choose `relay-only` to keep the original protocol and control behavior.
+TCP and UDP services are supported; UDP preserves the existing framed-stream semantics.
+
+Established direct sessions belong to the endpoints: stopping the coordinator
+or revoking a credential prevents new authorization but does not terminate
+already committed direct traffic. Stop the local tunnel to close it. Session
+status is an endpoint observation with age/staleness, not proof of liveness.
+There is no seamless replay to relay after direct commit.
+
+Rust SDK users enable the `p2p` feature and use `register_with_options` /
+`connect_with_options`. Node exposes `allowDirect` / `path` and `sessionsJson()`.
+The existing Flutter/C ABI entry points keep using relay-only.
+See the [implementation design](docs/issue-13-direct-connect-design.zh-CN.md)
+and [validation evidence](docs/issue-13-validation.zh-CN.md).
+
 ## Roadmap: harness-native remote control
 
 The current release provides the secure network, a Rust client SDK, and a

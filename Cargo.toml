@@ -2,7 +2,7 @@
 # Every library and the CLI live under `crates/`. The FFI cdylib stays next to
 # the Flutter code that loads it.
 members = ["crates/*", "ui/native/pb_mapper_ffi"]
-exclude = ["deps/uni-stream", "deps/kanal"]
+exclude = ["deps/uni-stream", "deps/kanal", "deps/quinn", "deps/rcgen", "deps/stun-proto"]
 # Spelled out: a virtual manifest does not infer the resolver from the edition,
 # and without this it silently falls back to resolver 1.
 resolver = "3"
@@ -13,7 +13,7 @@ resolver = "3"
 version = "0.6.1"
 authors = ["L_B__"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99.1"
 license = "MIT"
 repository = "https://github.com/acking-you/pb-mapper"
 homepage = "https://github.com/acking-you/pb-mapper"
@@ -45,6 +45,9 @@ kanal = { package = "kanal-plus", version = "0.2.0" }
 parking_lot = "0.12"
 rand = "0.10"
 ring = "0.17.14"
+quinn = { path = "deps/quinn/quinn", version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { path = "deps/rcgen/rcgen", version = "0.14.10", default-features = false, features = ["ring"] }
+stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.3" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 snafu = "0.9.2"

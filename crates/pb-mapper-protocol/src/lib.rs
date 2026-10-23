@@ -392,3 +392,5 @@ pub fn get_decodec(key: &[u8]) -> Result<Aes256GcmDeCodec> {
         detail: format!("{e}"),
     })
 }
+
+pub mod direct;
