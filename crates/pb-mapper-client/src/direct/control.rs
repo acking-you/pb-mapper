@@ -171,8 +171,11 @@ impl Control {
         rx.await
             .map_err(|_| io::Error::other("relay selection lost"))?
     }
-    pub fn report(&self, report: SessionUpdate) {
-        let _ = self.tx.try_send(DirectClientMessage::Report(report));
+    pub async fn report(&self, report: SessionUpdate) -> io::Result<()> {
+        self.tx
+            .send(DirectClientMessage::Report(report))
+            .await
+            .map_err(|_| io::Error::other("direct control closed"))
     }
     pub fn cancel(&self, id: SessionId) {
         let _ = self.tx.try_send(DirectClientMessage::Cancel { id });

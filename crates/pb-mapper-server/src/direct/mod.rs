@@ -497,7 +497,7 @@ impl DirectState {
             }
         }
         self.entries
-            .retain(|_, entry| entry.deadline + Duration::from_secs(120) > Instant::now());
+            .retain(|_, entry| entry.deadline > Instant::now());
         self.observations
             .retain(|_, observation| observation.touched.elapsed() < Duration::from_secs(120));
     }
@@ -529,16 +529,6 @@ impl DirectState {
         }
         let identity = (session.server_instance, session.id);
         if !self.observations.contains_key(&identity) {
-            if self.observations.len() >= 4096
-                || self
-                    .observations
-                    .values()
-                    .filter(|o| o.session.namespace == namespace)
-                    .count()
-                    >= 1024
-            {
-                return;
-            }
             let known = self
                 .entries
                 .get(&session.id)
@@ -552,6 +542,9 @@ impl DirectState {
             // without interrupting direct data. Restore an authenticated claim
             // even in this incarnation, but never recreate setup authority.
             let restored = known.is_none();
+            if !self.make_observation_room(namespace) {
+                return;
+            }
             self.observations.insert(
                 identity,
                 Observation {
@@ -581,6 +574,33 @@ impl DirectState {
         report.reason = report.reason.map(|r| r.chars().take(256).collect());
         observation.touched = Instant::now();
         *slot = Some((report, observation.touched));
+    }
+    fn make_observation_room(&mut self, namespace: u64) -> bool {
+        let namespace_full = self
+            .observations
+            .values()
+            .filter(|o| o.session.namespace == namespace)
+            .count()
+            >= 1024;
+        if !namespace_full && self.observations.len() < 4096 {
+            return true;
+        }
+        // Retention is a history budget, not a reason to hide new active
+        // sessions. Reclaim the oldest closed observation in the constrained
+        // scope, preserving active/conflicting reports and namespace isolation.
+        let oldest = self
+            .observations
+            .iter()
+            .filter(|(_, o)| !namespace_full || o.session.namespace == namespace)
+            .filter(|(_, o)| o.closed())
+            .min_by_key(|(_, o)| o.touched)
+            .map(|(id, _)| *id);
+        if let Some(id) = oldest {
+            self.observations.remove(&id);
+            true
+        } else {
+            false
+        }
     }
     pub fn observations(&self, namespace: u64) -> Vec<SessionObservation> {
         self.observations
@@ -626,6 +646,15 @@ struct Observation {
     consumer: Option<(SessionReport, Instant)>,
     provider: Option<(SessionReport, Instant)>,
     touched: Instant,
+}
+impl Observation {
+    fn closed(&self) -> bool {
+        (self.consumer.is_some() || self.provider.is_some())
+            && [&self.consumer, &self.provider]
+                .into_iter()
+                .flatten()
+                .all(|(report, _)| report.state == SessionState::Closed)
+    }
 }
 
 struct ControlGuard {
@@ -839,6 +868,38 @@ mod tests {
                 .report
                 .state,
             SessionState::Active
+        );
+        state.entries.get_mut(&grant.id).unwrap().deadline = Instant::now();
+        state.sweep(|_| None);
+        assert!(
+            state.entries.is_empty(),
+            "expired grants must release setup capacity"
+        );
+        assert_eq!(
+            state.observations(0).len(),
+            1,
+            "observations outlive setup grants"
+        );
+        for _ in 1..1024 {
+            let mut closed = update.clone();
+            closed.session.id = random_session_id();
+            closed.report.id = closed.session.id;
+            closed.report.state = SessionState::Closed;
+            state.observe(&admin, 0, closed, true);
+        }
+        let mut fresh = update.clone();
+        fresh.session.id = random_session_id();
+        fresh.report.id = fresh.session.id;
+        state.observe(&admin, 0, fresh.clone(), true);
+        let observed = state.observations(0);
+        assert_eq!(observed.len(), 1024);
+        assert!(
+            observed.iter().any(|o| o.id == fresh.session.id),
+            "closed history must not hide new active reports"
+        );
+        assert!(
+            observed.iter().any(|o| o.id == grant.id),
+            "active reports must survive history eviction"
         );
         // A long control outage on the same server must recover observations
         // after retention expires, without recovering the expired attach token.

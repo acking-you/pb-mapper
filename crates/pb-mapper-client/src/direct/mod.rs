@@ -406,14 +406,20 @@ async fn report_loop(
             continue;
         }
         let attempt = async {
-            let mut slot = control.lock().await;
-            if slot.as_ref().is_none_or(|c| !c.alive()) {
-                let _permit = remote.control_permit().await;
-                *slot = Some(Control::connect(&remote, credential, namespace).await?);
-            }
-            if let Some(control) = &*slot {
+            let current = {
+                let mut slot = control.lock().await;
+                if slot.as_ref().is_none_or(|c| !c.alive()) {
+                    let _permit = remote.control_permit().await;
+                    *slot = Some(Control::connect(&remote, credential, namespace).await?);
+                }
+                slot.clone()
+            };
+            if let Some(control) = current {
                 for report in snapshot {
-                    control.report(report);
+                    // Backpressure belongs to this independent reporter. A
+                    // snapshot larger than the channel must not repeatedly lose
+                    // the same tail, or hold the setup mutex while it drains.
+                    control.report(report).await?;
                 }
             }
             Ok::<_, io::Error>(())

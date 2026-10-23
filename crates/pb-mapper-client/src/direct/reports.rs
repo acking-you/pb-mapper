@@ -14,9 +14,19 @@ impl Latest {
         reports.retain(|_, (u, at)| {
             u.report.state == SessionState::Active || at.elapsed() < Duration::from_secs(30)
         });
-        if reports.len() < 1024 || reports.contains_key(&update.report.id) {
-            reports.insert(update.report.id, (update, Instant::now()));
+        if reports.len() >= 1024 && !reports.contains_key(&update.report.id) {
+            let oldest_closed = reports
+                .iter()
+                .filter(|(_, (u, _))| u.report.state == SessionState::Closed)
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(id, _)| *id);
+            if let Some(id) = oldest_closed {
+                reports.remove(&id);
+            } else {
+                return;
+            }
         }
+        reports.insert(update.report.id, (update, Instant::now()));
     }
     pub fn snapshot(&self) -> Vec<SessionUpdate> {
         let mut reports = self.0.lock().unwrap_or_else(|e| e.into_inner());

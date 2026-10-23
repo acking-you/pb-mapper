@@ -87,6 +87,39 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     .unwrap()
     .unwrap();
     assert!(matches!(prepared.path, DataPath::Relay { .. }));
+    // A reconnect snapshot can include more retained reports than the control
+    // channel can hold. Every authenticated observation must eventually arrive.
+    let mut report_ids = std::collections::HashSet::new();
+    for _ in 0..128 {
+        let mut summary = SessionSummary::from(&prepared.grant);
+        summary.id = random_session_id();
+        report_ids.insert(summary.id);
+        consumer.reports.put(SessionUpdate {
+            report: SessionReport {
+                id: summary.id,
+                seq: 1,
+                path: SessionPath::Direct,
+                state: SessionState::Active,
+                reason: None,
+            },
+            session: summary,
+            secret: SessionSecret::random(),
+        });
+    }
+    consumer.report_wake.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            for observation in client.sessions().await.unwrap() {
+                report_ids.remove(&observation.id);
+            }
+            if report_ids.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("snapshot must drain beyond the control channel capacity");
     let (mut service, _) = tokio::time::timeout(Duration::from_secs(1), backend.accept())
         .await
         .unwrap()

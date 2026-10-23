@@ -309,6 +309,8 @@ impl Drop for ProbeGuard {
 #[derive(Default)]
 struct ProviderReports {
     latest: super::reports::Latest,
+    // Alternative pooled control connections to ONE coordinator. A report
+    // needs one live route, not broadcast copies on every worker connection.
     routes: std::sync::Mutex<Vec<Reply>>,
 }
 impl ProviderReports {
