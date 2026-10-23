@@ -106,6 +106,11 @@ impl Consumer {
             network.invalidate();
         }
     }
+    pub async fn stop(&self) {
+        if let Some(network) = self.network.get() {
+            network.shutdown().await;
+        }
+    }
     pub async fn prepare(
         self: &Arc<Self>,
         key: &str,

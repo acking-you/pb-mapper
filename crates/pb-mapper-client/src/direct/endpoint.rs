@@ -176,6 +176,21 @@ impl Network {
     pub async fn accept(&self) -> Option<quinn::Connection> {
         self.incoming.lock().await.recv().await
     }
+    pub async fn shutdown(&self) {
+        for (_, endpoint) in &self.transports {
+            endpoint.close(0u32.into(), b"local tunnel stopped");
+        }
+        // Keep the UDP receive owner alive while Quinn sends/retransmits CLOSE.
+        // Dropping it with the last session can otherwise leave the peer waiting
+        // for its idle timeout. Bound draining so an unreachable peer cannot
+        // prevent a local stop.
+        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            for (_, endpoint) in &self.transports {
+                endpoint.wait_idle().await;
+            }
+        })
+        .await;
+    }
     pub async fn connect(
         &self,
         grant: &SessionGrant,

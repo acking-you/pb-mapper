@@ -170,6 +170,9 @@ async fn run<L: StreamProvider + Send + 'static>(
     }
     tasks.shutdown().await;
     arrivals.shutdown().await;
+    if let Some(network) = network {
+        network.shutdown().await;
+    }
 }
 fn send(reply: &Reply, message: DirectProviderMessage) {
     let _ = reply.try_send(LocalControlWrite::Direct(message));

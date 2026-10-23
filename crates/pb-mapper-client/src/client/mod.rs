@@ -454,6 +454,10 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     // Wait for the forwarding sessions to observe the cancellation, so returning
     // from here means no stream of this tunnel is still moving bytes.
     stream_tasks.shutdown().await;
+    #[cfg(feature = "p2p")]
+    if let Some(direct) = direct {
+        direct.stop().await;
+    }
 }
 
 /// Why a remote probe did not confirm the service, and whether waiting could
