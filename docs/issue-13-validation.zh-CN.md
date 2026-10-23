@@ -55,7 +55,7 @@
 - 直连收包改为 Quinn 驱动原地分流，GRO 拼包中夹杂的控制包有单元测试覆盖；新增 relay 邮箱变体装箱，ConnTask 回到 master 的 240 字节。
 - 本机 `cargo test` 覆盖 core/auth/server/client 全部单元测试，以及 CLI 的 direct_e2e、regression、sdk_e2e、temporary_credential_e2e、network_recovery、data_compatibility、test_delay。
 
-本机回环吞吐（macOS ARM64、release、三个角色同一进程、单连接写 512 MiB 共 3 次）：直连约 140–180 MiB/s，新旧两种收包实现差异在噪声范围内；同环境 TCP 中继约 1.0–1.6 GiB/s。采样显示直连瓶颈是 macOS 上每个 QUIC 包一次 `sendmsg`/`recvmsg`（无 GSO/GRO），Quinn 的 `fast-apple-datapath` 也没有改善。新收包路径的收益在支持批量接收与 GRO 的 Linux 上，本次未测量。这是回环数据，不代表公网链路；直连在公网上的价值是绕开 relay 这一跳及其带宽，而不是回环吞吐更高。
+本机回环吞吐（macOS ARM64、release、三个角色同一进程、单连接写 512 MiB 共 3 次，多轮重复）：直连约 130–180 MiB/s，新旧两种收包实现差异在噪声范围内；同环境 TCP 中继约 1.0–1.6 GiB/s。采样显示直连瓶颈是 macOS 上每个 QUIC 包一次 `sendmsg`/`recvmsg`（无 GSO/GRO），Quinn 的 `fast-apple-datapath` 也没有改善。新收包路径的收益在支持批量接收与 GRO 的 Linux 上，本次未测量。这是回环数据，不代表公网链路；直连在公网上的价值是绕开 relay 这一跳及其带宽，而不是回环吞吐更高。
 
 ## 构建与回归
 
