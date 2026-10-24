@@ -359,6 +359,9 @@ void main() {
       expect(api.config.msgHeaderKey, old);
       await tester.tap(find.text('Close'));
       await settle(tester);
+      // Another rotation would replace it, so none is offered until then.
+      final rotateButton = find.byKey(const Key('security-rotate'));
+      expect(tester.widget<OutlinedButton>(rotateButton).onPressed, isNull);
 
       // Closing it, or leaving the section, does not lose it; saying so does.
       await _section(tester, 'services');
@@ -371,9 +374,15 @@ void main() {
       await _section(tester, 'security');
 
       api.rotationAnswers = true;
+      api.calls.clear();
       await rotate();
       expect(find.byKey(const Key('security-rotated')), findsOneWidget);
       expect(api.config.msgHeaderKey, 'R0tatedAdminKey-0123456789abcdef');
+      // Every tunnel that was up starts again on the new key.
+      expect(
+        api.calls,
+        containsAll(['registerService(nas)', 'connectService(rdp)']),
+      );
       await finish(tester);
     });
 

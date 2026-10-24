@@ -131,12 +131,23 @@ class SecurityTab extends StatelessWidget {
             children: [
               Text(l10n.securityRotateBody, style: muted),
               const SizedBox(height: 12),
+              // A key waiting to be saved would be replaced by the next one.
               OutlinedButton.icon(
                 key: const Key('security-rotate'),
-                onPressed: () => _rotate(context, relay),
+                onPressed: relay.unsavedRotation != null
+                    ? null
+                    : () => _rotate(context, relay),
                 icon: const Icon(AppIcons.refresh, size: 16),
                 label: Text(l10n.securityRotate),
               ),
+              if (relay.unsavedRotation != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  l10n.securityRotateWaiting,
+                  key: const Key('security-rotate-waiting'),
+                  style: muted,
+                ),
+              ],
             ],
           ),
         ),

@@ -295,6 +295,21 @@ class AppStore extends ChangeNotifier {
   /// Start a stopped tunnel again with what it was saved with.
   Future<OperationResult> resume(Tunnel tunnel) => create(tunnel.draft);
 
+  /// Start every tunnel that is up again, so each takes this computer's
+  /// credential as it is now. A tunnel keeps the credential it started with,
+  /// which a rotated administrator key leaves useless: the old key, and every
+  /// temporary credential with it. A connection is stopped first, as in
+  /// [update], for the port it holds.
+  Future<void> restartLive() async {
+    for (final tunnel in tunnels.where((t) => t.isLive)) {
+      if (tunnel.kind == TunnelKind.connect) {
+        await api.disconnectService(tunnel.key);
+      }
+      await _apply(tunnel.draft);
+    }
+    await Future.wait([_reload(TunnelKind.share), _reload(TunnelKind.connect)]);
+  }
+
   /// Stop [tunnel]'s background task, keeping it saved.
   Future<OperationResult> stop(Tunnel tunnel) async {
     final result = tunnel.kind == TunnelKind.share
