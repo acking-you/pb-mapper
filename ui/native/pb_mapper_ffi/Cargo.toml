@@ -31,3 +31,7 @@ uni-stream.workspace = true
 parking_lot.workspace = true
 # The update manifest's Ed25519 signature; see src/update.rs.
 ring.workspace = true
+
+[dev-dependencies]
+# A live relay for the Relay page's calls; see src/relay.rs.
+pb-mapper-testkit.workspace = true

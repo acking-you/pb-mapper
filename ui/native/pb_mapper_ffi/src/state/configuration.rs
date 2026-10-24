@@ -15,12 +15,7 @@ impl PbMapperState {
     pub(super) async fn reset_status_caches(&self) {
         {
             let mut cache = self.local_server_status_cache.write().await;
-            *cache = LocalServerStatus {
-                is_running: false,
-                active_connections: 0,
-                registered_services: 0,
-                uptime_seconds: 0,
-            };
+            *cache = LocalServerStatus::default();
         }
         {
             let mut last_update = self.local_server_status_last_update.write().await;
@@ -38,12 +33,7 @@ impl PbMapperState {
         let config_dir = Self::get_config_dir(&app_directory_path);
         tracing::info!("Using config directory: {:?}", config_dir);
 
-        let local_server_status_cache = Arc::new(RwLock::new(LocalServerStatus {
-            is_running: false,
-            active_connections: 0,
-            registered_services: 0,
-            uptime_seconds: 0,
-        }));
+        let local_server_status_cache = Arc::new(RwLock::new(LocalServerStatus::default()));
 
         let mut state = Self {
             server_handle: None,
@@ -51,6 +41,7 @@ impl PbMapperState {
             server_shutdown_token: None,
             server_status_sender: None,
             server_start_time: None,
+            server_port: None,
             registered_services: Arc::new(RwLock::new(HashMap::new())),
             active_connections: Arc::new(RwLock::new(HashMap::new())),
             service_runtime: HashMap::new(),

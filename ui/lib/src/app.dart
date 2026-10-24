@@ -16,6 +16,7 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_view.dart';
 import 'package:pb_mapper_ui/src/pages/logs_page.dart';
 import 'package:pb_mapper_ui/src/pages/overview_page.dart';
+import 'package:pb_mapper_ui/src/pages/relay_page.dart';
 import 'package:pb_mapper_ui/src/pages/settings_page.dart';
 import 'package:pb_mapper_ui/src/pages/setup_flow.dart';
 import 'package:pb_mapper_ui/src/pages/tunnels_page.dart';
@@ -23,6 +24,7 @@ import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/app_shell.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
+import 'package:pb_mapper_ui/src/state/relay_store.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
@@ -77,6 +79,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     api: widget.api,
     changes: widget.changes,
   );
+  late final RelayStore _relay = RelayStore(app: _store);
   late final AppPrefs _prefs = widget.prefs ?? AppPrefs();
   late final UpdateController _updates =
       widget.updates ?? UpdateController(quit: () async => _quit());
@@ -239,6 +242,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     _lifecycle?.dispose();
     _updateSchedule?.dispose();
     if (widget.updates == null) _updates.dispose();
+    _relay.dispose();
     _store.dispose();
     _galaxy.dispose();
     super.dispose();
@@ -282,6 +286,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     }
     return AppScope(
       store: _store,
+      relay: _relay,
       prefs: _prefs,
       updates: _updates,
       galaxy: _galaxy,
@@ -293,6 +298,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
         child: switch (_page) {
           AppPage.overview => const OverviewPage(),
           AppPage.tunnels => const TunnelsPage(),
+          AppPage.relay => const RelayPage(),
           AppPage.logs => const LogsPage(),
           AppPage.settings => const SettingsPage(),
         },

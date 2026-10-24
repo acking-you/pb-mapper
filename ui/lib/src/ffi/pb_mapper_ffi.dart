@@ -324,6 +324,13 @@ class PbMapperFFI {
         _PbMapperGetServiceStatusDart
       >('pb_mapper_get_service_conns_json');
 
+  /// Every relay status and administrator operation, as `{"op": …}` JSON.
+  late final pbMapperRelayCall = lib
+      .lookupFunction<
+        _PbMapperGetServiceStatusNative,
+        _PbMapperGetServiceStatusDart
+      >('pb_mapper_relay_call_json');
+
   late final pbMapperGetClientConfigs = lib
       .lookupFunction<
         _PbMapperGetClientConfigsNative,

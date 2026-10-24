@@ -7,8 +7,8 @@ it is laid out, and how the galaxy view is drawn.
 
 ## Principles
 
-- **One question per screen.** The app has four places — Overview, Tunnels,
-  Logs, Settings — and everything else opens over one of them.
+- **One question per screen.** The app has five places — Overview, Tunnels,
+  Relay, Logs, Settings — and everything else opens over one of them.
 - **Colour is meaning.** Neutrals carry no hue; controls are ink. Green is a
   running tunnel, amber retrying, red failed, grey stopped. The logo blue marks
   only this computer and live tunnels. Selection is position, never colour.
@@ -22,7 +22,8 @@ it is laid out, and how the galaxy view is drawn.
 | Page | What it answers | Code |
 |---|---|---|
 | Overview | Where everything is, at a glance: the galaxy | `pages/overview_page.dart` |
-| Tunnels | What this computer shares, what it connects to, what else the relay offers | `pages/tunnels_page.dart` |
+| Tunnels | What this computer shares and what it connects to | `pages/tunnels_page.dart` |
+| Relay | Whether the relay answers, who this computer is to it, what it holds, and what an administrator can change | `pages/relay_page.dart`, `pages/relay/` |
 | Logs | What the Rust side said | `pages/logs_page.dart` |
 | Settings | Where the relay is, this computer's credential, theme, language | `pages/settings_page.dart` |
 
@@ -38,6 +39,46 @@ the galaxy, where a new tunnel spirals out of its star.
 All pages read one `AppStore` (`state/app_store.dart`), kept fresh by the Rust
 change stream and a slow relay check. The tray reads the same store instead of
 polling the FFI on its own.
+
+### The Relay page
+
+Tunnels is about this computer; Relay is about the relay. Its head answers
+three things at once — does it answer, how fast, and who am I to it — with the
+counts that matter beside them. Below it, sections:
+
+- **Services**: every service the relay lists, searchable, with Connect, and
+  whether it is this computer's own; the connections the relay holds for each.
+- **Connections**: the control connections the relay holds, the direct
+  sessions it has heard about, and the raw routing table folded away.
+- **Credentials** and **Security**, with the administrator key only.
+- **This computer**: the relay this computer can run itself, and its key.
+
+The page asks the relay only while it is on screen (`state/relay_store.dart`,
+every 10 s), since it asks several questions at once. Every question and
+administrator request goes through one FFI export, `pb_mapper_relay_call_json`,
+on the SDK's `Client` and `Admin`, so the app can do what the `admin` command
+can.
+
+**Nothing is hidden behind the key's shape.** The page asks the relay who this
+computer's credential is, and shows the administrator's sections when the
+relay says administrator. A temporary credential sees what it can use, and a
+line saying the administrator key brings the rest. Issuing a credential is the
+page's primary action; a new one is shown once, as itself and as a setup
+string for the computer it is for. Rotating the key and resetting every
+credential ask first — the reset needs a box ticked. Rotating erases every
+temporary credential as well, since the relay starts a new credential state
+with the new key, and both its card and its confirmation say so. It switches
+this computer to the new key once the relay is known to have taken it; if the
+relay's answer is lost and it cannot be asked again, the new key is shown to
+keep and this computer stays on the old one.
+
+Services are told apart by namespace as well as name, as the relay routes
+them: an administrator sees two credentials' `cache` as two rows, and retires
+each in its own namespace. Connect is offered only in this computer's own
+namespace, since a connection names its service by key alone.
+
+**Test answers in words.** Settings' Test, and Save, end in one toast: the
+latency and service count, or the relay's own reason it did not answer.
 
 ## Layout
 
@@ -130,8 +171,11 @@ the next step if raster time ever shows up in a profile.
 
 - `test/app_test.dart`: the shell, first run, and that no page overflows on a
   320 px phone in Chinese.
-- `test/tunnels_test.dart`, `test/editor_test.dart`, `test/settings_test.dart`:
-  each page's flows against `FakePbMapperApi`.
+- `test/tunnels_test.dart`, `test/editor_test.dart`, `test/settings_test.dart`,
+  `test/relay_test.dart`: each page's flows against `FakePbMapperApi`, which
+  plays the relay's administrator by default.
+- `relay.rs`'s own tests run every relay operation against a live relay from
+  `pb-mapper-testkit`.
 - `test/store_test.dart`: the store's reads, edits and rollback.
 - `test/galaxy_test.dart`: the scene, the Dart frame, Rust parity, and keyboard
   selection.

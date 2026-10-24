@@ -66,6 +66,92 @@ FakePbMapperApi _busy() => FakePbMapperApi(
   },
 );
 
+/// [_busy] as the relay's administrator sees it.
+FakePbMapperApi _relayBusy({RelayRole role = RelayRole.admin}) {
+  final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  RelayKey key(int id, String label, {int ageDays = 1, int leftDays = 6}) =>
+      RelayKey(
+        keyId: id,
+        state: RelayKeyState.active,
+        issuedAt: now - ageDays * 86400,
+        expiresAt: now + leftDays * 86400,
+        label: label,
+      );
+  return _busy()
+    ..identity = RelayIdentity(
+      role: role,
+      keyId: role == RelayRole.temporary ? 3 : null,
+    )
+    ..now = now
+    ..keys = [
+      key(3, 'laptop'),
+      key(4, 'phone', ageDays: 12, leftDays: 18),
+      key(5, 'office-pc', ageDays: 2, leftDays: 1),
+      RelayKey(
+        keyId: 2,
+        state: RelayKeyState.revoked,
+        issuedAt: now - 40 * 86400,
+        expiresAt: now - 10 * 86400,
+        label: 'old-tablet',
+      ),
+    ]
+    ..serviceOwners = {'office-rdp': 3, 'lab-db': 4, 'build-cache': 4}
+    ..relayConnections = [
+      fakeRelayConnection(service: 'nas-files', connId: 12),
+      fakeRelayConnection(service: 'home-ssh', connId: 13),
+      fakeRelayConnection(service: 'office-rdp', connId: 41, keyId: 3),
+      fakeRelayConnection(service: 'office-rdp', connId: 42, keyId: 3),
+      fakeRelayConnection(
+        service: 'build-cache',
+        connId: 7,
+        keyId: 4,
+        healthy: false,
+        lastRxAgeMs: 48000,
+      ),
+    ]
+    ..sessions = const [
+      DirectSession(
+        id: 'a1b2c3',
+        service: 'office-rdp',
+        transport: 'TCP',
+        path: 'direct',
+        state: 'active',
+        ageMs: 2000,
+        consumerSeen: true,
+        providerSeen: true,
+        stale: false,
+        conflicting: false,
+      ),
+    ];
+}
+
+Future<void> _relay(
+  WidgetTester tester,
+  String name, {
+  String? section,
+  ThemeMode theme = ThemeMode.light,
+  Size size = const Size(1280, 820),
+  Locale locale = const Locale('en'),
+  RelayRole role = RelayRole.admin,
+}) async {
+  await pumpApp(
+    tester,
+    _relayBusy(role: role),
+    themeMode: theme,
+    page: AppPage.relay,
+    size: size,
+    locale: locale,
+  );
+  if (section != null) {
+    final tab = find.byKey(Key('relay-section-$section'));
+    await tester.ensureVisible(tab);
+    await tester.tap(tab);
+    await settle(tester);
+  }
+  await _capture(tester, name);
+  await finish(tester);
+}
+
 void main() {
   if (_dir == null) {
     test('previews are opt-in', () {}, skip: 'set PB_MAPPER_UI_PREVIEW_DIR');
@@ -151,6 +237,65 @@ void main() {
     await pumpApp(tester, _busy(), size: const Size(393, 852));
     await _capture(tester, 'phone_overview');
     await finish(tester);
+  });
+
+  testWidgets('relay services light', (tester) async {
+    await _relay(tester, 'relay_services_light');
+  });
+
+  testWidgets('relay services dark', (tester) async {
+    await _relay(tester, 'relay_services_dark', theme: ThemeMode.dark);
+  });
+
+  testWidgets('relay connections', (tester) async {
+    await _relay(tester, 'relay_connections_light', section: 'connections');
+  });
+
+  testWidgets('relay credentials', (tester) async {
+    await _relay(
+      tester,
+      'relay_credentials_dark',
+      section: 'credentials',
+      theme: ThemeMode.dark,
+    );
+  });
+
+  testWidgets('relay security', (tester) async {
+    await _relay(tester, 'relay_security_light', section: 'security');
+  });
+
+  testWidgets('relay this computer', (tester) async {
+    await _relay(tester, 'relay_local_light', section: 'local');
+  });
+
+  testWidgets('relay as a temporary credential', (tester) async {
+    await _relay(tester, 'relay_temporary_light', role: RelayRole.temporary);
+  });
+
+  testWidgets('relay issue dialog', (tester) async {
+    await pumpApp(tester, _relayBusy(), page: AppPage.relay);
+    await tester.tap(find.byKey(const Key('relay-issue')));
+    await settle(tester);
+    await _capture(tester, 'relay_issue_light');
+    await finish(tester);
+  });
+
+  testWidgets('phone relay zh', (tester) async {
+    await _relay(
+      tester,
+      'phone_relay_zh',
+      size: const Size(393, 852),
+      locale: const Locale('zh'),
+    );
+  });
+
+  testWidgets('phone relay credentials', (tester) async {
+    await _relay(
+      tester,
+      'phone_relay_credentials',
+      section: 'credentials',
+      size: const Size(393, 852),
+    );
   });
 
   testWidgets('phone tunnels zh', (tester) async {

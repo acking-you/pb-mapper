@@ -136,12 +136,7 @@ impl PbMapperState {
     pub async fn get_local_server_status(&self) -> LocalServerStatus {
         let is_running = self.server_handle.is_some();
         if !is_running {
-            let status = LocalServerStatus {
-                is_running: false,
-                active_connections: 0,
-                registered_services: 0,
-                uptime_seconds: 0,
-            };
+            let status = LocalServerStatus::default();
             {
                 let mut cache = self.local_server_status_cache.write().await;
                 *cache = status.clone();
@@ -179,16 +174,17 @@ impl PbMapperState {
         let last_update = self.local_server_status_last_update.clone();
         let refreshing = self.local_server_status_refreshing.clone();
         let start_time = self.server_start_time;
+        let port = self.server_port;
 
         tokio::spawn(async move {
             let mut status = LocalServerStatus {
                 is_running: true,
-                active_connections: 0,
-                registered_services: 0,
+                port,
                 uptime_seconds: start_time
                     .and_then(|ts| SystemTime::now().duration_since(ts).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
+                ..LocalServerStatus::default()
             };
 
             if let Some(sender) = sender {
@@ -243,6 +239,16 @@ impl PbMapperState {
     /// instead of returning stale cache.
     pub async fn force_refresh_server_status(&self) -> Result<ServerStatusDetail, CtlError> {
         let server_addr = self.config.server_address.clone();
+        let started = Instant::now();
+        let unavailable = |error: String| ServerStatusDetail {
+            server_available: false,
+            registered_services: Vec::new(),
+            server_map: String::new(),
+            active_connections: String::new(),
+            idle_connections: String::new(),
+            error: Some(error),
+            latency_ms: None,
+        };
 
         let detail = match tokio::time::timeout(
             FORCE_REFRESH_TIMEOUT,
@@ -256,26 +262,19 @@ impl PbMapperState {
                 server_map: remote_id_data.server_map,
                 active_connections: remote_id_data.active,
                 idle_connections: remote_id_data.idle,
+                error: None,
+                latency_ms: Some(started.elapsed().as_millis() as u64),
             },
             Ok(Err(e)) => {
                 tracing::warn!("Force refresh failed: {}", e);
-                ServerStatusDetail {
-                    server_available: false,
-                    registered_services: Vec::new(),
-                    server_map: String::new(),
-                    active_connections: String::new(),
-                    idle_connections: String::new(),
-                }
+                unavailable(e.to_string())
             }
             Err(_) => {
                 tracing::warn!("Force refresh timed out after {:?}", FORCE_REFRESH_TIMEOUT);
-                ServerStatusDetail {
-                    server_available: false,
-                    registered_services: Vec::new(),
-                    server_map: String::new(),
-                    active_connections: String::new(),
-                    idle_connections: String::new(),
-                }
+                unavailable(format!(
+                    "{server_addr} did not answer within {} seconds",
+                    FORCE_REFRESH_TIMEOUT.as_secs()
+                ))
             }
         };
 

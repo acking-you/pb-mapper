@@ -121,8 +121,9 @@ async fn fetch_real_status_with_addr(
         get_remote_id_data_with_addr(server_addr),
     );
 
-    let services =
-        keys_result.map_err(|e| CtlError::internal(format!("Failed to get server keys: {e}")))?;
+    // The reason as it is: Settings' Test shows it to the user, after its own
+    // "The relay didn't answer".
+    let services = keys_result.map_err(|e| CtlError::internal(e.to_string()))?;
     let remote_id_data = remote_id_result.unwrap_or_else(|e| {
         tracing::warn!("Failed to get remote-id data: {}, using empty data", e);
         RemoteIdData {
@@ -280,7 +281,7 @@ pub struct ClientConfigStore {
     pub clients: HashMap<String, ClientConfigData>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct AppConfig {
     pub server_address: String,
@@ -325,10 +326,15 @@ pub struct ClientConfigInfo {
     pub updated_at_ms: u64,
 }
 
-#[derive(Serialize, Clone)]
+/// The relay this computer runs itself. The default is a stopped one.
+#[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalServerStatus {
     pub is_running: bool,
+    /// The port it listens on, while it runs: the page shows and dials this,
+    /// not whatever its port field last held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     pub active_connections: u32,
     pub registered_services: u32,
     pub uptime_seconds: u64,
@@ -342,6 +348,12 @@ pub struct ServerStatusDetail {
     pub server_map: String,
     pub active_connections: String,
     pub idle_connections: String,
+    /// Why the relay did not answer, for the person who asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// How long it took to answer, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 
 /// One control connection the server is holding for a service key.
@@ -497,6 +509,7 @@ pub struct PbMapperState {
     server_status_sender:
         Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<ServerStatusInfo>>>,
     server_start_time: Option<SystemTime>,
+    server_port: Option<u16>,
     registered_services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_runtime: HashMap<String, TunnelRuntime>,

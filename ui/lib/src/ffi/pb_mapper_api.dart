@@ -4,6 +4,9 @@
 import 'dart:async';
 
 import 'pb_mapper_service.dart';
+import 'relay_models.dart';
+
+export 'relay_models.dart';
 
 class OperationResult {
   final bool success;
@@ -119,12 +122,16 @@ class ClientConfigInfo {
 
 class LocalServerStatus {
   final bool isRunning;
+
+  /// The port it listens on, while it runs.
+  final int? port;
   final int activeConnections;
   final int registeredServices;
   final int uptimeSeconds;
 
   const LocalServerStatus({
     required this.isRunning,
+    this.port,
     required this.activeConnections,
     required this.registeredServices,
     required this.uptimeSeconds,
@@ -133,6 +140,7 @@ class LocalServerStatus {
   factory LocalServerStatus.fromMap(Map<String, dynamic> map) {
     return LocalServerStatus(
       isRunning: _asBool(map['isRunning']),
+      port: map['port'] == null ? null : _asInt(map['port']),
       activeConnections: _asInt(map['activeConnections']),
       registeredServices: _asInt(map['registeredServices']),
       uptimeSeconds: _asInt(map['uptimeSeconds']),
@@ -147,12 +155,20 @@ class ServerStatusDetail {
   final String activeConnections;
   final String idleConnections;
 
+  /// Why the relay did not answer.
+  final String? error;
+
+  /// How long it took to answer, when it did.
+  final int? latencyMs;
+
   const ServerStatusDetail({
     required this.serverAvailable,
     required this.registeredServices,
     required this.serverMap,
     required this.activeConnections,
     required this.idleConnections,
+    this.error,
+    this.latencyMs,
   });
 
   factory ServerStatusDetail.fromMap(Map<String, dynamic> map) {
@@ -162,6 +178,8 @@ class ServerStatusDetail {
       serverMap: _asString(map['serverMap']),
       activeConnections: _asString(map['activeConnections']),
       idleConnections: _asString(map['idleConnections']),
+      error: map['error'] as String?,
+      latencyMs: map['latencyMs'] == null ? null : _asInt(map['latencyMs']),
     );
   }
 }
@@ -292,6 +310,47 @@ abstract interface class PbMapperApiClient {
   });
   Future<OperationResult> disconnectService(String serviceKey);
   Future<OperationResult> deleteClientConfig(String serviceKey);
+
+  // --- The relay as a whole (`pb_mapper_relay_call_json`). Each throws a
+  // [RelayCallException] when the relay or the credential says no.
+
+  /// What this computer's credential makes it, to the relay.
+  Future<RelayIdentity> relayIdentity();
+
+  /// Direct sessions the relay has heard about, in this credential's view.
+  Future<List<DirectSession>> relaySessions();
+
+  // Administrator key only.
+  Future<RelayAuthStatus> adminAuthStatus();
+  Future<List<RelayService>> adminServices();
+  Future<List<RelayConnection>> adminConnections();
+  Future<List<RelayKey>> adminKeys();
+  Future<IssuedCredential> adminIssueKey({
+    required Duration ttl,
+    String? label,
+  });
+  Future<IssuedCredential> adminRevealKey(int keyId);
+  Future<IssuedCredential> adminRenewKey(int keyId, Duration ttl);
+  Future<RelayKey> adminRevokeKey(int keyId);
+
+  /// Forget expired and revoked credentials; returns how many.
+  Future<int> adminCleanUpKeys();
+
+  /// Drop the control connections the relay holds for [service] in
+  /// [namespace] (just [connId], when given); returns how many it dropped.
+  Future<int> adminRetireConnections({
+    required int namespace,
+    required String service,
+    int? connId,
+  });
+  Future<void> adminSetLegacyProtocol({required bool allow});
+
+  /// Erase every temporary credential the relay knows.
+  Future<void> adminResetCredentials();
+
+  /// Rotate the administrator key to a generated one. This computer
+  /// switches to it once the relay is known to have taken it.
+  Future<KeyRotation> adminRotateKey();
 }
 
 class PbMapperApi implements PbMapperApiClient {
@@ -373,32 +432,27 @@ class PbMapperApi implements PbMapperApiClient {
   }
 
   @override
-  Future<ServerStatusDetail> getServerStatusDetail() async {
-    final result = await _service.getServerStatusDetail();
-    if (result['success'] == true) {
-      return ServerStatusDetail.fromMap(_asMap(result['data']));
-    }
-    return const ServerStatusDetail(
-      serverAvailable: false,
-      registeredServices: [],
-      serverMap: '',
-      activeConnections: '',
-      idleConnections: '',
-    );
-  }
+  Future<ServerStatusDetail> getServerStatusDetail() async =>
+      _statusDetail(await _service.getServerStatusDetail());
 
   @override
-  Future<ServerStatusDetail> forceRefreshServerStatus() async {
-    final result = await _service.forceRefreshServerStatus();
+  Future<ServerStatusDetail> forceRefreshServerStatus() async =>
+      _statusDetail(await _service.forceRefreshServerStatus());
+
+  /// The relay's status, or why it could not be read: the FFI's message is
+  /// a sentence written for a person, and Settings' Test shows it.
+  static ServerStatusDetail _statusDetail(Map<String, dynamic> result) {
     if (result['success'] == true) {
       return ServerStatusDetail.fromMap(_asMap(result['data']));
     }
-    return const ServerStatusDetail(
+    final message = _asString(result['message']).trim();
+    return ServerStatusDetail(
       serverAvailable: false,
-      registeredServices: [],
+      registeredServices: const [],
       serverMap: '',
       activeConnections: '',
       idleConnections: '',
+      error: message.isEmpty ? null : message,
     );
   }
 
@@ -550,6 +604,122 @@ class PbMapperApi implements PbMapperApiClient {
       message: _asString(result['message'], fallback: 'Unknown result'),
     );
   }
+
+  /// One relay operation's `data`, or its failure as a
+  /// [RelayCallException].
+  Future<dynamic> _relay(
+    String op, [
+    Map<String, Object?> args = const {},
+  ]) async {
+    final result = await _service.relayCall({'op': op, ...args});
+    if (result['success'] != true) {
+      throw RelayCallException(
+        _asString(result['message'], fallback: 'The relay call failed'),
+        code: _asString(result['code'], fallback: 'INTERNAL'),
+      );
+    }
+    return result['data'];
+  }
+
+  Future<List<T>> _relayList<T>(
+    String op,
+    T Function(Map<String, dynamic>) parse,
+  ) async {
+    final data = await _relay(op);
+    return [
+      if (data is List)
+        for (final item in data.whereType<Map>()) parse(_asMap(item)),
+    ];
+  }
+
+  @override
+  Future<RelayIdentity> relayIdentity() async =>
+      RelayIdentity.fromMap(_asMap(await _relay('credential')));
+
+  @override
+  Future<List<DirectSession>> relaySessions() =>
+      _relayList('sessions', DirectSession.fromMap);
+
+  @override
+  Future<RelayAuthStatus> adminAuthStatus() async =>
+      RelayAuthStatus.fromMap(_asMap(await _relay('auth_status')));
+
+  @override
+  Future<List<RelayService>> adminServices() =>
+      _relayList('services', RelayService.fromMap);
+
+  @override
+  Future<List<RelayConnection>> adminConnections() =>
+      _relayList('connections', RelayConnection.fromMap);
+
+  @override
+  Future<List<RelayKey>> adminKeys() => _relayList('keys', RelayKey.fromMap);
+
+  @override
+  Future<IssuedCredential> adminIssueKey({
+    required Duration ttl,
+    String? label,
+  }) async => IssuedCredential.fromMap(
+    _asMap(
+      await _relay('key_issue', {'ttlSeconds': ttl.inSeconds, 'label': label}),
+    ),
+  );
+
+  @override
+  Future<IssuedCredential> adminRevealKey(int keyId) async =>
+      IssuedCredential.fromMap(
+        _asMap(await _relay('key_reveal', {'keyId': keyId})),
+      );
+
+  @override
+  Future<IssuedCredential> adminRenewKey(int keyId, Duration ttl) async =>
+      IssuedCredential.fromMap(
+        _asMap(
+          await _relay('key_renew', {
+            'keyId': keyId,
+            'ttlSeconds': ttl.inSeconds,
+          }),
+        ),
+      );
+
+  @override
+  Future<RelayKey> adminRevokeKey(int keyId) async =>
+      RelayKey.fromMap(_asMap(await _relay('key_revoke', {'keyId': keyId})));
+
+  @override
+  Future<int> adminCleanUpKeys() async =>
+      _asInt(_asMap(await _relay('key_gc'))['removed']);
+
+  @override
+  Future<int> adminRetireConnections({
+    required int namespace,
+    required String service,
+    int? connId,
+  }) async => _asInt(
+    _asMap(
+      // The relay names the namespace `keyId` here: a temporary
+      // credential's namespace is its key id.
+      await _relay('retire', {
+        'keyId': namespace,
+        'service': service,
+        'connId': connId,
+      }),
+    )['retired'],
+  );
+
+  @override
+  Future<void> adminSetLegacyProtocol({required bool allow}) async {
+    await _relay('legacy_protocol', {'allow': allow});
+  }
+
+  @override
+  Future<void> adminResetCredentials() async {
+    await _relay('reset_auth_state');
+  }
+
+  @override
+  Future<KeyRotation> adminRotateKey() async =>
+      KeyRotation.fromMap(_asMap(await _relay('rotate_root_key')));
 }
 
 Map<String, dynamic> _asMap(dynamic value) {

@@ -1,9 +1,8 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/common/setup_string.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
@@ -43,16 +42,6 @@ class SettingsPage extends StatelessWidget {
               RelayCard(store: scope.store),
               const SizedBox(height: 16),
               _AppearanceCard(prefs: scope.prefs),
-              ListenableBuilder(
-                listenable: scope.store,
-                builder: (context, _) =>
-                    scope.store.config.isolatedRelayAdminKeySet
-                    ? Padding(
-                        padding: const EdgeInsets.only(top: 16),
-                        child: _AdvancedCard(api: scope.store.api),
-                      )
-                    : const SizedBox.shrink(),
-              ),
               const SizedBox(height: 16),
               _AboutCard(updates: scope.updates, prefs: scope.prefs),
             ],
@@ -150,30 +139,56 @@ class _RelayCardState extends State<RelayCard> {
     if (!result.success) {
       showToast(context, result.message, kind: ToastKind.error);
     } else if (_store.relayState == RelayState.online) {
-      showToast(context, l10n.relaySaved, kind: ToastKind.success);
+      showToast(
+        context,
+        l10n.relaySaved,
+        kind: ToastKind.success,
+        description: _answered(),
+      );
     } else {
-      showToast(context, l10n.relaySavedOffline, kind: ToastKind.warning);
+      showToast(
+        context,
+        l10n.relaySavedOffline,
+        kind: ToastKind.warning,
+        description: l10n.relayTestFailed(
+          _store.relay?.error ?? l10n.relayNoReason,
+        ),
+      );
     }
   }
 
+  String _answered() => context.l10n.relayTestOk(
+    _store.relay?.latencyMs ?? 0,
+    _store.relayServices.length,
+  );
+
+  /// Ask the relay now, and say what it answered. Unsaved changes are saved
+  /// first: testing the old values while new ones sit in the fields would
+  /// answer a question nobody asked.
   Future<void> _test() async {
+    if (_edited) return _save();
+    final l10n = context.l10n;
     setState(() => _testing = true);
     await _store.checkRelay(force: true);
-    if (mounted) setState(() => _testing = false);
+    if (!mounted) return;
+    setState(() => _testing = false);
+    if (_store.relayState == RelayState.online) {
+      showToast(context, _answered(), kind: ToastKind.success);
+    } else {
+      showToast(
+        context,
+        l10n.relayTestFailed(_store.relay?.error ?? l10n.relayNoReason),
+        kind: ToastKind.error,
+      );
+    }
   }
 
-  /// The same base64 JSON the app has always exported, so a string copied
-  /// from an older build still pastes.
   Future<void> _copySetup() async {
-    final payload = base64Encode(
-      utf8.encode(
-        jsonEncode({
-          'version': 1,
-          'serverAddress': _address.text.trim(),
-          'keepAliveEnabled': _keepAlive,
-          'msgHeaderKey': _credential.text.trim(),
-          'exportedAt': DateTime.now().toIso8601String(),
-        }),
+    final payload = encodeSetupString(
+      SetupPayload(
+        address: _address.text,
+        credential: _credential.text,
+        keepAlive: _keepAlive,
       ),
     );
     await Clipboard.setData(ClipboardData(text: payload));
@@ -186,23 +201,10 @@ class _RelayCardState extends State<RelayCard> {
     final raw = await _askForSetupString();
     if (raw == null || !mounted) return;
     try {
-      final normalized = raw.replaceAll(RegExp(r'\s+'), '');
-      List<int> bytes;
-      try {
-        bytes = base64Decode(normalized);
-      } catch (_) {
-        bytes = base64Url.decode(base64Url.normalize(normalized));
-      }
-      final decoded = jsonDecode(utf8.decode(bytes));
-      if (decoded is! Map) throw const FormatException('not a JSON object');
-      final address = (decoded['serverAddress'] ?? '').toString().trim();
-      final credential = (decoded['msgHeaderKey'] ?? '').toString().trim();
-      final keepAlive = switch (decoded['keepAliveEnabled']) {
-        final bool b => b,
-        final num n => n != 0,
-        final String s => s.toLowerCase() == 'true' || s == '1',
-        _ => true,
-      };
+      final setup = decodeSetupString(raw);
+      final address = setup.address;
+      final credential = setup.credential;
+      final keepAlive = setup.keepAlive;
       if (!looksLikeHostPort(address)) {
         throw FormatException(l10n.errorAddress);
       }
@@ -511,57 +513,6 @@ class _ChoiceRow extends StatelessWidget {
                 ),
               ],
             ),
-    );
-  }
-}
-
-/// The key of the relay this app can run itself. Shown only once there is
-/// one, and only on request.
-class _AdvancedCard extends StatefulWidget {
-  const _AdvancedCard({required this.api});
-
-  final PbMapperApiClient api;
-
-  @override
-  State<_AdvancedCard> createState() => _AdvancedCardState();
-}
-
-class _AdvancedCardState extends State<_AdvancedCard> {
-  String _key = '';
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = context.l10n;
-    final theme = Theme.of(context);
-    return GroupCard(
-      title: l10n.settingsAdvanced,
-      icon: AppIcons.key,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(l10n.embeddedRelayKey, style: theme.textTheme.bodyMedium),
-          const SizedBox(height: 4),
-          Text(
-            l10n.embeddedRelayKeyHelp,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 10),
-          if (_key.isEmpty)
-            OutlinedButton.icon(
-              key: const Key('settings-reveal'),
-              onPressed: () async {
-                final key = await widget.api.revealIsolatedRelayAdminKey();
-                if (mounted) setState(() => _key = key);
-              },
-              icon: const Icon(AppIcons.show, size: 16),
-              label: Text(l10n.reveal),
-            )
-          else
-            SelectableText(_key, style: mono(fontSize: 13)),
-        ],
-      ),
     );
   }
 }

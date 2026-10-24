@@ -106,7 +106,7 @@ class NavRail extends StatelessWidget {
           const Expanded(child: WindowDragArea()),
           Padding(
             padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
-            child: _RelayFoot(onTap: () => onSelect(AppPage.settings)),
+            child: _RelayFoot(onTap: () => onSelect(AppPage.relay)),
           ),
         ],
       ),
@@ -185,7 +185,7 @@ class _RelayFoot extends StatelessWidget {
           depth: GlassDepth.chrome,
           borderRadius: BorderRadius.circular(kRowRadius),
           child: InkWell(
-            key: const Key('nav-relay'),
+            key: const Key('rail-relay-status'),
             mouseCursor: clickable,
             borderRadius: BorderRadius.circular(kRowRadius),
             onTap: onTap,

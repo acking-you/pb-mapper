@@ -39,6 +39,35 @@ class RaisedSurface extends StatelessWidget {
   }
 }
 
+/// One item's card in a list on a grouped page, spaced from the next.
+class ListCard extends StatelessWidget {
+  const ListCard({
+    super.key,
+    required this.child,
+    this.padding = const EdgeInsets.all(14),
+  });
+
+  final Widget child;
+  final EdgeInsetsGeometry padding;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 10),
+    child: RaisedSurface(
+      child: Padding(padding: padding, child: child),
+    ),
+  );
+}
+
+/// The one action on a list row, sized alike down the list so rows line up.
+ButtonStyle rowButtonStyle(BuildContext context) => ButtonStyle(
+  minimumSize: const WidgetStatePropertyAll(Size(76, 34)),
+  padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 14)),
+  textStyle: WidgetStatePropertyAll(
+    Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 13),
+  ),
+);
+
 /// A white card raised off a grouped page, with an optional title row, so
 /// groups read as calm plates rather than boxes.
 class GroupCard extends StatelessWidget {
