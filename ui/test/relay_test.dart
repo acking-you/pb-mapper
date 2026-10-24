@@ -177,6 +177,27 @@ void main() {
     expect(relay.adminError, contains('connections'));
   });
 
+  test('a listing read earlier never overwrites one read later', () async {
+    final api = _busy();
+    final (_, relay) = await _stores(api);
+    await relay.refresh();
+
+    // A refresh's credential list is still out when a revoke reads it back.
+    final early = api.adminGate = Completer<void>();
+    final refreshing = relay.refresh();
+    await pumpEventQueue();
+    final late = api.adminGate = Completer<void>();
+    final revoking = relay.revokeKey(3);
+    await pumpEventQueue();
+
+    late.complete();
+    await revoking;
+    expect(relay.keys.single.state, RelayKeyState.revoked);
+    early.complete();
+    await refreshing;
+    expect(relay.keys.single.state, RelayKeyState.revoked);
+  });
+
   test('switching relays forgets the old one, even mid-answer', () async {
     final api = _busy();
     final (app, relay) = await _stores(api);

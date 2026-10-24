@@ -98,6 +98,13 @@ class RelayStore extends ChangeNotifier {
   /// A refresh was asked for while one ran; run another after it.
   bool _again = false;
 
+  /// Administrator reads, numbered as they start, and for each listing the
+  /// latest whose answer was applied. Within one relay a change reads its
+  /// listings back while a refresh's may still be out; whichever answers
+  /// last, the one that started earlier must not overwrite the other.
+  int _adminReads = 0;
+  final Map<String, int> _adminApplied = {};
+
   /// Keep refreshing while something shows this; pair with [unwatch].
   void watch() {
     if (_watchers++ > 0) return;
@@ -202,29 +209,37 @@ class RelayStore extends ChangeNotifier {
   /// out) says why without blanking the ones that answered.
   Future<void> _loadAdmin([int? generation]) async {
     final asOf = generation ?? _generation;
+    final started = ++_adminReads;
     String? failure;
     Future<void> load<T>(
+      String listing,
       Future<T> Function() read,
       void Function(T value) apply,
     ) async {
       try {
         final value = await read();
-        if (asOf == _generation) apply(value);
+        if (asOf != _generation) return;
+        if (started < (_adminApplied[listing] ?? 0)) return;
+        _adminApplied[listing] = started;
+        apply(value);
       } catch (error) {
         failure ??= _reason(error);
       }
     }
 
     await Future.wait([
-      load(api.adminAuthStatus, (value) => authStatus = value),
-      load(api.adminServices, (value) {
+      load('auth', api.adminAuthStatus, (value) => authStatus = value),
+      load('services', api.adminServices, (value) {
         services = value;
         adminLoaded = true;
       }),
-      load(api.adminConnections, (value) => connections = value),
-      load(api.adminKeys, (value) => keys = value),
+      load('connections', api.adminConnections, (value) {
+        connections = value;
+      }),
+      load('keys', api.adminKeys, (value) => keys = value),
     ]);
-    if (asOf == _generation) adminError = failure;
+    // Only the latest read speaks for the relay now.
+    if (asOf == _generation && started == _adminReads) adminError = failure;
   }
 
   static String _reason(Object error) =>
