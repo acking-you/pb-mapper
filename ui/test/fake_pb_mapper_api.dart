@@ -2,17 +2,17 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 
 /// A [PbMapperApiClient] that answers from memory instead of over FFI.
 ///
-/// The views could not be tested at all before this: they built the real
-/// singleton in a field initialiser, so mounting one in a widget test meant
-/// loading the native library. Every method is implemented — the interface
-/// makes forgetting one a compile error rather than a call that escapes to
-/// the FFI at run time.
+/// Every method is implemented — the interface makes forgetting one a compile
+/// error rather than a call that escapes to the FFI at run time. Writes change
+/// what later reads return, so a view can be driven through a whole flow:
+/// register, see it listed, stop it, see it stopped.
 class FakePbMapperApi implements PbMapperApiClient {
   FakePbMapperApi({
     this.services = const [],
     this.clients = const [],
     this.serverServices = const [],
     this.conns = const {},
+    this.relayUp = true,
     this.config = const ConfigStatus(
       serverAddress: 'lb7666.top:7666',
       keepAliveEnabled: true,
@@ -24,17 +24,40 @@ class FakePbMapperApi implements PbMapperApiClient {
   List<ClientConfigInfo> clients;
   ConfigStatus config;
 
+  /// Whether the relay answers.
+  bool relayUp;
+
+  /// The status a tunnel gets when it is started.
+  String startStatus = 'running';
+
+  /// Refuse the next write with this message.
+  String? failNext;
+
+  /// How long reading the config takes, for a test about what is shown
+  /// before it arrives.
+  Duration configDelay = Duration.zero;
+
   /// Every call that changes something, in order, so a test can assert what
   /// the view asked for rather than only what it drew.
   final List<String> calls = [];
 
   static const _ok = OperationResult(success: true, message: 'ok');
 
+  OperationResult? _refused() {
+    final message = failNext;
+    if (message == null) return null;
+    failNext = null;
+    return OperationResult(success: false, message: message);
+  }
+
   @override
   Future<OperationResult> setAppDirectoryPath(String path) async => _ok;
 
   @override
-  Future<ConfigStatus> fetchConfig() async => config;
+  Future<ConfigStatus> fetchConfig() async {
+    if (configDelay > Duration.zero) await Future<void>.delayed(configDelay);
+    return config;
+  }
 
   @override
   Future<String> revealIsolatedRelayAdminKey() async {
@@ -49,6 +72,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     required String msgHeaderKey,
   }) async {
     calls.add('updateConfig($serverAddress)');
+    if (_refused() case final refused?) return refused;
     config = ConfigStatus(
       serverAddress: serverAddress,
       keepAliveEnabled: keepAlive,
@@ -81,29 +105,25 @@ class FakePbMapperApi implements PbMapperApiClient {
         uptimeSeconds: 0,
       );
 
-  /// What the remote server reports as registered, which is not the same list
-  /// as [services] — that one is what this machine has configured locally.
+  /// What the relay reports as registered — not the same list as [services],
+  /// which is what this machine has configured locally.
   List<String> serverServices;
-
-  /// The hand-formatted connection-id lines the server sends.
-  String activeConnections = '';
-  String idleConnections = '';
 
   @override
   Future<ServerStatusDetail> getServerStatusDetail() async =>
       ServerStatusDetail(
-        serverAvailable: true,
-        registeredServices: serverServices,
+        serverAvailable: relayUp,
+        registeredServices: relayUp ? serverServices : const [],
         serverMap: '',
-        activeConnections: activeConnections,
-        idleConnections: idleConnections,
+        activeConnections: '',
+        idleConnections: '',
       );
 
   @override
   Future<ServerStatusDetail> forceRefreshServerStatus() async =>
       getServerStatusDetail();
 
-  /// What the server is holding, keyed by service. Absent means no connections.
+  /// What the relay is holding, keyed by service. Absent means none.
   Map<String, List<ServiceConnInfo>> conns;
 
   @override
@@ -130,12 +150,35 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool enableKeepAlive,
   }) async {
     calls.add('registerService($serviceKey)');
+    if (_refused() case final refused?) return refused;
+    services = [
+      for (final s in services)
+        if (s.serviceKey != serviceKey) s,
+      fakeService(
+        serviceKey: serviceKey,
+        localAddress: localAddress,
+        protocol: protocol,
+        encrypted: enableEncryption,
+        status: startStatus,
+      ),
+    ];
     return _ok;
   }
 
   @override
   Future<OperationResult> unregisterService(String serviceKey) async {
     calls.add('unregisterService($serviceKey)');
+    if (_refused() case final refused?) return refused;
+    services = [
+      for (final s in services)
+        s.serviceKey == serviceKey
+            ? fakeService(
+                serviceKey: s.serviceKey,
+                localAddress: s.localAddress,
+                status: 'stopped',
+              )
+            : s,
+    ];
     return _ok;
   }
 
@@ -165,12 +208,32 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool enableKeepAlive,
   }) async {
     calls.add('connectService($serviceKey)');
+    if (_refused() case final refused?) return refused;
+    clients = [
+      for (final c in clients)
+        if (c.serviceKey != serviceKey) c,
+      fakeClient(
+        serviceKey: serviceKey,
+        localAddress: localAddress,
+        status: startStatus,
+      ),
+    ];
     return _ok;
   }
 
   @override
   Future<OperationResult> disconnectService(String serviceKey) async {
     calls.add('disconnectService($serviceKey)');
+    clients = [
+      for (final c in clients)
+        c.serviceKey == serviceKey
+            ? fakeClient(
+                serviceKey: c.serviceKey,
+                localAddress: c.localAddress,
+                status: 'stopped',
+              )
+            : c,
+    ];
     return _ok;
   }
 
@@ -182,7 +245,7 @@ class FakePbMapperApi implements PbMapperApiClient {
   }
 }
 
-/// A control connection the server is holding.
+/// A control connection the relay is holding.
 ServiceConnInfo fakeConn({
   required int connId,
   bool healthy = true,
@@ -202,13 +265,14 @@ ClientConfigInfo fakeClient({
   required String serviceKey,
   String localAddress = '127.0.0.1:9090',
   String status = 'running',
+  String message = '',
 }) => ClientConfigInfo(
   serviceKey: serviceKey,
   localAddress: localAddress,
   protocol: 'TCP',
   enableKeepAlive: true,
   status: status,
-  statusMessage: '',
+  statusMessage: message,
   createdAtMs: 1,
   updatedAtMs: 1,
 );
@@ -217,15 +281,18 @@ ClientConfigInfo fakeClient({
 ServiceConfigInfo fakeService({
   required String serviceKey,
   String localAddress = '127.0.0.1:8080',
+  String protocol = 'TCP',
+  bool encrypted = true,
   String status = 'running',
+  String message = '',
 }) => ServiceConfigInfo(
   serviceKey: serviceKey,
   localAddress: localAddress,
-  protocol: 'TCP',
-  enableEncryption: true,
+  protocol: protocol,
+  enableEncryption: encrypted,
   enableKeepAlive: true,
   status: status,
-  statusMessage: '',
+  statusMessage: message,
   createdAtMs: 1,
   updatedAtMs: 1,
 );

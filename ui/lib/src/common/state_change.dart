@@ -6,6 +6,7 @@ enum StateChangeKind {
   clients,
   server,
   config,
+
   /// A kind this build does not know. Newer Rust, older Dart — treated as
   /// "something changed", which is the safe reading for an invalidation hint.
   unknown;
@@ -71,9 +72,11 @@ class StateChange {
 
 /// Reloads on [StateChange]s of the kinds a view cares about.
 ///
-/// Coalesces a burst into one reload: starting three services produces three
+/// Coalesces a burst into one call: starting three services produces three
 /// events within a few milliseconds, and reloading three times would only make
-/// the list flicker.
+/// the list flicker. The call names every kind the burst touched, not only the
+/// last one's: a service and a client probe often land together, and keeping
+/// just the last event would leave the other list stale.
 class ChangeSubscription {
   ChangeSubscription._(this._sub, this._timer);
 
@@ -85,9 +88,10 @@ class ChangeSubscription {
   static ChangeSubscription listen(
     Stream<StateChange> stream,
     Set<StateChangeKind> kinds,
-    void Function(StateChange) onChange,
+    void Function(Set<StateChangeKind> kinds) onChange,
   ) {
     Timer? timer;
+    var pending = <StateChangeKind>{};
     late ChangeSubscription self;
     final sub = stream.listen((change) {
       // `unknown` always passes: a kind this build cannot name is still a
@@ -96,8 +100,13 @@ class ChangeSubscription {
           change.kind != StateChangeKind.unknown) {
         return;
       }
+      pending.add(change.kind);
       timer?.cancel();
-      timer = Timer(_debounce, () => onChange(change));
+      timer = Timer(_debounce, () {
+        final burst = pending;
+        pending = <StateChangeKind>{};
+        onChange(burst);
+      });
       self._timer = timer;
     });
     self = ChangeSubscription._(sub, timer);

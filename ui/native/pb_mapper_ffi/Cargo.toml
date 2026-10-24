@@ -24,6 +24,7 @@ dirs.workspace = true
 pb-mapper-auth.workspace = true
 pb-mapper-client.workspace = true
 pb-mapper-core.workspace = true
+pb-mapper-galaxy.workspace = true
 pb-mapper-protocol.workspace = true
 pb-mapper-server.workspace = true
 uni-stream.workspace = true

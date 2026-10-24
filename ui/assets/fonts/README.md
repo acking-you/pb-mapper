@@ -1,4 +1,12 @@
-# Bundled Chinese UI font
+# Bundled fonts
+
+`GoogleSansFlex-*.ttf` (prose) and `GeistMono-*.ttf` (keys, addresses, logs)
+are the design system's faces, shared with POCOX, under the SIL Open Font
+License 1.1 — see `OFL-GoogleSansFlex.txt` and `OFL-GeistMono.txt`. Static
+instances, one per weight. Windows keeps Segoe UI for prose; see
+`lib/src/theme/fonts.dart`.
+
+## Bundled Chinese UI font
 
 `NotoSansSC-*.subset.ttf` are subsets of **Noto Sans SC**, licensed under the
 SIL Open Font License 1.1 — see `OFL.txt`, taken verbatim from
@@ -16,9 +24,9 @@ which does exist, so the line renders at two weights. On Linux the answer
 depends on how fontconfig was set up, so it is not even predictable.
 
 macOS is left alone: it falls back to PingFang SC, which has six real weights
-and needs no help. See `lib/src/common/app_typography.dart`, which names these
-only in `fontFamilyFallback` — the primary family stays the platform's own, so
-English text still looks native.
+and needs no help. See `lib/src/theme/fonts.dart`, which names these
+only in `fontFamilyFallback` — Latin keeps the UI face (Segoe UI on Windows,
+Google Sans Flex elsewhere), and only Chinese runs reach these.
 
 ## Regenerating
 
@@ -47,6 +55,6 @@ for this font is 100 (Thin).
 Everything encodable in GB2312 (6763 hanzi), plus ASCII, CJK and fullwidth
 punctuation, and every character appearing in `lib/l10n/*.arb` — about 7000 in
 all, 2.1 MB per weight. Characters outside the subset fall through to the
-system font, which is why `app_typography.dart` still lists one after this
+system font, which is why `fonts.dart` still lists one after this
 family. Widening the subset is a one-line change in the generator, at roughly
 300 bytes per character per weight.

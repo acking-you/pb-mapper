@@ -1579,6 +1579,7 @@ dependencies = [
  "pb-mapper-auth",
  "pb-mapper-client",
  "pb-mapper-core",
+ "pb-mapper-galaxy",
  "pb-mapper-protocol",
  "pb-mapper-server",
  "serde",
@@ -1589,6 +1590,10 @@ dependencies = [
  "tracing-subscriber",
  "uni-stream",
 ]
+
+[[package]]
+name = "pb-mapper-galaxy"
+version = "0.8.1"
 
 [[package]]
 name = "pb-mapper-node"

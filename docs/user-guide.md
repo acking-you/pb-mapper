@@ -280,12 +280,21 @@ own, so this is the manual override, not the routine path.
 
 ## Run (GUI)
 
-The Flutter UI can start the server, register services, and connect clients through a graphical workflow. Start it from `ui/`:
+The Flutter UI shares and connects services without the command line. Start it from `ui/`:
 
 ```bash
 cd ui
 flutter run
 ```
+
+On first launch it asks where your relay is and for this computer's credential, then offers to share a service or connect to one. After that it has four pages:
+
+- **Overview**: a galaxy of your tunnels. This computer and the relay are two stars; each tunnel and each service on the relay is a planet, green when running; a running tunnel is an arc of light to the relay. Click a planet to start, stop, edit or connect it.
+- **Tunnels**: what this computer shares, what it connects to, and the relay's other services. **New tunnel** opens one form with a Share/Connect switch: a service key, a local address, and TCP or UDP.
+- **Logs**: the Rust log, filtered by level and keyword.
+- **Settings**: the relay address and credential, a setup string to paste on another computer, theme and language.
+
+Closing the window keeps it in the tray; quit from the tray menu.
 
 ## Environment variables
 

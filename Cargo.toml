@@ -1,7 +1,7 @@
 [workspace]
 # Every library and the CLI live under `crates/`. The FFI cdylib stays next to
 # the Flutter code that loads it.
-members = ["crates/*", "ui/native/pb_mapper_ffi"]
+members = ["crates/*", "ui/native/pb_mapper_ffi", "ui/native/pb_mapper_galaxy"]
 exclude = ["deps/uni-stream", "deps/kanal", "deps/quinn", "deps/rcgen", "deps/stun-proto"]
 # Spelled out: a virtual manifest does not infer the resolver from the edition,
 # and without this it silently falls back to resolver 1.
@@ -29,6 +29,7 @@ pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.8.1" }
 pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.8.1" }
 pb-mapper-protocol = { path = "crates/pb-mapper-protocol", version = "0.8.1" }
 pb-mapper-server = { path = "crates/pb-mapper-server", version = "0.8.1" }
+pb-mapper-galaxy = { path = "ui/native/pb_mapper_galaxy" }
 # Test support only; never a dependency of a shipped crate.
 pb-mapper-testkit = { path = "crates/pb-mapper-testkit" }
 

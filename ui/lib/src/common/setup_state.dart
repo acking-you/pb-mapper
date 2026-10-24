@@ -21,7 +21,7 @@ class SetupState {
   ///
   /// Errors count as configured: failing to read state is not evidence of a new
   /// install, and dropping an existing user into a wizard is the worse mistake.
-  static Future<bool> needsSetup(PbMapperApi api) async {
+  static Future<bool> needsSetup(PbMapperApiClient api) async {
     try {
       final results = await Future.wait([
         api.fetchConfig(),

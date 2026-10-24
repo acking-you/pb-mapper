@@ -58,7 +58,9 @@ pb-mapper/
 │   ├── lib/               # Flutter application code
 │   │   ├── l10n/          # ARB sources and generated AppLocalizations
 │   │   └── src/ffi/       # The Dart side of the FFI boundary
-│   ├── native/pb_mapper_ffi/  # C ABI crate (a workspace member)
+│   ├── native/pb_mapper_ffi/     # C ABI crate (a workspace member)
+│   ├── native/pb_mapper_galaxy/  # Galaxy view geometry; no dependencies
+│   ├── shaders/           # The galaxy's nebula backdrop
 │   └── test/              # Widget tests
 ├── docker/                # Docker deployment configuration
 └── services/              # Systemd service files
@@ -89,6 +91,10 @@ pb-mapper` resolves it from the workspace root regardless of the crate name.
 Likewise `pb-mapper-ffi` keeps its package name, because it determines the
 `libpb_mapper_ffi.{so,dylib,a}` / `pb_mapper_ffi.dll` filenames that the Dart
 loader, two CMakeLists, four xcconfigs, and the release-ui hash checks expect.
+
+`pb-mapper-galaxy` sits outside that graph: a leaf with no dependencies that
+only `pb-mapper-ffi` uses, for the UI's galaxy view (see `docs/ui-design.md`).
+Nothing in the SDK crates knows it exists.
 
 ### Core Modules
 
@@ -152,25 +158,43 @@ loader, two CMakeLists, four xcconfigs, and the release-ui hash checks expect.
   - `tests/regression.rs`: Protocol-level cases against hand-rolled frames
 
 #### Flutter UI (`ui/`)
-- **`lib/src/views/`**: One file per zone the shell can show
-  - `main_landing_view.dart`: Home — pick a role, or head into ops
-  - `setup_wizard_view.dart`: First-run guided setup
-  - `service_registration_view.dart`: The register workspace (form / list / logs)
-  - `client_connection_view.dart`: The connect workspace (form / list / logs)
-  - `status_monitoring_view.dart`: Status dashboard
-  - `configuration_view.dart`: Settings
-  - `log_view_page.dart`: The log stream, shown inside both workspaces
 
-- **`lib/src/common/`**: Shell and shared utilities
-  - `app_section.dart` / `workspace_pane.dart`: Where the user is
-  - `app_destination.dart`: The zone's destinations, described once and drawn
-    by both the side rail and the bottom bar
-  - `desktop_layout.dart`: The shell, and the animated move between the rail
-    and the bottom bar
-  - `responsive_layout.dart`: Breakpoints, and `usesBottomNav`
-  - `nav_transitions.dart`: The rail/bar transition
-  - `polling.dart`: `pollUntilSettled` and `firstWhereOrNull`
+The design and its rules are in `docs/ui-design.md`.
+
+- **`lib/src/app.dart`**: The root — owns the store, the preferences and the
+  galaxy's state; chooses first-run setup or the four pages; runs the tray
+
+- **`lib/src/pages/`**: One file per place
+  - `overview_page.dart`: The galaxy, with a floating summary and details panel
+  - `tunnels_page.dart`: Shares, connections, and the relay's other services
+  - `logs_page.dart`: The log stream, filtered by level and word
+  - `settings_page.dart`: Relay, credential, setup string, theme, language
+  - `setup_flow.dart`: First run — relay, then what to do, then that tunnel
+  - `tunnel_editor.dart`: The one share/connect form, and `followTunnel`
+  - `tunnel_actions.dart`: Start/stop, delete, copy — shared by list and panel
+
+- **`lib/src/shell/`**: Navigation and window chrome
+  - `app_scope.dart`: `AppPage` and the `AppScope` every page reads
+  - `app_shell.dart`: Rail on the backdrop and a sheet, or a bottom bar
+  - `navigation.dart`: The rail (with the relay's state at its foot), the bar
+  - `page_frame.dart`: A page's title bar, which is also the window's
+  - `window_chrome.dart`: Drag areas and the Windows/Linux caption buttons
+  - `app_prefs.dart`: Theme, language, last page
+
+- **`lib/src/state/`**: `AppStore` (every read and write, kept fresh by the
+  change stream) and the `Tunnel` model
+
+- **`lib/src/galaxy/`**: The galaxy view — scene model, camera, frame buffer
+  over `pb_mapper_galaxy_frame_v1` with its Dart mirror, painter, details panel
+
+- **`lib/src/theme/`**: POCOX's design system — colours, type, glass layers,
+  motion, Lucide icons
+
+- **`lib/src/common/`**: Shared utilities
+  - `polling.dart`: `waitUntilSettled` and `firstWhereOrNull`
+  - `state_change.dart`: The change stream's events, and `ChangeSubscription`
   - `log_manager.dart`: Log collection
+  - `app_toast.dart`: Toasts, as glass, raisable without a live context
 
 - **`lib/src/ffi/`**: The Dart side of the boundary
   - `pb_mapper_ffi.dart`: Raw `dart:ffi` symbol lookups and library loading
@@ -180,7 +204,14 @@ loader, two CMakeLists, four xcconfigs, and the release-ui hash checks expect.
 
 - **`native/pb_mapper_ffi/`**: The Rust C ABI crate (a workspace member)
   - Every call returns a JSON envelope: `{"success": bool, "message": …, "data": …}`
+    — except `pb_mapper_galaxy_frame_v1`, a leaf call over caller-owned
+    buffers made once per frame
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
+
+- **`native/pb_mapper_galaxy/`**: The galaxy's per-frame geometry. Its
+  arithmetic is mirrored step for step by `computeFrameInDart`
+  (`lib/src/galaxy/galaxy_frame.dart`); change both together and keep the
+  parity test in `test/galaxy_test.dart` passing
 
 ### Key Components
 
@@ -247,68 +278,24 @@ makes a missing implementation a compile error rather than a runtime crash,
 and it is what lets a widget test substitute `FakePbMapperApi`
 (`ui/test/fake_pb_mapper_api.dart`) instead of loading the native library.
 
-### Current UI Implementation Status
+### What the UI does
 
-Every view under `ui/lib/src/views/`:
+Four pages and a first-run flow (`docs/ui-design.md` has the reasoning):
 
-- **Main App** (`ui/lib/main.dart`): Entry point with navigation and theme management
-- **Landing Page** (`main_landing_view.dart`): Central navigation hub
-- **Setup Wizard** (`setup_wizard_view.dart`): First-run guided setup
-- **Service Registration** (`service_registration_view.dart`): The register workspace
-- **Registered Services** (`registered_services_view.dart`): What this process has registered
-- **Client Connection** (`client_connection_view.dart`): The connect workspace
-- **Status Monitoring** (`status_monitoring_view.dart`): Real-time status dashboard
-- **Configuration** (`configuration_view.dart`): Environment and settings management
-- **Logging** (`log_view_page.dart`, `src/common/log_manager.dart` (under `ui/lib/`)): The log stream
+- **Overview**: the galaxy — this computer and the relay as two stars, each
+  tunnel and each service on the relay as a planet, live tunnels as arcs;
+  click a body to start, stop, edit or connect
+- **Tunnels**: what this computer shares, what it connects to, and the relay's
+  other services with a Connect button and the connections the relay holds
+- **Logs**: the Rust log, by minimum level and word, following new lines
+- **Settings**: relay address, credential, default keep-alive, a copyable setup
+  string for another computer, theme and language, and the embedded relay's key
+  when there is one
+- **First run**: relay, then share-or-connect, then that one form
 
-There is no separate server-management view: starting and stopping the relay is
-part of the landing page and the setup wizard.
-
-### UI Features Implemented
-
-#### 1. Server Management Interface
-- **Start/Stop Server**: Direct server process control
-- **Port Configuration**: Configurable server port (default: 7666)
-- **IPv6 Support**: Toggle between IPv4/IPv6 listening
-- **Keep-Alive Control**: TCP keep-alive configuration
-- **Real-time Status**: Live server status monitoring
-- **Log Display**: Integrated log viewer with filtering
-
-#### 2. Service Registration Interface (Server CLI Replacement)
-- **TCP Service Registration**:
-  - Service key input and validation
-  - Local service address configuration (ip:port)
-  - Encryption codec toggle
-  - Remote server address management
-  - Keep-alive settings
-- **UDP Service Registration**: Same features as TCP with UDP-specific handling
-- **Active Service Management**: View and manage currently registered services
-
-#### 3. Client Connection Interface (Client CLI Replacement)
-- **TCP Client Connections**:
-  - Service key selection from available services
-  - Local listening address configuration
-  - Remote server connection management
-  - Connection status monitoring
-- **UDP Client Connections**: UDP-specific client interface
-- **Connection History**: Track and manage previous connections
-
-#### 4. Status Monitoring Interface
-- **Server Status Dashboard**:
-  - Active remote connection IDs display
-  - Registered service keys listing
-  - Server mapping information visualization
-  - Real-time connection statistics
-- **Service Health Monitoring**: Health checks and status indicators
-- **Performance Metrics**: Connection latency and throughput monitoring
-
-#### 5. Configuration Management
-- **Environment Variables**:
-  - `PB_MAPPER_SERVER`: Remote server address configuration
-  - `PB_MAPPER_KEEP_ALIVE`: Global keep-alive setting
-- **Application Settings**: UI preferences and configuration persistence
-- **Profile Management**: Save and load configuration profiles
-
+Sharing and connecting are one editor with a Share/Connect switch. Starting the
+embedded relay (`startServer`/`stopServer`) has no page; the API keeps it for
+the control server and for tests.
 ## Key Features
 
 ### Core Networking
@@ -368,9 +355,12 @@ part of the landing page and the setup wizard.
 ### UI Development Guidelines
 - **Framework**: Flutter 3.44.9, Material 3. CI pins the same version.
 - **State Management**: Plain `StatefulWidget` state; no state-management package
-- **Architecture**: A shell (`desktop_layout.dart`) that owns navigation, and
-  one view per zone. Views take their API as a parameter so they can be tested.
-- **Real-time Updates**: Polled through `pollUntilSettled`, plus the log stream
+- **Architecture**: `AppShell` owns navigation; every page reads one `AppStore`,
+  which takes its `PbMapperApiClient` as a parameter so tests can pass a fake.
+- **Real-time Updates**: The Rust change stream plus a slow relay check, both in
+  `AppStore`; `waitUntilSettled` waits out a tunnel's retry loop.
+- **Design**: POCOX's language (`lib/src/theme/`); see `docs/ui-design.md`.
+  Render the pages headlessly with `test/preview_test.dart` to look at a change.
 - **Error Handling**: Graceful error handling with user-friendly feedback
 - **Responsive Design**: Adaptive layouts for different screen sizes
 

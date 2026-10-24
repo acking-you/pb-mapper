@@ -48,9 +48,14 @@ Future<bool> waitUntilSettled({
     }
     return false;
   } finally {
+    // Nothing here is awaited: the caller has its answer, and clean-up has
+    // nothing to tell it. Awaiting `close` in particular hung forever when
+    // the first check already settled — nothing had listened to [wakeups],
+    // and the future `close` returns for an unlistened single-subscription
+    // stream never completes.
     ticker.cancel();
-    await sub.cancel();
-    await wakeups.close();
+    unawaited(sub.cancel());
+    unawaited(wakeups.close());
   }
 }
 

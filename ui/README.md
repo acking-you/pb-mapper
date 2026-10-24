@@ -1,19 +1,9 @@
-# ui
+# pb-mapper UI
 
-A new Flutter project.
-
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+The desktop and mobile app for pb-mapper: four pages — an Overview drawn as a
+galaxy, Tunnels, Logs and Settings — plus a three-step first run. The design
+follows POCOX's language; [`docs/ui-design.md`](../docs/ui-design.md) explains
+it.
 
 ## Using Rust Inside Flutter
 
@@ -22,10 +12,17 @@ located under `ui/native`.
 
 ### Flutter UI Architecture
 
-- **Views** live in `ui/lib/src/views` and represent pages:
-  server management, service registration, client connection, status monitoring,
-  and configuration.
-- **Widgets** shared across pages live in `ui/lib/src/widgets`.
+- **Pages** live in `ui/lib/src/pages` (overview, tunnels, logs, settings,
+  first-run setup, and the one share/connect editor); the shell that frames them
+  — rail or bottom bar, window chrome — in `ui/lib/src/shell`.
+- **State**: every page reads one `AppStore` (`ui/lib/src/state`), which wraps
+  the API and is refreshed by the Rust change stream.
+- **Galaxy**: `ui/lib/src/galaxy` draws the overview. Its per-frame geometry is
+  computed in Rust (`ui/native/pb_mapper_galaxy`, exported as
+  `pb_mapper_galaxy_frame_v1`); without the library a Dart mirror draws the
+  same frames.
+- **Theme**: colours, type, glass surfaces, motion and icons in
+  `ui/lib/src/theme`; shared widgets in `ui/lib/src/widgets`.
 - **FFI layering**:
   - `pb_mapper_api.dart`: typed UI-facing API.
   - `pb_mapper_service.dart`: FFI dispatch + isolate execution (keeps UI thread
