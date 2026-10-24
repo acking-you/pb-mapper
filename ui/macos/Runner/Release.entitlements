@@ -10,5 +10,9 @@
 	<!-- Local listening ports opened when subscribing to a service. -->
 	<key>com.apple.security.network.server</key>
 	<true/>
+	<!-- An update's disk image is saved to the user's Downloads; without
+	     this, a sandboxed app's Downloads is a folder inside its container. -->
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
 </dict>
 </plist>

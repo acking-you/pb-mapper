@@ -402,6 +402,28 @@ void main() {
       },
     );
 
+    test('a quiet check that fails keeps what the last one found', () async {
+      final world = _World();
+      final updates = world.controller();
+      await updates.check(quiet: true);
+      expect(updates.stage, UpdateStage.available);
+
+      world.http.bodies.clear();
+      await updates.check(quiet: true);
+      expect(updates.stage, UpdateStage.available);
+      expect(updates.plan?.asset.name, 'pb-mapper-windows-x86_64-setup.exe');
+      expect(updates.published?.version, const Version(0, 9, 1));
+      expect(updates.failure, isNull);
+    });
+
+    test('a quiet check still points at a newer unsigned release', () async {
+      final world = _World(signed: false);
+      final updates = world.controller();
+      await updates.check(quiet: true);
+      expect(updates.stage, UpdateStage.noPackage);
+      expect(updates.newer, isTrue);
+    });
+
     test('a quiet check that fails leaves no trace', () async {
       final world = _World()..http.bodies.clear();
       final updates = world.controller();

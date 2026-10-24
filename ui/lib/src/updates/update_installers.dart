@@ -61,13 +61,15 @@ class PlatformUpdateInstaller implements UpdateInstaller {
     final saved = await download.copy(target.path);
     await _delete(download);
     if (Platform.isWindows) {
+      // Explorer, with the file selected.
       await Process.start('explorer.exe', ['/select,', saved.path]);
     } else if (Platform.isMacOS) {
       // Opening the disk image mounts it, with the app ready to drag into
-      // Applications.
-      await Process.start('/usr/bin/open', [saved.path]);
-    } else if (Platform.isLinux) {
-      await Process.start('xdg-open', [downloads.path]);
+      // Applications. Through NSWorkspace rather than a child process, which
+      // the app sandbox would confine.
+      await launchUrl(Uri.file(saved.path));
+    } else {
+      await launchUrl(Uri.directory(downloads.path));
     }
     return saved.path;
   }

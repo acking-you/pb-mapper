@@ -126,13 +126,23 @@ class UpdateController extends ChangeNotifier {
 
   /// Ask GitHub for the newest release and, when it is newer than this app,
   /// read its signed manifest. A [quiet] check that fails leaves no trace
-  /// beyond the log: nobody asked for it.
+  /// beyond the log: nobody asked for it, so whatever the last check found
+  /// stays on offer.
   Future<void> check({bool quiet = false}) async {
     if (busy) return;
-    final before = _stage;
+    final stage = _stage;
+    final published = _published;
+    final plan = _plan;
     _failure = null;
     _plan = null;
     _set(UpdateStage.checking);
+    void restore(Object failure) {
+      debugPrint('Background update check failed: $failure');
+      _published = published;
+      _plan = plan;
+      _set(stage);
+    }
+
     try {
       final installed = _installed ??= await loadInstalled();
       final host = _host ??= await loadHost();
@@ -146,16 +156,19 @@ class UpdateController extends ChangeNotifier {
       _plan = planUpdate(manifest, host);
       _set(_plan == null ? UpdateStage.noPackage : UpdateStage.available);
     } on UpdateException catch (failure) {
-      if (quiet) {
-        debugPrint('Background update check failed: $failure');
-        _set(newer ? UpdateStage.noPackage : before);
-      } else {
+      if (!quiet) {
         _fail(failure);
+      } else if (failure.kind == UpdateFailure.unsigned) {
+        // A newer release that cannot be installed from here is still worth
+        // pointing at.
+        debugPrint('Background update check: $failure');
+        _set(UpdateStage.noPackage);
+      } else {
+        restore(failure);
       }
     } catch (error) {
       if (quiet) {
-        debugPrint('Background update check failed: $error');
-        _set(before);
+        restore(error);
       } else {
         _fail(UpdateException(UpdateFailure.network, '$error'));
       }
