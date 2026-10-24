@@ -599,87 +599,106 @@ class _AboutCardState extends State<_AboutCard> {
     );
     final updates = widget.updates;
     final prefs = widget.prefs;
+    final star = OutlinedButton.icon(
+      onPressed: () => launchUrl(
+        Uri.parse(kRepositoryUrl),
+        mode: LaunchMode.externalApplication,
+      ),
+      icon: const Icon(AppIcons.star, size: 16),
+      label: Text(l10n.starOnGitHub),
+    );
     return GroupCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
+      child: LayoutBuilder(
+        builder: (context, box) {
+          // On a phone the Star button does not fit beside the name; it
+          // joins the buttons below instead.
+          final narrow = box.maxWidth < 440;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const BrandMark(size: 44),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(l10n.appTitle, style: theme.textTheme.titleMedium),
-                    const SizedBox(height: 2),
-                    Text(l10n.aboutBody, style: muted),
-                    if (_version case final version?) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        l10n.versionLabel(version),
-                        key: const Key('settings-version'),
-                        style: muted,
-                      ),
-                    ],
-                  ],
-                ),
+              Row(
+                children: [
+                  const BrandMark(size: 44),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(l10n.appTitle, style: theme.textTheme.titleMedium),
+                        const SizedBox(height: 2),
+                        Text(l10n.aboutBody, style: muted),
+                        if (_version case final version?) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            l10n.versionLabel(version),
+                            key: const Key('settings-version'),
+                            style: muted,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  if (!narrow) ...[const SizedBox(width: 10), star],
+                ],
               ),
-              const SizedBox(width: 10),
-              OutlinedButton.icon(
-                onPressed: () => launchUrl(
-                  Uri.parse(kRepositoryUrl),
-                  mode: LaunchMode.externalApplication,
+              if (updatesSupported) ...[
+                const SizedBox(height: 14),
+                ListenableBuilder(
+                  listenable: Listenable.merge([updates, prefs]),
+                  builder: (context, _) {
+                    final release = updates.published;
+                    final offer = updates.newer && release != null;
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            if (offer)
+                              FilledButton.tonalIcon(
+                                key: const Key('settings-update'),
+                                onPressed: () =>
+                                    showUpdateDialog(context, updates),
+                                icon: const Icon(AppIcons.update, size: 16),
+                                label: Text(
+                                  l10n.updateTo('${release.version}'),
+                                ),
+                              )
+                            else
+                              OutlinedButton.icon(
+                                key: const Key('settings-check-updates'),
+                                onPressed: updates.busy
+                                    ? null
+                                    : () => showUpdateDialog(context, updates),
+                                icon: const Icon(AppIcons.update, size: 16),
+                                label: Text(l10n.checkForUpdates),
+                              ),
+                            if (narrow) star,
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        SwitchListTile(
+                          key: const Key('settings-auto-update'),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                          ),
+                          title: Text(l10n.autoCheckUpdates),
+                          subtitle: Text(l10n.autoCheckUpdatesHelp),
+                          value: prefs.autoCheckUpdates,
+                          onChanged: prefs.setAutoCheckUpdates,
+                        ),
+                      ],
+                    );
+                  },
                 ),
-                icon: const Icon(AppIcons.star, size: 16),
-                label: Text(l10n.starOnGitHub),
-              ),
+              ] else if (narrow) ...[
+                const SizedBox(height: 14),
+                Align(alignment: AlignmentDirectional.centerStart, child: star),
+              ],
             ],
-          ),
-          if (updatesSupported) ...[
-            const SizedBox(height: 14),
-            ListenableBuilder(
-              listenable: Listenable.merge([updates, prefs]),
-              builder: (context, _) {
-                final release = updates.published;
-                final offer = updates.newer && release != null;
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Align(
-                      alignment: AlignmentDirectional.centerStart,
-                      child: offer
-                          ? FilledButton.tonalIcon(
-                              key: const Key('settings-update'),
-                              onPressed: () =>
-                                  showUpdateDialog(context, updates),
-                              icon: const Icon(AppIcons.update, size: 16),
-                              label: Text(l10n.updateTo('${release.version}')),
-                            )
-                          : OutlinedButton.icon(
-                              key: const Key('settings-check-updates'),
-                              onPressed: updates.busy
-                                  ? null
-                                  : () => showUpdateDialog(context, updates),
-                              icon: const Icon(AppIcons.update, size: 16),
-                              label: Text(l10n.checkForUpdates),
-                            ),
-                    ),
-                    const SizedBox(height: 4),
-                    SwitchListTile(
-                      key: const Key('settings-auto-update'),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                      title: Text(l10n.autoCheckUpdates),
-                      subtitle: Text(l10n.autoCheckUpdatesHelp),
-                      value: prefs.autoCheckUpdates,
-                      onChanged: prefs.setAutoCheckUpdates,
-                    ),
-                  ],
-                );
-              },
-            ),
-          ],
-        ],
+          );
+        },
       ),
     );
   }

@@ -532,6 +532,36 @@ void main() {
     skip: library == null ? 'no built pb_mapper_ffi library' : false,
   );
 
+  testWidgets('the About card fits a small phone in Chinese', (tester) async {
+    final world = _World();
+    final updates = world.controller();
+    await updates.check(quiet: true);
+    await pumpApp(
+      tester,
+      FakePbMapperApi(),
+      page: AppPage.settings,
+      size: const Size(320, 640),
+      locale: const Locale('zh'),
+      updates: updates,
+    );
+    // Below the list's cache extent at this size: scroll until it is built.
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-auto-update')),
+      200,
+      // The list's own, not a narrow row's sideways one.
+      scrollable: find
+          .descendant(
+            of: find.byKey(const Key('settings-list')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await settle(tester);
+    expect(find.text('更新到 0.9.1'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await finish(tester);
+  });
+
   testWidgets('Settings offers a release a check found', (tester) async {
     final world = _World();
     final updates = world.controller();
