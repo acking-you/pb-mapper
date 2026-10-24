@@ -65,8 +65,10 @@ relay says administrator. A temporary credential sees what it can use, and a
 line saying the administrator key brings the rest. Issuing a credential is the
 page's primary action; a new one is shown once, as itself and as a setup
 string for the computer it is for. Rotating the key and resetting every
-credential ask first — the reset needs a box ticked. Rotating switches this
-computer to the new key once the relay is known to have taken it; if the
+credential ask first — the reset needs a box ticked. Rotating erases every
+temporary credential as well, since the relay starts a new credential state
+with the new key, and both its card and its confirmation say so. It switches
+this computer to the new key once the relay is known to have taken it; if the
 relay's answer is lost and it cannot be asked again, the new key is shown to
 keep and this computer stays on the old one.
 
