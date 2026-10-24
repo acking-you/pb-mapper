@@ -311,8 +311,10 @@ class AppStore extends ChangeNotifier {
   }) async {
     final failed = <String>[];
     Future<void> again(TunnelKind kind, String key) async {
+      // Read again: one stopped since the rotation stays stopped.
+      await _reload(kind);
       final tunnel = find(kind, key);
-      if (tunnel == null) return;
+      if (tunnel == null || !tunnel.isLive) return;
       if (config.serverAddress != relay || config.msgHeaderKey != credential) {
         failed.add('$key (this computer now uses another relay or key)');
         return;
