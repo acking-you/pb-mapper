@@ -295,6 +295,45 @@ class AppStore extends ChangeNotifier {
   /// Start a stopped tunnel again with what it was saved with.
   Future<OperationResult> resume(Tunnel tunnel) => create(tunnel.draft);
 
+  /// Start [shares] and [connections] again with what they were saved with,
+  /// so each takes this computer's credential as it is now. A tunnel keeps
+  /// the credential it started with, which a rotated administrator key
+  /// leaves useless. Each start takes the relay and credential configured at
+  /// that moment, so none starts once they are no longer [relay] and
+  /// [credential]: it would land on another relay. A connection is stopped
+  /// first, as in [update], for the port it holds. Returns those that did
+  /// not start, each with why.
+  Future<List<String>> restart({
+    required List<String> shares,
+    required List<String> connections,
+    required String relay,
+    required String credential,
+  }) async {
+    final failed = <String>[];
+    Future<void> again(TunnelKind kind, String key) async {
+      // Read again: one stopped since the rotation stays stopped.
+      await _reload(kind);
+      final tunnel = find(kind, key);
+      if (tunnel == null || !tunnel.isLive) return;
+      if (config.serverAddress != relay || config.msgHeaderKey != credential) {
+        failed.add('$key (this computer now uses another relay or key)');
+        return;
+      }
+      if (kind == TunnelKind.connect) await api.disconnectService(key);
+      final result = await _apply(tunnel.draft);
+      if (!result.success) failed.add('$key (${result.message})');
+    }
+
+    for (final key in shares) {
+      await again(TunnelKind.share, key);
+    }
+    for (final key in connections) {
+      await again(TunnelKind.connect, key);
+    }
+    await Future.wait([_reload(TunnelKind.share), _reload(TunnelKind.connect)]);
+    return failed;
+  }
+
   /// Stop [tunnel]'s background task, keeping it saved.
   Future<OperationResult> stop(Tunnel tunnel) async {
     final result = tunnel.kind == TunnelKind.share

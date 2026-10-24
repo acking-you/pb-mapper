@@ -19,6 +19,7 @@ use pb_mapper_client::sdk::{
     LegacyProtocol, ServiceInfo, SessionObservation,
 };
 use pb_mapper_core::checksum::{Credential, get_process_credential, parse_credential};
+use pb_mapper_core::config::resolve_pb_mapper_server_async;
 use serde_json::{Value, json};
 
 use crate::ctl::Origin;
@@ -61,6 +62,9 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
     let result = handle.runtime.block_on(async move {
         let config = state.lock().await.get_config_status().await;
         let credential = get_process_credential();
+        // The key a rotation retires: the tunnels still holding it are the
+        // ones to start again on the new key.
+        let retired = credential.as_ref().ok().copied();
         let outcome = call(
             &config.server_address,
             config.keep_alive_enabled,
@@ -76,13 +80,26 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
         // saving it would undo that change — or saving it fails. Either way
         // the rotation happened, so it is answered as one: `"saved"` tells
         // the page whether to keep the key for the person, and
-        // `"saveError"` why it could not be saved.
+        // `"saveError"` why it could not be saved. Once saved, `"restart"`
+        // names this computer's tunnels on that relay: those still holding
+        // the retired key, for the page to start again on the new one, and
+        // those on a temporary credential the rotation erased, which only
+        // a newly issued one can bring back.
         if let Some(key) = outcome.rotated_key {
+            // Where that relay is, to know its tunnels by address as well as
+            // by name. Resolved before the state is locked: it can be slow.
+            let endpoint = resolve_pb_mapper_server_async(Some(&config.server_address))
+                .await
+                .ok();
             let mut state = state.lock().await;
             let mut save_error = None;
             let saved = state.get_config_status().await == config
                 && match state
-                    .update_config(config.server_address, config.keep_alive_enabled, key)
+                    .update_config(
+                        config.server_address.clone(),
+                        config.keep_alive_enabled,
+                        key,
+                    )
                     .await
                 {
                     Ok(()) => true,
@@ -92,6 +109,9 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                         false
                     }
                 };
+            let restart = retired.filter(|_| saved).map(|retired| {
+                state.tunnels_on(&config.server_address, endpoint.as_ref(), retired)
+            });
             drop(state);
             if saved {
                 events::emit(events::ChangeKind::Config, None, Origin::Ui);
@@ -100,6 +120,16 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                 fields.insert("saved".to_owned(), saved.into());
                 if let Some(error) = save_error {
                     fields.insert("saveError".to_owned(), error.into());
+                }
+                if let Some(tunnels) = restart {
+                    fields.insert(
+                        "restart".to_owned(),
+                        json!({
+                            "shares": tunnels.shares,
+                            "connections": tunnels.connections,
+                            "stranded": tunnels.stranded,
+                        }),
+                    );
                 }
             }
         }

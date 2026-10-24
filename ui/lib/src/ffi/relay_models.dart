@@ -265,6 +265,9 @@ class KeyRotation {
     required this.saved,
     this.reason,
     this.saveError,
+    this.restartShares = const [],
+    this.restartConnections = const [],
+    this.stranded = const [],
   });
 
   final String key;
@@ -283,13 +286,36 @@ class KeyRotation {
   /// Why this computer could not save [key], when it tried and failed.
   final String? saveError;
 
-  factory KeyRotation.fromMap(Map<String, dynamic> map) => KeyRotation(
-    key: '${map['adminKey'] ?? ''}',
-    confirmed: map['confirmed'] == true,
-    saved: map['saved'] == true,
-    reason: map['reason'] as String?,
-    saveError: map['saveError'] as String?,
-  );
+  /// Once [saved], this computer's shares and connections on the rotated
+  /// relay that still hold the retired key, by key: each has to start again
+  /// on [key].
+  final List<String> restartShares;
+  final List<String> restartConnections;
+
+  /// Its tunnels on that relay on a temporary credential, which the rotation
+  /// erased. Started again on [key] they would move into the administrator's
+  /// namespace, so they are left for a newly issued credential.
+  final List<String> stranded;
+
+  factory KeyRotation.fromMap(Map<String, dynamic> map) {
+    final restart = map['restart'];
+    List<String> keys(String kind) => switch (restart) {
+      final Map<dynamic, dynamic> lists => [
+        for (final key in lists[kind] as List? ?? const []) '$key',
+      ],
+      _ => const [],
+    };
+    return KeyRotation(
+      key: '${map['adminKey'] ?? ''}',
+      confirmed: map['confirmed'] == true,
+      saved: map['saved'] == true,
+      reason: map['reason'] as String?,
+      saveError: map['saveError'] as String?,
+      restartShares: keys('shares'),
+      restartConnections: keys('connections'),
+      stranded: keys('stranded'),
+    );
+  }
 }
 
 /// A direct (peer-to-peer) session the relay has heard about from its ends.

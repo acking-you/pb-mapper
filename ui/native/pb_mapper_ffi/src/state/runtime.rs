@@ -156,6 +156,7 @@ impl PbMapperState {
             local_addrs,
             remote_addrs,
             credential,
+            relay,
         } = commit;
 
         if abort_runtime(&mut self.service_runtime, &service_key) {
@@ -215,6 +216,7 @@ impl PbMapperState {
                 pin: PinnedTunnel {
                     credential,
                     endpoint: remote_addrs,
+                    relay,
                 },
             },
         );
@@ -246,6 +248,49 @@ impl PbMapperState {
 
         tracing::info!("Service '{}' registration initiated", service_key);
         Ok(())
+    }
+
+    /// This computer's tunnels on `relay`, sorted by what rotating its
+    /// administrator key away from `retired` leaves them. Each keeps the
+    /// credential it started with, whatever the configuration says now. A
+    /// tunnel is on `relay` if it was started under that address, or dials
+    /// any address `endpoint` resolves to: the same relay may have been
+    /// written another way (a hostname, its IP) when it started.
+    pub fn tunnels_on(
+        &self,
+        relay: &str,
+        endpoint: Option<&ResolvedAddrs>,
+        retired: Credential,
+    ) -> RelayTunnels {
+        let on_relay = |pin: &PinnedTunnel| {
+            pin.relay == relay
+                || endpoint.is_some_and(|endpoint| {
+                    pin.endpoint
+                        .as_slice()
+                        .iter()
+                        .any(|addr| endpoint.as_slice().contains(addr))
+                })
+        };
+        let mut found = RelayTunnels::default();
+        for (runtimes, restart) in [
+            (&self.service_runtime, &mut found.shares),
+            (&self.client_runtime, &mut found.connections),
+        ] {
+            for (key, runtime) in runtimes {
+                if !on_relay(&runtime.pin) {
+                    continue;
+                }
+                if runtime.pin.credential == retired {
+                    restart.push(key.clone());
+                } else {
+                    found.stranded.push(key.clone());
+                }
+            }
+        }
+        found.shares.sort();
+        found.connections.sort();
+        found.stranded.sort();
+        found
     }
 
     pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
@@ -287,6 +332,7 @@ impl PbMapperState {
             local_addrs,
             remote_addrs,
             credential,
+            relay,
         } = commit;
 
         if abort_runtime(&mut self.client_runtime, &service_key) {
@@ -331,6 +377,7 @@ impl PbMapperState {
                 pin: PinnedTunnel {
                     credential,
                     endpoint: remote_addrs,
+                    relay,
                 },
             },
         );

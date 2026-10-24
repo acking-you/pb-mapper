@@ -131,12 +131,23 @@ class SecurityTab extends StatelessWidget {
             children: [
               Text(l10n.securityRotateBody, style: muted),
               const SizedBox(height: 12),
+              // A key waiting to be saved would be replaced by the next one.
               OutlinedButton.icon(
                 key: const Key('security-rotate'),
-                onPressed: () => _rotate(context, relay),
+                onPressed: relay.unsavedRotation != null
+                    ? null
+                    : () => _rotate(context, relay),
                 icon: const Icon(AppIcons.refresh, size: 16),
                 label: Text(l10n.securityRotate),
               ),
+              if (relay.unsavedRotation != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  l10n.securityRotateWaiting,
+                  key: const Key('security-rotate-waiting'),
+                  style: muted,
+                ),
+              ],
             ],
           ),
         ),
@@ -177,8 +188,9 @@ class SecurityTab extends StatelessWidget {
     if (!yes || !context.mounted) return;
     // The relay rotated, which Settings may have moved away from meanwhile.
     final address = relay.app.relayAddress;
-    final rotation = await attempt(context, relay.rotateKey);
-    if (rotation == null) return;
+    final outcome = await attempt(context, relay.rotateKey);
+    if (outcome == null) return;
+    final rotation = outcome.rotation;
     if (!context.mounted) {
       // Left while it ran: an unsaved key waits on the Relay page.
       if (!rotation.saved) {
@@ -186,7 +198,13 @@ class SecurityTab extends StatelessWidget {
       }
       return;
     }
-    await showRotationDialog(context, relay, rotation, address);
+    await showRotationDialog(
+      context,
+      relay,
+      rotation,
+      address,
+      notRestarted: outcome.notRestarted,
+    );
   }
 
   Future<void> _reset(BuildContext context, RelayStore relay) async {
@@ -313,8 +331,9 @@ Future<void> showRotationDialog(
   BuildContext context,
   RelayStore relay,
   KeyRotation rotation,
-  String address,
-) {
+  String address, {
+  List<String> notRestarted = const [],
+}) {
   final l10n = context.l10n;
   final theme = Theme.of(context);
   final scheme = theme.colorScheme;
@@ -367,6 +386,24 @@ Future<void> showRotationDialog(
                 rotation.reason ?? l10n.relayNoReason,
               ),
             }, style: theme.textTheme.bodySmall),
+            if (rotation.saved && rotation.stranded.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                l10n.securityRotatedStranded(rotation.stranded.join(', ')),
+                key: const Key('security-stranded'),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: cautionColor(scheme),
+                ),
+              ),
+            ],
+            if (notRestarted.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                l10n.securityRotatedNotRestarted(notRestarted.join(', ')),
+                key: const Key('security-not-restarted'),
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+            ],
           ],
         ),
       ),
