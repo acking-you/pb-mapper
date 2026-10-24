@@ -13,7 +13,9 @@ services:
       - pb-mapper-auth:/var/lib/pb-mapper/auth
       - pb-mapper-legacy:/var/lib/pb-mapper-server
     ports:
-      - "7666:7666"
+      - "7666:7666/tcp"
+      # Direct (peer-to-peer) coordination uses the same port number over UDP.
+      - "7666:7666/udp"
     restart: unless-stopped
 
 volumes:

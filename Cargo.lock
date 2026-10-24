@@ -1483,8 +1483,12 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "pb-mapper"
 version = "0.7.0"
 dependencies = [
+ "pb-mapper-auth",
  "pb-mapper-client",
+ "pb-mapper-server",
+ "serde_json",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1595,6 +1599,7 @@ dependencies = [
  "napi-derive",
  "pb-mapper-client",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

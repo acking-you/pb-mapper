@@ -1376,6 +1376,17 @@ where
         LocalServer::Direct(event) => {
             #[cfg(feature = "p2p")]
             if let Some(direct) = direct {
+                let mut event = event;
+                // `remote_addr` is the relay address this registration is
+                // connected to: the one to probe when the relay advertises
+                // only its STUN port.
+                if let (
+                    pb_mapper_protocol::direct::DirectEvent::Offer { stun_addr, .. },
+                    Some(relay),
+                ) = (&mut *event, target.remote_addr.as_slice().first())
+                {
+                    *stun_addr = pb_mapper_protocol::direct::stun_target(*stun_addr, relay.ip());
+                }
                 direct.event(*event, write_tx.clone());
             }
             #[cfg(not(feature = "p2p"))]

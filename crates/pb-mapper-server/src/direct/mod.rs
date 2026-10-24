@@ -16,7 +16,13 @@ mod stun;
 
 #[derive(Clone, Debug)]
 pub struct DirectServerConfig {
+    /// UDP address the STUN service binds.
     pub listen: SocketAddr,
+    /// Public address announced to clients. Port 0 takes the bound port. An
+    /// unspecified IP announces only the port: each client then uses the relay
+    /// IP it dialed, which is right whenever the UDP port is forwarded like the
+    /// TCP one, including behind cloud 1:1 NAT where the host never sees its
+    /// public IP.
     pub advertise: SocketAddr,
 }
 
@@ -44,7 +50,7 @@ pub(crate) async fn bind(
         if advertise.port() == 0 {
             advertise.set_port(socket.local_addr()?.port());
         }
-        if !valid_candidate(&advertise) {
+        if !advertise.ip().is_unspecified() && !valid_candidate(&advertise) {
             return Err(std::io::Error::other(
                 "direct advertise address must be reachable unicast IP:port",
             ));
@@ -53,7 +59,16 @@ pub(crate) async fn bind(
             version: DIRECT_VERSION,
             stun_addr: advertise,
         };
-        tracing::info!(event = "direct_service_listening", listen = %socket.local_addr()?, %advertise);
+        if advertise.ip().is_unspecified() {
+            tracing::info!(
+                event = "direct_service_listening",
+                listen = %socket.local_addr()?,
+                advertise_port = advertise.port(),
+                "direct coordination announces its port; clients pair it with the relay address they dialed"
+            );
+        } else {
+            tracing::info!(event = "direct_service_listening", listen = %socket.local_addr()?, %advertise);
+        }
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             if let Err(error) = stun::serve(socket).await {
                 tracing::error!(%error, "STUN service stopped");

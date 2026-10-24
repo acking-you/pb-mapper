@@ -72,17 +72,29 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ServerArgs {
-    /// Port exposed to registering services and connecting clients.
+    /// Port exposed to registering services and connecting clients. Direct
+    /// coordination listens on the same port number over UDP.
     #[arg(short, long, visible_alias = "pb-mapper-port", default_value_t = 7666)]
     port: u16,
-    /// Enable authenticated peer coordination and the UDP STUN service.
-    #[arg(long, requires_all = ["direct_listen", "direct_advertise"])]
+    /// Serve the relay only: no UDP port and no direct coordination.
+    #[arg(
+        long,
+        visible_alias = "disable-direct",
+        conflicts_with_all = ["enable_direct", "direct_listen", "direct_advertise"]
+    )]
+    relay_only: bool,
+    /// Accepted for 0.7 scripts. Direct is on by default; when this or a
+    /// `--direct-*` flag is given, a UDP bind failure stops the relay instead
+    /// of degrading it to relay-only.
+    #[arg(long, hide = true)]
     enable_direct: bool,
-    /// UDP address to bind for STUN (for example 0.0.0.0:10811).
-    #[arg(long, requires = "enable_direct")]
+    /// UDP address for direct coordination. Defaults to the relay's own
+    /// address and port, over UDP.
+    #[arg(long)]
     direct_listen: Option<SocketAddr>,
-    /// Public IP and UDP port advertised to direct-capable clients.
-    #[arg(long, requires = "enable_direct")]
+    /// Public IP and UDP port announced to clients. Defaults to the address
+    /// each client dialed to reach the relay, with the direct port.
+    #[arg(long)]
     direct_advertise: Option<SocketAddr>,
     /// Listen on IPv6 (::) instead of IPv4 (0.0.0.0).
     #[arg(long, visible_alias = "use-ipv6", default_value_t = false)]
@@ -124,8 +136,11 @@ mod admin;
 use admin::AdminArgs;
 #[derive(Debug, Args)]
 struct RegisterArgs {
-    /// Allow authenticated direct connections to this service.
-    #[arg(long)]
+    /// Keep every session to this service on the relay; refuse direct ones.
+    #[arg(long, conflicts_with = "allow_direct")]
+    relay_only: bool,
+    /// Accepted for 0.7 scripts: direct sessions are allowed by default.
+    #[arg(long, hide = true)]
     allow_direct: bool,
     /// Transport used by the local service.
     #[arg(value_enum)]
@@ -151,9 +166,12 @@ struct RegisterArgs {
 
 #[derive(Debug, Args)]
 struct ConnectArgs {
-    /// Select relay-only or try direct with automatic relay fallback.
-    #[arg(long, value_enum, default_value_t = PathArg::RelayOnly)]
+    /// Try direct first with automatic relay fallback, or use the relay only.
+    #[arg(long, value_enum, default_value_t = PathArg::Auto)]
     path: PathArg,
+    /// Shorthand for `--path relay-only`.
+    #[arg(long, conflicts_with = "path")]
+    relay_only: bool,
     /// Transport exposed by the local listener.
     #[arg(value_enum)]
     transport: Transport,
@@ -339,28 +357,61 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     };
     let shutdown = CancellationToken::new();
     let keep_alive = args.keep_alive || keep_alive_from_env();
-    if args.enable_direct {
-        let config = pb_mapper_server::DirectServerConfig {
-            listen: args.direct_listen.ok_or("--direct-listen is required")?,
-            advertise: args
-                .direct_advertise
-                .ok_or("--direct-advertise is required")?,
-        };
-        let auth = pb_mapper_auth::AuthRuntime::from_process(auth_config).await?;
-        let listener = tokio::net::TcpListener::bind((ip_addr, args.port)).await?;
-        pb_mapper_server::run_server_on_listener_with_direct(
-            listener,
-            shutdown,
-            None,
-            keep_alive,
-            auth,
-            Some(config),
-        )
-        .await?;
-    } else {
-        run_server_with_shutdown((ip_addr, args.port), shutdown, None, keep_alive).await?;
+    match direct_config(&args, ip_addr) {
+        Some(config) => {
+            let auth = pb_mapper_auth::AuthRuntime::from_process(auth_config).await?;
+            let listener = tokio::net::TcpListener::bind((ip_addr, args.port)).await?;
+            pb_mapper_server::run_server_on_listener_with_direct(
+                listener,
+                shutdown,
+                None,
+                keep_alive,
+                auth,
+                Some(config),
+            )
+            .await?;
+        }
+        None => {
+            run_server_with_shutdown((ip_addr, args.port), shutdown, None, keep_alive).await?;
+        }
     }
     Ok(())
+}
+
+/// Where direct coordination listens, or `None` to serve the relay alone.
+///
+/// By default it takes the relay's own port over UDP and announces only that
+/// port, so clients pair it with the relay address they dialed. A relay
+/// started without any direct flag keeps serving if that UDP port is taken —
+/// upgrading must not turn a running relay into one that will not start —
+/// while one given an explicit direct flag fails as asked.
+fn direct_config(
+    args: &ServerArgs,
+    ip_addr: IpAddr,
+) -> Option<pb_mapper_server::DirectServerConfig> {
+    let explicit =
+        args.enable_direct || args.direct_listen.is_some() || args.direct_advertise.is_some();
+    // A build without `p2p` has no direct service to offer by default; an
+    // explicit request still fails at bind, saying so.
+    if args.relay_only || (!explicit && !cfg!(feature = "p2p")) {
+        return None;
+    }
+    let listen = args
+        .direct_listen
+        .unwrap_or(SocketAddr::new(ip_addr, args.port));
+    let advertise = args
+        .direct_advertise
+        .unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
+    if !explicit && let Err(error) = std::net::UdpSocket::bind(listen) {
+        tracing::warn!(
+            event = "direct_service_unavailable",
+            %listen,
+            %error,
+            "UDP port unavailable; serving relay only (pass --direct-listen to choose another)"
+        );
+        return None;
+    }
+    Some(pb_mapper_server::DirectServerConfig { listen, advertise })
 }
 
 fn tunnel_client(relay: &RelayArgs, namespace: Option<u64>) -> Result<Client, Box<dyn Error>> {
@@ -394,7 +445,7 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
                 force_namespace: args.force,
             },
             RegisterOptions {
-                allow_direct: args.allow_direct,
+                allow_direct: !args.relay_only && RegisterOptions::default().allow_direct,
                 ..Default::default()
             },
         )
@@ -414,9 +465,10 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
                 transport: sdk_transport(args.transport),
             },
             ConnectOptions {
-                path: match args.path {
-                    PathArg::RelayOnly => PathPolicy::RelayOnly,
-                    PathArg::Auto => PathPolicy::Auto,
+                path: match (args.relay_only, args.path) {
+                    (true, _) | (false, PathArg::RelayOnly) => PathPolicy::RelayOnly,
+                    // Auto in a build with `p2p`, relay-only in one without.
+                    (false, PathArg::Auto) => PathPolicy::default(),
                 },
             },
         )
@@ -589,6 +641,95 @@ mod tests {
             "--force",
         ])
         .expect("administrator namespace registration flags should parse");
+    }
+
+    fn server_args(args: &[&str]) -> ServerArgs {
+        let cli = Cli::try_parse_from(["pb-mapper", "server"].iter().chain(args))
+            .expect("server flags should parse");
+        let Command::Server(args) = cli.command else {
+            panic!("expected server command");
+        };
+        args
+    }
+
+    #[cfg(feature = "p2p")]
+    #[test]
+    fn direct_is_on_by_default_on_the_relay_port_over_udp() {
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        // Port 0 so the UDP probe binds whatever is free on this machine.
+        let config =
+            direct_config(&server_args(&["--port", "0"]), ip).expect("direct is the default");
+        assert_eq!(config.listen, SocketAddr::new(ip, 0));
+        // Only the port is announced; clients add the relay IP they dialed.
+        assert!(config.advertise.ip().is_unspecified());
+
+        assert!(direct_config(&server_args(&["--relay-only"]), ip).is_none());
+        assert!(direct_config(&server_args(&["--disable-direct"]), ip).is_none());
+    }
+
+    #[test]
+    fn direct_flags_from_0_7_still_parse_and_override_the_defaults() {
+        let args = server_args(&[
+            "--enable-direct",
+            "--direct-listen",
+            "0.0.0.0:10811",
+            "--direct-advertise",
+            "203.0.113.7:10811",
+        ]);
+        let config = direct_config(&args, IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+            .expect("explicit direct configuration");
+        assert_eq!(config.listen, "0.0.0.0:10811".parse().unwrap());
+        assert_eq!(config.advertise, "203.0.113.7:10811".parse().unwrap());
+        assert!(
+            Cli::try_parse_from(["pb-mapper", "server", "--relay-only", "--enable-direct"])
+                .is_err()
+        );
+
+        let register = [
+            "pb-mapper",
+            "register",
+            "tcp",
+            "--key",
+            "web",
+            "--addr",
+            "127.0.0.1:8080",
+        ];
+        let Command::Register(defaults) = Cli::try_parse_from(register).unwrap().command else {
+            panic!("expected register command");
+        };
+        assert!(!defaults.relay_only);
+        assert!(
+            Cli::try_parse_from(register.iter().chain(&["--allow-direct"])).is_ok(),
+            "0.7 opt-in flag is accepted"
+        );
+        let Command::Register(opted_out) =
+            Cli::try_parse_from(register.iter().chain(&["--relay-only"]))
+                .unwrap()
+                .command
+        else {
+            panic!("expected register command");
+        };
+        assert!(opted_out.relay_only);
+
+        let connect = [
+            "pb-mapper",
+            "connect",
+            "tcp",
+            "--key",
+            "web",
+            "--addr",
+            "127.0.0.1:9090",
+        ];
+        let Command::Connect(defaults) = Cli::try_parse_from(connect).unwrap().command else {
+            panic!("expected connect command");
+        };
+        assert_eq!(defaults.path, PathArg::Auto);
+        assert!(!defaults.relay_only);
+        assert!(Cli::try_parse_from(connect.iter().chain(&["--path", "auto"])).is_ok());
+        assert!(Cli::try_parse_from(connect.iter().chain(&["--relay-only"])).is_ok());
+        assert!(
+            Cli::try_parse_from(connect.iter().chain(&["--relay-only", "--path", "auto"])).is_err()
+        );
     }
 
     #[test]

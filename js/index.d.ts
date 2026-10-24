@@ -59,8 +59,23 @@ export declare class Connection {
    * `stopped`, or `failed:<reason>`.
    */
   status(): string
-  /** Inspect the running SDK version, failure phase and bounded setup load. */
+  /**
+   * Inspect the running SDK version, failure phase, bounded setup
+   * load, the direct attempt in flight, and recent events.
+   */
   diagnostics(): JsTunnelDiagnostics
+  /**
+   * Resolves with the next status this tunnel reports, rendered as
+   * `status()` renders it: an event listener for status changes.
+   *
+   * Each handle keeps its own position, so a change that happens
+   * between two calls is returned by the next one rather than
+   * missed. Once the tunnel settles as `stopped` or
+   * `failed:<reason>`, every call resolves at once with that final
+   * status, which is what ends a listening loop. Rejects after
+   * `timeoutMs` without a change.
+   */
+  nextStatus(timeoutMs?: number | undefined | null): Promise<string>
   /**
    * Resolves once the tunnel is connected, and rejects if it fails or
    * is stopped first.
@@ -83,8 +98,23 @@ export declare class Registration {
    * `stopped`, or `failed:<reason>`.
    */
   status(): string
-  /** Inspect the running SDK version, failure phase and bounded setup load. */
+  /**
+   * Inspect the running SDK version, failure phase, bounded setup
+   * load, the direct attempt in flight, and recent events.
+   */
   diagnostics(): JsTunnelDiagnostics
+  /**
+   * Resolves with the next status this tunnel reports, rendered as
+   * `status()` renders it: an event listener for status changes.
+   *
+   * Each handle keeps its own position, so a change that happens
+   * between two calls is returned by the next one rather than
+   * missed. Once the tunnel settles as `stopped` or
+   * `failed:<reason>`, every call resolves at once with that final
+   * status, which is what ends a listening loop. Rejects after
+   * `timeoutMs` without a change.
+   */
+  nextStatus(timeoutMs?: number | undefined | null): Promise<string>
   /**
    * Resolves once the tunnel is connected, and rejects if it fails or
    * is stopped first.
@@ -138,11 +168,26 @@ export interface JsConnectionInfo {
 }
 
 export interface JsConnectRequest {
-  /** "relay-only" (default) or "auto". */
+  /**
+   * "auto" (default): direct first, relay fallback before any byte is sent.
+   * "relay-only": always use the relay.
+   */
   path?: string
   key: string
   localAddr: string
   transport: string
+}
+
+/** The direct attempt a tunnel is making right now. */
+export interface JsDirectAttempt {
+  /**
+   * `negotiating`, `discovering`, `punching` or `committing`. Every stage
+   * before `committing` can still fall back to the relay.
+   */
+  stage: string
+  elapsedMs: number
+  /** Attempts in flight, this one included. */
+  inFlight: number
 }
 
 export interface JsIssuedKey {
@@ -170,9 +215,15 @@ export interface JsPathDiagnostics {
   activeRelay: number
   fallbacks: number
   lastFallback?: string
+  /** The direct attempt in flight, if any. */
+  attempt?: JsDirectAttempt
 }
 
 export interface JsRegisterRequest {
+  /**
+   * Accept direct sessions from authorized consumers (default `true`).
+   * `false` keeps every session to this service on the relay.
+   */
   allowDirect?: boolean
   key: string
   localAddr: string
@@ -218,4 +269,39 @@ export interface JsTunnelDiagnostics {
   networkGeneration: number
   activeControlSetups: number
   activeDataSetups: number
+  /** Recent history, oldest first; at most 16 entries. */
+  events: Array<JsTunnelEvent>
+}
+
+/**
+ * One entry of a tunnel's recent history. Consecutive repeats fold into one
+ * entry, counted by `repeats`.
+ */
+export interface JsTunnelEvent {
+  /**
+   * Increases with every recorded event, a fold included: remember the
+   * highest one handled to tell which entries are new.
+   */
+  seq: number
+  /** Time since the latest occurrence. */
+  ageMs: number
+  repeats: number
+  /**
+   * `relay_ready`, `relay_failed`, `network_changed`, `direct_established`
+   * or `direct_fallback`.
+   */
+  kind: string
+  /** `relay_ready`: setup latency of the answering relay. */
+  latencyMs?: number
+  /**
+   * `relay_failed`: `dns`, `transport`, `timeout`, `service_unavailable`,
+   * `rejected` or `network_changed`.
+   */
+  failure?: string
+  /** `relay_failed`: delay before the next attempt. */
+  retryInMs?: number
+  /** `direct_established`: time from the first request to the open path. */
+  setupMs?: number
+  /** `direct_fallback`: the stage the attempt left for the relay. */
+  stage?: string
 }

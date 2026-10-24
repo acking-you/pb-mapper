@@ -1,7 +1,7 @@
 //! Opt-in coordination messages. Legacy connections never emit these messages.
 
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 pub type SessionId = [u8; 16];
 pub fn random_session_id() -> SessionId {
@@ -38,7 +38,23 @@ impl std::fmt::Debug for SessionSecret {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectCapability {
     pub version: u16,
+    /// An unspecified IP means the relay does not know its public address and
+    /// the client should use the one it reached the relay at; see [`stun_target`].
     pub stun_addr: SocketAddr,
+}
+
+/// The STUN address a client should query, given what the relay advertised and
+/// the relay IP this client's control connection actually reached.
+///
+/// A relay behind 1:1 NAT or port forwarding cannot see its own public IP, so
+/// unless the operator names one it advertises only the port. The client
+/// already dialed that public address, which is the one its UDP probes must use.
+pub fn stun_target(advertised: SocketAddr, relay: IpAddr) -> SocketAddr {
+    if advertised.ip().is_unspecified() {
+        SocketAddr::new(relay.to_canonical(), advertised.port())
+    } else {
+        advertised
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,6 +295,33 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&response).unwrap(),
             br#"{"Service":{"key":"legacy","connections":[]}}"#
+        );
+    }
+
+    #[test]
+    fn unspecified_stun_address_takes_the_dialed_relay_ip() {
+        use super::stun_target;
+        let relay: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        assert_eq!(
+            stun_target("0.0.0.0:7666".parse().unwrap(), relay),
+            "203.0.113.7:7666".parse().unwrap()
+        );
+        assert_eq!(
+            stun_target("[::]:7666".parse().unwrap(), relay),
+            "203.0.113.7:7666".parse().unwrap()
+        );
+        // An IPv4 relay reached through a dual-stack socket keeps its v4 form.
+        assert_eq!(
+            stun_target(
+                "0.0.0.0:7666".parse().unwrap(),
+                "::ffff:203.0.113.7".parse().unwrap()
+            ),
+            "203.0.113.7:7666".parse().unwrap()
+        );
+        // An operator-supplied address always wins.
+        assert_eq!(
+            stun_target("198.51.100.1:10811".parse().unwrap(), relay),
+            "198.51.100.1:10811".parse().unwrap()
         );
     }
 }

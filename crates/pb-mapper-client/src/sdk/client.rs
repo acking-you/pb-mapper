@@ -158,12 +158,15 @@ impl Client {
         })
     }
 
-    /// Publish a local service on the relay under `request.key`.
+    /// Publish a local service on the relay under `request.key`, with
+    /// [`RegisterOptions::default`]: direct sessions are allowed when the SDK
+    /// is built with `p2p`.
     ///
     /// Returns as soon as the worker is spawned; the handle's
     /// [`Registration::wait_ready`] is what waits for the relay to accept it.
     pub async fn register(&self, request: RegisterRequest) -> Result<Registration> {
-        self.register_inner(request, None, false).await
+        self.register_with_options(request, RegisterOptions::default())
+            .await
     }
 
     /// Publish with an idle deadline for each forwarded TCP data connection.
@@ -188,11 +191,16 @@ impl Client {
         {
             return Err(Error::invalid_config("idle timeout exceeds timer range"));
         }
-        self.register_inner(request, Some(idle_timeout), false)
-            .await
+        self.register_inner(
+            request,
+            Some(idle_timeout),
+            RegisterOptions::default().allow_direct,
+        )
+        .await
     }
 
-    /// Publish a service with explicitly enabled direct capability.
+    /// Publish a service with explicit options, such as
+    /// `allow_direct: false` to keep every session on the relay.
     pub async fn register_with_options(
         &self,
         request: RegisterRequest,
@@ -266,7 +274,9 @@ impl Client {
         Ok(Registration::new(handle, request.key))
     }
 
-    /// Subscribe to a registered service and forward it from a local listener.
+    /// Subscribe to a registered service and forward it from a local listener,
+    /// with [`ConnectOptions::default`]: direct first with relay fallback when
+    /// the SDK is built with `p2p`.
     ///
     /// Returns as soon as the worker is spawned; the handle's
     /// [`Connection::wait_ready`] is what waits for the local listener to bind
@@ -276,7 +286,7 @@ impl Client {
             .await
     }
 
-    /// Select direct-first or the unchanged relay protocol for this tunnel only.
+    /// Select direct-first or the relay-only protocol for this tunnel only.
     pub async fn connect_with_options(
         &self,
         request: ConnectRequest,
