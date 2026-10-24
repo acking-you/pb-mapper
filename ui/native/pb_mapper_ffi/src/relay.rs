@@ -76,13 +76,20 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
         // saving it would undo that change — or saving it fails. Either way
         // the rotation happened, so it is answered as one: `"saved"` tells
         // the page whether to keep the key for the person, and
-        // `"saveError"` why it could not be saved.
+        // `"saveError"` why it could not be saved. Once saved, `"restart"`
+        // names this computer's tunnels on that relay: each still holds the
+        // credential it started with, which the rotation retired, and the
+        // page starts them again on the new key.
         if let Some(key) = outcome.rotated_key {
             let mut state = state.lock().await;
             let mut save_error = None;
             let saved = state.get_config_status().await == config
                 && match state
-                    .update_config(config.server_address, config.keep_alive_enabled, key)
+                    .update_config(
+                        config.server_address.clone(),
+                        config.keep_alive_enabled,
+                        key,
+                    )
                     .await
                 {
                     Ok(()) => true,
@@ -92,6 +99,7 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                         false
                     }
                 };
+            let restart = saved.then(|| state.tunnels_on(&config.server_address));
             drop(state);
             if saved {
                 events::emit(events::ChangeKind::Config, None, Origin::Ui);
@@ -100,6 +108,12 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                 fields.insert("saved".to_owned(), saved.into());
                 if let Some(error) = save_error {
                     fields.insert("saveError".to_owned(), error.into());
+                }
+                if let Some((shares, connections)) = restart {
+                    fields.insert(
+                        "restart".to_owned(),
+                        json!({ "shares": shares, "connections": connections }),
+                    );
                 }
             }
         }

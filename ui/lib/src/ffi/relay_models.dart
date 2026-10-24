@@ -265,6 +265,8 @@ class KeyRotation {
     required this.saved,
     this.reason,
     this.saveError,
+    this.restartShares = const [],
+    this.restartConnections = const [],
   });
 
   final String key;
@@ -283,13 +285,30 @@ class KeyRotation {
   /// Why this computer could not save [key], when it tried and failed.
   final String? saveError;
 
-  factory KeyRotation.fromMap(Map<String, dynamic> map) => KeyRotation(
-    key: '${map['adminKey'] ?? ''}',
-    confirmed: map['confirmed'] == true,
-    saved: map['saved'] == true,
-    reason: map['reason'] as String?,
-    saveError: map['saveError'] as String?,
-  );
+  /// Once [saved], this computer's shares and connections on the rotated
+  /// relay, by key: each still holds the credential it started with, which
+  /// the rotation retired, so each has to start again.
+  final List<String> restartShares;
+  final List<String> restartConnections;
+
+  factory KeyRotation.fromMap(Map<String, dynamic> map) {
+    final restart = map['restart'];
+    List<String> keys(String kind) => switch (restart) {
+      final Map<dynamic, dynamic> lists => [
+        for (final key in lists[kind] as List? ?? const []) '$key',
+      ],
+      _ => const [],
+    };
+    return KeyRotation(
+      key: '${map['adminKey'] ?? ''}',
+      confirmed: map['confirmed'] == true,
+      saved: map['saved'] == true,
+      reason: map['reason'] as String?,
+      saveError: map['saveError'] as String?,
+      restartShares: keys('shares'),
+      restartConnections: keys('connections'),
+    );
+  }
 }
 
 /// A direct (peer-to-peer) session the relay has heard about from its ends.

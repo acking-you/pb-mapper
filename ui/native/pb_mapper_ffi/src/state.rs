@@ -456,6 +456,8 @@ fn claim_key(
 struct PinnedTunnel {
     credential: Credential,
     endpoint: ResolvedAddrs,
+    /// The relay address it was started against, as configured then.
+    relay: String,
 }
 
 struct TunnelRuntime {
@@ -489,6 +491,7 @@ struct RegisterCommit {
     local_addrs: ResolvedAddrs,
     remote_addrs: ResolvedAddrs,
     credential: Credential,
+    relay: String,
 }
 
 /// Everything [`PbMapperState::finish_connect`] needs once the slow work is done.
@@ -500,6 +503,7 @@ struct ConnectCommit {
     local_addrs: ResolvedAddrs,
     remote_addrs: ResolvedAddrs,
     credential: Credential,
+    relay: String,
 }
 
 pub struct PbMapperState {
@@ -589,6 +593,7 @@ pub async fn register_service(
             local_addrs,
             remote_addrs,
             credential,
+            relay: server_address,
         })
         .await
 }
@@ -648,6 +653,7 @@ pub async fn connect_service(
             local_addrs,
             remote_addrs,
             credential,
+            relay: server_address,
         })
         .await
 }

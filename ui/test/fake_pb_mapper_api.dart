@@ -518,7 +518,19 @@ class FakePbMapperApi implements PbMapperApiClient {
       keepAliveEnabled: config.keepAliveEnabled,
       msgHeaderKey: rotated,
     );
-    return const KeyRotation(key: rotated, confirmed: true, saved: true);
+    return KeyRotation(
+      key: rotated,
+      confirmed: true,
+      saved: true,
+      restartShares: [
+        for (final s in services)
+          if (s.status != 'stopped') s.serviceKey,
+      ],
+      restartConnections: [
+        for (final c in clients)
+          if (c.status != 'stopped') c.serviceKey,
+      ],
+    );
   }
 
   /// Whether the relay's answer to a rotation arrives. When it does not, the

@@ -188,8 +188,9 @@ class SecurityTab extends StatelessWidget {
     if (!yes || !context.mounted) return;
     // The relay rotated, which Settings may have moved away from meanwhile.
     final address = relay.app.relayAddress;
-    final rotation = await attempt(context, relay.rotateKey);
-    if (rotation == null) return;
+    final outcome = await attempt(context, relay.rotateKey);
+    if (outcome == null) return;
+    final rotation = outcome.rotation;
     if (!context.mounted) {
       // Left while it ran: an unsaved key waits on the Relay page.
       if (!rotation.saved) {
@@ -197,7 +198,13 @@ class SecurityTab extends StatelessWidget {
       }
       return;
     }
-    await showRotationDialog(context, relay, rotation, address);
+    await showRotationDialog(
+      context,
+      relay,
+      rotation,
+      address,
+      notRestarted: outcome.notRestarted,
+    );
   }
 
   Future<void> _reset(BuildContext context, RelayStore relay) async {
@@ -324,8 +331,9 @@ Future<void> showRotationDialog(
   BuildContext context,
   RelayStore relay,
   KeyRotation rotation,
-  String address,
-) {
+  String address, {
+  List<String> notRestarted = const [],
+}) {
   final l10n = context.l10n;
   final theme = Theme.of(context);
   final scheme = theme.colorScheme;
@@ -378,6 +386,14 @@ Future<void> showRotationDialog(
                 rotation.reason ?? l10n.relayNoReason,
               ),
             }, style: theme.textTheme.bodySmall),
+            if (notRestarted.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                l10n.securityRotatedNotRestarted(notRestarted.join(', ')),
+                key: const Key('security-not-restarted'),
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+            ],
           ],
         ),
       ),

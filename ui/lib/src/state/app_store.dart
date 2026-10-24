@@ -295,19 +295,33 @@ class AppStore extends ChangeNotifier {
   /// Start a stopped tunnel again with what it was saved with.
   Future<OperationResult> resume(Tunnel tunnel) => create(tunnel.draft);
 
-  /// Start every tunnel that is up again, so each takes this computer's
-  /// credential as it is now. A tunnel keeps the credential it started with,
-  /// which a rotated administrator key leaves useless: the old key, and every
-  /// temporary credential with it. A connection is stopped first, as in
-  /// [update], for the port it holds.
-  Future<void> restartLive() async {
-    for (final tunnel in tunnels.where((t) => t.isLive)) {
-      if (tunnel.kind == TunnelKind.connect) {
-        await api.disconnectService(tunnel.key);
-      }
-      await _apply(tunnel.draft);
+  /// Start [shares] and [connections] again with what they were saved with,
+  /// so each takes this computer's credential and relay as they are now. A
+  /// tunnel keeps the credential it started with, which a rotated
+  /// administrator key leaves useless. A connection is stopped first, as in
+  /// [update], for the port it holds. Returns those that would not start,
+  /// each with why.
+  Future<List<String>> restart({
+    required List<String> shares,
+    required List<String> connections,
+  }) async {
+    final failed = <String>[];
+    Future<void> again(TunnelKind kind, String key) async {
+      final tunnel = find(kind, key);
+      if (tunnel == null) return;
+      if (kind == TunnelKind.connect) await api.disconnectService(key);
+      final result = await _apply(tunnel.draft);
+      if (!result.success) failed.add('$key (${result.message})');
+    }
+
+    for (final key in shares) {
+      await again(TunnelKind.share, key);
+    }
+    for (final key in connections) {
+      await again(TunnelKind.connect, key);
     }
     await Future.wait([_reload(TunnelKind.share), _reload(TunnelKind.connect)]);
+    return failed;
   }
 
   /// Stop [tunnel]'s background task, keeping it saved.

@@ -375,14 +375,19 @@ void main() {
 
       api.rotationAnswers = true;
       api.calls.clear();
+      // The share will not start again; the connection will.
+      api.failNext = 'relay unreachable';
       await rotate();
       expect(find.byKey(const Key('security-rotated')), findsOneWidget);
       expect(api.config.msgHeaderKey, 'R0tatedAdminKey-0123456789abcdef');
-      // Every tunnel that was up starts again on the new key.
+      // Every tunnel on that relay starts again on the new key, and one
+      // that would not is named.
       expect(
         api.calls,
         containsAll(['registerService(nas)', 'connectService(rdp)']),
       );
+      expect(find.byKey(const Key('security-not-restarted')), findsOneWidget);
+      expect(find.textContaining('nas (relay unreachable)'), findsOneWidget);
       await finish(tester);
     });
 

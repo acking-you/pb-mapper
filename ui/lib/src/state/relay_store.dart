@@ -321,10 +321,12 @@ class RelayStore extends ChangeNotifier {
 
   /// Rotate the administrator key. Once the relay is known to have taken
   /// the new key this computer has switched to it, restarted its tunnels on
-  /// it, and read everything again with it; a key it could not switch to is
-  /// kept in [unsavedRotation]. Refused while one is still kept there: a
-  /// second would take its place, and it may be the only key a relay takes.
-  Future<KeyRotation> rotateKey() async {
+  /// that relay with it, and read everything again; a key it could not
+  /// switch to is kept in [unsavedRotation]. Refused while one is still kept
+  /// there: a second would take its place, and it may be the only key a
+  /// relay takes. Also returns the tunnels that would not start again.
+  Future<({KeyRotation rotation, List<String> notRestarted})>
+  rotateKey() async {
     if (unsavedRotation != null) {
       throw const RelayCallException(
         'Save the administrator key that is waiting first',
@@ -337,12 +339,18 @@ class RelayStore extends ChangeNotifier {
       unsavedRotation = (rotation: rotation, address: address);
       _notify();
     }
+    var notRestarted = const <String>[];
     if (rotation.confirmed) {
       await app.refresh(force: true);
-      if (rotation.saved) await app.restartLive();
+      if (rotation.saved) {
+        notRestarted = await app.restart(
+          shares: rotation.restartShares,
+          connections: rotation.restartConnections,
+        );
+      }
       await refresh();
     }
-    return rotation;
+    return (rotation: rotation, notRestarted: notRestarted);
   }
 
   /// The person has the key in [unsavedRotation] somewhere safe.

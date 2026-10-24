@@ -156,6 +156,7 @@ impl PbMapperState {
             local_addrs,
             remote_addrs,
             credential,
+            relay,
         } = commit;
 
         if abort_runtime(&mut self.service_runtime, &service_key) {
@@ -215,6 +216,7 @@ impl PbMapperState {
                 pin: PinnedTunnel {
                     credential,
                     endpoint: remote_addrs,
+                    relay,
                 },
             },
         );
@@ -248,6 +250,22 @@ impl PbMapperState {
         Ok(())
     }
 
+    /// The shares and connections running against `relay`, by key. Each
+    /// keeps the credential it started with, which a rotation of that
+    /// relay's administrator key leaves useless, whatever the configuration
+    /// says now.
+    pub fn tunnels_on(&self, relay: &str) -> (Vec<String>, Vec<String>) {
+        let on = |runtimes: &HashMap<String, TunnelRuntime>| {
+            let mut keys: Vec<String> = runtimes
+                .iter()
+                .filter(|(_, runtime)| runtime.pin.relay == relay)
+                .map(|(key, _)| key.clone())
+                .collect();
+            keys.sort();
+            keys
+        };
+        (on(&self.service_runtime), on(&self.client_runtime))
+    }
     pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
         abort_runtime(&mut self.service_runtime, &service_key);
 
@@ -287,6 +305,7 @@ impl PbMapperState {
             local_addrs,
             remote_addrs,
             credential,
+            relay,
         } = commit;
 
         if abort_runtime(&mut self.client_runtime, &service_key) {
@@ -331,6 +350,7 @@ impl PbMapperState {
                 pin: PinnedTunnel {
                     credential,
                     endpoint: remote_addrs,
+                    relay,
                 },
             },
         );
