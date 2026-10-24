@@ -263,13 +263,16 @@ class UpdateController extends ChangeNotifier {
           // the new AppImage to the user instead.
           debugPrint('Could not replace the AppImage: $error');
           _savedPath = await installer.saveToDownloads(file, plan.asset.name);
+          await _discard(file);
           _set(UpdateStage.saved);
           return;
         }
+        await _discard(file);
         _set(UpdateStage.installing);
         await quit();
       case UpdateMethod.saveDownload:
         _savedPath = await installer.saveToDownloads(file, plan.asset.name);
+        await _discard(file);
         _set(UpdateStage.saved);
       case UpdateMethod.openInBrowser:
         // Handled before anything is downloaded.
@@ -277,6 +280,8 @@ class UpdateController extends ChangeNotifier {
     }
   }
 
+  /// Remove the download's temporary folder. Not after handing it to the
+  /// Windows installer, which runs it once the app has quit.
   static Future<void> _discard(File? file) async {
     if (file == null) return;
     try {

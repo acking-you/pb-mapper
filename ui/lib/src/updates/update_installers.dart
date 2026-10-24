@@ -141,6 +141,10 @@ abstract final class AppImageUpdate {
     return path;
   }
 
+  /// Put [download] in place of [appImage]. [download] stays where it is,
+  /// for the caller to save elsewhere when this fails with a
+  /// [FileSystemException] (a folder the user cannot write to) or to clean
+  /// up when it succeeds.
   static Future<void> replace(File download, String appImage, int pid) async {
     final target = File(appImage);
     // Staged beside the target, so the rename that replaces it is atomic.
@@ -157,7 +161,12 @@ abstract final class AppImageUpdate {
       } finally {
         await written.close();
       }
-      final chmod = await Process.run('chmod', ['755', staged.path]);
+      final ProcessResult chmod;
+      try {
+        chmod = await Process.run('chmod', ['755', staged.path]);
+      } on ProcessException catch (error) {
+        throw FileSystemException('chmod failed: $error', staged.path);
+      }
       if (chmod.exitCode != 0) {
         throw FileSystemException('chmod failed: ${chmod.stderr}', staged.path);
       }
@@ -165,8 +174,6 @@ abstract final class AppImageUpdate {
     } catch (_) {
       await _delete(staged);
       rethrow;
-    } finally {
-      await _delete(download);
     }
     await Process.start('/bin/sh', [
       '-c',

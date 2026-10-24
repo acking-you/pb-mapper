@@ -23,8 +23,9 @@ abstract interface class UpdateHttp {
   Future<List<int>> get(Uri url, {int limit = 1 << 20});
 
   /// Stream [url] into [target] and return the SHA-256 (lower-case hex) of
-  /// what was written. Fails with [UpdateFailure.checksum] the moment more
-  /// than [size] bytes arrive, or when fewer than [size] did.
+  /// what was written, once all of it is. Fails with [UpdateFailure.checksum]
+  /// the moment more than [size] bytes arrive, or when fewer than [size] did,
+  /// and with [UpdateFailure.install] when the file could not be written.
   Future<String> download(
     Uri url,
     File target, {
@@ -97,11 +98,17 @@ class IoUpdateHttp implements UpdateHttp {
   }) async {
     _cancelled = false;
     final client = _active = _client();
-    final sink = target.openWrite();
     final digest = _DigestSink();
     final hasher = sha256.startChunkedConversion(digest);
     var received = 0;
+    RandomAccessFile? file;
     try {
+      // The hash describes the bytes received; it vouches for the file only
+      // if every one of them was written. So the file is opened up front
+      // and each write awaited: a disk that refuses it (missing folder, no
+      // space) fails the download here, not the install later with a
+      // truncated file.
+      file = await target.open(mode: FileMode.write);
       final response = await _open(client, url);
       await for (final chunk in response.timeout(const Duration(seconds: 60))) {
         if (_cancelled) throw const UpdateCancelled();
@@ -113,7 +120,7 @@ class IoUpdateHttp implements UpdateHttp {
           );
         }
         hasher.add(chunk);
-        sink.add(chunk);
+        await file.writeFrom(chunk);
         onProgress(received);
       }
       if (received != size) {
@@ -123,17 +130,24 @@ class IoUpdateHttp implements UpdateHttp {
         );
       }
       hasher.close();
+      await file.flush();
+      final written = file;
+      file = null;
+      await written.close();
       return '${digest.value}';
     } on UpdateException {
       rethrow;
     } on UpdateCancelled {
       rethrow;
+    } on FileSystemException catch (error) {
+      throw UpdateException(UpdateFailure.install, '$error');
     } catch (error) {
       if (_cancelled) throw const UpdateCancelled();
       throw UpdateException(UpdateFailure.network, '$error');
     } finally {
       _active = null;
-      await sink.close().catchError((_) {});
+      // Only on the way out of a failure, which is the one reported.
+      await file?.close().catchError((_) {});
       client.close(force: true);
     }
   }
