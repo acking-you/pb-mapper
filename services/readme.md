@@ -9,7 +9,9 @@ sudo install -m 0644 services/pb-mapper-register@.service /etc/systemd/system/
 sudo install -m 0644 services/pb-mapper-connect@.service /etc/systemd/system/
 ```
 
-The relay unit runs `pb-mapper server` directly. On first start it creates a
+The relay unit runs `pb-mapper server` directly. It listens on `7666/tcp` for
+the relay and on `7666/udp` for peer-to-peer coordination; open both. Add
+`--relay-only` to `ExecStart` to serve the relay alone. On first start it creates a
 random administrator key at `/var/lib/pb-mapper/auth/admin.key` with mode
 `0600`. Keep that directory persistent. If upgrading from the old
 machine-derived mode, the first v0.4 start automatically copies

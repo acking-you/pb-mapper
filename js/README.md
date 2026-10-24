@@ -2,16 +2,17 @@
 
 TypeScript/JavaScript bindings for [pb-mapper](https://github.com/acking-you/pb-mapper),
 built with Node-API (napi-rs). Publish a private TCP/UDP service with `register`
-and reach it on a local port with `connect`: through the relay by default, or
-end to end when a connection opts into direct and the network allows it.
+and reach it on a local port with `connect`. Every connection goes peer to peer
+over QUIC when the networks allow it and falls back to the relay before any
+byte is sent when they do not. Reconnection and recovery are automatic.
 
 ```bash
 npm install pb-mapper
 ```
 
-The package ships prebuilt native addons for 64-bit glibc Linux, macOS, and
-Windows. It supports Node.js 18+ and Bun 1.1+. Browsers and edge runtimes cannot
-load Node-API addons.
+The package ships prebuilt native addons for 64-bit glibc Linux (x64, arm64),
+macOS (x64, arm64) and Windows x64. It supports Node.js 18+ and Bun 1.1+.
+Browsers and edge runtimes cannot load Node-API addons.
 
 ```ts
 import { Client } from "pb-mapper";
@@ -22,72 +23,101 @@ const client = new Client({
   keepAlive: true,
 });
 
+// Publish a local service...
 const reg = await client.register({
-  key: "echo",
-  localAddr: "127.0.0.1:8080",
-  transport: "tcp",
+  key: "web", localAddr: "127.0.0.1:8080", transport: "tcp",
 });
 await reg.waitReady();
 
-const admin = client.admin();
-const issued = await admin.issueKey(3600, "agent");
-await admin.revokeKey(issued.keyId);
+// ...and reach it on a local port, direct first.
+const conn = await client.connect({
+  key: "web", localAddr: "127.0.0.1:9090", transport: "tcp",
+});
+await conn.waitReady();
 
+await conn.stop();
 await reg.stop();
 ```
 
-Build the native addon from a source checkout:
+## Paths
+
+`register` allows direct sessions and `connect` uses `path: "auto"` by
+default: try UDP hole punching and mutually authenticated QUIC, and fall back
+to the relay if setup fails before commit. After commit a failed connection
+closes and is never replayed onto the relay. After a fallback, the tunnel sends
+its next connections straight to the relay for a while (10 s doubling to 5 min,
+cleared by a direct success or `notifyNetworkChange()`).
+
+To stay on the relay, register with `allowDirect: false` or connect with
+`path: "relay-only"`. Established direct connections survive coordinator loss
+and credential revocation; local `stop()` closes them.
+
+## Listening for changes
+
+```ts
+// Resolves on every status change; once the tunnel settles as "stopped" or
+// "failed:<reason>", every call resolves at once, which ends the loop.
+let status = conn.status();
+while (status !== "stopped" && !status.startsWith("failed")) {
+  status = await conn.nextStatus();
+  console.log("status:", status);
+}
+```
+
+`diagnostics()` is a credential-free snapshot for dashboards and logs:
+
+- `events`: the last 16 of `relay_ready`, `relay_failed`, `network_changed`,
+  `direct_established` and `direct_fallback`, each with a `seq` so a poller
+  can print only new ones, plus `latencyMs`, `failure`, `retryInMs`,
+  `setupMs` or `stage` as they apply;
+- `direct`: sessions per path, active sessions, fallbacks, and the attempt in
+  flight with its stage (`negotiating`, `discovering`, `punching`,
+  `committing`);
+- recovery counters: attempts, consecutive failures, setup latency, next retry.
+
+Call `client.notifyNetworkChange()` from the host's network-change or resume
+notification: waiting retries start at once and direct is tried again.
+
+## Credentials and the relay
+
+With the administrator key, `client.admin()` manages temporary `pbmt1_`
+credentials and inspects the relay:
+
+```ts
+const admin = client.admin();
+const issued = await admin.issueKey(3600, "agent-session");  // ttl in seconds
+await admin.renewKey(issued.keyId, 7200);
+console.log(await admin.listKeys(), await admin.listServices(), await admin.listConnections());
+await admin.revokeKey(issued.keyId);                           // live relay connections close
+```
+
+Every credential has its own namespace: `client.listKeys()`, `serviceStatus()`,
+`sessionsJson()` and `remoteId()` only ever see that namespace.
+
+## Examples
+
+Runnable scripts in [`examples/`](examples) read `PB_MAPPER_SERVER` and
+`MSG_HEADER_KEY`:
+
+| Script | Shows |
+| --- | --- |
+| [`register.mjs`](examples/register.mjs) | Publish a TCP or UDP service, optionally relay-only |
+| [`connect.mjs`](examples/connect.mjs) | Reach it, listen with `nextStatus()`, print new events |
+| [`admin.mjs`](examples/admin.mjs) | The credential lifecycle and the relay inventory |
+| [`remote-control.mjs`](examples/remote-control.mjs) | One scoped credential per agent session, revoked at the end |
+
+## TCP idle connection reclamation
+
+`client.registerWithIdleTimeout(request, idleTimeoutMs)` reclaims abandoned
+data connections on the publishing device. The timeout is a non-negative safe
+integer in milliseconds; zero disables it. Traffic in either direction resets
+the deadline. UDP is rejected. Choose a deadline longer than the service's
+legitimate quiet periods, or use application heartbeats.
+
+## Building from source
 
 ```bash
 bun install
 bun run build:release   # LTO + strip
 bun test                # smoke + e2e (e2e needs `cargo build --bin pb-mapper`)
 ```
-
-### TCP idle connection reclamation
-
-Use `client.registerWithIdleTimeout(request, idleTimeoutMs)` to reclaim abandoned
-data connections on the publishing device. The timeout is a non-negative safe
-integer in milliseconds; zero disables it. Traffic in either direction resets
-the deadline. UDP is rejected. `register(request)` keeps the existing default,
-and other registrations and control connections are unaffected.
-
-Choose a deadline longer than the service's legitimate quiet periods, or use
-application heartbeats. This is a publisher SDK policy, not a relay protocol
-change: existing compatible relays and subscribers do not need an upgrade.
-
-### Recovery diagnostics
-
-`registration.diagnostics()` and `connection.diagnostics()` report the running
-SDK version, latest attempt phase, failure reason, timing and shared setup counts.
-`client.notifyNetworkChange()` wakes pending recovery after a host network/resume
-notification; healthy forwarding stays open. Workers retry initial DNS failures,
-refresh relay addresses through the OS resolver, and share bounded setup capacity.
-See [recovery design](../docs/weak-network-recovery.md) for bounds and limitations.
-
-### Direct connections with relay fallback
-
-Direct is opt-in on every side: the relay enables its UDP service, the
-publisher passes `allowDirect: true`, and each connect chooses `path: "auto"`.
-`"relay-only"` is the default, so existing calls keep the relay protocol.
-
-```ts
-const reg = await client.register({
-  key: "echo", localAddr: "127.0.0.1:8080", transport: "tcp", allowDirect: true,
-});
-const conn = await client.connect({
-  key: "echo", localAddr: "127.0.0.1:9090", transport: "tcp", path: "auto",
-});
-await conn.waitReady();
-console.log(conn.diagnostics().direct); // populated after path selection
-console.log(JSON.parse(await client.sessionsJson()));
-await conn.stop();
-await reg.stop();
-```
-
-`auto` tries UDP hole punching and mutually authenticated QUIC, then falls back
-to the relay if setup fails before commit. After commit a failed connection
-closes and is never replayed onto the relay. Established direct connections
-survive coordinator loss and credential revocation; local `stop()` closes them.
-Session reports carry ages and `stale`, `conflicting` and `restored` flags; they
-never authorize a connection.

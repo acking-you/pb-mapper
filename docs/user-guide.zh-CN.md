@@ -52,6 +52,12 @@ sequenceDiagram
 
 控制连接同时使用租约和接收超时。register 超过容忍窗口后会独立探测精确的 `conn_id` 和 `generation`；注册丢失会触发重连。超过容忍窗口加宽限期仍没有入站控制消息，也会触发重连，即使 status 中还存在这条连接。relay 对单次慢 ACK 先标记 suspect，并等待宽限期内的认证消息确认，不立即注销整个服务。connect 的本地监听持续保留，健康探测在后台进行，控制连接重建也不关闭仍健康的数据流。具体期限、资源上限和故障测试见[弱网恢复设计](weak-network-recovery.md)。
 
+### 直连（默认）
+
+每条新连接都先尝试 P2P 路径：消费端向 relay 申请会话授权，两端通过 relay 的 STUN 服务获知各自的公网 UDP 地址，打通各自的 NAT，再建立双向认证的 QUIC 连接；只有到这一步，提供端才会拨号本地服务。任何一步失败，这条连接都会在发送业务字节之前改走上面的中继路径，因此不会重放数据，后端也只拨号一次。回退之后，这条隧道接下来的连接会直接走中继一段时间（10 秒起，翻倍到 5 分钟；直连成功或网络切换时清零）。
+
+直连不需要任何配置：relay 在与 TCP 相同的端口号上监听 UDP，所有角色默认都允许直连。在 `server`、`register` 或 `connect` 上加 `--relay-only` 即可关闭对应一侧的直连。已建立的直连会话归两端所有：relay 重启或凭据吊销只阻止新的建连，不会切断它；停止本地隧道才会关闭它。
+
 ## 环境准备
 
 - 可选：Flutter SDK（用于 `ui/` 图形界面）
@@ -120,8 +126,13 @@ flutter run
 pb-mapper server --port 7666
 ```
 
+relay 监听 `7666/tcp`，并为直连监听 `7666/udp`。请在防火墙和云安全组同时放行两者；不放行 UDP 时，所有连接仍可经中继工作。
+
 可选参数：
 
+- `--relay-only`（别名 `--disable-direct`）：只提供中继，不开 UDP 端口
+- `--direct-listen <ADDR>`：把直连协调绑定到其他地址（默认是 relay 地址的 UDP）
+- `--direct-advertise <IP:PORT>`：UDP 端口与 TCP 端口映射不一致时，告诉客户端应使用的公网地址（默认使用客户端拨通 relay 的地址）
 - `--ipv6`：开启 IPv6 监听
 - `--keep-alive`：开启 TCP keep-alive
 - `--auth-state-dir`：认证状态目录（Linux 系统服务默认 `/var/lib/pb-mapper/auth`；无特权 Linux、macOS 与 Windows 使用当前用户可写的应用目录）
@@ -184,7 +195,9 @@ pb-mapper register udp \
   --addr "127.0.0.1:8211"
 ```
 
-如需启用 AES-256-GCM 的转发消息加密，请在 register 命令中加入 `--codec`。
+如需为中继流量启用 AES-256-GCM 加密，请在 register 命令中加入 `--codec`。直连会话始终由 QUIC 加密。
+
+加上 `--relay-only` 可以让这项服务的所有会话都只走中继。
 
 ### 3）远程客户端连接
 
@@ -197,12 +210,17 @@ pb-mapper connect tcp \
 
 完成后，远程机器可通过 `127.0.0.1:9090` 访问目标服务。
 
+连接默认先尝试直连（`--path auto`）。使用 `--relay-only`（或 `--path relay-only`）可让这条隧道始终走中继。
+
 ### 状态命令
 
 ```bash
 pb-mapper status remote-id --server "your-server:7666"
 pb-mapper status keys --server "your-server:7666"
+pb-mapper status sessions --server "your-server:7666"
 ```
+
+`status sessions` 列出本命名空间内的会话及各自走的路径（`direct` 或 `relay`）。这些是端点上报的观测，带有时间与 `stale` 标记，不代表存活证明。
 
 管理员可明确查看或连接某个临时命名空间：
 

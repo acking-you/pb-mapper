@@ -1,5 +1,7 @@
 # Issue #13：直连优先、失败中继的设计与实施方案
 
+> **0.8.0 起直连默认开启。** relay 在与 TCP 相同的端口号上监听 UDP，`register` 默认允许直连，`connect` 默认 `--path auto`；任一侧加 `--relay-only` 即恢复原有中继协议，0.7 的 `--enable-direct`、`--allow-direct`、`--path auto` 仍然可用。`--direct-advertise` 可以省略：relay 只公布端口号，客户端用自己拨通 relay 的地址与之配对。消费端在提交前回退后会暂停直连一段时间（10 秒起翻倍到 5 分钟，直连成功或网络切换时清零）。下文记录的是 0.7.0 的初始设计，其中“默认仅中继”“必须显式开启”等描述以本段为准。
+
 采用 **pb-mapper 自主协调 + 现有 TCP 控制面 + STUN/UDP 探测 + Quinn QUIC 直连 + 现有 TCP 中继兜底**。服务端开启直连支持且对应 UDP 探测端口就绪后，客户端每次 `connect` 可选择直连优先或仅中继；默认仅中继，保持现有协议和控制方式。server 完成建连授权、候选地址交换和状态汇总；直连建立后，由两端客户端持有和关闭会话。
 
 这份方案按 2026-10-23 的讨论收敛：用户最新要求覆盖 [issue #13](https://github.com/acking-you/pb-mapper/issues/13) 中原有的“服务端请求关闭直连”要求。本次已实现服务端开关、逐次 connect 策略、打洞直连、提交前中继兜底，以及只读会话观测。CLI、Rust SDK 和 Node API 接入了这些能力；现有 C ABI/Flutter 继续使用默认中继入口。Rust 工具链/SDK 最低版本/CI 升级到 1.99.1。下文第 4 节起描述实际实现，验收证据见 [测试记录](issue-13-validation.zh-CN.md)。

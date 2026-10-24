@@ -12,12 +12,19 @@
   Dockerfiles, install scripts and the Dart loader; do not rename them.
 
 ## Compatibility invariants
-- Defaults keep the existing protocol: the relay's direct service is off,
-  `register` does not allow direct, `connect` is relay-only. New wire fields are
-  optional and omitted when unset; old SDK request literals must keep compiling.
+- Defaults are direct first with relay fallback: the relay serves direct
+  coordination on its TCP port number over UDP and announces only that port
+  (clients pair it with the relay address they dialed), `register` allows
+  direct, `connect` uses `--path auto`. `--relay-only` on any side restores the
+  pre-direct protocol for it, and the 0.7 opt-in flags still parse. New wire
+  fields are optional and omitted when unset; old SDK request literals must
+  keep compiling.
 - Direct (`crates/*/src/direct`, `pb-mapper-protocol/src/direct.rs`) is tried
-  only when the relay, the publisher and that connect all opt in. pb-mapper
-  owns coordination; reuse mature crates, not a whole foreign runtime.
+  only when the relay, the publisher and that connect all allow it. After a
+  pre-commit fallback the consumer pauses direct (10 s doubling to 5 min,
+  cleared by a direct success or a network change) so an unpunchable path
+  costs one attempt, not one per connection. pb-mapper owns coordination;
+  reuse mature crates, not a whole foreign runtime.
 - The commit point is StartDirect: the publisher dials its backend only after
   it, and the consumer marks the attempt committed before sending it. Fallback
   to relay happens only before commit, pins the selected publisher and
