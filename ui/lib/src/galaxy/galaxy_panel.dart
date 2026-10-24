@@ -206,10 +206,11 @@ class _SystemDetail extends StatelessWidget {
                   ),
                 ]
               : [
-                  OutlinedButton.icon(
-                    onPressed: () => scope.go(AppPage.settings),
-                    icon: const Icon(AppIcons.settings, size: 16),
-                    label: Text(l10n.relaySettings),
+                  FilledButton.tonalIcon(
+                    key: const Key('galaxy-open-relay'),
+                    onPressed: () => scope.go(AppPage.relay),
+                    icon: const Icon(AppIcons.relay, size: 16),
+                    label: Text(l10n.relayOpen),
                   ),
                 ],
         ),

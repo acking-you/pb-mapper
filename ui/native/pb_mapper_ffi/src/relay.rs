@@ -1,0 +1,494 @@
+//! The relay as a whole, for the UI's Relay page: who this computer is to
+//! the relay, the direct sessions it observes, and — with the administrator
+//! key — every administrator operation, through the same SDK the CLI's
+//! `pb-mapper admin` uses, so the two cannot drift.
+//!
+//! One export, [`pb_mapper_relay_call_json`], takes `{"op": …, …}` and answers
+//! with the usual envelope, rather than a symbol per operation: the
+//! operations share everything but their arguments, and the Dart side keeps
+//! a typed method for each. Only the relay's address and keep-alive are read
+//! under the state lock; the network call runs without it, so a slow relay
+//! holds up nothing else.
+
+use std::ffi::c_char;
+use std::time::Duration;
+
+use pb_mapper_client::sdk::{
+    Admin, AuthStatusInfo, Client, ConnectionInfo, Error as SdkError, IssuedKey, KeyMetadata,
+    LegacyProtocol, ServiceInfo, SessionObservation,
+};
+use pb_mapper_core::checksum::{Credential, get_process_credential};
+use serde_json::{Value, json};
+
+use crate::ctl::Origin;
+use crate::error::CtlError;
+use crate::events;
+use crate::handle::PbMapperHandle;
+use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
+
+/// Long enough for an inventory paged across a large relay, short enough
+/// that a relay that stopped answering is reported rather than waited on.
+const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs one relay operation; see the module docs.
+///
+/// # Safety
+///
+/// `handle` must come from `pb_mapper_create` and not yet be destroyed, and
+/// `request` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pb_mapper_relay_call_json(
+    handle: *mut PbMapperHandle,
+    request: *const c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        return err_null_handle();
+    }
+    let request = match parse_c_string(request, "request")
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(bad_request))
+    {
+        Ok(request) => request,
+        Err(error) => return err_ctl(&error),
+    };
+
+    let handle = unsafe { &mut *handle };
+    let state = handle.state.clone();
+    let result = handle.runtime.block_on(async move {
+        let (server, keep_alive) = state.lock().await.relay_target();
+        let credential = get_process_credential();
+        let op = op(&request)?.to_owned();
+        let outcome = tokio::time::timeout(
+            CALL_TIMEOUT,
+            call(&server, keep_alive, credential, &request),
+        )
+        .await
+        .map_err(|_| {
+            CtlError::timeout(format!(
+                "{server} did not finish `{op}` within {} seconds",
+                CALL_TIMEOUT.as_secs()
+            ))
+        })??;
+        // A rotated administrator key is the only one the relay accepts now:
+        // this computer switches to it before anything else talks to the
+        // relay, or every later call would fail.
+        if let Some(key) = outcome.rotated_key {
+            let mut state = state.lock().await;
+            state
+                .update_config(server, keep_alive, key.clone())
+                .await
+                .map_err(|error| {
+                    CtlError::io(format!(
+                        "The relay now uses a new administrator key, but this computer could \
+                         not save it ({error}). Keep it somewhere safe: {key}"
+                    ))
+                })?;
+            drop(state);
+            events::emit(events::ChangeKind::Config, None, Origin::Ui);
+        }
+        Ok::<_, CtlError>(outcome.data)
+    });
+    match result {
+        Ok(data) => ok_data(data),
+        Err(error) => err_ctl(&error),
+    }
+}
+
+/// What an operation answered, and the administrator key it rotated to, if
+/// it rotated one.
+struct Outcome {
+    data: Value,
+    rotated_key: Option<String>,
+}
+
+impl From<Value> for Outcome {
+    fn from(data: Value) -> Self {
+        Self {
+            data,
+            rotated_key: None,
+        }
+    }
+}
+
+fn op(request: &Value) -> Result<&str, CtlError> {
+    request
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CtlError::invalid_argument("The relay request has no `op`"))
+}
+
+fn bad_request(error: serde_json::Error) -> CtlError {
+    CtlError::invalid_argument(format!("The relay request is not JSON: {error}"))
+}
+
+fn u64_arg(request: &Value, name: &str) -> Result<u64, CtlError> {
+    request
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CtlError::invalid_argument(format!("`{name}` must be a whole number")))
+}
+
+fn opt_u64_arg(request: &Value, name: &str) -> Result<Option<u64>, CtlError> {
+    match request.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => u64_arg(request, name).map(Some),
+    }
+}
+
+fn str_arg<'a>(request: &'a Value, name: &str) -> Result<&'a str, CtlError> {
+    request
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| CtlError::invalid_argument(format!("`{name}` must be text")))
+}
+
+/// The operation itself, against `server` with `credential`. Separate from
+/// the export so a test can drive it against a relay of its own.
+async fn call(
+    server: &str,
+    keep_alive: bool,
+    credential: Result<Credential, String>,
+    request: &Value,
+) -> Result<Outcome, CtlError> {
+    let op = op(request)?;
+    if op == "credential" {
+        return Ok(credential_json(&credential).into());
+    }
+    if server.trim().is_empty() {
+        return Err(CtlError::invalid_argument("No relay address is set"));
+    }
+    let credential = credential.map_err(|error| {
+        CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
+    })?;
+    let client = Client::from_credential(server, credential, keep_alive, None);
+    if op == "sessions" {
+        let sessions = client.sessions().await.map_err(sdk_error)?;
+        return Ok(Value::Array(sessions.iter().map(session_json).collect()).into());
+    }
+
+    let admin = client.admin().map_err(sdk_error)?;
+    let data = match op {
+        "auth_status" => auth_status_json(&admin.auth_status().await.map_err(sdk_error)?),
+        "services" => Value::Array(
+            admin
+                .list_services_all(None)
+                .await
+                .map_err(sdk_error)?
+                .iter()
+                .map(service_json)
+                .collect(),
+        ),
+        "connections" => Value::Array(
+            admin
+                .list_connections_all(None)
+                .await
+                .map_err(sdk_error)?
+                .iter()
+                .map(connection_json)
+                .collect(),
+        ),
+        "keys" => Value::Array(
+            admin
+                .list_keys_all()
+                .await
+                .map_err(sdk_error)?
+                .iter()
+                .map(key_json)
+                .collect(),
+        ),
+        "key_issue" => {
+            let ttl = Duration::from_secs(u64_arg(request, "ttlSeconds")?);
+            let label = request
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_owned);
+            issued_json(&admin.issue_key(ttl, label).await.map_err(sdk_error)?)
+        }
+        "key_reveal" => issued_json(
+            &admin
+                .reveal_key(u64_arg(request, "keyId")?)
+                .await
+                .map_err(sdk_error)?,
+        ),
+        "key_renew" => issued_json(
+            &admin
+                .renew_key(
+                    u64_arg(request, "keyId")?,
+                    Duration::from_secs(u64_arg(request, "ttlSeconds")?),
+                )
+                .await
+                .map_err(sdk_error)?,
+        ),
+        "key_revoke" => key_json(
+            &admin
+                .revoke_key(u64_arg(request, "keyId")?)
+                .await
+                .map_err(sdk_error)?,
+        ),
+        "key_gc" => json!({ "removed": admin.gc_keys().await.map_err(sdk_error)? }),
+        "retire" => json!({
+            "retired": admin
+                .retire_connections(
+                    opt_u64_arg(request, "keyId")?,
+                    str_arg(request, "service")?.to_owned(),
+                    opt_u64_arg(request, "connId")?
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(|_| CtlError::invalid_argument("`connId` is out of range"))?,
+                )
+                .await
+                .map_err(sdk_error)?,
+        }),
+        "legacy_protocol" => {
+            let allow = request
+                .get("allow")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| CtlError::invalid_argument("`allow` must be true or false"))?;
+            admin
+                .set_legacy_protocol(if allow {
+                    LegacyProtocol::Allow
+                } else {
+                    LegacyProtocol::Deny
+                })
+                .await
+                .map_err(sdk_error)?;
+            json!({ "allow": allow })
+        }
+        "reset_auth_state" => {
+            admin.reset_auth_state().await.map_err(sdk_error)?;
+            json!({})
+        }
+        "rotate_root_key" => return rotate(&admin).await,
+        other => {
+            return Err(CtlError::invalid_argument(format!(
+                "Unknown relay operation `{other}`"
+            )));
+        }
+    };
+    Ok(data.into())
+}
+
+/// Rotate to a generated administrator key, and hand it back to be saved as
+/// this computer's credential. When the outcome is unknown the relay may
+/// already be on the new key, so the error carries it rather than lose it.
+async fn rotate(admin: &Admin) -> Result<Outcome, CtlError> {
+    match admin.rotate_root_key(None).await {
+        Ok(key) => Ok(Outcome {
+            data: json!({ "adminKey": key }),
+            rotated_key: Some(key),
+        }),
+        Err(SdkError::RootRotationUncertain { candidate, message }) => {
+            Err(CtlError::protocol(format!(
+                "The relay may already be using a new administrator key ({message}). Keep it \
+                 somewhere safe and try it if the old one stops working: {candidate}"
+            )))
+        }
+        Err(error) => Err(sdk_error(error)),
+    }
+}
+
+fn sdk_error(error: SdkError) -> CtlError {
+    match error {
+        SdkError::NotAdministrator => CtlError::invalid_argument(
+            "This computer's credential is not the relay's administrator key",
+        ),
+        SdkError::InvalidConfig { message } => CtlError::invalid_argument(message),
+        SdkError::Address { .. } => CtlError::invalid_address(error.to_string()),
+        SdkError::Connect { .. } => CtlError::server_unreachable(error.to_string()),
+        SdkError::TimedOut { .. } => CtlError::timeout(error.to_string()),
+        SdkError::Remote { code, message, .. } => {
+            CtlError::protocol(format!("The relay refused: {message} ({code})"))
+        }
+        other => CtlError::protocol(other.to_string()),
+    }
+}
+
+fn credential_json(credential: &Result<Credential, String>) -> Value {
+    match credential {
+        Ok(credential) if credential.is_admin() => json!({ "role": "admin" }),
+        Ok(credential) => json!({ "role": "temporary", "keyId": credential.key_id() }),
+        Err(error) => json!({ "role": "none", "error": error }),
+    }
+}
+
+fn session_json(session: &SessionObservation) -> Value {
+    let reports = [&session.consumer, &session.provider];
+    let latest = reports
+        .iter()
+        .filter_map(|report| report.as_ref())
+        .min_by_key(|report| report.age_ms);
+    let id: String = session.id[..6].iter().map(|b| format!("{b:02x}")).collect();
+    json!({
+        "id": id,
+        "service": session.service,
+        "transport": if session.is_datagram { "UDP" } else { "TCP" },
+        "path": latest.map(|report| format!("{:?}", report.report.path).to_lowercase()),
+        "state": latest.map(|report| format!("{:?}", report.report.state).to_lowercase()),
+        "reason": latest.and_then(|report| report.report.reason.clone()),
+        "ageMs": latest.map(|report| report.age_ms),
+        "consumerSeen": session.consumer.is_some(),
+        "providerSeen": session.provider.is_some(),
+        "stale": session.stale,
+        "conflicting": session.conflicting,
+        "restored": session.restored,
+    })
+}
+
+fn auth_status_json(status: &AuthStatusInfo) -> Value {
+    json!({
+        "safeMode": status.safe_mode,
+        "capacity": status.capacity,
+        "activeKeys": status.active_keys,
+        "expiredKeys": status.expired_keys,
+        "revokedKeys": status.revoked_keys,
+        "legacyAllowed": status.legacy_protocol == LegacyProtocol::Allow,
+        "activeLegacyConnections": status.active_legacy_connections,
+        "lastLegacyConnectionAt": status.last_legacy_connection_at,
+        "authSuccesses": status.auth_successes,
+        "authFailures": status.auth_failures,
+        "serverInstanceId": status.server_instance_id,
+    })
+}
+
+fn service_json(service: &ServiceInfo) -> Value {
+    json!({
+        "keyId": service.key_id,
+        "namespace": service.namespace,
+        "name": service.service_name,
+        "transport": service.transport,
+        "encrypted": service.codec_enabled,
+        "connections": service.connection_count,
+    })
+}
+
+fn connection_json(connection: &ConnectionInfo) -> Value {
+    json!({
+        "keyId": connection.key_id,
+        "namespace": connection.namespace,
+        "service": connection.service_name,
+        "connId": connection.conn_id,
+        "generation": connection.generation,
+        "protocolVersion": connection.protocol_version,
+        "healthy": connection.healthy,
+        "transport": connection.transport,
+        "encrypted": connection.codec_enabled,
+        "lastRxAgeMs": connection.last_rx_age_ms,
+    })
+}
+
+fn key_json(key: &KeyMetadata) -> Value {
+    json!({
+        "keyId": key.key_id,
+        "state": key.state,
+        "issuedAt": key.issued_at,
+        "expiresAt": key.expires_at,
+        "label": key.label,
+    })
+}
+
+fn issued_json(key: &IssuedKey) -> Value {
+    json!({
+        "keyId": key.key_id,
+        "state": key.state,
+        "issuedAt": key.issued_at,
+        "expiresAt": key.expires_at,
+        "label": key.label,
+        "credential": key.credential,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pb_mapper_core::checksum::parse_credential;
+    use pb_mapper_testkit::{Relay, TEST_ADMIN_KEY};
+
+    async fn run(relay: &Relay, credential: &str, request: Value) -> Result<Value, CtlError> {
+        call(
+            &relay.addr().to_string(),
+            false,
+            parse_credential(credential),
+            &request,
+        )
+        .await
+        .map(|outcome| outcome.data)
+    }
+
+    #[tokio::test]
+    async fn an_administrator_runs_the_credential_lifecycle_over_the_wire() {
+        let relay = Relay::start("ffi-relay-call").await;
+        let admin = |request| run(&relay, TEST_ADMIN_KEY, request);
+
+        let role = admin(json!({ "op": "credential" })).await.unwrap();
+        assert_eq!(role["role"], "admin");
+
+        let issued = admin(json!({ "op": "key_issue", "ttlSeconds": 3600, "label": "laptop" }))
+            .await
+            .unwrap();
+        let key_id = issued["keyId"].as_u64().unwrap();
+        let credential = issued["credential"].as_str().unwrap().to_owned();
+        assert!(credential.starts_with("pbmt1_"), "{credential}");
+        assert_eq!(issued["label"], "laptop");
+
+        let keys = admin(json!({ "op": "keys" })).await.unwrap();
+        assert!(
+            keys.as_array()
+                .unwrap()
+                .iter()
+                .any(|key| key["keyId"] == key_id && key["state"] == "active"),
+            "{keys}"
+        );
+
+        let revealed = admin(json!({ "op": "key_reveal", "keyId": key_id }))
+            .await
+            .unwrap();
+        assert_eq!(revealed["credential"], credential.as_str());
+
+        let status = admin(json!({ "op": "auth_status" })).await.unwrap();
+        assert!(status["activeKeys"].as_u64().unwrap() >= 1, "{status}");
+        assert!(status["capacity"].as_u64().unwrap() > 0, "{status}");
+
+        // The temporary credential is not an administrator: refused before
+        // anything reaches the relay.
+        let temporary = run(&relay, &credential, json!({ "op": "keys" }))
+            .await
+            .unwrap_err();
+        assert!(
+            temporary.to_string().contains("administrator"),
+            "{temporary}"
+        );
+        let role = run(&relay, &credential, json!({ "op": "credential" }))
+            .await
+            .unwrap();
+        assert_eq!(role["role"], "temporary");
+        assert_eq!(role["keyId"], key_id);
+
+        let revoked = admin(json!({ "op": "key_revoke", "keyId": key_id }))
+            .await
+            .unwrap();
+        assert_eq!(revoked["state"], "revoked");
+
+        for op in ["services", "connections", "sessions"] {
+            let listed = admin(json!({ "op": op })).await.unwrap();
+            assert!(listed.is_array(), "{op}: {listed}");
+        }
+
+        let unknown = admin(json!({ "op": "teleport" })).await.unwrap_err();
+        assert!(unknown.to_string().contains("teleport"), "{unknown}");
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_does_not_answer_is_reported() {
+        let error = call(
+            "127.0.0.1:1",
+            false,
+            parse_credential(TEST_ADMIN_KEY),
+            &json!({ "op": "keys" }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.code(), crate::error::ErrorCode::ServerUnreachable);
+    }
+}

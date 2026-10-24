@@ -3,19 +3,22 @@ import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_view.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
+import 'package:pb_mapper_ui/src/state/relay_store.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/updates/update_controller.dart';
 
-/// The four places the app has. Everything else opens over one of them.
+/// The five places the app has. Everything else opens over one of them.
 enum AppPage {
   overview,
   tunnels,
+  relay,
   logs,
   settings;
 
   IconData get icon => switch (this) {
     AppPage.overview => AppIcons.overview,
     AppPage.tunnels => AppIcons.tunnels,
+    AppPage.relay => AppIcons.relay,
     AppPage.logs => AppIcons.logs,
     AppPage.settings => AppIcons.settings,
   };
@@ -25,6 +28,7 @@ enum AppPage {
     return switch (this) {
       AppPage.overview => l10n.navOverview,
       AppPage.tunnels => l10n.navTunnels,
+      AppPage.relay => l10n.navRelay,
       AppPage.logs => l10n.navLogs,
       AppPage.settings => l10n.navSettings,
     };
@@ -32,7 +36,10 @@ enum AppPage {
 
   /// A page of cards sits on the grouped grey sheet, so its white cards lift
   /// off it; a page you look at or read sits on white.
-  bool get grouped => this == AppPage.tunnels || this == AppPage.settings;
+  bool get grouped =>
+      this == AppPage.tunnels ||
+      this == AppPage.relay ||
+      this == AppPage.settings;
 
   static AppPage? parse(String? name) {
     for (final page in values) {
@@ -48,6 +55,7 @@ class AppScope extends InheritedWidget {
   const AppScope({
     super.key,
     required this.store,
+    required this.relay,
     required this.prefs,
     required this.updates,
     required this.galaxy,
@@ -57,6 +65,9 @@ class AppScope extends InheritedWidget {
   });
 
   final AppStore store;
+
+  /// The relay as a whole, read while the Relay page is on screen.
+  final RelayStore relay;
   final AppPrefs prefs;
 
   /// The app's self-update, owned by the app so a background find is still
@@ -81,6 +92,7 @@ class AppScope extends InheritedWidget {
   @override
   bool updateShouldNotify(AppScope old) =>
       old.store != store ||
+      old.relay != relay ||
       old.prefs != prefs ||
       old.updates != updates ||
       old.galaxy != galaxy ||

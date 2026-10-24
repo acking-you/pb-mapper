@@ -11,6 +11,7 @@ mod events;
 mod galaxy;
 mod handle;
 mod logging;
+mod relay;
 mod response;
 mod server;
 mod service;
@@ -34,6 +35,7 @@ pub use handle::{
     pb_mapper_start_control_server,
 };
 pub use logging::{pb_mapper_free_string, pb_mapper_init_logging, pb_mapper_set_log_callback};
+pub use relay::pb_mapper_relay_call_json;
 pub use server::{
     pb_mapper_force_refresh_server_status_json, pb_mapper_get_local_server_status_json,
     pb_mapper_get_server_status_detail_json, pb_mapper_start_server, pb_mapper_stop_server,

@@ -9,6 +9,7 @@ import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/updates/update_controller.dart';
+import 'package:toastification/toastification.dart' show toastification;
 
 import 'fake_pb_mapper_api.dart';
 
@@ -66,9 +67,13 @@ Future<void> settle(WidgetTester tester) async {
   await tester.pumpAndSettle(const Duration(milliseconds: 16));
 }
 
-/// Unmount the app and let any toast's timer run out, so no timer outlives
-/// the test.
+/// Close every toast, unmount the app, and let any toast's timer run out, so
+/// no timer outlives the test. An error toast stays until closed, and one left
+/// open would keep toastification holding an overlay the next test no longer
+/// has — that test's toasts would then never appear.
 Future<void> finish(WidgetTester tester) async {
+  toastification.dismissAll(delayForAnimation: false);
+  await tester.pump(const Duration(seconds: 1));
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump(const Duration(seconds: 6));
 }

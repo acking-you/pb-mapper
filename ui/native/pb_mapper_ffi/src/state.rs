@@ -121,8 +121,9 @@ async fn fetch_real_status_with_addr(
         get_remote_id_data_with_addr(server_addr),
     );
 
-    let services =
-        keys_result.map_err(|e| CtlError::internal(format!("Failed to get server keys: {e}")))?;
+    // The reason as it is: Settings' Test shows it to the user, after its own
+    // "The relay didn't answer".
+    let services = keys_result.map_err(|e| CtlError::internal(e.to_string()))?;
     let remote_id_data = remote_id_result.unwrap_or_else(|e| {
         tracing::warn!("Failed to get remote-id data: {}, using empty data", e);
         RemoteIdData {
@@ -342,6 +343,12 @@ pub struct ServerStatusDetail {
     pub server_map: String,
     pub active_connections: String,
     pub idle_connections: String,
+    /// Why the relay did not answer, for the person who asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// How long it took to answer, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 
 /// One control connection the server is holding for a service key.

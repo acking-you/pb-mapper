@@ -287,6 +287,12 @@ class PbMapperService {
   Future<Map<String, dynamic>> forceRefreshServerStatus() {
     return _runJsonOnWorker('forceRefreshServerStatus', {});
   }
+
+  /// A relay status or administrator operation: [request] carries its `op`
+  /// and arguments (see `relay.rs`).
+  Future<Map<String, dynamic>> relayCall(Map<String, Object?> request) {
+    return _runJsonOnWorker('relayCall', {'request': jsonEncode(request)});
+  }
 }
 
 Map<String, dynamic> _decodeJsonStatic(PbMapperFFI ffi, Pointer<Utf8> ptr) {
@@ -426,6 +432,10 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
         break;
       case 'forceRefreshServerStatus':
         result = ffi.pbMapperForceRefreshServerStatus(handle);
+        break;
+      case 'relayCall':
+        arg1 = (params['request'] as String).toNativeUtf8();
+        result = ffi.pbMapperRelayCall(handle, arg1);
         break;
       default:
         return {'success': false, 'message': 'Unknown op: $op'};

@@ -25,9 +25,15 @@ void main() {
     expect(find.byKey(const Key('tunnel-share:nas')), findsOneWidget);
     expect(find.byKey(const Key('tunnel-connect:rdp')), findsOneWidget);
     expect(find.text('127.0.0.1:5000  ·  TCP  ·  Encrypted'), findsOneWidget);
-    // A key this computer shares is not offered back to it.
-    expect(find.byKey(const Key('remote-nas')), findsNothing);
-    expect(find.byKey(const Key('remote-cache')), findsOneWidget);
+    // What else the relay offers is the Relay page's; this counts it (a key
+    // this computer shares is not offered back to it) and leads there.
+    expect(
+      find.text('2 services on the relay you can connect to.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const Key('tunnels-open-relay')));
+    await settle(tester);
+    expect(find.byKey(const Key('relay-list')), findsOneWidget);
     await finish(tester);
   });
 
@@ -95,49 +101,6 @@ void main() {
     await settle(tester);
     expect(api.calls, ['deleteServiceConfig(web)']);
     expect(find.byKey(const Key('tunnel-share:web')), findsNothing);
-    await finish(tester);
-  });
-
-  testWidgets('a relay service connects with its key filled in', (
-    tester,
-  ) async {
-    final api = FakePbMapperApi(serverServices: ['cache']);
-    await _open(tester, api);
-    await tester.tap(find.byKey(const Key('connect-cache')));
-    await settle(tester);
-    final field = tester.widget<TextField>(
-      find.descendant(
-        of: find.byKey(const Key('tunnel-key')),
-        matching: find.byType(TextField),
-      ),
-    );
-    expect(field.controller?.text, 'cache');
-
-    await tester.tap(find.byKey(const Key('tunnel-submit')));
-    await settle(tester);
-    expect(api.calls, ['connectService(cache)']);
-    expect(find.byKey(const Key('tunnel-connect:cache')), findsOneWidget);
-    await finish(tester);
-  });
-
-  testWidgets('what the relay holds for a key opens on request', (
-    tester,
-  ) async {
-    await _open(
-      tester,
-      FakePbMapperApi(
-        serverServices: ['cache'],
-        conns: {
-          'cache': [fakeConn(connId: 41), fakeConn(connId: 42, healthy: false)],
-        },
-      ),
-    );
-    expect(find.text('#41'), findsNothing);
-    await tester.tap(find.byKey(const Key('conns-cache')));
-    await settle(tester);
-    expect(find.text('#41'), findsOneWidget);
-    expect(find.text('#42'), findsOneWidget);
-    expect(find.text('Unhealthy'), findsOneWidget);
     await finish(tester);
   });
 }

@@ -4,6 +4,7 @@ import 'package:pb_mapper_ui/src/common/locale_controller.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/pages/overview_page.dart';
+import 'package:pb_mapper_ui/src/pages/relay_page.dart';
 import 'package:pb_mapper_ui/src/pages/settings_page.dart';
 import 'package:pb_mapper_ui/src/pages/tunnels_page.dart';
 import 'package:pb_mapper_ui/src/shell/navigation.dart';
@@ -21,12 +22,12 @@ FakePbMapperApi _fresh() => FakePbMapperApi(
 
 void main() {
   group('shell', () {
-    testWidgets('a wide window has a rail with the four pages', (tester) async {
+    testWidgets('a wide window has a rail with the five pages', (tester) async {
       await pumpApp(tester, FakePbMapperApi());
       expect(find.byType(NavRail), findsOneWidget);
       expect(find.byType(NavBar), findsNothing);
       expect(find.byType(OverviewPage), findsOneWidget);
-      for (final page in ['overview', 'tunnels', 'logs', 'settings']) {
+      for (final page in ['overview', 'tunnels', 'relay', 'logs', 'settings']) {
         expect(find.byKey(Key('nav-$page')), findsOneWidget);
       }
 
@@ -51,14 +52,16 @@ void main() {
       await pumpApp(tester, FakePbMapperApi(relayUp: false));
       expect(
         find.descendant(
-          of: find.byKey(const Key('nav-relay')),
+          of: find.byKey(const Key('rail-relay-status')),
           matching: find.text('Relay unreachable'),
         ),
         findsOneWidget,
       );
-      await tester.tap(find.byKey(const Key('nav-relay')));
+      // It opens the relay itself, where the reason is.
+      await tester.tap(find.byKey(const Key('rail-relay-status')));
       await settle(tester);
-      expect(find.byType(SettingsPage), findsOneWidget);
+      expect(find.byType(RelayPage), findsOneWidget);
+      expect(find.textContaining('connection refused'), findsOneWidget);
       await finish(tester);
     });
 
@@ -71,7 +74,7 @@ void main() {
     });
 
     testWidgets('nothing on screen overflows on a small phone', (tester) async {
-      for (final page in ['overview', 'tunnels', 'logs', 'settings']) {
+      for (final page in ['overview', 'tunnels', 'relay', 'logs', 'settings']) {
         await pumpApp(
           tester,
           FakePbMapperApi(

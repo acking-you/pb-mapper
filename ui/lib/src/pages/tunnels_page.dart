@@ -8,9 +8,7 @@ import 'package:pb_mapper_ui/src/shell/page_frame.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
-import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
-import 'package:pb_mapper_ui/src/widgets/connections.dart';
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
 
@@ -120,22 +118,21 @@ class TunnelsPage extends StatelessWidget {
       case RelayState.checking:
         return [EmptyNote(icon: AppIcons.relay, text: l10n.relayChecking)];
       case RelayState.online:
+        // Browsing, connecting and managing what the relay holds is the
+        // Relay page's; this only says there is something to find there.
         final remote = store.remoteServices;
-        if (remote.isEmpty) {
-          return [
-            EmptyNote(icon: AppIcons.relay, text: l10n.sectionRelayEmpty),
-          ];
-        }
         return [
-          _Card(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Column(
-              children: [
-                for (final (i, key) in remote.indexed) ...[
-                  if (i > 0) const Divider(indent: 58),
-                  _RemoteRow(serviceKey: key),
-                ],
-              ],
+          EmptyNote(
+            key: const Key('tunnels-relay-link'),
+            icon: AppIcons.relay,
+            text: remote.isEmpty
+                ? l10n.sectionRelayEmpty
+                : l10n.tunnelsRelayLink(remote.length),
+            action: FilledButton.tonal(
+              key: const Key('tunnels-open-relay'),
+              onPressed: () => scope.go(AppPage.relay),
+              style: rowButtonStyle(context),
+              child: Text(l10n.relayOpen),
             ),
           ),
         ];
@@ -159,26 +156,6 @@ class _AddButton extends StatelessWidget {
     ),
     icon: const Icon(AppIcons.add, size: 16),
     label: Text(label, style: const TextStyle(fontSize: 13)),
-  );
-}
-
-/// A white card on the grouped sheet.
-class _Card extends StatelessWidget {
-  const _Card({
-    super.key,
-    required this.child,
-    this.padding = const EdgeInsets.all(14),
-  });
-
-  final Widget child;
-  final EdgeInsetsGeometry padding;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 10),
-    child: RaisedSurface(
-      child: Padding(padding: padding, child: child),
-    ),
   );
 }
 
@@ -238,7 +215,7 @@ class TunnelCard extends StatelessWidget {
       size: 34,
     );
     final problem = tunnel.problem;
-    return _Card(
+    return ListCard(
       key: Key('tunnel-${tunnel.id}'),
       padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
       child: Column(
@@ -324,7 +301,7 @@ class _ToggleButtonState extends State<_ToggleButton> {
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final live = widget.tunnel.isLive;
-    final style = _rowButtonStyle(context);
+    final style = rowButtonStyle(context);
     final child = _busy
         ? const SizedBox.square(
             dimension: 15,
@@ -347,15 +324,6 @@ class _ToggleButtonState extends State<_ToggleButton> {
           );
   }
 }
-
-/// The one action on a row, sized alike down the list so rows line up.
-ButtonStyle _rowButtonStyle(BuildContext context) => ButtonStyle(
-  minimumSize: const WidgetStatePropertyAll(Size(76, 34)),
-  padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 14)),
-  textStyle: WidgetStatePropertyAll(
-    Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 13),
-  ),
-);
 
 enum _MenuAction { edit, copyKey, copyAddress, delete }
 
@@ -402,77 +370,6 @@ class _TunnelMenu extends StatelessWidget {
         const PopupMenuDivider(),
         item(_MenuAction.delete, AppIcons.delete, l10n.delete, danger: true),
       ],
-    );
-  }
-}
-
-/// A key the relay lists that this computer does not share: connect to it,
-/// or see what the relay holds for it.
-class _RemoteRow extends StatelessWidget {
-  const _RemoteRow({required this.serviceKey});
-
-  final String serviceKey;
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = context.l10n;
-    final store = AppScope.of(context).store;
-    final scheme = Theme.of(context).colorScheme;
-    final connection = store.connectionTo(serviceKey);
-    final inUse = connection?.health == TunnelHealth.running;
-    return Padding(
-      key: Key('remote-$serviceKey'),
-      padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: PlanetGlyph(
-              color: inUse ? successColor(scheme) : availableColor(scheme),
-              size: 30,
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SelectableText(
-                  serviceKey,
-                  maxLines: 1,
-                  style: mono(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                    color: scheme.onSurface,
-                  ),
-                ),
-                ConnectionsDisclosure(api: store.api, serviceKey: serviceKey),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          if (connection == null)
-            FilledButton.tonal(
-              key: Key('connect-$serviceKey'),
-              onPressed: () => openTunnelEditor(
-                context,
-                kind: TunnelKind.connect,
-                key: serviceKey,
-              ),
-              style: _rowButtonStyle(context),
-              child: Text(l10n.connect),
-            )
-          else
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: StatusChip(
-                color: inUse ? successColor(scheme) : availableColor(scheme),
-                label: l10n.openAt(connection.localAddress),
-              ),
-            ),
-        ],
-      ),
     );
   }
 }

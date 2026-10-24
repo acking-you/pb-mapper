@@ -183,13 +183,14 @@ class AppStore extends ChangeNotifier {
       next = force
           ? await api.forceRefreshServerStatus()
           : await api.getServerStatusDetail();
-    } catch (_) {
-      next = const ServerStatusDetail(
+    } catch (error) {
+      next = ServerStatusDetail(
         serverAvailable: false,
-        registeredServices: [],
+        registeredServices: const [],
         serverMap: '',
         activeConnections: '',
         idleConnections: '',
+        error: '$error',
       );
     }
     if (ask != _relayAsk) return;

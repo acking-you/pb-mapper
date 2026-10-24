@@ -162,13 +162,18 @@ Nothing in the SDK crates knows it exists.
 The design and its rules are in `docs/ui-design.md`.
 
 - **`lib/src/app.dart`**: The root — owns the store, the preferences and the
-  galaxy's state; chooses first-run setup or the four pages; runs the tray
+  galaxy's state; chooses first-run setup or the five pages; runs the tray
 
 - **`lib/src/pages/`**: One file per place
   - `overview_page.dart`: The galaxy, with a floating summary and details panel
-  - `tunnels_page.dart`: Shares, connections, and the relay's other services
+  - `tunnels_page.dart`: Shares and connections, and a count leading to Relay
+  - `relay_page.dart`: The relay as a whole — whether it answers, who this
+    computer is to it, and its sections, which live in `relay/`: services,
+    connections, and (administrator key only) credentials and security, plus
+    the relay this computer can run itself
   - `logs_page.dart`: The log stream, filtered by level and word
-  - `settings_page.dart`: Relay, credential, setup string, theme, language
+  - `settings_page.dart`: Relay, credential, setup string, theme, language;
+    Test says what the relay answered, or why it did not
   - `setup_flow.dart`: First run — relay, then what to do, then that tunnel
   - `tunnel_editor.dart`: The one share/connect form, and `followTunnel`
   - `tunnel_actions.dart`: Start/stop, delete, copy — shared by list and panel
@@ -182,7 +187,8 @@ The design and its rules are in `docs/ui-design.md`.
   - `app_prefs.dart`: Theme, language, last page
 
 - **`lib/src/state/`**: `AppStore` (every read and write, kept fresh by the
-  change stream) and the `Tunnel` model
+  change stream), `RelayStore` (the Relay page's reads and the administrator's
+  changes, polled only while that page is on screen) and the `Tunnel` model
 
 - **`lib/src/galaxy/`**: The galaxy view — scene model, camera, frame buffer
   over `pb_mapper_galaxy_frame_v1` with its Dart mirror, painter, details panel
@@ -207,12 +213,17 @@ The design and its rules are in `docs/ui-design.md`.
   - `pb_mapper_service.dart`: FFI dispatch on a background isolate
   - `pb_mapper_api.dart`: `PbMapperApiClient`, the interface the views take,
     and `PbMapperApi`, the real implementation over the FFI
+  - `relay_models.dart`: What the relay calls return, and `RelayCallException`
 
 - **`native/pb_mapper_ffi/`**: The Rust C ABI crate (a workspace member)
   - Every call returns a JSON envelope: `{"success": bool, "message": …, "data": …}`
     — except two leaf calls over caller-owned buffers:
     `pb_mapper_galaxy_frame_v1`, made once per frame, and
     `pb_mapper_ed25519_verify_v1`, the update manifest's signature check
+  - `relay.rs`: `pb_mapper_relay_call_json`, one export for every question
+    and administrator request to the relay, dispatched on the request's
+    `"op"` and answered with the SDK's `Client`/`Admin`. A new relay
+    operation is a new `op` here, not a new export
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
 
 - **`native/pb_mapper_galaxy/`**: The galaxy's per-frame geometry. Its
@@ -287,22 +298,29 @@ and it is what lets a widget test substitute `FakePbMapperApi`
 
 ### What the UI does
 
-Four pages and a first-run flow (`docs/ui-design.md` has the reasoning):
+Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
 
 - **Overview**: the galaxy — this computer and the relay as two stars, each
   tunnel and each service on the relay as a planet, live tunnels as arcs;
   click a body to start, stop, edit or connect
-- **Tunnels**: what this computer shares, what it connects to, and the relay's
-  other services with a Connect button and the connections the relay holds
+- **Tunnels**: what this computer shares and what it connects to, with a
+  count of the relay's other services that leads to Relay
+- **Relay**: whether the relay answers and how fast, and who this computer is
+  to it (administrator, temporary credential #n, or neither). Services, with
+  Connect and the connections the relay holds; connections and direct
+  sessions. With the administrator key, everything the `admin` command can
+  do: issue, reveal, renew, revoke and clean up credentials, retire
+  connections, allow older clients, rotate the key, reset all credentials.
+  Also the relay this computer can run itself, and its key
 - **Logs**: the Rust log, by minimum level and word, following new lines
 - **Settings**: relay address, credential, default keep-alive, a copyable setup
-  string for another computer, theme and language, and the embedded relay's key
-  when there is one
+  string for another computer, theme and language
 - **First run**: relay, then share-or-connect, then that one form
 
-Sharing and connecting are one editor with a Share/Connect switch. Starting the
-embedded relay (`startServer`/`stopServer`) has no page; the API keeps it for
-the control server and for tests.
+Sharing and connecting are one editor with a Share/Connect switch. The rail's
+relay status and the galaxy's relay star both open Relay. An administrator
+section is shown only when the relay confirms the administrator key — the
+credential's own shape decides nothing.
 ## Key Features
 
 ### Core Networking

@@ -87,23 +87,28 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool keepAlive,
   }) async {
     calls.add('startServer($port)');
+    if (_refused() case final refused?) return refused;
+    localRelayRunning = true;
     return _ok;
   }
 
   @override
   Future<OperationResult> stopServer() async {
     calls.add('stopServer');
+    localRelayRunning = false;
     return _ok;
   }
 
+  /// Whether the relay this app can run itself is running.
+  bool localRelayRunning = false;
+
   @override
-  Future<LocalServerStatus> getLocalServerStatus() async =>
-      const LocalServerStatus(
-        isRunning: false,
-        activeConnections: 0,
-        registeredServices: 0,
-        uptimeSeconds: 0,
-      );
+  Future<LocalServerStatus> getLocalServerStatus() async => LocalServerStatus(
+    isRunning: localRelayRunning,
+    activeConnections: localRelayRunning ? 2 : 0,
+    registeredServices: localRelayRunning ? 1 : 0,
+    uptimeSeconds: localRelayRunning ? 3720 : 0,
+  );
 
   /// What the relay reports as registered — not the same list as [services],
   /// which is what this machine has configured locally.
@@ -115,8 +120,10 @@ class FakePbMapperApi implements PbMapperApiClient {
         serverAvailable: relayUp,
         registeredServices: relayUp ? serverServices : const [],
         serverMap: '',
-        activeConnections: '',
+        activeConnections: relayUp ? '[41, 42]' : '',
         idleConnections: '',
+        error: relayUp ? null : 'connection refused',
+        latencyMs: relayUp ? 18 : null,
       );
 
   @override
@@ -243,7 +250,251 @@ class FakePbMapperApi implements PbMapperApiClient {
     clients = clients.where((c) => c.serviceKey != serviceKey).toList();
     return _ok;
   }
+
+  // --- The relay as a whole.
+
+  /// Who this computer is to the relay. An administrator unless a test says
+  /// otherwise, so every page has something to show.
+  RelayIdentity identity = const RelayIdentity(role: RelayRole.admin);
+
+  /// Temporary credentials, and the secret of each.
+  List<RelayKey> keys = [];
+  final Map<int, String> secrets = {};
+  int _nextKeyId = 1;
+
+  /// What the relay holds for each service, and who registered it.
+  List<RelayConnection> relayConnections = [];
+  Map<String, int> serviceOwners = {};
+  List<DirectSession> sessions = [];
+  bool legacyAllowed = false;
+
+  /// Unix seconds, fixed so a test can reason about expiry.
+  int now = 1_790_000_000;
+
+  void _relayReachable() {
+    if (!relayUp) {
+      throw const RelayCallException(
+        'Failed to connect to server: connection refused',
+        code: 'SERVER_UNREACHABLE',
+      );
+    }
+  }
+
+  void _admin() {
+    _relayReachable();
+    if (!identity.isAdmin) {
+      throw const RelayCallException(
+        "This computer's credential is not the relay's administrator key",
+        code: 'INVALID_ARGUMENT',
+      );
+    }
+  }
+
+  RelayKey _key(int keyId) => keys.firstWhere(
+    (k) => k.keyId == keyId,
+    orElse: () => throw RelayCallException(
+      'credential $keyId not found',
+      code: 'PROTOCOL',
+    ),
+  );
+
+  IssuedCredential _issued(RelayKey key) => IssuedCredential(
+    keyId: key.keyId,
+    state: key.state,
+    issuedAt: key.issuedAt,
+    expiresAt: key.expiresAt,
+    label: key.label,
+    credential: secrets[key.keyId] ?? '',
+  );
+
+  void _replace(RelayKey key) =>
+      keys = [for (final k in keys) k.keyId == key.keyId ? key : k];
+
+  @override
+  Future<RelayIdentity> relayIdentity() async => identity;
+
+  @override
+  Future<List<DirectSession>> relaySessions() async {
+    _relayReachable();
+    return sessions;
+  }
+
+  @override
+  Future<RelayAuthStatus> adminAuthStatus() async {
+    _admin();
+    int count(RelayKeyState state) =>
+        keys.where((k) => k.state == state).length;
+    return RelayAuthStatus(
+      safeMode: false,
+      capacity: 1024,
+      activeKeys: count(RelayKeyState.active),
+      expiredKeys: count(RelayKeyState.expired),
+      revokedKeys: count(RelayKeyState.revoked),
+      legacyAllowed: legacyAllowed,
+      activeLegacyConnections: 0,
+      lastLegacyConnectionAt: null,
+      authSuccesses: 128,
+      authFailures: 3,
+      serverInstanceId: '7f3a9c01',
+    );
+  }
+
+  @override
+  Future<List<RelayService>> adminServices() async {
+    _admin();
+    return [
+      for (final name in serverServices)
+        RelayService(
+          keyId: serviceOwners[name] ?? 0,
+          name: name,
+          transport: 'TCP',
+          encrypted: true,
+          connections: relayConnections.where((c) => c.service == name).length,
+        ),
+    ];
+  }
+
+  @override
+  Future<List<RelayConnection>> adminConnections() async {
+    _admin();
+    return relayConnections;
+  }
+
+  @override
+  Future<List<RelayKey>> adminKeys() async {
+    _admin();
+    return keys;
+  }
+
+  @override
+  Future<IssuedCredential> adminIssueKey({
+    required Duration ttl,
+    String? label,
+  }) async {
+    _admin();
+    calls.add('adminIssueKey(${ttl.inSeconds}, $label)');
+    final id = _nextKeyId++;
+    final key = RelayKey(
+      keyId: id,
+      state: RelayKeyState.active,
+      issuedAt: now,
+      expiresAt: now + ttl.inSeconds,
+      label: label,
+    );
+    keys = [...keys, key];
+    secrets[id] = 'pbmt1_${id}_${'s' * 40}';
+    return _issued(key);
+  }
+
+  @override
+  Future<IssuedCredential> adminRevealKey(int keyId) async {
+    _admin();
+    return _issued(_key(keyId));
+  }
+
+  @override
+  Future<IssuedCredential> adminRenewKey(int keyId, Duration ttl) async {
+    _admin();
+    calls.add('adminRenewKey($keyId, ${ttl.inSeconds})');
+    final old = _key(keyId);
+    final renewed = RelayKey(
+      keyId: keyId,
+      state: RelayKeyState.active,
+      issuedAt: old.issuedAt,
+      expiresAt: now + ttl.inSeconds,
+      label: old.label,
+    );
+    _replace(renewed);
+    return _issued(renewed);
+  }
+
+  @override
+  Future<RelayKey> adminRevokeKey(int keyId) async {
+    _admin();
+    calls.add('adminRevokeKey($keyId)');
+    final old = _key(keyId);
+    final revoked = RelayKey(
+      keyId: keyId,
+      state: RelayKeyState.revoked,
+      issuedAt: old.issuedAt,
+      expiresAt: old.expiresAt,
+      label: old.label,
+    );
+    _replace(revoked);
+    return revoked;
+  }
+
+  @override
+  Future<int> adminCleanUpKeys() async {
+    _admin();
+    calls.add('adminCleanUpKeys');
+    final before = keys.length;
+    keys = keys.where((k) => k.state == RelayKeyState.active).toList();
+    return before - keys.length;
+  }
+
+  @override
+  Future<int> adminRetireConnections({
+    required String service,
+    int? keyId,
+    int? connId,
+  }) async {
+    _admin();
+    calls.add('adminRetireConnections($service, $connId)');
+    bool hit(RelayConnection c) =>
+        c.service == service && (connId == null || c.connId == connId);
+    final retired = relayConnections.where(hit).length;
+    relayConnections = relayConnections.where((c) => !hit(c)).toList();
+    return retired;
+  }
+
+  @override
+  Future<void> adminSetLegacyProtocol({required bool allow}) async {
+    _admin();
+    calls.add('adminSetLegacyProtocol($allow)');
+    legacyAllowed = allow;
+  }
+
+  @override
+  Future<void> adminResetCredentials() async {
+    _admin();
+    calls.add('adminResetCredentials');
+    keys = [];
+    secrets.clear();
+  }
+
+  @override
+  Future<String> adminRotateKey() async {
+    _admin();
+    calls.add('adminRotateKey');
+    const rotated = 'R0tatedAdminKey-0123456789abcdef';
+    config = ConfigStatus(
+      serverAddress: config.serverAddress,
+      keepAliveEnabled: config.keepAliveEnabled,
+      msgHeaderKey: rotated,
+    );
+    return rotated;
+  }
 }
+
+/// A connection the relay holds, as the administrator inventory lists it.
+RelayConnection fakeRelayConnection({
+  required String service,
+  required int connId,
+  int keyId = 0,
+  bool healthy = true,
+  int lastRxAgeMs = 900,
+}) => RelayConnection(
+  keyId: keyId,
+  service: service,
+  connId: connId,
+  generation: 1,
+  protocolVersion: 2,
+  healthy: healthy,
+  transport: 'TCP',
+  encrypted: true,
+  lastRxAgeMs: lastRxAgeMs,
+);
 
 /// A control connection the relay is holding.
 ServiceConnInfo fakeConn({

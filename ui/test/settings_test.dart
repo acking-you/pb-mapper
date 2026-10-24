@@ -2,7 +2,6 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 
 import 'fake_pb_mapper_api.dart';
@@ -41,6 +40,46 @@ void main() {
     await settle(tester);
     expect(api.calls, ['updateConfig(relay.example:7666)']);
     expect(api.config.msgHeaderKey, 'pbmt1_token');
+    await finish(tester);
+  });
+
+  testWidgets('testing the relay says what it answered', (tester) async {
+    final api = FakePbMapperApi(serverServices: ['nas', 'cache']);
+    await _open(tester, api);
+    await tester.tap(find.byKey(const Key('settings-test')));
+    await settle(tester);
+    expect(
+      find.text('The relay answered in 18 ms · 2 services'),
+      findsOneWidget,
+    );
+    await finish(tester);
+
+    final down = FakePbMapperApi(relayUp: false);
+    await _open(tester, down);
+    await tester.tap(find.byKey(const Key('settings-test')));
+    await settle(tester);
+    expect(
+      find.text("The relay didn't answer: connection refused"),
+      findsOneWidget,
+    );
+    await finish(tester);
+  });
+
+  testWidgets('testing an edited relay saves it first', (tester) async {
+    final api = FakePbMapperApi();
+    await _open(tester, api);
+    await tester.enterText(
+      find.byKey(const Key('settings-address')),
+      'relay.example:7666',
+    );
+    await tester.tap(find.byKey(const Key('settings-test')));
+    await settle(tester);
+    // Not the old address checked while the new one sits unsaved.
+    expect(api.calls, ['updateConfig(relay.example:7666)']);
+    expect(
+      find.text('The relay answered in 18 ms · 0 services'),
+      findsOneWidget,
+    );
     await finish(tester);
   });
 
@@ -94,33 +133,6 @@ void main() {
     await tester.tap(find.byKey(const Key('settings-language-zh')));
     await settle(tester);
     expect(find.text('中继服务器'), findsOneWidget);
-    await finish(tester);
-  });
-
-  testWidgets('the embedded relay key shows only when there is one', (
-    tester,
-  ) async {
-    await _open(tester, FakePbMapperApi());
-    expect(find.byKey(const Key('settings-reveal')), findsNothing);
-    await finish(tester);
-
-    final api = FakePbMapperApi(
-      config: const ConfigStatus(
-        serverAddress: 'lb7666.top:7666',
-        keepAliveEnabled: true,
-        msgHeaderKey: '',
-        isolatedRelayAdminKeySet: true,
-        isolatedRelayAdminKey: 'k3y',
-      ),
-    );
-    await _open(tester, api);
-    // Built already (inside the list's cache extent), but below the fold.
-    await tester.ensureVisible(find.byKey(const Key('settings-reveal')));
-    await settle(tester);
-    await tester.tap(find.byKey(const Key('settings-reveal')));
-    await settle(tester);
-    expect(find.text('k3y'), findsOneWidget);
-    expect(api.calls, ['revealIsolatedRelayAdminKey']);
     await finish(tester);
   });
 }

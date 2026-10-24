@@ -243,6 +243,16 @@ impl PbMapperState {
     /// instead of returning stale cache.
     pub async fn force_refresh_server_status(&self) -> Result<ServerStatusDetail, CtlError> {
         let server_addr = self.config.server_address.clone();
+        let started = Instant::now();
+        let unavailable = |error: String| ServerStatusDetail {
+            server_available: false,
+            registered_services: Vec::new(),
+            server_map: String::new(),
+            active_connections: String::new(),
+            idle_connections: String::new(),
+            error: Some(error),
+            latency_ms: None,
+        };
 
         let detail = match tokio::time::timeout(
             FORCE_REFRESH_TIMEOUT,
@@ -256,30 +266,32 @@ impl PbMapperState {
                 server_map: remote_id_data.server_map,
                 active_connections: remote_id_data.active,
                 idle_connections: remote_id_data.idle,
+                error: None,
+                latency_ms: Some(started.elapsed().as_millis() as u64),
             },
             Ok(Err(e)) => {
                 tracing::warn!("Force refresh failed: {}", e);
-                ServerStatusDetail {
-                    server_available: false,
-                    registered_services: Vec::new(),
-                    server_map: String::new(),
-                    active_connections: String::new(),
-                    idle_connections: String::new(),
-                }
+                unavailable(e.to_string())
             }
             Err(_) => {
                 tracing::warn!("Force refresh timed out after {:?}", FORCE_REFRESH_TIMEOUT);
-                ServerStatusDetail {
-                    server_available: false,
-                    registered_services: Vec::new(),
-                    server_map: String::new(),
-                    active_connections: String::new(),
-                    idle_connections: String::new(),
-                }
+                unavailable(format!(
+                    "{server_addr} did not answer within {} seconds",
+                    FORCE_REFRESH_TIMEOUT.as_secs()
+                ))
             }
         };
 
         Ok(detail)
+    }
+
+    /// Where the relay is and whether connections to it keep alive: all a
+    /// one-off relay call needs, read without holding on to the state.
+    pub fn relay_target(&self) -> (String, bool) {
+        (
+            self.config.server_address.clone(),
+            self.config.keep_alive_enabled,
+        )
     }
 
     // Cache service status to avoid blocking UI with network checks on every paint.
