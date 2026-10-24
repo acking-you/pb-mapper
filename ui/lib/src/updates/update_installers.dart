@@ -149,6 +149,14 @@ abstract final class AppImageUpdate {
     );
     try {
       await download.copy(staged.path);
+      // On disk before it takes the AppImage's name: a power loss after the
+      // rename must not leave a name pointing at data that never landed.
+      final written = await staged.open(mode: FileMode.append);
+      try {
+        await written.flush();
+      } finally {
+        await written.close();
+      }
       final chmod = await Process.run('chmod', ['755', staged.path]);
       if (chmod.exitCode != 0) {
         throw FileSystemException('chmod failed: ${chmod.stderr}', staged.path);
