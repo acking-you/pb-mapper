@@ -2,8 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.8.0] - 2026-10-24
+- Make direct with relay fallback the default everywhere. `pb-mapper server` serves direct coordination on its TCP port number over UDP (7666/tcp + 7666/udp), `register` allows direct sessions and `connect` uses `--path auto`; the Rust SDK (`p2p` is now a default feature of `pb-mapper`) and the Node SDK follow the same defaults. `--relay-only` on `server`, `register` or `connect` (and `allow_direct: false` / `PathPolicy::RelayOnly` / `path: "relay-only"` in the SDKs) keeps that side on the relay. The 0.7 flags `--enable-direct`, `--allow-direct` and `--path auto` are still accepted.
+- Need no public IP to enable direct: without `--direct-advertise` the relay announces only its UDP port and clients pair it with the relay address they dialed, which also works behind cloud 1:1 NAT and port forwarding. A relay started without any direct flag keeps serving relay-only, with a warning, if its UDP port is taken.
+- Pause direct on a tunnel after a pre-commit fallback (10 s, doubling to 5 min; cleared by a direct success or a network change), so a network that cannot be punched costs one attempt instead of a full setup budget per connection. Concurrent setups that queue behind a failed capability query go straight to the relay, and a burst of fallbacks counts as one.
 - Show recovery as it unfolds in `TunnelDiagnostics`: `direct.attempt` gives the stage of the direct attempt in flight (negotiating, discovering, punching, committing), and `events` keeps the last 16 relay-ready, relay-failed, network-changed, direct-established and direct-fallback events, the fallback naming the stage it left. Consecutive repeats fold into one entry. Both are written only on control-path transitions; the data path and wire protocol are unchanged.
+- Node: add `nextStatus(timeoutMs?)` on `Registration` and `Connection`, a per-handle status listener that never misses a change and resolves at once after the tunnel settles; expose `events` and `direct.attempt` in `diagnostics()`.
+- Add runnable SDK examples covering every capability: an in-process `quickstart`, TCP and UDP tunnels, path options, event listening, status queries, credential lifecycle, relay inventory and the agent remote-control pattern in Rust, plus register, connect, admin and remote-control scripts for Node.
+- Publish UDP 7666 in the Docker image and compose file, with `PB_MAPPER_RELAY_ONLY` and `PB_MAPPER_DIRECT_ADVERTISE` for the entrypoint; document the UDP port in the installers, systemd notes and the deployment Skill. Rewrite both READMEs and redesign the poster, now in English and Chinese.
+- 0.7 clients that opted into direct fall back to the relay against a default 0.8 relay, since they do not pair the announced port with the relay address; upgrade them or start the relay with `--direct-advertise`.
 
 ## [0.7.0] - 2026-10-23
 - Add opt-in direct connections: a relay `--enable-direct` UDP service, publisher `--allow-direct`, and per-connect `--path auto` try UDP hole punching plus mutually authenticated QUIC. Defaults keep the existing relay protocol and control behavior.
