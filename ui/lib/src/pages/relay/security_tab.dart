@@ -386,6 +386,16 @@ Future<void> showRotationDialog(
                 rotation.reason ?? l10n.relayNoReason,
               ),
             }, style: theme.textTheme.bodySmall),
+            if (rotation.saved && rotation.stranded.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                l10n.securityRotatedStranded(rotation.stranded.join(', ')),
+                key: const Key('security-stranded'),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: cautionColor(scheme),
+                ),
+              ),
+            ],
             if (notRestarted.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(

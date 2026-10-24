@@ -322,6 +322,7 @@
   "securityRotatedTitle": "新的管理员密钥",
   "securityRotatedBody": "已保存在这台电脑上，本机连到这个中继的隧道也已用它重新启动。复制它或它的设置字符串，给其他原本使用旧密钥的地方。",
   "securityRotatedNotRestarted": "以下隧道没能重新启动，仍在使用旧密钥：{tunnels}。请到隧道页面停止后再启动。",
+  "securityRotatedStranded": "以下隧道使用的是临时凭据，已被这次更换清除，所以保持原样：{tunnels}。请为它们重新签发凭据。",
   "securityRotateWaiting": "请先保存上方等待中的新密钥，再次更换会把它替换掉。",
   "securityRotatedUnsavedBody": "{address} 现在只接受这个密钥。期间本机已切换到其他中继或凭据，所以没有保存它：请立即复制。",
   "securityRotatedSaveFailedBody": "{address} 现在只接受这个密钥，但本机没能保存它（{error}）。请立即复制，并粘贴到设置中。",

@@ -346,6 +346,8 @@ class RelayStore extends ChangeNotifier {
         notRestarted = await app.restart(
           shares: rotation.restartShares,
           connections: rotation.restartConnections,
+          relay: address,
+          credential: rotation.key,
         );
       }
       await refresh();

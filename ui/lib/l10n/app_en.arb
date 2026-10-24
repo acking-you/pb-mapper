@@ -391,6 +391,8 @@
   "securityRotatedBody": "Saved on this computer, and its tunnels on this relay started again with it. Copy it, or its setup string, for anything else that used the old key.",
   "securityRotatedNotRestarted": "These didn't start again, and still hold the old key: {tunnels}. Stop and start them on the Tunnels page.",
   "@securityRotatedNotRestarted": {"placeholders": {"tunnels": {"type": "String"}}},
+  "securityRotatedStranded": "These ran on temporary credentials, which the rotation erased, so they were left as they are: {tunnels}. Issue them new credentials.",
+  "@securityRotatedStranded": {"placeholders": {"tunnels": {"type": "String"}}},
   "securityRotateWaiting": "Save the new key waiting above before rotating again: the next rotation would replace it.",
   "securityRotatedUnsavedBody": "{address} takes only this key now. This computer was moved to another relay or credential meanwhile, so the key wasn't saved here: copy it now.",
   "@securityRotatedUnsavedBody": {"placeholders": {"address": {"type": "String"}}},

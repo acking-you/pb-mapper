@@ -465,6 +465,19 @@ struct TunnelRuntime {
     pin: PinnedTunnel,
 }
 
+/// This computer's tunnels on one relay, as rotating that relay's
+/// administrator key leaves them. See [`PbMapperState::tunnels_on`].
+#[derive(Default, Debug)]
+pub struct RelayTunnels {
+    /// On the retired administrator key: they start again on the new one.
+    pub shares: Vec<String>,
+    pub connections: Vec<String>,
+    /// On another credential, a temporary one, which the rotation erased.
+    /// The administrator key is not theirs to take: a tunnel started under
+    /// it lands in the administrator's namespace, not its own.
+    pub stranded: Vec<String>,
+}
+
 fn abort_runtime(map: &mut HashMap<String, TunnelRuntime>, key: &str) -> bool {
     match map.remove(key) {
         Some(runtime) => {
@@ -721,6 +734,48 @@ mod tests {
             .stop_server()
             .await
             .expect("UI server should stop cleanly");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// After a rotation only the rotated relay's tunnels on the retired key
+    /// start again. One on another credential would land in the
+    /// administrator's namespace under the new key, so it is only named; one
+    /// on another relay is left alone. The relay is known by its address as
+    /// well as by how it was written.
+    #[tokio::test]
+    async fn a_rotation_restarts_only_the_relays_tunnels_on_the_retired_key() {
+        let (_process_credential_guard, state, root) = temp_state("rotation-tunnels").await;
+        let retired = pb_mapper_core::checksum::parse_credential(&"a".repeat(32)).unwrap();
+        let other = pb_mapper_core::checksum::parse_credential(&"b".repeat(32)).unwrap();
+        let relay: std::net::SocketAddr = "127.0.0.1:7666".parse().unwrap();
+        let elsewhere: std::net::SocketAddr = "127.0.0.2:7666".parse().unwrap();
+        let runtime = |credential, name: &str, addr| TunnelRuntime {
+            handle: tokio::spawn(async {}),
+            pin: PinnedTunnel {
+                credential,
+                endpoint: ResolvedAddrs::from(addr),
+                relay: name.to_owned(),
+            },
+        };
+        let mut state = state.lock().await;
+        for (key, tunnel) in [
+            ("web", runtime(retired, "relay.example:7666", relay)),
+            ("cam", runtime(other, "relay.example:7666", relay)),
+        ] {
+            state.service_runtime.insert(key.to_owned(), tunnel);
+        }
+        for (key, tunnel) in [
+            ("db", runtime(retired, "127.0.0.1:7666", relay)),
+            ("far", runtime(retired, "other.example:7666", elsewhere)),
+        ] {
+            state.client_runtime.insert(key.to_owned(), tunnel);
+        }
+
+        let found = state.tunnels_on("relay.example:7666", Some(&relay.into()), retired);
+        assert_eq!(found.shares, ["web"]);
+        assert_eq!(found.connections, ["db"]);
+        assert_eq!(found.stranded, ["cam"]);
+        drop(state);
         let _ = std::fs::remove_dir_all(&root);
     }
 

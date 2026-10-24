@@ -250,17 +250,18 @@ impl PbMapperState {
         Ok(())
     }
 
-    /// The shares and connections running against `relay`, by key. Each
-    /// keeps the credential it started with, which a rotation of that
-    /// relay's administrator key leaves useless, whatever the configuration
-    /// says now. A tunnel is on `relay` if it was started under that address,
-    /// or dials any address `endpoint` resolves to: the same relay may have
-    /// been written another way (a hostname, its IP) when it started.
+    /// This computer's tunnels on `relay`, sorted by what rotating its
+    /// administrator key away from `retired` leaves them. Each keeps the
+    /// credential it started with, whatever the configuration says now. A
+    /// tunnel is on `relay` if it was started under that address, or dials
+    /// any address `endpoint` resolves to: the same relay may have been
+    /// written another way (a hostname, its IP) when it started.
     pub fn tunnels_on(
         &self,
         relay: &str,
         endpoint: Option<&ResolvedAddrs>,
-    ) -> (Vec<String>, Vec<String>) {
+        retired: Credential,
+    ) -> RelayTunnels {
         let on_relay = |pin: &PinnedTunnel| {
             pin.relay == relay
                 || endpoint.is_some_and(|endpoint| {
@@ -270,17 +271,28 @@ impl PbMapperState {
                         .any(|addr| endpoint.as_slice().contains(addr))
                 })
         };
-        let on = |runtimes: &HashMap<String, TunnelRuntime>| {
-            let mut keys: Vec<String> = runtimes
-                .iter()
-                .filter(|(_, runtime)| on_relay(&runtime.pin))
-                .map(|(key, _)| key.clone())
-                .collect();
-            keys.sort();
-            keys
-        };
-        (on(&self.service_runtime), on(&self.client_runtime))
+        let mut found = RelayTunnels::default();
+        for (runtimes, restart) in [
+            (&self.service_runtime, &mut found.shares),
+            (&self.client_runtime, &mut found.connections),
+        ] {
+            for (key, runtime) in runtimes {
+                if !on_relay(&runtime.pin) {
+                    continue;
+                }
+                if runtime.pin.credential == retired {
+                    restart.push(key.clone());
+                } else {
+                    found.stranded.push(key.clone());
+                }
+            }
+        }
+        found.shares.sort();
+        found.connections.sort();
+        found.stranded.sort();
+        found
     }
+
     pub async fn unregister_service(&mut self, service_key: String) -> Result<(), CtlError> {
         abort_runtime(&mut self.service_runtime, &service_key);
 

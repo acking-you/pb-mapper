@@ -62,6 +62,9 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
     let result = handle.runtime.block_on(async move {
         let config = state.lock().await.get_config_status().await;
         let credential = get_process_credential();
+        // The key a rotation retires: the tunnels still holding it are the
+        // ones to start again on the new key.
+        let retired = credential.as_ref().ok().copied();
         let outcome = call(
             &config.server_address,
             config.keep_alive_enabled,
@@ -78,9 +81,10 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
         // the rotation happened, so it is answered as one: `"saved"` tells
         // the page whether to keep the key for the person, and
         // `"saveError"` why it could not be saved. Once saved, `"restart"`
-        // names this computer's tunnels on that relay: each still holds the
-        // credential it started with, which the rotation retired, and the
-        // page starts them again on the new key.
+        // names this computer's tunnels on that relay: those still holding
+        // the retired key, for the page to start again on the new one, and
+        // those on a temporary credential the rotation erased, which only
+        // a newly issued one can bring back.
         if let Some(key) = outcome.rotated_key {
             // Where that relay is, to know its tunnels by address as well as
             // by name. Resolved before the state is locked: it can be slow.
@@ -105,8 +109,9 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                         false
                     }
                 };
-            let restart =
-                saved.then(|| state.tunnels_on(&config.server_address, endpoint.as_ref()));
+            let restart = retired.filter(|_| saved).map(|retired| {
+                state.tunnels_on(&config.server_address, endpoint.as_ref(), retired)
+            });
             drop(state);
             if saved {
                 events::emit(events::ChangeKind::Config, None, Origin::Ui);
@@ -116,10 +121,14 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                 if let Some(error) = save_error {
                     fields.insert("saveError".to_owned(), error.into());
                 }
-                if let Some((shares, connections)) = restart {
+                if let Some(tunnels) = restart {
                     fields.insert(
                         "restart".to_owned(),
-                        json!({ "shares": shares, "connections": connections }),
+                        json!({
+                            "shares": tunnels.shares,
+                            "connections": tunnels.connections,
+                            "stranded": tunnels.stranded,
+                        }),
                     );
                 }
             }
