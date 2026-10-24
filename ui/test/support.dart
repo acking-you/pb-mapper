@@ -8,6 +8,7 @@ import 'package:pb_mapper_ui/src/app.dart';
 import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
+import 'package:pb_mapper_ui/src/updates/update_controller.dart';
 
 import 'fake_pb_mapper_api.dart';
 
@@ -28,6 +29,7 @@ Future<void> pumpApp(
   ThemeMode themeMode = ThemeMode.light,
   Locale? locale = const Locale('en'),
   bool reducedMotion = true,
+  UpdateController? updates,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -49,6 +51,7 @@ Future<void> pumpApp(
         prefs: prefs,
         needsSetup: needsSetup,
         initialPage: page,
+        updates: updates,
       ),
     ),
   );

@@ -190,6 +190,12 @@ The design and its rules are in `docs/ui-design.md`.
 - **`lib/src/theme/`**: POCOX's design system — colours, type, glass layers,
   motion, Lucide icons
 
+- **`lib/src/updates/`**: The self-update, after proxy-everything's — find the
+  newest `vX.Y.Z-ui` release, check its Ed25519-signed manifest, download and
+  hash the one package, apply it per platform. See "Updates" in
+  `docs/ui-design.md`; `ui/pubspec.yaml`'s version must be bumped with the
+  workspace's at every release
+
 - **`lib/src/common/`**: Shared utilities
   - `polling.dart`: `waitUntilSettled` and `firstWhereOrNull`
   - `state_change.dart`: The change stream's events, and `ChangeSubscription`
@@ -204,8 +210,9 @@ The design and its rules are in `docs/ui-design.md`.
 
 - **`native/pb_mapper_ffi/`**: The Rust C ABI crate (a workspace member)
   - Every call returns a JSON envelope: `{"success": bool, "message": …, "data": …}`
-    — except `pb_mapper_galaxy_frame_v1`, a leaf call over caller-owned
-    buffers made once per frame
+    — except two leaf calls over caller-owned buffers:
+    `pb_mapper_galaxy_frame_v1`, made once per frame, and
+    `pb_mapper_ed25519_verify_v1`, the update manifest's signature check
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
 
 - **`native/pb_mapper_galaxy/`**: The galaxy's per-frame geometry. Its

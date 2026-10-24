@@ -4,6 +4,7 @@ import 'package:pb_mapper_ui/src/galaxy/galaxy_view.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
+import 'package:pb_mapper_ui/src/updates/update_controller.dart';
 
 /// The four places the app has. Everything else opens over one of them.
 enum AppPage {
@@ -48,6 +49,7 @@ class AppScope extends InheritedWidget {
     super.key,
     required this.store,
     required this.prefs,
+    required this.updates,
     required this.galaxy,
     required this.page,
     required this.go,
@@ -56,6 +58,10 @@ class AppScope extends InheritedWidget {
 
   final AppStore store;
   final AppPrefs prefs;
+
+  /// The app's self-update, owned by the app so a background find is still
+  /// there when Settings opens.
+  final UpdateController updates;
 
   /// Owned by the app, so the galaxy keeps its camera across page changes.
   final GalaxyView galaxy;
@@ -76,6 +82,7 @@ class AppScope extends InheritedWidget {
   bool updateShouldNotify(AppScope old) =>
       old.store != store ||
       old.prefs != prefs ||
+      old.updates != updates ||
       old.galaxy != galaxy ||
       old.page != page;
 }

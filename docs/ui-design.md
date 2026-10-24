@@ -145,6 +145,54 @@ PB_MAPPER_UI_PREVIEW_DIR=/tmp/pbm-preview FLUTTER_ROOT=$(dirname $(dirname $(whi
   flutter test test/preview_test.dart
 ```
 
+## Updates
+
+Settings › About has **Check for updates**, and the app also looks on its own
+about twice a day unless the user turns that off; a newer release is announced
+once, and nothing is downloaded until the user presses Update. The flow follows
+proxy-everything's (`ui/lib/src/updates/`):
+
+1. **Find.** GitHub's release listing, newest `vX.Y.Z-ui` that is neither a
+   draft nor a prerelease. Not newer than the app's own version (its pubspec
+   `version`, read through `package_info_plus`): up to date, nothing else is
+   fetched.
+2. **Trust.** Its `release-manifest.json` must carry an Ed25519 signature
+   (`release-manifest.json.sig`) by the release key, checked in Rust with
+   `ring` through `pb_mapper_ed25519_verify_v1`, and must describe that same
+   version, so an older genuinely signed manifest cannot stand in for it. A
+   release without one is offered only as a link to its page.
+3. **Fetch.** The one package for this device, hashed as it streams in; the
+   size and SHA-256 must match the manifest's, or it is deleted.
+4. **Apply**, per platform:
+
+   | Installed as | Update |
+   |---|---|
+   | Windows installer | Quit, then a hidden PowerShell waits for the process to exit, runs the Inno Setup installer with `/SILENT` (it elevates itself when the install is machine-wide), and opens the app again |
+   | Windows portable zip, Linux zip | Saved to Downloads and shown |
+   | Linux AppImage | Swapped in place (staged beside it, renamed over it) and reopened; saved to Downloads instead when its folder is not writable |
+   | macOS | The disk image is saved to Downloads and opened, to drag into Applications: the DMGs are not Developer ID signed, so the app does not replace its own bundle |
+   | Android | The APK opens in the browser. Release APKs are signed with CI's throwaway debug key, so the system would refuse to install one over another from inside the app |
+   | iOS | None: the IPA is an unsigned development build |
+
+   Debug builds stop after step 3 rather than replace themselves.
+
+### Releasing with updates
+
+- `ui/pubspec.yaml`'s `version` is the workspace version, with build number
+  `major * 10000 + minor * 100 + patch` (Android's version code only grows).
+  Bump it with `Cargo.toml`: `test/version_test.dart` fails on a mismatch, and
+  the release workflow refuses a tag that does not match it. An app built with
+  a stale version would offer the same update forever.
+- `release-ui.yml`'s last job, `publish-manifest`, downloads the release's ten
+  packages, writes and signs the manifest with
+  `scripts/release/ui_release_manifest.py`, verifies the signature against
+  `scripts/release/update_signing_key.pub.pem`, and attaches both files. It
+  needs the repository secret `UPDATE_SIGNING_KEY`: the private key, in PEM.
+- The public key is also compiled into the app (`updatePublicKey` in
+  `lib/src/updates/release.dart`). Rotating the key means shipping a release
+  signed with the old key that carries the new public key, before any release
+  is signed with the new one.
+
 ## The README poster
 
 `docs/assets/poster.png` and `poster.zh-CN.png` are not drawn by hand: as in

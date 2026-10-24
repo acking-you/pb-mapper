@@ -5,6 +5,7 @@ import 'dart:ui' show AppExitResponse;
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/locale_controller.dart';
 import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
@@ -25,6 +26,8 @@ import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
+import 'package:pb_mapper_ui/src/updates/update_controller.dart';
+import 'package:pb_mapper_ui/src/updates/update_schedule.dart';
 import 'package:toastification/toastification.dart' show ToastificationWrapper;
 import 'package:window_manager/window_manager.dart';
 
@@ -39,6 +42,8 @@ class PbMapperApp extends StatefulWidget {
     this.needsSetup,
     this.initialPage,
     this.desktop = false,
+    this.updates,
+    this.checkForUpdates = false,
   });
 
   final PbMapperApiClient api;
@@ -56,6 +61,13 @@ class PbMapperApp extends StatefulWidget {
   /// Run the window's desktop life: the tray, and closing to it.
   final bool desktop;
 
+  /// Defaults to one that updates from GitHub; tests pass their own.
+  final UpdateController? updates;
+
+  /// Look for a newer release in the background, while the user lets it.
+  /// Off in tests, which must not reach GitHub.
+  final bool checkForUpdates;
+
   @override
   State<PbMapperApp> createState() => _PbMapperAppState();
 }
@@ -66,6 +78,9 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     changes: widget.changes,
   );
   late final AppPrefs _prefs = widget.prefs ?? AppPrefs();
+  late final UpdateController _updates =
+      widget.updates ?? UpdateController(quit: () async => _quit());
+  UpdateSchedule? _updateSchedule;
   final GalaxyView _galaxy = GalaxyView();
   AppLifecycleListener? _lifecycle;
   late AppPage _page = widget.initialPage ?? AppPage.overview;
@@ -98,6 +113,19 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       }
     });
     await started;
+    if (widget.checkForUpdates && updatesSupported && mounted) {
+      _updateSchedule = UpdateSchedule(
+        updates: _updates,
+        prefs: _prefs,
+        announce: (version) => showToast(
+          null,
+          lookupAppLocalizations(
+            _prefs.activeLocale,
+          ).updateAnnounce('$version'),
+          kind: ToastKind.info,
+        ),
+      )..start();
+    }
   }
 
   void _onPrefs() {
@@ -209,6 +237,8 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       TrayService.instance.dispose();
     }
     _lifecycle?.dispose();
+    _updateSchedule?.dispose();
+    if (widget.updates == null) _updates.dispose();
     _store.dispose();
     _galaxy.dispose();
     super.dispose();
@@ -253,6 +283,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     return AppScope(
       store: _store,
       prefs: _prefs,
+      updates: _updates,
       galaxy: _galaxy,
       page: _page,
       go: _go,

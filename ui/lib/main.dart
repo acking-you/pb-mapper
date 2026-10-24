@@ -74,7 +74,9 @@ Future<void> main(List<String> args) async {
   // is still a window, and refusing to open because a pipe is unavailable
   // would be a poor trade.
   PbMapperService().startControlServer();
-  runApp(PbMapperApp(api: PbMapperApi(), desktop: _isDesktop));
+  runApp(
+    PbMapperApp(api: PbMapperApi(), desktop: _isDesktop, checkForUpdates: true),
+  );
 }
 
 /// Mobile platforms keep their config under the app's own documents

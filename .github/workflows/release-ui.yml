@@ -87,6 +87,18 @@ jobs:
       - name: Build Windows app with latest FFI
         run: |
           make release-ui-windows-no-ffi
+      # fastforge names its output after the Dart package and the pubspec
+      # version (pb_mapper_ui-0.9.0+900-windows-setup.exe); the in-app updater
+      # and every other platform use pb-mapper-<os>-<arch>.
+      - name: Name the Windows packages like the others
+        run: |
+          $setup = @(Get-ChildItem ui/dist -Recurse -Filter "*-windows-setup.exe")
+          $zip = @(Get-ChildItem ui/dist -Recurse -Filter "*-windows.zip")
+          if ($setup.Count -ne 1 -or $zip.Count -ne 1) {
+            throw "Expected one installer and one zip, found: $($setup.Name) $($zip.Name)"
+          }
+          Rename-Item $setup[0].FullName "pb-mapper-windows-x86_64-setup.exe"
+          Rename-Item $zip[0].FullName "pb-mapper-windows-x86_64.zip"
       - name: Verify Windows bundle uses latest FFI
         run: |
           $src = "ui/native/windows/x64/pb_mapper_ffi.dll"
@@ -501,3 +513,33 @@ jobs:
           body_path: ui_release_notes.md
           files: |
             ui/build/ios/iphoneos/pb-mapper-ios-unsigned.ipa
+
+  # The app updates itself only from a release whose manifest this key signs,
+  # and installs only files whose size and SHA-256 the manifest lists. A
+  # manual run has no version tag to check the manifest against, so only a
+  # tag push publishes one.
+  publish-manifest:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-linux, build-android, build-macos, build-ios]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE: ${{ github.ref_name }}-ui
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect the release's packages
+        run: gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --dir release --pattern 'pb-mapper-*'
+      - name: Write the release manifest
+        run: python3 scripts/release/ui_release_manifest.py build release "$GITHUB_REF_NAME" "$GITHUB_SHA"
+      - name: Sign the release manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          test -n "$UPDATE_SIGNING_KEY" || { echo "::error::UPDATE_SIGNING_KEY is not set"; exit 1; }
+          KEY=$(mktemp)
+          trap 'rm -f "$KEY"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$KEY"
+          python3 scripts/release/ui_release_manifest.py sign release/release-manifest.json --key "$KEY"
+          python3 scripts/release/ui_release_manifest.py verify release/release-manifest.json --public-key scripts/release/update_signing_key.pub.pem
+      - name: Attach the manifest
+        run: gh release upload "$RELEASE" release/release-manifest.json release/release-manifest.json.sig --repo "$GITHUB_REPOSITORY" --clobber
