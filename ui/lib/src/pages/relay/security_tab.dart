@@ -356,7 +356,13 @@ Future<void> showRotationDialog(
             const SizedBox(height: 12),
             Text(switch ((confirmed, rotation.saved)) {
               (true, true) => l10n.securityRotatedBody,
-              (true, false) => l10n.securityRotatedUnsavedBody(address),
+              (true, false) => switch (rotation.saveError) {
+                final error? => l10n.securityRotatedSaveFailedBody(
+                  address,
+                  error,
+                ),
+                null => l10n.securityRotatedUnsavedBody(address),
+              },
               (false, _) => l10n.securityRotationUnknownBody(
                 rotation.reason ?? l10n.relayNoReason,
               ),

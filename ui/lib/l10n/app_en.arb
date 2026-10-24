@@ -391,6 +391,8 @@
   "securityRotatedBody": "Saved on this computer. Copy it, or its setup string, for anything else that used the old key.",
   "securityRotatedUnsavedBody": "{address} takes only this key now. This computer was moved to another relay or credential meanwhile, so the key wasn't saved here: copy it now.",
   "@securityRotatedUnsavedBody": {"placeholders": {"address": {"type": "String"}}},
+  "securityRotatedSaveFailedBody": "{address} takes only this key now, but this computer couldn't save it ({error}). Copy it now, and paste it in Settings.",
+  "@securityRotatedSaveFailedBody": {"placeholders": {"address": {"type": "String"}, "error": {"type": "String"}}},
   "securityRotationKept": "I've saved it",
   "relayUnsavedKey": "A new administrator key for {address} isn't saved on this computer.",
   "@relayUnsavedKey": {"placeholders": {"address": {"type": "String"}}},

@@ -73,31 +73,34 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
         // now: this computer switches to it, or every later call would fail.
         // Unless Settings moved it to another relay or credential while the
         // rotation ran — then the key is not this computer's to save, and
-        // saving it would undo that change. `"saved"` tells the page which.
+        // saving it would undo that change — or saving it fails. Either way
+        // the rotation happened, so it is answered as one: `"saved"` tells
+        // the page whether to keep the key for the person, and
+        // `"saveError"` why it could not be saved.
         if let Some(key) = outcome.rotated_key {
             let mut state = state.lock().await;
-            let saved = state.get_config_status().await == config;
-            if saved {
-                state
-                    .update_config(
-                        config.server_address,
-                        config.keep_alive_enabled,
-                        key.clone(),
-                    )
+            let mut save_error = None;
+            let saved = state.get_config_status().await == config
+                && match state
+                    .update_config(config.server_address, config.keep_alive_enabled, key)
                     .await
-                    .map_err(|error| {
-                        CtlError::io(format!(
-                            "The relay now uses a new administrator key, but this computer \
-                             could not save it ({error}). Keep it somewhere safe: {key}"
-                        ))
-                    })?;
-            }
+                {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::error!("Saving the rotated administrator key failed: {error}");
+                        save_error = Some(error.to_string());
+                        false
+                    }
+                };
             drop(state);
             if saved {
                 events::emit(events::ChangeKind::Config, None, Origin::Ui);
             }
             if let Some(fields) = data.as_object_mut() {
                 fields.insert("saved".to_owned(), saved.into());
+                if let Some(error) = save_error {
+                    fields.insert("saveError".to_owned(), error.into());
+                }
             }
         }
         Ok::<_, CtlError>(data)

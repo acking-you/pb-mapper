@@ -264,6 +264,7 @@ class KeyRotation {
     required this.confirmed,
     required this.saved,
     this.reason,
+    this.saveError,
   });
 
   final String key;
@@ -279,11 +280,15 @@ class KeyRotation {
   /// Why the outcome is unknown, when it is.
   final String? reason;
 
+  /// Why this computer could not save [key], when it tried and failed.
+  final String? saveError;
+
   factory KeyRotation.fromMap(Map<String, dynamic> map) => KeyRotation(
     key: '${map['adminKey'] ?? ''}',
     confirmed: map['confirmed'] == true,
     saved: map['saved'] == true,
     reason: map['reason'] as String?,
+    saveError: map['saveError'] as String?,
   );
 }
 

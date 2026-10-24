@@ -322,6 +322,7 @@
   "securityRotatedTitle": "新的管理员密钥",
   "securityRotatedBody": "已保存在这台电脑上。复制它或它的设置字符串，给其他原本使用旧密钥的地方。",
   "securityRotatedUnsavedBody": "{address} 现在只接受这个密钥。期间本机已切换到其他中继或凭据，所以没有保存它：请立即复制。",
+  "securityRotatedSaveFailedBody": "{address} 现在只接受这个密钥，但本机没能保存它（{error}）。请立即复制，并粘贴到设置中。",
   "securityRotationKept": "我已保存",
   "relayUnsavedKey": "{address} 的新管理员密钥没有保存在本机。",
   "relayUnsavedKeyShow": "查看密钥",
