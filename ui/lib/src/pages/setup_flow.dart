@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/pages/tunnel_editor.dart';
@@ -156,11 +158,21 @@ class _SetupFlowState extends State<SetupFlow> {
               AnimatedSwitcher(
                 duration: Motion.of(context, Motion.medium),
                 switchInCurve: Motion.emphasized,
+                // What SizeTransition does, spelled out: its alignment
+                // parameter is newer than the Flutter the release builds use,
+                // and the older axisAlignment is deprecated in the one CI
+                // analyzes with.
                 transitionBuilder: (child, animation) => FadeTransition(
                   opacity: animation,
-                  child: SizeTransition(
-                    sizeFactor: animation,
-                    alignment: Alignment.topCenter,
+                  child: AnimatedBuilder(
+                    animation: animation,
+                    builder: (context, child) => ClipRect(
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        heightFactor: math.max(animation.value, 0),
+                        child: child,
+                      ),
+                    ),
                     child: child,
                   ),
                 ),
