@@ -1,7 +1,7 @@
 {
   "name": "pb-mapper",
-  "version": "0.7.0",
-  "description": "Node-API client for pb-mapper: virtual network cables with opt-in direct paths and relay fallback",
+  "version": "0.8.0",
+  "description": "Node-API client for pb-mapper: peer-to-peer tunnels to private TCP/UDP services with automatic relay fallback",
   "main": "index.js",
   "types": "index.d.ts",
   "exports": {
@@ -23,6 +23,9 @@
   },
   "keywords": [
     "tunnel",
+    "p2p",
+    "nat-traversal",
+    "quic",
     "tcp",
     "udp",
     "napi-rs",
@@ -56,10 +59,10 @@
     "@napi-rs/cli": "^3.3.0"
   },
   "optionalDependencies": {
-    "pb-mapper-darwin-arm64": "0.7.0",
-    "pb-mapper-darwin-x64": "0.7.0",
-    "pb-mapper-linux-arm64-gnu": "0.7.0",
-    "pb-mapper-linux-x64-gnu": "0.7.0"
+    "pb-mapper-darwin-arm64": "0.8.0",
+    "pb-mapper-darwin-x64": "0.8.0",
+    "pb-mapper-linux-arm64-gnu": "0.8.0",
+    "pb-mapper-linux-x64-gnu": "0.8.0"
   },
   "engines": {
     "node": ">= 18",

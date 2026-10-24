@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "Client SDK for pb-mapper: reach private TCP/UDP services through a relay, or end to end with opt-in direct QUIC and relay fallback"
+description = "Client SDK for pb-mapper: reach private TCP/UDP services peer to peer over QUIC, with automatic relay fallback and reconnection"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/pb-mapper"
 readme = "README.md"
-keywords = ["proxy", "tunnel", "nat", "tcp", "udp"]
+keywords = ["p2p", "tunnel", "nat-traversal", "quic", "relay"]
 categories = ["network-programming"]
 publish = ["crates-io"]
 
@@ -18,10 +18,18 @@ publish = ["crates-io"]
 pb-mapper-client.workspace = true
 
 [features]
+# Direct QUIC with relay fallback is the default path. Turning `p2p` off keeps
+# every connection on the relay and drops quinn, rcgen and stun-proto.
+default = ["p2p"]
 p2p = ["pb-mapper-client/p2p"]
 
 [dev-dependencies]
 tokio.workspace = true
+serde_json.workspace = true
+# `examples/quickstart.rs` runs its own relay in-process so it needs no setup.
+pb-mapper-auth.workspace = true
+pb-mapper-server = { workspace = true, features = ["p2p"] }
+tokio-util.workspace = true
 
 [lints]
 workspace = true

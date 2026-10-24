@@ -1,0 +1,121 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">pb-mapper — P2P 直连优先，中继兜底</title>
+  <desc id="desc">connect 与 register 两端通过 QUIC 直连，relay 以一个 TCP 端口和一个 UDP 端口兜底。四个亮点：全自动 SDK、一个 TCP 加一个 UDP 端口、自带密钥与事件监听、直连延迟低于 20 ms 且中继回退与 frp 持平。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#040A22"/>
+      <stop offset="0.6" stop-color="#0A1A55"/>
+      <stop offset="1" stop-color="#1445C4"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1210 300) rotate(90) scale(380 520)">
+      <stop offset="0" stop-color="#2E7BFF" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#2E7BFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#29E3FF"/>
+      <stop offset="1" stop-color="#6FA8FF"/>
+    </linearGradient>
+    <linearGradient id="icon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0876D9"/>
+      <stop offset="1" stop-color="#30B2FF"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-60%" width="160%" height="220%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+    <symbol id="mark" viewBox="0 0 1024 1024">
+      <path d="M687 514C779 511 855 574 855 677C855 791 744 843 639 811C581 793 543 755 498 716C414 644 316 655 250 748" stroke="white" stroke-width="43" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <rect x="382" y="326" width="44" height="119" rx="19" fill="white"/>
+      <rect x="581" y="326" width="44" height="119" rx="19" fill="white"/>
+      <rect x="328" y="400" width="368" height="228" rx="59" fill="white"/>
+      <path d="M414 501L456 535L414 565" stroke="#168BE5" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <path d="M596 501L554 535L596 565" stroke="#168BE5" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </symbol>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <rect width="1600" height="900" fill="url(#glow)"/>
+
+  <g font-family="Microsoft YaHei UI, Microsoft YaHei, PingFang SC, Noto Sans CJK SC, Segoe UI, sans-serif">
+    <!-- Brand -->
+    <rect x="80" y="72" width="112" height="112" rx="26" fill="#F4F8FF"/>
+    <rect x="89" y="81" width="94" height="94" rx="21" fill="url(#icon)"/>
+    <use href="#mark" x="89" y="81" width="94" height="94"/>
+    <text x="220" y="156" font-size="74" font-weight="700" fill="#FFFFFF" letter-spacing="-1">pb-mapper</text>
+
+    <!-- Headline -->
+    <text x="80" y="308" font-size="80" font-weight="800" fill="#FFFFFF" letter-spacing="-1">P2P 直连优先</text>
+    <text x="80" y="398" font-size="80" font-weight="800" fill="url(#accent)" letter-spacing="-1">中继兜底</text>
+    <text x="82" y="462" font-size="26" fill="#B9C8F2">访问任意私有 TCP / UDP 服务：能直连就走 QUIC，</text>
+    <text x="82" y="498" font-size="26" fill="#B9C8F2">打不通时，在发送任何数据之前自动回退中继。</text>
+
+    <!-- Path diagram -->
+    <path d="M1090 214 Q1210 72 1330 214" stroke="#29E3FF" stroke-width="14" stroke-linecap="round" opacity="0.55" filter="url(#soft)"/>
+    <path d="M1090 214 Q1210 72 1330 214" stroke="url(#accent)" stroke-width="6" stroke-linecap="round"/>
+    <rect x="1131" y="94" width="158" height="38" rx="19" fill="#06123D" stroke="#29E3FF" stroke-width="2"/>
+    <text x="1210" y="120" text-anchor="middle" font-size="19" font-weight="700" fill="#29E3FF">直连 · QUIC</text>
+
+    <rect x="900" y="196" width="200" height="84" rx="20" fill="#0B1A4F" stroke="#5AC8FF" stroke-width="2.5"/>
+    <text x="1000" y="234" text-anchor="middle" font-size="26" font-weight="700" fill="#FFFFFF">connect</text>
+    <text x="1000" y="262" text-anchor="middle" font-size="17" fill="#9FB4E8">本地端口</text>
+    <rect x="1320" y="196" width="200" height="84" rx="20" fill="#0B1A4F" stroke="#5AC8FF" stroke-width="2.5"/>
+    <text x="1420" y="234" text-anchor="middle" font-size="26" font-weight="700" fill="#FFFFFF">register</text>
+    <text x="1420" y="262" text-anchor="middle" font-size="17" fill="#9FB4E8">私有服务</text>
+
+    <path d="M1000 282 C1000 360 1080 420 1146 428" stroke="#7E9BE0" stroke-width="3.5" stroke-dasharray="10 10" stroke-linecap="round"/>
+    <path d="M1420 282 C1420 360 1340 420 1274 428" stroke="#7E9BE0" stroke-width="3.5" stroke-dasharray="10 10" stroke-linecap="round"/>
+    <text x="1210" y="300" text-anchor="middle" font-size="19" fill="#A9BCEB">提交前自动回退</text>
+
+    <rect x="1150" y="372" width="120" height="120" rx="30" fill="url(#icon)" stroke="#9AD8FF" stroke-width="2"/>
+    <use href="#mark" x="1162" y="384" width="96" height="96"/>
+    <text x="1210" y="530" text-anchor="middle" font-size="24" font-weight="700" fill="#FFFFFF">relay</text>
+    <rect x="1080" y="546" width="122" height="32" rx="16" fill="#0B1A4F" stroke="#5AC8FF" stroke-width="1.5"/>
+    <text x="1141" y="568" text-anchor="middle" font-size="17" font-weight="600" fill="#DDE8FF">7666/tcp</text>
+    <rect x="1218" y="546" width="122" height="32" rx="16" fill="#0B1A4F" stroke="#29E3FF" stroke-width="1.5"/>
+    <text x="1279" y="568" text-anchor="middle" font-size="17" font-weight="600" fill="#29E3FF">7666/udp</text>
+
+    <!-- Highlights -->
+    <g>
+      <rect x="80" y="626" width="345" height="176" rx="22" fill="#FFFFFF" fill-opacity="0.055" stroke="#7FA6FF" stroke-opacity="0.35" stroke-width="1.5"/>
+      <circle cx="128" cy="674" r="26" fill="#29E3FF" fill-opacity="0.16"/>
+      <path d="M140 664a14 14 0 1 0 2 14" stroke="#29E3FF" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M134 660l7 4-4 7" stroke="#29E3FF" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="168" y="684" font-size="26" font-weight="700" fill="#FFFFFF">SDK 全自动</text>
+      <text x="106" y="738" font-size="19" fill="#B4C4EE">打洞、回退中继、断线重连</text>
+      <text x="106" y="766" font-size="19" fill="#B4C4EE">全部自动完成</text>
+    </g>
+    <g>
+      <rect x="445" y="626" width="345" height="176" rx="22" fill="#FFFFFF" fill-opacity="0.055" stroke="#7FA6FF" stroke-opacity="0.35" stroke-width="1.5"/>
+      <circle cx="493" cy="674" r="26" fill="#29E3FF" fill-opacity="0.16"/>
+      <rect x="479" y="664" width="12" height="20" rx="3" stroke="#29E3FF" stroke-width="3"/>
+      <rect x="495" y="664" width="12" height="20" rx="3" stroke="#29E3FF" stroke-width="3"/>
+      <path d="M485 664v-6M501 664v-6" stroke="#29E3FF" stroke-width="3" stroke-linecap="round"/>
+      <text x="531" y="683" font-size="23" font-weight="700" fill="#FFFFFF">1 TCP + 1 UDP 端口</text>
+      <text x="471" y="738" font-size="19" fill="#B4C4EE">一个端口中继所有服务，</text>
+      <text x="471" y="766" font-size="19" fill="#B4C4EE">一个端口为所有服务打洞</text>
+    </g>
+    <g>
+      <rect x="810" y="626" width="345" height="176" rx="22" fill="#FFFFFF" fill-opacity="0.055" stroke="#7FA6FF" stroke-opacity="0.35" stroke-width="1.5"/>
+      <circle cx="858" cy="674" r="26" fill="#29E3FF" fill-opacity="0.16"/>
+      <circle cx="850" cy="674" r="7" stroke="#29E3FF" stroke-width="3.5"/>
+      <path d="M857 674h14M866 674v6M871 674v4" stroke="#29E3FF" stroke-width="3.5" stroke-linecap="round"/>
+      <text x="898" y="684" font-size="26" font-weight="700" fill="#FFFFFF">密钥与事件</text>
+      <text x="836" y="738" font-size="19" fill="#B4C4EE">可续期、可吊销的隔离凭据；</text>
+      <text x="836" y="766" font-size="19" fill="#B4C4EE">状态与事件监听接口</text>
+    </g>
+    <g>
+      <rect x="1175" y="626" width="345" height="176" rx="22" fill="#FFFFFF" fill-opacity="0.055" stroke="#7FA6FF" stroke-opacity="0.35" stroke-width="1.5"/>
+      <circle cx="1223" cy="674" r="26" fill="#29E3FF" fill-opacity="0.16"/>
+      <path d="M1227 658l-12 19h9l-4 15 13-20h-9z" fill="#29E3FF"/>
+      <text x="1263" y="684" font-size="26" font-weight="700" fill="#FFFFFF">直连 &lt; 20 ms</text>
+      <text x="1201" y="738" font-size="19" fill="#B4C4EE">中继回退的延迟与稳定性</text>
+      <text x="1201" y="766" font-size="19" fill="#B4C4EE">与 frp 持平（作者实测）</text>
+    </g>
+
+    <!-- Footer -->
+    <g transform="translate(80 838)">
+      <path fill="#FFFFFF" d="M14 0C6.27 0 0 6.27 0 14c0 6.19 4.01 11.43 9.57 13.28.7.13.96-.3.96-.67 0-.33-.01-1.21-.02-2.38-3.89.85-4.71-1.88-4.71-1.88-.64-1.62-1.56-2.05-1.56-2.05-1.27-.87.1-.85.1-.85 1.4.1 2.14 1.44 2.14 1.44 1.25 2.14 3.27 1.52 4.07 1.16.13-.9.49-1.52.89-1.87-3.11-.35-6.37-1.55-6.37-6.92 0-1.53.55-2.78 1.44-3.76-.14-.35-.62-1.78.14-3.71 0 0 1.17-.38 3.85 1.44a13.4 13.4 0 0 1 7 0c2.67-1.82 3.85-1.44 3.85-1.44.76 1.93.28 3.36.14 3.71.9.98 1.44 2.23 1.44 3.76 0 5.38-3.27 6.56-6.38 6.91.5.43.95 1.29.95 2.6 0 1.87-.02 3.38-.02 3.84 0 .37.25.81.97.67C23.99 25.42 28 20.18 28 14 28 6.27 21.73 0 14 0z"/>
+    </g>
+    <text x="122" y="860" font-size="23" fill="#FFFFFF">github.com/acking-you/pb-mapper</text>
+    <text x="1520" y="860" text-anchor="end" font-size="20" fill="#8FA6DC">Rust · Tokio · QUIC · TCP / UDP · MIT</text>
+  </g>
+</svg>

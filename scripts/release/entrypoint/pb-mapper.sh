@@ -31,6 +31,13 @@ else
   echo "USE_IPV6 is set to false or is not set"
 fi
 
+if [ "${PB_MAPPER_RELAY_ONLY:-false}" = "true" ]; then
+  echo "PB_MAPPER_RELAY_ONLY is set: serving the relay only"
+  ARGS+=(--relay-only)
+elif [ -n "${PB_MAPPER_DIRECT_ADVERTISE:-}" ]; then
+  ARGS+=(--direct-advertise "$PB_MAPPER_DIRECT_ADVERTISE")
+fi
+
 if [ "$USE_MACHINE_MSG_HEADER_KEY" = "true" ]; then
   if [ -s "$ADMIN_KEY_PATH" ]; then
     echo "admin.key already exists; skipping --use-machine-msg-header-key"

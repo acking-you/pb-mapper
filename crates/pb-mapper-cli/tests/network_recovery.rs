@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use pb_mapper_client::sdk::{Client, ConnectRequest, RegisterRequest, Registration, Transport};
+use pb_mapper_client::sdk::{
+    Client, ConnectOptions, ConnectRequest, PathPolicy, RegisterRequest, Registration, Transport,
+};
 use pb_mapper_testkit::{Relay, admin_credential, reserve_addr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -482,12 +484,18 @@ async fn connection_burst_has_bounded_setup_and_probe_concurrency() {
     let proxy = FaultProxy::start(relay.addr(), 0).await;
     let client = Client::from_credential(proxy.addr.to_string(), admin_credential(), false, None);
     let listen = reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+    // Relay setup is what is being counted: no direct capability query per caller.
     let connection = client
-        .connect(ConnectRequest {
-            key: "echo".into(),
-            local_addr: listen.to_string(),
-            transport: Transport::Tcp,
-        })
+        .connect_with_options(
+            ConnectRequest {
+                key: "echo".into(),
+                local_addr: listen.to_string(),
+                transport: Transport::Tcp,
+            },
+            ConnectOptions {
+                path: PathPolicy::RelayOnly,
+            },
+        )
         .await
         .unwrap();
     connection

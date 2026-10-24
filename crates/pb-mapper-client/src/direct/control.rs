@@ -40,6 +40,7 @@ impl Control {
         namespace: Option<u64>,
     ) -> io::Result<Arc<Self>> {
         let mut socket = remote.connect().await?;
+        let relay_ip = socket.peer_addr()?.ip();
         let session = ClientHeaderSession::new_v2(&credential).map_err(io_error)?;
         session
             .write_initial(
@@ -105,10 +106,11 @@ impl Control {
             }
             drop(cleanup);
         }));
-        let capability = tokio::time::timeout(control_io_timeout(), ready_rx)
+        let mut capability = tokio::time::timeout(control_io_timeout(), ready_rx)
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct control not ready"))?
             .map_err(|_| io::Error::other("direct control closed before ready"))?;
+        capability.stun_addr = stun_target(capability.stun_addr, relay_ip);
         Ok(Arc::new(Self {
             tx,
             pending,

@@ -8,6 +8,39 @@ use tokio::{io::AsyncWriteExt, net::TcpListener};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uni_stream::stream::{StreamProvider, TcpStreamProvider};
 
+#[test]
+fn fallback_cooldown_doubles_to_its_cap_and_clears() {
+    let start = Instant::now();
+    let mut cooldown = Cooldown::default();
+    assert!(!cooldown.active(start));
+
+    cooldown.back_off(start);
+    assert!(cooldown.active(start + COOLDOWN_INITIAL - Duration::from_millis(1)));
+    assert!(!cooldown.active(start + COOLDOWN_INITIAL));
+
+    // Fallbacks within a running pause belong to the same failure.
+    cooldown.back_off(start + Duration::from_secs(1));
+    assert!(!cooldown.active(start + COOLDOWN_INITIAL));
+
+    // Each fallback after a pause ends pauses longer, never past the cap.
+    let mut now = start + COOLDOWN_INITIAL;
+    let mut pause = COOLDOWN_INITIAL;
+    for _ in 0..16 {
+        cooldown.back_off(now);
+        pause = (pause * 2).min(COOLDOWN_MAX);
+        assert!(cooldown.active(now + pause - Duration::from_millis(1)));
+        assert!(!cooldown.active(now + pause));
+        now += pause;
+    }
+    assert_eq!(pause, COOLDOWN_MAX);
+
+    // A success or a network change starts the schedule over.
+    cooldown.clear();
+    assert!(!cooldown.active(now));
+    cooldown.back_off(now);
+    assert!(!cooldown.active(now + COOLDOWN_INITIAL));
+}
+
 #[tokio::test]
 async fn blocked_quic_selects_relay_and_dials_backend_once() {
     let credential = Credential::Admin(pb_mapper_core::checksum::gen_random_key());

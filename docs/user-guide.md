@@ -52,6 +52,23 @@ sequenceDiagram
 
 Control connections use leases and a receive watchdog. After the tolerance window, a register worker probes the exact `conn_id` and `generation`; a missing registration triggers reconnection. No inbound control activity beyond tolerance plus grace also triggers reconnection, even if the status probe still lists the socket. A single slow stream ACK first marks a relay candidate suspect; authenticated activity during its confirmation grace preserves the registration. Connect listeners stay bound while one background probe checks reachability, and healthy data streams survive control reconnection. See [weak-network recovery](weak-network-recovery.md) for deadlines, resource bounds, and fault tests.
 
+### Direct connections (default)
+
+Each new connection first tries a peer-to-peer path. The consumer asks the relay
+for a session grant, both ends learn their public UDP address from the relay's
+STUN service, punch through their NATs, and open a mutually authenticated QUIC
+connection. Only then does the publisher dial its local service. If any step
+fails, the connection uses the relay path above, before any application byte is
+sent, so nothing is replayed and the backend is dialed once. After a fallback the
+tunnel sends its next connections straight to the relay for a while (10 s,
+doubling to 5 min, cleared by a direct success or a network change).
+
+Direct needs nothing to be configured: the relay listens for it on its TCP port
+number over UDP, and every role allows it by default. `--relay-only` on
+`server`, `register` or `connect` turns it off for that side. Established direct
+sessions belong to the two endpoints: a relay restart or a revoked credential
+stops new setups but does not cut them, while stopping the local tunnel does.
+
 ## Prerequisites
 
 - Optional: Flutter SDK for the GUI (`ui/`)
@@ -121,8 +138,15 @@ If you added the binaries to your PATH, use them directly. Otherwise, prefix wit
 pb-mapper server --port 7666
 ```
 
+The relay listens on `7666/tcp` and, for direct connections, on `7666/udp`.
+Open both in the firewall and the cloud security group; without the UDP port,
+every connection still works through the relay.
+
 Optional flags:
 
+- `--relay-only` (alias `--disable-direct`): serve the relay alone, with no UDP port
+- `--direct-listen <ADDR>`: bind direct coordination elsewhere (default: the relay address over UDP)
+- `--direct-advertise <IP:PORT>`: the public address clients should use for it, when the UDP port is mapped differently from the TCP one (default: the address each client dialed)
 - `--ipv6`: enable IPv6 listening
 - `--keep-alive`: enable TCP keep-alive
 - `--auth-state-dir`: authentication state directory (Linux services default `/var/lib/pb-mapper/auth`; unprivileged Linux, macOS, and Windows use a user-writable application directory)
@@ -191,7 +215,9 @@ pb-mapper register udp \
   --addr "127.0.0.1:8211"
 ```
 
-To enable optional AES-256-GCM message encryption for forwarded traffic, add `--codec` to the register command.
+To enable optional AES-256-GCM message encryption for relayed traffic, add `--codec` to the register command. Direct sessions are always encrypted by QUIC.
+
+Add `--relay-only` to keep every session to this service on the relay.
 
 ### 3) Connect from a remote client
 
@@ -204,12 +230,20 @@ pb-mapper connect tcp \
 
 After step 3, the remote machine can access the service at `127.0.0.1:9090`.
 
+Connections try direct first (`--path auto`, the default). Use `--relay-only`
+(or `--path relay-only`) to keep this tunnel on the relay.
+
 ### Status commands
 
 ```bash
 pb-mapper status remote-id --server "your-server:7666"
 pb-mapper status keys --server "your-server:7666"
+pb-mapper status sessions --server "your-server:7666"
 ```
+
+`status sessions` lists the sessions in your namespace with the path each one
+took (`direct` or `relay`), as reported by the endpoints with an age and a
+`stale` flag; reports are observations, not proof of liveness.
 
 An administrator can explicitly inspect or connect to a temporary namespace:
 

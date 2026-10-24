@@ -3,7 +3,7 @@
 ![Docker Pulls](https://img.shields.io/docker/pulls/ackingliu/pb-mapper)
 ![Docker Image Size](https://img.shields.io/docker/image-size/ackingliu/pb-mapper)
 
-A high-performance Rust-based network tunneling server that allows you to expose local services to clients over a public network. Perfect for accessing your home services from anywhere!
+The pb-mapper relay: one TCP port relays every service, and the same port number over UDP lets clients connect peer to peer, falling back to the relay when they cannot. Expose home services and reach private runtimes from anywhere.
 
 ## 🚀 Quick Start
 
@@ -11,7 +11,8 @@ A high-performance Rust-based network tunneling server that allows you to expose
 ```bash
 docker run -d \
   --name pb-mapper \
-  -p 7666:7666 \
+  -p 7666:7666/tcp \
+  -p 7666:7666/udp \
   -e PB_MAPPER_PORT=7666 \
   -e RUST_LOG=error \
   -v pb-mapper-auth:/var/lib/pb-mapper/auth \
@@ -33,7 +34,8 @@ services:
     volumes:
       - pb-mapper-auth:/var/lib/pb-mapper/auth
     ports:
-      - "7666:7666"
+      - "7666:7666/tcp"
+      - "7666:7666/udp"   # direct (peer-to-peer) coordination
     restart: unless-stopped
 
 volumes:
@@ -54,6 +56,8 @@ docker-compose up -d
 | `MSG_HEADER_KEY` | unset | Optional 32-character administrator key used only to initialize a new persistent auth volume |
 | `USE_MACHINE_MSG_HEADER_KEY` | `false` | Legacy compatibility: derive the administrator key from hostname + MAC |
 | `PB_MAPPER_AUTH_STATE_DIR` | `/var/lib/pb-mapper/auth` | Persistent encrypted authentication state |
+| `PB_MAPPER_RELAY_ONLY` | `false` | `true` serves the relay only: no UDP port, no direct connections |
+| `PB_MAPPER_DIRECT_ADVERTISE` | unset | Public `IP:PORT` for direct coordination when the UDP port is mapped differently from the TCP one; by default clients use the address they dialed |
 | `RUST_LOG` | `error` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) |
 
 ⚠️ **Important**: `PB_MAPPER_PORT` must be set and `/var/lib/pb-mapper/auth` must be persistent. The first start creates a random administrator key at `admin.key`; losing the volume changes the root credential and loses temporary-key state.
@@ -97,7 +101,8 @@ services:
     volumes:
       - pb-mapper-auth:/var/lib/pb-mapper/auth
     ports:
-      - "7666:7666"
+      - "7666:7666/tcp"
+      - "7666:7666/udp"   # direct (peer-to-peer) coordination
     restart: unless-stopped
 
 volumes:
@@ -107,8 +112,9 @@ EOF
 
 ### Step 3: Configure Firewall (if enabled)
 ```bash
-# Allow pb-mapper port through firewall
+# Allow the relay (TCP) and direct coordination (UDP) through the firewall
 sudo ufw allow 7666/tcp
+sudo ufw allow 7666/udp
 
 # Check firewall status
 sudo ufw status
@@ -178,7 +184,7 @@ For other architectures, you can build the image yourself using the provided Doc
 
 ## 🛡️ Security Considerations
 
-- **Firewall**: Only expose port 7666 to trusted networks
+- **Firewall**: Expose 7666/tcp and 7666/udp only to the networks that need them
 - **Authentication**: Keep `admin.key` on the relay and distribute expiring `pbmt1_` temporary credentials to workloads
 - **Forwarded payload encryption**: Use `register --codec` when the inner application protocol is plaintext
 - **Updates**: Regularly update to the latest version for security patches
@@ -215,7 +221,8 @@ services:
     environment:
       PB_MAPPER_PORT: 8888  # Custom port
     ports:
-      - "8888:8888"         # Update port mapping
+      - "8888:8888/tcp"     # Update port mapping
+      - "8888:8888/udp"
 ```
 
 ### IPv6 Support
@@ -227,7 +234,8 @@ services:
       USE_IPV6: true
       PB_MAPPER_PORT: 7666
     ports:
-      - "[::]:7666:7666"    # IPv6 binding
+      - "[::]:7666:7666/tcp"    # IPv6 binding
+      - "[::]:7666:7666/udp"
 ```
 
 ### Production Deployment with Restart Policy
@@ -239,7 +247,8 @@ services:
       PB_MAPPER_PORT: 7666
       RUST_LOG: warn
     ports:
-      - "7666:7666"
+      - "7666:7666/tcp"
+      - "7666:7666/udp"   # direct (peer-to-peer) coordination
     restart: unless-stopped
     deploy:
       resources:

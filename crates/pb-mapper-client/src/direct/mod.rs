@@ -28,6 +28,52 @@ use tokio::{
 };
 use uni_stream::stream::NetworkStream;
 
+/// First pause after a direct setup falls back to the relay.
+const COOLDOWN_INITIAL: Duration = Duration::from_secs(10);
+/// Longest pause between direct attempts on a network that keeps refusing them.
+const COOLDOWN_MAX: Duration = Duration::from_secs(300);
+
+/// When a tunnel may try direct again after falling back.
+///
+/// A path that cannot be punched — a symmetric NAT, blocked UDP, a relay or
+/// publisher without direct — fails the same way for every connection, and
+/// each failure costs that connection its whole setup budget before the relay
+/// takes over. Pausing direct after a fallback sends the next connections
+/// straight to the relay instead. The pause doubles while fallbacks repeat; a
+/// direct success or a network change, which can make a path punchable,
+/// clears it.
+#[derive(Debug, Default)]
+struct Cooldown {
+    until: Option<Instant>,
+    next: Duration,
+}
+
+impl Cooldown {
+    fn active(&self, now: Instant) -> bool {
+        self.until.is_some_and(|until| now < until)
+    }
+
+    /// Start the next pause, unless one is running. A burst of connections
+    /// that were all mid-attempt when the path failed is one failure, not one
+    /// per connection: counting each would jump straight to the cap.
+    fn back_off(&mut self, now: Instant) {
+        if self.active(now) {
+            return;
+        }
+        let pause = if self.next.is_zero() {
+            COOLDOWN_INITIAL
+        } else {
+            self.next
+        };
+        self.until = Some(now + pause);
+        self.next = (pause * 2).min(COOLDOWN_MAX);
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub(crate) struct Consumer {
     remote: RelayEndpoint,
     credential: Credential,
@@ -40,6 +86,7 @@ pub(crate) struct Consumer {
     _reporter: tokio_util::task::AbortOnDropHandle<()>,
     network: OnceCell<Arc<Network>>,
     diagnostics: Diagnostics,
+    cooldown: std::sync::Mutex<Cooldown>,
 }
 impl Consumer {
     pub fn new(
@@ -73,12 +120,21 @@ impl Consumer {
             _reporter: reporter,
             network: OnceCell::new(),
             diagnostics,
+            cooldown: std::sync::Mutex::default(),
         })
+    }
+    fn cooldown(&self) -> std::sync::MutexGuard<'_, Cooldown> {
+        self.cooldown.lock().unwrap_or_else(|e| e.into_inner())
     }
     async fn control(&self, key: &str) -> io::Result<Option<Arc<Control>>> {
         let mut slot = self.control.lock().await;
         if let Some(control) = slot.as_ref().filter(|c| c.alive()) {
             return Ok(Some(control.clone()));
+        }
+        // Concurrent setups queue here. If the one ahead learned that direct
+        // is unavailable, the rest go to the relay instead of asking again.
+        if self.cooldown().active(Instant::now()) {
+            return Ok(None);
         }
         let mut stream = self.remote.connect().await?;
         let response = crate::client::status::get_status_with_credential(
@@ -98,9 +154,12 @@ impl Consumer {
         } = response
         else {
             *slot = None;
+            // Set before the lock is released, so no queued setup repeats the query.
+            self.cooldown().back_off(Instant::now());
             return Ok(None);
         };
         if capability.version != DIRECT_VERSION {
+            self.cooldown().back_off(Instant::now());
             return Ok(None);
         }
         let control = Control::connect(&self.remote, self.credential, self.namespace).await?;
@@ -108,6 +167,7 @@ impl Consumer {
         Ok(Some(control))
     }
     pub fn invalidate(&self) {
+        self.cooldown().clear();
         if let Some(network) = self.network.get() {
             network.invalidate();
         }
@@ -122,6 +182,11 @@ impl Consumer {
         key: &str,
         deadline: Instant,
     ) -> io::Result<Option<Prepared>> {
+        // A recent fallback says this path will not punch: take the ordinary
+        // relay path without spending the connection's setup budget on it.
+        if self.cooldown().active(Instant::now()) {
+            return Ok(None);
+        }
         // Before a grant arrives no endpoint can have committed, so a failed
         // capability/control/discovery attempt can use the ordinary relay path.
         let mut attempt = self.diagnostics.direct_attempt();
@@ -148,6 +213,7 @@ impl Consumer {
         .await
         else {
             attempt.fell_back("direct_negotiation_unavailable");
+            self.cooldown().back_off(Instant::now());
             return Ok(None);
         };
         let deadline = deadline.min(Instant::now() + Duration::from_millis(grant.ttl_ms));
@@ -199,6 +265,7 @@ impl Consumer {
             }
             let framing_key = endpoint::framing_key(&connection.0, &grant)?;
             attempt.established();
+            self.cooldown().clear();
             tracing::info!(event = "session_path_selected", path = "direct", service = %key, peer = %connection.0.remote_address());
             Ok(Some(Prepared {
                 path: DataPath::Quic {
@@ -215,6 +282,7 @@ impl Consumer {
         } else {
             tracing::debug!(reason = ?candidate.as_ref().map(|r| r.as_ref().map(|_| ())), "direct attempt failed before commit");
             attempt.fell_back("direct_timeout_or_unreachable");
+            self.cooldown().back_off(Instant::now());
             control.relay(grant.id).await?;
             let ready = crate::client::stream::subscribe_request(
                 PbConnRequest::DirectRelay {

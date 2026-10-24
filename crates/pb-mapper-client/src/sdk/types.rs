@@ -122,12 +122,27 @@ impl From<LegacyProtocolPolicy> for LegacyProtocol {
     }
 }
 
-/// Per-connect path policy. The default preserves the legacy relay protocol.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Per-connect path policy.
+///
+/// The default is [`Self::Auto`] when the SDK is built with the `p2p` feature,
+/// and [`Self::RelayOnly`] when it is not, since only `Auto` needs it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathPolicy {
-    #[default]
+    /// Use the relay for every connection, with the pre-direct protocol.
     RelayOnly,
+    /// Try a direct QUIC path first; fall back to the relay if it cannot be
+    /// set up, before any application byte is sent.
     Auto,
+}
+
+impl Default for PathPolicy {
+    fn default() -> Self {
+        if cfg!(feature = "p2p") {
+            Self::Auto
+        } else {
+            Self::RelayOnly
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -135,8 +150,20 @@ pub struct ConnectOptions {
     pub path: PathPolicy,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct RegisterOptions {
+    /// Accept direct sessions from authorized consumers. Defaults to `true`
+    /// with the `p2p` feature. Allowing it costs nothing until a consumer asks:
+    /// the UDP socket is opened on the first offer.
     pub allow_direct: bool,
     pub idle_timeout: Option<std::time::Duration>,
+}
+
+impl Default for RegisterOptions {
+    fn default() -> Self {
+        Self {
+            allow_direct: cfg!(feature = "p2p"),
+            idle_timeout: None,
+        }
+    }
 }

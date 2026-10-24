@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/poster.png" alt="pb-mapper — 随手拉一根虚拟网线：选择直连时端到端优先，无法直连时回退中继" width="800" />
+<img src="docs/assets/poster.zh-CN.png" alt="pb-mapper — P2P 直连优先，中继兜底：一个 TCP 端口加一个 UDP 端口，连通所有私有服务" width="800" />
 
 <p>
   <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
@@ -8,8 +8,9 @@
   <a href="https://flutter.dev/"><img alt="Flutter" src="https://img.shields.io/badge/UI-Flutter-02569B?logo=flutter&logoColor=white"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
   <a href="https://github.com/acking-you/pb-mapper/releases"><img alt="Release" src="https://img.shields.io/github/v/release/acking-you/pb-mapper?logo=github&color=success"></a>
+  <a href="https://crates.io/crates/pb-mapper"><img alt="crates.io" src="https://img.shields.io/crates/v/pb-mapper?logo=rust"></a>
+  <a href="https://www.npmjs.com/package/pb-mapper"><img alt="npm" src="https://img.shields.io/npm/v/pb-mapper?logo=npm"></a>
   <a href="https://github.com/acking-you/pb-mapper/actions/workflows/release.yml"><img alt="Build" src="https://github.com/acking-you/pb-mapper/actions/workflows/release.yml/badge.svg"></a>
-  <a href="https://github.com/acking-you/pb-mapper/actions/workflows/docker-publish.yml"><img alt="Docker Image" src="https://github.com/acking-you/pb-mapper/actions/workflows/docker-publish.yml/badge.svg"></a>
   <a href="https://github.com/acking-you/pb-mapper/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/acking-you/pb-mapper?style=social"></a>
 </p>
 
@@ -22,118 +23,140 @@
 
 ---
 
-> **随手拉一根虚拟网线，接到任何服务。**
-
-**pb-mapper** 是一层连接协调层。在私有 TCP/UDP 服务旁运行 `register`，在需要使用它的地方运行 `connect`，这项服务就出现在本地端口上，就像两台机器之间拉了一根网线。一个公网 relay 端口负责认证两端、按命名空间隔离，并决定字节怎么走。
-
-- **默认走中继。** 所有连接都可以经 relay 转发：Rust + Tokio 实现，支持 TCP 与 UDP，每段可选 AES-256-GCM。不主动选择，就不协商任何新能力。
-- **选择直连时端到端优先。** 选择直连的连接先尝试端到端路径：在同一个 UDP socket 上打洞，再建立双向认证的 QUIC。之后业务字节不经过 relay，会话归两端持有，协调服务掉线不会切断它。
-- **无法直连时回退中继。** 如果在建连预算内没有可用的直连路径，同一连接会在发送任何业务字节之前回退到 relay。一旦已为它授权了提供端，回退就锁定该提供端，其后端只会被拨号一次。
-
-pb-mapper 负责传输字节；隧道后的服务仍然负责自身的应用层认证与授权。
-
-## 为什么使用它
-
-- **一个公网端口，多项服务**：注册、订阅、状态查询与管理请求都进入同一个 relay 端口；新增服务不需要再开放公网监听端口。
-- **委派权限，而不是下发根密钥**：唯一的 32 字节管理员密钥留在 relay 上，为每个使用方签发可续期、可过期的 `pbmt1_` 凭据；每把凭据拥有隔离的命名空间。
-- **可以中止实时访问**：凭据过期、吊销、认证状态重置与根密钥轮换会关闭受影响的中继连接，并拒绝新的直连建立。
-- **紧凑、易于嵌入**：一个 Rust 二进制包含 relay、register、connect、status 与 admin 角色；Rust 与 Node SDK 内嵌同一套客户端。
-- **适合远程控制场景**：agent harness、编码会话、私有 API、模型网关、开发机与游戏服务器都在通过它进入私有运行环境。
-
-弱网恢复行为、资源边界与故障注入覆盖见 [弱网恢复设计](docs/weak-network-recovery.md)。
-
-## 一个 Relay，连接多项私有服务
-
-![pb-mapper architecture](docs/assets/architecture-flow.svg)
+**pb-mapper** 用来访问 NAT 后面的私有 TCP / UDP 服务。在服务旁边运行 `register`，在需要用它的地方运行 `connect`，服务就出现在本地端口上。每条连接都**先尝试 P2P QUIC 直连**；网络打不通时，在发送任何业务字节之前**自动回退到中继**。路径不需要手动选：CLI 和 SDK 按连接自动决定，并在中继重启、断网和网络切换时自动维持隧道。
 
 ```text
- 私有环境 A ── register "app" ──┐
- 私有环境 B ── register "shell" ├──► pb-mapper relay :7666 ◄── connect
- 私有环境 C ── register "tools" ┘             一个公网端口
+                 ┌──── 直连：UDP 打洞 + QUIC ────────────────┐
+ 你的应用 ─► connect                                          register ─► 私有服务
+   :9090         └──── 回退：relay.example.com:7666 ──────────┘
 ```
 
-- relay 按命名空间与 service name 匹配两端。
-- 不同临时凭据可以使用相同的 service name，彼此不可见，也不会发生冲突。
+## 为什么选 pb-mapper
+
+**🧩 SDK 把网络问题全包了。** `register` 和 `connect` 就是全部 API。打洞、双向认证 QUIC、中继回退、断线重连、DNS 刷新、网络切换后的恢复都在里面自动完成，TCP 和 UDP 一视同仁。一个进程可以同时维护任意多条隧道，每个 Client 各用各的凭据。
+
+**🔌 一个 TCP 端口承载全部中继，一个 UDP 端口让所有服务自由打洞。** `7666/tcp` 承载所有服务的注册、订阅、状态查询、管理和中继数据；`7666/udp` 为所有服务协调打洞。新增服务不用再开任何端口。
+
+**🔑 自带密钥管理、隔离和事件监听。** 一把管理员密钥签发可续期、可吊销的 `pbmt1_` 临时凭据，每把凭据拥有独立命名空间，租户、设备或 agent 会话只能看到自己的服务。每条隧道都提供状态流和事件历史（直连建立、回退中继、中继断开、网络切换），接入任何 App 都很直接，agent harness 的 remote control 正是它的主场景。
+
+**⚡ 两条路都快。** 作者实测：P2P 直连可以把交互延迟压到 **20 ms 以内**；回退到中继时，延迟和稳定性与 frp「一个端口对应一段映射」的模式持平。实际表现取决于两端网络和中继所在位置。
+
+## 快速开始
+
+**1. 在有公网 IP 的机器上运行 relay：**
+
+```bash
+cargo install pb-mapper-cli --locked   # 或从 Releases 下载二进制
+pb-mapper server                       # 7666/tcp 中继，7666/udp 打洞
+```
+
+在防火墙和云安全组放行 **7666/tcp 和 7666/udp**。首次启动时 relay 会在认证状态目录生成随机管理员密钥 `admin.key`（Linux 系统服务为 `/var/lib/pb-mapper/auth`）。
+
+**2. 为两端签发凭据：**
+
+```bash
+export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
+pb-mapper admin --server relay.example.com:7666 key issue --ttl 24h --label laptop
+```
+
+**3. 用打印出的 `pbmt1_…` 凭据发布服务并访问它：**
+
+```bash
+# 服务所在机器
+MSG_HEADER_KEY='pbmt1_…' pb-mapper register tcp --key web --addr 127.0.0.1:8080 --server relay.example.com:7666
+# 需要访问的机器
+MSG_HEADER_KEY='pbmt1_…' pb-mapper connect tcp --key web --addr 127.0.0.1:9090 --server relay.example.com:7666
+```
+
+现在访问 `127.0.0.1:9090` 就是访问那项服务。`pb-mapper status sessions` 可以查看每条连接走的是哪条路径。
 
 ## 连接如何选择路径
 
-是否直连按每次连接决定，并且三方都同意才会尝试：
+以下条件全部满足时走直连，前三条都是默认值：
 
-| Relay 服务端 | `register` | `connect` | 路径 |
-| --- | --- | --- | --- |
-| 默认 | 任意 | 任意 | 中继 |
-| `--enable-direct` | 默认 | 任意 | 中继 |
-| `--enable-direct` | `--allow-direct` | 默认（`--path relay-only`） | 中继 |
-| `--enable-direct` | `--allow-direct` | `--path auto` | 直连优先，提交前失败回退中继 |
+1. relay 提供打洞服务（默认开启，使用与 TCP 相同的端口号）；
+2. 提供端允许直连（`register` 默认允许）；
+3. 消费端请求直连（`connect` 默认 `--path auto`）；
+4. 两端网络确实能打通。
 
-```sh
-pb-mapper server --port 7666 --enable-direct \
-  --direct-listen 0.0.0.0:10811 --direct-advertise 公网IP:10811
-pb-mapper register tcp --key demo --addr 127.0.0.1:8080 \
-  --server relay.example.com:7666 --allow-direct
-pb-mapper connect tcp --key demo --addr 127.0.0.1:9090 \
-  --server relay.example.com:7666 --path auto
-pb-mapper status sessions --server relay.example.com:7666
-```
+任一条件不满足就走中继。切换发生在**提供端打开本地服务之前、任何业务字节发送之前**，因此不会重放任何数据，后端也只会被拨号一次。回退之后，这条隧道接下来的连接会直接走中继一段时间（10 秒起，翻倍增长到 5 分钟；直连成功或网络切换时清零），所以打不通的网络只付出一次尝试的代价，而不是每条连接都等一次。
 
-除 TCP relay 端口外，还需放行公布的 UDP 端口。凭据配置方式不变；省略这些选项即保持原有协议和控制方式，已有客户端和部署不受影响。
+需要时可以在任意一侧关闭直连：
+
+| 位置 | 参数 | 效果 |
+| --- | --- | --- |
+| Relay | `pb-mapper server --relay-only` | 不开 UDP 端口，所有连接走中继 |
+| 提供端 | `pb-mapper register --relay-only …` | 这项服务只能经中继访问 |
+| 消费端 | `pb-mapper connect --relay-only …` | 这条隧道始终走中继 |
+
+relay 只公布 UDP 端口号，客户端把它和自己拨通 relay 时用的地址配对，所以 1:1 NAT、端口转发都不用额外配置。如果 UDP 端口被映射到别处，用 `--direct-advertise 公网IP:端口` 指定；用 `--direct-listen` 绑定其他本地地址。
 
 需要了解的边界：
 
-- **回退只有一个边界。** 提供端只有在消费端提交直连后才拨号后端。提交前任何失败都回退中继；提交后绝不把业务重放到中继，避免后端副作用重复。
-- **直连会话归两端所有。** 停止 relay 或吊销凭据只阻止新的建连，不关闭已建立的直连；停止本地隧道才会关闭。`status sessions` 返回带时间与 stale 标记的端点观测，而不是存活证明。
-- **并非所有网络都能打通。** 对称 NAT、UDP 封锁等网络使用中继。目前已验证：两层独立 Linux NAT 之间 TCP、UDP 直连成功；阻断 UDP 后回退中继且后端没有重复连接；一次 macOS 到公网服务器的测试回退到了中继。详见 [验收记录](docs/issue-13-validation.zh-CN.md) 与 [设计说明](docs/issue-13-direct-connect-design.zh-CN.md)。
+- **直连会话归两端所有。** relay 重启或凭据吊销只阻止新的建连，不会切断已建立的直连；停止本地隧道才会关闭它。中继连接则在吊销时立即关闭。
+- **并非所有网络都能打通。** 对称 NAT、UDP 被封锁等情况走中继。已测试的场景见[设计说明](docs/issue-13-direct-connect-design.zh-CN.md)与[验收记录](docs/issue-13-validation.zh-CN.md)。
+- **pb-mapper 只负责传输字节。** 隧道后面的服务仍然负责自己的认证与授权。
 
-Rust SDK 开启 `p2p` feature 后使用 `register_with_options` / `connect_with_options`；Node 提供 `allowDirect`、`path` 与 `sessionsJson()`。Flutter UI 及其 C ABI 继续使用中继。
+## SDK
 
-## 安装 Agent Skill
-
-直接告诉你的 agent：
-
-```text
-Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md
-```
-
-## 面向自动化的凭据模型
-
-| 凭据 | 适合的持有者 | 权限边界 |
-| --- | --- | --- |
-| 管理员密钥 | Relay 操作者或可信的凭据分发自动化 | 签发、查看、续期、吊销、轮换并检查所有命名空间 |
-| 临时 `pbmt1_` 凭据 | 单个 harness、租户、设备或 workload | 只能注册、连接和查看自己的命名空间 |
-
-V2 协议在加密的首个请求内完成认证，不额外增加一次握手往返。临时凭据由管理员密钥、持久化 server instance ID 与 key ID 派生；relay 保存的是生命周期元数据，而不是每把临时密钥的副本。注册服务时增加 `--codec`，还可以启用可选的 AES-256-GCM 转发数据加密。
-
-pb-mapper 使用预共享凭据，不提供公钥身份体系。如果还需要基于证书的端点身份或对流量分析的防护，应在其上使用 TLS 或其他应用协议。准确的安全边界见 [认证设计](docs/authentication-v2.zh-CN.md)。
-
-## 当前已经提供的接入面
-
-| 接入面 | 当前能力 |
-| --- | --- |
-| 统一 CLI | `server`、`register`、`connect`、`status`、`admin` 五种角色 |
-| Agent Skills | 通过 `pb-mapper-suite` 完成安装、relay、register/connect 与验收，release 工作流保持独立 |
-| 运维能力 | Linux systemd、安装脚本、Docker 镜像、状态查询与管理员级服务/连接清单 |
-| 原生嵌入 | Rust crate `pb-mapper`（`Client`：register / connect / status / admin）、Flutter 使用的 C ABI、`js/` 下的 Node-API 包 |
-| 网络能力 | TCP、UDP、可选 QUIC 直连与中继回退、按隧道 keep-alive、可选的转发数据加密 |
-
-### Rust SDK
+### Rust
 
 ```toml
-pb-mapper = "0.7"
+[dependencies]
+pb-mapper = "0.8"
+tokio = { version = "1", features = ["full"] }
 ```
 
-填入已部署的 relay 地址和凭据后即可 register、connect、查 status，以及用管理员凭据调用全部 admin 接口。示例见 `crates/pb-mapper/examples/`。
+```rust
+use pb_mapper::{Client, ClientConfig, ConnectRequest, RegisterRequest, Transport};
 
-### CLI 与 Relay Server
+let client = Client::new(ClientConfig {
+    server: "relay.example.com:7666".into(),
+    credential: std::env::var("MSG_HEADER_KEY")?,
+    keep_alive: true,
+    namespace: None,
+})?;
 
-可以直接从 crates.io 安装统一 CLI：
+// 设备端：发布本地服务
+let registration = client.register(RegisterRequest {
+    key: "web".into(),
+    local_addr: "127.0.0.1:8080".into(),
+    transport: Transport::Tcp,
+    codec: false,
+    force_namespace: false,
+}).await?;
+registration.wait_ready().await?;
 
-```bash
-cargo install pb-mapper-cli --locked
+// 任意位置：在本地端口访问它，直连优先
+let connection = client.connect(ConnectRequest {
+    key: "web".into(),
+    local_addr: "127.0.0.1:9090".into(),
+    transport: Transport::Tcp,
+}).await?;
+connection.wait_ready().await?;
+
+// 监听状态变化：Starting → Connected → Retrying → …
+let mut status = connection.subscribe();
+while status.changed().await.is_ok() {
+    println!("{:?}", *status.borrow());
+}
 ```
 
-crate 名称是 `pb-mapper-cli`，安装后的可执行文件名为 `pb-mapper`。它同时包含 `server`、`register`、`connect`、`status` 和 `admin` 角色，无需另外安装 server 可执行文件。
+每项能力都有可运行的示例，见 [`crates/pb-mapper/examples/`](crates/pb-mapper/examples)。建议从 `cargo run -p pb-mapper --example quickstart` 开始，它不需要你自己的 relay：
 
-Relay 实现也以 `pb-mapper-server` library crate 形式发布，便于需要内嵌 relay 的 Rust 应用使用。
+| 示例 | 内容 |
+| --- | --- |
+| [`quickstart`](crates/pb-mapper/examples/quickstart.rs) | 内嵌 relay、发布 echo 服务、直连往返，并打印实际路径 |
+| [`register_tcp`](crates/pb-mapper/examples/register_tcp.rs) / [`connect_tcp`](crates/pb-mapper/examples/connect_tcp.rs) | TCP 隧道两端，实时显示直连与中继的连接数 |
+| [`udp`](crates/pb-mapper/examples/udp.rs) | UDP 隧道两端，例如游戏服务器 |
+| [`path_options`](crates/pb-mapper/examples/path_options.rs) | `allow_direct: false`、`PathPolicy::RelayOnly`、空闲超时 |
+| [`watch_events`](crates/pb-mapper/examples/watch_events.rs) | 状态流、事件历史、直连实时阶段、JSON 诊断 |
+| [`status`](crates/pb-mapper/examples/status.rs) | 命名空间内的服务、控制连接与会话 |
+| [`admin_credentials`](crates/pb-mapper/examples/admin_credentials.rs) | 签发、查看、显示密钥、续期、列出、吊销、回收凭据 |
+| [`admin_inventory`](crates/pb-mapper/examples/admin_inventory.rs) | 所有租户的服务与连接、清理卡住的连接、轮换根密钥 |
+| [`remote_control`](crates/pb-mapper/examples/remote_control.rs) | agent harness 模式：每个会话一把凭据、相互隔离、结束时吊销 |
+
+关闭 `p2p` feature（`default-features = false`）可得到不含 QUIC 的纯中继客户端。
 
 ### TypeScript（Node-API）
 
@@ -143,45 +166,74 @@ npm install pb-mapper
 
 ```ts
 import { Client } from "pb-mapper";
+
 const client = new Client({
   server: "relay.example.com:7666",
   credential: process.env.MSG_HEADER_KEY!,
 });
-const admin = client.admin();
+
+const conn = await client.connect({
+  key: "web", localAddr: "127.0.0.1:9090", transport: "tcp",
+});
+await conn.waitReady();
+
+// 事件监听：每次变化 resolve 一次，隧道终止后循环结束
+for (let s = conn.status(); s !== "stopped" && !s.startsWith("failed");) {
+  s = await conn.nextStatus();
+  console.log(s, conn.diagnostics().events.at(-1));
+}
 ```
 
-## Roadmap：Harness 原生的 Remote Control
+预编译覆盖 Linux（x64、arm64，glibc）、macOS（x64、arm64）与 Windows x64，支持 Node.js 18+ 与 Bun 1.1+。完整 API 见 [`js/README.md`](js/README.md)。
 
-当前版本已经提供安全网络、Rust client SDK 与 Node-API 包。仍待完成：
+### 其他接入面
 
-- 基于现有 `pb-mapper-suite` 工作流扩展更多 harness 专用 adapter 与凭据自动化；
-- 继续压缩 client-only Node 插件（linux-x64 上 `release-node` + strip 已经低于 **5 MB**）；
-- 面向无法加载原生 Node-API 插件的浏览器与 edge runtime adapter；
-- 面向远程模型 runtime、tool server、私有 API、开发机与浏览器控制端点的 harness adapter 和示例。
+| 接入面 | 能力 |
+| --- | --- |
+| CLI `pb-mapper` | 一个二进制包含 `server`、`register`、`connect`、`status`、`admin` |
+| Agent Skill | 端到端安装并验收 relay、register 与 connect（见下文） |
+| Flutter UI | 基于 C ABI 的桌面与移动端 GUI，目前走中继路径 |
+| Relay 库 | `pb-mapper-server`，可把 relay 内嵌进自己的进程 |
 
-以上均为路线图，不属于当前已发布的兼容性承诺。
+## 凭据与安全
 
-## 构建与文档
+| 凭据 | 持有者 | 权限 |
+| --- | --- | --- |
+| 管理员密钥（32 字节） | Relay 运维者或可信的凭据分发自动化 | 签发、查看、续期、吊销、轮换；检查所有命名空间 |
+| 临时 `pbmt1_` 凭据 | 单个租户、设备、harness 或会话 | 只能在自己的命名空间内注册、连接和查询 |
+
+- 临时凭据由管理员密钥、持久化的 relay 实例 ID 和 key ID 派生，relay 只保存生命周期元数据，不保存密钥本身。过期、吊销与根密钥轮换会立即作用于现有中继连接。
+- V2 协议在加密的首个请求内完成认证，不额外增加往返。直连会话运行在 QUIC 上，双方证书互相固定并绑定到会话授权。`register --codec` 为中继数据增加 AES-256-GCM 加密。
+- 凭据是预共享的，不是公钥身份体系。如需证书身份或对流量分析的防护，请在其上叠加 TLS 或其他应用协议。详见[认证设计](docs/authentication-v2.zh-CN.md)与[数据加密兼容性](docs/data-encryption-compatibility.md)。
+
+## 部署
+
+- **Agent Skill**：直接告诉你的编码 agent
+  `Fetch and follow instructions from https://raw.githubusercontent.com/acking-you/pb-mapper/master/skills/pb-mapper-suite/INSTALL.md`，
+  它会安装 CLI、部署 relay、配置 register/connect 并完成验收。
+- **Docker**：`docker compose -f docker/docker-compose.yml up -d` 同时发布 `7666/tcp` 与 `7666/udp`，见 [`DOCKER_README.md`](DOCKER_README.md)。
+- **systemd**：relay、register、connect 的 unit 文件在 [`services/`](services/readme.md)。
+- **预编译二进制**：Linux、macOS、Windows 的 CLI 与 UI 见 [Releases](https://github.com/acking-you/pb-mapper/releases)。
+
+## 从 0.7 升级
+
+现在所有位置的默认值都是「直连优先、中继兜底」。原有命令继续可用：`--enable-direct`、`--allow-direct`、`--path auto` 仍然被接受，连接旧版 relay 的客户端会直接走中继。想保持 0.7 的行为，就给 `server`、`register` 或 `connect` 加上 `--relay-only`。SDK 中，Node 设 `allowDirect: false` / `path: "relay-only"`，Rust 用 `RegisterOptions { allow_direct: false, .. }` / `PathPolicy::RelayOnly`。0.7 客户端不会把公布的端口号与 relay 地址配对，因此即使开启了直连，连接默认配置的 0.8 relay 也会回退中继；升级客户端，或用 `--direct-advertise 公网IP:7666` 启动 relay 即可。
+
+## 文档
+
+- [使用手册](docs/user-guide.zh-CN.md)：所有命令与参数
+- [弱网恢复](docs/weak-network-recovery.md)：超时、资源边界与故障测试
+- [认证与 V2 协议](docs/authentication-v2.zh-CN.md)
+- [直连设计说明](docs/issue-13-direct-connect-design.zh-CN.md)
+- [更新日志](CHANGELOG.md)
+
+仓库结构：`crates/` 是 Rust workspace（core、auth、protocol、server、client、`pb-mapper` SDK 门面、Node-API 绑定、CLI 与 testkit）；`js/` 是 npm 包；`ui/` 是 Flutter 应用及其 C ABI；`skills/` 是 agent 工作流；`docker/`、`services/`、`scripts/` 是打包与运维工具。
 
 ```bash
 make build-pb-mapper
-cargo test
+cargo test --workspace --all-features
 ```
-
-- 使用手册：[`docs/user-guide.zh-CN.md`](docs/user-guide.zh-CN.md)
-- 认证与 V2 协议：[`docs/authentication-v2.zh-CN.md`](docs/authentication-v2.zh-CN.md)
-- Docker 服务端指南：[`DOCKER_README.md`](DOCKER_README.md)
-- English docs：[`README.md`](README.md)、[`docs/user-guide.md`](docs/user-guide.md)
-
-仓库结构：
-
-- `crates/` — Rust workspace：core、auth、protocol、server、client、SDK facade（`pb-mapper`）、Node-API（`pb-mapper-node`）、CLI 与 testkit
-- `js/` — 包装 Node-API 插件的 JS 包（用 bun 构建）
-- `ui/` — Flutter UI 与原生 C ABI bridge
-- `skills/` — agent 可读取的部署与 release 工作流
-- `docs/` — 架构、认证、使用手册与项目素材
-- `docker/`、`services/`、`scripts/` — 打包和运维工具
 
 ## 许可证
 
-基于 [MIT License](LICENSE) 发布。
+[MIT](LICENSE)

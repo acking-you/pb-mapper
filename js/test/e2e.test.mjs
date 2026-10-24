@@ -65,6 +65,36 @@ test.skipIf(!hasRelay)(
 );
 
 test.skipIf(!hasRelay)(
+  "napi nextStatus reports each change until the tunnel settles",
+  async () => {
+    await withRelay(async (relay) => {
+      const client = clientFor(relay);
+      const echo = await startEchoServer();
+      const registration = await client.register({
+        key: "status-events",
+        localAddr: echo.address,
+        transport: "tcp",
+      });
+      try {
+        let status;
+        do {
+          status = await registration.nextStatus(READY_MS);
+        } while (status !== "connected" && !status.startsWith("failed"));
+        expect(status).toBe("connected");
+        await registration.stop();
+        expect(await registration.nextStatus(READY_MS)).toBe("stopped");
+        // A settled tunnel answers at once, which is what ends a listener loop.
+        expect(await registration.nextStatus(1)).toBe("stopped");
+      } finally {
+        await registration.stop();
+        await echo.close();
+      }
+    });
+  },
+  30_000,
+);
+
+test.skipIf(!hasRelay)(
   "napi tcp tunnel round-trips and appears in status",
   async () => {
     await withRelay(async (relay) => {
@@ -235,18 +265,19 @@ test.skipIf(!hasRelay)(
 
 
 test.skipIf(!hasRelay)(
-  "napi chooses direct per connect while the default remains relay-only",
+  "napi connects direct by default and relay-only opts out per connect",
   async () => {
     const relay = await startRelay({ direct: true });
     const echo = await startEchoServer();
     const client = clientFor(relay);
+    // No `allowDirect`: publishers accept direct sessions by default.
     const registration = await client.register({
-      key: "direct", localAddr: echo.address, transport: "tcp", allowDirect: true,
+      key: "direct", localAddr: echo.address, transport: "tcp",
     });
     const connections = [];
     try {
       await registration.waitReady(READY_MS);
-      for (const path of [undefined, "auto"]) {
+      for (const path of [undefined, "relay-only"]) {
         const localAddr = await reserveListenAddress();
         const connection = await client.connect({
           key: "direct", localAddr, transport: "tcp", path,
@@ -255,8 +286,12 @@ test.skipIf(!hasRelay)(
         await connection.waitReady(READY_MS);
         const payload = Buffer.alloc(32_000, 0x37);
         expect((await echoRoundTrip(localAddr, payload)).equals(payload)).toBe(true);
-        if (path === "auto") {
-          expect(connection.diagnostics().direct.directSessions).toBe(1);
+        if (path === undefined) {
+          const diagnostics = connection.diagnostics();
+          expect(diagnostics.direct.directSessions).toBe(1);
+          expect(
+            diagnostics.events.some((event) => event.kind === "direct_established"),
+          ).toBe(true);
           const deadline = Date.now() + READY_MS;
           let observations;
           do {

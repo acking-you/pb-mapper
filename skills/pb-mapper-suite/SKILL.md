@@ -20,9 +20,12 @@ Official sources:
 Before downloading, connecting over SSH, or changing a machine, ask the user to
 confirm:
 
-1. The relay's public TCP port, default `7666`, is fully open from the Internet
-   in both the cloud security group and the host firewall. Do not change
-   firewall rules unless the user explicitly asks.
+1. The relay's public port, default `7666`, is fully open from the Internet
+   over **both TCP and UDP**, in the cloud security group and the host
+   firewall. TCP carries the relay; UDP on the same port number lets
+   connections go peer to peer, and without it every connection still works
+   through the relay. Do not change firewall rules unless the user
+   explicitly asks.
 2. The server OS and architecture. Offer **Linux x86_64** as the default, mapped
    to `x86_64-unknown-linux-musl`, but require confirmation before selecting an
    artifact.
@@ -104,7 +107,9 @@ environment file with mode `0600`, and verify the service does not restart-loop.
 Do not stop at process startup. Verify:
 
 - every host reports the intended pb-mapper version;
-- the relay is externally reachable on the confirmed port;
+- the relay is externally reachable on the confirmed TCP port;
+- `pb-mapper status sessions` reports which path the round-trip used —
+  `direct`, or `relay` when UDP is closed or the NATs cannot be punched;
 - scoped status shows the registered service;
 - the connect-side address is listening;
 - a real payload round-trip reaches the private service; and

@@ -29,6 +29,22 @@ use pb_mapper_client::sdk::{
 /// Default page size for the `list*` calls that take an explicit page.
 const DEFAULT_PAGE_SIZE: u32 = 100;
 
+/// A JS-safe integer: `u64` values past 2^53 - 1 saturate rather than round.
+fn number(value: u64) -> f64 {
+    value.min((1_u64 << 53) - 1) as f64
+}
+
+/// The direct attempt a tunnel is making right now.
+#[napi(object)]
+pub struct JsDirectAttempt {
+    /// `negotiating`, `discovering`, `punching` or `committing`. Every stage
+    /// before `committing` can still fall back to the relay.
+    pub stage: String,
+    pub elapsed_ms: f64,
+    /// Attempts in flight, this one included.
+    pub in_flight: u32,
+}
+
 /// Recovery counters from the running SDK, with no credential or payload data.
 #[napi(object)]
 pub struct JsPathDiagnostics {
@@ -38,6 +54,75 @@ pub struct JsPathDiagnostics {
     pub active_relay: f64,
     pub fallbacks: f64,
     pub last_fallback: Option<String>,
+    /// The direct attempt in flight, if any.
+    pub attempt: Option<JsDirectAttempt>,
+}
+
+/// One entry of a tunnel's recent history. Consecutive repeats fold into one
+/// entry, counted by `repeats`.
+#[napi(object)]
+pub struct JsTunnelEvent {
+    /// Increases with every recorded event, a fold included: remember the
+    /// highest one handled to tell which entries are new.
+    pub seq: f64,
+    /// Time since the latest occurrence.
+    pub age_ms: f64,
+    pub repeats: u32,
+    /// `relay_ready`, `relay_failed`, `network_changed`, `direct_established`
+    /// or `direct_fallback`.
+    pub kind: String,
+    /// `relay_ready`: setup latency of the answering relay.
+    pub latency_ms: Option<f64>,
+    /// `relay_failed`: `dns`, `transport`, `timeout`, `service_unavailable`,
+    /// `rejected` or `network_changed`.
+    pub failure: Option<String>,
+    /// `relay_failed`: delay before the next attempt.
+    pub retry_in_ms: Option<f64>,
+    /// `direct_established`: time from the first request to the open path.
+    pub setup_ms: Option<f64>,
+    /// `direct_fallback`: the stage the attempt left for the relay.
+    pub stage: Option<String>,
+}
+
+impl From<sdk::TunnelEvent> for JsTunnelEvent {
+    fn from(event: sdk::TunnelEvent) -> Self {
+        let mut js = Self {
+            seq: number(event.seq),
+            age_ms: number(event.age_ms),
+            repeats: event.repeats,
+            kind: String::new(),
+            latency_ms: None,
+            failure: None,
+            retry_in_ms: None,
+            setup_ms: None,
+            stage: None,
+        };
+        js.kind = match event.kind {
+            sdk::TunnelEventKind::RelayReady { latency_ms } => {
+                js.latency_ms = Some(number(latency_ms));
+                "relay_ready"
+            }
+            sdk::TunnelEventKind::RelayFailed {
+                failure,
+                retry_in_ms,
+            } => {
+                js.failure = Some(failure.as_str().to_string());
+                js.retry_in_ms = Some(number(retry_in_ms));
+                "relay_failed"
+            }
+            sdk::TunnelEventKind::NetworkChanged => "network_changed",
+            sdk::TunnelEventKind::DirectEstablished { setup_ms } => {
+                js.setup_ms = Some(number(setup_ms));
+                "direct_established"
+            }
+            sdk::TunnelEventKind::DirectFallback { stage } => {
+                js.stage = Some(stage.as_str().to_string());
+                "direct_fallback"
+            }
+        }
+        .to_string();
+        js
+    }
 }
 
 #[napi(object)]
@@ -55,11 +140,12 @@ pub struct JsTunnelDiagnostics {
     pub network_generation: f64,
     pub active_control_setups: u32,
     pub active_data_setups: u32,
+    /// Recent history, oldest first; at most 16 entries.
+    pub events: Vec<JsTunnelEvent>,
 }
 
 impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
     fn from(value: sdk::TunnelDiagnostics) -> Self {
-        let number = |value: u64| value.min((1_u64 << 53) - 1) as f64;
         Self {
             direct: value.direct.map(|d| JsPathDiagnostics {
                 direct_sessions: number(d.direct_sessions),
@@ -68,6 +154,11 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
                 active_relay: number(d.active_relay),
                 fallbacks: number(d.fallbacks),
                 last_fallback: d.last_fallback,
+                attempt: d.attempt.map(|attempt| JsDirectAttempt {
+                    stage: attempt.stage.as_str().to_string(),
+                    elapsed_ms: number(attempt.elapsed_ms),
+                    in_flight: attempt.in_flight,
+                }),
             }),
             sdk_version: value.sdk_version.to_string(),
             last_attempt_phase: value.last_attempt_phase.as_str().to_string(),
@@ -83,6 +174,7 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
             network_generation: number(value.network_generation),
             active_control_setups: value.active_control_setups as u32,
             active_data_setups: value.active_data_setups as u32,
+            events: value.events.into_iter().map(JsTunnelEvent::from).collect(),
         }
     }
 }
@@ -151,6 +243,8 @@ pub struct JsClientConfig {
 
 #[napi(object)]
 pub struct JsRegisterRequest {
+    /// Accept direct sessions from authorized consumers (default `true`).
+    /// `false` keeps every session to this service on the relay.
     pub allow_direct: Option<bool>,
     pub key: String,
     pub local_addr: String,
@@ -175,7 +269,8 @@ impl TryFrom<JsRegisterRequest> for RegisterRequest {
 
 #[napi(object)]
 pub struct JsConnectRequest {
-    /// "relay-only" (default) or "auto".
+    /// "auto" (default): direct first, relay fallback before any byte is sent.
+    /// "relay-only": always use the relay.
     pub path: Option<String>,
     pub key: String,
     pub local_addr: String,
@@ -381,7 +476,7 @@ impl Client {
     #[napi]
     pub async fn register(&self, request: JsRegisterRequest) -> Result<Registration> {
         let options = sdk::RegisterOptions {
-            allow_direct: request.allow_direct.unwrap_or(false),
+            allow_direct: request.allow_direct.unwrap_or(true),
             ..Default::default()
         };
         let registration = self
@@ -408,7 +503,7 @@ impl Client {
             ));
         }
         let options = sdk::RegisterOptions {
-            allow_direct: request.allow_direct.unwrap_or(false),
+            allow_direct: request.allow_direct.unwrap_or(true),
             idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
         };
         let registration = self
@@ -421,7 +516,7 @@ impl Client {
 
     #[napi]
     pub async fn connect(&self, request: JsConnectRequest) -> Result<Connection> {
-        let path = match request.path.as_deref().unwrap_or("relay-only") {
+        let path = match request.path.as_deref().unwrap_or("auto") {
             "relay-only" => sdk::PathPolicy::RelayOnly,
             "auto" => sdk::PathPolicy::Auto,
             _ => return Err(invalid_argument("path must be relay-only or auto")),
@@ -483,16 +578,22 @@ impl Client {
     }
 }
 
+/// The status stream behind `nextStatus`. Held per handle, so a change that
+/// lands between two calls is reported by the second instead of missed.
+type StatusFeed = tokio::sync::Mutex<tokio::sync::watch::Receiver<TunnelStatus>>;
+
 /// A live `register` tunnel: a local service published on the relay.
 #[napi]
 pub struct Registration {
     inner: Arc<sdk::Registration>,
+    status: StatusFeed,
 }
 
 /// A live `connect` tunnel: a local listener forwarding to a registered service.
 #[napi]
 pub struct Connection {
     inner: Arc<sdk::Connection>,
+    status: StatusFeed,
 }
 
 /// Implements the JS surface of one tunnel handle.
@@ -512,6 +613,7 @@ macro_rules! tunnel_class {
         impl $name {
             fn new(inner: $handle) -> Self {
                 Self {
+                    status: tokio::sync::Mutex::new(inner.subscribe()),
                     inner: Arc::new(inner),
                 }
             }
@@ -532,10 +634,47 @@ macro_rules! tunnel_class {
                 status_label(&self.inner.status())
             }
 
-            /// Inspect the running SDK version, failure phase and bounded setup load.
+            /// Inspect the running SDK version, failure phase, bounded setup
+            /// load, the direct attempt in flight, and recent events.
             #[napi]
             pub fn diagnostics(&self) -> JsTunnelDiagnostics {
                 self.inner.diagnostics().into()
+            }
+
+            /// Resolves with the next status this tunnel reports, rendered as
+            /// `status()` renders it: an event listener for status changes.
+            ///
+            /// Each handle keeps its own position, so a change that happens
+            /// between two calls is returned by the next one rather than
+            /// missed. Once the tunnel settles as `stopped` or
+            /// `failed:<reason>`, every call resolves at once with that final
+            /// status, which is what ends a listening loop. Rejects after
+            /// `timeoutMs` without a change.
+            #[napi]
+            pub async fn next_status(&self, timeout_ms: Option<u32>) -> Result<String> {
+                let mut status = self.status.lock().await;
+                let fresh = status.has_changed().unwrap_or(false);
+                let settled = matches!(
+                    *status.borrow(),
+                    TunnelStatus::Stopped | TunnelStatus::Failed(_)
+                );
+                // An unseen change answers at once; so does a settled tunnel,
+                // which never reports again.
+                if !fresh && !settled {
+                    let changed = status.changed();
+                    // `Err` means the worker is gone and its last status is final.
+                    let _ = match timeout_ms {
+                        Some(ms) => {
+                            tokio::time::timeout(Duration::from_millis(u64::from(ms)), changed)
+                                .await
+                                .map_err(|_| {
+                                    invalid_argument(format!("no status change within {ms} ms"))
+                                })?
+                        }
+                        None => changed.await,
+                    };
+                }
+                Ok(status_label(&status.borrow_and_update()))
             }
 
             /// Resolves once the tunnel is connected, and rejects if it fails or

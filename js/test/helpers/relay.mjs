@@ -129,8 +129,11 @@ export async function startRelay({ direct = false } = {}) {
   const logs = [];
   const args = ["server", "--port", String(port)];
   if (direct) {
-    args.push("--enable-direct", "--direct-listen", "127.0.0.1:0",
-      "--direct-advertise", "127.0.0.1:0");
+    // No `--direct-advertise`: clients must derive the STUN address from the
+    // relay address they dialed, as they do against a default relay.
+    args.push("--direct-listen", "127.0.0.1:0");
+  } else {
+    args.push("--relay-only");
   }
   const child = spawn(bin, args, {
     env: {
