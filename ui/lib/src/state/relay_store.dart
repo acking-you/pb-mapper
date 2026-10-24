@@ -4,6 +4,30 @@ import 'package:flutter/foundation.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 
+/// One service on the relay, as the Services section lists it.
+class RelayServiceRow {
+  const RelayServiceRow({
+    required this.namespace,
+    required this.name,
+    this.info,
+  });
+
+  /// With [name], what the relay routes by: two credentials can each
+  /// register the same name. See [RelayService.namespace].
+  final int namespace;
+  final String name;
+
+  /// The administrator inventory's entry, when this computer has one.
+  final RelayService? info;
+
+  /// Unique on the relay, for keys: the bare name in the administrator's
+  /// namespace, `namespace/name` in a credential's.
+  String get id => relayServiceId(namespace, name);
+}
+
+String relayServiceId(int namespace, String name) =>
+    namespace == 0 ? name : '$namespace/$name';
+
 /// The relay as a whole, for the Relay page: who this computer is to it,
 /// the direct sessions it observes, the relay this computer can run itself,
 /// and — with the administrator key — everything the relay holds: its
@@ -13,7 +37,8 @@ import 'package:pb_mapper_ui/src/state/app_store.dart';
 /// asks the relay several questions at once, so it does so only while the
 /// Relay page is on screen ([watch]), and after anything here changes.
 class RelayStore extends ChangeNotifier {
-  RelayStore({required this.app, this.interval = const Duration(seconds: 10)}) {
+  RelayStore({required this.app, this.interval = const Duration(seconds: 10)})
+    : _seenConfig = (app.relayAddress, app.config.msgHeaderKey) {
     app.addListener(_onApp);
   }
 
@@ -56,7 +81,14 @@ class RelayStore extends ChangeNotifier {
   int _watchers = 0;
   Timer? _timer;
   bool _disposed = false;
-  (String, String)? _seenConfig;
+  (String, String) _seenConfig;
+
+  /// Bumped when the relay or the credential changes. A read that began
+  /// before then answers for a relay no longer shown, and is dropped.
+  int _generation = 0;
+
+  /// A refresh was asked for while one ran; run another after it.
+  bool _again = false;
 
   /// Keep refreshing while something shows this; pair with [unwatch].
   void watch() {
@@ -71,47 +103,84 @@ class RelayStore extends ChangeNotifier {
     _timer = null;
   }
 
-  /// A new address or credential is a new identity, and new data.
+  /// A new address or credential is a new relay, or a new identity on it:
+  /// nothing read before applies, and nothing still in flight may land.
   void _onApp() {
     final config = (app.relayAddress, app.config.msgHeaderKey);
     if (config == _seenConfig) return;
-    final first = _seenConfig == null;
     _seenConfig = config;
-    if (first) return;
+    _generation++;
+    identity = RelayIdentity.unknown;
     identityLoaded = false;
-    adminLoaded = false;
+    sessions = const [];
+    sessionsError = null;
+    _forgetAdmin();
+    _notify();
     if (_watchers > 0) unawaited(refresh());
   }
 
-  /// Read everything this credential may see.
+  void _forgetAdmin() {
+    authStatus = null;
+    services = const [];
+    connections = const [];
+    keys = const [];
+    adminLoaded = false;
+    adminError = null;
+  }
+
+  /// Read everything this credential may see. Each part stands alone: one
+  /// that fails says why and leaves the others to load.
   Future<void> refresh() async {
-    if (loading || _disposed) return;
+    if (_disposed) return;
+    if (loading) {
+      _again = true;
+      return;
+    }
     loading = true;
     _notify();
+    final generation = _generation;
     try {
-      identity = await api.relayIdentity();
-      identityLoaded = true;
-      _seenConfig ??= (app.relayAddress, app.config.msgHeaderKey);
       await Future.wait([
         _loadLocal(),
-        if (app.hasRelay) _loadSessions(),
-        if (identity.isAdmin && app.hasRelay) _loadAdmin(),
+        _loadIdentity(generation),
+        if (app.hasRelay) _loadSessions(generation),
       ]);
-    } on RelayCallException catch (error) {
-      adminError = error.message;
     } finally {
       loading = false;
       refreshedAt = DateTime.now();
       _notify();
     }
+    if (_again && !_disposed) {
+      _again = false;
+      await refresh();
+    }
   }
 
-  Future<void> _loadSessions() async {
+  Future<void> _loadIdentity(int generation) async {
+    RelayIdentity read;
     try {
-      sessions = await api.relaySessions();
+      read = await api.relayIdentity();
+    } catch (error) {
+      read = RelayIdentity(role: RelayRole.none, error: _reason(error));
+    }
+    if (generation != _generation) return;
+    identity = read;
+    identityLoaded = true;
+    if (read.isAdmin && app.hasRelay) {
+      await _loadAdmin(generation);
+    } else {
+      _forgetAdmin();
+    }
+  }
+
+  Future<void> _loadSessions(int generation) async {
+    try {
+      final read = await api.relaySessions();
+      if (generation != _generation) return;
+      sessions = read;
       sessionsError = null;
-    } on RelayCallException catch (error) {
-      sessionsError = error.message;
+    } catch (error) {
+      if (generation == _generation) sessionsError = _reason(error);
     }
   }
 
@@ -121,7 +190,8 @@ class RelayStore extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<void> _loadAdmin() async {
+  Future<void> _loadAdmin([int? generation]) async {
+    final asOf = generation ?? _generation;
     try {
       final results = await Future.wait([
         api.adminAuthStatus(),
@@ -129,40 +199,50 @@ class RelayStore extends ChangeNotifier {
         api.adminConnections(),
         api.adminKeys(),
       ]);
+      if (asOf != _generation) return;
       authStatus = results[0] as RelayAuthStatus;
       services = results[1] as List<RelayService>;
       connections = results[2] as List<RelayConnection>;
       keys = results[3] as List<RelayKey>;
       adminLoaded = true;
       adminError = null;
-    } on RelayCallException catch (error) {
-      adminError = error.message;
+    } catch (error) {
+      if (asOf == _generation) adminError = _reason(error);
     }
   }
 
-  /// The administrator inventory's entry for [service], if it has one.
-  RelayService? serviceNamed(String service) {
-    for (final s in services) {
-      if (s.name == service) return s;
-    }
-    return null;
+  static String _reason(Object error) =>
+      error is RelayCallException ? error.message : '$error';
+
+  /// The namespace this computer's own tunnels live in: a temporary
+  /// credential's own, or the administrator's, 0.
+  int get ownNamespace =>
+      identity.role == RelayRole.temporary ? identity.keyId ?? 0 : 0;
+
+  /// Every service on the relay, by name: the administrator inventory when
+  /// there is one, which sees every namespace, or else what this
+  /// credential's status query lists, all in its own namespace.
+  List<RelayServiceRow> get serviceRows {
+    final rows = adminLoaded
+        ? [
+            for (final s in services)
+              RelayServiceRow(namespace: s.namespace, name: s.name, info: s),
+          ]
+        : [
+            for (final name in app.relayServices)
+              RelayServiceRow(namespace: ownNamespace, name: name),
+          ];
+    return rows..sort((a, b) {
+      final byName = a.name.compareTo(b.name);
+      return byName != 0 ? byName : a.namespace.compareTo(b.namespace);
+    });
   }
 
-  /// The connections the relay holds for [service].
-  List<RelayConnection> connectionsOf(String service) => [
+  /// The connections the relay holds for [row].
+  List<RelayConnection> connectionsOf(RelayServiceRow row) => [
     for (final c in connections)
-      if (c.service == service) c,
+      if (c.namespace == row.namespace && c.service == row.name) c,
   ];
-
-  /// Every service on the relay: the administrator inventory when there is
-  /// one, which sees every namespace, or else what this credential's status
-  /// query lists.
-  List<String> get serviceNames {
-    if (adminLoaded) {
-      return [for (final s in services) s.name]..sort();
-    }
-    return [...app.relayServices]..sort();
-  }
 
   /// The label of credential [keyId], or null for the administrator's own (0)
   /// or one not listed.
@@ -190,11 +270,15 @@ class RelayStore extends ChangeNotifier {
   Future<int> cleanUpKeys() => _then(api.adminCleanUpKeys(), _loadAdmin);
 
   Future<int> retireConnections({
+    required int namespace,
     required String service,
-    int? keyId,
     int? connId,
   }) => _then(
-    api.adminRetireConnections(service: service, keyId: keyId, connId: connId),
+    api.adminRetireConnections(
+      namespace: namespace,
+      service: service,
+      connId: connId,
+    ),
     _loadAdmin,
   );
 
@@ -204,13 +288,16 @@ class RelayStore extends ChangeNotifier {
   Future<void> resetCredentials() =>
       _then(api.adminResetCredentials(), _loadAdmin);
 
-  /// Rotate the administrator key; this computer switches to the new one,
-  /// which is returned to be shown once.
-  Future<String> rotateKey() async {
-    final key = await api.adminRotateKey();
-    await app.refresh(force: true);
-    await refresh();
-    return key;
+  /// Rotate the administrator key. Once the relay is known to have taken
+  /// the new key this computer has switched to it, and everything is read
+  /// again with it.
+  Future<KeyRotation> rotateKey() async {
+    final rotation = await api.adminRotateKey();
+    if (rotation.confirmed) {
+      await app.refresh(force: true);
+      await refresh();
+    }
+    return rotation;
   }
 
   Future<OperationResult> startLocalRelay({

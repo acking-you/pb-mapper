@@ -65,8 +65,15 @@ relay says administrator. A temporary credential sees what it can use, and a
 line saying the administrator key brings the rest. Issuing a credential is the
 page's primary action; a new one is shown once, as itself and as a setup
 string for the computer it is for. Rotating the key and resetting every
-credential ask first — the reset needs a box ticked — and rotating switches
-this computer to the new key and shows it once.
+credential ask first — the reset needs a box ticked. Rotating switches this
+computer to the new key once the relay is known to have taken it; if the
+relay's answer is lost and it cannot be asked again, the new key is shown to
+keep and this computer stays on the old one.
+
+Services are told apart by namespace as well as name, as the relay routes
+them: an administrator sees two credentials' `cache` as two rows, and retires
+each in its own namespace. Connect is offered only in this computer's own
+namespace, since a connection names its service by key alone.
 
 **Test answers in words.** Settings' Test, and Save, end in one toast: the
 latency and service count, or the relay's own reason it did not answer.

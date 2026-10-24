@@ -103,9 +103,13 @@ class RelayAuthStatus {
 }
 
 /// A service registered on the relay, from the administrator inventory.
+///
+/// The relay routes by [namespace] and [name] together: two credentials can
+/// each register the same name, and those are two services.
 class RelayService {
   const RelayService({
     required this.keyId,
+    required this.namespace,
     required this.name,
     required this.transport,
     required this.encrypted,
@@ -114,6 +118,11 @@ class RelayService {
 
   /// The credential that registered it; 0 is the administrator's own.
   final int keyId;
+
+  /// Whose services it is among: 0 for the administrator's, or a temporary
+  /// credential's key id. Usually [keyId], unless the administrator
+  /// registered it into a credential's namespace.
+  final int namespace;
   final String name;
   final String transport;
   final bool encrypted;
@@ -123,6 +132,7 @@ class RelayService {
 
   factory RelayService.fromMap(Map<String, dynamic> map) => RelayService(
     keyId: _int(map['keyId']) ?? 0,
+    namespace: _int(map['namespace']) ?? 0,
     name: '${map['name'] ?? ''}',
     transport: '${map['transport'] ?? ''}',
     encrypted: map['encrypted'] == true,
@@ -134,6 +144,7 @@ class RelayService {
 class RelayConnection {
   const RelayConnection({
     required this.keyId,
+    required this.namespace,
     required this.service,
     required this.connId,
     required this.generation,
@@ -145,6 +156,9 @@ class RelayConnection {
   });
 
   final int keyId;
+
+  /// With [service], which service it serves; see [RelayService.namespace].
+  final int namespace;
   final String service;
   final int connId;
   final int generation;
@@ -158,6 +172,7 @@ class RelayConnection {
 
   factory RelayConnection.fromMap(Map<String, dynamic> map) => RelayConnection(
     keyId: _int(map['keyId']) ?? 0,
+    namespace: _int(map['namespace']) ?? 0,
     service: '${map['service'] ?? ''}',
     connId: _int(map['connId']) ?? 0,
     generation: _int(map['generation']) ?? 0,
@@ -240,6 +255,27 @@ class IssuedCredential extends RelayKey {
       credential: '${map['credential'] ?? ''}',
     );
   }
+}
+
+/// A rotated administrator key.
+class KeyRotation {
+  const KeyRotation({required this.key, required this.confirmed, this.reason});
+
+  final String key;
+
+  /// The relay is known to use [key], and this computer switched to it.
+  /// When false the relay's reply was lost and it could not be asked again:
+  /// it may be using [key] or the old key, and this computer kept the old.
+  final bool confirmed;
+
+  /// Why the outcome is unknown, when it is.
+  final String? reason;
+
+  factory KeyRotation.fromMap(Map<String, dynamic> map) => KeyRotation(
+    key: '${map['adminKey'] ?? ''}',
+    confirmed: map['confirmed'] == true,
+    reason: map['reason'] as String?,
+  );
 }
 
 /// A direct (peer-to-peer) session the relay has heard about from its ends.

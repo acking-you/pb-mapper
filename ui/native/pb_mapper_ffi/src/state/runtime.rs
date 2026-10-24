@@ -66,14 +66,14 @@ impl PbMapperState {
         self.server_shutdown_token = Some(shutdown_token);
         self.server_status_sender = Some(status_sender);
         self.server_start_time = Some(SystemTime::now());
+        self.server_port = Some(port);
 
         {
             let mut cache = self.local_server_status_cache.write().await;
             *cache = LocalServerStatus {
                 is_running: true,
-                active_connections: 0,
-                registered_services: 0,
-                uptime_seconds: 0,
+                port: Some(port),
+                ..LocalServerStatus::default()
             };
         }
         {
@@ -118,15 +118,11 @@ impl PbMapperState {
             }
 
             self.server_start_time = None;
+            self.server_port = None;
 
             {
                 let mut cache = self.local_server_status_cache.write().await;
-                *cache = LocalServerStatus {
-                    is_running: false,
-                    active_connections: 0,
-                    registered_services: 0,
-                    uptime_seconds: 0,
-                };
+                *cache = LocalServerStatus::default();
             }
             {
                 let mut last_update = self.local_server_status_last_update.write().await;

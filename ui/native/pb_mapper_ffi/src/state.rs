@@ -326,10 +326,15 @@ pub struct ClientConfigInfo {
     pub updated_at_ms: u64,
 }
 
-#[derive(Serialize, Clone)]
+/// The relay this computer runs itself. The default is a stopped one.
+#[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalServerStatus {
     pub is_running: bool,
+    /// The port it listens on, while it runs: the page shows and dials this,
+    /// not whatever its port field last held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     pub active_connections: u32,
     pub registered_services: u32,
     pub uptime_seconds: u64,
@@ -504,6 +509,7 @@ pub struct PbMapperState {
     server_status_sender:
         Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<ServerStatusInfo>>>,
     server_start_time: Option<SystemTime>,
+    server_port: Option<u16>,
     registered_services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_runtime: HashMap<String, TunnelRuntime>,

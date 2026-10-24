@@ -13,11 +13,12 @@
 use std::ffi::c_char;
 use std::time::Duration;
 
+use pb_mapper_auth::generate_admin_key;
 use pb_mapper_client::sdk::{
     Admin, AuthStatusInfo, Client, ConnectionInfo, Error as SdkError, IssuedKey, KeyMetadata,
     LegacyProtocol, ServiceInfo, SessionObservation,
 };
-use pb_mapper_core::checksum::{Credential, get_process_credential};
+use pb_mapper_core::checksum::{Credential, get_process_credential, parse_credential};
 use serde_json::{Value, json};
 
 use crate::ctl::Origin;
@@ -29,6 +30,10 @@ use crate::response::{err_ctl, err_null_handle, ok_data, parse_c_string};
 /// Long enough for an inventory paged across a large relay, short enough
 /// that a relay that stopped answering is reported rather than waited on.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to wait when asking the relay which administrator key it
+/// accepts, after a rotation whose outcome was lost.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Runs one relay operation; see the module docs.
 ///
@@ -56,18 +61,7 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
     let result = handle.runtime.block_on(async move {
         let (server, keep_alive) = state.lock().await.relay_target();
         let credential = get_process_credential();
-        let op = op(&request)?.to_owned();
-        let outcome = tokio::time::timeout(
-            CALL_TIMEOUT,
-            call(&server, keep_alive, credential, &request),
-        )
-        .await
-        .map_err(|_| {
-            CtlError::timeout(format!(
-                "{server} did not finish `{op}` within {} seconds",
-                CALL_TIMEOUT.as_secs()
-            ))
-        })??;
+        let outcome = call(&server, keep_alive, credential, &request).await?;
         // A rotated administrator key is the only one the relay accepts now:
         // this computer switches to it before anything else talks to the
         // relay, or every later call would fail.
@@ -150,6 +144,8 @@ async fn call(
     request: &Value,
 ) -> Result<Outcome, CtlError> {
     let op = op(request)?;
+    // Who this computer is comes from its own credential, not from the relay,
+    // so it needs no address: the page says it before a relay is even set.
     if op == "credential" {
         return Ok(credential_json(&credential).into());
     }
@@ -160,6 +156,24 @@ async fn call(
         CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
     })?;
     let client = Client::from_credential(server, credential, keep_alive, None);
+    // Rotation keeps its own time: a timeout here could drop the new key
+    // while the relay installs it.
+    if op == "rotate_root_key" {
+        let admin = client.admin().map_err(sdk_error)?;
+        return rotate(server, keep_alive, credential, &admin).await;
+    }
+    tokio::time::timeout(CALL_TIMEOUT, dispatch(&client, op, request))
+        .await
+        .map_err(|_| {
+            CtlError::timeout(format!(
+                "{server} did not finish `{op}` within {} seconds",
+                CALL_TIMEOUT.as_secs()
+            ))
+        })?
+}
+
+/// Every operation but rotation, which [`call`] keeps apart.
+async fn dispatch(client: &Client, op: &str, request: &Value) -> Result<Outcome, CtlError> {
     if op == "sessions" {
         let sessions = client.sessions().await.map_err(sdk_error)?;
         return Ok(Value::Array(sessions.iter().map(session_json).collect()).into());
@@ -259,7 +273,6 @@ async fn call(
             admin.reset_auth_state().await.map_err(sdk_error)?;
             json!({})
         }
-        "rotate_root_key" => return rotate(&admin).await,
         other => {
             return Err(CtlError::invalid_argument(format!(
                 "Unknown relay operation `{other}`"
@@ -269,23 +282,67 @@ async fn call(
     Ok(data.into())
 }
 
-/// Rotate to a generated administrator key, and hand it back to be saved as
-/// this computer's credential. When the outcome is unknown the relay may
-/// already be on the new key, so the error carries it rather than lose it.
-async fn rotate(admin: &Admin) -> Result<Outcome, CtlError> {
-    match admin.rotate_root_key(None).await {
-        Ok(key) => Ok(Outcome {
-            data: json!({ "adminKey": key }),
-            rotated_key: Some(key),
-        }),
-        Err(SdkError::RootRotationUncertain { candidate, message }) => {
-            Err(CtlError::protocol(format!(
-                "The relay may already be using a new administrator key ({message}). Keep it \
-                 somewhere safe and try it if the old one stops working: {candidate}"
-            )))
-        }
-        Err(error) => Err(sdk_error(error)),
+/// Rotate to a new administrator key, and hand it back to be saved as this
+/// computer's credential.
+///
+/// The key is made here, before anything is sent, so nothing that cuts the
+/// request short can lose it. When the reply is lost the relay may or may not
+/// have switched, so it is asked, with each key in turn, which it accepts.
+/// If it answers neither, the key comes back unconfirmed (`"confirmed":
+/// false`) for the person to keep, and this computer stays on the old one.
+async fn rotate(
+    server: &str,
+    keep_alive: bool,
+    old: Credential,
+    admin: &Admin,
+) -> Result<Outcome, CtlError> {
+    let candidate = generate_admin_key();
+    let reason =
+        match tokio::time::timeout(CALL_TIMEOUT, admin.rotate_root_key(Some(candidate.clone())))
+            .await
+        {
+            Ok(Ok(key)) => return Ok(rotated(key)),
+            // Refused before the request left this computer: nothing changed.
+            Ok(Err(
+                error @ (SdkError::NotAdministrator
+                | SdkError::InvalidConfig { .. }
+                | SdkError::Address { .. }
+                | SdkError::Connect { .. }),
+            )) => return Err(sdk_error(error)),
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => format!(
+                "{server} did not answer within {} seconds",
+                CALL_TIMEOUT.as_secs()
+            ),
+        };
+    let new = parse_credential(&candidate).map_err(CtlError::internal)?;
+    if accepts(server, keep_alive, new).await {
+        return Ok(rotated(candidate));
     }
+    if accepts(server, keep_alive, old).await {
+        return Err(CtlError::protocol(format!(
+            "The relay kept its administrator key: {reason}"
+        )));
+    }
+    Ok(json!({ "adminKey": candidate, "confirmed": false, "reason": reason }).into())
+}
+
+fn rotated(key: String) -> Outcome {
+    Outcome {
+        data: json!({ "adminKey": key, "confirmed": true }),
+        rotated_key: Some(key),
+    }
+}
+
+/// Whether the relay takes `credential` as its administrator key now.
+async fn accepts(server: &str, keep_alive: bool, credential: Credential) -> bool {
+    let Ok(admin) = Client::from_credential(server, credential, keep_alive, None).admin() else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(PROBE_TIMEOUT, admin.auth_status()).await,
+        Ok(Ok(_))
+    )
 }
 
 fn sdk_error(error: SdkError) -> CtlError {
@@ -476,6 +533,26 @@ mod tests {
 
         let unknown = admin(json!({ "op": "teleport" })).await.unwrap_err();
         assert!(unknown.to_string().contains("teleport"), "{unknown}");
+
+        // Rotation hands back the key the relay now takes, to be saved; the
+        // old one stops working.
+        let rotated = call(
+            &relay.addr().to_string(),
+            false,
+            parse_credential(TEST_ADMIN_KEY),
+            &json!({ "op": "rotate_root_key" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rotated.data["confirmed"], true);
+        let key = rotated.rotated_key.unwrap();
+        assert_eq!(rotated.data["adminKey"], key.as_str());
+        run(&relay, &key, json!({ "op": "auth_status" }))
+            .await
+            .unwrap();
+        run(&relay, TEST_ADMIN_KEY, json!({ "op": "auth_status" }))
+            .await
+            .unwrap_err();
     }
 
     #[tokio::test]

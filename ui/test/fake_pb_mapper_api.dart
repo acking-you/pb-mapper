@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 
 /// A [PbMapperApiClient] that answers from memory instead of over FFI.
@@ -88,23 +90,25 @@ class FakePbMapperApi implements PbMapperApiClient {
   }) async {
     calls.add('startServer($port)');
     if (_refused() case final refused?) return refused;
-    localRelayRunning = true;
+    localRelayPort = port;
     return _ok;
   }
 
   @override
   Future<OperationResult> stopServer() async {
     calls.add('stopServer');
-    localRelayRunning = false;
+    localRelayPort = null;
     return _ok;
   }
 
-  /// Whether the relay this app can run itself is running.
-  bool localRelayRunning = false;
+  /// The port of the relay this app can run itself, while it runs.
+  int? localRelayPort;
+  bool get localRelayRunning => localRelayPort != null;
 
   @override
   Future<LocalServerStatus> getLocalServerStatus() async => LocalServerStatus(
     isRunning: localRelayRunning,
+    port: localRelayPort,
     activeConnections: localRelayRunning ? 2 : 0,
     registeredServices: localRelayRunning ? 1 : 0,
     uptimeSeconds: localRelayRunning ? 3720 : 0,
@@ -342,17 +346,27 @@ class FakePbMapperApi implements PbMapperApiClient {
   @override
   Future<List<RelayService>> adminServices() async {
     _admin();
+    RelayService service(int namespace, String name) => RelayService(
+      keyId: namespace,
+      namespace: namespace,
+      name: name,
+      transport: 'TCP',
+      encrypted: true,
+      connections: relayConnections
+          .where((c) => c.namespace == namespace && c.service == name)
+          .length,
+    );
     return [
       for (final name in serverServices)
-        RelayService(
-          keyId: serviceOwners[name] ?? 0,
-          name: name,
-          transport: 'TCP',
-          encrypted: true,
-          connections: relayConnections.where((c) => c.service == name).length,
-        ),
+        service(serviceOwners[name] ?? 0, name),
+      for (final (namespace, name) in namespacedServices)
+        service(namespace, name),
     ];
   }
+
+  /// Services the administrator inventory lists in a credential's namespace
+  /// besides [serverServices]: a name here may repeat one there.
+  List<(int, String)> namespacedServices = [];
 
   @override
   Future<List<RelayConnection>> adminConnections() async {
@@ -363,8 +377,14 @@ class FakePbMapperApi implements PbMapperApiClient {
   @override
   Future<List<RelayKey>> adminKeys() async {
     _admin();
-    return keys;
+    final answered = keys;
+    await adminGate?.future;
+    return answered;
   }
+
+  /// Holds the credential list's answer back until completed, to stand for
+  /// a relay that is slow to reply.
+  Completer<void>? adminGate;
 
   @override
   Future<IssuedCredential> adminIssueKey({
@@ -373,6 +393,12 @@ class FakePbMapperApi implements PbMapperApiClient {
   }) async {
     _admin();
     calls.add('adminIssueKey(${ttl.inSeconds}, $label)');
+    if (ttl > maxTtl) {
+      throw const RelayCallException(
+        'The relay refused: temporary-key TTL exceeds the maximum',
+        code: 'PROTOCOL',
+      );
+    }
     final id = _nextKeyId++;
     final key = RelayKey(
       keyId: id,
@@ -435,14 +461,16 @@ class FakePbMapperApi implements PbMapperApiClient {
 
   @override
   Future<int> adminRetireConnections({
+    required int namespace,
     required String service,
-    int? keyId,
     int? connId,
   }) async {
     _admin();
-    calls.add('adminRetireConnections($service, $connId)');
+    calls.add('adminRetireConnections($namespace, $service, $connId)');
     bool hit(RelayConnection c) =>
-        c.service == service && (connId == null || c.connId == connId);
+        c.namespace == namespace &&
+        c.service == service &&
+        (connId == null || c.connId == connId);
     final retired = relayConnections.where(hit).length;
     relayConnections = relayConnections.where((c) => !hit(c)).toList();
     return retired;
@@ -464,17 +492,31 @@ class FakePbMapperApi implements PbMapperApiClient {
   }
 
   @override
-  Future<String> adminRotateKey() async {
+  Future<KeyRotation> adminRotateKey() async {
     _admin();
     calls.add('adminRotateKey');
     const rotated = 'R0tatedAdminKey-0123456789abcdef';
+    if (!rotationAnswers) {
+      return const KeyRotation(
+        key: rotated,
+        confirmed: false,
+        reason: 'connection reset',
+      );
+    }
     config = ConfigStatus(
       serverAddress: config.serverAddress,
       keepAliveEnabled: config.keepAliveEnabled,
       msgHeaderKey: rotated,
     );
-    return rotated;
+    return const KeyRotation(key: rotated, confirmed: true);
   }
+
+  /// Whether the relay's answer to a rotation arrives. When it does not, the
+  /// relay may or may not have taken the new key.
+  bool rotationAnswers = true;
+
+  /// The longest lifetime the relay accepts for a credential.
+  Duration maxTtl = const Duration(days: 30);
 }
 
 /// A connection the relay holds, as the administrator inventory lists it.
@@ -482,10 +524,12 @@ RelayConnection fakeRelayConnection({
   required String service,
   required int connId,
   int keyId = 0,
+  int? namespace,
   bool healthy = true,
   int lastRxAgeMs = 900,
 }) => RelayConnection(
   keyId: keyId,
+  namespace: namespace ?? keyId,
   service: service,
   connId: connId,
   generation: 1,

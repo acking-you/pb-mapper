@@ -136,12 +136,7 @@ impl PbMapperState {
     pub async fn get_local_server_status(&self) -> LocalServerStatus {
         let is_running = self.server_handle.is_some();
         if !is_running {
-            let status = LocalServerStatus {
-                is_running: false,
-                active_connections: 0,
-                registered_services: 0,
-                uptime_seconds: 0,
-            };
+            let status = LocalServerStatus::default();
             {
                 let mut cache = self.local_server_status_cache.write().await;
                 *cache = status.clone();
@@ -179,16 +174,17 @@ impl PbMapperState {
         let last_update = self.local_server_status_last_update.clone();
         let refreshing = self.local_server_status_refreshing.clone();
         let start_time = self.server_start_time;
+        let port = self.server_port;
 
         tokio::spawn(async move {
             let mut status = LocalServerStatus {
                 is_running: true,
-                active_connections: 0,
-                registered_services: 0,
+                port,
                 uptime_seconds: start_time
                     .and_then(|ts| SystemTime::now().duration_since(ts).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
+                ..LocalServerStatus::default()
             };
 
             if let Some(sender) = sender {

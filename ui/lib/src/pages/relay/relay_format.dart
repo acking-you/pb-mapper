@@ -132,13 +132,15 @@ Future<T?> attempt<T>(BuildContext context, Future<T> Function() change) async {
   }
 }
 
-/// The lifetimes a credential can be given or renewed for.
+/// The lifetimes a credential can be given or renewed for: up to 30 days,
+/// the longest a relay accepts unless started with a longer
+/// `--max-temporary-key-ttl`. It refuses longer rather than shorten them,
+/// and does not say what its own limit is.
 const List<Duration> credentialLifetimes = [
   Duration(hours: 1),
   Duration(days: 1),
   Duration(days: 7),
   Duration(days: 30),
-  Duration(days: 90),
 ];
 
 String lifetimeLabel(BuildContext context, Duration ttl) {

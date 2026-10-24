@@ -335,22 +335,20 @@ Future<void> issueCredential(
   RelayStore relay,
   AppStore store,
 ) async {
-  final request = await showDialog<(String, Duration)>(
+  final issued = await showDialog<IssuedCredential>(
     context: context,
-    builder: (_) => const _IssueDialog(),
-  );
-  if (request == null || !context.mounted) return;
-  final (label, ttl) = request;
-  final issued = await attempt(
-    context,
-    () => relay.issueKey(ttl: ttl, label: label.isEmpty ? null : label),
+    builder: (_) => _IssueDialog(relay: relay),
   );
   if (issued == null || !context.mounted) return;
   await showCredentialDialog(context, issued, store, fresh: true);
 }
 
+/// Issues the credential itself, so that when the relay refuses — a lifetime
+/// longer than it allows, a full table — the form is still there to change.
 class _IssueDialog extends StatefulWidget {
-  const _IssueDialog();
+  const _IssueDialog({required this.relay});
+
+  final RelayStore relay;
 
   @override
   State<_IssueDialog> createState() => _IssueDialogState();
@@ -359,6 +357,8 @@ class _IssueDialog extends StatefulWidget {
 class _IssueDialogState extends State<_IssueDialog> {
   final TextEditingController _label = TextEditingController();
   Duration _ttl = const Duration(days: 7);
+  bool _busy = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -366,7 +366,28 @@ class _IssueDialogState extends State<_IssueDialog> {
     super.dispose();
   }
 
-  void _submit() => Navigator.of(context).pop((_label.text.trim(), _ttl));
+  Future<void> _submit() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final label = _label.text.trim();
+    try {
+      final issued = await widget.relay.issueKey(
+        ttl: _ttl,
+        label: label.isEmpty ? null : label,
+      );
+      if (mounted) Navigator.of(context).pop(issued);
+    } on RelayCallException catch (error) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = error.message;
+        });
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -423,6 +444,16 @@ class _IssueDialogState extends State<_IssueDialog> {
                 ],
               ),
             ),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _error!,
+                key: const Key('credential-issue-error'),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.error,
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -433,7 +464,7 @@ class _IssueDialogState extends State<_IssueDialog> {
         ),
         FilledButton(
           key: const Key('credential-issue-submit'),
-          onPressed: _submit,
+          onPressed: _busy ? null : _submit,
           child: Text(l10n.credentialIssue),
         ),
       ],

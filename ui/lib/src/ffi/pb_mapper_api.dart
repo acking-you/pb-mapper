@@ -122,12 +122,16 @@ class ClientConfigInfo {
 
 class LocalServerStatus {
   final bool isRunning;
+
+  /// The port it listens on, while it runs.
+  final int? port;
   final int activeConnections;
   final int registeredServices;
   final int uptimeSeconds;
 
   const LocalServerStatus({
     required this.isRunning,
+    this.port,
     required this.activeConnections,
     required this.registeredServices,
     required this.uptimeSeconds,
@@ -136,6 +140,7 @@ class LocalServerStatus {
   factory LocalServerStatus.fromMap(Map<String, dynamic> map) {
     return LocalServerStatus(
       isRunning: _asBool(map['isRunning']),
+      port: map['port'] == null ? null : _asInt(map['port']),
       activeConnections: _asInt(map['activeConnections']),
       registeredServices: _asInt(map['registeredServices']),
       uptimeSeconds: _asInt(map['uptimeSeconds']),
@@ -331,11 +336,11 @@ abstract interface class PbMapperApiClient {
   /// Forget expired and revoked credentials; returns how many.
   Future<int> adminCleanUpKeys();
 
-  /// Drop the control connections the relay holds for [service] (just
-  /// [connId], when given); returns how many it dropped.
+  /// Drop the control connections the relay holds for [service] in
+  /// [namespace] (just [connId], when given); returns how many it dropped.
   Future<int> adminRetireConnections({
+    required int namespace,
     required String service,
-    int? keyId,
     int? connId,
   });
   Future<void> adminSetLegacyProtocol({required bool allow});
@@ -343,9 +348,9 @@ abstract interface class PbMapperApiClient {
   /// Erase every temporary credential the relay knows.
   Future<void> adminResetCredentials();
 
-  /// Rotate the administrator key to a generated one, which this computer
-  /// also switches to; returns it.
-  Future<String> adminRotateKey();
+  /// Rotate the administrator key to a generated one. This computer
+  /// switches to it once the relay is known to have taken it.
+  Future<KeyRotation> adminRotateKey();
 }
 
 class PbMapperApi implements PbMapperApiClient {
@@ -692,14 +697,16 @@ class PbMapperApi implements PbMapperApiClient {
 
   @override
   Future<int> adminRetireConnections({
+    required int namespace,
     required String service,
-    int? keyId,
     int? connId,
   }) async => _asInt(
     _asMap(
+      // The relay names the namespace `keyId` here: a temporary
+      // credential's namespace is its key id.
       await _relay('retire', {
+        'keyId': namespace,
         'service': service,
-        'keyId': keyId,
         'connId': connId,
       }),
     )['retired'],
@@ -716,8 +723,8 @@ class PbMapperApi implements PbMapperApiClient {
   }
 
   @override
-  Future<String> adminRotateKey() async =>
-      _asString(_asMap(await _relay('rotate_root_key'))['adminKey']);
+  Future<KeyRotation> adminRotateKey() async =>
+      KeyRotation.fromMap(_asMap(await _relay('rotate_root_key')));
 }
 
 Map<String, dynamic> _asMap(dynamic value) {

@@ -66,17 +66,17 @@ class _ServicesTabState extends State<ServicesTab> {
       case RelayState.online:
         break;
     }
-    final names = relay.serviceNames;
+    final rows = relay.serviceRows;
     final query = _query.trim().toLowerCase();
     final shown = [
-      for (final name in names)
-        if (query.isEmpty || name.toLowerCase().contains(query)) name,
+      for (final row in rows)
+        if (query.isEmpty || row.name.toLowerCase().contains(query)) row,
     ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SectionHeader(title: l10n.relayTabServices, count: names.length),
-        if (names.length > 6) ...[
+        SectionHeader(title: l10n.relayTabServices, count: rows.length),
+        if (rows.length > 6) ...[
           TextField(
             key: const Key('relay-search'),
             controller: _search,
@@ -89,13 +89,18 @@ class _ServicesTabState extends State<ServicesTab> {
           ),
           const SizedBox(height: 12),
         ],
-        if (names.isEmpty)
+        if (rows.isEmpty)
           EmptyNote(icon: AppIcons.service, text: l10n.relayServicesEmpty)
         else if (shown.isEmpty)
           EmptyNote(icon: AppIcons.search, text: l10n.relayNoMatch(_query))
         else
-          for (final name in shown)
-            _ServiceRow(name: name, store: store, relay: relay),
+          for (final row in shown)
+            _ServiceRow(
+              key: Key('relay-row-${row.id}'),
+              row: row,
+              store: store,
+              relay: relay,
+            ),
       ],
     );
   }
@@ -103,12 +108,13 @@ class _ServicesTabState extends State<ServicesTab> {
 
 class _ServiceRow extends StatefulWidget {
   const _ServiceRow({
-    required this.name,
+    super.key,
+    required this.row,
     required this.store,
     required this.relay,
   });
 
-  final String name;
+  final RelayServiceRow row;
   final AppStore store;
   final RelayStore relay;
 
@@ -124,13 +130,17 @@ class _ServiceRowState extends State<_ServiceRow> {
     final l10n = context.l10n;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final name = widget.name;
+    final row = widget.row;
+    final name = row.name;
     final store = widget.store;
     final relay = widget.relay;
-    final mine = store.find(TunnelKind.share, name);
-    final connection = store.connectionTo(name);
-    final info = relay.serviceNamed(name);
-    final held = relay.connectionsOf(name);
+    // This computer's tunnels name a service in its own namespace only, so
+    // they say nothing about another credential's service of the same name.
+    final local = row.namespace == relay.ownNamespace;
+    final mine = local ? store.find(TunnelKind.share, name) : null;
+    final connection = local ? store.connectionTo(name) : null;
+    final info = row.info;
+    final held = relay.connectionsOf(row);
 
     final Color color;
     if (mine != null) {
@@ -147,7 +157,9 @@ class _ServiceRowState extends State<_ServiceRow> {
         info.transport,
         if (info.encrypted) l10n.encrypted,
         l10n.relayServiceConnections(info.connections),
-        ownerName(context, relay, info.keyId),
+        // The namespace chip names the credential already.
+        if (local || info.keyId != row.namespace)
+          ownerName(context, relay, info.keyId),
       ],
     ];
 
@@ -160,9 +172,21 @@ class _ServiceRowState extends State<_ServiceRow> {
         label: l10n.openAt(connection.localAddress),
         shrinks: true,
       );
+    } else if (!local) {
+      // A connection names its service by key alone, in this computer's
+      // namespace: another credential's service is for its own computers.
+      trailing = Tooltip(
+        message: l10n.relayNamespaceHint(row.namespace),
+        child: StatusChip(
+          key: Key('relay-namespace-${row.id}'),
+          color: availableColor(scheme),
+          label: l10n.relayNamespace(row.namespace),
+          shrinks: true,
+        ),
+      );
     } else {
       trailing = FilledButton.tonal(
-        key: Key('connect-$name'),
+        key: Key('connect-${row.id}'),
         onPressed: () =>
             openTunnelEditor(context, kind: TunnelKind.connect, key: name),
         style: rowButtonStyle(context),
@@ -173,7 +197,7 @@ class _ServiceRowState extends State<_ServiceRow> {
     return ListCard(
       padding: const EdgeInsets.fromLTRB(14, 10, 6, 10),
       child: Column(
-        key: Key('relay-service-$name'),
+        key: Key('relay-service-${row.id}'),
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
@@ -210,10 +234,9 @@ class _ServiceRowState extends State<_ServiceRow> {
               const SizedBox(width: 8),
               Flexible(flex: 0, child: trailing),
               _ServiceMenu(
-                name: name,
+                row: row,
                 relay: relay,
                 canRetire: relay.isAdmin && (info?.connections ?? 0) > 0,
-                ownerKeyId: info?.keyId,
               ),
             ],
           ),
@@ -227,7 +250,7 @@ class _ServiceRowState extends State<_ServiceRow> {
                 children: [
                   if (held.isNotEmpty)
                     TextButton.icon(
-                      key: Key('relay-service-open-$name'),
+                      key: Key('relay-service-open-${row.id}'),
                       onPressed: () => setState(() => _open = !_open),
                       style: TextButton.styleFrom(
                         padding: EdgeInsets.zero,
@@ -263,29 +286,28 @@ enum _ServiceAction { copyKey, retire }
 
 class _ServiceMenu extends StatelessWidget {
   const _ServiceMenu({
-    required this.name,
+    required this.row,
     required this.relay,
     required this.canRetire,
-    this.ownerKeyId,
   });
 
-  final String name;
+  final RelayServiceRow row;
   final RelayStore relay;
   final bool canRetire;
-  final int? ownerKeyId;
 
   Future<void> _retire(BuildContext context) async {
     final l10n = context.l10n;
     final yes = await confirmDestructive(
       context,
-      title: l10n.relayRetireAllTitle(name),
+      title: l10n.relayRetireAllTitle(row.name),
       body: l10n.relayRetireAllBody,
       action: l10n.relayRetire,
     );
     if (!yes || !context.mounted) return;
     final retired = await attempt(
       context,
-      () => relay.retireConnections(service: name, keyId: ownerKeyId),
+      () =>
+          relay.retireConnections(namespace: row.namespace, service: row.name),
     );
     if (retired != null && context.mounted) {
       showToast(context, l10n.relayRetired(retired), kind: ToastKind.success);
@@ -297,11 +319,11 @@ class _ServiceMenu extends StatelessWidget {
     final l10n = context.l10n;
     final scheme = Theme.of(context).colorScheme;
     return PopupMenuButton<_ServiceAction>(
-      key: Key('relay-service-menu-$name'),
+      key: Key('relay-service-menu-${row.id}'),
       tooltip: l10n.more,
       icon: const Icon(AppIcons.more, size: 18),
       onSelected: (action) => switch (action) {
-        _ServiceAction.copyKey => copyText(context, name),
+        _ServiceAction.copyKey => copyText(context, row.name),
         _ServiceAction.retire => _retire(context),
       },
       itemBuilder: (context) => [
@@ -317,7 +339,7 @@ class _ServiceMenu extends StatelessWidget {
         ),
         if (canRetire)
           PopupMenuItem(
-            key: Key('relay-retire-all-$name'),
+            key: Key('relay-retire-all-${row.id}'),
             value: _ServiceAction.retire,
             child: Row(
               children: [
@@ -363,8 +385,8 @@ class RelayConnectionRow extends StatelessWidget {
     final retired = await attempt(
       context,
       () => relay.retireConnections(
+        namespace: connection.namespace,
         service: connection.service,
-        keyId: connection.keyId,
         connId: connection.connId,
       ),
     );
@@ -379,6 +401,7 @@ class RelayConnectionRow extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final c = connection;
+    final id = relayServiceId(c.namespace, c.service);
     final facts = [
       c.transport,
       if (c.encrypted) l10n.encrypted,
@@ -390,7 +413,7 @@ class RelayConnectionRow extends StatelessWidget {
       if (showService) ownerName(context, relay, c.keyId),
     ].join('  ·  ');
     return Padding(
-      key: Key('relay-conn-${c.service}-${c.connId}'),
+      key: Key('relay-conn-$id-${c.connId}'),
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
@@ -424,7 +447,7 @@ class RelayConnectionRow extends StatelessWidget {
           ),
           if (relay.isAdmin)
             IconButton(
-              key: Key('relay-retire-${c.service}-${c.connId}'),
+              key: Key('relay-retire-$id-${c.connId}'),
               tooltip: l10n.relayRetire,
               onPressed: () => _retire(context),
               icon: Icon(AppIcons.unlink, size: 16, color: scheme.error),

@@ -174,19 +174,30 @@ class SecurityTab extends StatelessWidget {
       action: l10n.securityRotateAction,
     );
     if (!yes || !context.mounted) return;
-    final key = await attempt(context, relay.rotateKey);
-    if (key == null || !context.mounted) return;
+    final rotation = await attempt(context, relay.rotateKey);
+    if (rotation == null || !context.mounted) return;
+    final key = rotation.key;
+    final confirmed = rotation.confirmed;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final setup = encodeSetupString(
       SetupPayload(address: relay.app.relayAddress, credential: key),
     );
+    // Unconfirmed, this may be the only key the relay takes now, and this
+    // dialog the only place it is written down.
     await showDialog<void>(
       context: context,
+      barrierDismissible: confirmed,
       builder: (c) => AlertDialog(
-        key: const Key('security-rotated'),
-        icon: Icon(AppIcons.ok, color: successColor(scheme)),
-        title: Text(l10n.securityRotatedTitle),
+        key: Key(confirmed ? 'security-rotated' : 'security-rotation-unknown'),
+        icon: confirmed
+            ? Icon(AppIcons.ok, color: successColor(scheme))
+            : Icon(AppIcons.warning, color: cautionColor(scheme)),
+        title: Text(
+          confirmed
+              ? l10n.securityRotatedTitle
+              : l10n.securityRotationUnknownTitle,
+        ),
         content: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 460),
           child: Column(
@@ -205,7 +216,14 @@ class SecurityTab extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 12),
-              Text(l10n.securityRotatedBody, style: theme.textTheme.bodySmall),
+              Text(
+                confirmed
+                    ? l10n.securityRotatedBody
+                    : l10n.securityRotationUnknownBody(
+                        rotation.reason ?? l10n.relayNoReason,
+                      ),
+                style: theme.textTheme.bodySmall,
+              ),
             ],
           ),
         ),
@@ -215,11 +233,12 @@ class SecurityTab extends StatelessWidget {
             icon: const Icon(AppIcons.copy, size: 16),
             label: Text(l10n.credentialCopy),
           ),
-          FilledButton.icon(
-            onPressed: () => copySecret(c, setup, l10n.credentialSetupCopied),
-            icon: const Icon(AppIcons.export, size: 16),
-            label: Text(l10n.credentialCopySetup),
-          ),
+          if (confirmed)
+            FilledButton.icon(
+              onPressed: () => copySecret(c, setup, l10n.credentialSetupCopied),
+              icon: const Icon(AppIcons.export, size: 16),
+              label: Text(l10n.credentialCopySetup),
+            ),
           TextButton(
             onPressed: () => Navigator.of(c).pop(),
             child: Text(l10n.close),

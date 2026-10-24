@@ -29,6 +29,15 @@ class _LocalRelayTabState extends State<LocalRelayTab> {
   String? _portError;
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // A relay already running keeps the port it was started on, whatever
+    // this field held when the tab was last built.
+    final port = AppScope.of(context).relay.local.port;
+    if (port != null) _port.text = '$port';
+  }
+
+  @override
   void dispose() {
     _port.dispose();
     super.dispose();
@@ -74,7 +83,7 @@ class _LocalRelayTabState extends State<LocalRelayTab> {
 
   Future<void> _useHere(RelayStore relay) async {
     final l10n = context.l10n;
-    final port = _portNumber ?? 7666;
+    final port = relay.local.port ?? _portNumber ?? 7666;
     final key = _key.isEmpty
         ? await relay.api.revealIsolatedRelayAdminKey()
         : _key;
@@ -123,7 +132,10 @@ class _LocalRelayTabState extends State<LocalRelayTab> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(l10n.localBody(_portNumber ?? 7666), style: muted),
+              Text(
+                l10n.localBody(local.port ?? _portNumber ?? 7666),
+                style: muted,
+              ),
               if (running) ...[
                 const SizedBox(height: 10),
                 Text(
