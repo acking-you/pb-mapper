@@ -371,8 +371,17 @@ class FakePbMapperApi implements PbMapperApiClient {
   @override
   Future<List<RelayConnection>> adminConnections() async {
     _admin();
+    if (connectionsFail) {
+      throw const RelayCallException(
+        'relay.example:7666 did not finish `connections` within 30 seconds',
+        code: 'TIMEOUT',
+      );
+    }
     return relayConnections;
   }
+
+  /// The connection listing times out, while the other listings answer.
+  bool connectionsFail = false;
 
   @override
   Future<List<RelayKey>> adminKeys() async {

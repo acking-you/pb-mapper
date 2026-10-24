@@ -432,32 +432,27 @@ class PbMapperApi implements PbMapperApiClient {
   }
 
   @override
-  Future<ServerStatusDetail> getServerStatusDetail() async {
-    final result = await _service.getServerStatusDetail();
-    if (result['success'] == true) {
-      return ServerStatusDetail.fromMap(_asMap(result['data']));
-    }
-    return const ServerStatusDetail(
-      serverAvailable: false,
-      registeredServices: [],
-      serverMap: '',
-      activeConnections: '',
-      idleConnections: '',
-    );
-  }
+  Future<ServerStatusDetail> getServerStatusDetail() async =>
+      _statusDetail(await _service.getServerStatusDetail());
 
   @override
-  Future<ServerStatusDetail> forceRefreshServerStatus() async {
-    final result = await _service.forceRefreshServerStatus();
+  Future<ServerStatusDetail> forceRefreshServerStatus() async =>
+      _statusDetail(await _service.forceRefreshServerStatus());
+
+  /// The relay's status, or why it could not be read: the FFI's message is
+  /// a sentence written for a person, and Settings' Test shows it.
+  static ServerStatusDetail _statusDetail(Map<String, dynamic> result) {
     if (result['success'] == true) {
       return ServerStatusDetail.fromMap(_asMap(result['data']));
     }
-    return const ServerStatusDetail(
+    final message = _asString(result['message']).trim();
+    return ServerStatusDetail(
       serverAvailable: false,
-      registeredServices: [],
+      registeredServices: const [],
       serverMap: '',
       activeConnections: '',
       idleConnections: '',
+      error: message.isEmpty ? null : message,
     );
   }
 

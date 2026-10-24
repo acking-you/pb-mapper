@@ -184,13 +184,16 @@ class AppStore extends ChangeNotifier {
           ? await api.forceRefreshServerStatus()
           : await api.getServerStatusDetail();
     } catch (error) {
-      next = ServerStatusDetail(
+      // The relay's own reasons arrive in the status, as sentences for a
+      // person. Anything thrown here is a fault in this app, not something
+      // the relay said, so it goes to the log rather than the page.
+      debugPrint('Checking the relay failed: $error');
+      next = const ServerStatusDetail(
         serverAvailable: false,
-        registeredServices: const [],
+        registeredServices: [],
         serverMap: '',
         activeConnections: '',
         idleConnections: '',
-        error: '$error',
       );
     }
     if (ask != _relayAsk) return;

@@ -64,7 +64,8 @@ class RelayStore extends ChangeNotifier {
     uptimeSeconds: 0,
   );
 
-  /// Whether the administrator inventories have been read at all.
+  /// Whether the administrator's service inventory has been read, which
+  /// the Services section then lists in place of this credential's own.
   bool adminLoaded = false;
 
   /// Why the administrator inventories could not be read, last time.
@@ -197,25 +198,33 @@ class RelayStore extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Each listing on its own: one that fails (a connection list that times
+  /// out) says why without blanking the ones that answered.
   Future<void> _loadAdmin([int? generation]) async {
     final asOf = generation ?? _generation;
-    try {
-      final results = await Future.wait([
-        api.adminAuthStatus(),
-        api.adminServices(),
-        api.adminConnections(),
-        api.adminKeys(),
-      ]);
-      if (asOf != _generation) return;
-      authStatus = results[0] as RelayAuthStatus;
-      services = results[1] as List<RelayService>;
-      connections = results[2] as List<RelayConnection>;
-      keys = results[3] as List<RelayKey>;
-      adminLoaded = true;
-      adminError = null;
-    } catch (error) {
-      if (asOf == _generation) adminError = _reason(error);
+    String? failure;
+    Future<void> load<T>(
+      Future<T> Function() read,
+      void Function(T value) apply,
+    ) async {
+      try {
+        final value = await read();
+        if (asOf == _generation) apply(value);
+      } catch (error) {
+        failure ??= _reason(error);
+      }
     }
+
+    await Future.wait([
+      load(api.adminAuthStatus, (value) => authStatus = value),
+      load(api.adminServices, (value) {
+        services = value;
+        adminLoaded = true;
+      }),
+      load(api.adminConnections, (value) => connections = value),
+      load(api.adminKeys, (value) => keys = value),
+    ]);
+    if (asOf == _generation) adminError = failure;
   }
 
   static String _reason(Object error) =>

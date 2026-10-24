@@ -63,6 +63,19 @@ FakePbMapperApi _busy() {
 Future<void> _open(WidgetTester tester, FakePbMapperApi api) =>
     pumpApp(tester, api, page: AppPage.relay);
 
+/// The two stores over [api], without the page.
+Future<(AppStore, RelayStore)> _stores(FakePbMapperApi api) async {
+  final app = AppStore(
+    api: api,
+    changes: StreamController<StateChange>.broadcast().stream,
+  );
+  addTearDown(app.dispose);
+  await app.start();
+  final relay = RelayStore(app: app);
+  addTearDown(relay.dispose);
+  return (app, relay);
+}
+
 Future<void> _section(WidgetTester tester, String name) async {
   await tester.tap(find.byKey(Key('relay-section-$name')));
   await settle(tester);
@@ -155,16 +168,18 @@ void main() {
     await finish(tester);
   });
 
+  test('one listing failing leaves the others, and says why', () async {
+    final (_, relay) = await _stores(_busy()..connectionsFail = true);
+    await relay.refresh();
+    expect(relay.keys, isNotEmpty);
+    expect(relay.authStatus, isNotNull);
+    expect(relay.serviceRows, hasLength(4));
+    expect(relay.adminError, contains('connections'));
+  });
+
   test('switching relays forgets the old one, even mid-answer', () async {
     final api = _busy();
-    final app = AppStore(
-      api: api,
-      changes: StreamController<StateChange>.broadcast().stream,
-    );
-    addTearDown(app.dispose);
-    await app.start();
-    final relay = RelayStore(app: app);
-    addTearDown(relay.dispose);
+    final (app, relay) = await _stores(api);
     await relay.refresh();
     expect(relay.keys, isNotEmpty);
 
