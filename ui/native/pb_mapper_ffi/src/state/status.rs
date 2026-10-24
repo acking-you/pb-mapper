@@ -281,15 +281,6 @@ impl PbMapperState {
         Ok(detail)
     }
 
-    /// Where the relay is and whether connections to it keep alive: all a
-    /// one-off relay call needs, read without holding on to the state.
-    pub fn relay_target(&self) -> (String, bool) {
-        (
-            self.config.server_address.clone(),
-            self.config.keep_alive_enabled,
-        )
-    }
-
     // Cache service status to avoid blocking UI with network checks on every paint.
     async fn get_cached_service_status(&self, service_key: &str) -> (String, String) {
         let Some(runtime) = self.service_runtime.get(service_key) else {

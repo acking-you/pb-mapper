@@ -281,7 +281,7 @@ pub struct ClientConfigStore {
     pub clients: HashMap<String, ClientConfigData>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct AppConfig {
     pub server_address: String,

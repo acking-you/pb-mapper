@@ -500,6 +500,7 @@ class FakePbMapperApi implements PbMapperApiClient {
       return const KeyRotation(
         key: rotated,
         confirmed: false,
+        saved: false,
         reason: 'connection reset',
       );
     }
@@ -508,7 +509,7 @@ class FakePbMapperApi implements PbMapperApiClient {
       keepAliveEnabled: config.keepAliveEnabled,
       msgHeaderKey: rotated,
     );
-    return const KeyRotation(key: rotated, confirmed: true);
+    return const KeyRotation(key: rotated, confirmed: true, saved: true);
   }
 
   /// Whether the relay's answer to a rotation arrives. When it does not, the

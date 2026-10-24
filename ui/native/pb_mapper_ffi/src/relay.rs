@@ -59,27 +59,48 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
     let handle = unsafe { &mut *handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
-        let (server, keep_alive) = state.lock().await.relay_target();
+        let config = state.lock().await.get_config_status().await;
         let credential = get_process_credential();
-        let outcome = call(&server, keep_alive, credential, &request).await?;
-        // A rotated administrator key is the only one the relay accepts now:
-        // this computer switches to it before anything else talks to the
-        // relay, or every later call would fail.
+        let outcome = call(
+            &config.server_address,
+            config.keep_alive_enabled,
+            credential,
+            &request,
+        )
+        .await?;
+        let mut data = outcome.data;
+        // A rotated administrator key is the only one that relay accepts
+        // now: this computer switches to it, or every later call would fail.
+        // Unless Settings moved it to another relay or credential while the
+        // rotation ran — then the key is not this computer's to save, and
+        // saving it would undo that change. `"saved"` tells the page which.
         if let Some(key) = outcome.rotated_key {
             let mut state = state.lock().await;
-            state
-                .update_config(server, keep_alive, key.clone())
-                .await
-                .map_err(|error| {
-                    CtlError::io(format!(
-                        "The relay now uses a new administrator key, but this computer could \
-                         not save it ({error}). Keep it somewhere safe: {key}"
-                    ))
-                })?;
+            let saved = state.get_config_status().await == config;
+            if saved {
+                state
+                    .update_config(
+                        config.server_address,
+                        config.keep_alive_enabled,
+                        key.clone(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        CtlError::io(format!(
+                            "The relay now uses a new administrator key, but this computer \
+                             could not save it ({error}). Keep it somewhere safe: {key}"
+                        ))
+                    })?;
+            }
             drop(state);
-            events::emit(events::ChangeKind::Config, None, Origin::Ui);
+            if saved {
+                events::emit(events::ChangeKind::Config, None, Origin::Ui);
+            }
+            if let Some(fields) = data.as_object_mut() {
+                fields.insert("saved".to_owned(), saved.into());
+            }
         }
-        Ok::<_, CtlError>(outcome.data)
+        Ok::<_, CtlError>(data)
     });
     match result {
         Ok(data) => ok_data(data),
@@ -458,7 +479,7 @@ fn issued_json(key: &IssuedKey) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pb_mapper_core::checksum::parse_credential;
+    use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
     use pb_mapper_testkit::{Relay, TEST_ADMIN_KEY};
 
     async fn run(relay: &Relay, credential: &str, request: Value) -> Result<Value, CtlError> {
@@ -474,6 +495,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_administrator_runs_the_credential_lifecycle_over_the_wire() {
+        // The relay installs the test credential process-wide, and its root
+        // rotation replaces it; `state::tests` set and clear that same
+        // credential under this lock. Held until the relay is gone.
+        let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
         let relay = Relay::start("ffi-relay-call").await;
         let admin = |request| run(&relay, TEST_ADMIN_KEY, request);
 

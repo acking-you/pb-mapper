@@ -197,7 +197,6 @@ class _Hero extends StatelessWidget {
     final status = store.relay;
     final online = store.relayState == RelayState.online;
     final identity = relay.identity;
-    int ids(String text) => RegExp(r'\d+').allMatches(text).length;
     final auth = relay.authStatus;
 
     final head = Row(
@@ -244,13 +243,13 @@ class _Hero extends StatelessWidget {
       ],
     );
 
+    // Counts the relay keeps as such. Its status strings are diagnostics:
+    // counting the ids in them would count a publisher's idle pool as
+    // traffic, so connections are an administrator's, from the inventory.
     final stats = [
-      (l10n.relayStatServices, '${online ? store.relayServices.length : '—'}'),
-      (
-        l10n.relayStatActive,
-        online ? '${ids(status!.activeConnections)}' : '—',
-      ),
-      (l10n.relayStatIdle, online ? '${ids(status!.idleConnections)}' : '—'),
+      (l10n.relayStatServices, online ? '${relay.serviceRows.length}' : '—'),
+      if (relay.isAdmin && relay.adminLoaded)
+        (l10n.relayTabConnections, '${relay.connections.length}'),
       (l10n.relayStatSessions, online ? '${relay.sessions.length}' : '—'),
       if (relay.isAdmin && auth != null)
         (l10n.relayStatCredentials, '${auth.activeKeys} / ${auth.capacity}'),

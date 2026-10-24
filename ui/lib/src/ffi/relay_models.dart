@@ -259,14 +259,22 @@ class IssuedCredential extends RelayKey {
 
 /// A rotated administrator key.
 class KeyRotation {
-  const KeyRotation({required this.key, required this.confirmed, this.reason});
+  const KeyRotation({
+    required this.key,
+    required this.confirmed,
+    required this.saved,
+    this.reason,
+  });
 
   final String key;
 
-  /// The relay is known to use [key], and this computer switched to it.
-  /// When false the relay's reply was lost and it could not be asked again:
-  /// it may be using [key] or the old key, and this computer kept the old.
+  /// The relay is known to use [key]. When false its reply was lost and it
+  /// could not be asked again: it may be using [key] or the old key.
   final bool confirmed;
+
+  /// This computer switched to [key]. Not when the outcome is unknown, nor
+  /// when Settings moved it to another relay or credential meanwhile.
+  final bool saved;
 
   /// Why the outcome is unknown, when it is.
   final String? reason;
@@ -274,6 +282,7 @@ class KeyRotation {
   factory KeyRotation.fromMap(Map<String, dynamic> map) => KeyRotation(
     key: '${map['adminKey'] ?? ''}',
     confirmed: map['confirmed'] == true,
+    saved: map['saved'] == true,
     reason: map['reason'] as String?,
   );
 }

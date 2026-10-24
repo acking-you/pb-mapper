@@ -174,6 +174,8 @@ class SecurityTab extends StatelessWidget {
       action: l10n.securityRotateAction,
     );
     if (!yes || !context.mounted) return;
+    // The relay rotated, which Settings may have moved away from meanwhile.
+    final address = relay.app.relayAddress;
     final rotation = await attempt(context, relay.rotateKey);
     if (rotation == null || !context.mounted) return;
     final key = rotation.key;
@@ -181,13 +183,13 @@ class SecurityTab extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final setup = encodeSetupString(
-      SetupPayload(address: relay.app.relayAddress, credential: key),
+      SetupPayload(address: address, credential: key),
     );
-    // Unconfirmed, this may be the only key the relay takes now, and this
-    // dialog the only place it is written down.
+    // Unless this computer saved it, this may be the only key the relay
+    // takes now, and this dialog the only place it is written down.
     await showDialog<void>(
       context: context,
-      barrierDismissible: confirmed,
+      barrierDismissible: rotation.saved,
       builder: (c) => AlertDialog(
         key: Key(confirmed ? 'security-rotated' : 'security-rotation-unknown'),
         icon: confirmed
@@ -216,14 +218,13 @@ class SecurityTab extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 12),
-              Text(
-                confirmed
-                    ? l10n.securityRotatedBody
-                    : l10n.securityRotationUnknownBody(
-                        rotation.reason ?? l10n.relayNoReason,
-                      ),
-                style: theme.textTheme.bodySmall,
-              ),
+              Text(switch ((confirmed, rotation.saved)) {
+                (true, true) => l10n.securityRotatedBody,
+                (true, false) => l10n.securityRotatedUnsavedBody(address),
+                (false, _) => l10n.securityRotationUnknownBody(
+                  rotation.reason ?? l10n.relayNoReason,
+                ),
+              }, style: theme.textTheme.bodySmall),
             ],
           ),
         ),
