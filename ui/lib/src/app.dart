@@ -117,6 +117,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     });
     await started;
     if (widget.checkForUpdates && updatesSupported && mounted) {
+      unawaited(_reportUpdate());
       _updateSchedule = UpdateSchedule(
         updates: _updates,
         prefs: _prefs,
@@ -128,6 +129,35 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
           kind: ToastKind.info,
         ),
       )..start();
+    }
+  }
+
+  /// Say what became of the update handed off before the last quit. The
+  /// installer reopens the app from the background, where Windows lets no
+  /// window take the front, so it comes forward here too: otherwise the app
+  /// seems to have vanished, and the update to have failed.
+  Future<void> _reportUpdate() async {
+    final outcome = await _updates.takeOutcome();
+    if (outcome == null || !mounted) return;
+    if (widget.desktop) {
+      try {
+        await windowManager.show();
+        await windowManager.focus();
+      } catch (error) {
+        debugPrint('Could not bring the window forward: $error');
+      }
+    }
+    final l10n = lookupAppLocalizations(_prefs.activeLocale);
+    final version = '${outcome.to}';
+    if (outcome.installed) {
+      showToast(null, l10n.updateDone(version), kind: ToastKind.success);
+    } else {
+      showToast(
+        null,
+        l10n.updateNotDone(version),
+        kind: ToastKind.error,
+        description: l10n.updateNotDoneHint,
+      );
     }
   }
 

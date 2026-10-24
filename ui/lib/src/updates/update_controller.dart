@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:pb_mapper_ui/src/updates/release.dart';
 import 'package:pb_mapper_ui/src/updates/update_installers.dart';
+import 'package:pb_mapper_ui/src/updates/update_record.dart';
 import 'package:pb_mapper_ui/src/updates/update_source.dart';
 
 /// Whether this build can update itself. iOS builds are unsigned
@@ -48,11 +49,23 @@ enum UpdateStage {
   failed,
 }
 
+/// What became of an update handed off before the app last quit.
+class UpdateOutcome {
+  const UpdateOutcome({required this.to, required this.installed});
+
+  /// The version it was installing.
+  final Version to;
+
+  /// Whether this app is that version now.
+  final bool installed;
+}
+
 class UpdateController extends ChangeNotifier {
   UpdateController({
     required this.quit,
     UpdateSource? source,
     this.installer = const PlatformUpdateInstaller(),
+    this.record = const FileUpdateRecord(),
     this.loadInstalled = _loadInstalled,
     this.loadHost = _loadHost,
     bool? replaceSelf,
@@ -63,8 +76,14 @@ class UpdateController extends ChangeNotifier {
   final Future<void> Function() quit;
   final UpdateSource source;
   final UpdateInstaller installer;
+  final UpdateRecord record;
   final Future<Version> Function() loadInstalled;
   final Future<UpdateHost> Function() loadHost;
+
+  /// How long after a hand-off its outcome is still news. The installer
+  /// reopens the app within a minute; a record older than this belongs to a
+  /// launch nobody is waiting on.
+  static const outcomeWindow = Duration(hours: 1);
 
   /// Off in debug builds: trying the flow from a development build verifies
   /// the download and stops, so it cannot clobber itself.
@@ -248,6 +267,7 @@ class UpdateController extends ChangeNotifier {
     }
     switch (plan.method) {
       case UpdateMethod.installer:
+        await _remember();
         await installer.runInstallerAfterExit(file);
         _set(UpdateStage.installing);
         await quit();
@@ -267,6 +287,7 @@ class UpdateController extends ChangeNotifier {
           _set(UpdateStage.saved);
           return;
         }
+        await _remember();
         await _discard(file);
         _set(UpdateStage.installing);
         await quit();
@@ -277,6 +298,40 @@ class UpdateController extends ChangeNotifier {
       case UpdateMethod.openInBrowser:
         // Handled before anything is downloaded.
         break;
+    }
+  }
+
+  /// Write down where this update is going, for the launch after it to check.
+  /// Best effort: an update is not refused for want of a note.
+  Future<void> _remember() async {
+    final from = _installed;
+    final to = _published?.version;
+    if (from == null || to == null) return;
+    try {
+      await record.write(PendingUpdate(from: from, to: to, at: DateTime.now()));
+    } catch (error) {
+      debugPrint('Could not record the update: $error');
+    }
+  }
+
+  /// What became of the update handed off before this app last quit: null
+  /// when there was none, or when it is too old to be the one just made.
+  /// Read once; the next launch hears nothing.
+  Future<UpdateOutcome?> takeOutcome() async {
+    try {
+      final pending = await record.take();
+      if (pending == null ||
+          DateTime.now().difference(pending.at) > outcomeWindow) {
+        return null;
+      }
+      final installed = _installed ??= await loadInstalled();
+      return UpdateOutcome(
+        to: pending.to,
+        installed: !(pending.to > installed),
+      );
+    } catch (error) {
+      debugPrint('Could not read the last update: $error');
+      return null;
     }
   }
 
