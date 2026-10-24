@@ -76,6 +76,13 @@ class RelayStore extends ChangeNotifier {
   bool loading = false;
   DateTime? refreshedAt;
 
+  /// A rotated administrator key this computer did not save, and the relay
+  /// it is for: the relay's answer was lost, or Settings moved this computer
+  /// elsewhere while it ran. It may be the only key that relay takes, so it
+  /// is held here rather than by the page, which may be gone by the time it
+  /// arrives, until the person says they have it.
+  ({KeyRotation rotation, String address})? unsavedRotation;
+
   bool get isAdmin => identity.isAdmin;
 
   int _watchers = 0;
@@ -290,14 +297,26 @@ class RelayStore extends ChangeNotifier {
 
   /// Rotate the administrator key. Once the relay is known to have taken
   /// the new key this computer has switched to it, and everything is read
-  /// again with it.
+  /// again with it; a key it could not switch to is kept in
+  /// [unsavedRotation].
   Future<KeyRotation> rotateKey() async {
+    final address = app.relayAddress;
     final rotation = await api.adminRotateKey();
+    if (!rotation.saved) {
+      unsavedRotation = (rotation: rotation, address: address);
+      _notify();
+    }
     if (rotation.confirmed) {
       await app.refresh(force: true);
       await refresh();
     }
     return rotation;
+  }
+
+  /// The person has the key in [unsavedRotation] somewhere safe.
+  void keptUnsavedRotation() {
+    unsavedRotation = null;
+    _notify();
   }
 
   Future<OperationResult> startLocalRelay({

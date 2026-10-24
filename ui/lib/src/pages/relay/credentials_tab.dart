@@ -285,7 +285,9 @@ class _CredentialMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final scheme = Theme.of(context).colorScheme;
-    final active = credential.state == RelayKeyState.active;
+    // Revealing and renewing need a credential still in force: the relay
+    // refuses to renew one whose time has run out, even before its sweep.
+    final active = standingOf(credential) == RelayKeyState.active;
     PopupMenuItem<_CredentialAction> item(
       _CredentialAction value,
       IconData icon,
@@ -314,7 +316,7 @@ class _CredentialMenu extends StatelessWidget {
       itemBuilder: (context) => [
         if (active)
           item(_CredentialAction.reveal, AppIcons.show, l10n.credentialReveal),
-        if (credential.state != RelayKeyState.revoked)
+        if (active)
           item(_CredentialAction.renew, AppIcons.refresh, l10n.credentialRenew),
         if (credential.state != RelayKeyState.revoked)
           item(

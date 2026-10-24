@@ -324,6 +324,16 @@ void main() {
       await tester.tap(find.text('Close'));
       await settle(tester);
 
+      // Closing it, or leaving the section, does not lose it; saying so does.
+      await _section(tester, 'services');
+      expect(find.byKey(const Key('relay-unsaved-key')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('relay-unsaved-key-show')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('security-rotation-kept')));
+      await settle(tester);
+      expect(find.byKey(const Key('relay-unsaved-key')), findsNothing);
+      await _section(tester, 'security');
+
       api.rotationAnswers = true;
       await rotate();
       expect(find.byKey(const Key('security-rotated')), findsOneWidget);

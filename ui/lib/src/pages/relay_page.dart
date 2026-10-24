@@ -5,7 +5,8 @@ import 'package:pb_mapper_ui/src/pages/relay/connections_tab.dart';
 import 'package:pb_mapper_ui/src/pages/relay/credentials_tab.dart'
     show CredentialsTab, issueCredential;
 import 'package:pb_mapper_ui/src/pages/relay/local_tab.dart';
-import 'package:pb_mapper_ui/src/pages/relay/security_tab.dart';
+import 'package:pb_mapper_ui/src/pages/relay/security_tab.dart'
+    show SecurityTab, showRotationDialog;
 import 'package:pb_mapper_ui/src/pages/relay/services_tab.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/page_frame.dart';
@@ -110,6 +111,14 @@ class _RelayPageState extends State<RelayPage> {
                   padding: const EdgeInsets.fromLTRB(18, 4, 18, 28),
                   children: [
                     _Hero(store: store, relay: relay),
+                    if (relay.unsavedRotation case final pending?) ...[
+                      const SizedBox(height: 12),
+                      _UnsavedKey(
+                        relay: relay,
+                        rotation: pending.rotation,
+                        address: pending.address,
+                      ),
+                    ],
                     const SizedBox(height: 16),
                     // Across the page where there is room; on a phone it
                     // scrolls sideways rather than squeeze five labels.
@@ -311,6 +320,53 @@ class _Hero extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A rotated administrator key this computer could not save. It stays above
+/// every section, whichever the person is on, until they say they have it.
+class _UnsavedKey extends StatelessWidget {
+  const _UnsavedKey({
+    required this.relay,
+    required this.rotation,
+    required this.address,
+  });
+
+  final RelayStore relay;
+  final KeyRotation rotation;
+  final String address;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final caution = cautionColor(theme.colorScheme);
+    return Container(
+      key: const Key('relay-unsaved-key'),
+      padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+      decoration: BoxDecoration(
+        color: caution.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          Icon(AppIcons.warning, size: 18, color: caution),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              l10n.relayUnsavedKey(address),
+              style: theme.textTheme.bodyMedium,
+            ),
+          ),
+          TextButton(
+            key: const Key('relay-unsaved-key-show'),
+            onPressed: () =>
+                showRotationDialog(context, relay, rotation, address),
+            child: Text(l10n.relayUnsavedKeyShow),
+          ),
+        ],
       ),
     );
   }

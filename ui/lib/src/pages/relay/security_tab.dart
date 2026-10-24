@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/common/setup_string.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/pages/relay/relay_format.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/state/relay_store.dart';
@@ -177,76 +178,15 @@ class SecurityTab extends StatelessWidget {
     // The relay rotated, which Settings may have moved away from meanwhile.
     final address = relay.app.relayAddress;
     final rotation = await attempt(context, relay.rotateKey);
-    if (rotation == null || !context.mounted) return;
-    final key = rotation.key;
-    final confirmed = rotation.confirmed;
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final setup = encodeSetupString(
-      SetupPayload(address: address, credential: key),
-    );
-    // Unless this computer saved it, this may be the only key the relay
-    // takes now, and this dialog the only place it is written down.
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: rotation.saved,
-      builder: (c) => AlertDialog(
-        key: Key(confirmed ? 'security-rotated' : 'security-rotation-unknown'),
-        icon: confirmed
-            ? Icon(AppIcons.ok, color: successColor(scheme))
-            : Icon(AppIcons.warning, color: cautionColor(scheme)),
-        title: Text(
-          confirmed
-              ? l10n.securityRotatedTitle
-              : l10n.securityRotationUnknownTitle,
-        ),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 460),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: codeSurface(scheme),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: SelectableText(
-                  key,
-                  style: mono(fontSize: 13, color: scheme.onSurface),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text(switch ((confirmed, rotation.saved)) {
-                (true, true) => l10n.securityRotatedBody,
-                (true, false) => l10n.securityRotatedUnsavedBody(address),
-                (false, _) => l10n.securityRotationUnknownBody(
-                  rotation.reason ?? l10n.relayNoReason,
-                ),
-              }, style: theme.textTheme.bodySmall),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton.icon(
-            onPressed: () => copySecret(c, key, l10n.credentialCopied),
-            icon: const Icon(AppIcons.copy, size: 16),
-            label: Text(l10n.credentialCopy),
-          ),
-          if (confirmed)
-            FilledButton.icon(
-              onPressed: () => copySecret(c, setup, l10n.credentialSetupCopied),
-              icon: const Icon(AppIcons.export, size: 16),
-              label: Text(l10n.credentialCopySetup),
-            ),
-          TextButton(
-            onPressed: () => Navigator.of(c).pop(),
-            child: Text(l10n.close),
-          ),
-        ],
-      ),
-    );
+    if (rotation == null) return;
+    if (!context.mounted) {
+      // Left while it ran: an unsaved key waits on the Relay page.
+      if (!rotation.saved) {
+        showToast(null, l10n.relayUnsavedKeyToast, kind: ToastKind.warning);
+      }
+      return;
+    }
+    await showRotationDialog(context, relay, rotation, address);
   }
 
   Future<void> _reset(BuildContext context, RelayStore relay) async {
@@ -364,4 +304,98 @@ class _Figure extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A rotated administrator key, shown once: as itself, and as a setup string
+/// for anything else that used the old one. A key this computer did not save
+/// stays on the Relay page until the person says they have it.
+Future<void> showRotationDialog(
+  BuildContext context,
+  RelayStore relay,
+  KeyRotation rotation,
+  String address,
+) {
+  final l10n = context.l10n;
+  final theme = Theme.of(context);
+  final scheme = theme.colorScheme;
+  final key = rotation.key;
+  final confirmed = rotation.confirmed;
+  final setup = encodeSetupString(
+    SetupPayload(address: address, credential: key),
+  );
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: rotation.saved,
+    builder: (c) => AlertDialog(
+      key: Key(confirmed ? 'security-rotated' : 'security-rotation-unknown'),
+      icon: confirmed
+          ? Icon(AppIcons.ok, color: successColor(scheme))
+          : Icon(AppIcons.warning, color: cautionColor(scheme)),
+      title: Text(
+        confirmed
+            ? l10n.securityRotatedTitle
+            : l10n.securityRotationUnknownTitle,
+      ),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: codeSurface(scheme),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: SelectableText(
+                key,
+                style: mono(fontSize: 13, color: scheme.onSurface),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(switch ((confirmed, rotation.saved)) {
+              (true, true) => l10n.securityRotatedBody,
+              (true, false) => l10n.securityRotatedUnsavedBody(address),
+              (false, _) => l10n.securityRotationUnknownBody(
+                rotation.reason ?? l10n.relayNoReason,
+              ),
+            }, style: theme.textTheme.bodySmall),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () => copySecret(c, key, l10n.credentialCopied),
+          icon: const Icon(AppIcons.copy, size: 16),
+          label: Text(l10n.credentialCopy),
+        ),
+        if (confirmed && rotation.saved)
+          FilledButton.icon(
+            onPressed: () => copySecret(c, setup, l10n.credentialSetupCopied),
+            icon: const Icon(AppIcons.export, size: 16),
+            label: Text(l10n.credentialCopySetup),
+          )
+        else if (confirmed)
+          TextButton.icon(
+            onPressed: () => copySecret(c, setup, l10n.credentialSetupCopied),
+            icon: const Icon(AppIcons.export, size: 16),
+            label: Text(l10n.credentialCopySetup),
+          ),
+        TextButton(
+          onPressed: () => Navigator.of(c).pop(),
+          child: Text(l10n.close),
+        ),
+        if (!rotation.saved)
+          FilledButton(
+            key: const Key('security-rotation-kept'),
+            onPressed: () {
+              relay.keptUnsavedRotation();
+              Navigator.of(c).pop();
+            },
+            child: Text(l10n.securityRotationKept),
+          ),
+      ],
+    ),
+  );
 }
