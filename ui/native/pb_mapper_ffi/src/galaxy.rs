@@ -12,7 +12,8 @@ const MAX_OUT: u32 = 1 << 24;
 ///
 /// Returns the number of values written to `out`; when `capacity` is too
 /// small, minus the number needed (and `out` holds nothing usable); -1 for a
-/// null pointer, an oversized buffer, or a malformed scene or frame.
+/// null pointer, an oversized buffer, a `frame_len` other than
+/// [`pb_mapper_galaxy::FRAME_FIELDS`], or a malformed scene or frame.
 ///
 /// A leaf call, unlike the JSON-envelope exports: it allocates nothing the
 /// caller must free, takes no lock, makes no callback, and catches any panic
@@ -36,11 +37,17 @@ pub unsafe extern "C" fn pb_mapper_galaxy_frame_v1(
     if scene.is_null() || frame.is_null() || scene_len > MAX_SCENE || capacity > MAX_OUT {
         return -1;
     }
+    // A frame has one length, and `compute` refuses any other; refusing it
+    // here means no slice is ever built over a length the pointer may not back.
+    if frame_len as usize != pb_mapper_galaxy::FRAME_FIELDS {
+        return -1;
+    }
     if out.is_null() && capacity > 0 {
         return -1;
     }
-    // SAFETY: both pointers are non-null, and the caller guarantees each is
-    // valid and aligned for its length for the duration of the call.
+    // SAFETY: both pointers are non-null, both lengths are bounded, and the
+    // caller guarantees each is valid and aligned for its length for the
+    // duration of the call.
     let (scene, frame) = unsafe {
         (
             slice::from_raw_parts(scene, scene_len as usize),
@@ -112,6 +119,21 @@ mod tests {
             pb_mapper_galaxy_frame_v1(scene.as_ptr(), 5, ptr::null(), 13, ptr::null_mut(), 0)
         };
         assert_eq!(null_frame, -1);
+        for frame_len in [FRAME.len() as u32 - 1, u32::MAX] {
+            // SAFETY: a `frame_len` other than the layout's is refused before
+            // `frame` is read, so neither length is ever sliced.
+            let wrong_frame = unsafe {
+                pb_mapper_galaxy_frame_v1(
+                    scene.as_ptr(),
+                    5,
+                    FRAME.as_ptr(),
+                    frame_len,
+                    out.as_mut_ptr(),
+                    out.len() as u32,
+                )
+            };
+            assert_eq!(wrong_frame, -1, "{frame_len}");
+        }
         // SAFETY: a null `out` with room claimed is refused before any write.
         let null_out = unsafe {
             pb_mapper_galaxy_frame_v1(scene.as_ptr(), 5, FRAME.as_ptr(), 13, ptr::null_mut(), 8)
