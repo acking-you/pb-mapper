@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.8.1] - 2026-10-24
 - Fix a Windows relay that stopped admitting connections about a minute after starting, and admitted none after a restart: first flights and admin mutations were refused with `connection_replay_store_unavailable`. Compacting or reloading the first-flight replay log replaced the file while still holding it open, which the hand-rolled `MoveFileExW` call refused, and one failed rewrite disabled the log until the process exited. The log is now closed before it is rewritten and replaced through `std::fs::rename`, and a partly written record is rolled back through a handle that can truncate it, which a Windows append handle cannot. Linux behavior and durability are unchanged.
 
 ## [0.8.0] - 2026-10-24

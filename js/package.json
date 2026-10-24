@@ -1,6 +1,6 @@
 {
   "name": "pb-mapper",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Node-API client for pb-mapper: peer-to-peer tunnels to private TCP/UDP services with automatic relay fallback",
   "main": "index.js",
   "types": "index.d.ts",
@@ -59,10 +59,10 @@
     "@napi-rs/cli": "^3.3.0"
   },
   "optionalDependencies": {
-    "pb-mapper-darwin-arm64": "0.8.0",
-    "pb-mapper-darwin-x64": "0.8.0",
-    "pb-mapper-linux-arm64-gnu": "0.8.0",
-    "pb-mapper-linux-x64-gnu": "0.8.0"
+    "pb-mapper-darwin-arm64": "0.8.1",
+    "pb-mapper-darwin-x64": "0.8.1",
+    "pb-mapper-linux-arm64-gnu": "0.8.1",
+    "pb-mapper-linux-x64-gnu": "0.8.1"
   },
   "engines": {
     "node": ">= 18",
