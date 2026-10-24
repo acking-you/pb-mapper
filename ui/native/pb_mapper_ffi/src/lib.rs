@@ -8,6 +8,7 @@ mod config;
 mod ctl;
 mod error;
 mod events;
+mod galaxy;
 mod handle;
 mod logging;
 mod response;
@@ -26,6 +27,7 @@ pub use config::{
     pb_mapper_get_config_json, pb_mapper_reveal_isolated_admin_key, pb_mapper_update_config,
 };
 pub use events::pb_mapper_set_change_callback;
+pub use galaxy::pb_mapper_galaxy_frame_v1;
 pub use handle::{
     PbMapperHandle, pb_mapper_create, pb_mapper_destroy, pb_mapper_set_app_dir,
     pb_mapper_start_control_server,

@@ -26,10 +26,15 @@ class LocaleController {
     }
   }
 
-  static Future<void> save(Locale locale) async {
+  /// Remember [locale]; null goes back to following the system.
+  static Future<void> save(Locale? locale) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_storageKey, locale.languageCode);
+      if (locale == null) {
+        await prefs.remove(_storageKey);
+      } else {
+        await prefs.setString(_storageKey, locale.languageCode);
+      }
     } catch (_) {
       // Losing the preference only costs the choice on next launch.
     }

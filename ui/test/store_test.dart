@@ -1,0 +1,159 @@
+import 'dart:async';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/src/common/state_change.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/state/app_store.dart';
+import 'package:pb_mapper_ui/src/state/tunnel.dart';
+
+import 'fake_pb_mapper_api.dart';
+
+Future<AppStore> _started(
+  FakePbMapperApi api, [
+  StreamController<StateChange>? changes,
+]) async {
+  final store = AppStore(
+    api: api,
+    changes: (changes ?? StreamController<StateChange>.broadcast()).stream,
+  );
+  addTearDown(store.dispose);
+  await store.start();
+  return store;
+}
+
+void main() {
+  test(
+    'what there is to connect to leaves out what this computer shares',
+    () async {
+      final store = await _started(
+        FakePbMapperApi(
+          services: [fakeService(serviceKey: 'web')],
+          serverServices: ['web', 'zeta', 'alpha'],
+        ),
+      );
+      expect(store.relayServices, ['web', 'zeta', 'alpha']);
+      expect(store.remoteServices, ['alpha', 'zeta']);
+    },
+  );
+
+  test(
+    'the relay is unset without an address, and offline when down',
+    () async {
+      final api = FakePbMapperApi(
+        config: const ConfigStatus(
+          serverAddress: '',
+          keepAliveEnabled: true,
+          msgHeaderKey: '',
+        ),
+      );
+      final store = await _started(api);
+      expect(store.relayState, RelayState.unset);
+
+      api.relayUp = false;
+      await store.saveRelay(
+        address: 'relay.example:7666',
+        credential: '',
+        keepAlive: true,
+      );
+      expect(store.relayState, RelayState.offline);
+      expect(store.relayServices, isEmpty);
+    },
+  );
+
+  test(
+    'a renamed share registers the new key before dropping the old',
+    () async {
+      final api = FakePbMapperApi(services: [fakeService(serviceKey: 'old')]);
+      final store = await _started(api);
+      final old = store.shares.single;
+
+      final result = await store.update(
+        old,
+        const TunnelDraft(
+          kind: TunnelKind.share,
+          key: 'new',
+          localAddress: '127.0.0.1:8081',
+        ),
+      );
+
+      expect(result.success, isTrue);
+      expect(api.calls, ['registerService(new)', 'deleteServiceConfig(old)']);
+      expect(store.shares.map((t) => t.key), ['new']);
+    },
+  );
+
+  test('a connection edit that is refused puts the old one back', () async {
+    final api = FakePbMapperApi(clients: [fakeClient(serviceKey: 'db')]);
+    final store = await _started(api);
+    final old = store.connections.single;
+
+    api.failNext = 'address in use';
+    final result = await store.update(
+      old,
+      const TunnelDraft(
+        kind: TunnelKind.connect,
+        key: 'db',
+        localAddress: '127.0.0.1:5432',
+      ),
+    );
+
+    expect(result.success, isFalse);
+    expect(api.calls, [
+      'disconnectService(db)',
+      'connectService(db)',
+      'connectService(db)',
+    ]);
+    expect(store.connections.single.localAddress, '127.0.0.1:9090');
+    expect(store.connections.single.health, TunnelHealth.running);
+  });
+
+  test('a change made elsewhere is read back', () async {
+    final api = FakePbMapperApi();
+    final changes = StreamController<StateChange>.broadcast();
+    final store = await _started(api, changes);
+    expect(store.shares, isEmpty);
+
+    api.services = [fakeService(serviceKey: 'from-terminal')];
+    changes.add(
+      const StateChange(
+        kind: StateChangeKind.services,
+        origin: ChangeOrigin.cli,
+        seq: 1,
+      ),
+    );
+    // The subscription coalesces a burst over 150 ms.
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(store.shares.map((t) => t.key), ['from-terminal']);
+  });
+
+  test(
+    'settling waits out the retry loop and reports where it landed',
+    () async {
+      final api = FakePbMapperApi(
+        services: [fakeService(serviceKey: 'web', status: 'failed')],
+      );
+      final store = await _started(api);
+      final settled = await store.settle(TunnelKind.share, 'web');
+      expect(settled?.health, TunnelHealth.failed);
+    },
+  );
+
+  group('validation', () {
+    test('host:port', () {
+      expect(looksLikeHostPort('127.0.0.1:8080'), isTrue);
+      expect(looksLikeHostPort('example.com:7666'), isTrue);
+      expect(looksLikeHostPort('[::1]:22'), isTrue);
+      expect(looksLikeHostPort('example.com'), isFalse);
+      expect(looksLikeHostPort(':8080'), isFalse);
+      expect(looksLikeHostPort('host:70000'), isFalse);
+      expect(looksLikeHostPort('::1:22'), isFalse);
+    });
+
+    test('credential', () {
+      expect(looksLikeCredential(''), isTrue);
+      expect(looksLikeCredential('a' * 32), isTrue);
+      expect(looksLikeCredential('pbmt1_abc'), isTrue);
+      expect(looksLikeCredential('short'), isFalse);
+    });
+  });
+}

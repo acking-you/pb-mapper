@@ -37,9 +37,11 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  # Native buffers for the galaxy's per-frame call into pb_mapper_galaxy_frame_v1.
   ffi: ^2.1.0
-  meta: ^1.16.0
-  tuple: ^2.0.2
+  # The app's one icon family (Lucide, ISC), mapped in lib/src/theme/app_icons.dart.
+  # Pinned exactly so a glyph redraw is a choice, as in POCOX.
+  lucide_icons_flutter: 3.1.25
   url_launcher: ^6.3.0
   shared_preferences: ^2.2.2
   path_provider: ^2.1.5
@@ -108,18 +110,46 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  # The galaxy's backdrop, rendered once per size and theme.
+  shaders:
+    - shaders/nebula.frag
   assets:
     - assets/tray/
-    # The OFL requires its notice to travel with the font, so the text is
+    # The OFL requires its notice to travel with the font, so the texts are
     # bundled and registered in main.dart rather than only living in the repo.
     - assets/fonts/OFL.txt
+    - assets/fonts/OFL-GoogleSansFlex.txt
+    - assets/fonts/OFL-GeistMono.txt
 
-  # Reached only through fontFamilyFallback on Windows and Linux, where the
-  # system CJK face has no 500 or 600 weight; macOS gets PingFang SC, which
-  # does, and never touches this. Static instances rather than the variable
-  # font they were cut from, because Flutter does not map fontWeight onto a
-  # wght axis. Regenerate with tool/gen_cjk_subset.mjs.
   fonts:
+    # The design system's faces, after POCOX (SIL OFL): Google Sans Flex for
+    # prose (Windows keeps Segoe UI, see lib/src/theme/fonts.dart) and Geist
+    # Mono for keys, addresses and logs. Latin only, ~1 MB together; static
+    # instances, since Flutter maps fontWeight to the nearest declared weight
+    # and never onto a wght axis.
+    - family: GoogleSansFlex
+      fonts:
+        - asset: assets/fonts/GoogleSansFlex-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/GoogleSansFlex-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/GoogleSansFlex-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/GoogleSansFlex-Bold.ttf
+          weight: 700
+    - family: GeistMono
+      fonts:
+        - asset: assets/fonts/GeistMono-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/GeistMono-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/GeistMono-SemiBold.ttf
+          weight: 600
+
+    # Chinese, reached through fontFamilyFallback: first on Windows and Linux,
+    # where the system CJK face has no 500 or 600 weight; macOS gets PingFang
+    # SC first, which does. Static instances cut from the variable font.
+    # Regenerate with tool/gen_cjk_subset.mjs.
     - family: NotoSansSC
       fonts:
         - asset: assets/fonts/NotoSansSC-Regular.subset.ttf

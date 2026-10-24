@@ -1,353 +1,178 @@
 {
   "@@locale": "zh",
   "appTitle": "pb-mapper",
-  "navRegister": "注册服务",
-  "navConnect": "连接服务",
-  "navStatus": "状态",
-  "navConfig": "设置",
+
+  "navOverview": "总览",
+  "navTunnels": "隧道",
   "navLogs": "日志",
-  "navOps": "运维配置",
-  "opsSummary": "服务器、状态与日志",
-  "pageRegister": "注册服务",
-  "pageConnect": "连接服务",
-  "pageStatus": "状态",
-  "pageConfig": "设置",
-  "pageLogs": "日志",
-  "toggleTheme": "切换主题",
-  "toggleLanguage": "切换语言",
-  "home": "首页",
-  "back": "返回",
-  "switchWorkspace": "切换工作区",
-  "quickStart": "快速开始",
-  "quickStartStep1": "填好服务器地址",
-  "quickStartStep1Action": "去设置",
-  "quickStartStep2": "选这台机器的角色",
-  "roleRegisterSummary": "共享本机的服务",
-  "roleRegisterDetail": "把本地端口以一个 key 发布出去。",
-  "roleConnectSummary": "访问别处共享的服务",
-  "roleConnectDetail": "把远程 key 映射成本地端口。",
-  "setupStepOf": "第 {current} 步，共 {total} 步",
-  "@setupStepOf": {
-    "placeholders": {
-      "current": {
-        "type": "int"
-      },
-      "total": {
-        "type": "int"
-      }
-    }
-  },
-  "setupServerTitle": "服务器在哪？",
-  "setupServerBody": "地址和端口，所有流量都经过它。",
-  "setupServerHint": "example.com:7666",
-  "setupServerInvalid": "请用 host:port 格式",
-  "setupKeyLabel": "连接凭据",
-  "setupKeyBody": "请使用中继管理员签发的临时凭据；管理员密钥也可以连接。",
-  "setupKeyInvalid": "请输入 32 字符管理员密钥或 pbmt1_ 临时凭据",
-  "setupCheckingServer": "检测中…",
-  "setupServerOk": "已连上服务器",
-  "setupServerFailed": "连不上，也可以先继续。",
-  "setupRoleTitle": "这台机器做什么？",
-  "setupDetailsTitleRegister": "要共享哪个服务？",
-  "setupDetailsTitleConnect": "要访问哪个服务？",
-  "setupServiceKeyBody": "你自己起的名字，两边用同一个。",
-  "setupServiceKeyBodyConnect": "选择已注册的服务，或直接输入双方约定的 Key。",
-  "setupLocalAddressBodyRegister": "你的服务当前监听的地址。",
-  "setupLocalAddressBodyConnect": "一个空闲的本地端口。",
-  "setupDoneTitle": "完成",
-  "setupDoneBodyServer": "服务器已保存。",
-  "setupVerifyTitle": "正在启动",
-  "setupVerifyWaiting": "启动中…",
-  "setupVerifyRunning": "{key} 已在运行",
-  "@setupVerifyRunning": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "setupVerifyRetrying": "{key} 正在重试。服务器未启动时属正常。",
-  "@setupVerifyRetrying": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "setupVerifyFailed": "{key} 启动失败：{message}",
-  "@setupVerifyFailed": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      },
-      "message": {
-        "type": "String"
-      }
-    }
-  },
-  "setupVerifyStopped": "{key} 还没运行",
-  "@setupVerifyStopped": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "setupAddRegister": "注册一个服务",
-  "setupAddConnect": "连接一个服务",
-  "setupWorking": "已就绪",
-  "setupNothingYet": "还没有配置服务",
-  "setupDoneAll": "完成",
-  "setupRetry": "重试",
-  "setupBack": "上一步",
-  "setupNext": "下一步",
-  "setupFinish": "完成",
-  "setupSkip": "跳过",
-  "setupFailed": "配置失败：{message}",
-  "@setupFailed": {
-    "placeholders": {
-      "message": {
-        "type": "String"
-      }
-    }
-  },
-  "starOnGitHub": "去 GitHub 点个 Star",
-  "starPitch": "开源项目，一个 Star 能帮更多人发现它。",
+  "navSettings": "设置",
+
+  "thisComputer": "本机",
+  "relay": "中继",
+  "relayOnline": "中继在线",
+  "relayOffline": "中继连不上",
+  "relayChecking": "正在检查中继…",
+  "relayUnset": "还没设置中继",
+  "relaySettings": "中继设置",
+
+  "newTunnel": "新建隧道",
+  "editTunnel": "编辑隧道",
+  "kindShare": "共享",
+  "kindConnect": "连接",
+  "kindRemote": "中继上的服务",
+  "kindShareLong": "共享本机服务",
+  "kindConnectLong": "连接远程服务",
+  "kindShareHint": "把本机正在运行的服务以一个 Key 发布到中继，让你的其他设备访问。",
+  "kindConnectHint": "把其他设备共享的服务映射成本机的一个端口。",
+
+  "sectionShared": "本机共享",
+  "sectionConnected": "本机连接",
+  "sectionRelay": "中继上的服务",
+  "sectionSharedEmpty": "还没有共享服务。共享一个本地服务，就能在任何地方访问它。",
+  "sectionConnectedEmpty": "还没有连接。连接一个已共享的服务，即可在本机使用。",
+  "sectionRelayEmpty": "中继上暂时没有其他服务。",
+  "sectionRelayOffline": "中继没有响应，暂时无法列出它的服务。",
+  "sectionRelayUnset": "在设置中填写中继后，这里会列出它提供的服务。",
+  "addShare": "共享服务",
+  "addConnect": "连接服务",
+
+  "serviceKey": "服务 Key",
+  "serviceKeyHelpShare": "你自己起的名字，另一端用同一个名字连接。",
+  "serviceKeyHelpConnect": "对方共享时使用的 Key。",
+  "localAddressShare": "服务地址",
+  "localAddressConnect": "本机地址",
+  "localAddressHelpShare": "服务在本机监听的地址，例如 127.0.0.1:8080。",
+  "localAddressHelpConnect": "本机上一个空闲端口，例如 127.0.0.1:9090。",
+  "protocol": "协议",
+  "moreOptions": "更多选项",
+  "encryption": "加密传输",
+  "encryptionHelp": "在本机与连接方之间端到端加密。",
+  "keepAlive": "TCP 保活",
+  "keepAliveHelp": "防止空闲连接被 NAT 或防火墙断开。",
+  "suggestionsFromRelay": "中继上可用",
+  "create": "创建",
+  "save": "保存",
   "cancel": "取消",
-  "delete": "删除",
   "close": "关闭",
   "copy": "复制",
   "refresh": "刷新",
-  "protocol": "协议",
-  "serviceKey": "服务 Key",
-  "localAddress": "本地地址",
-  "serverAddress": "服务器地址",
-  "enableEncryption": "启用加密",
-  "enableKeepAlive": "启用 TCP Keep-Alive",
+  "more": "更多",
+  "errorKeyRequired": "请填写服务 Key。",
+  "errorAddress": "请使用 host:port 格式，例如 127.0.0.1:8080。",
+  "errorDuplicateShare": "本机已经共享了「{key}」。",
+  "errorDuplicateConnect": "本机已经连接了「{key}」。",
+
+  "healthRunning": "运行中",
+  "healthRetrying": "重试中",
+  "healthFailed": "失败",
+  "healthStopped": "已停止",
+  "healthAvailable": "可连接",
+  "healthInUse": "本机在用",
+
+  "start": "启动",
+  "stop": "停止",
+  "edit": "编辑",
+  "delete": "删除",
+  "copyKey": "复制 Key",
+  "copyAddress": "复制地址",
+  "copied": "已复制 {value}",
+  "connect": "连接",
+  "showConnection": "查看连接",
+  "encrypted": "已加密",
+  "openAt": "已映射到 {address}",
+
+  "toastStarting": "正在启动 {key}…",
+  "toastRunning": "{key} 已运行",
+  "toastRetrying": "{key} 正在等待中继",
+  "toastFailed": "{key} 未能启动",
+  "toastStopped": "{key} 已停止",
+  "toastDeleted": "已删除 {key}",
+  "toastUpdated": "{key} 已更新",
+
+  "deleteTitle": "删除这个隧道？",
+  "deleteBody": "「{key}」会停止，并从本机删除。",
+
+  "connsTitle": "中继保持的连接",
+  "connsNone": "中继没有为这个 Key 保持连接。",
+  "connLastSeen": "{value}前",
+  "connGeneration": "第 {value} 代",
+  "connProtocol": "v{value}",
+  "connUnhealthy": "不健康",
+  "showConnections": "连接详情",
+
+  "overviewEmptyTitle": "这里还空着",
+  "overviewEmptyBody": "每个服务都是一颗行星。共享一个本机服务，或连接中继上的服务。",
+  "summaryShared": "共享 {count}",
+  "summaryConnected": "连接 {count}",
+  "servicesCount": "{count} 个服务",
+  "galaxyLabel": "隧道星图",
+  "galaxyHint": "拖动旋转 · 滚轮缩放 · 点击行星",
+  "showEverything": "查看全部",
+
+  "settingsRelay": "中继服务器",
+  "settingsRelayBody": "所有隧道都经由这台中继。",
+  "relayAddress": "地址",
+  "relayAddressHelp": "pb-mapper 服务器的 host:port，例如 example.com:7666。",
+  "credential": "连接凭据",
+  "credentialHelp": "中继管理员签发的 pbmt1_ 凭据，或 32 字符管理员密钥。",
+  "errorCredential": "请输入 32 字符管理员密钥或 pbmt1_ 临时凭据。",
+  "keepAliveDefault": "默认启用保活",
+  "testRelay": "测试",
+  "relaySaved": "中继已保存",
+  "relaySavedOffline": "已保存，但中继暂未响应",
+  "copySetup": "复制配置串",
+  "pasteSetup": "粘贴配置串",
+  "setupStringCopied": "配置串已复制，到另一台电脑粘贴即可。",
+  "pasteSetupHint": "粘贴从另一台电脑复制的配置串。",
+  "setupStringInvalid": "这不是有效的配置串：{error}",
+  "apply": "应用",
+  "showSecret": "显示",
+  "hideSecret": "隐藏",
+  "settingsAppearance": "外观",
+  "theme": "主题",
+  "themeSystem": "跟随系统",
+  "themeLight": "浅色",
+  "themeDark": "深色",
+  "language": "语言",
+  "languageSystem": "跟随系统",
+  "settingsAdvanced": "高级",
+  "embeddedRelayKey": "内嵌中继密钥",
+  "embeddedRelayKeyHelp": "仅用于本应用自带的本地中继，不是上面的连接凭据。",
+  "reveal": "显示",
+  "settingsAbout": "关于",
+  "aboutBody": "通过自己的中继，访问 NAT 之后的服务。",
+  "starOnGitHub": "去 GitHub 点个 Star",
+
+  "logsFilter": "筛选日志",
+  "logLevelAll": "全部",
+  "logsShown": "显示 {shown} / {total} 行",
+  "logsCopied": "已复制 {count} 行",
+  "clearLogs": "清空",
+  "followLogs": "跟随最新",
+  "logsEmpty": "暂无日志。",
+  "logsNoMatch": "没有匹配的日志。",
+
+  "setupWelcome": "欢迎使用 pb-mapper",
+  "setupWelcomeBody": "通过中继访问你任意一台电脑上的服务。先告诉我中继在哪里。",
+  "setupContinue": "继续",
+  "setupSkip": "暂时跳过",
+  "setupChooseTitle": "想先做什么？",
+  "setupLater": "稍后再说",
+  "setupBack": "上一步",
+  "setupRelayOnline": "已连接到中继。",
+  "setupRelayOffline": "中继暂未响应。可以继续，隧道会自动重试。",
+  "setupStep": "第 {current} / {total} 步",
+
+  "windowMinimize": "最小化",
+  "windowMaximize": "最大化",
+  "windowRestore": "还原",
+  "windowClose": "关闭",
+
   "trayStatusOffline": "离线 · pb-mapper",
-  "trayStatusConnections": "已连接 · {count} 个连接",
-  "@trayStatusConnections": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "trayStatusServices": "已连接 · {count} 个服务",
-  "@trayStatusServices": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
+  "trayStatusConnections": "在线 · {count} 个连接",
+  "trayStatusServices": "在线 · {count} 个服务",
   "trayStatusOnlineIdle": "在线 · 暂无服务",
   "trayOpen": "打开 pb-mapper",
   "trayRefresh": "刷新状态",
-  "trayQuit": "退出",
-  "deleteService": "删除服务",
-  "serviceKeyRequired": "请填写服务 Key",
-  "deleteClientConfig": "删除客户端配置",
-  "exportConfig": "导出（Base64）",
-  "importConfig": "导入（Base64）",
-  "logLevel": "日志级别",
-  "logKeyword": "关键词",
-  "clearLogs": "清空日志",
-  "copyVisibleLogs": "复制当前日志",
-  "scrollToBottom": "滚到底部",
-  "configTitle": "pb-mapper 配置",
-  "currentConfig": "当前配置",
-  "saveConfig": "保存配置",
-  "saving": "保存中…",
-  "checkServer": "检测服务器连通性",
-  "serverAddressHelp": "要连接的 pb-mapper 服务器地址",
-  "msgHeaderKeyHelp": "必填。优先使用中继签发的 pbmt1_ 临时凭据，也可使用 32 字符管理员密钥。",
-  "isolatedRelayAdminKey": "内嵌中继管理员密钥",
-  "isolatedRelayAdminKeyHelp": "仅用于本应用内嵌中继。用它向本地中继注册或连接，不要把它当成对外的 MSG_HEADER_KEY。",
-  "isolatedRelayReveal": "显示内嵌中继密钥",
-  "keepAliveHelp": "为连接启用 TCP keep-alive",
-  "configServerAddress": "服务器地址：{value}",
-  "@configServerAddress": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "configKeepAlive": "Keep-alive：{value}",
-  "@configKeepAlive": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "configKeyPresent": "消息头密钥：{value}",
-  "@configKeyPresent": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "yes": "已设置",
-  "no": "未设置",
-  "configNote": "改动会在后续的注册与连接操作中生效。",
-  "exportTitle": "导出配置",
-  "importTitle": "导入配置",
-  "exportCopyHint": "复制下面这段字符串。",
-  "importPasteHint": "粘贴导出的 Base64 字符串。",
-  "base64String": "Base64 字符串",
-  "exportCopied": "配置已复制到剪贴板",
-  "importFailed": "导入失败：{error}",
-  "@importFailed": {
-    "placeholders": {
-      "error": {
-        "type": "String"
-      }
-    }
-  },
-  "saveFailed": "保存配置失败",
-  "serverCheckFailed": "服务器检测失败",
-  "keyLengthInvalid": "请输入 32 字符管理员密钥或 pbmt1_ 临时凭据",
-  "registerTitle": "注册服务",
-  "registerAction": "注册并启动",
-  "registeredList": "已注册服务（{count}）",
-  "@registeredList": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "connectTitle": "连接服务",
-  "connectAction": "连接",
-  "activeConnections": "当前连接",
-  "serviceKeyHint": "唯一的服务 key",
-  "selectService": "选择一个服务",
-  "enterServiceKey": "输入服务 key",
-  "serviceKeyNeeded": "请选择或输入服务 key",
-  "clientExists": "“{key}”的客户端已存在",
-  "@clientExists": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "registering": "正在注册 {key}…",
-  "@registering": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "registered": "{key} 已注册",
-  "@registered": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "registerTimeout": "{key} 注册超时",
-  "@registerTimeout": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "refreshingStatus": "正在刷新 {key}",
-  "@refreshingStatus": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "testingConfig": "正在测试新配置…",
-  "loading": "加载中…",
-  "navNewRegister": "新建服务",
-  "navNewConnect": "新建连接",
-  "navRegisteredList": "已注册",
-  "navConnectionList": "连接列表",
-  "serverStatusTitle": "服务器状态",
-  "statusAvailable": "可用",
-  "statusUnavailable": "不可用",
-  "registeredServicesTitle": "已注册服务",
-  "serverMapDetails": "映射详情",
-  "connectionDetails": "连接详情",
-  "connectionsActive": "活跃：",
-  "connectionsIdle": "空闲：",
-  "noServicesRegistered": "暂无已注册服务",
-  "tapToConnect": "点击以连接",
-  "navigatedToConnect": "已带着 \"{key}\" 打开连接页",
-  "refreshServiceList": "刷新服务列表",
-  "refreshAllStatus": "刷新全部",
-  "noClientConfigs": "暂无连接",
-  "noClientConfigsHint": "在“新建连接”中添加",
-  "deleteClientConfirm": "确定删除 \"{key}\" 的连接配置？",
-  "deleteServiceConfirm": "确定删除 \"{key}\"？",
-  "reconnectFailed": "使用新配置连接 \"{key}\" 失败",
-  "editService": "编辑服务",
-  "save": "保存",
-  "keyAndAddressRequired": "服务标识和本地地址不能为空",
-  "logLevelAll": "全部",
-  "logKeywordHint": "error, timeout…",
-  "logsCopied": "已复制 {count} 条日志",
-  "logFilterNone": "无",
-  "logSummary": "显示 {shown}/{total} · 过滤：{filters}",
-  "followingNewest": "正在跟随最新",
-  "followNewest": "跟随最新",
-  "importAction": "导入",
-  "serverReachable": "服务器可达",
-  "serverNotReachable": "服务器不可达",
-  "statusConnected": "已连接",
-  "statusRetrying": "重试中",
-  "statusFailed": "失败",
-  "statusDisconnected": "已断开",
-  "statusRunning": "运行中",
-  "statusStopped": "已停止",
-  "connect": "连接",
-  "disconnect": "断开",
-  "start": "启动",
-  "stop": "停止",
-  "startService": "启动服务",
-  "stopService": "停止服务",
-  "connecting": "连接中…",
-  "disconnecting": "断开中…",
-  "starting": "启动中…",
-  "stopping": "停止中…",
-  "openInBrowser": "在浏览器中打开",
-  "refreshStatus": "刷新状态",
-  "editConfig": "编辑",
-  "deleteConfig": "删除",
-  "encrypted": "已加密",
-  "copiedToClipboard": "已复制：{text}",
-  "cannotOpen": "无法打开 {url}",
-  "justNow": "刚刚",
-  "minutesAgo": "{count} 分钟前",
-  "hoursAgo": "{count} 小时前",
-  "daysAgo": "{count} 天前",
-  "updatedAt": "更新于 {time}",
-  "noServicesHint": "在“新建服务”中添加",
-  "serviceExists": "服务 \"{key}\" 已存在",
-  "keyAutoSelected": "已选用状态页的 \"{key}\"",
-  "registeringInProgress": "注册中…",
-  "serviceUpdated": "服务「{key}」已更新",
-  "serviceConfigDeleted": "服务「{key}」的配置已删除",
-  "navServices": "服务",
-  "pageServices": "服务",
-  "serverHoldsNothing": "服务器没有为该服务保持任何连接",
-  "connGeneration": "第 {value} 代",
-  "connProtocol": "v{value}",
-  "connLastSeen": "{value}前收到",
-  "connUnhealthy": "不健康",
-  "connCount": "保持 {count} 个",
-  "connectionIds": "连接 ID",
-  "noConnectionIds": "无",
-  "connectFailed": "{key} 连接未成功",
-  "registerFailedStatus": "{key} 注册未成功"
+  "trayQuit": "退出"
 }

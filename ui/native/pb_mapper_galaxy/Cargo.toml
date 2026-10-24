@@ -1,0 +1,15 @@
+[package]
+name = "pb-mapper-galaxy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+
+# The galaxy view's per-frame geometry. `pb-mapper-ffi` exports it to the
+# Flutter UI as `pb_mapper_galaxy_frame_v1`; it has no dependencies so that the
+# per-frame call stays a pure computation over caller-owned buffers.
+
+[dependencies]
+
+[lints]
+workspace = true

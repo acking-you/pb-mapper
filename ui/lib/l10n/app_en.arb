@@ -1,671 +1,202 @@
 {
   "@@locale": "en",
   "appTitle": "pb-mapper",
-  "navRegister": "Register",
-  "navConnect": "Connect",
-  "navStatus": "Status",
-  "navConfig": "Config",
+
+  "navOverview": "Overview",
+  "navTunnels": "Tunnels",
   "navLogs": "Logs",
-  "navOps": "Operations",
-  "opsSummary": "Server, status and logs",
-  "pageRegister": "Register",
-  "pageConnect": "Connect",
-  "pageStatus": "Status",
-  "pageConfig": "Config",
-  "pageLogs": "Logs",
-  "toggleTheme": "Toggle theme",
-  "toggleLanguage": "Switch language",
-  "home": "Home",
-  "back": "Back",
-  "switchWorkspace": "Switch workspace",
-  "quickStart": "Quick Start",
-  "quickStartStep1": "Set your server address",
-  "quickStartStep1Action": "Configure",
-  "quickStartStep2": "Pick this machine's role",
-  "roleRegisterSummary": "Share a service on this machine",
-  "roleRegisterDetail": "Publish a local port under a key.",
-  "roleConnectSummary": "Reach a service shared elsewhere",
-  "roleConnectDetail": "Expose a remote key as a local port.",
-  "setupStepOf": "Step {current} of {total}",
-  "@setupStepOf": {
-    "placeholders": {
-      "current": {
-        "type": "int"
-      },
-      "total": {
-        "type": "int"
-      }
-    }
-  },
-  "setupServerTitle": "Where is your server?",
-  "setupServerBody": "Host and port. All traffic goes through it.",
-  "setupServerHint": "example.com:7666",
-  "setupServerInvalid": "Use host:port",
-  "setupKeyLabel": "Credential",
-  "setupKeyBody": "Use a temporary credential issued by the relay administrator. The administrator key also works.",
-  "setupKeyInvalid": "Use a 32-character administrator key or a pbmt1_ temporary credential",
-  "setupCheckingServer": "Checking…",
-  "setupServerOk": "Server reached",
-  "setupServerFailed": "Not reachable. You can continue anyway.",
-  "setupRoleTitle": "What does this machine do?",
-  "setupDetailsTitleRegister": "Which service do you want to share?",
-  "setupDetailsTitleConnect": "Which service do you want to reach?",
-  "setupServiceKeyBody": "Your own name for it. Both sides use the same one.",
-  "setupServiceKeyBodyConnect": "Choose a registered service, or type the shared key.",
-  "setupLocalAddressBodyRegister": "Where your service already listens.",
-  "setupLocalAddressBodyConnect": "A free local port.",
-  "setupDoneTitle": "Ready",
-  "setupDoneBodyServer": "Server saved.",
-  "setupVerifyTitle": "Starting",
-  "setupVerifyWaiting": "Starting…",
-  "setupVerifyRunning": "{key} is running",
-  "@setupVerifyRunning": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "setupVerifyRetrying": "{key} retrying. Normal if the server is down.",
-  "@setupVerifyRetrying": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "setupVerifyFailed": "{key} could not start: {message}",
-  "@setupVerifyFailed": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      },
-      "message": {
-        "type": "String"
-      }
-    }
-  },
-  "setupVerifyStopped": "{key} is not running yet",
-  "@setupVerifyStopped": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "setupAddRegister": "Register a service",
-  "setupAddConnect": "Connect to a service",
-  "setupWorking": "Ready",
-  "setupNothingYet": "Nothing set up yet",
-  "setupDoneAll": "Done",
-  "setupRetry": "Try again",
-  "setupBack": "Back",
-  "setupNext": "Next",
-  "setupFinish": "Finish",
-  "setupSkip": "Skip",
-  "setupFailed": "Setup failed: {message}",
-  "@setupFailed": {
-    "placeholders": {
-      "message": {
-        "type": "String"
-      }
-    }
-  },
-  "starOnGitHub": "Star on GitHub",
-  "starPitch": "Open source. A star helps others find it.",
+  "navSettings": "Settings",
+
+  "thisComputer": "This computer",
+  "relay": "Relay",
+  "relayOnline": "Relay online",
+  "relayOffline": "Relay unreachable",
+  "relayChecking": "Checking the relay…",
+  "relayUnset": "No relay yet",
+  "relaySettings": "Relay settings",
+
+  "newTunnel": "New tunnel",
+  "editTunnel": "Edit tunnel",
+  "kindShare": "Share",
+  "kindConnect": "Connect",
+  "kindRemote": "On the relay",
+  "kindShareLong": "Share from this computer",
+  "kindConnectLong": "Connect to a service",
+  "kindShareHint": "Publish a service running here under a key, so your other devices can reach it.",
+  "kindConnectHint": "Open a service another device shared as a port on this computer.",
+
+  "sectionShared": "Shared from this computer",
+  "sectionConnected": "Connected on this computer",
+  "sectionRelay": "On the relay",
+  "sectionSharedEmpty": "Nothing shared yet. Share a local service to reach it from anywhere.",
+  "sectionConnectedEmpty": "No connections yet. Connect to a shared service to use it here.",
+  "sectionRelayEmpty": "The relay lists no other services.",
+  "sectionRelayOffline": "The relay isn't answering, so its services can't be listed.",
+  "sectionRelayUnset": "Set a relay in Settings to see what it offers.",
+  "addShare": "Share a service",
+  "addConnect": "Connect to a service",
+
+  "serviceKey": "Service key",
+  "serviceKeyHelpShare": "A name you choose; the other side connects with the same one.",
+  "serviceKeyHelpConnect": "The key the other device shared it under.",
+  "localAddressShare": "Service address",
+  "localAddressConnect": "Local address",
+  "localAddressHelpShare": "Where the service listens on this computer, e.g. 127.0.0.1:8080.",
+  "localAddressHelpConnect": "A free port on this computer to open it at, e.g. 127.0.0.1:9090.",
+  "protocol": "Protocol",
+  "moreOptions": "More options",
+  "encryption": "Encrypt traffic",
+  "encryptionHelp": "End to end, between this computer and whoever connects.",
+  "keepAlive": "TCP keep-alive",
+  "keepAliveHelp": "Keeps idle connections from being dropped by NATs and firewalls.",
+  "suggestionsFromRelay": "On the relay",
+  "create": "Create",
+  "save": "Save",
   "cancel": "Cancel",
-  "delete": "Delete",
   "close": "Close",
   "copy": "Copy",
   "refresh": "Refresh",
-  "protocol": "Protocol",
-  "serviceKey": "Service Key",
-  "localAddress": "Local Address",
-  "serverAddress": "Server Address",
-  "enableEncryption": "Enable Encryption",
-  "enableKeepAlive": "Enable TCP Keep-Alive",
+  "more": "More",
+  "errorKeyRequired": "Enter a service key.",
+  "errorAddress": "Use host:port, e.g. 127.0.0.1:8080.",
+  "errorDuplicateShare": "This computer already shares \"{key}\".",
+  "@errorDuplicateShare": {"placeholders": {"key": {"type": "String"}}},
+  "errorDuplicateConnect": "This computer is already connected to \"{key}\".",
+  "@errorDuplicateConnect": {"placeholders": {"key": {"type": "String"}}},
+
+  "healthRunning": "Running",
+  "healthRetrying": "Retrying",
+  "healthFailed": "Failed",
+  "healthStopped": "Stopped",
+  "healthAvailable": "Available",
+  "healthInUse": "In use here",
+
+  "start": "Start",
+  "stop": "Stop",
+  "edit": "Edit",
+  "delete": "Delete",
+  "copyKey": "Copy key",
+  "copyAddress": "Copy address",
+  "copied": "Copied {value}",
+  "@copied": {"placeholders": {"value": {"type": "String"}}},
+  "connect": "Connect",
+  "showConnection": "Show connection",
+  "encrypted": "Encrypted",
+  "openAt": "Open at {address}",
+  "@openAt": {"placeholders": {"address": {"type": "String"}}},
+
+  "toastStarting": "Starting {key}…",
+  "@toastStarting": {"placeholders": {"key": {"type": "String"}}},
+  "toastRunning": "{key} is running",
+  "@toastRunning": {"placeholders": {"key": {"type": "String"}}},
+  "toastRetrying": "{key} is waiting for the relay",
+  "@toastRetrying": {"placeholders": {"key": {"type": "String"}}},
+  "toastFailed": "{key} didn't start",
+  "@toastFailed": {"placeholders": {"key": {"type": "String"}}},
+  "toastStopped": "{key} stopped",
+  "@toastStopped": {"placeholders": {"key": {"type": "String"}}},
+  "toastDeleted": "{key} removed",
+  "@toastDeleted": {"placeholders": {"key": {"type": "String"}}},
+  "toastUpdated": "{key} updated",
+  "@toastUpdated": {"placeholders": {"key": {"type": "String"}}},
+
+  "deleteTitle": "Delete this tunnel?",
+  "deleteBody": "\"{key}\" stops and is forgotten on this computer.",
+  "@deleteBody": {"placeholders": {"key": {"type": "String"}}},
+
+  "connsTitle": "Connections the relay holds",
+  "connsNone": "The relay holds no connection for this key.",
+  "connLastSeen": "{value} ago",
+  "@connLastSeen": {"placeholders": {"value": {"type": "String"}}},
+  "connGeneration": "gen {value}",
+  "@connGeneration": {"placeholders": {"value": {"type": "String"}}},
+  "connProtocol": "v{value}",
+  "@connProtocol": {"placeholders": {"value": {"type": "String"}}},
+  "connUnhealthy": "Unhealthy",
+  "showConnections": "Connections",
+
+  "overviewEmptyTitle": "Your galaxy is empty",
+  "overviewEmptyBody": "Each service becomes a planet. Share one from this computer, or connect to one on the relay.",
+  "summaryShared": "{count} shared",
+  "@summaryShared": {"placeholders": {"count": {"type": "int"}}},
+  "summaryConnected": "{count} connected",
+  "@summaryConnected": {"placeholders": {"count": {"type": "int"}}},
+  "servicesCount": "{count, plural, =0{No services} =1{1 service} other{{count} services}}",
+  "@servicesCount": {"placeholders": {"count": {"type": "int"}}},
+  "galaxyLabel": "Galaxy of your tunnels",
+  "galaxyHint": "Drag to turn · scroll to zoom · click a planet",
+  "showEverything": "Show everything",
+
+  "settingsRelay": "Relay server",
+  "settingsRelayBody": "Every tunnel runs through this relay.",
+  "relayAddress": "Address",
+  "relayAddressHelp": "host:port of the pb-mapper server, e.g. example.com:7666.",
+  "credential": "Credential",
+  "credentialHelp": "A pbmt1_ credential from the relay's administrator, or the 32-character administrator key.",
+  "errorCredential": "Use a 32-character administrator key or a pbmt1_ credential.",
+  "keepAliveDefault": "Keep-alive by default",
+  "testRelay": "Test",
+  "relaySaved": "Relay saved",
+  "relaySavedOffline": "Saved, but the relay isn't answering yet",
+  "copySetup": "Copy setup string",
+  "pasteSetup": "Paste setup string",
+  "setupStringCopied": "Setup string copied. Paste it on your other computer.",
+  "pasteSetupHint": "Paste the string copied from another computer.",
+  "setupStringInvalid": "That isn't a setup string: {error}",
+  "@setupStringInvalid": {"placeholders": {"error": {"type": "String"}}},
+  "apply": "Apply",
+  "showSecret": "Show",
+  "hideSecret": "Hide",
+  "settingsAppearance": "Appearance",
+  "theme": "Theme",
+  "themeSystem": "System",
+  "themeLight": "Light",
+  "themeDark": "Dark",
+  "language": "Language",
+  "languageSystem": "System",
+  "settingsAdvanced": "Advanced",
+  "embeddedRelayKey": "Embedded relay key",
+  "embeddedRelayKeyHelp": "Only for this app's own local relay; it is not the credential above.",
+  "reveal": "Reveal",
+  "settingsAbout": "About",
+  "aboutBody": "Reach services behind NAT through a relay you run.",
+  "starOnGitHub": "Star on GitHub",
+
+  "logsFilter": "Filter logs",
+  "logLevelAll": "All",
+  "logsShown": "{shown} of {total} lines",
+  "@logsShown": {"placeholders": {"shown": {"type": "int"}, "total": {"type": "int"}}},
+  "logsCopied": "Copied {count} lines",
+  "@logsCopied": {"placeholders": {"count": {"type": "int"}}},
+  "clearLogs": "Clear",
+  "followLogs": "Follow new lines",
+  "logsEmpty": "No log lines yet.",
+  "logsNoMatch": "No line matches.",
+
+  "setupWelcome": "Welcome to pb-mapper",
+  "setupWelcomeBody": "Reach services on any of your computers through a relay. First, where is your relay?",
+  "setupContinue": "Continue",
+  "setupSkip": "Skip for now",
+  "setupChooseTitle": "What would you like to do first?",
+  "setupLater": "I'll do this later",
+  "setupBack": "Back",
+  "setupRelayOnline": "Connected to the relay.",
+  "setupRelayOffline": "The relay isn't answering yet. You can carry on: tunnels retry on their own.",
+  "setupStep": "Step {current} of {total}",
+  "@setupStep": {"placeholders": {"current": {"type": "int"}, "total": {"type": "int"}}},
+
+  "windowMinimize": "Minimize",
+  "windowMaximize": "Maximize",
+  "windowRestore": "Restore",
+  "windowClose": "Close",
+
   "trayStatusOffline": "Offline · pb-mapper",
-  "trayStatusConnections": "Connected · {count} connections",
-  "@trayStatusConnections": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "trayStatusServices": "Connected · {count} services",
-  "@trayStatusServices": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "trayStatusOnlineIdle": "Online · No services",
+  "trayStatusConnections": "Online · {count} connections",
+  "@trayStatusConnections": {"placeholders": {"count": {"type": "int"}}},
+  "trayStatusServices": "Online · {count} services",
+  "@trayStatusServices": {"placeholders": {"count": {"type": "int"}}},
+  "trayStatusOnlineIdle": "Online · no services",
   "trayOpen": "Open pb-mapper",
   "trayRefresh": "Refresh status",
-  "trayQuit": "Quit",
-  "deleteService": "Delete Service",
-  "serviceKeyRequired": "Service key is required",
-  "deleteClientConfig": "Delete Client Configuration",
-  "exportConfig": "Export (Base64)",
-  "importConfig": "Import (Base64)",
-  "logLevel": "Log Level",
-  "logKeyword": "Keyword",
-  "clearLogs": "Clear logs",
-  "copyVisibleLogs": "Copy visible logs",
-  "scrollToBottom": "Scroll to bottom",
-  "configTitle": "pb-mapper Configuration",
-  "currentConfig": "Current Configuration",
-  "saveConfig": "Save Configuration",
-  "saving": "Saving…",
-  "checkServer": "Check Server Connectivity",
-  "serverAddressHelp": "Address of the pb-mapper server to connect to",
-  "msgHeaderKeyHelp": "Required. Prefer a pbmt1_ temporary credential issued by the relay; the 32-character administrator key also works.",
-  "isolatedRelayAdminKey": "Embedded relay administrator key",
-  "isolatedRelayAdminKeyHelp": "Generated for this app's local relay only. Use it to register or connect to that relay; it is not the outbound MSG_HEADER_KEY.",
-  "isolatedRelayReveal": "Reveal embedded relay key",
-  "keepAliveHelp": "Enable TCP keep-alive for connections",
-  "configServerAddress": "Server Address: {value}",
-  "@configServerAddress": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "configKeepAlive": "Keep-alive: {value}",
-  "@configKeepAlive": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "configKeyPresent": "Header key: {value}",
-  "@configKeyPresent": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "yes": "Yes",
-  "no": "No",
-  "configNote": "Changes apply to later register and connect operations.",
-  "exportTitle": "Export Configuration",
-  "importTitle": "Import Configuration",
-  "exportCopyHint": "Copy the string below.",
-  "importPasteHint": "Paste the exported Base64 string.",
-  "base64String": "Base64 string",
-  "exportCopied": "Configuration copied to clipboard",
-  "importFailed": "Import failed: {error}",
-  "@importFailed": {
-    "placeholders": {
-      "error": {
-        "type": "String"
-      }
-    }
-  },
-  "saveFailed": "Failed to save the configuration",
-  "serverCheckFailed": "Server check failed",
-  "keyLengthInvalid": "Use a 32-character administrator key or a pbmt1_ temporary credential",
-  "registerTitle": "Register Service",
-  "registerAction": "Register & Start",
-  "registeredList": "Registered Services ({count})",
-  "@registeredList": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "connectTitle": "Connect to Service",
-  "connectAction": "Connect",
-  "activeConnections": "Active Connections",
-  "serviceKeyHint": "unique-service-key",
-  "selectService": "Select a service",
-  "enterServiceKey": "Enter service key",
-  "serviceKeyNeeded": "Select or enter a service key",
-  "clientExists": "A client for \"{key}\" already exists",
-  "@clientExists": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "registering": "Registering {key}…",
-  "@registering": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "registered": "{key} registered",
-  "@registered": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "registerTimeout": "Registration timed out for {key}",
-  "@registerTimeout": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "refreshingStatus": "Refreshing {key}",
-  "@refreshingStatus": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "testingConfig": "Testing the new configuration…",
-  "loading": "Loading…",
-  "navNewRegister": "New Service",
-  "navNewConnect": "New Connection",
-  "navRegisteredList": "Registered",
-  "navConnectionList": "Connections",
-  "serverStatusTitle": "Server Status",
-  "@serverStatusTitle": {
-    "description": "Server Status"
-  },
-  "statusAvailable": "Available",
-  "@statusAvailable": {
-    "description": "Available"
-  },
-  "statusUnavailable": "Unavailable",
-  "@statusUnavailable": {
-    "description": "Unavailable"
-  },
-  "registeredServicesTitle": "Registered Services",
-  "@registeredServicesTitle": {
-    "description": "Registered Services"
-  },
-  "serverMapDetails": "Server Map",
-  "@serverMapDetails": {
-    "description": "Server Map"
-  },
-  "connectionDetails": "Connections",
-  "@connectionDetails": {
-    "description": "Connections"
-  },
-  "connectionsActive": "Active:",
-  "@connectionsActive": {
-    "description": "Active:"
-  },
-  "connectionsIdle": "Idle:",
-  "@connectionsIdle": {
-    "description": "Idle:"
-  },
-  "noServicesRegistered": "No services registered",
-  "@noServicesRegistered": {
-    "description": "No services registered"
-  },
-  "tapToConnect": "Tap to connect",
-  "@tapToConnect": {
-    "description": "Tap to connect"
-  },
-  "navigatedToConnect": "Opened Connect with \"{key}\"",
-  "@navigatedToConnect": {
-    "description": "Opened Connect with \"{key}\"",
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "refreshServiceList": "Refresh service list",
-  "@refreshServiceList": {
-    "description": "Refresh service list"
-  },
-  "refreshAllStatus": "Refresh all",
-  "@refreshAllStatus": {
-    "description": "Refresh all"
-  },
-  "noClientConfigs": "No connections yet",
-  "@noClientConfigs": {
-    "description": "No connections yet"
-  },
-  "noClientConfigsHint": "Add one from New connection",
-  "@noClientConfigsHint": {
-    "description": "Add one from New connection"
-  },
-  "deleteClientConfirm": "Delete the connection for \"{key}\"?",
-  "@deleteClientConfirm": {
-    "description": "Delete the connection for \"{key}\"?",
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "deleteServiceConfirm": "Delete \"{key}\"?",
-  "@deleteServiceConfirm": {
-    "description": "Delete \"{key}\"?",
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "reconnectFailed": "Could not connect with the new settings for \"{key}\"",
-  "@reconnectFailed": {
-    "description": "Could not connect with the new settings for \"{key}\"",
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "editService": "Edit service",
-  "@editService": {
-    "description": "Edit service"
-  },
-  "save": "Save",
-  "@save": {
-    "description": "Save"
-  },
-  "keyAndAddressRequired": "Service key and local address are required",
-  "@keyAndAddressRequired": {
-    "description": "Service key and local address are required"
-  },
-  "logLevelAll": "All",
-  "@logLevelAll": {
-    "description": "All"
-  },
-  "logKeywordHint": "error, timeout…",
-  "@logKeywordHint": {
-    "description": "error, timeout…"
-  },
-  "logsCopied": "Copied {count} logs",
-  "@logsCopied": {
-    "description": "Copied {count} logs",
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "logFilterNone": "none",
-  "@logFilterNone": {
-    "description": "none"
-  },
-  "logSummary": "{shown}/{total} shown · filters: {filters}",
-  "@logSummary": {
-    "description": "{shown}/{total} shown · filters: {filters}",
-    "placeholders": {
-      "shown": {
-        "type": "int"
-      },
-      "total": {
-        "type": "int"
-      },
-      "filters": {
-        "type": "String"
-      }
-    }
-  },
-  "followingNewest": "Following newest",
-  "@followingNewest": {
-    "description": "Following newest"
-  },
-  "followNewest": "Follow newest",
-  "@followNewest": {
-    "description": "Follow newest"
-  },
-  "importAction": "Import",
-  "@importAction": {
-    "description": "Import"
-  },
-  "serverReachable": "Server is reachable",
-  "@serverReachable": {
-    "description": "Server is reachable"
-  },
-  "serverNotReachable": "Server is not reachable",
-  "@serverNotReachable": {
-    "description": "Server is not reachable"
-  },
-  "statusConnected": "Connected",
-  "@statusConnected": {
-    "description": "Connected"
-  },
-  "statusRetrying": "Retrying",
-  "@statusRetrying": {
-    "description": "Retrying"
-  },
-  "statusFailed": "Failed",
-  "@statusFailed": {
-    "description": "Failed"
-  },
-  "statusDisconnected": "Disconnected",
-  "@statusDisconnected": {
-    "description": "Disconnected"
-  },
-  "statusRunning": "Running",
-  "@statusRunning": {
-    "description": "Running"
-  },
-  "statusStopped": "Stopped",
-  "@statusStopped": {
-    "description": "Stopped"
-  },
-  "connect": "Connect",
-  "@connect": {
-    "description": "Connect"
-  },
-  "disconnect": "Disconnect",
-  "@disconnect": {
-    "description": "Disconnect"
-  },
-  "start": "Start",
-  "@start": {
-    "description": "Start"
-  },
-  "stop": "Stop",
-  "@stop": {
-    "description": "Stop"
-  },
-  "startService": "Start service",
-  "@startService": {
-    "description": "Start service"
-  },
-  "stopService": "Stop service",
-  "@stopService": {
-    "description": "Stop service"
-  },
-  "connecting": "Connecting…",
-  "@connecting": {
-    "description": "Connecting…"
-  },
-  "disconnecting": "Disconnecting…",
-  "@disconnecting": {
-    "description": "Disconnecting…"
-  },
-  "starting": "Starting…",
-  "@starting": {
-    "description": "Starting…"
-  },
-  "stopping": "Stopping…",
-  "@stopping": {
-    "description": "Stopping…"
-  },
-  "openInBrowser": "Open in browser",
-  "@openInBrowser": {
-    "description": "Open in browser"
-  },
-  "refreshStatus": "Refresh status",
-  "@refreshStatus": {
-    "description": "Refresh status"
-  },
-  "editConfig": "Edit",
-  "@editConfig": {
-    "description": "Edit"
-  },
-  "deleteConfig": "Delete",
-  "@deleteConfig": {
-    "description": "Delete"
-  },
-  "encrypted": "Encrypted",
-  "@encrypted": {
-    "description": "Encrypted"
-  },
-  "copiedToClipboard": "Copied: {text}",
-  "@copiedToClipboard": {
-    "description": "Copied: {text}",
-    "placeholders": {
-      "text": {
-        "type": "String"
-      }
-    }
-  },
-  "cannotOpen": "Cannot open {url}",
-  "@cannotOpen": {
-    "description": "Cannot open {url}",
-    "placeholders": {
-      "url": {
-        "type": "String"
-      }
-    }
-  },
-  "justNow": "Just now",
-  "@justNow": {
-    "description": "Just now"
-  },
-  "minutesAgo": "{count}m ago",
-  "@minutesAgo": {
-    "description": "{count}m ago",
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "hoursAgo": "{count}h ago",
-  "@hoursAgo": {
-    "description": "{count}h ago",
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "daysAgo": "{count}d ago",
-  "@daysAgo": {
-    "description": "{count}d ago",
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "updatedAt": "Updated {time}",
-  "@updatedAt": {
-    "description": "Updated {time}",
-    "placeholders": {
-      "time": {
-        "type": "String"
-      }
-    }
-  },
-  "noServicesHint": "Add one from New Service",
-  "@noServicesHint": {
-    "description": "Add one from New Service"
-  },
-  "serviceExists": "Service \"{key}\" already exists",
-  "@serviceExists": {
-    "description": "Service \"{key}\" already exists",
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "keyAutoSelected": "Using \"{key}\" from Status",
-  "@keyAutoSelected": {
-    "description": "Using \"{key}\" from Status",
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "registeringInProgress": "Registering…",
-  "serviceUpdated": "Service \"{key}\" updated",
-  "serviceConfigDeleted": "Configuration for \"{key}\" deleted",
-  "@serviceUpdated": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "@serviceConfigDeleted": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "navServices": "Services",
-  "pageServices": "Services",
-  "serverHoldsNothing": "The server is holding no connections for this service",
-  "connGeneration": "gen {value}",
-  "connProtocol": "v{value}",
-  "connLastSeen": "seen {value} ago",
-  "connUnhealthy": "Unhealthy",
-  "connCount": "{count} held",
-  "connectionIds": "Connection IDs",
-  "noConnectionIds": "None",
-  "@connGeneration": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "@connProtocol": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "@connLastSeen": {
-    "placeholders": {
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "@connCount": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "connectFailed": "{key} could not connect",
-  "registerFailedStatus": "{key} could not register",
-  "@connectFailed": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  },
-  "@registerFailedStatus": {
-    "placeholders": {
-      "key": {
-        "type": "String"
-      }
-    }
-  }
+  "trayQuit": "Quit"
 }
