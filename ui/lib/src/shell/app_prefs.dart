@@ -15,6 +15,9 @@ class AppPrefs extends ChangeNotifier {
 
   static const _themeKey = 'theme_mode';
   static const _pageKey = 'last_page';
+  static const _autoUpdateKey = 'update_auto_check';
+  static const _lastUpdateCheckKey = 'update_last_check_ms';
+  static const _announcedUpdateKey = 'update_announced';
 
   ThemeMode themeMode = ThemeMode.system;
 
@@ -23,6 +26,17 @@ class AppPrefs extends ChangeNotifier {
 
   /// The page shown when the app last closed.
   String? lastPage;
+
+  /// Whether the app looks for a newer release on its own, about twice a
+  /// day. Nothing is downloaded without the user.
+  bool autoCheckUpdates = true;
+
+  /// When it last did.
+  DateTime? lastUpdateCheck;
+
+  /// The newest version the user has been told about, so each is announced
+  /// once.
+  String? announcedUpdate;
 
   Future<void> load() async {
     if (!persist) return;
@@ -34,6 +48,12 @@ class AppPrefs extends ChangeNotifier {
         _ => ThemeMode.system,
       };
       lastPage = prefs.getString(_pageKey);
+      autoCheckUpdates = prefs.getBool(_autoUpdateKey) ?? true;
+      final last = prefs.getInt(_lastUpdateCheckKey);
+      lastUpdateCheck = last == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(last);
+      announcedUpdate = prefs.getString(_announcedUpdateKey);
     } catch (_) {}
     locale = await LocaleController.load();
     notifyListeners();
@@ -69,6 +89,35 @@ class AppPrefs extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_pageKey, page);
+    } catch (_) {}
+  }
+
+  Future<void> setAutoCheckUpdates(bool value) async {
+    if (value == autoCheckUpdates) return;
+    autoCheckUpdates = value;
+    notifyListeners();
+    if (!persist) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_autoUpdateKey, value);
+    } catch (_) {}
+  }
+
+  Future<void> markUpdateCheck(DateTime at) async {
+    lastUpdateCheck = at;
+    if (!persist) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_lastUpdateCheckKey, at.millisecondsSinceEpoch);
+    } catch (_) {}
+  }
+
+  Future<void> markUpdateAnnounced(String version) async {
+    announcedUpdate = version;
+    if (!persist) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_announcedUpdateKey, version);
     } catch (_) {}
   }
 }

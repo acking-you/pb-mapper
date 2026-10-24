@@ -57,6 +57,8 @@ abstract final class AppIcons {
   static const IconData themeDark = LucideIcons.moon300;
   static const IconData language = LucideIcons.languages300;
   static const IconData star = LucideIcons.star300;
+  static const IconData update = LucideIcons.circleFadingArrowUp300;
+  static const IconData download = LucideIcons.download300;
 
   // Disclosure.
   static const IconData chevronDown = LucideIcons.chevronDown300;

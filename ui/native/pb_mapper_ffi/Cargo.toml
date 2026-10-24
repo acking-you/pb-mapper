@@ -29,3 +29,5 @@ pb-mapper-protocol.workspace = true
 pb-mapper-server.workspace = true
 uni-stream.workspace = true
 parking_lot.workspace = true
+# The update manifest's Ed25519 signature; see src/update.rs.
+ring.workspace = true

@@ -1582,6 +1582,7 @@ dependencies = [
  "pb-mapper-galaxy",
  "pb-mapper-protocol",
  "pb-mapper-server",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

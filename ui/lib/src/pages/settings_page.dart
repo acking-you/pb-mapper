@@ -13,9 +13,12 @@ import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
+import 'package:pb_mapper_ui/src/updates/update_controller.dart';
+import 'package:pb_mapper_ui/src/updates/update_dialog.dart';
 import 'package:pb_mapper_ui/src/widgets/brand_mark.dart';
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 const String kRepositoryUrl = 'https://github.com/acking-you/pb-mapper';
@@ -51,7 +54,7 @@ class SettingsPage extends StatelessWidget {
                     : const SizedBox.shrink(),
               ),
               const SizedBox(height: 16),
-              const _AboutCard(),
+              _AboutCard(updates: scope.updates, prefs: scope.prefs),
             ],
           ),
         ),
@@ -563,42 +566,119 @@ class _AdvancedCardState extends State<_AdvancedCard> {
   }
 }
 
-class _AboutCard extends StatelessWidget {
-  const _AboutCard();
+/// What this is, which version, and the way to the next one.
+class _AboutCard extends StatefulWidget {
+  const _AboutCard({required this.updates, required this.prefs});
+
+  final UpdateController updates;
+  final AppPrefs prefs;
+
+  @override
+  State<_AboutCard> createState() => _AboutCardState();
+}
+
+class _AboutCardState extends State<_AboutCard> {
+  String? _version;
+
+  @override
+  void initState() {
+    super.initState();
+    PackageInfo.fromPlatform()
+        .then((info) {
+          if (mounted) setState(() => _version = info.version);
+        })
+        .catchError((_) {});
+  }
 
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.onSurfaceVariant,
+    );
+    final updates = widget.updates;
+    final prefs = widget.prefs;
     return GroupCard(
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const BrandMark(size: 44),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(l10n.appTitle, style: theme.textTheme.titleMedium),
-                const SizedBox(height: 2),
-                Text(
-                  l10n.aboutBody,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+          Row(
+            children: [
+              const BrandMark(size: 44),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(l10n.appTitle, style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 2),
+                    Text(l10n.aboutBody, style: muted),
+                    if (_version case final version?) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        l10n.versionLabel(version),
+                        key: const Key('settings-version'),
+                        style: muted,
+                      ),
+                    ],
+                  ],
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                onPressed: () => launchUrl(
+                  Uri.parse(kRepositoryUrl),
+                  mode: LaunchMode.externalApplication,
+                ),
+                icon: const Icon(AppIcons.star, size: 16),
+                label: Text(l10n.starOnGitHub),
+              ),
+            ],
           ),
-          const SizedBox(width: 10),
-          OutlinedButton.icon(
-            onPressed: () => launchUrl(
-              Uri.parse(kRepositoryUrl),
-              mode: LaunchMode.externalApplication,
+          if (updatesSupported) ...[
+            const SizedBox(height: 14),
+            ListenableBuilder(
+              listenable: Listenable.merge([updates, prefs]),
+              builder: (context, _) {
+                final release = updates.published;
+                final offer = updates.newer && release != null;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: offer
+                          ? FilledButton.tonalIcon(
+                              key: const Key('settings-update'),
+                              onPressed: () =>
+                                  showUpdateDialog(context, updates),
+                              icon: const Icon(AppIcons.update, size: 16),
+                              label: Text(l10n.updateTo('${release.version}')),
+                            )
+                          : OutlinedButton.icon(
+                              key: const Key('settings-check-updates'),
+                              onPressed: updates.busy
+                                  ? null
+                                  : () => showUpdateDialog(context, updates),
+                              icon: const Icon(AppIcons.update, size: 16),
+                              label: Text(l10n.checkForUpdates),
+                            ),
+                    ),
+                    const SizedBox(height: 4),
+                    SwitchListTile(
+                      key: const Key('settings-auto-update'),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                      title: Text(l10n.autoCheckUpdates),
+                      subtitle: Text(l10n.autoCheckUpdatesHelp),
+                      value: prefs.autoCheckUpdates,
+                      onChanged: prefs.setAutoCheckUpdates,
+                    ),
+                  ],
+                );
+              },
             ),
-            icon: const Icon(AppIcons.star, size: 16),
-            label: Text(l10n.starOnGitHub),
-          ),
+          ],
         ],
       ),
     );
