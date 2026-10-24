@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/app.dart';
 import 'package:pb_mapper_ui/src/common/state_change.dart';
@@ -66,4 +68,48 @@ Future<void> settle(WidgetTester tester) async {
 Future<void> finish(WidgetTester tester) async {
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump(const Duration(seconds: 6));
+}
+
+/// Load the app's real typefaces, which `flutter test` otherwise draws as
+/// boxes, for the tests that render images meant to be looked at. Material's
+/// own icon font comes from the SDK, when `FLUTTER_ROOT` says where it is.
+Future<void> loadRealFonts() async {
+  Future<void> family(String name, List<String> assets) async {
+    final loader = FontLoader(name);
+    for (final asset in assets) {
+      loader.addFont(rootBundle.load(asset));
+    }
+    await loader.load();
+  }
+
+  await family('GoogleSansFlex', [
+    'assets/fonts/GoogleSansFlex-Regular.ttf',
+    'assets/fonts/GoogleSansFlex-Medium.ttf',
+    'assets/fonts/GoogleSansFlex-SemiBold.ttf',
+    'assets/fonts/GoogleSansFlex-Bold.ttf',
+  ]);
+  await family('GeistMono', [
+    'assets/fonts/GeistMono-Regular.ttf',
+    'assets/fonts/GeistMono-Medium.ttf',
+    'assets/fonts/GeistMono-SemiBold.ttf',
+  ]);
+  await family('NotoSansSC', [
+    'assets/fonts/NotoSansSC-Regular.subset.ttf',
+    'assets/fonts/NotoSansSC-Medium.subset.ttf',
+    'assets/fonts/NotoSansSC-SemiBold.subset.ttf',
+  ]);
+  await family('packages/lucide_icons_flutter/Lucide300', [
+    'packages/lucide_icons_flutter/assets/build_font/LucideVariable-w300.ttf',
+  ]);
+  final flutterRoot = Platform.environment['FLUTTER_ROOT'];
+  if (flutterRoot != null) {
+    final icons = File(
+      '$flutterRoot/bin/cache/artifacts/material_fonts/materialicons-regular.otf',
+    );
+    if (icons.existsSync()) {
+      final loader = FontLoader('MaterialIcons')
+        ..addFont(Future.value(ByteData.sublistView(icons.readAsBytesSync())));
+      await loader.load();
+    }
+  }
 }

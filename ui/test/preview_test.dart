@@ -22,47 +22,6 @@ import 'support.dart';
 
 final String? _dir = Platform.environment['PB_MAPPER_UI_PREVIEW_DIR'];
 
-Future<void> _loadFonts() async {
-  Future<void> family(String name, List<String> assets) async {
-    final loader = FontLoader(name);
-    for (final asset in assets) {
-      loader.addFont(rootBundle.load(asset));
-    }
-    await loader.load();
-  }
-
-  await family('GoogleSansFlex', [
-    'assets/fonts/GoogleSansFlex-Regular.ttf',
-    'assets/fonts/GoogleSansFlex-Medium.ttf',
-    'assets/fonts/GoogleSansFlex-SemiBold.ttf',
-    'assets/fonts/GoogleSansFlex-Bold.ttf',
-  ]);
-  await family('GeistMono', [
-    'assets/fonts/GeistMono-Regular.ttf',
-    'assets/fonts/GeistMono-Medium.ttf',
-    'assets/fonts/GeistMono-SemiBold.ttf',
-  ]);
-  await family('NotoSansSC', [
-    'assets/fonts/NotoSansSC-Regular.subset.ttf',
-    'assets/fonts/NotoSansSC-Medium.subset.ttf',
-    'assets/fonts/NotoSansSC-SemiBold.subset.ttf',
-  ]);
-  await family('packages/lucide_icons_flutter/Lucide300', [
-    'packages/lucide_icons_flutter/assets/build_font/LucideVariable-w300.ttf',
-  ]);
-  final flutterRoot = Platform.environment['FLUTTER_ROOT'];
-  if (flutterRoot != null) {
-    final icons = File(
-      '$flutterRoot/bin/cache/artifacts/material_fonts/materialicons-regular.otf',
-    );
-    if (icons.existsSync()) {
-      final loader = FontLoader('MaterialIcons')
-        ..addFont(Future.value(ByteData.sublistView(icons.readAsBytesSync())));
-      await loader.load();
-    }
-  }
-}
-
 Future<void> _capture(WidgetTester tester, String name) async {
   final boundary = tester.renderObject<RenderRepaintBoundary>(
     find.byKey(appRootKey),
@@ -115,7 +74,7 @@ void main() {
 
   setUpAll(() async {
     Directory(_dir!).createSync(recursive: true);
-    await _loadFonts();
+    await loadRealFonts();
   });
 
   for (final (name, theme) in [
