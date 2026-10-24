@@ -360,7 +360,8 @@ the control server and for tests.
 - **Real-time Updates**: The Rust change stream plus a slow relay check, both in
   `AppStore`; `waitUntilSettled` waits out a tunnel's retry loop.
 - **Design**: POCOX's language (`lib/src/theme/`); see `docs/ui-design.md`.
-  Render the pages headlessly with `test/preview_test.dart` to look at a change.
+  Render the pages headlessly with `test/preview_test.dart` to look at a change;
+  the README posters are derived from the pages by `test/gen_poster_test.dart`.
 - **Error Handling**: Graceful error handling with user-friendly feedback
 - **Responsive Design**: Adaptive layouts for different screen sizes
 

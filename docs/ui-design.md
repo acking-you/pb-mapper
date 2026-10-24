@@ -144,3 +144,22 @@ cd ui
 PB_MAPPER_UI_PREVIEW_DIR=/tmp/pbm-preview FLUTTER_ROOT=$(dirname $(dirname $(which flutter))) \
   flutter test test/preview_test.dart
 ```
+
+## The README poster
+
+`docs/assets/poster.png` and `poster.zh-CN.png` are not drawn by hand: as in
+POCOX, `test/gen_poster_test.dart` renders the real pages from fixture data —
+the galaxy in the dark, the Tunnels page behind it, a phone connecting to a
+service on the relay — and sets them beside the name and what pb-mapper does.
+Change the app and the poster follows; change the words in that file. To
+regenerate both:
+
+```sh
+cd ui
+PB_MAPPER_REGEN_POSTER=1 FLUTTER_ROOT=$(dirname $(dirname $(which flutter))) \
+  flutter test test/gen_poster_test.dart
+```
+
+It is opt-in because the PNGs differ slightly from one platform's rasterizer to
+another's, and it turns the test harness's shadow suppression off, since a
+poster wants the shadows the app really casts.

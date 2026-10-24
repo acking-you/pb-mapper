@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/poster.zh-CN.png" alt="pb-mapper — P2P 直连优先，中继兜底：一个 TCP 端口加一个 UDP 端口，连通所有私有服务" width="800" />
+<img src="docs/assets/poster.zh-CN.png" alt="pb-mapper — P2P 直连优先，中继兜底：桌面应用把这台电脑、中继和其间的每条隧道画成星系，旁边是隧道页，以及在手机上连接中继上的服务" width="800" />
 
 <p>
   <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>

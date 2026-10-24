@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/poster.png" alt="pb-mapper — peer to peer first, relay always: one TCP port and one UDP port reach every private service" width="800" />
+<img src="docs/assets/poster.png" alt="pb-mapper — P2P first, relay always: the desktop app's galaxy of this computer, its relay and every tunnel between them, the Tunnels page, and a phone connecting to a service on the relay" width="800" />
 
 <p>
   <a href="https://www.rust-lang.org/"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white"></a>
