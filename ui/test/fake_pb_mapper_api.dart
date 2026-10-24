@@ -33,6 +33,10 @@ class FakePbMapperApi implements PbMapperApiClient {
   /// Refuse the next write with this message.
   String? failNext;
 
+  /// How long reading the config takes, for a test about what is shown
+  /// before it arrives.
+  Duration configDelay = Duration.zero;
+
   /// Every call that changes something, in order, so a test can assert what
   /// the view asked for rather than only what it drew.
   final List<String> calls = [];
@@ -50,7 +54,10 @@ class FakePbMapperApi implements PbMapperApiClient {
   Future<OperationResult> setAppDirectoryPath(String path) async => _ok;
 
   @override
-  Future<ConfigStatus> fetchConfig() async => config;
+  Future<ConfigStatus> fetchConfig() async {
+    if (configDelay > Duration.zero) await Future<void>.delayed(configDelay);
+    return config;
+  }
 
   @override
   Future<String> revealIsolatedRelayAdminKey() async {

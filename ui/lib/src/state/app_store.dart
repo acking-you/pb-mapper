@@ -26,13 +26,16 @@ enum RelayState {
 /// and the galaxy now listen to this, and every write goes through it.
 ///
 /// Freshness comes from the Rust change stream (a tunnel's state moving, a
-/// terminal command, a config edit) plus a slow relay check, since nothing on
-/// this side is told when another computer registers a key.
+/// terminal command, a config edit), a slow relay check, since nothing on this
+/// side is told when another computer registers a key, and a periodic read of
+/// this computer's tunnels, without which the stream would go quiet (see
+/// [tunnelInterval]).
 class AppStore extends ChangeNotifier {
   AppStore({
     required this.api,
     Stream<StateChange>? changes,
     this.relayInterval = const Duration(seconds: 12),
+    this.tunnelInterval = const Duration(seconds: 6),
   }) : _changes = changes ?? PbMapperService.changeStream;
 
   final PbMapperApiClient api;
@@ -40,6 +43,12 @@ class AppStore extends ChangeNotifier {
 
   /// How often the relay is asked what it holds while nothing else asks.
   final Duration relayInterval;
+
+  /// How often this computer's tunnels are read again. The Rust side probes a
+  /// tunnel's health only when its cached status is read and has gone stale,
+  /// and only a probe that sees a transition sends a change event; with no
+  /// reads, a tunnel that fails after it settled would stay drawn as running.
+  final Duration tunnelInterval;
 
   ConfigStatus config = const ConfigStatus(
     serverAddress: '',
@@ -64,6 +73,8 @@ class AppStore extends ChangeNotifier {
   bool _disposed = false;
   ChangeSubscription? _subscription;
   Timer? _relayTimer;
+  Timer? _tunnelTimer;
+  final Completer<void> _firstRead = Completer<void>();
 
   String get relayAddress => config.serverAddress.trim();
 
@@ -106,6 +117,10 @@ class AppStore extends ChangeNotifier {
         (t) => t.key == key,
       );
 
+  /// Completes once [start]'s first read of the config and the tunnels is in,
+  /// without waiting for the relay to answer.
+  Future<void> get ready => _firstRead.future;
+
   /// Begin reading and listening. Safe to call more than once.
   Future<void> start() async {
     if (_started) return;
@@ -117,30 +132,33 @@ class AppStore extends ChangeNotifier {
       StateChangeKind.config,
     }, _onChange);
     _relayTimer = Timer.periodic(relayInterval, (_) => checkRelay());
+    _tunnelTimer = Timer.periodic(tunnelInterval, (_) => _loadTunnels());
     await refresh(force: true);
   }
 
-  void _onChange(StateChange change) {
+  /// Re-read whatever a burst of changes touched.
+  void _onChange(Set<StateChangeKind> kinds) {
     if (_disposed) return;
-    switch (change.kind) {
-      case StateChangeKind.services:
-        unawaited(_loadShares());
-      case StateChangeKind.clients:
-        unawaited(_loadConnections());
-      case StateChangeKind.server:
-        unawaited(checkRelay());
-      case StateChangeKind.config:
-        unawaited(_loadConfig().then((_) => checkRelay(force: true)));
-      case StateChangeKind.unknown:
-        unawaited(refresh());
+    if (kinds.contains(StateChangeKind.unknown)) {
+      unawaited(refresh());
+      return;
+    }
+    if (kinds.contains(StateChangeKind.services)) unawaited(_loadShares());
+    if (kinds.contains(StateChangeKind.clients)) unawaited(_loadConnections());
+    // A config change asks the relay again anyway, at its new address.
+    if (kinds.contains(StateChangeKind.config)) {
+      unawaited(_loadConfig().then((_) => checkRelay(force: true)));
+    } else if (kinds.contains(StateChangeKind.server)) {
+      unawaited(checkRelay());
     }
   }
 
   /// Read everything again; [force] makes the relay answer now rather than
   /// from the Rust side's cache.
   Future<void> refresh({bool force = false}) async {
-    await Future.wait([_loadConfig(), _loadShares(), _loadConnections()]);
+    await Future.wait([_loadConfig(), _loadTunnels()]);
     loaded = true;
+    if (!_firstRead.isCompleted) _firstRead.complete();
     _notify();
     await checkRelay(force: force);
   }
@@ -213,6 +231,11 @@ class AppStore extends ChangeNotifier {
     } catch (_) {}
   }
 
+  Future<void> _loadTunnels() async {
+    if (_disposed) return;
+    await Future.wait([_loadShares(), _loadConnections()]);
+  }
+
   Future<void> _reload(TunnelKind kind) =>
       kind == TunnelKind.share ? _loadShares() : _loadConnections();
 
@@ -245,19 +268,21 @@ class AppStore extends ChangeNotifier {
   /// Replace [old] with [next], putting [old] back if [next] is refused.
   ///
   /// A share or connection under the same key is replaced in place by the
-  /// Rust side. A connection is stopped first either way, since the new one
-  /// usually binds the port the old one holds.
+  /// Rust side. A connection is stopped first, since the new one usually binds
+  /// the port the old one holds. A share is not: the Rust side refuses a share
+  /// (bad address, relay unreachable) before it touches the one it would
+  /// replace, so a refused share edit normally leaves the old share running.
+  /// Whatever the refusal left down that was up before is started again.
   Future<OperationResult> update(Tunnel old, TunnelDraft next) async {
     if (old.kind == TunnelKind.connect && old.isLive) {
       await api.disconnectService(old.key);
     }
     final result = await _apply(next);
-    if (!result.success) {
-      if (old.kind == TunnelKind.connect && old.isLive) {
-        await _apply(old.draft);
-      }
-    } else if (old.key != next.key) {
-      await _remove(old);
+    if (result.success) {
+      if (old.key != next.key) await _remove(old);
+    } else if (old.isLive) {
+      await _reload(old.kind);
+      if (find(old.kind, old.key)?.isLive != true) await _apply(old.draft);
     }
     await _reload(old.kind);
     return result;
@@ -336,6 +361,7 @@ class AppStore extends ChangeNotifier {
     _disposed = true;
     _subscription?.cancel();
     _relayTimer?.cancel();
+    _tunnelTimer?.cancel();
     super.dispose();
   }
 }

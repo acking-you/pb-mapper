@@ -84,6 +84,11 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
 
   Future<void> _boot() async {
     await _prefs.load();
+    final started = _store.start();
+    // Setup seeds its fields from the store once, so the saved config has to
+    // be in it first: shown any earlier, setup would offer a blank credential
+    // and saving the relay would overwrite the real one with it.
+    await _store.ready;
     final setup = widget.needsSetup ?? await SetupState.needsSetup(widget.api);
     if (!mounted) return;
     setState(() {
@@ -92,7 +97,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
         _page = AppPage.parse(_prefs.lastPage) ?? AppPage.overview;
       }
     });
-    await _store.start();
+    await started;
   }
 
   void _onPrefs() {

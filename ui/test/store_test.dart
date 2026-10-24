@@ -107,6 +107,28 @@ void main() {
     expect(store.connections.single.health, TunnelHealth.running);
   });
 
+  test('a share edit that is refused leaves the running share alone', () async {
+    final api = FakePbMapperApi(services: [fakeService(serviceKey: 'web')]);
+    final store = await _started(api);
+    final old = store.shares.single;
+
+    api.failNext = 'relay unreachable';
+    final result = await store.update(
+      old,
+      const TunnelDraft(
+        kind: TunnelKind.share,
+        key: 'web',
+        localAddress: '127.0.0.1:8081',
+      ),
+    );
+
+    // Refused before the old share was touched, so it is not started twice.
+    expect(result.success, isFalse);
+    expect(api.calls, ['registerService(web)']);
+    expect(store.shares.single.localAddress, '127.0.0.1:8080');
+    expect(store.shares.single.health, TunnelHealth.running);
+  });
+
   test('a change made elsewhere is read back', () async {
     final api = FakePbMapperApi();
     final changes = StreamController<StateChange>.broadcast();
@@ -125,6 +147,46 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 250));
     expect(store.shares.map((t) => t.key), ['from-terminal']);
   });
+
+  test('a burst that touches both lists reads both again', () async {
+    final api = FakePbMapperApi();
+    final changes = StreamController<StateChange>.broadcast();
+    final store = await _started(api, changes);
+
+    api.services = [fakeService(serviceKey: 'web')];
+    api.clients = [fakeClient(serviceKey: 'db')];
+    for (final (seq, kind) in [
+      (1, StateChangeKind.services),
+      (2, StateChangeKind.clients),
+    ]) {
+      changes.add(
+        StateChange(kind: kind, origin: ChangeOrigin.internal, seq: seq),
+      );
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(store.shares.map((t) => t.key), ['web']);
+    expect(store.connections.map((t) => t.key), ['db']);
+  });
+
+  test(
+    'a tunnel that fails after it settled is seen without an event',
+    () async {
+      final api = FakePbMapperApi(services: [fakeService(serviceKey: 'web')]);
+      final store = AppStore(
+        api: api,
+        changes: const Stream.empty(),
+        tunnelInterval: const Duration(milliseconds: 50),
+      );
+      addTearDown(store.dispose);
+      await store.start();
+      expect(store.shares.single.health, TunnelHealth.running);
+
+      // What the Rust side reports once a read has made it probe again.
+      api.services = [fakeService(serviceKey: 'web', status: 'failed')];
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      expect(store.shares.single.health, TunnelHealth.failed);
+    },
+  );
 
   test(
     'settling waits out the retry loop and reports where it landed',

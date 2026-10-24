@@ -142,6 +142,33 @@ void main() {
       await finish(tester);
     });
 
+    testWidgets('keeps a saved credential that is slow to load', (
+      tester,
+    ) async {
+      final saved = 'k' * 32;
+      final api = FakePbMapperApi(
+        config: ConfigStatus(
+          serverAddress: 'localhost:7666',
+          keepAliveEnabled: true,
+          msgHeaderKey: saved,
+        ),
+      )..configDelay = const Duration(milliseconds: 120);
+      await pumpApp(tester, api, needsSetup: true);
+      final credential = tester.widget<TextField>(
+        find.byKey(const Key('setup-credential')),
+      );
+      expect(credential.controller!.text, saved);
+
+      await tester.enterText(
+        find.byKey(const Key('setup-address')),
+        'relay.example:7666',
+      );
+      await tester.tap(find.byKey(const Key('setup-continue')));
+      await settle(tester);
+      expect(api.config.msgHeaderKey, saved);
+      await finish(tester);
+    });
+
     testWidgets('saves the relay, then shares a first service', (tester) async {
       final api = _fresh();
       await pumpApp(tester, api, needsSetup: true);
