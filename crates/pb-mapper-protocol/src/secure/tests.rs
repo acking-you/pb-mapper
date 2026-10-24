@@ -825,6 +825,85 @@ fn restored_replay_generation_ages_with_loaded_records() {
     let _ = std::fs::remove_file(path);
 }
 
+// Compaction rewrites the log in place. On Windows that replace used to be
+// refused while the compaction still held the log open, which latched the
+// guard unavailable for every admission after the first minute.
+#[test]
+fn replay_log_accepts_admissions_after_compaction() {
+    let mut random = [0_u8; 8];
+    let mut rng = rand::rng();
+    for byte in &mut random {
+        *byte = rng.random();
+    }
+    let path = std::env::temp_dir().join(format!(
+        "pb-mapper-replay-compact-{}",
+        u64::from_be_bytes(random)
+    ));
+    let now = unix_seconds();
+    let later = now.saturating_add(REPLAY_COMPACT_INTERVAL_SECONDS);
+    let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(2), &[2_u8; 32], later),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        guard.admit(KeyId::from_u64(3), &[3_u8; 32], later),
+        FirstFlightAdmit::Fresh
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        3 * REPLAY_RECORD_LEN as u64
+    );
+    drop(guard);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn replay_log_rollback_removes_a_partial_record() {
+    use std::io::Write;
+
+    let mut random = [0_u8; 8];
+    let mut rng = rand::rng();
+    for byte in &mut random {
+        *byte = rng.random();
+    }
+    let path = std::env::temp_dir().join(format!(
+        "pb-mapper-replay-rollback-{}",
+        u64::from_be_bytes(random)
+    ));
+    let now = unix_seconds();
+    {
+        let mut guard = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+        assert_eq!(
+            guard.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+            FirstFlightAdmit::Fresh
+        );
+    }
+    // An append that died partway through a record, as `persist` would leave it.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&[0xaa; 7])
+        .unwrap();
+    truncate_replay_log(&path, REPLAY_RECORD_LEN as u64).unwrap();
+    let mut restored = ReplayGuard::open(Some(path.clone()), 1024, DEFAULT_REPLAY_WINDOW_SECONDS);
+    assert_eq!(
+        restored.admit(KeyId::from_u64(1), &[1_u8; 32], now),
+        FirstFlightAdmit::Replayed
+    );
+    assert_eq!(
+        restored.admit(KeyId::from_u64(2), &[2_u8; 32], now),
+        FirstFlightAdmit::Fresh
+    );
+    drop(restored);
+    let _ = std::fs::remove_file(path);
+}
+
 #[tokio::test]
 async fn legacy_initial_frame_validates_against_isolated_relay_key() {
     let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;

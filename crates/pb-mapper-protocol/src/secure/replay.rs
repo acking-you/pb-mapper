@@ -26,15 +26,15 @@ use pb_mapper_auth::KeyId;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rand::RngExt;
 
 use super::*;
 
 const DEFAULT_NEW_STREAMS_PER_SECOND: u32 = 100;
-const REPLAY_RECORD_LEN: usize = 40;
-const REPLAY_COMPACT_INTERVAL_SECONDS: u64 = 60;
+pub(super) const REPLAY_RECORD_LEN: usize = 40;
+pub(super) const REPLAY_COMPACT_INTERVAL_SECONDS: u64 = 60;
 
 fn first_flight_budget(window_seconds: u64) -> u32 {
     let streams_per_sec = std::env::var("PB_MAPPER_NEW_STREAMS_PER_SECOND")
@@ -244,11 +244,8 @@ impl ReplayGuard {
         record[..32].copy_from_slice(fingerprint);
         record[32..].copy_from_slice(&now.to_be_bytes());
         if let Err(error) = file.write_all(&record).and_then(|()| file.sync_data()) {
-            if file
-                .set_len(start_len)
-                .and_then(|()| file.sync_data())
-                .is_err()
-            {
+            drop(file);
+            if truncate_replay_log(path, start_len).is_err() {
                 self.log_failed = true;
             }
             return Err(error);
@@ -267,15 +264,8 @@ impl ReplayGuard {
         if !path.exists() {
             return;
         }
-        let mut file = match File::open(&path) {
-            Ok(file) => file,
-            Err(_) => {
-                self.log_failed = true;
-                return;
-            }
-        };
         let now = unix_seconds();
-        let records = match read_complete_replay_records(&mut file) {
+        let records = match read_complete_replay_records(&path) {
             Ok(records) => records,
             Err(_) => {
                 self.log_failed = true;
@@ -315,14 +305,7 @@ impl ReplayGuard {
             self.last_compact_at = now;
             return;
         };
-        let mut file = match File::open(path) {
-            Ok(file) => file,
-            Err(_) => {
-                self.log_failed = true;
-                return;
-            }
-        };
-        let records = match read_complete_replay_records(&mut file) {
+        let records = match read_complete_replay_records(path) {
             Ok(records) => records,
             Err(_) => {
                 self.log_failed = true;
@@ -379,7 +362,14 @@ impl ReplayGuard {
     }
 }
 
-fn read_complete_replay_records(file: &mut File) -> std::io::Result<Vec<[u8; REPLAY_RECORD_LEN]>> {
+/// Reads every record in the log, and closes it before returning.
+///
+/// Both callers go on to replace this file. On Windows a handle still open on
+/// it makes `MoveFileExW` refuse that replace, leaving it to std's POSIX-rename
+/// retry, which older releases and some file systems lack; a failed rewrite
+/// latches `log_failed` for the life of the process.
+fn read_complete_replay_records(path: &Path) -> std::io::Result<Vec<[u8; REPLAY_RECORD_LEN]>> {
+    let mut file = File::open(path)?;
     let mut records = Vec::new();
     loop {
         let mut record = [0_u8; REPLAY_RECORD_LEN];
@@ -395,6 +385,17 @@ fn read_complete_replay_records(file: &mut File) -> std::io::Result<Vec<[u8; REP
         }
         records.push(record);
     }
+}
+
+/// Cuts the log back to `len`, removing a partly appended record.
+///
+/// This opens a handle of its own rather than reusing the append one: on
+/// Windows an append handle lacks `FILE_WRITE_DATA`, so `set_len` through it
+/// always fails, and the rollback would latch `log_failed` on any write error.
+pub(super) fn truncate_replay_log(path: &Path, len: u64) -> std::io::Result<()> {
+    let file = OpenOptions::new().write(true).open(path)?;
+    file.set_len(len)?;
+    file.sync_data()
 }
 
 fn bloom_positions(filter_len: usize, fingerprint: &[u8; 32]) -> [usize; 4] {

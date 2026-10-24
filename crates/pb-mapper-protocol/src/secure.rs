@@ -657,9 +657,11 @@ mod frame;
 use frame::{V2Material, derive_material, first_prefix, open_v2_payload, read_v2_frame};
 pub use frame::{V2MessageReader, V2MessageWriter};
 mod replay;
-#[cfg(test)]
-use replay::RotatingBloom;
 use replay::{FirstFlightAdmit, ReplayGuard, replay_fingerprint};
+#[cfg(test)]
+use replay::{
+    REPLAY_COMPACT_INTERVAL_SECONDS, REPLAY_RECORD_LEN, RotatingBloom, truncate_replay_log,
+};
 mod first_flight;
 use first_flight::*;
 fn legacy_message_reader<'a, T: AsyncReadExt + Unpin>(

@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+- Fix a Windows relay that stopped admitting connections about a minute after starting, and admitted none after a restart: first flights and admin mutations were refused with `connection_replay_store_unavailable`. Compacting or reloading the first-flight replay log replaced the file while still holding it open, which the hand-rolled `MoveFileExW` call refused, and one failed rewrite disabled the log until the process exited. The log is now closed before it is rewritten and replaced through `std::fs::rename`, and a partly written record is rolled back through a handle that can truncate it, which a Windows append handle cannot. Linux behavior and durability are unchanged.
+
 ## [0.8.0] - 2026-10-24
 - Make direct with relay fallback the default everywhere. `pb-mapper server` serves direct coordination on its TCP port number over UDP (7666/tcp + 7666/udp), `register` allows direct sessions and `connect` uses `--path auto`; the Rust SDK (`p2p` is now a default feature of `pb-mapper`) and the Node SDK follow the same defaults. `--relay-only` on `server`, `register` or `connect` (and `allow_direct: false` / `PathPolicy::RelayOnly` / `path: "relay-only"` in the SDKs) keeps that side on the relay. The 0.7 flags `--enable-direct`, `--allow-direct` and `--path auto` are still accepted.
 - Need no public IP to enable direct: without `--direct-advertise` the relay announces only its UDP port and clients pair it with the relay address they dialed, which also works behind cloud 1:1 NAT and port forwarding. A relay started without any direct flag keeps serving relay-only, with a warning, if its UDP port is taken.
