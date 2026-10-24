@@ -253,12 +253,27 @@ impl PbMapperState {
     /// The shares and connections running against `relay`, by key. Each
     /// keeps the credential it started with, which a rotation of that
     /// relay's administrator key leaves useless, whatever the configuration
-    /// says now.
-    pub fn tunnels_on(&self, relay: &str) -> (Vec<String>, Vec<String>) {
+    /// says now. A tunnel is on `relay` if it was started under that address,
+    /// or dials any address `endpoint` resolves to: the same relay may have
+    /// been written another way (a hostname, its IP) when it started.
+    pub fn tunnels_on(
+        &self,
+        relay: &str,
+        endpoint: Option<&ResolvedAddrs>,
+    ) -> (Vec<String>, Vec<String>) {
+        let on_relay = |pin: &PinnedTunnel| {
+            pin.relay == relay
+                || endpoint.is_some_and(|endpoint| {
+                    pin.endpoint
+                        .as_slice()
+                        .iter()
+                        .any(|addr| endpoint.as_slice().contains(addr))
+                })
+        };
         let on = |runtimes: &HashMap<String, TunnelRuntime>| {
             let mut keys: Vec<String> = runtimes
                 .iter()
-                .filter(|(_, runtime)| runtime.pin.relay == relay)
+                .filter(|(_, runtime)| on_relay(&runtime.pin))
                 .map(|(key, _)| key.clone())
                 .collect();
             keys.sort();

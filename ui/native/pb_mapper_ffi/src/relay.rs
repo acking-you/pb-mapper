@@ -19,6 +19,7 @@ use pb_mapper_client::sdk::{
     LegacyProtocol, ServiceInfo, SessionObservation,
 };
 use pb_mapper_core::checksum::{Credential, get_process_credential, parse_credential};
+use pb_mapper_core::config::resolve_pb_mapper_server_async;
 use serde_json::{Value, json};
 
 use crate::ctl::Origin;
@@ -81,6 +82,11 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
         // credential it started with, which the rotation retired, and the
         // page starts them again on the new key.
         if let Some(key) = outcome.rotated_key {
+            // Where that relay is, to know its tunnels by address as well as
+            // by name. Resolved before the state is locked: it can be slow.
+            let endpoint = resolve_pb_mapper_server_async(Some(&config.server_address))
+                .await
+                .ok();
             let mut state = state.lock().await;
             let mut save_error = None;
             let saved = state.get_config_status().await == config
@@ -99,7 +105,8 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                         false
                     }
                 };
-            let restart = saved.then(|| state.tunnels_on(&config.server_address));
+            let restart =
+                saved.then(|| state.tunnels_on(&config.server_address, endpoint.as_ref()));
             drop(state);
             if saved {
                 events::emit(events::ChangeKind::Config, None, Origin::Ui);
