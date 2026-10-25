@@ -1,8 +1,10 @@
-//! The one cryptographic check the app's self-update needs from Rust: that a
-//! release manifest carries a valid Ed25519 signature by the release key. It
-//! goes through `ring`, the cryptography the rest of the workspace already
-//! trusts, rather than a second implementation on the Dart side.
+//! What the app's self-update needs from Rust: the one cryptographic check,
+//! that a release manifest carries a valid Ed25519 signature by the release
+//! key, through `ring`, the cryptography the rest of the workspace already
+//! trusts; and on Windows, starting the process that installs the update
+//! once the app has quit.
 
+use std::ffi::{CStr, c_char};
 use std::slice;
 
 use ring::signature::{ED25519, UnparsedPublicKey};
@@ -58,6 +60,98 @@ pub unsafe extern "C" fn pb_mapper_ed25519_verify_v1(
         Ok(()) => 1,
         Err(_) => 0,
     }
+}
+
+/// Starts `powershell.exe -Command <script>` so that it outlives this
+/// process, which quits right after: the Windows update's hand-off, which
+/// waits for the app to exit, runs the installer and opens the app again.
+///
+/// Dart's `ProcessStartMode.detached` cannot do this. It starts the child
+/// with no console at all, and PowerShell exits at once without running a
+/// line, so no update was ever installed from inside the app. Here it gets a
+/// console of its own that has no window (`CREATE_NO_WINDOW`), its own
+/// process group, null standard handles, and, where allowed, leaves any job
+/// the app runs in, so closing that job cannot take it down with the app.
+///
+/// Returns 1 when it started, 0 when it could not (or on another platform),
+/// and -1 for a null or non-UTF-8 script. A leaf call: it allocates nothing
+/// the caller must free.
+///
+/// # Safety
+///
+/// `script` must be null or point to a NUL-terminated string that stays
+/// valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pb_mapper_spawn_hidden_powershell_v1(script: *const c_char) -> i32 {
+    if script.is_null() {
+        return -1;
+    }
+    // SAFETY: non-null, and the caller guarantees a NUL-terminated string.
+    let Ok(script) = unsafe { CStr::from_ptr(script) }.to_str() else {
+        return -1;
+    };
+    match spawn_hidden_powershell(script) {
+        Ok(()) => 1,
+        Err(error) => {
+            tracing::error!("could not start the update hand-off: {error}");
+            0
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_hidden_powershell(script: &str) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let spawn = |flags: u32| {
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(flags)
+            .spawn()
+    };
+    let flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    // A job that forbids breaking away refuses the first with access denied;
+    // the second then starts inside it, which is the best that job allows.
+    // Any other failure is the real one, and is reported as it is.
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    match spawn(flags | CREATE_BREAKAWAY_FROM_JOB) {
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            // Said, because a job that also kills its processes when it
+            // closes takes the hand-off with the app, and the update then
+            // does not go in. An app opened from Explorer has no such job.
+            tracing::warn!(
+                "the app's job forbids leaving it; the update hand-off starts \
+                 inside it, and does not outlive the app if the job kills \
+                 its processes on close"
+            );
+            spawn(flags)
+        }
+        started => started,
+    }
+    .map(drop)
+}
+
+#[cfg(not(windows))]
+fn spawn_hidden_powershell(_script: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "the update hand-off is a Windows installer's",
+    ))
 }
 
 #[cfg(test)]
@@ -120,5 +214,34 @@ mod tests {
             )
         };
         assert_eq!(null, -1);
+    }
+
+    /// The PowerShell it starts runs its script, which a detached Dart
+    /// child never did.
+    #[cfg(windows)]
+    #[test]
+    fn the_hidden_powershell_runs_its_script() {
+        let marker =
+            std::env::temp_dir().join(format!("pb-mapper-hand-off-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = std::ffi::CString::new(format!(
+            "Set-Content -LiteralPath '{}' -Value 'ran'",
+            marker.display()
+        ))
+        .expect("no NUL in the script");
+        // SAFETY: a live NUL-terminated string, and null.
+        let (started, null) = unsafe {
+            (
+                pb_mapper_spawn_hidden_powershell_v1(script.as_ptr()),
+                pb_mapper_spawn_hidden_powershell_v1(ptr::null()),
+            )
+        };
+        assert_eq!((started, null), (1, -1));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !marker.exists() {
+            assert!(std::time::Instant::now() < deadline, "the script never ran");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = std::fs::remove_file(&marker);
     }
 }

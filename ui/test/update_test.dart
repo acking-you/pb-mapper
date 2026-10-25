@@ -85,10 +85,13 @@ class _FakeVerifier implements SignatureVerifier {
 class _FakeInstaller implements UpdateInstaller {
   final List<String> calls = [];
   Object? appImageError;
+  Object? installerError;
 
   @override
-  Future<void> runInstallerAfterExit(File installer) async =>
-      calls.add('installer ${installer.uri.pathSegments.last}');
+  Future<void> runInstallerAfterExit(File installer) async {
+    if (installerError case final error?) throw error;
+    calls.add('installer ${installer.uri.pathSegments.last}');
+  }
 
   @override
   Future<void> replaceAppImage(File download, String appImage) async {
@@ -171,8 +174,12 @@ class _World {
     for (final MapEntry(key: name, value: body) in this.packages.entries) {
       http.files[_file(tag, name)] = corrupt ?? body;
     }
+    addTearDown(() => downloads.deleteSync(recursive: true));
   }
 
+  /// Where this world's downloads land, rather than the real temp folder:
+  /// a handed-off installer's folder is never removed by the app.
+  final downloads = Directory.systemTemp.createTempSync('pb-mapper-test-');
   final http = _FakeHttp();
   final verifier = _FakeVerifier();
   final installer = _FakeInstaller();
@@ -196,6 +203,7 @@ class _World {
     record: record,
     loadInstalled: () async => Version.tryParse(installed)!,
     loadHost: () async => host,
+    workDir: () => downloads.createTemp('update-'),
     replaceSelf: replaceSelf,
   );
 }
@@ -400,6 +408,25 @@ void main() {
     });
 
     test(
+      'a hand-off that cannot start fails with the app still open',
+      () async {
+        final world = _World()
+          ..installer.installerError = const UpdateException(
+            UpdateFailure.install,
+            'Could not start the installer',
+          );
+        final updates = world.controller();
+        await updates.check();
+        await updates.start();
+        expect(updates.stage, UpdateStage.failed);
+        expect(updates.failure?.kind, UpdateFailure.install);
+        expect(world.quits, 0);
+        // Nothing is waiting to install it, so the next launch hears nothing.
+        expect(world.record.pending, isNull);
+      },
+    );
+
+    test(
       'a debug build verifies and stops short of replacing itself',
       () async {
         final world = _World();
@@ -524,13 +551,18 @@ void main() {
 
   test("the Windows hand-off quotes paths PowerShell's way", () {
     final script = WindowsInstallerUpdate.script(
-      r"C:\Users\o'neil\Temp\pb-mapper-windows-x86_64-setup.exe",
+      r"C:\Users\o'neil smith\Temp\pb-mapper-windows-x86_64-setup.exe",
       42,
       r'C:\Program Files\pb-mapper\pb_mapper_ui.exe',
     );
-    expect(script, contains(r"'C:\Users\o''neil\Temp\"));
+    expect(script, contains(r"'C:\Users\o''neil smith\Temp\"));
     expect(script, contains('Wait-Process -Id 42'));
     expect(script, contains('/SILENT'));
+    // Setup's log path, with its space, quoted for setup itself.
+    expect(
+      script,
+      contains(r"""'/LOG="C:\Users\o''neil smith\Temp\setup.log"'"""),
+    );
     expect(script, contains(r"Start-Process -FilePath 'C:\Program Files\"));
   });
 
@@ -630,4 +662,76 @@ void main() {
     expect(find.text('Update to 0.9.1'), findsOneWidget);
     await finish(tester);
   });
+
+  test(
+    'the Windows hand-off waits for the app, installs, and reopens it',
+    () async {
+      final dir = Directory.systemTemp.createTempSync('pb-mapper-test-');
+      addTearDown(() async {
+        // The reopened stand-in may still be closing.
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        try {
+          dir.deleteSync(recursive: true);
+        } on FileSystemException catch (_) {}
+      });
+      final native = DynamicLibrary.open(library!);
+      final installed = File('${dir.path}\\installed.txt');
+
+      /// One update whose setup exits with [exitCode]: its download folder,
+      /// once the app has been reopened.
+      Future<Directory> update(int exitCode, {bool shared = false}) async {
+        final name = '$exitCode${shared ? '-shared' : ''}';
+        final download = Directory('${dir.path}\\download-$name')..createSync();
+        if (shared) File('${download.path}\\other.txt').writeAsStringSync('');
+        final reopened = File('${dir.path}\\reopened-$name.txt');
+        final installer = File('${download.path}\\setup.cmd')
+          ..writeAsStringSync(
+            '@echo %*> "${installed.path}"\r\n@exit /b $exitCode\r\n',
+          );
+        final app = File('${dir.path}\\app-$name.cmd')
+          ..writeAsStringSync('@echo reopened> "${reopened.path}"\r\n');
+        // The app: a process that ends a moment after the hand-off begins.
+        final running = await Process.start('powershell.exe', [
+          '-NoProfile',
+          '-Command',
+          'Start-Sleep -Seconds 2',
+        ]);
+        await WindowsInstallerUpdate.handOff(
+          installer,
+          running.pid,
+          app.path,
+          native,
+        );
+        expect(installed.existsSync(), isFalse, reason: 'the app still runs');
+        final deadline = DateTime.now().add(const Duration(seconds: 30));
+        while (!reopened.existsSync()) {
+          if (DateTime.now().isAfter(deadline)) {
+            fail('the app was not reopened');
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+        expect(installed.readAsStringSync(), contains('/SILENT'));
+        expect(installed.readAsStringSync(), contains('/LOG='));
+        installed.deleteSync();
+        return download;
+      }
+
+      // Installed: nothing of the download is left.
+      expect((await update(0)).existsSync(), isFalse);
+      // Only what the update made is removed: anything else in its folder,
+      // and so the folder, stays.
+      final shared = await update(0, shared: true);
+      expect(File('${shared.path}\\setup.cmd').existsSync(), isFalse);
+      expect(File('${shared.path}\\other.txt').existsSync(), isTrue);
+      // Not installed: the installer goes, its folder (and setup's log) stay.
+      final failed = await update(1);
+      expect(failed.existsSync(), isTrue);
+      expect(File('${failed.path}\\setup.cmd').existsSync(), isFalse);
+    },
+    skip: !Platform.isWindows
+        ? 'the hand-off is Windows-only'
+        : library == null
+        ? 'no built pb_mapper_ffi library'
+        : false,
+  );
 }
