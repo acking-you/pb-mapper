@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
 use pb_mapper_client::client::status::{get_status, get_status_with_credential};
-use pb_mapper_client::client::{ClientStatusCallback, run_client_side_cli_with_pinned_credential};
+use pb_mapper_client::client::{ClientStatusCallback, run_client_side_cli_with_callback_scoped};
 use pb_mapper_client::server::{
     ServerTunnelOptions, StatusCallback, run_server_side_cli_with_pinned_credential,
 };
@@ -79,19 +79,35 @@ impl ProbeTarget {
     }
 }
 
+/// Whether the relay lists `service_key`, asked in `namespace` when the
+/// service is in another credential's, which only the administrator key can.
 async fn check_service_with_get_status(
     target: ProbeTarget,
     service_key: &str,
     credential: Option<Credential>,
+    namespace: Option<u64>,
 ) -> Result<bool, CtlError> {
     let addrs = target.resolve().await?;
+    // A namespace needs a credential to ask with: the process's, when no
+    // tunnel is pinned to one. Without either the question cannot be asked
+    // there, and asked unscoped it would answer for another namespace.
+    let credential = match (credential, namespace) {
+        (Some(credential), _) => Some(credential),
+        (None, Some(_)) => Some(get_process_credential().map_err(|error| {
+            CtlError::invalid_argument(format!(
+                "No credential to ask another namespace with: {error}"
+            ))
+        })?),
+        (None, None) => None,
+    };
 
     match TcpStreamProvider::from_addr(addrs.as_slice()).await {
         Ok(mut stream) => {
             let status_req = PbConnStatusReq::Keys;
             let status = match credential {
                 Some(credential) => {
-                    get_status_with_credential(&mut stream, status_req, None, &credential).await
+                    get_status_with_credential(&mut stream, status_req, namespace, &credential)
+                        .await
                 }
                 None => get_status(&mut stream, status_req).await,
             };
@@ -274,6 +290,10 @@ pub struct ClientConfigData {
     pub protocol: String,
     pub enable_keep_alive: bool,
     pub created_at: SystemTime,
+    /// The namespace the service is in, when it is not this credential's own:
+    /// an administrator connecting to a temporary credential's service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -320,6 +340,13 @@ pub struct ClientConfigInfo {
     pub local_address: String,
     pub protocol: String,
     pub enable_keep_alive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<u64>,
+    /// While it runs, the namespace the relay routes it in: [`Self::namespace`],
+    /// or else that of the credential it was started with, which a credential
+    /// changed since does not move.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routed_namespace: Option<u64>,
     pub status: String,
     pub status_message: String,
     pub created_at_ms: u64,
@@ -458,6 +485,15 @@ struct PinnedTunnel {
     endpoint: ResolvedAddrs,
     /// The relay address it was started against, as configured then.
     relay: String,
+    /// The namespace a connection subscribes in, when not its credential's own.
+    namespace: Option<u64>,
+}
+
+impl PinnedTunnel {
+    /// The namespace the relay routes this tunnel in.
+    fn routed_namespace(&self) -> u64 {
+        self.namespace.unwrap_or_else(|| self.credential.key_id())
+    }
 }
 
 struct TunnelRuntime {
@@ -517,6 +553,7 @@ struct ConnectCommit {
     remote_addrs: ResolvedAddrs,
     credential: Credential,
     relay: String,
+    namespace: Option<u64>,
 }
 
 pub struct PbMapperState {
@@ -613,12 +650,15 @@ pub async fn register_service(
 
 /// Connects to a registered service. Phased exactly like [`register_service`];
 /// the slow step here is the local bind that proves the port is free.
+/// `namespace` names whose service it is when that is not this credential's
+/// own, which only the administrator key may ask for.
 pub async fn connect_service(
     state: &Arc<Mutex<PbMapperState>>,
     service_key: String,
     local_address: String,
     protocol: String,
     enable_keep_alive: bool,
+    namespace: Option<u64>,
 ) -> Result<(), CtlError> {
     let (_claim, server_address, credential) = {
         let state = state.lock().await;
@@ -667,6 +707,7 @@ pub async fn connect_service(
             remote_addrs,
             credential,
             relay: server_address,
+            namespace,
         })
         .await
 }
@@ -755,6 +796,7 @@ mod tests {
                 credential,
                 endpoint: ResolvedAddrs::from(addr),
                 relay: name.to_owned(),
+                namespace: None,
             },
         };
         let mut state = state.lock().await;

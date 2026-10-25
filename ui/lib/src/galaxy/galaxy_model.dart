@@ -10,6 +10,7 @@ library;
 
 import 'dart:math' as math;
 
+import 'package:pb_mapper_ui/src/state/remote_service.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 
 /// A point or direction in the galaxy's world (the disk is the x–z plane, y
@@ -89,13 +90,19 @@ class Planet {
     required this.tilt,
     this.tunnel,
     this.inUse = false,
-  });
+    String? label,
+  }) : label = label ?? key;
 
   /// Stable id: the tunnel's id, or `remote:<key>`.
   final String id;
 
-  /// The service key, which is also its label.
+  /// The service key, or for a [BodyKind.remote] planet its id on the relay
+  /// (see [relayServiceId]).
   final String key;
+
+  /// What it is called in the sky: the service's name, and whose it is when
+  /// it is another credential's.
+  final String label;
   final BodyKind kind;
 
   /// The tunnel it stands for, for a share or a connection.
@@ -219,12 +226,22 @@ GalaxyScene buildScene({
   required List<Tunnel> connections,
   required String? relayAddress,
   required bool relayOnline,
-  required List<String> remote,
+  required List<RemoteService> remote,
   required String homeLabel,
+  int ownNamespace = 0,
 }) {
   final homePlanets = _planets(StarSystem.homeId, [
-    (BodyKind.share, [for (final t in shares) (key: t.key, tunnel: t)]),
-    (BodyKind.connect, [for (final t in connections) (key: t.key, tunnel: t)]),
+    (
+      BodyKind.share,
+      [for (final t in shares) (key: t.key, label: t.key, tunnel: t)],
+    ),
+    (
+      BodyKind.connect,
+      [
+        for (final t in connections)
+          (key: t.key, label: remoteLabel(t.key, t.namespace), tunnel: t),
+      ],
+    ),
   ]);
   if (relayAddress == null) {
     final home = StarSystem(
@@ -239,10 +256,24 @@ GalaxyScene buildScene({
   }
   final running = {
     for (final c in connections)
-      if (c.health == TunnelHealth.running) c.key,
+      if (c.health == TunnelHealth.running)
+        relayServiceId(c.namespace ?? ownNamespace, c.key),
   };
   final relayPlanets = _planets(StarSystem.relayId, [
-    (BodyKind.remote, [for (final key in remote) (key: key, tunnel: null)]),
+    (
+      BodyKind.remote,
+      [
+        for (final s in remote)
+          (
+            key: s.id,
+            label: remoteLabel(
+              s.name,
+              s.namespace == ownNamespace ? null : s.namespace,
+            ),
+            tunnel: null,
+          ),
+      ],
+    ),
   ], inUse: running);
   final homeExtent = _extent(homePlanets);
   final relayExtent = _extent(relayPlanets);
@@ -282,7 +313,7 @@ double _extent(List<Planet> planets) =>
 
 List<Planet> _planets(
   String systemId,
-  List<(BodyKind, List<({String key, Tunnel? tunnel})>)> groups, {
+  List<(BodyKind, List<({String key, String label, Tunnel? tunnel})>)> groups, {
   Set<String> inUse = const {},
 }) {
   final planets = <Planet>[];
@@ -304,6 +335,7 @@ List<Planet> _planets(
           Planet(
             id: entry.tunnel?.id ?? 'remote:${entry.key}',
             key: entry.key,
+            label: entry.label,
             kind: kind,
             tunnel: entry.tunnel,
             inUse: inUse.contains(entry.key),

@@ -134,11 +134,16 @@ class _ServiceRowState extends State<_ServiceRow> {
     final name = row.name;
     final store = widget.store;
     final relay = widget.relay;
-    // This computer's tunnels name a service in its own namespace only, so
-    // they say nothing about another credential's service of the same name.
+    // This computer shares only into its own namespace; it connects into any
+    // the administrator key reaches, so a connection is matched by both.
     final local = row.namespace == relay.ownNamespace;
+    final remote = RemoteService(
+      name: name,
+      namespace: row.namespace,
+      owner: row.info?.keyId,
+    );
     final mine = local ? store.find(TunnelKind.share, name) : null;
-    final connection = local ? store.connectionTo(name) : null;
+    final connection = store.connectionTo(remote);
     final info = row.info;
     final held = relay.connectionsOf(row);
 
@@ -157,9 +162,8 @@ class _ServiceRowState extends State<_ServiceRow> {
         info.transport,
         if (info.encrypted) l10n.encrypted,
         l10n.relayServiceConnections(info.connections),
-        // The namespace chip names the credential already.
-        if (local || info.keyId != row.namespace)
-          ownerName(context, relay, info.keyId),
+        // Another credential's service has its owner on a tag of its own.
+        if (local) ownerName(context, relay, info.keyId),
       ],
     ];
 
@@ -172,23 +176,15 @@ class _ServiceRowState extends State<_ServiceRow> {
         label: l10n.openAt(connection.localAddress),
         shrinks: true,
       );
-    } else if (!local) {
-      // A connection names its service by key alone, in this computer's
-      // namespace: another credential's service is for its own computers.
-      trailing = Tooltip(
-        message: l10n.relayNamespaceHint(row.namespace),
-        child: StatusChip(
-          key: Key('relay-namespace-${row.id}'),
-          color: availableColor(scheme),
-          label: l10n.relayNamespace(row.namespace),
-          shrinks: true,
-        ),
-      );
     } else {
       trailing = FilledButton.tonal(
         key: Key('connect-${row.id}'),
-        onPressed: () =>
-            openTunnelEditor(context, kind: TunnelKind.connect, key: name),
+        onPressed: () => openTunnelEditor(
+          context,
+          kind: TunnelKind.connect,
+          key: name,
+          namespace: store.connectNamespace(remote),
+        ),
         style: rowButtonStyle(context),
         child: Text(l10n.connect),
       );
@@ -217,6 +213,17 @@ class _ServiceRowState extends State<_ServiceRow> {
                         color: scheme.onSurface,
                       ),
                     ),
+                    if (!local) ...[
+                      const SizedBox(height: 4),
+                      // Whose it is, at a glance: the administrator's own
+                      // services carry no tag.
+                      StatusChip(
+                        key: Key('relay-owner-${row.id}'),
+                        color: signalColor(scheme),
+                        label: ownerName(context, relay, remote.owner),
+                        shrinks: true,
+                      ),
+                    ],
                     if (facts.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Text(

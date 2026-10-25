@@ -44,6 +44,8 @@ class Tunnel {
     required this.health,
     this.message = '',
     this.createdAtMs = 0,
+    this.namespace,
+    this.routedNamespace,
   });
 
   factory Tunnel.fromService(ServiceConfigInfo s) => Tunnel(
@@ -68,6 +70,8 @@ class Tunnel {
     health: TunnelHealth.parse(c.status),
     message: c.statusMessage,
     createdAtMs: c.createdAtMs,
+    namespace: c.namespace,
+    routedNamespace: c.routedNamespace,
   );
 
   final TunnelKind kind;
@@ -91,6 +95,15 @@ class Tunnel {
   final String message;
   final int createdAtMs;
 
+  /// For a connection to another credential's service, that credential's
+  /// key id: only the administrator key reaches those. Null for one in this
+  /// computer's own namespace, and for every share.
+  final int? namespace;
+
+  /// While a connection runs, the namespace the relay routes it in — which
+  /// a credential changed since it started does not move. Null otherwise.
+  final int? routedNamespace;
+
   /// Unique across both kinds: a computer can share and connect one key.
   String get id => '${kind.name}:$key';
 
@@ -112,6 +125,7 @@ class Tunnel {
     protocol: protocol,
     encrypted: encrypted,
     keepAlive: keepAlive,
+    namespace: namespace,
   );
 
   @override
@@ -124,7 +138,9 @@ class Tunnel {
       other.encrypted == encrypted &&
       other.keepAlive == keepAlive &&
       other.health == health &&
-      other.message == message;
+      other.message == message &&
+      other.namespace == namespace &&
+      other.routedNamespace == routedNamespace;
 
   @override
   int get hashCode => Object.hash(
@@ -136,6 +152,8 @@ class Tunnel {
     keepAlive,
     health,
     message,
+    namespace,
+    routedNamespace,
   );
 }
 
@@ -149,6 +167,7 @@ class TunnelDraft {
     this.protocol = 'TCP',
     this.encrypted = true,
     this.keepAlive = true,
+    this.namespace,
   });
 
   final TunnelKind kind;
@@ -157,6 +176,9 @@ class TunnelDraft {
   final String protocol;
   final bool encrypted;
   final bool keepAlive;
+
+  /// See [Tunnel.namespace]. A connection only.
+  final int? namespace;
 
   /// The address a fresh form starts with: the conventional local service
   /// port for a share, a free-looking one for a connection.

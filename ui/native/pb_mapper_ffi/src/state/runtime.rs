@@ -217,6 +217,7 @@ impl PbMapperState {
                     credential,
                     endpoint: remote_addrs,
                     relay,
+                    namespace: None,
                 },
             },
         );
@@ -333,6 +334,7 @@ impl PbMapperState {
             remote_addrs,
             credential,
             relay,
+            namespace,
         } = commit;
 
         if abort_runtime(&mut self.client_runtime, &service_key) {
@@ -360,26 +362,24 @@ impl PbMapperState {
             })
         };
 
+        let pin = PinnedTunnel {
+            credential,
+            endpoint: remote_addrs,
+            relay,
+            namespace,
+        };
         let handle = spawn_connect_tunnel(
             &protocol_upper,
             &local_addrs,
-            &remote_addrs,
+            &pin,
             key_clone,
             enable_keep_alive,
             status_callback,
-            credential,
         );
         replace_runtime(
             &mut self.client_runtime,
             &service_key,
-            TunnelRuntime {
-                handle,
-                pin: PinnedTunnel {
-                    credential,
-                    endpoint: remote_addrs,
-                    relay,
-                },
-            },
+            TunnelRuntime { handle, pin },
         );
 
         {
@@ -410,9 +410,13 @@ impl PbMapperState {
         // from a terminal is remembered exactly like one made from the window.
         // `finish_register` has always done this; leaving it out here meant a
         // CLI `connect` started a client that never appeared in the list.
-        if let Err(e) =
-            self.save_client_config(&service_key, &local_address, &protocol, enable_keep_alive)
-        {
+        if let Err(e) = self.save_client_config(
+            &service_key,
+            &local_address,
+            &protocol,
+            enable_keep_alive,
+            namespace,
+        ) {
             // The client is up either way, so this is a warning and not a
             // failure: losing the config costs the entry after a restart.
             tracing::warn!("Failed to save client config for '{service_key}': {e}");
@@ -510,40 +514,47 @@ fn spawn_register_tunnel(
     }
 }
 
+/// Run a connection to `key` on the relay, credential and namespace it is
+/// pinned to.
 fn spawn_connect_tunnel(
     protocol: &str,
     local_addrs: &ResolvedAddrs,
-    remote_addrs: &ResolvedAddrs,
+    pin: &PinnedTunnel,
     key: String,
     enable_keep_alive: bool,
     callback: ClientStatusCallback,
-    credential: Credential,
 ) -> JoinHandle<()> {
+    let PinnedTunnel {
+        credential,
+        endpoint: remote_addrs,
+        namespace,
+        ..
+    } = pin.clone();
     if protocol.eq_ignore_ascii_case("TCP") {
         let local_addrs = local_addrs.clone();
-        let remote_addrs = remote_addrs.clone();
         tokio::spawn(async move {
-            run_client_side_cli_with_pinned_credential::<TcpListenerProvider, _>(
+            run_client_side_cli_with_callback_scoped::<TcpListenerProvider, _>(
                 local_addrs.as_slice(),
                 remote_addrs.as_slice(),
                 key.into(),
                 enable_keep_alive,
+                namespace,
                 Some(callback),
-                credential,
+                Some(credential),
             )
             .await;
         })
     } else {
         let local_addrs = local_addrs.clone();
-        let remote_addrs = remote_addrs.clone();
         tokio::spawn(async move {
-            run_client_side_cli_with_pinned_credential::<UdpListenerProvider, _>(
+            run_client_side_cli_with_callback_scoped::<UdpListenerProvider, _>(
                 local_addrs.as_slice(),
                 remote_addrs.as_slice(),
                 key.into(),
                 enable_keep_alive,
+                namespace,
                 Some(callback),
-                credential,
+                Some(credential),
             )
             .await;
         })

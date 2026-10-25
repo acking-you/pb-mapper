@@ -219,12 +219,14 @@ class PbMapperService {
     required String localAddress,
     required String protocol,
     required bool enableKeepAlive,
+    int? namespace,
   }) {
     return _runJsonOnWorker('connectService', {
       'serviceKey': serviceKey,
       'localAddress': localAddress,
       'protocol': protocol,
       'enableKeepAlive': enableKeepAlive,
+      'namespace': namespace,
     });
   }
 
@@ -380,6 +382,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           arg2,
           arg3,
           (params['enableKeepAlive'] as bool) ? 1 : 0,
+          params['namespace'] as int? ?? -1,
         );
         break;
       case 'disconnectService':

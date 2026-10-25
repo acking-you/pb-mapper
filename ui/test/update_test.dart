@@ -10,6 +10,7 @@ import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/updates/release.dart';
 import 'package:pb_mapper_ui/src/updates/update_controller.dart';
 import 'package:pb_mapper_ui/src/updates/update_installers.dart';
+import 'package:pb_mapper_ui/src/updates/update_record.dart';
 import 'package:pb_mapper_ui/src/updates/update_schedule.dart';
 import 'package:pb_mapper_ui/src/updates/update_source.dart';
 
@@ -105,6 +106,21 @@ class _FakeInstaller implements UpdateInstaller {
   Future<void> open(Uri url) async => calls.add('open $url');
 }
 
+/// The note an update leaves for the next launch, kept in memory.
+class _MemoryRecord implements UpdateRecord {
+  PendingUpdate? pending;
+
+  @override
+  Future<void> write(PendingUpdate pending) async => this.pending = pending;
+
+  @override
+  Future<PendingUpdate?> take() async {
+    final taken = pending;
+    pending = null;
+    return taken;
+  }
+}
+
 /// A newest release `v[version]-ui` carrying [packages], signed or not, over
 /// older releases and a CLI release that must be ignored.
 class _World {
@@ -160,6 +176,7 @@ class _World {
   final http = _FakeHttp();
   final verifier = _FakeVerifier();
   final installer = _FakeInstaller();
+  final record = _MemoryRecord();
   late final Map<String, List<int>> packages;
   late final List<int> manifest;
   int quits = 0;
@@ -176,6 +193,7 @@ class _World {
     quit: () async => quits++,
     source: UpdateSource(http: http, verifier: verifier),
     installer: installer,
+    record: record,
     loadInstalled: () async => Version.tryParse(installed)!,
     loadHost: () async => host,
     replaceSelf: replaceSelf,
@@ -353,6 +371,32 @@ void main() {
       ]);
       expect(world.quits, 1);
       expect(updates.stage, UpdateStage.installing);
+
+      // The app that opens next says what happened, once: the installer
+      // reopens it out of sight, and a failed install looks the same.
+      final updated = world.controller(installed: '0.9.1');
+      final outcome = await updated.takeOutcome();
+      expect('${outcome?.to}', '0.9.1');
+      expect(outcome?.installed, isTrue);
+      expect(await updated.takeOutcome(), isNull);
+    });
+
+    test('an install that did not happen is said so', () async {
+      final world = _World();
+      final updates = world.controller();
+      await updates.check();
+      await updates.start();
+      final unchanged = world.controller(installed: '0.9.0');
+      final outcome = await unchanged.takeOutcome();
+      expect(outcome?.installed, isFalse);
+
+      // A note from long ago is not news.
+      world.record.pending = PendingUpdate(
+        from: const Version(0, 9, 0),
+        to: const Version(0, 9, 1),
+        at: DateTime.now().subtract(const Duration(days: 1)),
+      );
+      expect(await unchanged.takeOutcome(), isNull);
     });
 
     test(

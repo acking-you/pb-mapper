@@ -217,8 +217,13 @@ class FakePbMapperApi implements PbMapperApiClient {
     required String localAddress,
     required String protocol,
     required bool enableKeepAlive,
+    int? namespace,
   }) async {
-    calls.add('connectService($serviceKey)');
+    calls.add(
+      namespace == null
+          ? 'connectService($serviceKey)'
+          : 'connectService($serviceKey@$namespace)',
+    );
     if (_refused() case final refused?) return refused;
     clients = [
       for (final c in clients)
@@ -227,6 +232,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         serviceKey: serviceKey,
         localAddress: localAddress,
         status: startStatus,
+        namespace: namespace,
       ),
     ];
     return _ok;
@@ -242,6 +248,7 @@ class FakePbMapperApi implements PbMapperApiClient {
                 serviceKey: c.serviceKey,
                 localAddress: c.localAddress,
                 status: 'stopped',
+                namespace: c.namespace,
               )
             : c,
     ];
@@ -583,11 +590,15 @@ ClientConfigInfo fakeClient({
   String localAddress = '127.0.0.1:9090',
   String status = 'running',
   String message = '',
+  int? namespace,
+  int? routedNamespace,
 }) => ClientConfigInfo(
   serviceKey: serviceKey,
   localAddress: localAddress,
   protocol: 'TCP',
   enableKeepAlive: true,
+  namespace: namespace,
+  routedNamespace: routedNamespace,
   status: status,
   statusMessage: message,
   createdAtMs: 1,

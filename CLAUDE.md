@@ -311,6 +311,10 @@ Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
   sessions. With the administrator key, everything the `admin` command can
   do: issue, reveal, renew, revoke and clean up credentials, retire
   connections, allow older clients, rotate the key, reset all credentials.
+  The administrator also sees and connects to every credential's services:
+  a connection can carry a `namespace` (FFI `pb_mapper_connect_service`,
+  `ClientConfigData.namespace`), and services are told apart by namespace and
+  name (`RemoteService` in `lib/src/state/remote_service.dart`)
   Also the relay this computer can run itself, and its key
 - **Logs**: the Rust log, by minimum level and word, following new lines
 - **Settings**: relay address, credential, default keep-alive, a copyable setup

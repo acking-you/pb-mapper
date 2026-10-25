@@ -88,6 +88,8 @@ typedef _PbMapperConnectServiceNative =
       Pointer<Utf8> localAddress,
       Pointer<Utf8> protocol,
       Int32 enableKeepAlive,
+      // The temporary credential whose service it is; negative for none.
+      Int64 namespace,
     );
 typedef _PbMapperConnectServiceDart =
     Pointer<Utf8> Function(
@@ -96,6 +98,7 @@ typedef _PbMapperConnectServiceDart =
       Pointer<Utf8> localAddress,
       Pointer<Utf8> protocol,
       int enableKeepAlive,
+      int namespace,
     );
 
 typedef _PbMapperDisconnectServiceNative =

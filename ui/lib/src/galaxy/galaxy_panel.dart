@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_model.dart';
 import 'package:pb_mapper_ui/src/galaxy/planet_glyph.dart';
+import 'package:pb_mapper_ui/src/pages/relay/relay_format.dart' show ownerName;
 import 'package:pb_mapper_ui/src/pages/tunnel_actions.dart';
 import 'package:pb_mapper_ui/src/pages/tunnel_editor.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
@@ -175,7 +176,7 @@ class _SystemDetail extends StatelessWidget {
                       size: 26,
                     ),
                     title: Text(
-                      planet.key,
+                      planet.label,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: mono(fontSize: 13, color: scheme.onSurface),
@@ -238,9 +239,16 @@ class _PlanetDetail extends StatelessWidget {
         final tunnel = planet.tunnel == null
             ? null
             : store.find(planet.tunnel!.kind, planet.key);
-        final connection = planet.kind == BodyKind.remote
-            ? store.connectionTo(planet.key)
+        // A service on the relay, by namespace and name: with the
+        // administrator key it may be a temporary credential's.
+        final service = planet.kind == BodyKind.remote
+            ? store.remoteById(planet.key)
             : null;
+        final connection = service == null ? null : store.connectionTo(service);
+        final namespace = service == null
+            ? null
+            : store.connectNamespace(service);
+        final name = service?.name ?? planet.key;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
@@ -250,7 +258,7 @@ class _PlanetDetail extends StatelessWidget {
                 color: planetColor(scheme, planet),
                 size: 36,
               ),
-              title: planet.key,
+              title: planet.label,
               subtitle: planetSubtitle(context, planet),
               mono: true,
             ),
@@ -315,8 +323,22 @@ class _PlanetDetail extends StatelessWidget {
                       : l10n.openAt(connection.localAddress),
                 ),
               ),
+              if (service != null && namespace != null) ...[
+                const SizedBox(height: 10),
+                _Fact(
+                  icon: AppIcons.key,
+                  text: ownerName(
+                    context,
+                    AppScope.of(context).relay,
+                    service.owner,
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
-              ConnectionsDisclosure(api: store.api, serviceKey: planet.key),
+              // What the relay holds for it is asked in this credential's own
+              // namespace; another credential's is on the Relay page.
+              if (namespace == null)
+                ConnectionsDisclosure(api: store.api, serviceKey: name),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -328,7 +350,8 @@ class _PlanetDetail extends StatelessWidget {
                       onPressed: () => openTunnelEditor(
                         context,
                         kind: TunnelKind.connect,
-                        key: planet.key,
+                        key: name,
+                        namespace: namespace,
                       ),
                       icon: const Icon(AppIcons.connect, size: 16),
                       label: Text(l10n.connect),
@@ -341,7 +364,7 @@ class _PlanetDetail extends StatelessWidget {
                     ),
                   IconButton(
                     tooltip: l10n.copyKey,
-                    onPressed: () => copyText(context, planet.key),
+                    onPressed: () => copyText(context, name),
                     icon: const Icon(AppIcons.copy, size: 17),
                   ),
                 ],
