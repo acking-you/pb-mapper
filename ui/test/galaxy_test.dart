@@ -18,14 +18,22 @@ import 'support.dart';
 Tunnel _share(String key, {String status = 'running'}) =>
     Tunnel.fromService(fakeService(serviceKey: key, status: status));
 
-Tunnel _connect(String key, {String status = 'running'}) =>
-    Tunnel.fromClient(fakeClient(serviceKey: key, status: status));
+Tunnel _connect(String key, {String status = 'running', TunnelPath? path}) =>
+    Tunnel.fromClient(fakeClient(serviceKey: key, status: status, path: path));
+
+/// A connection whose sessions travel as [direct] and [relay] say.
+Tunnel _travelling(String key, {int direct = 0, int relay = 0}) => _connect(
+  key,
+  path: TunnelPath(activeDirect: direct, activeRelay: relay),
+);
 
 GalaxyScene _scene({int shares = 3, int remote = 4}) => buildScene(
   shares: [for (var i = 0; i < shares; i++) _share('share-$i')],
   connections: [
     _connect('conn-a'),
     _connect('conn-b', status: 'stopped'),
+    // Straight to the relay's `remote-0`, so its arc ends on that planet.
+    if (remote > 0) _travelling('remote-0', direct: 1),
   ],
   relayAddress: 'relay.example:7666',
   relayOnline: true,
@@ -110,11 +118,38 @@ void main() {
         'share:share-1',
         'share:share-2',
         'connect:conn-a',
+        'connect:remote-0',
       });
-      expect(
-        scene.links.every((l) => l.systemId == StarSystem.relayId),
-        isTrue,
+    });
+
+    test('a direct arc goes past the relay to the service it reaches', () {
+      final scene = buildScene(
+        shares: [_share('web')],
+        connections: [
+          _travelling('cam', direct: 1),
+          _travelling('db', relay: 1),
+          _travelling('nas', direct: 1, relay: 1),
+        ],
+        relayAddress: 'relay.example:7666',
+        relayOnline: true,
+        remote: const [
+          RemoteService(name: 'cam'),
+          RemoteService(name: 'db'),
+          RemoteService(name: 'nas'),
+        ],
+        homeLabel: 'This computer',
       );
+      Set<(String, bool)> arcs(String planet) => {
+        for (final l in scene.links)
+          if (l.planetId == planet) (l.targetId, l.direct),
+      };
+      expect(arcs('share:web'), {(StarSystem.relayId, false)});
+      expect(arcs('connect:cam'), {('remote:cam', true)});
+      expect(arcs('connect:db'), {(StarSystem.relayId, false)});
+      expect(arcs('connect:nas'), {
+        (StarSystem.relayId, false),
+        ('remote:nas', true),
+      });
     });
 
     test('the two stars never overlap, however many planets they hold', () {
@@ -157,7 +192,8 @@ void main() {
     test('a malformed scene or frame draws nothing', () {
       final scene = _encode(_scene());
       final out = Float32List(1 << 16);
-      final wrongVersion = Float64List.fromList(scene)..[0] = 2;
+      // The layout before an arc could end on a planet.
+      final wrongVersion = Float64List.fromList(scene)..[0] = 1;
       expect(computeFrameInDart(wrongVersion, _frame(), out), -1);
       expect(computeFrameInDart(scene, _frame(distance: 0), out), -1);
       final truncated = Float64List.sublistView(scene, 0, 20);

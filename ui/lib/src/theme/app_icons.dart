@@ -15,6 +15,12 @@ abstract final class AppIcons {
   static const IconData share = LucideIcons.arrowUpFromLine300;
   static const IconData connect = LucideIcons.arrowDownToLine300;
   static const IconData relay = LucideIcons.radioTower300;
+
+  /// A path straight between two computers, past the relay.
+  static const IconData direct = LucideIcons.zap300;
+
+  /// Some sessions direct, some through the relay.
+  static const IconData mixedPath = LucideIcons.split300;
   static const IconData computer = LucideIcons.laptop300;
   static const IconData service = LucideIcons.server300;
 

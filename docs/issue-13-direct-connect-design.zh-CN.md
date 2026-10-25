@@ -1,6 +1,6 @@
 # Issue #13：直连优先、失败中继的设计与实施方案
 
-> **0.8.0 起直连默认开启。** relay 在与 TCP 相同的端口号上监听 UDP，`register` 默认允许直连，`connect` 默认 `--path auto`；任一侧加 `--relay-only` 即恢复原有中继协议，0.7 的 `--enable-direct`、`--allow-direct`、`--path auto` 仍然可用。`--direct-advertise` 可以省略：relay 只公布端口号，客户端用自己拨通 relay 的地址与之配对。消费端在提交前回退后会暂停直连一段时间（10 秒起翻倍到 5 分钟，直连成功或网络切换时清零）。下文记录的是 0.7.0 的初始设计，其中“默认仅中继”“必须显式开启”等描述以本段为准。
+> **0.8.0 起直连默认开启。** relay 在与 TCP 相同的端口号上监听 UDP，`register` 默认允许直连，`connect` 默认 `--path auto`；任一侧加 `--relay-only` 即恢复原有中继协议，0.7 的 `--enable-direct`、`--allow-direct`、`--path auto` 仍然可用。`--direct-advertise` 可以省略：relay 只公布端口号，客户端用自己拨通 relay 的地址与之配对。消费端在提交前回退后会暂停直连一段时间（10 秒起翻倍到 5 分钟，直连成功或网络切换时清零）。下文记录的是 0.7.0 的初始设计，其中“默认仅中继”“必须显式开启”等描述以本段为准。0.9.4 起桌面与移动应用同样直连优先，并显示每条隧道走的是直连还是中继（见第 7 节）。
 
 采用 **pb-mapper 自主协调 + 现有 TCP 控制面 + STUN/UDP 探测 + Quinn QUIC 直连 + 现有 TCP 中继兜底**。服务端开启直连支持且对应 UDP 探测端口就绪后，客户端每次 `connect` 可选择直连优先或仅中继；默认仅中继，保持现有协议和控制方式。server 完成建连授权、候选地址交换和状态汇总；直连建立后，由两端客户端持有和关闭会话。
 
@@ -226,7 +226,7 @@ pb-mapper status sessions --server relay.example.com:12111
 
 Rust SDK 保留 `ClientConfig`、`RegisterRequest`、`ConnectRequest` 的公开结构体；新增 `register_with_options(request, RegisterOptions { allow_direct, idle_timeout })` 与 `connect_with_options(request, ConnectOptions { path: PathPolicy::Auto })`。库的 `p2p` feature 默认关闭，未编译时显式请求直连返回配置错误。CLI 默认构建 p2p，Node addon 也包含能力；运行默认仍关闭。Node 参数为 `allowDirect`、`path`，状态为 `sessionsJson()` 与 `diagnostics().direct`。
 
-现有 C ABI/Flutter 继续走原入口，保持其协议与控制行为；本次没有新增 UI 开关。低层公开 wire enum 的 Rust 构造代码需补 `direct: None` / `direct_query: None`；这是源码兼容性要求，不改变默认 wire 字节。
+0.9.4 起 C ABI/Flutter 也改用 SDK 的 `Registration`/`Connection` 句柄（启用 `p2p`），与 CLI 一样直连优先、共享默认允许直连；`pb_mapper_register_service`/`pb_mapper_connect_service` 增加 `allow_direct`，隧道表单的“更多选项”可逐条关闭。隧道列表按句柄诊断报告每条运行中隧道的路径（两种路径的会话数、进行中的尝试、最近一次的结果与回退阶段），界面据此显示直连或中继及原因，见 [UI 设计](ui-design.md#which-way-the-traffic-goes)。0.7 时的 C ABI/Flutter 仍走原入口，没有 UI 开关。低层公开 wire enum 的 Rust 构造代码需补 `direct: None` / `direct_query: None`；这是源码兼容性要求，不改变默认 wire 字节。
 
 ## 8. 验证和依赖维护
 

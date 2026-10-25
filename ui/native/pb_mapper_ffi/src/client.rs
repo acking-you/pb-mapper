@@ -13,7 +13,8 @@ use crate::state::{ClientConfigInfo, ClientStatusResponse};
 
 /// Connect client to service. `namespace` is the temporary credential whose
 /// service it is, for the administrator key; negative for this credential's
-/// own namespace.
+/// own namespace. A nonzero `allow_direct` has each session try a direct
+/// path before the relay; zero keeps them all on the relay.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_connect_service(
     handle: *mut PbMapperHandle,
@@ -22,6 +23,7 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
     protocol: *const c_char,
     enable_keep_alive: c_int,
     namespace: i64,
+    allow_direct: c_int,
 ) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -55,6 +57,7 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
             protocol,
             enable_keep_alive != 0,
             u64::try_from(namespace).ok(),
+            allow_direct != 0,
         )
         .await
     });

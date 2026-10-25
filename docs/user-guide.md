@@ -287,12 +287,15 @@ cd ui
 flutter run
 ```
 
-On first launch it asks where your relay is and for this computer's credential, then offers to share a service or connect to one. After that it has four pages:
+On first launch it asks where your relay is and for this computer's credential, then offers to share a service or connect to one. After that it has five pages:
 
-- **Overview**: a galaxy of your tunnels. This computer and the relay are two stars; each tunnel and each service on the relay is a planet, green when running; a running tunnel is an arc of light to the relay. Click a planet to start, stop, edit or connect it.
-- **Tunnels**: what this computer shares, what it connects to, and the relay's other services. **New tunnel** opens one form with a Share/Connect switch: a service key, a local address, and TCP or UDP.
+- **Overview**: a galaxy of your tunnels. This computer and the relay are two stars; each tunnel and each service on the relay is a planet, green when running. A running tunnel is an arc of light: into the relay's star when its traffic goes through the relay, or, lit end to end, past the relay to the service's own planet when it goes direct. Click a planet to start, stop, edit or connect it; its panel draws the route and says why it is the relay when direct did not work.
+- **Tunnels**: what this computer shares and what it connects to. Each running tunnel says which way its traffic goes: **Direct**, **Relay**, both with their counts, **Going direct…** while a path is being set up, or **Relay only**. **New tunnel** opens one form with a Share/Connect switch: a service key, a local address, and TCP or UDP.
+- **Relay**: whether the relay answers, its services and connections, and with the administrator key its credentials and security.
 - **Logs**: the Rust log, filtered by level and keyword.
 - **Settings**: the relay address and credential, a setup string to paste on another computer, theme and language.
+
+The app goes direct the way the CLI does: each connection tries a direct path first and uses the relay when that fails, and each share lets connections reach it directly. **More options** in the tunnel form turns that off for one tunnel, as `--relay-only` does.
 
 Closing the window keeps it in the tray; quit from the tray menu.
 

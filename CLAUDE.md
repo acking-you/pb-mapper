@@ -224,6 +224,13 @@ The design and its rules are in `docs/ui-design.md`.
     and administrator request to the relay, dispatched on the request's
     `"op"` and answered with the SDK's `Client`/`Admin`. A new relay
     operation is a new `op` here, not a new export
+  - `state/`: tunnels run on the SDK's `Registration`/`Connection` handles,
+    built with `p2p` — the same workers the CLI runs, direct first. A
+    tunnel's status and its `path` (`PathInfo`: sessions on each path, the
+    attempt in flight, how the last one ended) are read from its handle,
+    not probed; `watch_tunnel` emits the change events. Dropping a handle
+    stops its tunnel. `pb_mapper_register_service` and
+    `pb_mapper_connect_service` take `allow_direct`, saved with the tunnel
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
 
 - **`native/pb_mapper_galaxy/`**: The galaxy's per-frame geometry. Its
@@ -301,10 +308,13 @@ and it is what lets a widget test substitute `FakePbMapperApi`
 Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
 
 - **Overview**: the galaxy — this computer and the relay as two stars, each
-  tunnel and each service on the relay as a planet, live tunnels as arcs;
-  click a body to start, stop, edit or connect
-- **Tunnels**: what this computer shares and what it connects to, with a
-  count of the relay's other services that leads to Relay
+  tunnel and each service on the relay as a planet, live tunnels as arcs:
+  into the relay's star, or for a direct path past it to the service's
+  planet; click a body to start, stop, edit or connect, and its panel draws
+  the route and says why when it is the relay
+- **Tunnels**: what this computer shares and what it connects to, each
+  running one with a chip for its path (`widgets/path.dart`), and a count of
+  the relay's other services that leads to Relay
 - **Relay**: whether the relay answers and how fast, and who this computer is
   to it (administrator, temporary credential #n, or neither). Services, with
   Connect and the connections the relay holds; connections and direct
@@ -321,7 +331,8 @@ Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
   string for another computer, theme and language
 - **First run**: relay, then share-or-connect, then that one form
 
-Sharing and connecting are one editor with a Share/Connect switch. The rail's
+Sharing and connecting are one editor with a Share/Connect switch; its More
+options hold the direct switch, off being `--relay-only`. The rail's
 relay status and the galaxy's relay star both open Relay. An administrator
 section is shown only when the relay confirms the administrator key — the
 credential's own shape decides nothing.

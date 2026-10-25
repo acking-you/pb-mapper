@@ -125,6 +125,34 @@ void main() {
     await finish(tester);
   });
 
+  testWidgets('a connection kept on the relay stays there through an edit', (
+    tester,
+  ) async {
+    final api = FakePbMapperApi();
+    await _openEditor(tester, api);
+    await tester.tap(find.byKey(const Key('tunnel-kind-connect')));
+    await settle(tester);
+    await tester.enterText(find.byKey(const Key('tunnel-key')), 'db');
+    await tester.tap(find.byKey(const Key('tunnel-more')));
+    await settle(tester);
+    await tester.tap(find.byKey(const Key('tunnel-direct')));
+    await tester.tap(find.byKey(const Key('tunnel-submit')));
+    await settle(tester);
+    expect(api.calls, ['connectService(db, relay only)']);
+    // The list says which way it goes.
+    expect(find.byKey(const Key('path-connect:db')), findsOneWidget);
+
+    api.calls.clear();
+    await tester.tap(find.byKey(const Key('menu-connect:db')));
+    await settle(tester);
+    await tester.tap(find.byKey(const Key('menu-edit')));
+    await settle(tester);
+    await tester.tap(find.byKey(const Key('tunnel-submit')));
+    await settle(tester);
+    expect(api.calls.last, 'connectService(db, relay only)');
+    await finish(tester);
+  });
+
   testWidgets('editing keeps the kind and starts from what was saved', (
     tester,
   ) async {

@@ -47,14 +47,33 @@ impl PbMapperState {
 
         let (status_sender, status_receiver) = tokio::sync::mpsc::unbounded_channel();
 
+        // Direct sessions, on the same port over UDP, as `pb-mapper server`
+        // offers them by default: tunnels through this relay may then go
+        // direct. A UDP port someone else holds leaves it relaying only.
+        let direct_listen = std::net::SocketAddr::new(ip_addr, port);
+        let direct = match std::net::UdpSocket::bind(direct_listen) {
+            Ok(socket) => {
+                drop(socket);
+                Some(DirectServerConfig {
+                    listen: direct_listen,
+                    advertise: std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                })
+            }
+            Err(error) => {
+                tracing::warn!("UDP port {port} unavailable, relaying only: {error}");
+                None
+            }
+        };
+
         self.server_auth = Some(auth.clone());
         let handle = tokio::spawn(async move {
-            if let Err(e) = run_server_on_listener(
+            if let Err(e) = run_server_on_listener_with_direct(
                 listener,
                 shutdown_token_clone,
                 Some(status_receiver),
                 enable_keep_alive,
                 auth,
+                direct,
             )
             .await
             {
@@ -129,12 +148,8 @@ impl PbMapperState {
                 *last_update = Some(Instant::now());
             }
 
-            for (_, runtime) in self.service_runtime.drain() {
-                runtime.handle.abort();
-            }
-            for (_, runtime) in self.client_runtime.drain() {
-                runtime.handle.abort();
-            }
+            self.service_runtime.clear();
+            self.client_runtime.clear();
 
             self.registered_services.write().await.clear();
             self.active_connections.write().await.clear();
@@ -153,24 +168,17 @@ impl PbMapperState {
             protocol,
             enable_encryption,
             enable_keep_alive,
-            local_addrs,
-            remote_addrs,
-            credential,
-            relay,
+            allow_direct,
+            handle,
+            pin,
         } = commit;
-
-        if abort_runtime(&mut self.service_runtime, &service_key) {
-            tracing::warn!(
-                "Service '{service_key}' is already registered, replacing existing handle"
-            );
-        }
 
         tracing::info!(
             "Registering service '{}' with protocol {}, local address {}, server address {}",
             service_key,
             protocol,
             local_address,
-            self.config.server_address
+            pin.relay
         );
 
         self.save_service_config(
@@ -179,61 +187,19 @@ impl PbMapperState {
             &protocol,
             enable_encryption,
             enable_keep_alive,
+            allow_direct,
         )
         .map_err(|e| CtlError::io(format!("Failed to save service configuration: {e}")))?;
 
-        let key_clone = service_key.clone();
-        let service_key_for_status = service_key.clone();
-
-        let callback: StatusCallback = Box::new(move |status: &str| {
-            tracing::info!(
-                "Service {} status update: {}",
-                service_key_for_status,
-                status
-            );
-        });
-
-        let handle = spawn_register_tunnel(
-            &protocol,
-            &local_addrs,
-            &remote_addrs,
-            key_clone,
-            ServerTunnelOptions {
-                need_codec: enable_encryption,
-                is_datagram: !protocol.eq_ignore_ascii_case("TCP"),
-                keep_alive: enable_keep_alive,
-                namespace: None,
-                force_namespace: false,
-            },
-            callback,
-            credential,
-        );
-        replace_runtime(
-            &mut self.service_runtime,
-            &service_key,
-            TunnelRuntime {
-                handle,
-                pin: PinnedTunnel {
-                    credential,
-                    endpoint: remote_addrs,
-                    relay,
-                    namespace: None,
-                },
-            },
-        );
-
+        let handle = Arc::new(TunnelHandle::Share(handle));
+        watch_tunnel(&handle, events::ChangeKind::Services, &service_key);
+        if self
+            .service_runtime
+            .insert(service_key.clone(), TunnelRuntime { handle, pin })
+            .is_some()
         {
-            let mut cache = self.service_status_cache.write().await;
-            cache.insert(
-                service_key.clone(),
-                StatusCacheEntry {
-                    status: "retrying".to_string(),
-                    message: "Connecting to pb-mapper server...".to_string(),
-                    updated_at: Instant::now(),
-                },
-            );
+            tracing::warn!("Service '{service_key}' was already registered; replaced it");
         }
-        self.schedule_service_status_refresh(&service_key).await;
 
         let service_info = ServiceInfo {
             service_key: service_key.clone(),
@@ -330,70 +296,29 @@ impl PbMapperState {
             local_address,
             protocol,
             enable_keep_alive,
-            local_addrs,
-            remote_addrs,
-            credential,
-            relay,
-            namespace,
+            allow_direct,
+            handle,
+            pin,
         } = commit;
-
-        if abort_runtime(&mut self.client_runtime, &service_key) {
-            tracing::warn!(
-                "Client for service '{service_key}' is already connected, replacing handle"
-            );
-        }
-
-        let protocol_upper = protocol.to_uppercase();
 
         tracing::info!(
             "Connecting to service '{}' with protocol {}, local address {}, server address {}",
             service_key,
             protocol,
             local_address,
-            self.config.server_address
+            pin.relay
         );
 
-        let key_clone = service_key.clone();
-
-        let status_callback: ClientStatusCallback = {
-            let service_key_for_callback = service_key.clone();
-            Box::new(move |status: &str| {
-                tracing::info!("Client {} status: {}", service_key_for_callback, status);
-            })
-        };
-
-        let pin = PinnedTunnel {
-            credential,
-            endpoint: remote_addrs,
-            relay,
-            namespace,
-        };
-        let handle = spawn_connect_tunnel(
-            &protocol_upper,
-            &local_addrs,
-            &pin,
-            key_clone,
-            enable_keep_alive,
-            status_callback,
-        );
-        replace_runtime(
-            &mut self.client_runtime,
-            &service_key,
-            TunnelRuntime { handle, pin },
-        );
-
+        let namespace = pin.namespace;
+        let handle = Arc::new(TunnelHandle::Connect(handle));
+        watch_tunnel(&handle, events::ChangeKind::Clients, &service_key);
+        if self
+            .client_runtime
+            .insert(service_key.clone(), TunnelRuntime { handle, pin })
+            .is_some()
         {
-            let mut cache = self.client_status_cache.write().await;
-            cache.insert(
-                service_key.clone(),
-                StatusCacheEntry {
-                    status: "retrying".to_string(),
-                    message: "Connecting to pb-mapper server...".to_string(),
-                    updated_at: Instant::now(),
-                },
-            );
+            tracing::warn!("Client for service '{service_key}' was already running; replaced it");
         }
-        self.schedule_client_status_refresh(&service_key).await;
 
         let connection_info = ConnectionInfo {
             service_key: service_key.clone(),
@@ -416,6 +341,7 @@ impl PbMapperState {
             &protocol,
             enable_keep_alive,
             namespace,
+            allow_direct,
         ) {
             // The client is up either way, so this is a warning and not a
             // failure: losing the config costs the entry after a restart.
@@ -474,89 +400,37 @@ impl PbMapperState {
     }
 }
 
-fn spawn_register_tunnel(
-    protocol: &str,
-    local_addrs: &ResolvedAddrs,
-    remote_addrs: &ResolvedAddrs,
-    key: String,
-    options: ServerTunnelOptions,
-    callback: StatusCallback,
-    credential: Credential,
-) -> JoinHandle<()> {
-    if protocol.eq_ignore_ascii_case("TCP") {
-        let local_addrs = local_addrs.clone();
-        let remote_addrs = remote_addrs.clone();
-        tokio::spawn(async move {
-            let _ = run_server_side_cli_with_pinned_credential::<TcpStreamProvider, _>(
-                local_addrs.as_slice(),
-                remote_addrs.as_slice(),
-                key.into(),
-                options,
-                Some(callback),
-                credential,
-            )
-            .await;
-        })
-    } else {
-        let local_addrs = local_addrs.clone();
-        let remote_addrs = remote_addrs.clone();
-        tokio::spawn(async move {
-            let _ = run_server_side_cli_with_pinned_credential::<UdpStreamProvider, _>(
-                local_addrs.as_slice(),
-                remote_addrs.as_slice(),
-                key.into(),
-                options,
-                Some(callback),
-                credential,
-            )
-            .await;
-        })
-    }
-}
-
-/// Run a connection to `key` on the relay, credential and namespace it is
-/// pinned to.
-fn spawn_connect_tunnel(
-    protocol: &str,
-    local_addrs: &ResolvedAddrs,
-    pin: &PinnedTunnel,
-    key: String,
-    enable_keep_alive: bool,
-    callback: ClientStatusCallback,
-) -> JoinHandle<()> {
-    let PinnedTunnel {
-        credential,
-        endpoint: remote_addrs,
-        namespace,
-        ..
-    } = pin.clone();
-    if protocol.eq_ignore_ascii_case("TCP") {
-        let local_addrs = local_addrs.clone();
-        tokio::spawn(async move {
-            run_client_side_cli_with_callback_scoped::<TcpListenerProvider, _>(
-                local_addrs.as_slice(),
-                remote_addrs.as_slice(),
-                key.into(),
-                enable_keep_alive,
-                namespace,
-                Some(callback),
-                Some(credential),
-            )
-            .await;
-        })
-    } else {
-        let local_addrs = local_addrs.clone();
-        tokio::spawn(async move {
-            run_client_side_cli_with_callback_scoped::<UdpListenerProvider, _>(
-                local_addrs.as_slice(),
-                remote_addrs.as_slice(),
-                key.into(),
-                enable_keep_alive,
-                namespace,
-                Some(callback),
-                Some(credential),
-            )
-            .await;
-        })
-    }
+/// Tell the window when `handle`'s state or path changes, until the tunnel
+/// ends. Its status is published as it happens; which path its sessions
+/// take is read once a second, since a session's path is settled without a
+/// status change. Holds the handle weakly, so it never keeps a tunnel alive.
+fn watch_tunnel(handle: &Arc<TunnelHandle>, kind: events::ChangeKind, key: &str) {
+    let tunnel = Arc::downgrade(handle);
+    let mut status = handle.subscribe();
+    let key = key.to_string();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut seen = None;
+        loop {
+            let live = tokio::select! {
+                changed = status.changed() => changed.is_ok(),
+                _ = tick.tick() => true,
+            };
+            let Some(handle) = tunnel.upgrade() else {
+                return;
+            };
+            let view = handle.view();
+            drop(handle);
+            // The message is left out: a failing tunnel's says when it tries
+            // again, which is not worth a reload of the list each second.
+            let now = (view.status, view.path.map(|path| path.shape()));
+            if seen.replace(now).is_some_and(|before| before != now) {
+                events::emit(kind, Some(&key), Origin::Internal);
+            }
+            if !live {
+                return;
+            }
+        }
+    });
 }

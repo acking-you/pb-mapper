@@ -35,8 +35,16 @@ Future<void> _capture(WidgetTester tester, String name) async {
 
 FakePbMapperApi _busy() => FakePbMapperApi(
   services: [
-    fakeService(serviceKey: 'nas-files', localAddress: '127.0.0.1:5000'),
-    fakeService(serviceKey: 'home-ssh', localAddress: '127.0.0.1:22'),
+    fakeService(
+      serviceKey: 'nas-files',
+      localAddress: '127.0.0.1:5000',
+      path: const TunnelPath(activeDirect: 2, directSessions: 5),
+    ),
+    fakeService(
+      serviceKey: 'home-ssh',
+      localAddress: '127.0.0.1:22',
+      allowDirect: false,
+    ),
     fakeService(
       serviceKey: 'grafana',
       localAddress: '127.0.0.1:3000',
@@ -45,7 +53,26 @@ FakePbMapperApi _busy() => FakePbMapperApi(
     ),
   ],
   clients: [
-    fakeClient(serviceKey: 'office-rdp', localAddress: '127.0.0.1:13389'),
+    fakeClient(
+      serviceKey: 'office-rdp',
+      localAddress: '127.0.0.1:13389',
+      path: const TunnelPath(
+        activeDirect: 1,
+        directSessions: 3,
+        lastDirect: true,
+        setupMs: 184,
+      ),
+    ),
+    fakeClient(
+      serviceKey: 'media-server',
+      localAddress: '127.0.0.1:18096',
+      path: const TunnelPath(
+        activeRelay: 1,
+        relaySessions: 2,
+        lastDirect: false,
+        fallbackStage: DirectStage.punching,
+      ),
+    ),
     fakeClient(
       serviceKey: 'lab-db',
       localAddress: '127.0.0.1:15432',
@@ -222,6 +249,23 @@ void main() {
     await _capture(tester, 'overview_selected_dark');
     await finish(tester);
   });
+
+  for (final key in ['office-rdp', 'media-server']) {
+    testWidgets('overview path $key', (tester) async {
+      await pumpApp(tester, _busy(), themeMode: ThemeMode.dark);
+      await tester.tap(find.byKey(const Key('galaxy-canvas')));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+      final row = find.byKey(Key('galaxy-row-connect:$key'));
+      if (row.evaluate().isNotEmpty) {
+        await tester.tap(row);
+        await settle(tester);
+      }
+      await _capture(tester, 'overview_path_$key');
+      await finish(tester);
+    });
+  }
 
   testWidgets('empty overview', (tester) async {
     await pumpApp(

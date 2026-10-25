@@ -328,6 +328,7 @@ class AppStore extends ChangeNotifier {
       protocol: draft.protocol,
       enableEncryption: draft.encrypted,
       enableKeepAlive: draft.keepAlive,
+      allowDirect: draft.allowDirect,
     ),
     TunnelKind.connect => api.connectService(
       serviceKey: draft.key,
@@ -335,6 +336,7 @@ class AppStore extends ChangeNotifier {
       protocol: draft.protocol,
       enableKeepAlive: draft.keepAlive,
       namespace: draft.namespace,
+      allowDirect: draft.allowDirect,
     ),
   };
 

@@ -25,10 +25,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
-use pb_mapper_client::client::status::{get_status, get_status_with_credential};
-use pb_mapper_client::client::{ClientStatusCallback, run_client_side_cli_with_callback_scoped};
-use pb_mapper_client::server::{
-    ServerTunnelOptions, StatusCallback, run_server_side_cli_with_pinned_credential,
+use pb_mapper_client::client::status::get_status;
+use pb_mapper_client::sdk::{
+    Client, ConnectOptions, ConnectRequest, Connection, DirectStage, PathPolicy, RecoveryFailure,
+    RegisterOptions, RegisterRequest, Registration, Transport, TunnelDiagnostics, TunnelEventKind,
+    TunnelStatus,
 };
 use pb_mapper_core::addr::each_addr;
 use pb_mapper_core::checksum::{
@@ -36,98 +37,15 @@ use pb_mapper_core::checksum::{
 };
 use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async, resolve_pb_mapper_server_async};
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
-use pb_mapper_server::{ServerStatusInfo, run_server_on_listener};
-use uni_stream::stream::{
-    ListenerProvider, StreamProvider, TcpListenerProvider, TcpStreamProvider, UdpListenerProvider,
-    UdpStreamProvider,
-};
+use pb_mapper_server::{DirectServerConfig, ServerStatusInfo, run_server_on_listener_with_direct};
+use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 
 use crate::ctl::Origin;
 use crate::error::CtlError;
 use crate::events;
 
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
-const STATUS_REFRESH_TIMEOUT: Duration = Duration::from_millis(3000);
 const FORCE_REFRESH_TIMEOUT: Duration = Duration::from_millis(5000);
-
-#[derive(Clone)]
-struct StatusCacheEntry {
-    status: String,
-    message: String,
-    updated_at: Instant,
-}
-
-/// Where a status probe should dial.
-enum ProbeTarget {
-    /// A running tunnel's own candidates, taken from its pin: the probe then
-    /// reports on the addresses that tunnel actually dials, even if the
-    /// configuration has changed underneath it since.
-    Pinned(ResolvedAddrs),
-    /// The configured relay address, resolved when the probe runs. Used when no
-    /// tunnel is pinned, so there is nothing to inherit.
-    Configured(String),
-}
-
-impl ProbeTarget {
-    async fn resolve(&self) -> Result<ResolvedAddrs, CtlError> {
-        match self {
-            Self::Pinned(addrs) => Ok(addrs.clone()),
-            Self::Configured(addr) => resolve_addrs_async(addr)
-                .await
-                .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}"))),
-        }
-    }
-}
-
-/// Whether the relay lists `service_key`, asked in `namespace` when the
-/// service is in another credential's, which only the administrator key can.
-async fn check_service_with_get_status(
-    target: ProbeTarget,
-    service_key: &str,
-    credential: Option<Credential>,
-    namespace: Option<u64>,
-) -> Result<bool, CtlError> {
-    let addrs = target.resolve().await?;
-    // A namespace needs a credential to ask with: the process's, when no
-    // tunnel is pinned to one. Without either the question cannot be asked
-    // there, and asked unscoped it would answer for another namespace.
-    let credential = match (credential, namespace) {
-        (Some(credential), _) => Some(credential),
-        (None, Some(_)) => Some(get_process_credential().map_err(|error| {
-            CtlError::invalid_argument(format!(
-                "No credential to ask another namespace with: {error}"
-            ))
-        })?),
-        (None, None) => None,
-    };
-
-    match TcpStreamProvider::from_addr(addrs.as_slice()).await {
-        Ok(mut stream) => {
-            let status_req = PbConnStatusReq::Keys;
-            let status = match credential {
-                Some(credential) => {
-                    get_status_with_credential(&mut stream, status_req, namespace, &credential)
-                        .await
-                }
-                None => get_status(&mut stream, status_req).await,
-            };
-            match status {
-                Ok(status_resp) => match status_resp {
-                    PbConnStatusResp::Keys(keys) => {
-                        if keys.contains(&service_key.to_string()) {
-                            Ok(true)
-                        } else {
-                            Err(CtlError::not_found("Service not found in server"))
-                        }
-                    }
-                    _ => Ok(true),
-                },
-                Err(_) => Ok(false),
-            }
-        }
-        Err(_) => Err(CtlError::server_unreachable("Cannot connect to server")),
-    }
-}
 
 async fn fetch_real_status_with_addr(
     server_addr: &str,
@@ -276,6 +194,15 @@ pub struct ServiceConfigData {
     pub enable_encryption: bool,
     pub enable_keep_alive: bool,
     pub created_at: SystemTime,
+    /// Whether a connection may reach it directly rather than through the
+    /// relay. On unless turned off: a share saved before there was a choice
+    /// allows it, as `register` does.
+    #[serde(default = "direct_by_default")]
+    pub allow_direct: bool,
+}
+
+fn direct_by_default() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -294,6 +221,10 @@ pub struct ClientConfigData {
     /// an administrator connecting to a temporary credential's service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<u64>,
+    /// Whether each session tries a direct path before the relay. Off is
+    /// `connect --relay-only`.
+    #[serde(default = "direct_by_default")]
+    pub allow_direct: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -327,8 +258,12 @@ pub struct ServiceConfigInfo {
     pub protocol: String,
     pub enable_encryption: bool,
     pub enable_keep_alive: bool,
+    pub allow_direct: bool,
     pub status: String,
     pub status_message: String,
+    /// How its sessions travel, while it runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathInfo>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -347,10 +282,90 @@ pub struct ClientConfigInfo {
     /// changed since does not move.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routed_namespace: Option<u64>,
+    pub allow_direct: bool,
     pub status: String,
     pub status_message: String,
+    /// How its sessions travel, while it runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathInfo>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+}
+
+/// How a running tunnel's sessions travel: each TCP connection or UDP flow
+/// through it takes a direct path or the relay, decided when it opens.
+///
+/// A connection counts both paths and its direct attempts. A share counts
+/// only the sessions that reached it directly: the rest come in over its
+/// registration with the relay, which does not tell them apart.
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PathInfo {
+    /// Sessions open now, on each path.
+    pub active_direct: u64,
+    pub active_relay: u64,
+    /// Sessions opened since the tunnel started, on each path.
+    pub direct_sessions: u64,
+    pub relay_sessions: u64,
+    /// The stage reached by a direct attempt in flight.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<DirectStage>,
+    /// How the latest attempt ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last: Option<PathOutcome>,
+}
+
+/// How a direct attempt ended.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(tag = "path", rename_all = "camelCase")]
+pub enum PathOutcome {
+    /// It went direct, set up in this long.
+    Direct {
+        #[serde(rename = "setupMs")]
+        setup_ms: u64,
+    },
+    /// It gave way to the relay at this stage. Later sessions go straight to
+    /// the relay for a while (10 s, doubling to 5 min) before trying again.
+    Relay { stage: DirectStage },
+}
+
+impl PathInfo {
+    /// What the diagnostics of a running tunnel say about its paths; None
+    /// before any session or attempt.
+    fn of(diagnostics: &TunnelDiagnostics) -> Option<Self> {
+        let direct = diagnostics.direct.as_ref()?;
+        let last = diagnostics
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event.kind {
+                TunnelEventKind::DirectEstablished { setup_ms } => {
+                    Some(PathOutcome::Direct { setup_ms })
+                }
+                TunnelEventKind::DirectFallback { stage } => Some(PathOutcome::Relay { stage }),
+                _ => None,
+            });
+        Some(Self {
+            active_direct: direct.active_direct,
+            active_relay: direct.active_relay,
+            direct_sessions: direct.direct_sessions,
+            relay_sessions: direct.relay_sessions,
+            attempt: direct.attempt.map(|attempt| attempt.stage),
+            last,
+        })
+    }
+
+    /// What a change of is worth telling the window about: which paths are
+    /// in use, an attempt and how the last one ended, but not the counts.
+    fn shape(&self) -> (bool, bool, Option<DirectStage>, Option<bool>) {
+        (
+            self.active_direct > 0,
+            self.active_relay > 0,
+            self.attempt,
+            self.last
+                .map(|last| matches!(last, PathOutcome::Direct { .. })),
+        )
+    }
 }
 
 /// The relay this computer runs itself. The default is a stopped one.
@@ -496,8 +511,104 @@ impl PinnedTunnel {
     }
 }
 
+/// A running tunnel, as the SDK runs it for the CLI too. Dropping it stops
+/// the tunnel.
+enum TunnelHandle {
+    Share(Registration),
+    Connect(Connection),
+}
+
+impl TunnelHandle {
+    fn status(&self) -> TunnelStatus {
+        match self {
+            Self::Share(handle) => handle.status(),
+            Self::Connect(handle) => handle.status(),
+        }
+    }
+
+    fn diagnostics(&self) -> TunnelDiagnostics {
+        match self {
+            Self::Share(handle) => handle.diagnostics(),
+            Self::Connect(handle) => handle.diagnostics(),
+        }
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<TunnelStatus> {
+        match self {
+            Self::Share(handle) => handle.subscribe(),
+            Self::Connect(handle) => handle.subscribe(),
+        }
+    }
+
+    /// Its state as the list shows it, and how its sessions travel.
+    fn view(&self) -> TunnelView {
+        let diagnostics = self.diagnostics();
+        let (status, message) = match self.status() {
+            TunnelStatus::Connected => ("running", String::new()),
+            // Still dialling, or failed and trying again: "failed" is what a
+            // tunnel whose last attempt failed has always reported, while its
+            // retry loop runs on.
+            TunnelStatus::Starting | TunnelStatus::Retrying => {
+                match diagnostics
+                    .last_failure
+                    .filter(|_| diagnostics.consecutive_failures > 0)
+                {
+                    Some(failure) => ("failed", failure_message(failure, self)),
+                    None => ("retrying", "Connecting to the relay".to_string()),
+                }
+            }
+            TunnelStatus::Failed(reason) => ("failed", reason),
+            // Nothing here stops a tunnel but removing it, so a stopped one
+            // that is still held ended on its own.
+            TunnelStatus::Stopped => ("failed", "The tunnel stopped".to_string()),
+        };
+        TunnelView {
+            status,
+            message,
+            path: PathInfo::of(&diagnostics),
+        }
+    }
+}
+
+/// What the relay's last answer, or the lack of one, means for a tunnel.
+fn failure_message(failure: RecoveryFailure, handle: &TunnelHandle) -> String {
+    match failure {
+        RecoveryFailure::Dns => "The relay's address does not resolve",
+        RecoveryFailure::Transport => "Cannot reach the relay",
+        RecoveryFailure::Timeout => "The relay did not answer in time",
+        RecoveryFailure::ServiceUnavailable => match handle {
+            TunnelHandle::Share(_) => "The relay cannot take this service now",
+            TunnelHandle::Connect(_) => "The relay does not list this service",
+        },
+        RecoveryFailure::Rejected => "The relay refused this computer's credential",
+        RecoveryFailure::NetworkChanged => "The network changed; reconnecting",
+    }
+    .to_string()
+}
+
+/// A tunnel's state as the list shows it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct TunnelView {
+    status: &'static str,
+    message: String,
+    path: Option<PathInfo>,
+}
+
+impl TunnelView {
+    /// The view of a tunnel this computer has configured but is not running.
+    fn stopped(message: &str) -> Self {
+        Self {
+            status: "stopped",
+            message: message.to_string(),
+            path: None,
+        }
+    }
+}
+
 struct TunnelRuntime {
-    handle: JoinHandle<()>,
+    /// Shared only with the task that reports its changes, which holds it
+    /// weakly: removing the runtime still stops the tunnel.
+    handle: Arc<TunnelHandle>,
     pin: PinnedTunnel,
 }
 
@@ -514,46 +625,49 @@ pub struct RelayTunnels {
     pub stranded: Vec<String>,
 }
 
+/// Stops the tunnel under `key`, if there is one: dropping its handle does.
 fn abort_runtime(map: &mut HashMap<String, TunnelRuntime>, key: &str) -> bool {
-    match map.remove(key) {
-        Some(runtime) => {
-            runtime.handle.abort();
-            true
-        }
-        None => false,
-    }
+    map.remove(key).is_some()
 }
 
-fn replace_runtime(map: &mut HashMap<String, TunnelRuntime>, key: &str, runtime: TunnelRuntime) {
-    if let Some(previous) = map.insert(key.to_string(), runtime) {
-        previous.handle.abort();
-    }
-}
-
-/// Everything [`PbMapperState::finish_register`] needs once the slow work is done.
+/// Everything [`PbMapperState::finish_register`] needs once the slow work is
+/// done, the tunnel itself included: it starts before the commit, and stops
+/// again if the commit fails.
 struct RegisterCommit {
     service_key: String,
     local_address: String,
     protocol: String,
     enable_encryption: bool,
     enable_keep_alive: bool,
-    local_addrs: ResolvedAddrs,
-    remote_addrs: ResolvedAddrs,
-    credential: Credential,
-    relay: String,
+    allow_direct: bool,
+    handle: Registration,
+    pin: PinnedTunnel,
 }
 
-/// Everything [`PbMapperState::finish_connect`] needs once the slow work is done.
+/// Everything [`PbMapperState::finish_connect`] needs once the slow work is
+/// done. See [`RegisterCommit`].
 struct ConnectCommit {
     service_key: String,
     local_address: String,
     protocol: String,
     enable_keep_alive: bool,
-    local_addrs: ResolvedAddrs,
-    remote_addrs: ResolvedAddrs,
-    credential: Credential,
-    relay: String,
-    namespace: Option<u64>,
+    allow_direct: bool,
+    handle: Connection,
+    pin: PinnedTunnel,
+}
+
+/// The transport `protocol` names: TCP, or else UDP.
+fn transport_of(protocol: &str) -> Transport {
+    if protocol.eq_ignore_ascii_case("TCP") {
+        Transport::Tcp
+    } else {
+        Transport::Udp
+    }
+}
+
+/// What the SDK said when it refused a tunnel before starting it.
+fn sdk_refusal(error: pb_mapper_client::sdk::Error) -> CtlError {
+    CtlError::invalid_argument(error.to_string())
 }
 
 pub struct PbMapperState {
@@ -574,10 +688,6 @@ pub struct PbMapperState {
     local_server_status_cache: Arc<RwLock<LocalServerStatus>>,
     local_server_status_last_update: Arc<RwLock<Option<Instant>>>,
     local_server_status_refreshing: Arc<AtomicBool>,
-    service_status_cache: Arc<RwLock<HashMap<String, StatusCacheEntry>>>,
-    client_status_cache: Arc<RwLock<HashMap<String, StatusCacheEntry>>>,
-    service_status_refreshing: Arc<RwLock<HashSet<String>>>,
-    client_status_refreshing: Arc<RwLock<HashSet<String>>>,
     /// Keys currently being set up. See [`KeyClaim`]. Separate sets because a
     /// key can legitimately be registered and connected to at the same time.
     registering: Arc<SyncMutex<HashSet<String>>>,
@@ -601,6 +711,7 @@ pub async fn register_service(
     protocol: String,
     enable_encryption: bool,
     enable_keep_alive: bool,
+    allow_direct: bool,
 ) -> Result<(), CtlError> {
     // 1. Claim the key and take what the slow work needs. Microseconds.
     //    `_claim` is held to the end of the function on purpose: dropping it
@@ -614,8 +725,9 @@ pub async fn register_service(
         (claim, state.config.server_address.clone(), credential)
     };
 
-    // 2. The slow parts, with the lock released.
-    let local_addrs = resolve_addrs_async(&local_address)
+    // 2. The slow parts, with the lock released, ending with the tunnel
+    //    started.
+    resolve_addrs_async(&local_address)
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid local address: {e}")))?;
     let remote_addrs = resolve_pb_mapper_server_async(Some(&server_address))
@@ -629,6 +741,22 @@ pub async fn register_service(
                 "Failed to connect to server {server_address}: {e}"
             ))
         })?;
+    let handle = Client::from_credential(&server_address, credential, enable_keep_alive, None)
+        .register_with_options(
+            RegisterRequest {
+                key: service_key.clone(),
+                local_addr: local_address.clone(),
+                transport: transport_of(&protocol),
+                codec: enable_encryption,
+                force_namespace: false,
+            },
+            RegisterOptions {
+                allow_direct,
+                idle_timeout: None,
+            },
+        )
+        .await
+        .map_err(sdk_refusal)?;
 
     // 3. Commit. Microseconds again.
     state
@@ -640,10 +768,14 @@ pub async fn register_service(
             protocol,
             enable_encryption,
             enable_keep_alive,
-            local_addrs,
-            remote_addrs,
-            credential,
-            relay: server_address,
+            allow_direct,
+            handle,
+            pin: PinnedTunnel {
+                credential,
+                endpoint: remote_addrs,
+                relay: server_address,
+                namespace: None,
+            },
         })
         .await
 }
@@ -651,7 +783,8 @@ pub async fn register_service(
 /// Connects to a registered service. Phased exactly like [`register_service`];
 /// the slow step here is the local bind that proves the port is free.
 /// `namespace` names whose service it is when that is not this credential's
-/// own, which only the administrator key may ask for.
+/// own, which only the administrator key may ask for. With `allow_direct`
+/// each session tries a direct path first, and the relay when that fails.
 pub async fn connect_service(
     state: &Arc<Mutex<PbMapperState>>,
     service_key: String,
@@ -659,6 +792,7 @@ pub async fn connect_service(
     protocol: String,
     enable_keep_alive: bool,
     namespace: Option<u64>,
+    allow_direct: bool,
 ) -> Result<(), CtlError> {
     let (_claim, server_address, credential) = {
         let state = state.lock().await;
@@ -675,25 +809,35 @@ pub async fn connect_service(
         .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
 
     // Preflight local bind to detect "port already in use" before starting client.
-    if protocol.to_uppercase() == "TCP" {
-        let listener = TcpListenerProvider::bind(local_addrs.as_slice())
+    let transport = transport_of(&protocol);
+    let bound = match transport {
+        Transport::Tcp => TcpListenerProvider::bind(local_addrs.as_slice())
             .await
-            .map_err(|e| {
-                CtlError::address_in_use(format!(
-                    "Failed to bind local address {local_address}: {e}"
-                ))
-            })?;
-        drop(listener);
-    } else {
-        let listener = UdpListenerProvider::bind(local_addrs.as_slice())
+            .map(drop),
+        Transport::Udp => UdpListenerProvider::bind(local_addrs.as_slice())
             .await
-            .map_err(|e| {
-                CtlError::address_in_use(format!(
-                    "Failed to bind local address {local_address}: {e}"
-                ))
-            })?;
-        drop(listener);
-    }
+            .map(drop),
+    };
+    bound.map_err(|e| {
+        CtlError::address_in_use(format!("Failed to bind local address {local_address}: {e}"))
+    })?;
+    let handle = Client::from_credential(&server_address, credential, enable_keep_alive, namespace)
+        .connect_with_options(
+            ConnectRequest {
+                key: service_key.clone(),
+                local_addr: local_address.clone(),
+                transport,
+            },
+            ConnectOptions {
+                path: if allow_direct {
+                    PathPolicy::Auto
+                } else {
+                    PathPolicy::RelayOnly
+                },
+            },
+        )
+        .await
+        .map_err(sdk_refusal)?;
 
     state
         .lock()
@@ -703,11 +847,14 @@ pub async fn connect_service(
             local_address,
             protocol,
             enable_keep_alive,
-            local_addrs,
-            remote_addrs,
-            credential,
-            relay: server_address,
-            namespace,
+            allow_direct,
+            handle,
+            pin: PinnedTunnel {
+                credential,
+                endpoint: remote_addrs,
+                relay: server_address,
+                namespace,
+            },
         })
         .await
 }
@@ -790,8 +937,23 @@ mod tests {
         let other = pb_mapper_core::checksum::parse_credential(&"b".repeat(32)).unwrap();
         let relay: std::net::SocketAddr = "127.0.0.1:7666".parse().unwrap();
         let elsewhere: std::net::SocketAddr = "127.0.0.2:7666".parse().unwrap();
+        // A real handle, on a relay that is not there: only the pin matters.
+        let idle = Client::from_credential("127.0.0.1:1", retired, false, None)
+            .register_with_options(
+                RegisterRequest {
+                    key: "idle".into(),
+                    local_addr: "127.0.0.1:1".into(),
+                    transport: Transport::Tcp,
+                    codec: false,
+                    force_namespace: false,
+                },
+                RegisterOptions::default(),
+            )
+            .await
+            .unwrap();
+        let handle = Arc::new(TunnelHandle::Share(idle));
         let runtime = |credential, name: &str, addr| TunnelRuntime {
-            handle: tokio::spawn(async {}),
+            handle: handle.clone(),
             pin: PinnedTunnel {
                 credential,
                 endpoint: ResolvedAddrs::from(addr),
@@ -821,11 +983,145 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Each session of a tunnel goes direct when both ends allow it, and the
+    /// list says so; a share that keeps to the relay sends its connections
+    /// there, and the list says at which stage direct gave way.
+    #[tokio::test]
+    async fn the_list_says_which_path_each_tunnel_takes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (_process_credential_guard, state, root) = temp_state("paths").await;
+        let relay = pb_mapper_testkit::Relay::start_with_direct(
+            "ffi-paths",
+            Some(DirectServerConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                advertise: "127.0.0.1:0".parse().unwrap(),
+            }),
+        )
+        .await;
+        set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
+        state.lock().await.config.server_address = relay.addr().to_string();
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = echo.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let (mut read, mut write) = socket.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+
+        let mut ports = Vec::new();
+        for (key, direct) in [("direct", true), ("relayed", false)] {
+            register_service(
+                &state,
+                key.into(),
+                backend.clone(),
+                "TCP".into(),
+                true,
+                false,
+                direct,
+            )
+            .await
+            .unwrap();
+            let port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+            connect_service(
+                &state,
+                key.into(),
+                port.to_string(),
+                "TCP".into(),
+                false,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+            ports.push(port);
+        }
+        let running = || async {
+            let state = state.lock().await;
+            let clients = state.get_client_configs().await;
+            clients.len() == 2 && clients.iter().all(|client| client.status == "running")
+        };
+        tokio::time::timeout(pb_mapper_testkit::READY_TIMEOUT, async {
+            while !running().await {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("both connections come up");
+
+        // One session through each, held open while the list is read.
+        let mut sessions = Vec::new();
+        for port in ports {
+            let mut socket = tokio::net::TcpStream::connect(port).await.unwrap();
+            socket.write_all(b"path").await.unwrap();
+            let mut echoed = [0; 4];
+            tokio::time::timeout(
+                pb_mapper_testkit::READY_TIMEOUT,
+                socket.read_exact(&mut echoed),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(&echoed, b"path");
+            sessions.push(socket);
+        }
+
+        let state = state.lock().await;
+        let path = |key: &str, infos: &[(String, Option<PathInfo>)]| {
+            infos
+                .iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, path)| *path)
+                .unwrap_or_else(|| panic!("{key} reports no path"))
+        };
+        let clients: Vec<_> = state
+            .get_client_configs()
+            .await
+            .into_iter()
+            .map(|client| (client.service_key, client.path))
+            .collect();
+        let shares: Vec<_> = state
+            .get_service_configs()
+            .await
+            .into_iter()
+            .map(|share| (share.service_key, share.path))
+            .collect();
+
+        let direct = path("direct", &clients);
+        assert_eq!((direct.active_direct, direct.active_relay), (1, 0));
+        assert!(matches!(direct.last, Some(PathOutcome::Direct { .. })));
+        assert_eq!(path("direct", &shares).active_direct, 1);
+
+        // The relay asked the share, which declined: no grant came back.
+        let relayed = path("relayed", &clients);
+        assert_eq!((relayed.active_direct, relayed.active_relay), (0, 1));
+        assert_eq!(
+            relayed.last,
+            Some(PathOutcome::Relay {
+                stage: DirectStage::Discovering
+            })
+        );
+        // As the window reads it; `store_test.dart` parses this same shape.
+        assert_eq!(
+            serde_json::to_value(relayed).unwrap()["last"],
+            serde_json::json!({ "path": "relay", "stage": "discovering" })
+        );
+
+        drop(sessions);
+        drop(state);
+        drop(relay);
+        let _ = set_process_msg_header_key(None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The claim is what stands in for the lock that registration no longer
     /// holds across its slow phase. Without it, two callers — the window and a
     /// terminal, say — could both finish the preflight and both insert, and the
-    /// second would overwrite the first's `JoinHandle`, leaving a tunnel with
-    /// nothing able to abort it.
+    /// second would replace the first's handle, stopping a tunnel the first
+    /// caller was told had started.
     #[tokio::test]
     async fn a_second_registration_of_the_same_key_is_refused() {
         let (_process_credential_guard, state, root) = temp_state("claim").await;
@@ -844,6 +1140,7 @@ mod tests {
             "TCP".to_string(),
             false,
             false,
+            true,
         )
         .await
         .expect_err("a claimed key must be refused");
@@ -889,6 +1186,7 @@ mod tests {
             "TCP".to_string(),
             false,
             false,
+            true,
         )
         .await
         .expect_err("an unparseable local address should fail");
@@ -907,6 +1205,7 @@ mod tests {
             "TCP".to_string(),
             false,
             false,
+            true,
         )
         .await
         .expect_err("still an unparseable address");

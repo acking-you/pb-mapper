@@ -48,6 +48,10 @@ pub struct RegisterArgs {
     pub no_encrypt: bool,
     #[arg(long, default_value_t = false)]
     pub keep_alive: bool,
+    /// Accept connections only through the relay, never directly.
+    #[arg(long, default_value_t = false)]
+    #[serde(default)]
+    pub relay_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, clap::Args)]
@@ -69,6 +73,10 @@ pub struct ConnectArgs {
     #[arg(long)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<u64>,
+    /// Keep every session on the relay instead of trying a direct path first.
+    #[arg(long, default_value_t = false)]
+    #[serde(default)]
+    pub relay_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, clap::Subcommand)]
@@ -233,6 +241,7 @@ async fn run(
                 protocol(args.udp),
                 !args.no_encrypt,
                 args.keep_alive,
+                !args.relay_only,
             )
             .await?;
             Ok(proto::Response::ok(
@@ -254,6 +263,7 @@ async fn run(
                 protocol(args.udp),
                 args.keep_alive,
                 args.namespace,
+                !args.relay_only,
             )
             .await?;
             Ok(proto::Response::ok(

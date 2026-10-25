@@ -174,12 +174,20 @@ class StarSystem {
       : planets.map((p) => p.radius).reduce(math.max) + 0.2;
 }
 
-/// A tunnel carrying traffic: an arc from its planet to the relay.
+/// A tunnel carrying traffic: an arc from its planet into the relay, or for
+/// one that goes direct, past it to the planet of the service it reaches.
 class Link {
-  const Link({required this.planetId, required this.systemId});
+  const Link({
+    required this.planetId,
+    required this.targetId,
+    this.direct = false,
+  });
 
   final String planetId;
-  final String systemId;
+
+  /// The relay's star, or the service's planet.
+  final String targetId;
+  final bool direct;
 }
 
 /// Everything the galaxy shows.
@@ -256,8 +264,7 @@ GalaxyScene buildScene({
   }
   final running = {
     for (final c in connections)
-      if (c.health == TunnelHealth.running)
-        relayServiceId(c.namespace ?? ownNamespace, c.key),
+      if (c.health == TunnelHealth.running) _remoteIdOf(c, ownNamespace),
   };
   final relayPlanets = _planets(StarSystem.relayId, [
     (
@@ -300,12 +307,40 @@ GalaxyScene buildScene({
     home: false,
     online: relayOnline,
   );
+  final remotePlanet = {for (final p in relayPlanets) p.key: p.id};
   final links = [
     for (final planet in homePlanets)
-      if (planet.tunnel?.health == TunnelHealth.running)
-        Link(planetId: planet.id, systemId: StarSystem.relayId),
+      if (planet.tunnel case final tunnel?
+          when tunnel.health == TunnelHealth.running)
+        ..._links(
+          planet.id,
+          tunnel,
+          remotePlanet[_remoteIdOf(tunnel, ownNamespace)],
+        ),
   ];
   return GalaxyScene(systems: [home, relay], links: links);
+}
+
+/// The id, on the relay's side of the sky, of the service [connection]
+/// reaches: in the namespace it runs in (see `AppStore.namespaceOf`).
+String _remoteIdOf(Tunnel connection, int ownNamespace) => relayServiceId(
+  connection.routedNamespace ?? connection.namespace ?? ownNamespace,
+  connection.key,
+);
+
+/// The arcs of a running tunnel: into the relay, and for a connection that
+/// goes direct, past it to [service]'s planet — both when its sessions take
+/// both. A share's arc is its registration with the relay, whichever way
+/// its visitors arrive.
+List<Link> _links(String planetId, Tunnel tunnel, String? service) {
+  final relay = Link(planetId: planetId, targetId: StarSystem.relayId);
+  if (tunnel.kind == TunnelKind.share || service == null) return [relay];
+  final direct = Link(planetId: planetId, targetId: service, direct: true);
+  return switch (tunnel.pathMode) {
+    PathMode.direct => [direct],
+    PathMode.mixed => [relay, direct],
+    _ => [relay],
+  };
 }
 
 double _extent(List<Planet> planets) =>

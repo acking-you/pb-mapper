@@ -11,7 +11,8 @@ use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 use crate::state::{ServiceConfigInfo, ServiceStatusResponse};
 
-/// Register a service.
+/// Register a service. A nonzero `allow_direct` lets connections reach it
+/// directly rather than through the relay.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_register_service(
     handle: *mut PbMapperHandle,
@@ -20,6 +21,7 @@ pub unsafe extern "C" fn pb_mapper_register_service(
     protocol: *const c_char,
     enable_encryption: c_int,
     enable_keep_alive: c_int,
+    allow_direct: c_int,
 ) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -51,6 +53,7 @@ pub unsafe extern "C" fn pb_mapper_register_service(
             protocol,
             enable_encryption != 0,
             enable_keep_alive != 0,
+            allow_direct != 0,
         )
         .await
     });
