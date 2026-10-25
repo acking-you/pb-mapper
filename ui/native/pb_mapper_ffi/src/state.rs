@@ -89,13 +89,17 @@ async fn check_service_with_get_status(
 ) -> Result<bool, CtlError> {
     let addrs = target.resolve().await?;
     // A namespace needs a credential to ask with: the process's, when no
-    // tunnel is pinned to one.
-    let credential = credential.or_else(|| {
-        namespace
-            .is_some()
-            .then(|| get_process_credential().ok())
-            .flatten()
-    });
+    // tunnel is pinned to one. Without either the question cannot be asked
+    // there, and asked unscoped it would answer for another namespace.
+    let credential = match (credential, namespace) {
+        (Some(credential), _) => Some(credential),
+        (None, Some(_)) => Some(get_process_credential().map_err(|error| {
+            CtlError::invalid_argument(format!(
+                "No credential to ask another namespace with: {error}"
+            ))
+        })?),
+        (None, None) => None,
+    };
 
     match TcpStreamProvider::from_addr(addrs.as_slice()).await {
         Ok(mut stream) => {
