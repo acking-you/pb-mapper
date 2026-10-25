@@ -524,33 +524,60 @@ class _Frame {
 
   void links() {
     final light = palette.signal;
+    final scene = bodies.scene;
     for (var n = reader.count(); n > 0; n--) {
+      final index = reader.count();
       final curve = reader.points(reader.count());
       final particles = reader.points(reader.count());
+      final direct = scene.links[index].direct;
       final last = curve.length - 2;
       final bounds = Rect.fromPoints(
         Offset(curve[0], curve[1]),
         Offset(curve[last], curve[last + 1]),
       ).inflate(1);
-      canvas.drawPath(
-        _path(curve),
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.6
-          ..strokeCap = StrokeCap.round
-          ..shader = LinearGradient(
-            colors: [
-              light.withValues(alpha: dark ? 0.7 : 0.55),
-              light.withValues(alpha: dark ? 0.15 : 0.12),
-            ],
-          ).createShader(bounds),
-      );
-      // Particles run along the tunnel, through the relay.
+      final path = _path(curve);
+      if (direct) {
+        // A path of its own: lit end to end, with a glow under it.
+        canvas
+          ..drawPath(
+            path,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 5
+              ..strokeCap = StrokeCap.round
+              ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3)
+              ..color = light.withValues(alpha: dark ? 0.32 : 0.22),
+          )
+          ..drawPath(
+            path,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.8
+              ..strokeCap = StrokeCap.round
+              ..color = light.withValues(alpha: dark ? 0.85 : 0.7),
+          );
+      } else {
+        // Into the relay: bright where it leaves, fading as it goes in.
+        canvas.drawPath(
+          path,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.6
+            ..strokeCap = StrokeCap.round
+            ..shader = LinearGradient(
+              colors: [
+                light.withValues(alpha: dark ? 0.7 : 0.55),
+                light.withValues(alpha: dark ? 0.15 : 0.12),
+              ],
+            ).createShader(bounds),
+        );
+      }
+      // Particles run along the tunnel: through the relay, or past it.
       for (var i = 0; i < particles.length; i += 2) {
         softDisc(
           canvas,
           Offset(particles[i], particles[i + 1]),
-          dark ? 2.2 : 1.8,
+          (dark ? 2.2 : 1.8) * (direct ? 1.2 : 1),
           dark ? 2.2 : 1,
           light.withValues(alpha: 0.9),
         );

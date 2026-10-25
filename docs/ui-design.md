@@ -85,6 +85,46 @@ connecting to a second `cache` in another namespace replaces the first.
 **Test answers in words.** Settings' Test, and Save, end in one toast: the
 latency and service count, or the relay's own reason it did not answer.
 
+### Which way the traffic goes
+
+The app's tunnels run on the SDK's `Registration` and `Connection`, the
+handles the CLI runs, so they go direct as the CLI does: each session of a
+connection tries a direct path first and falls back to the relay before a
+byte is sent, and a share lets connections reach it directly. The path is
+chosen per session — a connection can hold some sessions of each — so a
+tunnel's path is what its sessions are doing now, or when none is open, how
+the last attempt ended.
+
+- **A chip** beside each running tunnel's state, `PathChip`
+  (`widgets/path.dart`): **Direct** in the signal blue with a bolt, for a
+  path of this computer's own past the relay; **Relay** and **Relay only** in
+  grey with the relay's tower; both counted when a connection holds both;
+  **Going direct…** breathing while a path is being set up. A share knows
+  only the sessions that reached it directly, so it shows a chip only for
+  those, or for Relay only. On a phone the chip takes the room left of the
+  actions.
+- **A route** in the galaxy's details panel, `PathRoute`: this computer and
+  the service at either end; the relay on the line when traffic crosses it,
+  set below an arc that clears it when it goes direct. Under it, one
+  sentence: what the path means, how long a direct one took to set up, and
+  when it is the relay after all, why — the relay offers no direct, the
+  sharing computer declines it, or the two networks could not reach each
+  other — and that later connections try again.
+- **The arcs** in the galaxy, below.
+- **A switch** under the editor's More options: *Try direct first* for a
+  connection, *Allow direct connections* for a share. Off is
+  `--relay-only`; it is saved with the tunnel and kept through an edit.
+
+Blue keeps its one meaning: this computer and what it reaches by itself. A
+relayed path is not a fault, so it is never amber or red; why it is the
+relay is in words, on hover and in the panel.
+
+The FFI reports each running tunnel's `path` (`PathInfo` in
+`native/pb_mapper_ffi/src/state.rs`) from its handle's diagnostics, and a
+task per tunnel emits a change event when its state or which paths it uses
+changes, so the window follows a path as it is chosen. The embedded relay
+offers direct as `pb-mapper server` does, over UDP on its TCP port.
+
 ## Layout
 
 The window is layered as in POCOX (`theme/glass.dart`):
@@ -122,8 +162,12 @@ perspective, after POCOX's galaxy:
   services it lists that this computer does not share. Up to six share a ring,
   outer rings turning slower. Every position comes from a stable hash, so a
   planet keeps its place between visits.
-- **Arcs**: a running tunnel is an arc of light from its planet to the relay,
-  with particles travelling along it.
+- **Arcs**: a running tunnel is an arc of light from its planet, with
+  particles travelling along it. Through the relay, it falls into the
+  relay's star, fading as it goes; a connection that goes direct is lit end
+  to end over a soft glow, its particles quicker, and lands past the relay
+  on the planet of the service it reaches. One with sessions on both has
+  both. The legend shows the two arcs beside the colours.
 - **Motion**: a new planet spirals out of its star; a change of state sends a
   ripple round its ring; a removed one fades where it was. Reduced motion
   stills all of it.
@@ -151,7 +195,10 @@ int64_t pb_mapper_galaxy_frame_v1(const double *scene, uint32_t scene_len,
 
 It is a leaf call on buffers the app owns — no allocation to free, no lock, no
 callback, panics caught — returning the values written, minus the length
-needed when `out` is short, or -1 for malformed input. The scene is encoded only
+needed when `out` is short, or -1 for malformed input. The buffers carry
+their layout's version (`VERSION`, 2 since an arc can end on a planet), so a
+library and a Dart side of different layouts refuse each other rather than
+misread. The scene is encoded only
 when it changes; each frame writes 13 values (size, camera, clock, selection)
 and reads the result in place. None of the JSON-envelope exports and none of the
 SDK crates changed.

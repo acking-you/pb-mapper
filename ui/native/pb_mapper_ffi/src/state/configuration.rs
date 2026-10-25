@@ -23,11 +23,6 @@ impl PbMapperState {
         }
         self.local_server_status_refreshing
             .store(false, Ordering::Release);
-
-        self.service_status_cache.write().await.clear();
-        self.client_status_cache.write().await.clear();
-        self.service_status_refreshing.write().await.clear();
-        self.client_status_refreshing.write().await.clear();
     }
     pub fn new(app_directory_path: Option<String>) -> Self {
         let config_dir = Self::get_config_dir(&app_directory_path);
@@ -52,10 +47,6 @@ impl PbMapperState {
             local_server_status_cache,
             local_server_status_last_update: Arc::new(RwLock::new(None)),
             local_server_status_refreshing: Arc::new(AtomicBool::new(false)),
-            service_status_cache: Arc::new(RwLock::new(HashMap::new())),
-            client_status_cache: Arc::new(RwLock::new(HashMap::new())),
-            service_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
-            client_status_refreshing: Arc::new(RwLock::new(HashSet::new())),
             registering: Arc::new(SyncMutex::new(HashSet::new())),
             connecting: Arc::new(SyncMutex::new(HashSet::new())),
         };
@@ -210,6 +201,7 @@ impl PbMapperState {
         protocol: &str,
         enable_encryption: bool,
         enable_keep_alive: bool,
+        allow_direct: bool,
     ) -> Result<(), CtlError> {
         let mut store = self.load_service_configs();
         let now = SystemTime::now();
@@ -225,6 +217,7 @@ impl PbMapperState {
             } else {
                 now
             },
+            allow_direct,
         };
 
         store.services.insert(service_key.to_string(), config);
@@ -271,6 +264,7 @@ impl PbMapperState {
         protocol: &str,
         enable_keep_alive: bool,
         namespace: Option<u64>,
+        allow_direct: bool,
     ) -> Result<(), CtlError> {
         let mut store = self.load_client_configs();
         let now = SystemTime::now();
@@ -286,6 +280,7 @@ impl PbMapperState {
                 now
             },
             namespace,
+            allow_direct,
         };
 
         store.clients.insert(service_key.to_string(), config);

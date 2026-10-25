@@ -10,6 +10,7 @@ import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
+import 'package:pb_mapper_ui/src/widgets/path.dart';
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
 
@@ -205,6 +206,7 @@ class TunnelCard extends StatelessWidget {
         ),
       ],
     );
+    final hasPath = tunnel.pathMode != null;
     final actions = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -234,10 +236,15 @@ class TunnelCard extends StatelessWidget {
                     const SizedBox(width: 12),
                     Expanded(child: identity),
                     const SizedBox(width: 10),
+                    if (hasPath) ...[
+                      PathChip(tunnel: tunnel),
+                      const SizedBox(width: 6),
+                    ],
                     actions,
                   ],
                 );
               }
+              // The path takes the room the actions leave beside them.
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -249,9 +256,19 @@ class TunnelCard extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  Align(
-                    alignment: AlignmentDirectional.centerEnd,
-                    child: actions,
+                  Row(
+                    children: [
+                      if (hasPath)
+                        Flexible(
+                          child: Align(
+                            alignment: AlignmentDirectional.centerStart,
+                            child: PathChip(tunnel: tunnel, shrinks: true),
+                          ),
+                        )
+                      else
+                        const Spacer(),
+                      actions,
+                    ],
                   ),
                 ],
               );

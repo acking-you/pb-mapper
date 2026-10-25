@@ -159,8 +159,13 @@ class FakePbMapperApi implements PbMapperApiClient {
     required String protocol,
     required bool enableEncryption,
     required bool enableKeepAlive,
+    bool allowDirect = true,
   }) async {
-    calls.add('registerService($serviceKey)');
+    calls.add(
+      allowDirect
+          ? 'registerService($serviceKey)'
+          : 'registerService($serviceKey, relay only)',
+    );
     if (_refused() case final refused?) return refused;
     services = [
       for (final s in services)
@@ -171,6 +176,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         protocol: protocol,
         encrypted: enableEncryption,
         status: startStatus,
+        allowDirect: allowDirect,
       ),
     ];
     return _ok;
@@ -218,11 +224,13 @@ class FakePbMapperApi implements PbMapperApiClient {
     required String protocol,
     required bool enableKeepAlive,
     int? namespace,
+    bool allowDirect = true,
   }) async {
+    final target = namespace == null ? serviceKey : '$serviceKey@$namespace';
     calls.add(
-      namespace == null
-          ? 'connectService($serviceKey)'
-          : 'connectService($serviceKey@$namespace)',
+      allowDirect
+          ? 'connectService($target)'
+          : 'connectService($target, relay only)',
     );
     if (_refused() case final refused?) return refused;
     clients = [
@@ -233,6 +241,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         localAddress: localAddress,
         status: startStatus,
         namespace: namespace,
+        allowDirect: allowDirect,
       ),
     ];
     return _ok;
@@ -249,6 +258,7 @@ class FakePbMapperApi implements PbMapperApiClient {
                 localAddress: c.localAddress,
                 status: 'stopped',
                 namespace: c.namespace,
+                allowDirect: c.allowDirect,
               )
             : c,
     ];
@@ -592,6 +602,8 @@ ClientConfigInfo fakeClient({
   String message = '',
   int? namespace,
   int? routedNamespace,
+  bool allowDirect = true,
+  TunnelPath? path,
 }) => ClientConfigInfo(
   serviceKey: serviceKey,
   localAddress: localAddress,
@@ -599,6 +611,8 @@ ClientConfigInfo fakeClient({
   enableKeepAlive: true,
   namespace: namespace,
   routedNamespace: routedNamespace,
+  allowDirect: allowDirect,
+  path: path,
   status: status,
   statusMessage: message,
   createdAtMs: 1,
@@ -613,14 +627,18 @@ ServiceConfigInfo fakeService({
   bool encrypted = true,
   String status = 'running',
   String message = '',
+  bool allowDirect = true,
+  TunnelPath? path,
 }) => ServiceConfigInfo(
   serviceKey: serviceKey,
   localAddress: localAddress,
   protocol: protocol,
   enableEncryption: encrypted,
   enableKeepAlive: true,
+  allowDirect: allowDirect,
   status: status,
   statusMessage: message,
+  path: path,
   createdAtMs: 1,
   updatedAtMs: 1,
 );

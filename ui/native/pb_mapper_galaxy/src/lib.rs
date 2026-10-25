@@ -7,7 +7,9 @@
 //! or the relay server it works through. Planets orbit them: around this
 //! computer its tunnels (the services it shares and the connections it holds),
 //! around the relay the services registered there. A link is a live tunnel,
-//! drawn as a curve from a planet to another system's star.
+//! drawn as a curve from a planet to another system's star — or, for one that
+//! goes direct and so never crosses the relay, to the planet of the service it
+//! reaches.
 //!
 //! The UI calls `pb_mapper_galaxy_frame_v1` (exported by `pb-mapper-ffi`, a
 //! thin wrapper over [`compute`]) once per frame through a leaf `dart:ffi` call
@@ -36,7 +38,9 @@
 //!   appeared, so it spirals out of its star, or NaN), rippled (when its status
 //!   last changed, so a ripple crosses it, or NaN), label width and height, then
 //!   the strong label's width and height;
-//! - per link (2 values): the planet it starts from and the system it ends at;
+//! - per link (3 values): the planet it starts from, the body it ends at
+//!   (numbered as in the frame: a system's star, or a planet), and direct
+//!   (0/1), whose particles travel faster;
 //! - per star layer: its parallax and number of buckets, then per bucket its
 //!   twinkle phase, its number of stars and their unit coordinates (x, y each,
 //!   in 0..1 of the view).
@@ -62,7 +66,8 @@
 //!   and its planets: count, then per planet its index in the planet list, x,
 //!   y, radius, depth, opacity, ripple progress (-1 none) and behind its star
 //!   (0/1);
-//! - links: count, then per link its curve's points and its particles' points;
+//! - links: count, then per link its index in the scene's links, its curve's
+//!   points and its particles' points;
 //! - labels: count, then per label the body (numbered as in the frame), strong
 //!   (0/1), x, y.
 mod scratch;
@@ -74,7 +79,7 @@ use std::f64::consts::PI;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// The buffer layouts' version; both ends name it.
-pub const VERSION: f64 = 1.0;
+pub const VERSION: f64 = 2.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct V3 {
@@ -252,10 +257,19 @@ struct StarLayer {
 struct Scene<'a> {
     systems: Vec<System>,
     planets: Vec<Planet>,
-    /// Live tunnels: from a planet to a system's star.
-    links: Vec<(usize, usize)>,
+    links: Vec<Link>,
     layers: Vec<StarLayer>,
     stars: &'a [f64],
+}
+
+/// A live tunnel: from a planet to a body.
+#[derive(Clone, Copy, Debug)]
+struct Link {
+    /// The planet it starts from.
+    from: usize,
+    /// Systems first, then planets: a system's star, or a planet.
+    to: usize,
+    direct: bool,
 }
 
 const SYSTEM_FIELDS: usize = 9;
@@ -325,11 +339,12 @@ impl<'a> Scene<'a> {
         }
         let mut links = Vec::with_capacity(n_links);
         for _ in 0..n_links {
-            let f = fields.take(2)?;
-            links.push((
-                count(f[0], n_planets.checked_sub(1)?)?,
-                count(f[1], n_systems.checked_sub(1)?)?,
-            ));
+            let f = fields.take(3)?;
+            links.push(Link {
+                from: count(f[0], n_planets.checked_sub(1)?)?,
+                to: count(f[1], (n_systems + n_planets).checked_sub(1)?)?,
+                direct: f[2] != 0.0,
+            });
         }
         let mut layers = Vec::with_capacity(n_layers);
         for _ in 0..n_layers {
@@ -810,17 +825,23 @@ fn systems(scene: &Scene, frame: &Frame, camera: &Camera, out: &mut Out, scratch
     }
 }
 
-/// Each live tunnel as a raised quadratic curve from its planet to the other
-/// system's star, with three particles travelling along it.
+/// Each live tunnel as a raised quadratic curve from its planet to the body it
+/// ends at, with three particles travelling along it: faster on a direct one.
 fn links(scene: &Scene, frame: &Frame, camera: &Camera, out: &mut Out) {
     let count = out.hole();
     let mut n = 0;
-    for &(planet, to) in &scene.links {
-        let p = &scene.planets[planet];
-        let from = scene.systems[p.system]
+    let planet_at = |index: usize| {
+        let p = &scene.planets[index];
+        scene.systems[p.system]
             .position
-            .add(p.offset_at(frame.orbit_time()));
-        let to = scene.systems[to].position;
+            .add(p.offset_at(frame.orbit_time()))
+    };
+    for (index, link) in scene.links.iter().enumerate() {
+        let from = planet_at(link.from);
+        let to = match link.to.checked_sub(scene.systems.len()) {
+            Some(planet) => planet_at(planet),
+            None => scene.systems[link.to].position,
+        };
         let rise = to.sub(from).length() * 0.42 + 0.4;
         let control = from.lerp(to, 0.5).add(V3::new(0.0, rise, 0.0));
         let at = |t: f64| {
@@ -839,14 +860,16 @@ fn links(scene: &Scene, frame: &Frame, camera: &Camera, out: &mut Out) {
         if len < 2 {
             continue;
         }
+        out.push(index as f64);
         out.points(&points[..len]);
+        let speed = if link.direct { 0.34 } else { 0.22 };
         let mut particles = [(0.0, 0.0); 3];
         let mut len = 0;
         for k in 0..3 {
             let t = if frame.still {
                 (k + 1) as f64 / 4.0
             } else {
-                (frame.time * 0.22 + k as f64 / 3.0).rem_euclid(1.0)
+                (frame.time * speed + k as f64 / 3.0).rem_euclid(1.0)
             };
             if let Some(p) = camera.at(at(t)) {
                 particles[len] = (p.x, p.y);

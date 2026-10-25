@@ -323,7 +323,7 @@ class _EmptyCard extends StatelessWidget {
   }
 }
 
-/// What the colours mean.
+/// What the colours mean, and the two kinds of arc.
 class _Legend extends StatelessWidget {
   const _Legend();
 
@@ -331,12 +331,12 @@ class _Legend extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final scheme = Theme.of(context).colorScheme;
-    Widget entry(Color color, String label) => Padding(
+    Widget labelled(Widget glyph, String label) => Padding(
       padding: const EdgeInsets.only(right: 12),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          PlanetGlyph(color: color, size: 16),
+          glyph,
           const SizedBox(width: 4),
           Text(
             label,
@@ -344,6 +344,15 @@ class _Legend extends StatelessWidget {
           ),
         ],
       ),
+    );
+    Widget entry(Color color, String label) =>
+        labelled(PlanetGlyph(color: color, size: 16), label);
+    Widget arc(bool direct, String label) => labelled(
+      CustomPaint(
+        size: const Size(20, 10),
+        painter: _ArcSample(signalColor(scheme), direct: direct),
+      ),
+      label,
     );
     return ExcludeSemantics(
       child: Glass(
@@ -367,9 +376,62 @@ class _Legend extends StatelessWidget {
               l10n.healthStopped,
             ),
             entry(availableColor(scheme), l10n.healthAvailable),
+            arc(true, l10n.pathDirect),
+            arc(false, l10n.pathRelay),
           ],
         ),
       ),
     );
   }
+}
+
+/// A short arc as the galaxy draws one: lit end to end for a direct path,
+/// fading into the relay for the other.
+class _ArcSample extends CustomPainter {
+  _ArcSample(this.color, {required this.direct});
+
+  final Color color;
+  final bool direct;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(0, size.height)
+      ..quadraticBezierTo(
+        size.width / 2,
+        -size.height / 2,
+        size.width,
+        size.height,
+      );
+    final stroke = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = direct ? 1.8 : 1.6;
+    if (direct) {
+      canvas.drawPath(
+        path,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 4
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2)
+          ..color = color.withValues(alpha: 0.3),
+      );
+      canvas.drawPath(path, stroke..color = color.withValues(alpha: 0.85));
+    } else {
+      canvas.drawPath(
+        path,
+        stroke
+          ..shader = LinearGradient(
+            colors: [
+              color.withValues(alpha: 0.7),
+              color.withValues(alpha: 0.12),
+            ],
+          ).createShader(Offset.zero & size),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_ArcSample old) =>
+      old.color != color || old.direct != direct;
 }
