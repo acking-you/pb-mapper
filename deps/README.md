@@ -8,7 +8,7 @@ Issue #13 新增直接依赖使用自己的 GitHub fork 和 submodule，维护�
 
 | 本地目录 | fork | 上游 / 基线 tag | 固定 commit | 许可证 |
 |---|---|---|---|---|
-| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/codex/pb-mapper-issue-13) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `quinn-proto-0.11.19` | `70135460fecf8dae7597b00c8ede3f15d69a36f8` | MIT OR Apache-2.0 |
+| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/codex/pb-mapper-issue-13) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `quinn-proto-0.11.19` | `933438363da5db1fc8fc32dcfa2a66b486a695d5` | MIT OR Apache-2.0 |
 | `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/codex/pb-mapper-issue-13) | [rustls/rcgen](https://github.com/rustls/rcgen), `v0.14.10` | `f4a3b165c467c070d5c74b86acc2c3f0a0be10ab` | MIT OR Apache-2.0 |
 | `deps/stun-proto` | [acking-you/stun-proto](https://github.com/acking-you/stun-proto/tree/codex/pb-mapper-issue-13) | [ystreet/stun-proto](https://github.com/ystreet/stun-proto), `v2.0.3` | `0c465c121ae42ced958c5096740329edec46522b` | MIT OR Apache-2.0 |
 
