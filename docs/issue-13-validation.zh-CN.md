@@ -81,7 +81,7 @@ lookup confirms that the hint is redundant. It preserves the socket/port,
 payload, ECN and segmentation. It neither drops a required source address nor
 changes authenticated direct negotiation or post-commit replay rules.
 
-Windows x64 / Rust 1.99.1 validation:
+Initial `pocox` maintenance-branch validation on Windows x64 / Rust 1.99.1:
 
 - Quinn UDP: 2 regression tests, 8 existing socket tests, formatting and
   `clippy -p quinn-udp --all-targets --locked -- -D warnings` passed.
@@ -96,6 +96,15 @@ Windows x64 / Rust 1.99.1 validation:
   relay-loss survival, then timed out restoring coordinator observations at
   line 159. Replacing Quinn with its original source reproduces the same
   timeout, so this pre-existing failure is not attributed to the UDP fix.
+
+The `master` forward-port (0.9.x) passed all 6 client direct unit tests and
+all 3 CLI direct integration tests, including coordinator restart, on the
+same Windows host. Workspace formatting and Clippy also passed. The TLS
+boundary fixture now advertises one discovered IPv4 loopback path: racing
+several candidates could pair different TLS sessions for its binding check.
+The unmodified Quinn baseline reproduced that fixture failure. Wrong-peer
+certificate and wrong-session binding rejection assertions remain intact;
+the integration tests continue exercising normal candidate discovery.
 
 This does not claim phone acceptance on an updated POCOX installation or
 traversal through arbitrary NATs. The running host was not replaced.
