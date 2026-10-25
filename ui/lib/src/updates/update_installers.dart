@@ -155,9 +155,11 @@ abstract final class WindowsInstallerUpdate {
   /// update did not go in.
   static String script(String installer, int processId, String app) {
     String quote(String text) => "'${text.replaceAll("'", "''")}'";
+    // A Windows path, read as Windows reads it whatever runs this, so the
+    // script is the same when a test builds it elsewhere.
+    final folder = installer.lastIndexOf(RegExp(r'[\\/]'));
     final log =
-        '${File(installer).parent.path}${Platform.pathSeparator}'
-        'setup.log';
+        '${folder < 0 ? '.' : installer.substring(0, folder)}\\setup.log';
     return [
       'try { Wait-Process -Id $processId -Timeout 60 -ErrorAction Stop } catch {}',
       'if (Get-Process -Id $processId -ErrorAction SilentlyContinue) { exit 1 }',
