@@ -130,7 +130,17 @@ fn spawn_hidden_powershell(script: &str) -> std::io::Result<()> {
     // Any other failure is the real one, and is reported as it is.
     const ERROR_ACCESS_DENIED: i32 = 5;
     match spawn(flags | CREATE_BREAKAWAY_FROM_JOB) {
-        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => spawn(flags),
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            // Said, because a job that also kills its processes when it
+            // closes takes the hand-off with the app, and the update then
+            // does not go in. An app opened from Explorer has no such job.
+            tracing::warn!(
+                "the app's job forbids leaving it; the update hand-off starts \
+                 inside it, and does not outlive the app if the job kills \
+                 its processes on close"
+            );
+            spawn(flags)
+        }
         started => started,
     }
     .map(drop)
