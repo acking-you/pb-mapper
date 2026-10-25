@@ -679,15 +679,16 @@ void main() {
 
       /// One update whose setup exits with [exitCode]: its download folder,
       /// once the app has been reopened.
-      Future<Directory> update(int exitCode) async {
-        final download = Directory('${dir.path}\\download-$exitCode')
-          ..createSync();
-        final reopened = File('${dir.path}\\reopened-$exitCode.txt');
+      Future<Directory> update(int exitCode, {bool shared = false}) async {
+        final name = '$exitCode${shared ? '-shared' : ''}';
+        final download = Directory('${dir.path}\\download-$name')..createSync();
+        if (shared) File('${download.path}\\other.txt').writeAsStringSync('');
+        final reopened = File('${dir.path}\\reopened-$name.txt');
         final installer = File('${download.path}\\setup.cmd')
           ..writeAsStringSync(
             '@echo %*> "${installed.path}"\r\n@exit /b $exitCode\r\n',
           );
-        final app = File('${dir.path}\\app-$exitCode.cmd')
+        final app = File('${dir.path}\\app-$name.cmd')
           ..writeAsStringSync('@echo reopened> "${reopened.path}"\r\n');
         // The app: a process that ends a moment after the hand-off begins.
         final running = await Process.start('powershell.exe', [
@@ -717,6 +718,11 @@ void main() {
 
       // Installed: nothing of the download is left.
       expect((await update(0)).existsSync(), isFalse);
+      // Only what the update made is removed: anything else in its folder,
+      // and so the folder, stays.
+      final shared = await update(0, shared: true);
+      expect(File('${shared.path}\\setup.cmd').existsSync(), isFalse);
+      expect(File('${shared.path}\\other.txt').existsSync(), isTrue);
       // Not installed: the installer goes, its folder (and setup's log) stay.
       final failed = await update(1);
       expect(failed.existsSync(), isTrue);

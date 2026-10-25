@@ -160,16 +160,19 @@ abstract final class WindowsInstallerUpdate {
     // script is the same when a test builds it elsewhere. The installer has
     // its download folder to itself.
     final cut = installer.lastIndexOf(RegExp(r'[\\/]'));
-    final folder = cut < 0 ? null : installer.substring(0, cut);
+    final folder = cut <= 0 ? null : installer.substring(0, cut);
     final log = '${folder ?? '.'}\\setup.log';
     final removeInstaller =
         'Remove-Item -LiteralPath ${quote(installer)} -ErrorAction SilentlyContinue';
     // Installed: nothing left to keep. Not installed: the log stays, for
-    // whoever asks why.
+    // whoever asks why. Only what the update made is removed, then the
+    // folder if that left it empty: a folder holding anything else, or a
+    // path that is not the download's own folder, is never touched.
     final cleanUp = folder == null
         ? removeInstaller
         : 'if (\$setup.ExitCode -eq 0) { Remove-Item -LiteralPath '
-              '${quote(folder)} -Recurse -Force -ErrorAction SilentlyContinue } '
+              '${quote(installer)},${quote(log)} -ErrorAction SilentlyContinue; '
+              'try { [IO.Directory]::Delete(${quote(folder)}) } catch {} } '
               'else { $removeInstaller }';
     return [
       'try { Wait-Process -Id $processId -Timeout 60 -ErrorAction Stop } catch {}',
