@@ -56,6 +56,9 @@ impl PbMapperState {
                 drop(socket);
                 Some(DirectServerConfig {
                     listen: direct_listen,
+                    // Only the bound port is announced: each client pairs it
+                    // with the relay address it dialled, which is right
+                    // wherever the UDP port is reached like the TCP one.
                     advertise: std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                 })
             }

@@ -625,7 +625,8 @@ pub struct RelayTunnels {
     pub stranded: Vec<String>,
 }
 
-/// Stops the tunnel under `key`, if there is one: dropping its handle does.
+/// Stops the tunnel under `key`, if there is one: dropping its handle does,
+/// since the SDK's `LiveTunnel` cancels and aborts its worker on drop.
 fn abort_runtime(map: &mut HashMap<String, TunnelRuntime>, key: &str) -> bool {
     map.remove(key).is_some()
 }
