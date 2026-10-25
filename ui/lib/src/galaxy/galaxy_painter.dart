@@ -172,7 +172,7 @@ class GalaxyGeometry {
       stars: starfield.data,
       systemLabel: (system) => labels.of(system.label, styles.system).size,
       planetLabel: (planet, {required strong}) =>
-          labels.of(planet.key, strong ? styles.strong : styles.base).size,
+          labels.of(planet.label, strong ? styles.strong : styles.base).size,
       appeared: view.appeared,
       rippled: view.rippled,
     );
@@ -589,7 +589,7 @@ class _Frame {
       } else {
         painter.labels
             .of(
-              bodies.planets[body - bodies.systems.length].key,
+              bodies.planets[body - bodies.systems.length].label,
               strong ? styles.strong : styles.base,
             )
             .paint(canvas, offset);

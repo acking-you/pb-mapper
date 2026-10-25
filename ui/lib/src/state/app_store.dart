@@ -5,7 +5,10 @@ import 'package:pb_mapper_ui/src/common/polling.dart';
 import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/state/remote_service.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
+
+export 'package:pb_mapper_ui/src/state/remote_service.dart';
 
 /// Where the relay stands, as far as this window knows.
 enum RelayState {
@@ -90,26 +93,68 @@ class AppStore extends ChangeNotifier {
   /// Every tunnel this computer owns, shares first.
   List<Tunnel> get tunnels => [...shares, ...connections];
 
-  /// Keys the relay lists right now; empty while it is not answering.
-  List<String> get relayServices {
+  /// Who this computer's credential is to the relay, read with each relay
+  /// check: it decides which namespace this computer's own tunnels are in,
+  /// and whether every namespace is in view.
+  RelayIdentity identity = RelayIdentity.unknown;
+
+  /// The administrator listing of every namespace's services, while this
+  /// computer holds the administrator key and the relay answers it.
+  List<RelayService>? _everyService;
+
+  /// This computer's own namespace: a temporary credential's key id, or the
+  /// administrator's, 0.
+  int get ownNamespace =>
+      identity.role == RelayRole.temporary ? identity.keyId ?? 0 : 0;
+
+  /// Every service the relay lists right now; empty while it is not
+  /// answering. With the administrator key, every namespace's: the
+  /// administrator can connect to any of them. Otherwise this credential's
+  /// own, which is all it can see.
+  List<RemoteService> get relayServices {
     final relay = this.relay;
     if (relay == null || !relay.serverAvailable) return const [];
-    return relay.registeredServices;
+    if (_everyService case final every?) {
+      return [
+        for (final s in every)
+          RemoteService(name: s.name, namespace: s.namespace, owner: s.keyId),
+      ];
+    }
+    return [
+      for (final name in relay.registeredServices)
+        RemoteService(name: name, namespace: ownNamespace),
+    ];
   }
 
-  /// Keys on the relay that this computer does not share itself: what there
-  /// is to connect to.
-  List<String> get remoteServices {
+  /// Services on the relay that this computer does not share itself: what
+  /// there is to connect to, by name.
+  List<RemoteService> get remoteServices {
     final mine = {for (final s in shares) s.key};
     return [
-      for (final key in relayServices)
-        if (!mine.contains(key)) key,
-    ]..sort();
+      for (final s in relayServices)
+        if (s.namespace != ownNamespace || !mine.contains(s.name)) s,
+    ]..sort((a, b) {
+      final byName = a.name.compareTo(b.name);
+      return byName != 0 ? byName : a.namespace.compareTo(b.namespace);
+    });
   }
 
-  /// This computer's connection to [key], if it has one.
-  Tunnel? connectionTo(String key) =>
-      connections.firstWhereOrNull((c) => c.key == key);
+  /// The service on the relay that [id] names, if it lists one.
+  RemoteService? remoteById(String id) =>
+      relayServices.firstWhereOrNull((s) => s.id == id);
+
+  /// The namespace [connection] subscribes in, as the relay knows it.
+  int namespaceOf(Tunnel connection) => connection.namespace ?? ownNamespace;
+
+  /// This computer's connection to [service], if it has one.
+  Tunnel? connectionTo(RemoteService service) => connections.firstWhereOrNull(
+    (c) => c.key == service.name && namespaceOf(c) == service.namespace,
+  );
+
+  /// The namespace to connect to [service] in: its own, when that is not
+  /// this computer's. Only the administrator key sees such a service.
+  int? connectNamespace(RemoteService service) =>
+      service.namespace == ownNamespace ? null : service.namespace;
 
   /// The tunnel of [kind] for [key], if there is one.
   Tunnel? find(TunnelKind kind, String key) =>
@@ -196,9 +241,30 @@ class AppStore extends ChangeNotifier {
         idleConnections: '',
       );
     }
+    // Who this computer is decides what it can see: the administrator key
+    // sees every namespace's services, so it asks for all of them. The
+    // identity is read from this computer's own credential, without the
+    // relay.
+    var identity = this.identity;
+    try {
+      identity = await api.relayIdentity();
+    } catch (error) {
+      debugPrint('Reading this computer\'s identity failed: $error');
+    }
+    List<RelayService>? every;
+    if (next.serverAvailable && identity.isAdmin) {
+      try {
+        every = await api.adminServices();
+      } catch (error) {
+        // This credential's own namespace, from the status, is still there.
+        debugPrint('Listing every namespace\'s services failed: $error');
+      }
+    }
     if (ask != _relayAsk) return;
     _checking = false;
     relay = next;
+    this.identity = identity;
+    _everyService = every;
     _notify();
   }
 
@@ -266,6 +332,7 @@ class AppStore extends ChangeNotifier {
       localAddress: draft.localAddress,
       protocol: draft.protocol,
       enableKeepAlive: draft.keepAlive,
+      namespace: draft.namespace,
     ),
   };
 

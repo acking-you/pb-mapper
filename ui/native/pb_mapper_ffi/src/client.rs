@@ -11,7 +11,9 @@ use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 use crate::state::{ClientConfigInfo, ClientStatusResponse};
 
-/// Connect client to service.
+/// Connect client to service. `namespace` is the temporary credential whose
+/// service it is, for the administrator key; negative for this credential's
+/// own namespace.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_connect_service(
     handle: *mut PbMapperHandle,
@@ -19,6 +21,7 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
     local_address: *const c_char,
     protocol: *const c_char,
     enable_keep_alive: c_int,
+    namespace: i64,
 ) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -51,6 +54,7 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
             local_address,
             protocol,
             enable_keep_alive != 0,
+            u64::try_from(namespace).ok(),
         )
         .await
     });

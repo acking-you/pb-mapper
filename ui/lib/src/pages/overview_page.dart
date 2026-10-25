@@ -40,6 +40,7 @@ class _OverviewPageState extends State<OverviewPage> {
       relay: store.hasRelay ? store.relayAddress : null,
       online: store.relayState == RelayState.online,
       remote: store.remoteServices,
+      ownNamespace: store.ownNamespace,
       homeLabel: homeLabel,
     );
     if (inputs == _inputs) return _scene;
@@ -50,6 +51,7 @@ class _OverviewPageState extends State<OverviewPage> {
       relayAddress: inputs.relay,
       relayOnline: inputs.online,
       remote: inputs.remote,
+      ownNamespace: inputs.ownNamespace,
       homeLabel: homeLabel,
     );
   }
@@ -182,6 +184,7 @@ class _SceneInputs {
     required this.relay,
     required this.online,
     required this.remote,
+    required this.ownNamespace,
     required this.homeLabel,
   });
 
@@ -189,7 +192,8 @@ class _SceneInputs {
   final List<Tunnel> connections;
   final String? relay;
   final bool online;
-  final List<String> remote;
+  final List<RemoteService> remote;
+  final int ownNamespace;
   final String homeLabel;
 
   @override
@@ -200,6 +204,7 @@ class _SceneInputs {
       other.relay == relay &&
       other.online == online &&
       listEquals(other.remote, remote) &&
+      other.ownNamespace == ownNamespace &&
       other.homeLabel == homeLabel;
 
   @override
@@ -209,6 +214,7 @@ class _SceneInputs {
     relay,
     online,
     Object.hashAll(remote),
+    ownNamespace,
     homeLabel,
   );
 }

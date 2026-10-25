@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_backdrop.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_frame.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_model.dart';
+import 'package:pb_mapper_ui/src/state/remote_service.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 
 import 'fake_pb_mapper_api.dart';
@@ -28,7 +29,7 @@ GalaxyScene _scene({int shares = 3, int remote = 4}) => buildScene(
   ],
   relayAddress: 'relay.example:7666',
   relayOnline: true,
-  remote: [for (var i = 0; i < remote; i++) 'remote-$i'],
+  remote: [for (var i = 0; i < remote; i++) RemoteService(name: 'remote-$i')],
   homeLabel: 'This computer',
 );
 

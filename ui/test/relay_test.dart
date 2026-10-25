@@ -101,13 +101,14 @@ void main() {
     ]) {
       expect(find.byKey(Key('relay-section-$section')), findsOneWidget);
     }
-    // Two services named `cache`: the administrator's own can be connected
-    // to from here; credential #3's is for that credential's computers.
+    // Two services named `cache`: the administrator's own, and credential
+    // #3's, tagged as that credential's. Both can be connected to from here.
     expect(find.byKey(const Key('relay-service-cache')), findsOneWidget);
     expect(find.byKey(const Key('relay-service-3/cache')), findsOneWidget);
+    expect(find.byKey(const Key('relay-owner-3/cache')), findsOneWidget);
+    expect(find.byKey(const Key('relay-owner-cache')), findsNothing);
     expect(find.byKey(const Key('connect-cache')), findsOneWidget);
-    expect(find.byKey(const Key('connect-3/cache')), findsNothing);
-    expect(find.byKey(const Key('relay-namespace-3/cache')), findsOneWidget);
+    expect(find.byKey(const Key('connect-3/cache')), findsOneWidget);
     expect(find.byKey(const Key('connect-nas')), findsNothing);
 
     // The connections behind a service unfold under it, and only its own.
@@ -158,6 +159,29 @@ void main() {
     await tester.tap(find.byKey(const Key('tunnel-submit')));
     await settle(tester);
     expect(api.calls, ['connectService(cache)']);
+    await finish(tester);
+  });
+
+  testWidgets('an administrator connects to a credential\'s service', (
+    tester,
+  ) async {
+    // Nothing of the administrator's own: everything is credentials'.
+    final api = FakePbMapperApi()..namespacedServices = [(3, 'cam')];
+    await _open(tester, api);
+    await tester.tap(find.byKey(const Key('connect-3/cam')));
+    await settle(tester);
+    expect(find.byKey(const Key('tunnel-namespace')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('tunnel-submit')));
+    await settle(tester);
+    expect(api.calls, ['connectService(cam@3)']);
+    // The connection stands against that credential's service, not one of
+    // the administrator's own of the same name.
+    expect(find.byKey(const Key('connect-3/cam')), findsNothing);
+    await finish(tester);
+
+    // The other pages count it too: not "no services".
+    await pumpApp(tester, api, page: AppPage.tunnels);
+    expect(find.textContaining('credential #3'), findsOneWidget);
     await finish(tester);
   });
 

@@ -27,12 +27,20 @@ void main() {
     () async {
       final store = await _started(
         FakePbMapperApi(
-          services: [fakeService(serviceKey: 'web')],
-          serverServices: ['web', 'zeta', 'alpha'],
-        ),
+            services: [fakeService(serviceKey: 'web')],
+            serverServices: ['web', 'zeta', 'alpha'],
+          )
+          // Credential #3's `web` is not this computer's share of that name.
+          ..namespacedServices = [(3, 'web')],
       );
-      expect(store.relayServices, ['web', 'zeta', 'alpha']);
-      expect(store.remoteServices, ['alpha', 'zeta']);
+      expect(
+        [for (final s in store.relayServices) s.id],
+        ['web', 'zeta', 'alpha', '3/web'],
+      );
+      expect(
+        [for (final s in store.remoteServices) s.id],
+        ['alpha', '3/web', 'zeta'],
+      );
     },
   );
 

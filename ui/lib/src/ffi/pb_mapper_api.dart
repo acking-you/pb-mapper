@@ -90,6 +90,10 @@ class ClientConfigInfo {
   final String localAddress;
   final String protocol;
   final bool enableKeepAlive;
+
+  /// The temporary credential whose service it connects to, when it is not
+  /// this credential's own.
+  final int? namespace;
   final String status;
   final String statusMessage;
   final int createdAtMs;
@@ -100,6 +104,7 @@ class ClientConfigInfo {
     required this.localAddress,
     required this.protocol,
     required this.enableKeepAlive,
+    this.namespace,
     required this.status,
     required this.statusMessage,
     required this.createdAtMs,
@@ -112,6 +117,7 @@ class ClientConfigInfo {
       localAddress: _asString(map['localAddress']),
       protocol: _asString(map['protocol'], fallback: 'TCP'),
       enableKeepAlive: _asBool(map['enableKeepAlive']),
+      namespace: map['namespace'] == null ? null : _asInt(map['namespace']),
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
       createdAtMs: _asInt(map['createdAtMs']),
@@ -302,11 +308,16 @@ abstract interface class PbMapperApiClient {
 
   Future<List<ClientConfigInfo>> getClientConfigs();
   Future<ClientStatusSignal> getClientStatus(String serviceKey);
+
+  /// Connect to [serviceKey]. [namespace] is the temporary credential whose
+  /// service it is, which only the administrator key may name; null for this
+  /// credential's own.
   Future<OperationResult> connectService({
     required String serviceKey,
     required String localAddress,
     required String protocol,
     required bool enableKeepAlive,
+    int? namespace,
   });
   Future<OperationResult> disconnectService(String serviceKey);
   Future<OperationResult> deleteClientConfig(String serviceKey);
@@ -576,12 +587,14 @@ class PbMapperApi implements PbMapperApiClient {
     required String localAddress,
     required String protocol,
     required bool enableKeepAlive,
+    int? namespace,
   }) async {
     final result = await _service.connectService(
       serviceKey: serviceKey,
       localAddress: localAddress,
       protocol: protocol,
       enableKeepAlive: enableKeepAlive,
+      namespace: namespace,
     );
     return _resultFrom(result);
   }

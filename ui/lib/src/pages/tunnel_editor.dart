@@ -13,12 +13,14 @@ import 'package:pb_mapper_ui/src/theme/motion.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
 
 /// Open the editor for a new tunnel of [kind] (the user can switch), or for
-/// [existing]. [key] prefills the service key — a planet picked in the sky.
+/// [existing]. [key] prefills the service key — a planet picked in the sky —
+/// and [namespace] says whose service it is, when it is another credential's.
 Future<void> openTunnelEditor(
   BuildContext context, {
   TunnelKind kind = TunnelKind.share,
   Tunnel? existing,
   String? key,
+  int? namespace,
 }) {
   final store = AppScope.of(context).store;
   final l10n = context.l10n;
@@ -52,6 +54,7 @@ Future<void> openTunnelEditor(
             kindLocked: existing != null,
             existing: existing,
             initialKey: key,
+            initialNamespace: namespace,
             submitLabel: existing == null ? l10n.create : l10n.save,
             onCancel: () => Navigator.of(c).pop(),
             onDone: (draft) {
@@ -118,6 +121,7 @@ class TunnelForm extends StatefulWidget {
     this.kindLocked = false,
     this.existing,
     this.initialKey,
+    this.initialNamespace,
     this.cancelLabel,
     this.onCancel,
   });
@@ -129,6 +133,10 @@ class TunnelForm extends StatefulWidget {
   final bool kindLocked;
   final Tunnel? existing;
   final String? initialKey;
+
+  /// Whose service [initialKey] is, when it is another credential's: only
+  /// the administrator key connects to those.
+  final int? initialNamespace;
   final String submitLabel;
   final String? cancelLabel;
   final VoidCallback? onCancel;
@@ -154,6 +162,7 @@ class _TunnelFormState extends State<TunnelForm> {
   late bool _encrypted = widget.existing?.encrypted ?? true;
   late bool _keepAlive =
       widget.existing?.keepAlive ?? widget.store.config.keepAliveEnabled;
+  late int? _namespace = widget.existing?.namespace ?? widget.initialNamespace;
   bool _more = false;
   bool _busy = false;
   String? _keyError;
@@ -208,6 +217,7 @@ class _TunnelFormState extends State<TunnelForm> {
       protocol: _protocol,
       encrypted: _encrypted,
       keepAlive: _keepAlive,
+      namespace: _kind == TunnelKind.connect ? _namespace : null,
     );
     setState(() => _busy = true);
     final result = existing == null
@@ -228,12 +238,14 @@ class _TunnelFormState extends State<TunnelForm> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final share = _kind == TunnelKind.share;
+    final store = widget.store;
     final suggestions = share
-        ? const <String>[]
+        ? const <RemoteService>[]
         : [
-            for (final key in widget.store.remoteServices)
-              if (widget.store.connectionTo(key) == null) key,
+            for (final s in store.remoteServices)
+              if (store.connectionTo(s) == null) s,
           ];
+    final namespace = share ? null : _namespace;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -284,14 +296,28 @@ class _TunnelFormState extends State<TunnelForm> {
           autofocus: widget.existing == null && widget.initialKey == null,
           onSubmitted: _submit,
         ),
+        if (namespace != null) ...[
+          const SizedBox(height: 8),
+          _NamespaceNote(
+            namespace: namespace,
+            onClear: widget.existing == null
+                ? () => setState(() => _namespace = null)
+                : null,
+          ),
+        ],
         if (suggestions.isNotEmpty) ...[
           const SizedBox(height: 10),
           _Suggestions(
             label: l10n.suggestionsFromRelay,
-            keys: suggestions,
-            selected: _key.text.trim(),
-            onPick: (key) => setState(() {
-              _key.text = key;
+            services: suggestions,
+            labelOf: (s) => remoteLabel(s.name, store.connectNamespace(s)),
+            selected: relayServiceId(
+              _namespace ?? store.ownNamespace,
+              _key.text.trim(),
+            ),
+            onPick: (s) => setState(() {
+              _key.text = s.name;
+              _namespace = store.connectNamespace(s);
               _keyError = null;
             }),
           ),
@@ -489,19 +515,66 @@ class _FieldState extends State<_Field> {
   }
 }
 
-/// Keys the relay lists that nobody here connects to yet, one tap away.
+/// Whose service a connection reaches, when it is another credential's: the
+/// administrator key connects into that credential's namespace.
+class _NamespaceNote extends StatelessWidget {
+  const _NamespaceNote({required this.namespace, this.onClear});
+
+  final int namespace;
+
+  /// Connect in this computer's own namespace instead. Null when editing,
+  /// since a connection keeps the service it was made for.
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Row(
+      key: const Key('tunnel-namespace'),
+      children: [
+        Icon(AppIcons.key, size: 15, color: scheme.onSurfaceVariant),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            l10n.tunnelNamespace(namespace),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+        if (onClear != null)
+          IconButton(
+            key: const Key('tunnel-namespace-clear'),
+            tooltip: l10n.tunnelNamespaceClear,
+            visualDensity: VisualDensity.compact,
+            onPressed: onClear,
+            icon: const Icon(AppIcons.close, size: 15),
+          ),
+      ],
+    );
+  }
+}
+
+/// Services the relay lists that nobody here connects to yet, one tap away.
+/// With the administrator key, other credentials' too, named as theirs.
 class _Suggestions extends StatelessWidget {
   const _Suggestions({
     required this.label,
-    required this.keys,
+    required this.services,
+    required this.labelOf,
     required this.selected,
     required this.onPick,
   });
 
   final String label;
-  final List<String> keys;
+  final List<RemoteService> services;
+  final String Function(RemoteService service) labelOf;
+
+  /// The id ([RemoteService.id]) of the one the form holds.
   final String selected;
-  final ValueChanged<String> onPick;
+  final ValueChanged<RemoteService> onPick;
 
   @override
   Widget build(BuildContext context) {
@@ -521,12 +594,12 @@ class _Suggestions extends StatelessWidget {
           spacing: 6,
           runSpacing: 6,
           children: [
-            for (final key in keys.take(12))
+            for (final s in services.take(12))
               _Pill(
-                key: Key('suggestion-$key'),
-                label: key,
-                selected: key == selected,
-                onTap: () => onPick(key),
+                key: Key('suggestion-${s.id}'),
+                label: labelOf(s),
+                selected: s.id == selected,
+                onTap: () => onPick(s),
               ),
           ],
         ),

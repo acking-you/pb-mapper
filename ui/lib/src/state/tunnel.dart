@@ -44,6 +44,7 @@ class Tunnel {
     required this.health,
     this.message = '',
     this.createdAtMs = 0,
+    this.namespace,
   });
 
   factory Tunnel.fromService(ServiceConfigInfo s) => Tunnel(
@@ -68,6 +69,7 @@ class Tunnel {
     health: TunnelHealth.parse(c.status),
     message: c.statusMessage,
     createdAtMs: c.createdAtMs,
+    namespace: c.namespace,
   );
 
   final TunnelKind kind;
@@ -91,6 +93,11 @@ class Tunnel {
   final String message;
   final int createdAtMs;
 
+  /// For a connection to another credential's service, that credential's
+  /// key id: only the administrator key reaches those. Null for one in this
+  /// computer's own namespace, and for every share.
+  final int? namespace;
+
   /// Unique across both kinds: a computer can share and connect one key.
   String get id => '${kind.name}:$key';
 
@@ -112,6 +119,7 @@ class Tunnel {
     protocol: protocol,
     encrypted: encrypted,
     keepAlive: keepAlive,
+    namespace: namespace,
   );
 
   @override
@@ -124,7 +132,8 @@ class Tunnel {
       other.encrypted == encrypted &&
       other.keepAlive == keepAlive &&
       other.health == health &&
-      other.message == message;
+      other.message == message &&
+      other.namespace == namespace;
 
   @override
   int get hashCode => Object.hash(
@@ -136,6 +145,7 @@ class Tunnel {
     keepAlive,
     health,
     message,
+    namespace,
   );
 }
 
@@ -149,6 +159,7 @@ class TunnelDraft {
     this.protocol = 'TCP',
     this.encrypted = true,
     this.keepAlive = true,
+    this.namespace,
   });
 
   final TunnelKind kind;
@@ -157,6 +168,9 @@ class TunnelDraft {
   final String protocol;
   final bool encrypted;
   final bool keepAlive;
+
+  /// See [Tunnel.namespace]. A connection only.
+  final int? namespace;
 
   /// The address a fresh form starts with: the conventional local service
   /// port for a share, a free-looking one for a connection.

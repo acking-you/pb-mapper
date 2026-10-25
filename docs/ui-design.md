@@ -74,8 +74,13 @@ keep and this computer stays on the old one.
 
 Services are told apart by namespace as well as name, as the relay routes
 them: an administrator sees two credentials' `cache` as two rows, and retires
-each in its own namespace. Connect is offered only in this computer's own
-namespace, since a connection names its service by key alone.
+each in its own namespace. With the administrator key every page sees every
+namespace — the galaxy, the Tunnels count, the editor's suggestions — and
+connects to any of them in one click: the connection subscribes in that
+credential's namespace, remembers it, and says whose service it is. A
+credential's service carries its owner's tag; the administrator's own carry
+none. A connection is still known on this computer by its service's name, so
+connecting to a second `cache` in another namespace replaces the first.
 
 **Test answers in words.** Settings' Test, and Save, end in one toast: the
 latency and service count, or the relay's own reason it did not answer.

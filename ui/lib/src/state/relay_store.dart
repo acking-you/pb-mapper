@@ -25,9 +25,6 @@ class RelayServiceRow {
   String get id => relayServiceId(namespace, name);
 }
 
-String relayServiceId(int namespace, String name) =>
-    namespace == 0 ? name : '$namespace/$name';
-
 /// The relay as a whole, for the Relay page: who this computer is to it,
 /// the direct sessions it observes, the relay this computer can run itself,
 /// and — with the administrator key — everything the relay holds: its
@@ -245,10 +242,9 @@ class RelayStore extends ChangeNotifier {
   static String _reason(Object error) =>
       error is RelayCallException ? error.message : '$error';
 
-  /// The namespace this computer's own tunnels live in: a temporary
-  /// credential's own, or the administrator's, 0.
-  int get ownNamespace =>
-      identity.role == RelayRole.temporary ? identity.keyId ?? 0 : 0;
+  /// The namespace this computer's own tunnels live in. See
+  /// [AppStore.ownNamespace].
+  int get ownNamespace => app.ownNamespace;
 
   /// Every service on the relay, by name: the administrator inventory when
   /// there is one, which sees every namespace, or else what this
@@ -260,8 +256,8 @@ class RelayStore extends ChangeNotifier {
               RelayServiceRow(namespace: s.namespace, name: s.name, info: s),
           ]
         : [
-            for (final name in app.relayServices)
-              RelayServiceRow(namespace: ownNamespace, name: name),
+            for (final s in app.relayServices)
+              RelayServiceRow(namespace: s.namespace, name: s.name),
           ];
     return rows..sort((a, b) {
       final byName = a.name.compareTo(b.name);
