@@ -8,11 +8,11 @@ Issue #13 新增直接依赖使用自己的 GitHub fork 和 submodule，维护�
 
 | 本地目录 | fork | 上游 / 基线 tag | 固定 commit | 许可证 |
 |---|---|---|---|---|
-| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/codex/pb-mapper-issue-13) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `quinn-proto-0.11.19` | `8192ed399a26a6e8f0aba43d10ec8badaa5b905e` | MIT OR Apache-2.0 |
+| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/codex/pb-mapper-issue-13) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `quinn-proto-0.11.19` | `933438363da5db1fc8fc32dcfa2a66b486a695d5` | MIT OR Apache-2.0 |
 | `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/codex/pb-mapper-issue-13) | [rustls/rcgen](https://github.com/rustls/rcgen), `v0.14.10` | `f4a3b165c467c070d5c74b86acc2c3f0a0be10ab` | MIT OR Apache-2.0 |
 | `deps/stun-proto` | [acking-you/stun-proto](https://github.com/acking-you/stun-proto/tree/codex/pb-mapper-issue-13) | [ystreet/stun-proto](https://github.com/ystreet/stun-proto), `v2.0.3` | `0c465c121ae42ced958c5096740329edec46522b` | MIT OR Apache-2.0 |
 
-三个维护分支均已推送并检出到上述稳定 tag，当前没有源码补丁。Quinn 仓库包含 `quinn 0.11.12`、`quinn-proto 0.11.19`、`quinn-udp 0.5.16`，选用该 tag 是为了纳入 0.11 系列后续修复。stun-proto 仓库包含配套 `stun-types`，使用其 re-export，无需额外直接依赖。
+三个 fork 的固定提交均已推送。Quinn 在稳定 tag 上增加了 Windows IPv4 源地址提示的兼容修复（[PR #1](https://github.com/acking-you/quinn/pull/1)，提交先发布于 `codex/windows-pktinfo-fallback`，目标维护分支不变）；其余两个库没有源码补丁。Quinn 仓库包含 `quinn 0.11.12`、`quinn-proto 0.11.19`、`quinn-udp 0.5.16`，选用该 tag 是为了纳入 0.11 系列后续修复。stun-proto 仓库包含配套 `stun-types`，使用其 re-export，无需额外直接依赖。
 
 rustls 作为 Quinn 的传递依赖由 Cargo 管理，通过 `quinn::rustls` 使用，不单独声明直接依赖、添加 patch 或维护 submodule。iroh 保留为架构参考；成熟度评估及具体复用边界见 [设计方案](../docs/issue-13-direct-connect-design.zh-CN.md#3-传输选型与依赖)。此前比较的 rustls、iroh、webrtc 已不在本项目 submodule 中，远端 fork 保留。
 
@@ -65,7 +65,7 @@ stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.3" }
 
 通过 `cargo metadata`/`cargo tree` 检查三个直接依赖 source 为本地路径、rustls 由 registry 解析且只有预期的一份、没有意外启用 aws-lc 或系统证书验证。依赖锁定后运行受影响测试，CI 已把 `deps/*` 和 `.gitmodules` 纳入 Rust/Node 变更触发范围；仅调整 gitlink 也必须验收。
 
-以上 path 方案适用于本仓库构建二进制。**发布 crates.io SDK 需要另行完成依赖发布闭环**：根 `[patch.crates-io]` 不会作为库的依赖配置传播给使用者；`path + version` 在发布时会解析 registry 版本。若 fork 有行为修改，应先合入上游并依赖包含修复的版本，或发布明确命名的 fork 包并统一改依赖，不能把尚未发布的本地修复当作下游已经获得。当前没有发布任何第三方 crate。
+以上 path 方案适用于本仓库构建二进制。**发布 crates.io SDK 需要另行完成依赖发布闭环**：根 `[patch.crates-io]` 不会作为库的依赖配置传播给使用者；`path + version` 在发布时会解析 registry 版本。若 fork 有行为修改，应先合入上游并依赖包含修复的版本，或发布明确命名的 fork 包并统一改依赖，不能把尚未发布的本地修复当作下游已经获得。当前没有发布任何第三方 crate；Quinn 的 Windows 修复仅由固定 Git/submodule 依赖提供，不应宣称 crates.io 用户已获得该补丁。
 
 ## 已执行的检查
 
