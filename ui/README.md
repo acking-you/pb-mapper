@@ -5,6 +5,11 @@ galaxy, Tunnels, Logs and Settings — plus a three-step first run. The design
 follows POCOX's language; [`docs/ui-design.md`](../docs/ui-design.md) explains
 it.
 
+Updates download and verify packages inside the app before opening the system
+installer. Android releases use the maintainer's persistent local signing key;
+see [updates and release verification](../docs/ui-updates.md) for platform
+behavior and migration from older CI-signed APKs.
+
 ## Using Rust Inside Flutter
 
 This project uses raw `dart:ffi` to call into a Rust FFI library (`pb-mapper-ffi`)

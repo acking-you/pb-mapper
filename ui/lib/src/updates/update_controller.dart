@@ -8,8 +8,10 @@ library;
 import 'dart:async';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/updates/release.dart';
 import 'package:pb_mapper_ui/src/updates/update_installers.dart';
 import 'package:pb_mapper_ui/src/updates/update_record.dart';
@@ -41,8 +43,8 @@ enum UpdateStage {
   /// Saved to Downloads for the user to finish.
   saved,
 
-  /// Opened in the browser (Android).
-  opened,
+  /// Android's installer is open; the user may return without installing.
+  installerOpened,
 
   /// Debug builds verify everything and stop short of replacing themselves.
   verifiedOnly,
@@ -104,6 +106,8 @@ class UpdateController extends ChangeNotifier {
   int _received = 0;
   double _bytesPerSecond = 0;
   bool _disposed = false;
+  bool _cancelled = false;
+  File? _verifiedFile;
 
   UpdateStage get stage => _stage;
   Version? get installed => _installed;
@@ -153,7 +157,13 @@ class UpdateController extends ChangeNotifier {
   /// beyond the log: nobody asked for it, so whatever the last check found
   /// stays on offer.
   Future<void> check({bool quiet = false}) async {
-    if (busy) return;
+    if (busy || _disposed) return;
+    final previousFile = _verifiedFile;
+    _verifiedFile = null;
+    // A file handed to Android must remain readable by its installer.
+    if (_stage != UpdateStage.installerOpened) {
+      unawaited(_discard(previousFile));
+    }
     final stage = _stage;
     final published = _published;
     final plan = _plan;
@@ -171,12 +181,14 @@ class UpdateController extends ChangeNotifier {
       final installed = _installed ??= await loadInstalled();
       final host = _host ??= await loadHost();
       final release = await source.newest();
+      if (_disposed) return;
       _published = release;
       if (release == null || !(release.version > installed)) {
         _set(UpdateStage.upToDate);
         return;
       }
       final manifest = await source.manifest(release);
+      if (_disposed) return;
       _plan = planUpdate(manifest, host);
       _set(_plan == null ? UpdateStage.noPackage : UpdateStage.available);
     } on UpdateException catch (failure) {
@@ -215,57 +227,79 @@ class UpdateController extends ChangeNotifier {
       return;
     }
     _failure = null;
-    if (plan.method == UpdateMethod.openInBrowser) {
-      await installer.open(url);
-      _set(UpdateStage.opened);
-      return;
-    }
-
+    _cancelled = false;
     _received = 0;
     _bytesPerSecond = 0;
     _set(UpdateStage.downloading);
     final started = DateTime.now();
     File? file;
     try {
-      final work = await workDir();
-      file = File('${work.path}${Platform.pathSeparator}${plan.asset.name}');
-      final digest = await source.http.download(
-        url,
-        file,
-        size: plan.asset.size,
-        onProgress: (received) {
-          _received = received;
-          final seconds =
-              DateTime.now().difference(started).inMilliseconds / 1000;
-          _bytesPerSecond = seconds <= 0 ? 0 : received / seconds;
-          if (!_disposed) notifyListeners();
-        },
-      );
-      _set(UpdateStage.verifying);
-      if (digest != plan.asset.sha256) {
-        throw UpdateException(
-          UpdateFailure.checksum,
-          '${plan.asset.name} hashes to $digest, the manifest lists '
-          '${plan.asset.sha256}',
+      final cached = _verifiedFile;
+      if (cached != null && await cached.exists()) {
+        file = cached;
+        _set(UpdateStage.verifying);
+        // The permission screen may have been open for a while. Recheck the
+        // local bytes before each hand-off, without downloading again.
+        if (await cached.length() != plan.asset.size ||
+            '${await sha256.bind(cached.openRead()).first}' !=
+                plan.asset.sha256) {
+          throw const UpdateException(UpdateFailure.checksum);
+        }
+      } else {
+        _verifiedFile = null;
+        final work = await workDir();
+        file = File('${work.path}${Platform.pathSeparator}${plan.asset.name}');
+        _ensureActive();
+        final digest = await source.http.download(
+          url,
+          file,
+          size: plan.asset.size,
+          onProgress: (received) {
+            _received = received;
+            final seconds =
+                DateTime.now().difference(started).inMilliseconds / 1000;
+            _bytesPerSecond = seconds <= 0 ? 0 : received / seconds;
+            if (!_disposed) notifyListeners();
+          },
         );
+        _set(UpdateStage.verifying);
+        if (digest != plan.asset.sha256) {
+          throw UpdateException(
+            UpdateFailure.checksum,
+            '${plan.asset.name} hashes to $digest, the manifest lists '
+            '${plan.asset.sha256}',
+          );
+        }
       }
+      _ensureActive();
+      if (plan.method == UpdateMethod.systemInstaller) _verifiedFile = file;
       await _apply(plan, file);
     } on UpdateCancelled {
+      _verifiedFile = null;
       await _discard(file);
       _set(UpdateStage.available);
     } on UpdateException catch (failure) {
-      await _discard(file);
+      if (_verifiedFile == null || failure.kind == UpdateFailure.checksum) {
+        _verifiedFile = null;
+        await _discard(file);
+      }
       _fail(failure);
     } catch (error) {
+      _verifiedFile = null;
       await _discard(file);
       _fail(UpdateException(UpdateFailure.install, '$error'));
     }
   }
 
+  void _ensureActive() {
+    if (_cancelled || _disposed) throw const UpdateCancelled();
+  }
+
   Future<void> _apply(UpdatePlan plan, File file) async {
     final replacesSelf =
         plan.method == UpdateMethod.installer ||
-        plan.method == UpdateMethod.replaceAppImage;
+        plan.method == UpdateMethod.replaceAppImage ||
+        plan.method == UpdateMethod.systemInstaller;
     if (replacesSelf && !replaceSelf) {
       _set(UpdateStage.verifiedOnly);
       return;
@@ -308,9 +342,12 @@ class UpdateController extends ChangeNotifier {
         _savedPath = await installer.saveToDownloads(file, plan.asset.name);
         await _discard(file);
         _set(UpdateStage.saved);
-      case UpdateMethod.openInBrowser:
-        // Handled before anything is downloaded.
-        break;
+      case UpdateMethod.systemInstaller:
+        _set(UpdateStage.installing);
+        await installer.installAndroidPackage(file);
+        // Handoff is not installation success. Android owns confirmation;
+        // returning from it must leave Close and Retry available.
+        _set(UpdateStage.installerOpened);
     }
   }
 
@@ -368,7 +405,10 @@ class UpdateController extends ChangeNotifier {
   }
 
   void cancel() {
-    if (_stage == UpdateStage.downloading) source.http.cancel();
+    if (_stage == UpdateStage.downloading) {
+      _cancelled = true;
+      source.http.cancel();
+    }
   }
 
   @override
@@ -378,8 +418,16 @@ class UpdateController extends ChangeNotifier {
     super.dispose();
   }
 
-  static Future<Directory> _workDir() =>
-      Directory.systemTemp.createTemp('pb-mapper-update-');
+  static Future<Directory> _workDir() async {
+    if (!Platform.isAndroid) {
+      return Directory.systemTemp.createTemp('pb-mapper-update-');
+    }
+    final cache = await getTemporaryDirectory();
+    final updates = await Directory(
+      '${cache.path}/pb-mapper-updates',
+    ).create(recursive: true);
+    return updates.createTemp('download-');
+  }
 
   static Future<Version> _loadInstalled() async {
     final info = await PackageInfo.fromPlatform();
@@ -401,10 +449,13 @@ class UpdateController extends ChangeNotifier {
     final target = RegExp(r'on "\w+_(\w+)"').firstMatch(Platform.version);
     return UpdateHost(
       os: Platform.operatingSystem,
-      arch: target?[1] ?? 'x64',
+      arch: target?[1] ?? 'unknown',
       windowsInstalled:
           Platform.isWindows && WindowsInstallerUpdate.isInstalled(),
       appImage: Platform.isLinux ? AppImageUpdate.current() : null,
+      androidAbis: Platform.isAndroid
+          ? await AndroidPackageUpdate.abis()
+          : const [],
     );
   }
 }

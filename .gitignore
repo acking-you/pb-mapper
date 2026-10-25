@@ -11,3 +11,5 @@ ui/native/**/libpb_mapper_ffi.*
 ui/native/**/pb_mapper_ffi.*
 # Packaging output: msix payloads and store assets, tens of megabytes of it.
 ui/dist/
+# Python release tooling bytecode.
+__pycache__/

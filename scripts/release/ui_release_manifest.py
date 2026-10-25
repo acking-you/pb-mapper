@@ -26,9 +26,11 @@ import re
 import subprocess
 import tempfile
 
+from android_package import CERTIFICATE, inspect_apk, verify_release
+
 MANIFEST = 'release-manifest.json'
 
-# Every package a UI release carries, by the names release-ui.yml gives them.
+# CI publishes desktops only. Locally signed APKs are verified and added later.
 EXPECTED = {
     'pb-mapper-windows-x86_64-setup.exe',
     'pb-mapper-windows-x86_64.zip',
@@ -36,10 +38,6 @@ EXPECTED = {
     'pb-mapper-linux.zip',
     'pb-mapper-macos-arm64.dmg',
     'pb-mapper-macos-x86_64.dmg',
-    'pb-mapper-arm64-v8a.apk',
-    'pb-mapper-armeabi-v7a.apk',
-    'pb-mapper-x86_64.apk',
-    'pb-mapper-ios-unsigned.ipa',
 }
 
 
@@ -79,6 +77,28 @@ def build(directory: Path, tag: str, commit: str) -> Path:
     output = directory / MANIFEST
     output.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     return output
+
+
+def add_android(manifest: Path, packages: list[Path], build_tools: Path,
+                previous_directory: Path | None, establish_baseline: bool) -> None:
+    if (previous_directory is not None) == establish_baseline:
+        raise ValueError('Provide previous packages, or explicitly establish the first signing baseline')
+    release = json.loads(manifest.read_text(encoding='utf-8'))
+    assets = {asset['name']: asset for asset in release['assets']}
+    for package in packages:
+        info = inspect_apk(package, build_tools)
+        previous = inspect_apk(previous_directory / package.name, build_tools) if previous_directory else None
+        verify_release(info, release['version'], CERTIFICATE.read_text().strip(), previous)
+        expected_name = f"pb-mapper-{info['abis'][0]}.apk"
+        if package.name != expected_name:
+            raise ValueError(f'APK name must be {expected_name}')
+        if package.name in assets and assets[package.name] != info:
+            raise ValueError('Must not replace a published Android asset')
+        assets[package.name] = info
+    release['assets'] = sorted(assets.values(), key=lambda asset: asset['name'])
+    manifest.write_text(json.dumps(release, indent=2) + '\n', encoding='utf-8')
+    # A changed manifest must never travel with its former signature.
+    manifest.with_name(manifest.name + '.sig').unlink(missing_ok=True)
 
 
 def sign(manifest: Path, key: Path) -> Path:
@@ -123,11 +143,21 @@ if __name__ == '__main__':
     verify_args = commands.add_parser('verify')
     verify_args.add_argument('manifest', type=Path)
     verify_args.add_argument('--public-key', type=Path, required=True)
+    android_args = commands.add_parser('add-android')
+    android_args.add_argument('manifest', type=Path)
+    android_args.add_argument('packages', nargs='+', type=Path)
+    android_args.add_argument('--build-tools', required=True, type=Path)
+    baseline = android_args.add_mutually_exclusive_group(required=True)
+    baseline.add_argument('--previous-directory', type=Path)
+    baseline.add_argument('--establish-signing-baseline', action='store_true')
     args = parser.parse_args()
     if args.command == 'build':
         print(build(args.directory, args.tag, args.commit))
     elif args.command == 'sign':
         print(sign(args.manifest, args.key))
-    else:
+    elif args.command == 'verify':
         verify(args.manifest, args.public_key)
         print('Signature verified')
+    else:
+        add_android(args.manifest, args.packages, args.build_tools,
+                    args.previous_directory, args.establish_signing_baseline)
