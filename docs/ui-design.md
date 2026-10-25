@@ -263,7 +263,7 @@ proxy-everything's (`ui/lib/src/updates/`):
 
    | Installed as | Update |
    |---|---|
-   | Windows installer | Quit, then a hidden PowerShell waits for the process to exit, runs the Inno Setup installer with `/SILENT` (it elevates itself when the install is machine-wide), and opens the app again |
+   | Windows installer | Quit, then a hidden PowerShell waits for the process to exit, runs the Inno Setup installer with `/SILENT` (it elevates itself when the install is machine-wide, so Windows asks for permission), writes setup's log to `setup.log` beside the download, and opens the app again. The PowerShell is started by the FFI's `pb_mapper_spawn_hidden_powershell_v1` with a console of its own that has no window: started as a detached Dart process it had no console at all and exited without running a line, so no update installed until 0.9.5 |
    | Windows portable zip, Linux zip | Saved to Downloads and shown |
    | Linux AppImage | Swapped in place (staged beside it, renamed over it) and reopened; saved to Downloads instead when its folder is not writable |
    | macOS | The disk image is saved to Downloads and opened, to drag into Applications: the DMGs are not Developer ID signed, so the app does not replace its own bundle |

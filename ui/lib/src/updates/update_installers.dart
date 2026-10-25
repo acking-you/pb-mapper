@@ -8,16 +8,21 @@
 /// app lives.
 library;
 
+import 'dart:ffi';
 import 'dart:io';
 
+import 'package:ffi/ffi.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_ffi.dart';
+import 'package:pb_mapper_ui/src/updates/release.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// The platform effects of an update, behind an interface so the flow can be
 /// tested without replacing anything.
 abstract interface class UpdateInstaller {
   /// Run [installer] quietly once this process has exited, then open the app
-  /// again. The caller quits right after.
+  /// again. The caller quits right after; this throws an [UpdateException]
+  /// when nothing could be started to do it, so the caller stays.
   Future<void> runInstallerAfterExit(File installer);
 
   /// Put [download] in place of the AppImage at [appImage] and open it once
@@ -104,32 +109,63 @@ abstract final class WindowsInstallerUpdate {
   /// [installer] quietly, and opens [app] again whether or not the install
   /// succeeded, so the user is never left without the app. It gives up,
   /// installing nothing, if the app has not exited within a minute.
-  static Future<void> handOff(File installer, int processId, String app) async {
-    await Process.start('powershell.exe', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-WindowStyle',
-      'Hidden',
-      '-Command',
-      script(installer.absolute.path, processId, app),
-    ], mode: ProcessStartMode.detached);
+  ///
+  /// Started by `pb_mapper_spawn_hidden_powershell_v1` in the app's FFI
+  /// library (or [library]), not by `Process.start`: a detached Dart child
+  /// has no console, and PowerShell exits at once without running a line.
+  /// Throws an [UpdateException] when it could not be started.
+  static Future<void> handOff(
+    File installer,
+    int processId,
+    String app, [
+    DynamicLibrary? library,
+  ]) async {
+    final spawn = (library ?? PbMapperFFI().lib)
+        .lookupFunction<_SpawnNative, _SpawnDart>(
+          'pb_mapper_spawn_hidden_powershell_v1',
+        );
+    final command = script(
+      installer.absolute.path,
+      processId,
+      app,
+    ).toNativeUtf8();
+    try {
+      if (spawn(command) != 1) {
+        throw const UpdateException(
+          UpdateFailure.install,
+          'Could not start the installer',
+        );
+      }
+    } finally {
+      malloc.free(command);
+    }
   }
 
   /// The PowerShell [handOff] runs. Paths go in single quotes, where only a
-  /// single quote is special.
+  /// single quote is special. Setup writes its log beside the installer
+  /// (`setup.log`), which stays when the installer is removed, for when an
+  /// update did not go in.
   static String script(String installer, int processId, String app) {
     String quote(String text) => "'${text.replaceAll("'", "''")}'";
+    final log =
+        '${File(installer).parent.path}${Platform.pathSeparator}'
+        'setup.log';
     return [
       'try { Wait-Process -Id $processId -Timeout 60 -ErrorAction Stop } catch {}',
       'if (Get-Process -Id $processId -ErrorAction SilentlyContinue) { exit 1 }',
+      // Start-Process joins its arguments with spaces and quotes none of
+      // them, so a log path with a space is quoted for setup here.
       'Start-Process -FilePath ${quote(installer)} '
-          "-ArgumentList '/SILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait",
+          "-ArgumentList '/SILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"
+          '${quote('/LOG="$log"')} -Wait',
+      'Remove-Item -LiteralPath ${quote(installer)} -ErrorAction SilentlyContinue',
       'Start-Process -FilePath ${quote(app)}',
     ].join('; ');
   }
 }
+
+typedef _SpawnNative = Int32 Function(Pointer<Utf8>);
+typedef _SpawnDart = int Function(Pointer<Utf8>);
 
 /// Linux, as an AppImage: the file the app runs from is replaced, which a
 /// running AppImage tolerates, since it keeps its own mount of the old file.

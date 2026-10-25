@@ -68,6 +68,7 @@ class UpdateController extends ChangeNotifier {
     this.record = const FileUpdateRecord(),
     this.loadInstalled = _loadInstalled,
     this.loadHost = _loadHost,
+    this.workDir = _workDir,
     bool? replaceSelf,
   }) : source = source ?? UpdateSource(),
        replaceSelf = replaceSelf ?? !kDebugMode;
@@ -79,6 +80,10 @@ class UpdateController extends ChangeNotifier {
   final UpdateRecord record;
   final Future<Version> Function() loadInstalled;
   final Future<UpdateHost> Function() loadHost;
+
+  /// A fresh folder for one download. A Windows installer stays in it after
+  /// the app quits, until the hand-off has run it.
+  final Future<Directory> Function() workDir;
 
   /// How long after a hand-off its outcome is still news. The installer
   /// reopens the app within a minute; a record older than this belongs to a
@@ -222,7 +227,7 @@ class UpdateController extends ChangeNotifier {
     final started = DateTime.now();
     File? file;
     try {
-      final work = await Directory.systemTemp.createTemp('pb-mapper-update-');
+      final work = await workDir();
       file = File('${work.path}${Platform.pathSeparator}${plan.asset.name}');
       final digest = await source.http.download(
         url,
@@ -267,8 +272,10 @@ class UpdateController extends ChangeNotifier {
     }
     switch (plan.method) {
       case UpdateMethod.installer:
-        await _remember();
+        // Noted only once something is waiting to run it: a hand-off that
+        // could not start fails here, with the app still open.
         await installer.runInstallerAfterExit(file);
+        await _remember();
         _set(UpdateStage.installing);
         await quit();
       case UpdateMethod.replaceAppImage:
@@ -354,6 +361,9 @@ class UpdateController extends ChangeNotifier {
     source.http.cancel();
     super.dispose();
   }
+
+  static Future<Directory> _workDir() =>
+      Directory.systemTemp.createTemp('pb-mapper-update-');
 
   static Future<Version> _loadInstalled() async {
     final info = await PackageInfo.fromPlatform();
