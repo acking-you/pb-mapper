@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.5] - 2026-10-25
+- Install Windows updates from inside the app. None ever had: after the download, the app started a hidden PowerShell to wait for it to quit, run the installer and open it again, but started it in a way that gives it no console, and PowerShell exits at once without running a line. The app then closed, nothing was installed, and the next launch said the update had not gone in. The hand-off is now started from the app's Rust library with a console of its own that has no window, and it outlives the app. Windows still asks for permission when the app is installed for all users.
+- Copies of 0.9.4 and earlier carry the old hand-off, so updating them from inside the app still fails: install 0.9.5 by hand once, and updates from it on go in by themselves.
+- If the hand-off cannot start, the update now fails in the app, which stays open, instead of closing. Setup writes its log to `setup.log` beside the download, for when an update does not go in. The CLI, both SDKs and the wire protocol are unchanged.
+
 ## [0.9.4] - 2026-10-25
 - Go direct in the app, as the CLI has since 0.8.0. The app's tunnels ran on the relay-only entry points, so every one went through the relay. They now run on the SDK's `Registration` and `Connection`, the workers the CLI runs: each connection tries a direct path first and falls back to the relay before any traffic is sent, and each share lets connections reach it directly. The app's own relay offers direct over UDP on its TCP port, as `pb-mapper server` does.
 - Show which way each tunnel's traffic goes. Each running tunnel on the Tunnels page carries a chip: **Direct**, **Relay**, both with their counts, **Going direct…** while a path is being set up, or **Relay only**. In the galaxy a direct arc is lit end to end and lands past the relay on the planet of the service it reaches, while a relayed one falls into the relay's star; the legend shows both. A tunnel's details panel draws its route and says what it means, and when it is the relay after all, why: the relay offers no direct, the sharing computer declines it, or the two networks could not reach each other.

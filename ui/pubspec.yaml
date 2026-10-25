@@ -22,7 +22,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # code only ever grows. Bump both with every release: the in-app updater
 # compares this against the newest release, and test/version_test.dart and
 # the release workflow both refuse a mismatch.
-version: 0.9.4+904
+version: 0.9.5+905
 
 environment:
   sdk: ^3.9.0
