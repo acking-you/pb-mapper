@@ -272,10 +272,16 @@ class UpdateController extends ChangeNotifier {
     }
     switch (plan.method) {
       case UpdateMethod.installer:
-        // Noted only once something is waiting to run it: a hand-off that
-        // could not start fails here, with the app still open.
-        await installer.runInstallerAfterExit(file);
+        // Noted before the hand-off starts, so a running hand-off always
+        // has its note; taken back when it could not start, which fails
+        // here with the app still open.
         await _remember();
+        try {
+          await installer.runInstallerAfterExit(file);
+        } catch (_) {
+          await _forget();
+          rethrow;
+        }
         _set(UpdateStage.installing);
         await quit();
       case UpdateMethod.replaceAppImage:
@@ -318,6 +324,16 @@ class UpdateController extends ChangeNotifier {
       await record.write(PendingUpdate(from: from, to: to, at: DateTime.now()));
     } catch (error) {
       debugPrint('Could not record the update: $error');
+    }
+  }
+
+  /// Take back the note [_remember] wrote, for an update that is not going
+  /// ahead after all. Best effort, like the note.
+  Future<void> _forget() async {
+    try {
+      await record.take();
+    } catch (error) {
+      debugPrint('Could not clear the update record: $error');
     }
   }
 
