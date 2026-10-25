@@ -342,6 +342,11 @@ pub struct ClientConfigInfo {
     pub enable_keep_alive: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<u64>,
+    /// While it runs, the namespace the relay routes it in: [`Self::namespace`],
+    /// or else that of the credential it was started with, which a credential
+    /// changed since does not move.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routed_namespace: Option<u64>,
     pub status: String,
     pub status_message: String,
     pub created_at_ms: u64,
@@ -482,6 +487,13 @@ struct PinnedTunnel {
     relay: String,
     /// The namespace a connection subscribes in, when not its credential's own.
     namespace: Option<u64>,
+}
+
+impl PinnedTunnel {
+    /// The namespace the relay routes this tunnel in.
+    fn routed_namespace(&self) -> u64 {
+        self.namespace.unwrap_or_else(|| self.credential.key_id())
+    }
 }
 
 struct TunnelRuntime {

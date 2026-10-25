@@ -94,6 +94,10 @@ class ClientConfigInfo {
   /// The temporary credential whose service it connects to, when it is not
   /// this credential's own.
   final int? namespace;
+
+  /// While it runs, the namespace the relay routes it in, from the credential
+  /// it was started with: a credential changed since does not move it.
+  final int? routedNamespace;
   final String status;
   final String statusMessage;
   final int createdAtMs;
@@ -105,6 +109,7 @@ class ClientConfigInfo {
     required this.protocol,
     required this.enableKeepAlive,
     this.namespace,
+    this.routedNamespace,
     required this.status,
     required this.statusMessage,
     required this.createdAtMs,
@@ -118,6 +123,9 @@ class ClientConfigInfo {
       protocol: _asString(map['protocol'], fallback: 'TCP'),
       enableKeepAlive: _asBool(map['enableKeepAlive']),
       namespace: map['namespace'] == null ? null : _asInt(map['namespace']),
+      routedNamespace: map['routedNamespace'] == null
+          ? null
+          : _asInt(map['routedNamespace']),
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
       createdAtMs: _asInt(map['createdAtMs']),

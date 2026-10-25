@@ -202,8 +202,12 @@ class _TunnelFormState extends State<TunnelForm> {
   /// this one replaces: a connection is known here by its name alone.
   Tunnel? get _replaces {
     if (_kind != TunnelKind.connect || widget.existing != null) return null;
-    final same = widget.store.find(TunnelKind.connect, _key.text.trim());
-    if (same == null || same.namespace == _namespace) return null;
+    final store = widget.store;
+    final same = store.find(TunnelKind.connect, _key.text.trim());
+    if (same == null ||
+        store.namespaceOf(same) == (_namespace ?? store.ownNamespace)) {
+      return null;
+    }
     return same;
   }
 

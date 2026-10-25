@@ -45,6 +45,7 @@ class Tunnel {
     this.message = '',
     this.createdAtMs = 0,
     this.namespace,
+    this.routedNamespace,
   });
 
   factory Tunnel.fromService(ServiceConfigInfo s) => Tunnel(
@@ -70,6 +71,7 @@ class Tunnel {
     message: c.statusMessage,
     createdAtMs: c.createdAtMs,
     namespace: c.namespace,
+    routedNamespace: c.routedNamespace,
   );
 
   final TunnelKind kind;
@@ -97,6 +99,10 @@ class Tunnel {
   /// key id: only the administrator key reaches those. Null for one in this
   /// computer's own namespace, and for every share.
   final int? namespace;
+
+  /// While a connection runs, the namespace the relay routes it in — which
+  /// a credential changed since it started does not move. Null otherwise.
+  final int? routedNamespace;
 
   /// Unique across both kinds: a computer can share and connect one key.
   String get id => '${kind.name}:$key';
@@ -133,7 +139,8 @@ class Tunnel {
       other.keepAlive == keepAlive &&
       other.health == health &&
       other.message == message &&
-      other.namespace == namespace;
+      other.namespace == namespace &&
+      other.routedNamespace == routedNamespace;
 
   @override
   int get hashCode => Object.hash(
@@ -146,6 +153,7 @@ class Tunnel {
     health,
     message,
     namespace,
+    routedNamespace,
   );
 }
 

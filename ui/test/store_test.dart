@@ -44,6 +44,23 @@ void main() {
     },
   );
 
+  test(
+    'a connection stays in the namespace it started in after the credential changes',
+    () async {
+      // Started under credential #3; this computer now holds the
+      // administrator key, whose own `cam` is a different service.
+      final store = await _started(
+        FakePbMapperApi(
+          clients: [fakeClient(serviceKey: 'cam', routedNamespace: 3)],
+          serverServices: ['cam'],
+        )..namespacedServices = [(3, 'cam')],
+      );
+      final [own, theirs] = store.relayServices;
+      expect(store.connectionTo(own), isNull);
+      expect(store.connectionTo(theirs)?.key, 'cam');
+    },
+  );
+
   test('a name that reads like another namespace keeps its own id', () {
     // The administrator's `3/cache` and credential #3's `cache`.
     const own = RemoteService(name: '3/cache');

@@ -248,6 +248,7 @@ class FakePbMapperApi implements PbMapperApiClient {
                 serviceKey: c.serviceKey,
                 localAddress: c.localAddress,
                 status: 'stopped',
+                namespace: c.namespace,
               )
             : c,
     ];
@@ -590,12 +591,14 @@ ClientConfigInfo fakeClient({
   String status = 'running',
   String message = '',
   int? namespace,
+  int? routedNamespace,
 }) => ClientConfigInfo(
   serviceKey: serviceKey,
   localAddress: localAddress,
   protocol: 'TCP',
   enableKeepAlive: true,
   namespace: namespace,
+  routedNamespace: routedNamespace,
   status: status,
   statusMessage: message,
   createdAtMs: 1,

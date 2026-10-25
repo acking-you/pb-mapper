@@ -143,8 +143,10 @@ class AppStore extends ChangeNotifier {
   RemoteService? remoteById(String id) =>
       relayServices.firstWhereOrNull((s) => s.id == id);
 
-  /// The namespace [connection] subscribes in, as the relay knows it.
-  int namespaceOf(Tunnel connection) => connection.namespace ?? ownNamespace;
+  /// The namespace [connection] subscribes in, as the relay knows it: where
+  /// a running one was started, else where starting it now would put it.
+  int namespaceOf(Tunnel connection) =>
+      connection.routedNamespace ?? connection.namespace ?? ownNamespace;
 
   /// This computer's connection to [service], if it has one.
   Tunnel? connectionTo(RemoteService service) => connections.firstWhereOrNull(
