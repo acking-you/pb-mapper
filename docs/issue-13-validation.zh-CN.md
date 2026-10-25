@@ -65,4 +65,37 @@
 - `bun run build:release` + `bun test`：11 个 Node 用例通过；本机 macOS ARM64 addon 3,127,088 字节，保留 CI 原有 5.5 MiB 限制。
 - `cargo zigbuild --bin pb-mapper --release --target x86_64-unknown-linux-musl`：交叉构建并用于上述 Linux 实测。
 
-测试只证明已列出的环境与边界；本次不宣称大规模压力测试、持续路径最优选择或运行中无损切换。三个 fork 没有源码补丁，固定 gitlink 与维护分支见 [依赖说明](../deps/README.md)。
+测试只证明已列出的环境与边界；本次不宣称大规模压力测试、持续路径最优选择或运行中无损切换。当时三个 fork 没有源码补丁；后续 Windows 修复及当前固定 gitlink 与维护分支见 [依赖说明](../deps/README.md)。
+
+## Windows IPv4 handshake reply regression — 2026-10-26
+
+POCOX 0.7.7 on Windows fell back while punching from a phone, while the same
+SDK on a Linux host and Windows self-connections worked. The host logged
+`quinn_udp sendmsg error` with `WSAEINVAL (10022)`, a 1,200-byte handshake and
+the Wi-Fi address in `src_ip`. A minimal `UdpSocketState::try_send` probe on
+that machine reproduced the error only with the IPv4 source hint, regardless
+of ECN; binding the socket to the source or omitting the hint succeeded.
+
+The pinned Quinn fix retries once only if the socket binding or Windows route
+lookup confirms that the hint is redundant. It preserves the socket/port,
+payload, ECN and segmentation. It neither drops a required source address nor
+changes authenticated direct negotiation or post-commit replay rules.
+
+Windows x64 / Rust 1.99.1 validation:
+
+- Quinn UDP: 2 regression tests, 8 existing socket tests, formatting and
+  `clippy -p quinn-udp --all-targets --locked -- -D warnings` passed.
+- The affected host's failing source-pinned sends now succeed, with ECN both
+  enabled and disabled.
+- Release-build loopback send cost (1,200 bytes, draining receiver, 5,000 sends
+  per run, median of 3 runs): source + ECT0 10.59 us before / 10.55 us after;
+  default source without ECN 10.50 / 10.60 us. All sends succeeded. This is a
+  syscall-cost smoke check, not a throughput claim.
+- All 5 client direct unit tests passed. CLI `direct_e2e`: UDP direct and
+  compatibility fallback passed. The TCP test completed direct transfer and
+  relay-loss survival, then timed out restoring coordinator observations at
+  line 159. Replacing Quinn with its original source reproduces the same
+  timeout, so this pre-existing failure is not attributed to the UDP fix.
+
+This does not claim phone acceptance on an updated POCOX installation or
+traversal through arbitrary NATs. The running host was not replaced.
