@@ -3,9 +3,13 @@ import 'package:flutter/foundation.dart';
 /// How a relay service is told apart on this side: the bare name in the
 /// administrator's namespace, `namespace/name` in a temporary credential's.
 /// The relay routes by the two together, so two credentials can each
-/// register the same name.
+/// register the same name. A name may hold a slash, so one of the
+/// administrator's that already reads like `3/cache` is written `0/3/cache`:
+/// no two services share an id.
 String relayServiceId(int namespace, String name) =>
-    namespace == 0 ? name : '$namespace/$name';
+    namespace == 0 && !_looksScoped.hasMatch(name) ? name : '$namespace/$name';
+
+final _looksScoped = RegExp(r'^\d+/');
 
 /// A service the relay lists, as this computer can reach it.
 @immutable

@@ -185,6 +185,24 @@ void main() {
     await finish(tester);
   });
 
+  testWidgets('connecting to a same-named service replaces the old one', (
+    tester,
+  ) async {
+    final api = FakePbMapperApi(
+      clients: [fakeClient(serviceKey: 'cam')],
+      serverServices: ['cam'],
+    )..namespacedServices = [(3, 'cam')];
+    await _open(tester, api);
+    await tester.tap(find.byKey(const Key('connect-3/cam')));
+    await settle(tester);
+    // Said before it happens: a connection here is known by its name.
+    expect(find.byKey(const Key('tunnel-replaces')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('tunnel-submit')));
+    await settle(tester);
+    expect(api.calls, ['disconnectService(cam)', 'connectService(cam@3)']);
+    await finish(tester);
+  });
+
   testWidgets('a relay that does not answer says why', (tester) async {
     await _open(tester, FakePbMapperApi(relayUp: false));
     expect(find.byKey(const Key('relay-error')), findsOneWidget);

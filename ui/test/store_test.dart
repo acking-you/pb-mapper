@@ -44,6 +44,14 @@ void main() {
     },
   );
 
+  test('a name that reads like another namespace keeps its own id', () {
+    // The administrator's `3/cache` and credential #3's `cache`.
+    const own = RemoteService(name: '3/cache');
+    const theirs = RemoteService(name: 'cache', namespace: 3);
+    expect(own.id, '0/3/cache');
+    expect(theirs.id, '3/cache');
+  });
+
   test(
     'the relay is unset without an address, and offline when down',
     () async {

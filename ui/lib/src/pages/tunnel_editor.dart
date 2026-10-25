@@ -170,7 +170,17 @@ class _TunnelFormState extends State<TunnelForm> {
   String? _error;
 
   @override
+  void initState() {
+    super.initState();
+    // Whether this replaces a connection of the same name hangs on the key.
+    _key.addListener(_onKey);
+  }
+
+  void _onKey() => setState(() {});
+
+  @override
   void dispose() {
+    _key.removeListener(_onKey);
     _key.dispose();
     _address.dispose();
     super.dispose();
@@ -188,16 +198,28 @@ class _TunnelFormState extends State<TunnelForm> {
     });
   }
 
+  /// This computer's connection of the same name in another namespace, which
+  /// this one replaces: a connection is known here by its name alone.
+  Tunnel? get _replaces {
+    if (_kind != TunnelKind.connect || widget.existing != null) return null;
+    final same = widget.store.find(TunnelKind.connect, _key.text.trim());
+    if (same == null || same.namespace == _namespace) return null;
+    return same;
+  }
+
   Future<void> _submit() async {
     if (_busy) return;
     final l10n = context.l10n;
     final key = _key.text.trim();
     final address = _address.text.trim();
     final existing = widget.existing;
+    final replaces = _replaces;
     String? keyError;
     if (key.isEmpty) {
       keyError = l10n.errorKeyRequired;
-    } else if (key != existing?.key && widget.store.find(_kind, key) != null) {
+    } else if (replaces == null &&
+        key != existing?.key &&
+        widget.store.find(_kind, key) != null) {
       keyError = _kind == TunnelKind.share
           ? l10n.errorDuplicateShare(key)
           : l10n.errorDuplicateConnect(key);
@@ -220,9 +242,12 @@ class _TunnelFormState extends State<TunnelForm> {
       namespace: _kind == TunnelKind.connect ? _namespace : null,
     );
     setState(() => _busy = true);
-    final result = existing == null
+    // Replacing goes the way an edit does: the old connection stops first,
+    // and comes back if the new one is refused.
+    final replacing = existing ?? replaces;
+    final result = replacing == null
         ? await widget.store.create(draft)
-        : await widget.store.update(existing, draft);
+        : await widget.store.update(replacing, draft);
     if (!mounted) return;
     setState(() => _busy = false);
     if (!result.success) {
@@ -303,6 +328,17 @@ class _TunnelFormState extends State<TunnelForm> {
             onClear: widget.existing == null
                 ? () => setState(() => _namespace = null)
                 : null,
+          ),
+        ],
+        // Read as the key changes: see initState.
+        if (_replaces case final replaced?) ...[
+          const SizedBox(height: 8),
+          Text(
+            l10n.tunnelReplaces(remoteLabel(replaced.key, replaced.namespace)),
+            key: const Key('tunnel-replaces'),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: cautionColor(scheme),
+            ),
           ),
         ],
         if (suggestions.isNotEmpty) ...[

@@ -53,6 +53,7 @@
   "tunnelNamespace": "Credential #{id}'s service, reached with the administrator key",
   "@tunnelNamespace": {"placeholders": {"id": {"type": "int"}}},
   "tunnelNamespaceClear": "Connect to this computer's own service of that name instead",
+  "tunnelReplaces": "This replaces this computer's connection to {name}: a connection here is known by its name alone.",
   "create": "Create",
   "save": "Save",
   "cancel": "Cancel",

@@ -52,6 +52,7 @@
   "suggestionsFromRelay": "中继上可用",
   "tunnelNamespace": "凭据 #{id} 的服务，通过管理员密钥连接",
   "tunnelNamespaceClear": "改为连接本机命名空间里的同名服务",
+  "tunnelReplaces": "这会替换本机到 {name} 的连接：本机按名称区分连接。",
   "create": "创建",
   "save": "保存",
   "cancel": "取消",
