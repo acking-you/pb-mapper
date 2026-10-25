@@ -12,6 +12,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_ffi.dart';
 import 'package:pb_mapper_ui/src/updates/release.dart';
@@ -33,8 +34,9 @@ abstract interface class UpdateInstaller {
   /// went.
   Future<String> saveToDownloads(File download, String name);
 
-  /// Open [url] outside the app.
-  Future<void> open(Uri url);
+  /// Verify package identity, request install permission if needed, and open
+  /// Android's confirmation. Permission denial keeps the download retryable.
+  Future<void> installAndroidPackage(File package);
 }
 
 class PlatformUpdateInstaller implements UpdateInstaller {
@@ -72,16 +74,40 @@ class PlatformUpdateInstaller implements UpdateInstaller {
       // Opening the disk image mounts it, with the app ready to drag into
       // Applications. Through NSWorkspace rather than a child process, which
       // the app sandbox would confine.
-      await launchUrl(Uri.file(saved.path));
+      await _open(Uri.file(saved.path));
     } else {
-      await launchUrl(Uri.directory(downloads.path));
+      await _open(Uri.directory(downloads.path));
     }
     return saved.path;
   }
 
   @override
-  Future<void> open(Uri url) async {
-    await launchUrl(url, mode: LaunchMode.externalApplication);
+  Future<void> installAndroidPackage(File package) =>
+      AndroidPackageUpdate.install(package);
+
+  static Future<void> _open(Uri url) async {
+    if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
+      throw UpdateException(UpdateFailure.install, 'Could not open $url');
+    }
+  }
+}
+
+abstract final class AndroidPackageUpdate {
+  static const channel = MethodChannel('pb_mapper/updates');
+
+  static Future<List<String>> abis() async =>
+      await channel.invokeListMethod<String>('abis') ?? const [];
+
+  static Future<void> install(File package) async {
+    try {
+      await channel.invokeMethod<void>('install', {'path': package.path});
+    } on PlatformException catch (error) {
+      throw UpdateException(switch (error.code) {
+        'permission_denied' => UpdateFailure.permission,
+        'incompatible_package' => UpdateFailure.incompatiblePackage,
+        _ => UpdateFailure.install,
+      }, error.message);
+    }
   }
 }
 

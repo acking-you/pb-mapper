@@ -1,0 +1,91 @@
+name: Publish verified Android updates
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing source release tag (vX.Y.Z)
+        required: true
+        type: string
+      previous_release:
+        description: Previous fixed-key UI release (vX.Y.Z-ui); empty only for the first baseline
+        type: string
+      establish_signing_baseline:
+        description: First fixed-key release only; old CI APKs require manual migration
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-manifest-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      PREVIOUS_RELEASE: ${{ inputs.previous_release }}
+      ESTABLISH_BASELINE: ${{ inputs.establish_signing_baseline }}
+    steps:
+      - name: Validate release selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [ "$ESTABLISH_BASELINE" = true ]; then
+            test "$RELEASE_TAG" = v0.9.6
+            test -z "$PREVIOUS_RELEASE"
+          else
+            [[ "$PREVIOUS_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-ui$ ]]
+            test "$PREVIOUS_RELEASE" != "$RELEASE_TAG-ui"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: android-actions/setup-android@v3
+      - name: Install APK verification tools
+        run: sdkmanager 'build-tools;36.0.0'
+      - name: Download and authenticate the existing release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG-ui" --dir release --pattern 'release-manifest.json*' --pattern 'pb-mapper-*.apk'
+          python scripts/release/ui_release_manifest.py verify release/release-manifest.json --public-key scripts/release/update_signing_key.pub.pem
+          python - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          manifest = json.loads(Path('release/release-manifest.json').read_text())
+          assert manifest['tag'] == os.environ['RELEASE_TAG'] + '-ui'
+          assert manifest['version'] == os.environ['RELEASE_TAG'][1:]
+          assert manifest['commit'] == subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          PY
+      - name: Verify APKs and prepare the updated manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=(--establish-signing-baseline)
+          if [ "$ESTABLISH_BASELINE" != true ]; then
+            gh release download "$PREVIOUS_RELEASE" --dir previous --pattern 'pb-mapper-*.apk'
+            baseline=(--previous-directory previous)
+          fi
+          python scripts/release/ui_release_manifest.py add-android release/release-manifest.json release/*.apk --build-tools "$ANDROID_HOME/build-tools/36.0.0" "${baseline[@]}"
+      - name: Sign and publish the verified manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$UPDATE_SIGNING_KEY"
+          KEY=$(mktemp)
+          trap 'rm -f "$KEY"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$KEY"
+          python scripts/release/ui_release_manifest.py sign release/release-manifest.json --key "$KEY"
+          python scripts/release/ui_release_manifest.py verify release/release-manifest.json --public-key scripts/release/update_signing_key.pub.pem
+          gh release upload "$RELEASE_TAG-ui" release/release-manifest.json release/release-manifest.json.sig --clobber

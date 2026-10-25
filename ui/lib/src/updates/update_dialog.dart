@@ -16,7 +16,9 @@ import 'package:url_launcher/url_launcher.dart';
 Future<void> showUpdateDialog(BuildContext context, UpdateController updates) {
   final settled =
       updates.stage == UpdateStage.available ||
-      updates.stage == UpdateStage.noPackage;
+      updates.stage == UpdateStage.noPackage ||
+      updates.stage == UpdateStage.installerOpened ||
+      updates.stage == UpdateStage.failed;
   if (!updates.busy && !settled) updates.check();
   return showDialog<void>(
     context: context,
@@ -36,15 +38,19 @@ class UpdateDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: updates,
-      builder: (context, _) => AlertDialog(
-        key: const Key('update-dialog'),
-        icon: const Icon(AppIcons.update),
-        title: Text(context.l10n.checkForUpdates),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(minWidth: 320, maxWidth: 440),
-          child: _body(context),
+      builder: (context, _) => PopScope(
+        canPop: !updates.busy,
+        child: AlertDialog(
+          key: const Key('update-dialog'),
+          scrollable: true,
+          icon: const Icon(AppIcons.update),
+          title: Text(context.l10n.checkForUpdates),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 320, maxWidth: 440),
+            child: _body(context),
+          ),
+          actions: _actions(context),
         ),
-        actions: _actions(context),
       ),
     );
   }
@@ -106,7 +112,7 @@ class UpdateDialog extends StatelessWidget {
                 plan.asset.name.endsWith('.dmg')
                     ? l10n.updateNoteDiskImage
                     : l10n.updateNoteArchive,
-              UpdateMethod.openInBrowser => l10n.updateNoteBrowser,
+              UpdateMethod.systemInstaller => l10n.updateNoteAndroid,
             }),
             const SizedBox(height: 4),
             TextButton.icon(
@@ -142,17 +148,24 @@ class UpdateDialog extends StatelessWidget {
         UpdateStage.installing => Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
-          children: [progress(), Text(l10n.updateInstalling)],
+          children: [
+            progress(),
+            Text(
+              plan?.method == UpdateMethod.systemInstaller
+                  ? l10n.updateInstallingAndroid
+                  : l10n.updateInstalling,
+            ),
+          ],
         ),
         UpdateStage.saved => _Status(
           icon: AppIcons.ok,
           color: successColor(scheme),
           text: l10n.updateSaved(updates.savedPath ?? ''),
         ),
-        UpdateStage.opened => _Status(
+        UpdateStage.installerOpened => _Status(
           icon: AppIcons.ok,
           color: successColor(scheme),
-          text: l10n.updateOpened,
+          text: l10n.updateInstallerOpened,
         ),
         UpdateStage.verifiedOnly => _Status(
           icon: AppIcons.ok,
@@ -167,10 +180,17 @@ class UpdateDialog extends StatelessWidget {
             UpdateFailure.unsigned => l10n.updateFailedUnsigned,
             UpdateFailure.signature => l10n.updateFailedSignature,
             UpdateFailure.checksum => l10n.updateFailedChecksum,
+            UpdateFailure.permission => l10n.updateFailedPermission,
+            UpdateFailure.incompatiblePackage => l10n.updateIncompatiblePackage,
             UpdateFailure.install => l10n.updateFailedInstall,
           },
         ),
       },
+      if (updates.stage == UpdateStage.failed &&
+          updates.failure?.detail != null) ...[
+        const SizedBox(height: 12),
+        SelectableText(updates.failure!.detail!, style: muted),
+      ],
     ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -217,7 +237,7 @@ class UpdateDialog extends StatelessWidget {
             child: Text(l10n.updateOpenReleasePage),
           ),
       ],
-      UpdateStage.failed => [
+      UpdateStage.failed || UpdateStage.installerOpened => [
         if (updates.newer && release != null)
           TextButton(
             onPressed: () => _open(release.page),

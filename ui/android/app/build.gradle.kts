@@ -1,3 +1,6 @@
+import java.security.KeyStore
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -45,9 +48,30 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
+            // Like proxy-everything, distributed APKs are signed locally with
+            // the existing key. Never regenerate it or ship a CI runner's key.
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+}
+
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.name.contains("Release", ignoreCase = true) }) {
+        check(System.getenv("CI") != "true" && System.getenv("GITHUB_ACTIONS") != "true") {
+            "Release APKs must be built and signed locally; see docs/ui-updates.md"
+        }
+        check(android.signingConfigs.getByName("debug").storeFile?.isFile == true) {
+            "The persistent Android signing key is missing. Restore its backup; do not generate a replacement."
+        }
+        val signing = android.signingConfigs.getByName("debug")
+        val keyStore = KeyStore.getInstance("JKS")
+        signing.storeFile!!.inputStream().use { keyStore.load(it, signing.storePassword!!.toCharArray()) }
+        val certificate = keyStore.getCertificate(signing.keyAlias)
+        val fingerprint = MessageDigest.getInstance("SHA-256")
+            .digest(certificate.encoded).joinToString("") { "%02x".format(it) }
+        val expected = rootProject.file("../../scripts/release/android_signing_certificate.sha256").readText().trim()
+        check(fingerprint == expected) {
+            "Android signing certificate changed. Restore the pinned signing key; see docs/ui-updates.md"
         }
     }
 }

@@ -48,6 +48,12 @@ enum UpdateFailure {
   /// A download does not match the size or SHA-256 the manifest lists.
   checksum,
 
+  /// Android requires the user to allow installs from this app.
+  permission,
+
+  /// The APK cannot upgrade this installed package (identity, key or build).
+  incompatiblePackage,
+
   /// Putting the update in place failed.
   install,
 }
@@ -222,10 +228,8 @@ enum UpdateMethod {
   /// drag the app out of the disk image (portable Windows, Linux zip, macOS).
   saveDownload,
 
-  /// Open the package's download in the browser (Android: release packages
-  /// are signed with a different key each release, so the system would
-  /// refuse to install one over another from inside the app).
-  openInBrowser,
+  /// Hand a verified APK to Android's package installer.
+  systemInstaller,
 }
 
 /// What this installation is, as far as choosing an update goes.
@@ -235,6 +239,7 @@ class UpdateHost {
     required this.arch,
     this.windowsInstalled = false,
     this.appImage,
+    this.androidAbis = const [],
   });
 
   /// `windows`, `macos`, `linux`, `android` or `ios`.
@@ -249,6 +254,9 @@ class UpdateHost {
 
   /// The AppImage the Linux app runs from, if it does.
   final String? appImage;
+
+  /// Device ABIs in preference order, including when this process is 32 bit.
+  final List<String> androidAbis;
 }
 
 /// The file to fetch and how to apply it.
@@ -262,13 +270,13 @@ class UpdatePlan {
 /// The release file meant for [host]'s platform, by the names the release
 /// workflow gives them.
 String? packageFor(UpdateHost host) => switch (host.os) {
-  'windows' =>
+  'windows' when host.arch == 'x64' =>
     host.windowsInstalled
         ? 'pb-mapper-windows-x86_64-setup.exe'
         : 'pb-mapper-windows-x86_64.zip',
-  'linux' =>
+  'linux' when host.arch == 'x64' =>
     host.appImage != null ? 'pb-mapper-linux.AppImage' : 'pb-mapper-linux.zip',
-  'macos' =>
+  'macos' when host.arch == 'arm64' || host.arch == 'x64' =>
     host.arch == 'arm64'
         ? 'pb-mapper-macos-arm64.dmg'
         : 'pb-mapper-macos-x86_64.dmg',
@@ -285,12 +293,21 @@ String? packageFor(UpdateHost host) => switch (host.os) {
 /// the release has none for it.
 UpdatePlan? planUpdate(ReleaseManifest manifest, UpdateHost host) {
   final name = packageFor(host);
-  final asset = name == null ? null : manifest.named(name);
+  ReleaseAsset? asset;
+  if (host.os == 'android' && host.androidAbis.isNotEmpty) {
+    for (final abi in host.androidAbis) {
+      if (!const ['arm64-v8a', 'armeabi-v7a', 'x86_64'].contains(abi)) continue;
+      asset = manifest.named('pb-mapper-$abi.apk');
+      if (asset != null) break;
+    }
+  } else {
+    asset = name == null ? null : manifest.named(name);
+  }
   if (asset == null) return null;
   final method = switch (host.os) {
     'windows' when host.windowsInstalled => UpdateMethod.installer,
     'linux' when host.appImage != null => UpdateMethod.replaceAppImage,
-    'android' => UpdateMethod.openInBrowser,
+    'android' => UpdateMethod.systemInstaller,
     _ => UpdateMethod.saveDownload,
   };
   return UpdatePlan(asset, method);

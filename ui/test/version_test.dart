@@ -26,6 +26,9 @@ void main() {
       for (final i in [1, 2, 3]) int.parse(app![i]!),
     ];
     expect('$major.$minor.$patch', workspace![1]);
-    expect(int.parse(app![4]!), major * 10000 + minor * 100 + patch);
+    // Package builds advance independently of the public version, including
+    // locally distributed rebuilds. APK continuity is checked against the
+    // preceding signed package by scripts/release/android_package.py.
+    expect(int.parse(app![4]!), greaterThan(0));
   });
 }

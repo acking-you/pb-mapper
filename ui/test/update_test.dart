@@ -86,6 +86,7 @@ class _FakeInstaller implements UpdateInstaller {
   final List<String> calls = [];
   Object? appImageError;
   Object? installerError;
+  Object? androidError;
 
   @override
   Future<void> runInstallerAfterExit(File installer) async {
@@ -106,7 +107,10 @@ class _FakeInstaller implements UpdateInstaller {
   }
 
   @override
-  Future<void> open(Uri url) async => calls.add('open $url');
+  Future<void> installAndroidPackage(File package) async {
+    calls.add('android ${package.uri.pathSegments.last}');
+    if (androidError case final error?) throw error;
+  }
 }
 
 /// The note an update leaves for the next launch, kept in memory.
@@ -281,11 +285,23 @@ void main() {
       );
       expect(
         plan(const UpdateHost(os: 'android', arch: 'arm')),
-        'pb-mapper-armeabi-v7a.apk openInBrowser',
+        'pb-mapper-armeabi-v7a.apk systemInstaller',
       );
       // Not in this release, and not a platform that updates.
       expect(plan(const UpdateHost(os: 'android', arch: 'x64')), isNull);
       expect(plan(const UpdateHost(os: 'ios', arch: 'arm64')), isNull);
+      expect(plan(const UpdateHost(os: 'linux', arch: 'arm64')), isNull);
+      expect(plan(const UpdateHost(os: 'macos', arch: 'unknown')), isNull);
+      expect(
+        plan(
+          const UpdateHost(
+            os: 'android',
+            arch: 'arm',
+            androidAbis: ['arm64-v8a', 'armeabi-v7a'],
+          ),
+        ),
+        'pb-mapper-arm64-v8a.apk systemInstaller',
+      );
     });
 
     test('a manifest names only plain files with sound hashes', () {
@@ -457,7 +473,7 @@ void main() {
     });
 
     test(
-      'Android opens the package in the browser, downloading nothing',
+      'Android downloads and verifies before opening the system installer',
       () async {
         final world = _World();
         final updates = world.controller(
@@ -465,13 +481,64 @@ void main() {
         );
         await updates.check();
         await updates.start();
-        expect(world.http.downloaded, isEmpty);
-        expect(world.installer.calls, [
-          'open ${_file('v0.9.1-ui', 'pb-mapper-arm64-v8a.apk')}',
+        expect(world.http.downloaded, [
+          _file('v0.9.1-ui', 'pb-mapper-arm64-v8a.apk'),
         ]);
-        expect(updates.stage, UpdateStage.opened);
+        expect(world.installer.calls, ['android pb-mapper-arm64-v8a.apk']);
+        expect(updates.stage, UpdateStage.installerOpened);
+        expect(updates.busy, isFalse);
+        expect(world.quits, 0);
+        // Returning from a cancelled installer can reopen the same download.
+        await updates.start();
+        expect(world.http.downloaded, hasLength(1));
       },
     );
+
+    test(
+      'permission denial keeps the APK, but a modified cache cannot install',
+      () async {
+        final world = _World()
+          ..installer.androidError = const UpdateException(
+            UpdateFailure.permission,
+          );
+        final updates = world.controller(
+          host: const UpdateHost(os: 'android', arch: 'arm64'),
+        );
+        await updates.check();
+        await updates.start();
+        expect(updates.failure?.kind, UpdateFailure.permission);
+        world.installer.androidError = null;
+        await updates.start();
+        expect(updates.stage, UpdateStage.installerOpened);
+        expect(world.http.downloaded, hasLength(1));
+        final cached = world.downloads
+            .listSync(recursive: true)
+            .whereType<File>()
+            .single;
+        cached.writeAsStringSync('tampered');
+        await updates.start();
+        expect(updates.failure?.kind, UpdateFailure.checksum);
+        expect(world.installer.calls, hasLength(2));
+        expect(cached.existsSync(), isFalse);
+      },
+    );
+
+    test('cancellation on the final download chunk never hands off', () async {
+      final world = _World();
+      final updates = world.controller(
+        host: const UpdateHost(os: 'android', arch: 'arm64'),
+      );
+      await updates.check();
+      updates.addListener(() {
+        if (updates.stage == UpdateStage.downloading && updates.received > 0) {
+          updates.cancel();
+        }
+      });
+      await updates.start();
+      expect(updates.stage, UpdateStage.available);
+      expect(world.installer.calls, isEmpty);
+      expect(world.downloads.listSync(), isEmpty);
+    });
 
     test('a quiet check that fails keeps what the last one found', () async {
       final world = _World();

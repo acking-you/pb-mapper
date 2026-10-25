@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.6] - 2026-10-26
+- Download and verify Android updates inside the app, then open the system installer. Continue automatically after install permission is granted, and reuse verified downloads after a denied permission or cancelled installer.
+- Build mobile releases locally with a pinned persistent Android certificate, following proxy-everything. Stop publishing CI-signed APKs and unsigned IPAs; verify APK identity, effective versionCode, signatures, and 16 KiB alignment before adding them to the signed release manifest.
+- Refuse unsupported desktop architectures, report failures to open downloaded packages, and prevent a cancelled or disposed update from proceeding to installation. Document the one-time migration required from older disposable Android signing keys.
+- Android migration: APKs from old CI releases cannot be updated in place because their signing keys were disposable. Export settings before uninstalling the old app, install this release, and import settings. Future releases retain this signing identity and update in place.
+
 ## [0.9.5] - 2026-10-25
 - Install Windows updates from inside the app. None ever had: after the download, the app started a hidden PowerShell to wait for it to quit, run the installer and open it again, but started it in a way that gives it no console, and PowerShell exits at once without running a line. The app then closed, nothing was installed, and the next launch said the update had not gone in. The hand-off is now started from the app's Rust library with a console of its own that has no window, and it outlives the app. Windows still asks for permission when the app is installed for all users.
 - Copies of 0.9.4 and earlier carry the old hand-off, so updating them from inside the app still fails: install 0.9.5 by hand once, and updates from it on go in by themselves.
