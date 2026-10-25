@@ -68,6 +68,7 @@ class UpdateController extends ChangeNotifier {
     this.record = const FileUpdateRecord(),
     this.loadInstalled = _loadInstalled,
     this.loadHost = _loadHost,
+    this.workDir = _workDir,
     bool? replaceSelf,
   }) : source = source ?? UpdateSource(),
        replaceSelf = replaceSelf ?? !kDebugMode;
@@ -79,6 +80,10 @@ class UpdateController extends ChangeNotifier {
   final UpdateRecord record;
   final Future<Version> Function() loadInstalled;
   final Future<UpdateHost> Function() loadHost;
+
+  /// A fresh folder for one download. A Windows installer stays in it after
+  /// the app quits, until the hand-off has run it.
+  final Future<Directory> Function() workDir;
 
   /// How long after a hand-off its outcome is still news. The installer
   /// reopens the app within a minute; a record older than this belongs to a
@@ -222,7 +227,7 @@ class UpdateController extends ChangeNotifier {
     final started = DateTime.now();
     File? file;
     try {
-      final work = await Directory.systemTemp.createTemp('pb-mapper-update-');
+      final work = await workDir();
       file = File('${work.path}${Platform.pathSeparator}${plan.asset.name}');
       final digest = await source.http.download(
         url,
@@ -267,8 +272,16 @@ class UpdateController extends ChangeNotifier {
     }
     switch (plan.method) {
       case UpdateMethod.installer:
+        // Noted before the hand-off starts, so a running hand-off always
+        // has its note; taken back when it could not start, which fails
+        // here with the app still open.
         await _remember();
-        await installer.runInstallerAfterExit(file);
+        try {
+          await installer.runInstallerAfterExit(file);
+        } catch (_) {
+          await _forget();
+          rethrow;
+        }
         _set(UpdateStage.installing);
         await quit();
       case UpdateMethod.replaceAppImage:
@@ -314,6 +327,16 @@ class UpdateController extends ChangeNotifier {
     }
   }
 
+  /// Take back the note [_remember] wrote, for an update that is not going
+  /// ahead after all. Best effort, like the note.
+  Future<void> _forget() async {
+    try {
+      await record.take();
+    } catch (error) {
+      debugPrint('Could not clear the update record: $error');
+    }
+  }
+
   /// What became of the update handed off before this app last quit: null
   /// when there was none, or when it is too old to be the one just made.
   /// Read once; the next launch hears nothing.
@@ -354,6 +377,9 @@ class UpdateController extends ChangeNotifier {
     source.http.cancel();
     super.dispose();
   }
+
+  static Future<Directory> _workDir() =>
+      Directory.systemTemp.createTemp('pb-mapper-update-');
 
   static Future<Version> _loadInstalled() async {
     final info = await PackageInfo.fromPlatform();

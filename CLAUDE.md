@@ -217,9 +217,13 @@ The design and its rules are in `docs/ui-design.md`.
 
 - **`native/pb_mapper_ffi/`**: The Rust C ABI crate (a workspace member)
   - Every call returns a JSON envelope: `{"success": bool, "message": …, "data": …}`
-    — except two leaf calls over caller-owned buffers:
+    — except three small calls that return a plain integer:
     `pb_mapper_galaxy_frame_v1`, made once per frame, and
-    `pb_mapper_ed25519_verify_v1`, the update manifest's signature check
+    `pb_mapper_ed25519_verify_v1`, the update manifest's signature check,
+    both leaf calls over caller-owned buffers; and
+    `pb_mapper_spawn_hidden_powershell_v1`, which starts the Windows
+    update's hand-off so that it outlives the app (a detached Dart child
+    cannot: PowerShell without a console exits at once)
   - `relay.rs`: `pb_mapper_relay_call_json`, one export for every question
     and administrator request to the relay, dispatched on the request's
     `"op"` and answered with the SDK's `Client`/`Admin`. A new relay
