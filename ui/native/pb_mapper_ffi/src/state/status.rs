@@ -105,6 +105,11 @@ impl PbMapperState {
                 local_address: config.local_address.clone(),
                 protocol: config.protocol.clone(),
                 enable_keep_alive: config.enable_keep_alive,
+                namespace: config.namespace,
+                routed_namespace: self
+                    .client_runtime
+                    .get(service_key)
+                    .map(|runtime| runtime.pin.routed_namespace()),
                 status,
                 status_message,
                 created_at_ms: config
@@ -372,7 +377,7 @@ impl PbMapperState {
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 STATUS_REFRESH_TIMEOUT,
-                check_service_with_get_status(target, &key, credential),
+                check_service_with_get_status(target, &key, credential, None),
             )
             .await;
 
@@ -438,12 +443,15 @@ impl PbMapperState {
         let cache = self.client_status_cache.clone();
         let refreshing = self.client_status_refreshing.clone();
         let key = service_key.to_string();
+        // A connection into another credential's namespace looks for its
+        // service there. Only a running one is probed, so its pin says which.
+        let namespace = tunnel.as_ref().and_then(|tunnel| tunnel.namespace);
         let credential = tunnel.map(|tunnel| tunnel.credential);
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 STATUS_REFRESH_TIMEOUT,
-                check_service_with_get_status(target, &key, credential),
+                check_service_with_get_status(target, &key, credential, namespace),
             )
             .await;
 

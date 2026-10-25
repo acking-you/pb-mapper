@@ -27,14 +27,47 @@ void main() {
     () async {
       final store = await _started(
         FakePbMapperApi(
-          services: [fakeService(serviceKey: 'web')],
-          serverServices: ['web', 'zeta', 'alpha'],
-        ),
+            services: [fakeService(serviceKey: 'web')],
+            serverServices: ['web', 'zeta', 'alpha'],
+          )
+          // Credential #3's `web` is not this computer's share of that name.
+          ..namespacedServices = [(3, 'web')],
       );
-      expect(store.relayServices, ['web', 'zeta', 'alpha']);
-      expect(store.remoteServices, ['alpha', 'zeta']);
+      expect(
+        [for (final s in store.relayServices) s.id],
+        ['web', 'zeta', 'alpha', '3/web'],
+      );
+      expect(
+        [for (final s in store.remoteServices) s.id],
+        ['alpha', '3/web', 'zeta'],
+      );
     },
   );
+
+  test(
+    'a connection stays in the namespace it started in after the credential changes',
+    () async {
+      // Started under credential #3; this computer now holds the
+      // administrator key, whose own `cam` is a different service.
+      final store = await _started(
+        FakePbMapperApi(
+          clients: [fakeClient(serviceKey: 'cam', routedNamespace: 3)],
+          serverServices: ['cam'],
+        )..namespacedServices = [(3, 'cam')],
+      );
+      final [own, theirs] = store.relayServices;
+      expect(store.connectionTo(own), isNull);
+      expect(store.connectionTo(theirs)?.key, 'cam');
+    },
+  );
+
+  test('a name that reads like another namespace keeps its own id', () {
+    // The administrator's `3/cache` and credential #3's `cache`.
+    const own = RemoteService(name: '3/cache');
+    const theirs = RemoteService(name: 'cache', namespace: 3);
+    expect(own.id, '0/3/cache');
+    expect(theirs.id, '3/cache');
+  });
 
   test(
     'the relay is unset without an address, and offline when down',

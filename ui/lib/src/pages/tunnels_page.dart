@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/galaxy/planet_glyph.dart';
+import 'package:pb_mapper_ui/src/pages/relay/relay_format.dart' show ownerName;
 import 'package:pb_mapper_ui/src/pages/tunnel_actions.dart';
 import 'package:pb_mapper_ui/src/pages/tunnel_editor.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
@@ -177,6 +178,9 @@ class TunnelCard extends StatelessWidget {
       tunnel.localAddress,
       tunnel.protocol,
       if (tunnel.encrypted) l10n.encrypted,
+      // A connection into another credential's namespace says whose.
+      if (tunnel.namespace case final namespace?)
+        ownerName(context, AppScope.of(context).relay, namespace),
     ].join('  ·  ');
     final identity = Column(
       crossAxisAlignment: CrossAxisAlignment.start,

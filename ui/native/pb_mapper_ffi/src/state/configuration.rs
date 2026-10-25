@@ -270,6 +270,7 @@ impl PbMapperState {
         local_address: &str,
         protocol: &str,
         enable_keep_alive: bool,
+        namespace: Option<u64>,
     ) -> Result<(), CtlError> {
         let mut store = self.load_client_configs();
         let now = SystemTime::now();
@@ -284,6 +285,7 @@ impl PbMapperState {
             } else {
                 now
             },
+            namespace,
         };
 
         store.clients.insert(service_key.to_string(), config);

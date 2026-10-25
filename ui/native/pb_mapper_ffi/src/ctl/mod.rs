@@ -64,6 +64,11 @@ pub struct ConnectArgs {
     pub udp: bool,
     #[arg(long, default_value_t = false)]
     pub keep_alive: bool,
+    /// The temporary credential whose service it is. Administrator key only;
+    /// without it, this credential's own namespace.
+    #[arg(long)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, clap::Subcommand)]
@@ -248,6 +253,7 @@ async fn run(
                 args.addr,
                 protocol(args.udp),
                 args.keep_alive,
+                args.namespace,
             )
             .await?;
             Ok(proto::Response::ok(
