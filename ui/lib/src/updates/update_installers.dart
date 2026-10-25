@@ -151,24 +151,35 @@ abstract final class WindowsInstallerUpdate {
 
   /// The PowerShell [handOff] runs. Paths go in single quotes, where only a
   /// single quote is special. Setup writes its log beside the installer
-  /// (`setup.log`), which stays when the installer is removed, for when an
-  /// update did not go in.
+  /// (`setup.log`). When setup succeeds the download's folder is removed;
+  /// when it fails only the installer is, and the log stays for whoever
+  /// asks why the update did not go in.
   static String script(String installer, int processId, String app) {
     String quote(String text) => "'${text.replaceAll("'", "''")}'";
     // A Windows path, read as Windows reads it whatever runs this, so the
-    // script is the same when a test builds it elsewhere.
-    final folder = installer.lastIndexOf(RegExp(r'[\\/]'));
-    final log =
-        '${folder < 0 ? '.' : installer.substring(0, folder)}\\setup.log';
+    // script is the same when a test builds it elsewhere. The installer has
+    // its download folder to itself.
+    final cut = installer.lastIndexOf(RegExp(r'[\\/]'));
+    final folder = cut < 0 ? null : installer.substring(0, cut);
+    final log = '${folder ?? '.'}\\setup.log';
+    final removeInstaller =
+        'Remove-Item -LiteralPath ${quote(installer)} -ErrorAction SilentlyContinue';
+    // Installed: nothing left to keep. Not installed: the log stays, for
+    // whoever asks why.
+    final cleanUp = folder == null
+        ? removeInstaller
+        : 'if (\$setup.ExitCode -eq 0) { Remove-Item -LiteralPath '
+              '${quote(folder)} -Recurse -Force -ErrorAction SilentlyContinue } '
+              'else { $removeInstaller }';
     return [
       'try { Wait-Process -Id $processId -Timeout 60 -ErrorAction Stop } catch {}',
       'if (Get-Process -Id $processId -ErrorAction SilentlyContinue) { exit 1 }',
       // Start-Process joins its arguments with spaces and quotes none of
       // them, so a log path with a space is quoted for setup here.
-      'Start-Process -FilePath ${quote(installer)} '
+      '\$setup = Start-Process -FilePath ${quote(installer)} '
           "-ArgumentList '/SILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"
-          '${quote('/LOG="$log"')} -Wait',
-      'Remove-Item -LiteralPath ${quote(installer)} -ErrorAction SilentlyContinue',
+          '${quote('/LOG="$log"')} -Wait -PassThru',
+      cleanUp,
       'Start-Process -FilePath ${quote(app)}',
     ].join('; ');
   }

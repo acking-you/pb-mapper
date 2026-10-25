@@ -674,34 +674,53 @@ void main() {
           dir.deleteSync(recursive: true);
         } on FileSystemException catch (_) {}
       });
-      File stand(String name, String body) =>
-          File('${dir.path}\\$name')..writeAsStringSync(body);
+      final native = DynamicLibrary.open(library!);
       final installed = File('${dir.path}\\installed.txt');
-      final reopened = File('${dir.path}\\reopened.txt');
-      final installer = stand('setup.cmd', '@echo %*> "${installed.path}"\r\n');
-      final app = stand('app.cmd', '@echo reopened> "${reopened.path}"\r\n');
-      // The app: a process that ends a moment after the hand-off begins.
-      final running = await Process.start('powershell.exe', [
-        '-NoProfile',
-        '-Command',
-        'Start-Sleep -Seconds 2',
-      ]);
-      await WindowsInstallerUpdate.handOff(
-        installer,
-        running.pid,
-        app.path,
-        DynamicLibrary.open(library!),
-      );
-      expect(installed.existsSync(), isFalse, reason: 'the app still runs');
 
-      final deadline = DateTime.now().add(const Duration(seconds: 30));
-      while (!reopened.existsSync()) {
-        if (DateTime.now().isAfter(deadline)) fail('the app was not reopened');
-        await Future<void>.delayed(const Duration(milliseconds: 100));
+      /// One update whose setup exits with [exitCode]: its download folder,
+      /// once the app has been reopened.
+      Future<Directory> update(int exitCode) async {
+        final download = Directory('${dir.path}\\download-$exitCode')
+          ..createSync();
+        final reopened = File('${dir.path}\\reopened-$exitCode.txt');
+        final installer = File('${download.path}\\setup.cmd')
+          ..writeAsStringSync(
+            '@echo %*> "${installed.path}"\r\n@exit /b $exitCode\r\n',
+          );
+        final app = File('${dir.path}\\app-$exitCode.cmd')
+          ..writeAsStringSync('@echo reopened> "${reopened.path}"\r\n');
+        // The app: a process that ends a moment after the hand-off begins.
+        final running = await Process.start('powershell.exe', [
+          '-NoProfile',
+          '-Command',
+          'Start-Sleep -Seconds 2',
+        ]);
+        await WindowsInstallerUpdate.handOff(
+          installer,
+          running.pid,
+          app.path,
+          native,
+        );
+        expect(installed.existsSync(), isFalse, reason: 'the app still runs');
+        final deadline = DateTime.now().add(const Duration(seconds: 30));
+        while (!reopened.existsSync()) {
+          if (DateTime.now().isAfter(deadline)) {
+            fail('the app was not reopened');
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+        expect(installed.readAsStringSync(), contains('/SILENT'));
+        expect(installed.readAsStringSync(), contains('/LOG='));
+        installed.deleteSync();
+        return download;
       }
-      expect(installed.readAsStringSync(), contains('/SILENT'));
-      expect(installed.readAsStringSync(), contains('/LOG='));
-      expect(installer.existsSync(), isFalse, reason: 'removed once run');
+
+      // Installed: nothing of the download is left.
+      expect((await update(0)).existsSync(), isFalse);
+      // Not installed: the installer goes, its folder (and setup's log) stay.
+      final failed = await update(1);
+      expect(failed.existsSync(), isTrue);
+      expect(File('${failed.path}\\setup.cmd').existsSync(), isFalse);
     },
     skip: !Platform.isWindows
         ? 'the hand-off is Windows-only'
