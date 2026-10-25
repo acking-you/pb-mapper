@@ -125,11 +125,15 @@ fn spawn_hidden_powershell(script: &str) -> std::io::Result<()> {
             .spawn()
     };
     let flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
-    // A job that forbids breaking away refuses the first; the second then
-    // starts inside it, which is the best that job allows.
-    spawn(flags | CREATE_BREAKAWAY_FROM_JOB)
-        .or_else(|_| spawn(flags))
-        .map(drop)
+    // A job that forbids breaking away refuses the first with access denied;
+    // the second then starts inside it, which is the best that job allows.
+    // Any other failure is the real one, and is reported as it is.
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    match spawn(flags | CREATE_BREAKAWAY_FROM_JOB) {
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => spawn(flags),
+        started => started,
+    }
+    .map(drop)
 }
 
 #[cfg(not(windows))]

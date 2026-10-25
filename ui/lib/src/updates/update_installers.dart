@@ -130,11 +130,19 @@ abstract final class WindowsInstallerUpdate {
       app,
     ).toNativeUtf8();
     try {
-      if (spawn(command) != 1) {
-        throw const UpdateException(
-          UpdateFailure.install,
-          'Could not start the installer',
-        );
+      switch (spawn(command)) {
+        case 1:
+          return;
+        case -1:
+          throw const UpdateException(
+            UpdateFailure.install,
+            'The installer hand-off script was refused as malformed',
+          );
+        default:
+          throw const UpdateException(
+            UpdateFailure.install,
+            'Windows would not start the installer hand-off (see the log)',
+          );
       }
     } finally {
       malloc.free(command);
