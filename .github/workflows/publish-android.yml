@@ -50,8 +50,9 @@ jobs:
         with:
           python-version: '3.12'
       - uses: android-actions/setup-android@v3
-      - name: Install APK verification tools
-        run: sdkmanager 'build-tools;36.0.0'
+        with:
+          # The action defaults to the retired SDK package named "tools".
+          packages: 'build-tools;36.0.0'
       - name: Download and authenticate the existing release
         shell: bash
         run: |
