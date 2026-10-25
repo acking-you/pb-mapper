@@ -19,7 +19,7 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_ffi.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_model.dart';
 
 /// The layouts' version, the same on both ends.
-const double galaxyFrameVersion = 1;
+const double galaxyFrameVersion = 2;
 
 /// The frame buffer's length.
 const int galaxyFrameFields = 13;
@@ -125,8 +125,9 @@ typedef StarLayerData = ({
 /// layers; per system x, y, z, home, online, first planet, planet count, label
 /// width, label height; per planet system, ring, radius, phase, period, size,
 /// tilt axis, tilt, appeared, rippled, label width and height, strong label
-/// width and height; per link planet, system; per star layer parallax,
-/// buckets, then per bucket phase, count and the unit coordinates.
+/// width and height; per link planet, the body it ends at (systems first,
+/// then planets) and direct (0/1); per star layer parallax, buckets, then
+/// per bucket phase, count and the unit coordinates.
 Float64List encodeScene(
   GalaxyBodies bodies, {
   required List<StarLayerData> stars,
@@ -181,7 +182,8 @@ Float64List encodeScene(
   for (final link in bodies.scene.links) {
     values
       ..add((bodies.indexOf(link.planetId) - bodies.systems.length).toDouble())
-      ..add(bodies.indexOf(link.systemId).toDouble());
+      ..add(bodies.indexOf(link.targetId).toDouble())
+      ..add(link.direct ? 1 : 0);
   }
   for (final layer in stars) {
     values
@@ -502,12 +504,12 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
     planets.add(_Planet(f));
   }
   if (systems.any((s) => s.first + s.count > nPlanets)) return -1;
-  final links = <(int, int)>[];
+  final links = <(int, int, bool)>[];
   for (var i = 0; i < nLinks; i++) {
-    final f = take(2);
+    final f = take(3);
     if (f == null || !_count(f[0]) || !_count(f[1])) return -1;
-    if (f[0] >= nPlanets || f[1] >= nSystems) return -1;
-    links.add((f[0].toInt(), f[1].toInt()));
+    if (f[0] >= nPlanets || f[1] >= nSystems + nPlanets) return -1;
+    links.add((f[0].toInt(), f[1].toInt(), f[2] != 0));
   }
   final layers = <(double, List<(double, int, int)>)>[];
   for (var i = 0; i < nLayers; i++) {
@@ -764,10 +766,16 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
   // Links.
   final linkCount = o.hole();
   var drawnLinks = 0;
-  for (final (planet, toIndex) in links) {
-    final p = planets[planet];
-    final from = systems[p.system].position + p.offsetAt(orbitTime);
-    final to = systems[toIndex].position;
+  Vec3 planetAt(int index) {
+    final p = planets[index];
+    return systems[p.system].position + p.offsetAt(orbitTime);
+  }
+
+  for (final (index, (planet, toIndex, direct)) in links.indexed) {
+    final from = planetAt(planet);
+    final to = toIndex >= nSystems
+        ? planetAt(toIndex - nSystems)
+        : systems[toIndex].position;
     final rise = (to - from).length * 0.42 + 0.4;
     final control = from.lerp(to, 0.5) + Vec3(0, rise, 0);
     Vec3 curve(double t) =>
@@ -777,10 +785,12 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
         if (camera.at(curve(i / 32)) case final q?) (q.x, q.y),
     ];
     if (points.length < 2) continue;
+    o.push(index.toDouble());
     o.points(points);
+    final speed = direct ? 0.34 : 0.22;
     o.points([
       for (var k = 0; k < 3; k++)
-        if (camera.at(curve(still ? (k + 1) / 4 : (time * 0.22 + k / 3) % 1.0))
+        if (camera.at(curve(still ? (k + 1) / 4 : (time * speed + k / 3) % 1.0))
             case final q?)
           (q.x, q.y),
     ]);

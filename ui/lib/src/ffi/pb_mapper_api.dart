@@ -3,6 +3,9 @@
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+import 'package:pb_mapper_ui/src/common/polling.dart' show FirstWhereOrNull;
+
 import 'pb_mapper_service.dart';
 import 'relay_models.dart';
 
@@ -53,8 +56,14 @@ class ServiceConfigInfo {
   final String protocol;
   final bool enableEncryption;
   final bool enableKeepAlive;
+
+  /// Whether connections may reach it directly rather than through the relay.
+  final bool allowDirect;
   final String status;
   final String statusMessage;
+
+  /// How its sessions travel, while it runs.
+  final TunnelPath? path;
   final int createdAtMs;
   final int updatedAtMs;
 
@@ -64,8 +73,10 @@ class ServiceConfigInfo {
     required this.protocol,
     required this.enableEncryption,
     required this.enableKeepAlive,
+    this.allowDirect = true,
     required this.status,
     required this.statusMessage,
+    this.path,
     required this.createdAtMs,
     required this.updatedAtMs,
   });
@@ -77,8 +88,10 @@ class ServiceConfigInfo {
       protocol: _asString(map['protocol'], fallback: 'TCP'),
       enableEncryption: _asBool(map['enableEncryption']),
       enableKeepAlive: _asBool(map['enableKeepAlive']),
+      allowDirect: _asBool(map['allowDirect'], fallback: true),
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
+      path: TunnelPath.maybeFrom(map['path']),
       createdAtMs: _asInt(map['createdAtMs']),
       updatedAtMs: _asInt(map['updatedAtMs']),
     );
@@ -98,8 +111,14 @@ class ClientConfigInfo {
   /// While it runs, the namespace the relay routes it in, from the credential
   /// it was started with: a credential changed since does not move it.
   final int? routedNamespace;
+
+  /// Whether each session tries a direct path before the relay.
+  final bool allowDirect;
   final String status;
   final String statusMessage;
+
+  /// How its sessions travel, while it runs.
+  final TunnelPath? path;
   final int createdAtMs;
   final int updatedAtMs;
 
@@ -110,8 +129,10 @@ class ClientConfigInfo {
     required this.enableKeepAlive,
     this.namespace,
     this.routedNamespace,
+    this.allowDirect = true,
     required this.status,
     required this.statusMessage,
+    this.path,
     required this.createdAtMs,
     required this.updatedAtMs,
   });
@@ -126,12 +147,118 @@ class ClientConfigInfo {
       routedNamespace: map['routedNamespace'] == null
           ? null
           : _asInt(map['routedNamespace']),
+      allowDirect: _asBool(map['allowDirect'], fallback: true),
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
+      path: TunnelPath.maybeFrom(map['path']),
       createdAtMs: _asInt(map['createdAtMs']),
       updatedAtMs: _asInt(map['updatedAtMs']),
     );
   }
+}
+
+/// How far a direct attempt got. Every stage before [committing] can still
+/// give way to the relay.
+enum DirectStage {
+  /// Asking the relay whether the sharing computer offers direct.
+  negotiating,
+
+  /// Learning this computer's public address, and asking for a session.
+  discovering,
+
+  /// Dialling the sharing computer through both networks' NATs.
+  punching,
+
+  /// The path is up; the sharing computer is opening its service.
+  committing;
+
+  static DirectStage? parse(Object? raw) =>
+      DirectStage.values.firstWhereOrNull((stage) => stage.name == raw);
+}
+
+/// How a running tunnel's sessions travel: each TCP connection or UDP flow
+/// through it goes direct or through the relay, decided as it opens. A
+/// connection counts both and its attempts; a share counts only the
+/// sessions that reach it directly.
+@immutable
+class TunnelPath {
+  const TunnelPath({
+    this.activeDirect = 0,
+    this.activeRelay = 0,
+    this.directSessions = 0,
+    this.relaySessions = 0,
+    this.attempt,
+    this.lastDirect,
+    this.setupMs,
+    this.fallbackStage,
+  });
+
+  /// Sessions open now, on each path.
+  final int activeDirect;
+  final int activeRelay;
+
+  /// Sessions opened since the tunnel started, on each path.
+  final int directSessions;
+  final int relaySessions;
+
+  /// The stage reached by a direct attempt in flight.
+  final DirectStage? attempt;
+
+  /// How the latest attempt ended: direct, the relay, or none yet.
+  final bool? lastDirect;
+
+  /// How long the latest direct path took to set up.
+  final int? setupMs;
+
+  /// Where the latest attempt gave way to the relay. The tunnel then sends
+  /// its sessions straight to the relay for a while before trying again.
+  final DirectStage? fallbackStage;
+
+  static TunnelPath? maybeFrom(Object? raw) {
+    if (raw is! Map) return null;
+    final last = raw['last'];
+    final lastPath = last is Map ? last['path'] : null;
+    return TunnelPath(
+      activeDirect: _asInt(raw['activeDirect']),
+      activeRelay: _asInt(raw['activeRelay']),
+      directSessions: _asInt(raw['directSessions']),
+      relaySessions: _asInt(raw['relaySessions']),
+      attempt: DirectStage.parse(raw['attempt']),
+      lastDirect: switch (lastPath) {
+        'direct' => true,
+        'relay' => false,
+        _ => null,
+      },
+      setupMs: last is Map && last['setupMs'] != null
+          ? _asInt(last['setupMs'])
+          : null,
+      fallbackStage: last is Map ? DirectStage.parse(last['stage']) : null,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is TunnelPath &&
+      other.activeDirect == activeDirect &&
+      other.activeRelay == activeRelay &&
+      other.directSessions == directSessions &&
+      other.relaySessions == relaySessions &&
+      other.attempt == attempt &&
+      other.lastDirect == lastDirect &&
+      other.setupMs == setupMs &&
+      other.fallbackStage == fallbackStage;
+
+  @override
+  int get hashCode => Object.hash(
+    activeDirect,
+    activeRelay,
+    directSessions,
+    relaySessions,
+    attempt,
+    lastDirect,
+    setupMs,
+    fallbackStage,
+  );
 }
 
 class LocalServerStatus {
@@ -304,12 +431,15 @@ abstract interface class PbMapperApiClient {
   /// What the remote server is holding for [serviceKey], structured.
   Future<List<ServiceConnInfo>> getServiceConns(String serviceKey);
 
+  /// Share [serviceKey]. With [allowDirect], connections may reach it
+  /// directly rather than through the relay.
   Future<OperationResult> registerService({
     required String serviceKey,
     required String localAddress,
     required String protocol,
     required bool enableEncryption,
     required bool enableKeepAlive,
+    bool allowDirect = true,
   });
   Future<OperationResult> unregisterService(String serviceKey);
   Future<OperationResult> deleteServiceConfig(String serviceKey);
@@ -319,13 +449,15 @@ abstract interface class PbMapperApiClient {
 
   /// Connect to [serviceKey]. [namespace] is the temporary credential whose
   /// service it is, which only the administrator key may name; null for this
-  /// credential's own.
+  /// credential's own. With [allowDirect] each session tries a direct path
+  /// before the relay.
   Future<OperationResult> connectService({
     required String serviceKey,
     required String localAddress,
     required String protocol,
     required bool enableKeepAlive,
     int? namespace,
+    bool allowDirect = true,
   });
   Future<OperationResult> disconnectService(String serviceKey);
   Future<OperationResult> deleteClientConfig(String serviceKey);
@@ -532,6 +664,7 @@ class PbMapperApi implements PbMapperApiClient {
     required String protocol,
     required bool enableEncryption,
     required bool enableKeepAlive,
+    bool allowDirect = true,
   }) async {
     final result = await _service.registerService(
       serviceKey: serviceKey,
@@ -539,6 +672,7 @@ class PbMapperApi implements PbMapperApiClient {
       protocol: protocol,
       enableEncryption: enableEncryption,
       enableKeepAlive: enableKeepAlive,
+      allowDirect: allowDirect,
     );
     return _resultFrom(result);
   }
@@ -596,6 +730,7 @@ class PbMapperApi implements PbMapperApiClient {
     required String protocol,
     required bool enableKeepAlive,
     int? namespace,
+    bool allowDirect = true,
   }) async {
     final result = await _service.connectService(
       serviceKey: serviceKey,
@@ -603,6 +738,7 @@ class PbMapperApi implements PbMapperApiClient {
       protocol: protocol,
       enableKeepAlive: enableKeepAlive,
       namespace: namespace,
+      allowDirect: allowDirect,
     );
     return _resultFrom(result);
   }

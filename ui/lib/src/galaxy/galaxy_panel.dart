@@ -17,6 +17,7 @@ import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/widgets/brand_mark.dart';
 import 'package:pb_mapper_ui/src/widgets/connections.dart';
+import 'package:pb_mapper_ui/src/widgets/path.dart';
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 
 class GalaxyPanel extends StatelessWidget {
@@ -286,6 +287,28 @@ class _PlanetDetail extends StatelessWidget {
                   ),
                 ),
               ],
+              // Which way its traffic goes, drawn and then said.
+              if (tunnel.pathMode != null) ...[
+                const SizedBox(height: 10),
+                PathRoute(tunnel: tunnel),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    PathChip(tunnel: tunnel),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        pathDetail(context, tunnel),
+                        key: Key('path-detail-${tunnel.id}'),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 14),
               Wrap(
                 spacing: 8,
@@ -405,14 +428,18 @@ Color planetColor(ColorScheme scheme, Planet planet) {
   return planet.inUse ? successColor(scheme) : availableColor(scheme);
 }
 
-/// What a planet is, and its state, in words.
+/// What a planet is, its state, and for a tunnel that is up its path, in
+/// words.
 String planetSubtitle(BuildContext context, Planet planet) {
   final l10n = context.l10n;
+  String tunnel(String kind, Tunnel tunnel) => [
+    kind,
+    healthLabel(context, tunnel.health),
+    if (tunnel.pathMode != null) pathLabel(context, tunnel),
+  ].join(' · ');
   return switch (planet.kind) {
-    BodyKind.share =>
-      '${l10n.kindShare} · ${healthLabel(context, planet.tunnel!.health)}',
-    BodyKind.connect =>
-      '${l10n.kindConnect} · ${healthLabel(context, planet.tunnel!.health)}',
+    BodyKind.share => tunnel(l10n.kindShare, planet.tunnel!),
+    BodyKind.connect => tunnel(l10n.kindConnect, planet.tunnel!),
     BodyKind.remote =>
       '${l10n.kindRemote} · ${planet.inUse ? l10n.healthInUse : l10n.healthAvailable}',
   };

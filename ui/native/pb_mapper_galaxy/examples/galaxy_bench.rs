@@ -182,9 +182,9 @@ fn encode(bench: &Bench, rng: &mut Rng) -> Vec<f64> {
             }
         }
     }
-    // Per link: planet, system.
+    // Per link: planet, the body it ends at (a system's star), relayed.
     for &(planet, system) in bench.links {
-        scene.extend([planet as f64, system as f64]);
+        scene.extend([planet as f64, system as f64, 0.0]);
     }
     // Per star layer: parallax, buckets; per bucket phase, count, unit x, y.
     for (stars, parallax) in STAR_LAYERS {

@@ -163,6 +163,7 @@ class _TunnelFormState extends State<TunnelForm> {
   late bool _keepAlive =
       widget.existing?.keepAlive ?? widget.store.config.keepAliveEnabled;
   late int? _namespace = widget.existing?.namespace ?? widget.initialNamespace;
+  late bool _direct = widget.existing?.allowDirect ?? true;
   bool _more = false;
   bool _busy = false;
   String? _keyError;
@@ -244,6 +245,7 @@ class _TunnelFormState extends State<TunnelForm> {
       encrypted: _encrypted,
       keepAlive: _keepAlive,
       namespace: _kind == TunnelKind.connect ? _namespace : null,
+      allowDirect: _direct,
     );
     setState(() => _busy = true);
     // Replacing goes the way an edit does: the old connection stops first,
@@ -480,6 +482,13 @@ class _TunnelFormState extends State<TunnelForm> {
             value: _encrypted,
             onChanged: (v) => setState(() => _encrypted = v),
           ),
+        _SwitchRow(
+          key: const Key('tunnel-direct'),
+          title: share ? l10n.directAllow : l10n.directPrefer,
+          subtitle: share ? l10n.directAllowHelp : l10n.directPreferHelp,
+          value: _direct,
+          onChanged: (v) => setState(() => _direct = v),
+        ),
         _SwitchRow(
           key: const Key('tunnel-keepalive'),
           title: l10n.keepAlive,

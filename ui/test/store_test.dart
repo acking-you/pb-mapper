@@ -61,6 +61,75 @@ void main() {
     },
   );
 
+  test('a tunnel shows the path its sessions take, and idle the last one', () {
+    Tunnel connection(
+      TunnelPath? path, {
+      bool allowDirect = true,
+      String status = 'running',
+    }) => Tunnel.fromClient(
+      fakeClient(
+        serviceKey: 'db',
+        path: path,
+        allowDirect: allowDirect,
+        status: status,
+      ),
+    );
+    expect(connection(null).pathMode, PathMode.directFirst);
+    expect(
+      connection(const TunnelPath(activeDirect: 1, activeRelay: 1)).pathMode,
+      PathMode.mixed,
+    );
+    expect(
+      connection(const TunnelPath(attempt: DirectStage.punching)).pathMode,
+      PathMode.trying,
+    );
+    // Idle after giving way: the relay, until direct is tried again.
+    expect(
+      connection(
+        const TunnelPath(
+          relaySessions: 1,
+          lastDirect: false,
+          fallbackStage: DirectStage.punching,
+        ),
+      ).pathMode,
+      PathMode.relay,
+    );
+    expect(connection(null, allowDirect: false).pathMode, PathMode.relayOnly);
+    expect(
+      connection(const TunnelPath(activeDirect: 1), status: 'failed').pathMode,
+      isNull,
+    );
+    // A share knows only the sessions that reached it directly.
+    expect(Tunnel.fromService(fakeService(serviceKey: 'web')).pathMode, isNull);
+    expect(
+      Tunnel.fromService(
+        fakeService(serviceKey: 'web', path: const TunnelPath(activeDirect: 2)),
+      ).pathMode,
+      PathMode.direct,
+    );
+  });
+
+  test('a path reads as the Rust side writes it', () {
+    // `PathInfo` as `the_list_says_which_path_each_tunnel_takes` pins it.
+    final path = TunnelPath.maybeFrom({
+      'activeDirect': 0,
+      'activeRelay': 1,
+      'directSessions': 0,
+      'relaySessions': 1,
+      'last': {'path': 'relay', 'stage': 'discovering'},
+    });
+    expect(path?.activeRelay, 1);
+    expect(path?.lastDirect, isFalse);
+    expect(path?.fallbackStage, DirectStage.discovering);
+    final direct = TunnelPath.maybeFrom({
+      'activeDirect': 1,
+      'attempt': 'punching',
+      'last': {'path': 'direct', 'setupMs': 230},
+    });
+    expect(direct?.attempt, DirectStage.punching);
+    expect((direct?.lastDirect, direct?.setupMs), (true, 230));
+  });
+
   test('a name that reads like another namespace keeps its own id', () {
     // The administrator's `3/cache` and credential #3's `cache`.
     const own = RemoteService(name: '3/cache');

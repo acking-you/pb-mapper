@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 
+export 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart'
+    show DirectStage, TunnelPath;
+
 /// Which end of a tunnel this computer is.
 enum TunnelKind {
   /// This computer publishes a local service under a key (`register`).
@@ -46,6 +49,8 @@ class Tunnel {
     this.createdAtMs = 0,
     this.namespace,
     this.routedNamespace,
+    this.allowDirect = true,
+    this.path,
   });
 
   factory Tunnel.fromService(ServiceConfigInfo s) => Tunnel(
@@ -58,6 +63,8 @@ class Tunnel {
     health: TunnelHealth.parse(s.status),
     message: s.statusMessage,
     createdAtMs: s.createdAtMs,
+    allowDirect: s.allowDirect,
+    path: s.path,
   );
 
   factory Tunnel.fromClient(ClientConfigInfo c) => Tunnel(
@@ -72,6 +79,8 @@ class Tunnel {
     createdAtMs: c.createdAtMs,
     namespace: c.namespace,
     routedNamespace: c.routedNamespace,
+    allowDirect: c.allowDirect,
+    path: c.path,
   );
 
   final TunnelKind kind;
@@ -104,6 +113,39 @@ class Tunnel {
   /// a credential changed since it started does not move. Null otherwise.
   final int? routedNamespace;
 
+  /// Whether its traffic may go direct: for a connection, whether each
+  /// session tries a direct path before the relay; for a share, whether it
+  /// lets connections reach it that way.
+  final bool allowDirect;
+
+  /// How its sessions travel, while it runs.
+  final TunnelPath? path;
+
+  /// Which way its traffic goes, for a tunnel that is up; null otherwise,
+  /// and for a share no connection has reached directly.
+  PathMode? get pathMode {
+    if (health != TunnelHealth.running) return null;
+    if (!allowDirect) return PathMode.relayOnly;
+    final path = this.path;
+    if (kind == TunnelKind.share) {
+      // A share cannot tell the sessions that came through the relay apart.
+      return path != null && path.activeDirect > 0 ? PathMode.direct : null;
+    }
+    if (path == null) return PathMode.directFirst;
+    return switch ((path.activeDirect > 0, path.activeRelay > 0)) {
+      (true, true) => PathMode.mixed,
+      (true, false) => PathMode.direct,
+      (false, true) => PathMode.relay,
+      // Idle: an attempt under way, or how the last one ended.
+      (false, false) when path.attempt != null => PathMode.trying,
+      (false, false) => switch (path.lastDirect) {
+        true => PathMode.direct,
+        false => PathMode.relay,
+        null => PathMode.directFirst,
+      },
+    };
+  }
+
   /// Unique across both kinds: a computer can share and connect one key.
   String get id => '${kind.name}:$key';
 
@@ -126,6 +168,7 @@ class Tunnel {
     encrypted: encrypted,
     keepAlive: keepAlive,
     namespace: namespace,
+    allowDirect: allowDirect,
   );
 
   @override
@@ -140,7 +183,9 @@ class Tunnel {
       other.health == health &&
       other.message == message &&
       other.namespace == namespace &&
-      other.routedNamespace == routedNamespace;
+      other.routedNamespace == routedNamespace &&
+      other.allowDirect == allowDirect &&
+      other.path == path;
 
   @override
   int get hashCode => Object.hash(
@@ -154,7 +199,30 @@ class Tunnel {
     message,
     namespace,
     routedNamespace,
+    allowDirect,
+    path,
   );
+}
+
+/// Which way a running tunnel's traffic goes, as it is shown.
+enum PathMode {
+  /// Kept on the relay by choice.
+  relayOnly,
+
+  /// Nothing has gone through it yet; each session will try direct first.
+  directFirst,
+
+  /// A direct path is being set up.
+  trying,
+
+  /// Straight between the two computers, now or last time.
+  direct,
+
+  /// Through the relay, now or last time.
+  relay,
+
+  /// Some sessions direct and some through the relay, now.
+  mixed,
 }
 
 /// What the new-tunnel form produces.
@@ -168,6 +236,7 @@ class TunnelDraft {
     this.encrypted = true,
     this.keepAlive = true,
     this.namespace,
+    this.allowDirect = true,
   });
 
   final TunnelKind kind;
@@ -179,6 +248,9 @@ class TunnelDraft {
 
   /// See [Tunnel.namespace]. A connection only.
   final int? namespace;
+
+  /// See [Tunnel.allowDirect].
+  final bool allowDirect;
 
   /// The address a fresh form starts with: the conventional local service
   /// port for a share, a free-looking one for a connection.

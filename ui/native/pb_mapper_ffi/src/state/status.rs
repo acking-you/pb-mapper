@@ -1,15 +1,14 @@
-//! Non-blocking status views and bounded asynchronous refresh scheduling for Flutter.
+//! Non-blocking status views for Flutter.
 //!
 //! ```text
-//! UI read -> cached snapshot -> immediate response
-//!              |
-//!              +-- stale? -> one deduplicated network refresh -> cache + change event
-//! force refresh -----------------------------------------> awaited network result
+//! tunnel read   -> its SDK handle's status and diagnostics -> immediate response
+//! relay read    -> cached snapshot; stale? -> one deduplicated refresh
+//! force refresh ---------------------------------------> awaited network result
 //! ```
 //!
-//! Service, client, and embedded-relay caches are independent. Refresh markers prevent
-//! duplicate probes, while visible events are emitted only when the displayed state
-//! actually changes.
+//! A tunnel's state is what its own worker reports, the same worker the CLI
+//! runs, so nothing here asks the relay about it; `watch_tunnel` emits the
+//! change events. Only the embedded relay's figures are cached.
 
 use super::*;
 
@@ -59,7 +58,7 @@ impl PbMapperState {
         sorted_configs.sort_by_key(|config| config.created_at);
 
         for config in sorted_configs {
-            let (status, message) = self.get_cached_service_status(&config.service_key).await;
+            let view = self.service_view(&config.service_key);
 
             services.push(ServiceConfigInfo {
                 service_key: config.service_key.clone(),
@@ -67,8 +66,10 @@ impl PbMapperState {
                 protocol: config.protocol.clone(),
                 enable_encryption: config.enable_encryption,
                 enable_keep_alive: config.enable_keep_alive,
-                status,
-                status_message: message,
+                allow_direct: config.allow_direct,
+                status: view.status.to_string(),
+                status_message: view.message,
+                path: view.path,
                 created_at_ms: config
                     .created_at
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -85,11 +86,11 @@ impl PbMapperState {
     }
 
     pub async fn get_service_status(&self, service_key: String) -> ServiceStatusResponse {
-        let (status, message) = self.get_cached_service_status(&service_key).await;
+        let view = self.service_view(&service_key);
         ServiceStatusResponse {
             service_key,
-            status,
-            message,
+            status: view.status.to_string(),
+            message: view.message,
         }
     }
 
@@ -98,7 +99,7 @@ impl PbMapperState {
         let mut client_infos = Vec::new();
 
         for (service_key, config) in store.clients.iter() {
-            let (status, status_message) = self.get_cached_client_status(service_key).await;
+            let view = self.client_view(service_key);
 
             client_infos.push(ClientConfigInfo {
                 service_key: config.service_key.clone(),
@@ -110,8 +111,10 @@ impl PbMapperState {
                     .client_runtime
                     .get(service_key)
                     .map(|runtime| runtime.pin.routed_namespace()),
-                status,
-                status_message,
+                allow_direct: config.allow_direct,
+                status: view.status.to_string(),
+                status_message: view.message,
+                path: view.path,
                 created_at_ms: config
                     .created_at
                     .duration_since(UNIX_EPOCH)
@@ -130,11 +133,25 @@ impl PbMapperState {
     }
 
     pub async fn get_client_status(&self, service_key: String) -> ClientStatusResponse {
-        let (status, message) = self.get_cached_client_status(&service_key).await;
+        let view = self.client_view(&service_key);
         ClientStatusResponse {
             service_key,
-            status,
-            message,
+            status: view.status.to_string(),
+            message: view.message,
+        }
+    }
+
+    fn service_view(&self, service_key: &str) -> TunnelView {
+        match self.service_runtime.get(service_key) {
+            Some(runtime) => runtime.handle.view(),
+            None => TunnelView::stopped("Service is not registered"),
+        }
+    }
+
+    fn client_view(&self, service_key: &str) -> TunnelView {
+        match self.client_runtime.get(service_key) {
+            Some(runtime) => runtime.handle.view(),
+            None => TunnelView::stopped("Client is not connected"),
         }
     }
 
@@ -284,216 +301,5 @@ impl PbMapperState {
         };
 
         Ok(detail)
-    }
-
-    // Cache service status to avoid blocking UI with network checks on every paint.
-    async fn get_cached_service_status(&self, service_key: &str) -> (String, String) {
-        let Some(runtime) = self.service_runtime.get(service_key) else {
-            return (
-                "stopped".to_string(),
-                "Service is not registered".to_string(),
-            );
-        };
-        if runtime.handle.is_finished() {
-            return (
-                "failed".to_string(),
-                "Service connection terminated".to_string(),
-            );
-        }
-        let cached = {
-            let cache = self.service_status_cache.read().await;
-            cache.get(service_key).cloned()
-        };
-        if cached
-            .as_ref()
-            .map(|entry| entry.updated_at.elapsed() > STATUS_CACHE_TTL)
-            .unwrap_or(true)
-        {
-            self.schedule_service_status_refresh(service_key).await;
-        }
-        cached
-            .map(|entry| (entry.status, entry.message))
-            .unwrap_or_else(|| {
-                (
-                    "retrying".to_string(),
-                    "Checking service status...".to_string(),
-                )
-            })
-    }
-
-    async fn get_cached_client_status(&self, service_key: &str) -> (String, String) {
-        let Some(runtime) = self.client_runtime.get(service_key) else {
-            return ("stopped".to_string(), "Client is not connected".to_string());
-        };
-        if runtime.handle.is_finished() {
-            return (
-                "failed".to_string(),
-                "Client connection terminated".to_string(),
-            );
-        }
-        let cached = {
-            let cache = self.client_status_cache.read().await;
-            cache.get(service_key).cloned()
-        };
-        if cached
-            .as_ref()
-            .map(|entry| entry.updated_at.elapsed() > STATUS_CACHE_TTL)
-            .unwrap_or(true)
-        {
-            self.schedule_client_status_refresh(service_key).await;
-        }
-        cached
-            .map(|entry| (entry.status, entry.message))
-            .unwrap_or_else(|| {
-                (
-                    "retrying".to_string(),
-                    "Checking client status...".to_string(),
-                )
-            })
-    }
-
-    pub(super) async fn schedule_service_status_refresh(&self, service_key: &str) {
-        {
-            let mut refreshing = self.service_status_refreshing.write().await;
-            if refreshing.contains(service_key) {
-                return;
-            }
-            refreshing.insert(service_key.to_string());
-        }
-
-        let tunnel = self
-            .service_runtime
-            .get(service_key)
-            .map(|runtime| runtime.pin.clone());
-        let target = match tunnel.as_ref() {
-            Some(tunnel) => ProbeTarget::Pinned(tunnel.endpoint.clone()),
-            None => ProbeTarget::Configured(self.config.server_address.clone()),
-        };
-        let cache = self.service_status_cache.clone();
-        let refreshing = self.service_status_refreshing.clone();
-        let key = service_key.to_string();
-        let credential = tunnel.map(|tunnel| tunnel.credential);
-
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                STATUS_REFRESH_TIMEOUT,
-                check_service_with_get_status(target, &key, credential, None),
-            )
-            .await;
-
-            let (status, message) = match result {
-                Ok(Ok(true)) => (
-                    "running".to_string(),
-                    "Service is running normally".to_string(),
-                ),
-                Ok(Ok(false)) => (
-                    "retrying".to_string(),
-                    "Service is in retry connection loop".to_string(),
-                ),
-                Ok(Err(_)) | Err(_) => (
-                    "failed".to_string(),
-                    "Cannot connect to pb-server".to_string(),
-                ),
-            };
-
-            let changed = {
-                let mut cache = cache.write().await;
-                let changed = cache
-                    .get(&key)
-                    .is_none_or(|entry| entry.status != status || entry.message != message);
-                cache.insert(
-                    key.clone(),
-                    StatusCacheEntry {
-                        status,
-                        message,
-                        updated_at: Instant::now(),
-                    },
-                );
-                changed
-            };
-            // Only transitions the user can perceive. These run on a timer for
-            // every configured entry, so emitting on every refresh would reload
-            // the list several times a second for no visible reason.
-            if changed {
-                events::emit(events::ChangeKind::Services, Some(&key), Origin::Internal);
-            }
-
-            let mut refreshing = refreshing.write().await;
-            refreshing.remove(&key);
-        });
-    }
-
-    pub(super) async fn schedule_client_status_refresh(&self, service_key: &str) {
-        {
-            let mut refreshing = self.client_status_refreshing.write().await;
-            if refreshing.contains(service_key) {
-                return;
-            }
-            refreshing.insert(service_key.to_string());
-        }
-
-        let tunnel = self
-            .client_runtime
-            .get(service_key)
-            .map(|runtime| runtime.pin.clone());
-        let target = match tunnel.as_ref() {
-            Some(tunnel) => ProbeTarget::Pinned(tunnel.endpoint.clone()),
-            None => ProbeTarget::Configured(self.config.server_address.clone()),
-        };
-        let cache = self.client_status_cache.clone();
-        let refreshing = self.client_status_refreshing.clone();
-        let key = service_key.to_string();
-        // A connection into another credential's namespace looks for its
-        // service there. Only a running one is probed, so its pin says which.
-        let namespace = tunnel.as_ref().and_then(|tunnel| tunnel.namespace);
-        let credential = tunnel.map(|tunnel| tunnel.credential);
-
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                STATUS_REFRESH_TIMEOUT,
-                check_service_with_get_status(target, &key, credential, namespace),
-            )
-            .await;
-
-            let (status, message) = match result {
-                Ok(Ok(true)) => (
-                    "running".to_string(),
-                    "Client is connected normally".to_string(),
-                ),
-                Ok(Ok(false)) => (
-                    "retrying".to_string(),
-                    "Client is in retry connection loop".to_string(),
-                ),
-                Ok(Err(_)) | Err(_) => (
-                    "failed".to_string(),
-                    "Cannot connect to pb-server".to_string(),
-                ),
-            };
-
-            let changed = {
-                let mut cache = cache.write().await;
-                let changed = cache
-                    .get(&key)
-                    .is_none_or(|entry| entry.status != status || entry.message != message);
-                cache.insert(
-                    key.clone(),
-                    StatusCacheEntry {
-                        status,
-                        message,
-                        updated_at: Instant::now(),
-                    },
-                );
-                changed
-            };
-            // Only transitions the user can perceive. These run on a timer for
-            // every configured entry, so emitting on every refresh would reload
-            // the list several times a second for no visible reason.
-            if changed {
-                events::emit(events::ChangeKind::Clients, Some(&key), Origin::Internal);
-            }
-
-            let mut refreshing = refreshing.write().await;
-            refreshing.remove(&key);
-        });
     }
 }

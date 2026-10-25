@@ -60,6 +60,8 @@ typedef _PbMapperRegisterServiceNative =
       Pointer<Utf8> protocol,
       Int32 enableEncryption,
       Int32 enableKeepAlive,
+      // Nonzero lets connections reach it directly.
+      Int32 allowDirect,
     );
 typedef _PbMapperRegisterServiceDart =
     Pointer<Utf8> Function(
@@ -69,6 +71,7 @@ typedef _PbMapperRegisterServiceDart =
       Pointer<Utf8> protocol,
       int enableEncryption,
       int enableKeepAlive,
+      int allowDirect,
     );
 
 typedef _PbMapperUnregisterServiceNative =
@@ -90,6 +93,8 @@ typedef _PbMapperConnectServiceNative =
       Int32 enableKeepAlive,
       // The temporary credential whose service it is; negative for none.
       Int64 namespace,
+      // Nonzero tries a direct path before the relay.
+      Int32 allowDirect,
     );
 typedef _PbMapperConnectServiceDart =
     Pointer<Utf8> Function(
@@ -99,6 +104,7 @@ typedef _PbMapperConnectServiceDart =
       Pointer<Utf8> protocol,
       int enableKeepAlive,
       int namespace,
+      int allowDirect,
     );
 
 typedef _PbMapperDisconnectServiceNative =
