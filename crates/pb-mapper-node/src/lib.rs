@@ -34,6 +34,62 @@ fn number(value: u64) -> f64 {
     value.min((1_u64 << 53) - 1) as f64
 }
 
+#[napi(object)]
+pub struct JsRelayDiagnostics {
+    pub transport: String,
+    pub connections_created: f64,
+    pub streams_opened: f64,
+    pub streams_reused: f64,
+    pub last_error: Option<String>,
+    pub connections: Vec<JsQuicConnectionDiagnostics>,
+}
+
+#[napi(object)]
+pub struct JsQuicConnectionDiagnostics {
+    pub connection_id: f64,
+    pub peer_addr: String,
+    pub rtt_us: f64,
+    pub congestion_window: f64,
+    pub mtu: u32,
+    pub sent_packets: f64,
+    pub lost_packets: f64,
+    pub congestion_events: f64,
+    pub sent_bytes: f64,
+    pub received_bytes: f64,
+}
+
+impl From<sdk::RelayDiagnostics> for JsRelayDiagnostics {
+    fn from(value: sdk::RelayDiagnostics) -> Self {
+        Self {
+            transport: match value.transport {
+                sdk::RelayTransport::Tcp => "tcp",
+                sdk::RelayTransport::Quic => "quic",
+            }
+            .into(),
+            connections_created: number(value.connections_created),
+            streams_opened: number(value.streams_opened),
+            streams_reused: number(value.streams_reused),
+            last_error: value.last_error,
+            connections: value
+                .connections
+                .into_iter()
+                .map(|connection| JsQuicConnectionDiagnostics {
+                    connection_id: number(connection.connection_id),
+                    peer_addr: connection.peer_addr.to_string(),
+                    rtt_us: number(connection.rtt_us),
+                    congestion_window: number(connection.congestion_window),
+                    mtu: connection.mtu.into(),
+                    sent_packets: number(connection.sent_packets),
+                    lost_packets: number(connection.lost_packets),
+                    congestion_events: number(connection.congestion_events),
+                    sent_bytes: number(connection.sent_bytes),
+                    received_bytes: number(connection.received_bytes),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The direct attempt a tunnel is making right now.
 #[napi(object)]
 pub struct JsDirectAttempt {
@@ -127,6 +183,7 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
 
 #[napi(object)]
 pub struct JsTunnelDiagnostics {
+    pub relay_transport: String,
     pub direct: Option<JsPathDiagnostics>,
     pub sdk_version: String,
     pub last_attempt_phase: String,
@@ -160,6 +217,11 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
                     in_flight: attempt.in_flight,
                 }),
             }),
+            relay_transport: match value.relay_transport {
+                sdk::RelayTransport::Tcp => "tcp",
+                sdk::RelayTransport::Quic => "quic",
+            }
+            .into(),
             sdk_version: value.sdk_version.to_string(),
             last_attempt_phase: value.last_attempt_phase.as_str().to_string(),
             attempts: number(value.attempts),
@@ -235,6 +297,8 @@ fn status_label(status: &TunnelStatus) -> String {
 
 #[napi(object)]
 pub struct JsClientConfig {
+    /// Relay carrier: tcp (default) or quic, independent of the local service protocol.
+    pub relay_transport: Option<String>,
     pub server: String,
     pub credential: String,
     pub keep_alive: Option<bool>,
@@ -452,6 +516,11 @@ pub struct Client {
 impl Client {
     #[napi(constructor)]
     pub fn new(config: JsClientConfig) -> Result<Self> {
+        let relay_transport = match config.relay_transport.as_deref().unwrap_or("tcp") {
+            "tcp" => sdk::RelayTransport::Tcp,
+            "quic" => sdk::RelayTransport::Quic,
+            _ => return Err(invalid_argument("relayTransport must be tcp or quic")),
+        };
         let inner = sdk::Client::new(ClientConfig {
             server: config.server,
             credential: config.credential,
@@ -459,7 +528,15 @@ impl Client {
             namespace: as_opt_u64("namespace", config.namespace)?,
         })
         .map_err(to_napi)?;
+        let inner = inner
+            .with_relay_transport(relay_transport)
+            .map_err(to_napi)?;
         Ok(Self { inner })
+    }
+
+    #[napi]
+    pub async fn relay_diagnostics(&self) -> JsRelayDiagnostics {
+        self.inner.relay_diagnostics().await.into()
     }
 
     #[napi]

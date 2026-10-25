@@ -754,7 +754,7 @@ impl Drop for ControlGuard {
 pub(crate) async fn handle_control(
     connection: RemoteConnId,
     namespace: u64,
-    socket: tokio::net::TcpStream,
+    socket: pb_mapper_protocol::transport::RelayStream,
     session: pb_mapper_protocol::secure::ServerHeaderSession,
     sender: super::ManagerTaskSender,
 ) -> std::io::Result<()> {

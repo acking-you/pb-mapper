@@ -31,3 +31,5 @@ pub use crate::diagnostics::{
 pub use pb_mapper_protocol::direct::{
     ObservedReport, SessionObservation, SessionPath, SessionState,
 };
+
+pub use crate::relay::{QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport};

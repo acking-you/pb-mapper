@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
+use crate::endpoint::RelayEndpoint;
 use pb_mapper_core::checksum::Credential;
-use pb_mapper_core::config::ResolvedAddrs;
+use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async};
 use pb_mapper_protocol::MessageReader;
 use pb_mapper_protocol::command::{
     AdminRequest, AdminResponse, MessageSerializer, PbConnRequest, PbConnResponse,
@@ -32,15 +33,17 @@ const MAX_ATTEMPTS: usize = 2;
 /// generally idempotent — `RootKeyRotate` least of all — so a failure after the
 /// request went out is reported rather than repeated.
 pub(super) async fn send_admin_request(
-    server: &str,
+    endpoint: &RelayEndpoint,
     credential: Credential,
     request: AdminRequest,
     io_timeout: Duration,
 ) -> Result<AdminResponse> {
-    let addrs = pb_mapper_core::config::resolve_addrs_async(server)
+    // Preserve the administrator API's fresh resolution and public address error
+    // boundary. The selected carrier may still reuse a matching QUIC connection.
+    let addrs = resolve_addrs_async(endpoint.name())
         .await
         .map_err(|source| Error::Address {
-            addr: server.to_string(),
+            addr: endpoint.to_string(),
             source,
         })?;
     let encoded = PbConnRequest::Admin(request).encode().map_err(protocol)?;
@@ -48,17 +51,21 @@ pub(super) async fn send_admin_request(
     for attempt in 0..MAX_ATTEMPTS {
         let last_attempt = attempt + 1 == MAX_ATTEMPTS;
         let mut exchange = Exchange::new();
-        let outcome = tokio::time::timeout(io_timeout, exchange.run(&addrs, &credential, &encoded))
-            .await
-            .unwrap_or(Err(Error::TimedOut {
-                timeout: io_timeout,
-            }));
+        let outcome = tokio::time::timeout(
+            io_timeout,
+            exchange.run(endpoint, &addrs, &credential, &encoded),
+        )
+        .await
+        .unwrap_or(Err(Error::TimedOut {
+            timeout: io_timeout,
+        }));
 
         let response = match outcome {
             Ok(response) => response,
             // Nothing reached the relay, so re-sending cannot duplicate an
             // effect. Anything past that point is reported as-is.
             Err(error) => {
+                endpoint.invalidate_cached_transport();
                 if exchange.sent || last_attempt {
                     return Err(error);
                 }
@@ -99,18 +106,18 @@ impl Exchange {
         Self { sent: false }
     }
 
-    /// Runs one exchange against `addrs`, trying each candidate in turn.
-    ///
-    /// `each_addr` stops at the first address that connects, so `sent` still
-    /// describes a single relay: the candidates are alternative routes to it, not
-    /// separate recipients, and only the one that answered ever saw the request.
+    /// Select a carrier stream before sending the administrator request.
+    /// Candidate racing and QUIC discovery cannot send this mutation: `sent`
+    /// still describes exactly one authenticated protocol session.
     async fn run(
         &mut self,
+        endpoint: &RelayEndpoint,
         addrs: &ResolvedAddrs,
         credential: &Credential,
         encoded: &[u8],
     ) -> Result<PbConnResponse> {
-        let mut stream = crate::addr::connect_tcp(addrs)
+        let mut stream = endpoint
+            .connect_addresses(addrs, *credential)
             .await
             .context(ConnectSnafu {
                 addr: addrs.to_string(),
@@ -148,6 +155,19 @@ fn protocol(error: impl std::fmt::Display) -> Error {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn invalid_admin_address_preserves_the_sdk_error_variant() {
+        let endpoint = RelayEndpoint::shared("localhost:invalid-port");
+        let result = send_admin_request(
+            &endpoint,
+            Credential::Admin(*b"0123456789abcdefghijklmnopqrstuv"),
+            AdminRequest::AuthStatus,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Address { .. })));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn cancelled_partial_admin_write_must_not_be_retried() {

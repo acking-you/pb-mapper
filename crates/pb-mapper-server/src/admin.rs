@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use tokio::net::TcpStream;
+use pb_mapper_protocol::transport::RelayStream;
 use tokio_util::sync::CancellationToken;
 
 use super::error::Error;
@@ -32,7 +32,7 @@ pub async fn handle_admin_request(
     auth: AuthRuntime,
     manager: ManagerTaskSender,
     conn_id: RemoteConnId,
-    mut conn: TcpStream,
+    mut conn: RelayStream,
     session: ServerHeaderSession,
 ) -> Result<()> {
     let result = execute(request, &authorization, auth, manager).await;

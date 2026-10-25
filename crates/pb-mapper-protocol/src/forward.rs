@@ -190,7 +190,7 @@ impl<'a, T: AsyncReadExt + Send + Unpin, D: Decryptor> ForwardReader
     for CodecForwardReader<'a, T, D>
 {
     async fn read(&mut self) -> Result<&'_ [u8]> {
-        self.0.read_msg().await
+        self.0.read_stream().await
     }
 }
 
@@ -321,165 +321,113 @@ pub async fn start_forward<
     .await
 }
 
-#[derive(Default)]
-struct ForwardDirectionState {
-    len: usize,
-    result: Option<Result<usize>>,
-}
-
-impl ForwardDirectionState {
-    fn is_done(&self) -> bool {
-        self.result.is_some()
-    }
-}
-
-#[derive(Clone, Copy)]
+/// Both directions are polled by the same forwarding task. A short, uncontended
+/// stack-owned lock makes the futures Send without allocating or queueing progress.
 struct ForwardActivity {
-    bytes: usize,
-    at: Instant,
+    state: parking_lot::Mutex<(usize, Instant)>,
+}
+impl ForwardActivity {
+    fn new() -> Self {
+        Self {
+            state: parking_lot::Mutex::new((0, Instant::now())),
+        }
+    }
+    fn record(&self, n: usize) {
+        let mut state = self.state.lock();
+        state.0 += n;
+        state.1 = Instant::now();
+    }
+    fn snapshot(&self) -> (usize, Instant) {
+        *self.state.lock()
+    }
 }
 
 async fn copy_with_activity<R: ForwardReader, W: ForwardWriter>(
     mut reader: R,
     mut writer: W,
-    activity_tx: tokio::sync::mpsc::UnboundedSender<ForwardActivity>,
+    activity: &ForwardActivity,
 ) -> Result<usize> {
     let mut length = 0;
     loop {
         let src = reader.read().await?;
-        let n = src.len();
-        if n == 0 {
+        if src.is_empty() {
             break;
         }
         writer.write(src).await?;
-        length += n;
-        let _ = activity_tx.send(ForwardActivity {
-            bytes: n,
-            at: Instant::now(),
-        });
+        length += src.len();
+        activity.record(src.len());
     }
     writer.shutdown().await;
     Ok(length)
 }
 
 async fn start_forward_with_config<
-    ClientReader: ForwardReader,
-    ClientWriter: ForwardWriter,
-    ServerReader: ForwardReader,
-    ServerWriter: ForwardWriter,
+    CR: ForwardReader,
+    CW: ForwardWriter,
+    SR: ForwardReader,
+    SW: ForwardWriter,
 >(
-    client_reader: ClientReader,
-    client_writer: ClientWriter,
-    server_reader: ServerReader,
-    server_writer: ServerWriter,
-    timeout_config: ForwardTimeoutConfig,
+    client_reader: CR,
+    client_writer: CW,
+    server_reader: SR,
+    server_writer: SW,
+    config: ForwardTimeoutConfig,
 ) {
-    let tunnel_idle_enabled = !timeout_config.tunnel_idle_timeout.is_zero();
-    let half_close_idle_enabled = !timeout_config.half_close_idle_timeout.is_zero();
-    let tunnel_idle_sleep = tokio::time::sleep(timeout_config.tunnel_idle_timeout);
-    let half_close_idle_sleep = tokio::time::sleep(timeout_config.half_close_idle_timeout);
-    tokio::pin!(tunnel_idle_sleep);
-    tokio::pin!(half_close_idle_sleep);
-
-    let (client_activity_tx, mut client_activity_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (server_activity_tx, mut server_activity_rx) = tokio::sync::mpsc::unbounded_channel();
-    // Keep each direction as one pinned future. Recreating a combined read/write future in every
-    // `select!` iteration can cancel it after the read consumed bytes but before the write
-    // completed, silently dropping a response tail when the peer direction finishes first.
-    let client_to_server = copy_with_activity(client_reader, server_writer, client_activity_tx);
-    let server_to_client = copy_with_activity(server_reader, client_writer, server_activity_tx);
-    tokio::pin!(client_to_server);
-    tokio::pin!(server_to_client);
-
-    let mut client_state = ForwardDirectionState::default();
-    let mut server_state = ForwardDirectionState::default();
-
+    let client_activity = ForwardActivity::new();
+    let server_activity = ForwardActivity::new();
+    let client_to_server = copy_with_activity(client_reader, server_writer, &client_activity);
+    let server_to_client = copy_with_activity(server_reader, client_writer, &server_activity);
+    tokio::pin!(client_to_server, server_to_client);
+    let idle = tokio::time::sleep(config.tunnel_idle_timeout);
+    let half_close = tokio::time::sleep(config.half_close_idle_timeout);
+    tokio::pin!(idle, half_close);
+    let mut client_result = None;
+    let mut server_result = None;
+    let mut half_closed_at = None;
     loop {
-        let client_done = client_state.is_done();
-        let server_done = server_state.is_done();
-        let half_closed = client_done ^ server_done;
+        let client_done = client_result.is_some();
+        let server_done = server_result.is_some();
         if client_done && server_done {
             break;
         }
-
         tokio::select! {
             biased;
-
             result = &mut client_to_server, if !client_done => {
                 let failed = result.is_err();
-                client_state.result = Some(result);
-                reset_sleep(&mut half_close_idle_sleep, timeout_config.half_close_idle_timeout);
-                if failed {
-                    break;
-                }
+                client_result = Some(result);
+                half_closed_at = Some(Instant::now());
+                reset_sleep(&mut half_close, config.half_close_idle_timeout);
+                if failed { break; }
             }
             result = &mut server_to_client, if !server_done => {
                 let failed = result.is_err();
-                server_state.result = Some(result);
-                reset_sleep(&mut half_close_idle_sleep, timeout_config.half_close_idle_timeout);
-                if failed {
-                    break;
-                }
+                server_result = Some(result);
+                half_closed_at = Some(Instant::now());
+                reset_sleep(&mut half_close, config.half_close_idle_timeout);
+                if failed { break; }
             }
-            Some(activity) = client_activity_rx.recv(), if !client_done => {
-                record_forward_activity(
-                    activity,
-                    &mut client_state,
-                    &mut tunnel_idle_sleep,
-                    timeout_config.tunnel_idle_timeout,
-                    &mut half_close_idle_sleep,
-                    timeout_config.half_close_idle_timeout,
-                    server_done,
-                );
+            _ = &mut idle, if !config.tunnel_idle_timeout.is_zero() && half_closed_at.is_none() => {
+                let last = client_activity.snapshot().1.max(server_activity.snapshot().1);
+                if last.elapsed() >= config.tunnel_idle_timeout { break; }
+                reset_sleep_at(&mut idle, config.tunnel_idle_timeout, last);
             }
-            Some(activity) = server_activity_rx.recv(), if !server_done => {
-                record_forward_activity(
-                    activity,
-                    &mut server_state,
-                    &mut tunnel_idle_sleep,
-                    timeout_config.tunnel_idle_timeout,
-                    &mut half_close_idle_sleep,
-                    timeout_config.half_close_idle_timeout,
-                    client_done,
-                );
-            }
-            _ = &mut tunnel_idle_sleep, if tunnel_idle_enabled && !half_closed => {
-                tracing::debug!(
-                    "forward tunnel idle timeout after {:?}",
-                    timeout_config.tunnel_idle_timeout
-                );
-                break;
-            }
-            _ = &mut half_close_idle_sleep, if half_close_idle_enabled && half_closed => {
-                tracing::debug!(
-                    "forward half-close idle timeout after {:?}",
-                    timeout_config.half_close_idle_timeout
-                );
-                break;
+            _ = &mut half_close, if !config.half_close_idle_timeout.is_zero() && half_closed_at.is_some() => {
+                let last = client_activity.snapshot().1.max(server_activity.snapshot().1).max(half_closed_at.unwrap_or_else(Instant::now));
+                if last.elapsed() >= config.half_close_idle_timeout { break; }
+                reset_sleep_at(&mut half_close, config.half_close_idle_timeout, last);
             }
         }
     }
-
-    let client_len = client_state.len;
-    let server_len = server_state.len;
-    handle_forward_final_result(client_state.result, client_len, "client->server");
-    handle_forward_final_result(server_state.result, server_len, "server->client");
-}
-
-fn record_forward_activity(
-    activity: ForwardActivity,
-    state: &mut ForwardDirectionState,
-    tunnel_idle_sleep: &mut Pin<&mut tokio::time::Sleep>,
-    tunnel_idle_timeout: Duration,
-    half_close_idle_sleep: &mut Pin<&mut tokio::time::Sleep>,
-    half_close_idle_timeout: Duration,
-    peer_done: bool,
-) {
-    state.len += activity.bytes;
-    reset_sleep_at(tunnel_idle_sleep, tunnel_idle_timeout, activity.at);
-    if peer_done {
-        reset_sleep_at(half_close_idle_sleep, half_close_idle_timeout, activity.at);
-    }
+    handle_forward_final_result(
+        client_result,
+        client_activity.snapshot().0,
+        "client->server",
+    );
+    handle_forward_final_result(
+        server_result,
+        server_activity.snapshot().0,
+        "server->client",
+    );
 }
 
 fn reset_sleep(sleep: &mut Pin<&mut tokio::time::Sleep>, timeout: Duration) {

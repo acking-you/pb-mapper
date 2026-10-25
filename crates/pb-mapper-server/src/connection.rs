@@ -35,7 +35,7 @@ pub(super) async fn handle_listener(
         snafu_error_handle!(set_tcp_nodelay(&stream), "remote stream set nodelay");
         task_sender
             .send(ManagerTask::Accept {
-                stream,
+                stream: stream.into(),
                 peer_addr: addr,
             })
             .await
@@ -44,13 +44,14 @@ pub(super) async fn handle_listener(
     }
 }
 
-#[instrument(skip(manager_task_sender, conn, security), fields(conn_id = %conn_id, peer_addr = %peer_addr))]
+#[instrument(skip(manager_task_sender, conn, security, quic_capability), fields(conn_id = %conn_id, peer_addr = %peer_addr))]
 pub(super) async fn handle_conn(
     conn_id: RemoteConnId,
     peer_addr: SocketAddr,
     manager_task_sender: ManagerTaskSender,
-    mut conn: TcpStream,
+    mut conn: RelayStream,
     security: ServerSecurity,
+    quic_capability: Option<Arc<pb_mapper_protocol::command::QuicEndpoint>>,
 ) -> Result<()> {
     let timeout = control_io_timeout();
     let initial = match tokio::time::timeout(timeout, security.read_initial(&mut conn)).await {
@@ -216,6 +217,15 @@ pub(super) async fn handle_conn(
         }
     };
     match init_request {
+        PbConnRequest::QuicEndpoint => {
+            let response =
+                PbConnResponse::QuicEndpoint(quic_capability.as_deref().cloned()).encode();
+            if let Ok(response) = response
+                && let Ok(mut writer) = session.response_writer(&mut conn)
+            {
+                let _ = tokio::time::timeout(timeout, writer.write_msg(&response)).await;
+            }
+        }
         PbConnRequest::DirectControl { .. } => {
             if session.protocol() != HeaderProtocol::V2 {
                 return Ok(());
@@ -530,7 +540,7 @@ pub(super) async fn handle_conn(
 }
 
 async fn scope_service_or_reject(
-    conn: &mut TcpStream,
+    conn: &mut RelayStream,
     session: &ServerHeaderSession,
     auth_context: &AuthContext,
     namespace: u64,
@@ -546,7 +556,7 @@ async fn scope_service_or_reject(
 }
 
 async fn run_while_credential_active<F, Fut>(
-    mut conn: TcpStream,
+    mut conn: RelayStream,
     session: ServerHeaderSession,
     auth_context: &AuthContext,
     conn_id: RemoteConnId,
@@ -554,7 +564,7 @@ async fn run_while_credential_active<F, Fut>(
     work: F,
 ) -> Result<()>
 where
-    F: FnOnce(TcpStream, ServerHeaderSession) -> Fut,
+    F: FnOnce(RelayStream, ServerHeaderSession) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
     let cancellation = match auth_context.cancellation_token() {
@@ -579,7 +589,7 @@ where
 }
 
 async fn write_protocol_error(
-    conn: &mut TcpStream,
+    conn: &mut RelayStream,
     session: &ServerHeaderSession,
     failure: &pb_mapper_auth::AuthFailure,
 ) {

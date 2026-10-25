@@ -32,6 +32,7 @@ export declare class Admin {
 
 export declare class Client {
   constructor(config: JsClientConfig)
+  relayDiagnostics(): Promise<JsRelayDiagnostics>
   server(): string
   /** Wake recovering tunnels after a host network or resume notification. */
   notifyNetworkChange(): void
@@ -148,6 +149,8 @@ export interface JsAuthStatus {
 }
 
 export interface JsClientConfig {
+  /** Relay carrier: tcp (default) or quic, independent of the local service protocol. */
+  relayTransport?: string
   server: string
   credential: string
   keepAlive?: boolean
@@ -219,6 +222,19 @@ export interface JsPathDiagnostics {
   attempt?: JsDirectAttempt
 }
 
+export interface JsQuicConnectionDiagnostics {
+  connectionId: number
+  peerAddr: string
+  rttUs: number
+  congestionWindow: number
+  mtu: number
+  sentPackets: number
+  lostPackets: number
+  congestionEvents: number
+  sentBytes: number
+  receivedBytes: number
+}
+
 export interface JsRegisterRequest {
   /**
    * Accept direct sessions from authorized consumers (default `true`).
@@ -230,6 +246,15 @@ export interface JsRegisterRequest {
   transport: string
   codec?: boolean
   forceNamespace?: boolean
+}
+
+export interface JsRelayDiagnostics {
+  transport: string
+  connectionsCreated: number
+  streamsOpened: number
+  streamsReused: number
+  lastError?: string
+  connections: Array<JsQuicConnectionDiagnostics>
 }
 
 export interface JsRemoteId {
@@ -256,6 +281,7 @@ export interface JsServiceInfo {
 }
 
 export interface JsTunnelDiagnostics {
+  relayTransport: string
   direct?: JsPathDiagnostics
   sdkVersion: string
   lastAttemptPhase: string

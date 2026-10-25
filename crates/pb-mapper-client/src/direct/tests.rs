@@ -189,7 +189,12 @@ async fn peer_certificate_and_session_binding_are_both_required() {
     // No STUN server is needed for the TLS boundary test; loopback candidates
     // come from the real bound sockets through discovery.
     let stun: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
-    let provider_peer = provider.peer(stun).await;
+    let mut provider_peer = provider.peer(stun).await;
+    // Test one TLS session, not which address wins the candidate race. Otherwise
+    // accept() can return a losing handshake with a different TLS exporter.
+    provider_peer
+        .candidates
+        .retain(|addr| addr.is_ipv4() && addr.ip().is_loopback());
     let consumer_peer = consumer.peer(stun).await;
     let grant = SessionGrant {
         id: [1; 16],

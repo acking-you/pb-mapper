@@ -56,6 +56,8 @@ pub struct PbServiceConnStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub enum PbConnRequest {
+    /// Authenticated discovery; available to administrator and temporary credentials.
+    QuicEndpoint,
     DirectControl {
         namespace: Option<u64>,
     },
@@ -296,6 +298,7 @@ pub enum AdminResponse {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum PbConnResponse {
+    QuicEndpoint(Option<QuicEndpoint>),
     Direct(crate::direct::DirectEvent),
     Register(u32),
     RegisterV2 {
@@ -426,4 +429,11 @@ mod tests {
         let value: PbConnRequest = serde_json::from_str(raw_json_str).unwrap();
         assert_eq!(mapper, value)
     }
+}
+
+/// Only a UDP port is advertised; use the IP of the authenticated TCP peer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct QuicEndpoint {
+    pub port: u16,
+    pub certificate: Vec<u8>,
 }

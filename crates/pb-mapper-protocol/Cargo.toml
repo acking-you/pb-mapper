@@ -11,6 +11,8 @@ description = "Message framing and authenticated sessions for pb-mapper"
 publish = ["crates-io"]
 
 [dependencies]
+quinn = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
 pb-mapper-auth.workspace = true
 pb-mapper-core.workspace = true
 
@@ -27,6 +29,7 @@ tracing.workspace = true
 uni-stream.workspace = true
 
 [features]
+relay-quic = ["dep:quinn", "dep:rcgen"]
 udp-timeout = ["uni-stream/udp-timeout"]
 
 [lints]

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
-use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
@@ -148,7 +148,7 @@ pub struct ServerRegistration {
 pub async fn handle_server_conn(
     registration: ServerRegistration,
     task_sender: ManagerTaskSender,
-    mut conn: TcpStream,
+    mut conn: RelayStream,
     session: ServerHeaderSession,
 ) -> Result<()> {
     let ServerRegistration {

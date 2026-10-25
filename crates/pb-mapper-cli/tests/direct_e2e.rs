@@ -51,15 +51,35 @@ async fn roundtrip(socket: &mut TcpStream) {
 
 #[tokio::test]
 async fn direct_tcp_survives_server_restart_and_local_stop_closes_it() {
-    let mut relay = Relay::start_with_direct(
+    direct_survives_coordinator_loss(pb_mapper_client::sdk::RelayTransport::Tcp).await;
+}
+
+#[cfg(feature = "relay-quic")]
+#[tokio::test]
+async fn direct_sessions_survive_quic_coordinator_loss() {
+    direct_survives_coordinator_loss(pb_mapper_client::sdk::RelayTransport::Quic).await;
+}
+
+async fn direct_survives_coordinator_loss(carrier: pb_mapper_client::sdk::RelayTransport) {
+    let mut relay = Relay::start_with_options(
         "direct-tcp",
-        Some(DirectServerConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            advertise: "127.0.0.1:0".parse().unwrap(),
-        }),
+        pb_mapper_server::RelayServerOptions {
+            direct: Some(DirectServerConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                advertise: "127.0.0.1:0".parse().unwrap(),
+            }),
+            quic: (carrier == pb_mapper_client::sdk::RelayTransport::Quic).then(|| {
+                pb_mapper_server::QuicServerConfig {
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    advertise_port: 0,
+                }
+            }),
+        },
     )
     .await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None)
+        .with_relay_transport(carrier)
+        .unwrap();
     let (backend, count, _echo) = echo().await;
     let registration = client
         .register_with_options(

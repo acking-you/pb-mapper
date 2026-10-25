@@ -116,7 +116,7 @@ export async function echoRoundTrip(address, payload, timeoutMs = 5_000) {
   });
 }
 
-export async function startRelay({ direct = false } = {}) {
+export async function startRelay({ direct = false, quic = false } = {}) {
   const bin = findPbMapperBinary();
   if (!bin) {
     return null;
@@ -128,6 +128,7 @@ export async function startRelay({ direct = false } = {}) {
   const port = await reservePort();
   const logs = [];
   const args = ["server", "--port", String(port)];
+  if (quic) args.push("--quic-listen", "127.0.0.1:0");
   if (direct) {
     // No `--direct-advertise`: clients must derive the STUN address from the
     // relay address they dialed, as they do against a default relay.

@@ -650,6 +650,12 @@ mod tests {
             panic!("expected accepted offer");
         };
         grant.provider = peer;
+        // The first accepted session must be the one this test commits, rather
+        // than a losing candidate from the production address race.
+        grant
+            .provider
+            .candidates
+            .retain(|addr| addr.is_ipv4() && addr.ip().is_loopback());
         let deadline = Instant::now() + Duration::from_secs(3);
         consumer.authorize(&grant, false, deadline).unwrap();
         events.send(SessionEvent::Granted).await.unwrap();

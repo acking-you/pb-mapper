@@ -1,5 +1,5 @@
+use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
-use tokio::net::TcpStream;
 use tracing::{Instrument, info_span};
 
 use super::error::{
@@ -89,7 +89,7 @@ pub async fn handle_show_status(
     namespace: u64,
     manager_sender: ManagerTaskSender,
     conn_id: RemoteConnId,
-    mut conn: TcpStream,
+    mut conn: RelayStream,
     session: ServerHeaderSession,
 ) -> Result<()> {
     let info_span = info_span!("show status", "{status:?},{conn_id:?}");

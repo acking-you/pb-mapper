@@ -35,6 +35,8 @@ struct Cache {
 
 struct RelayState {
     name: String,
+    #[cfg(feature = "relay-quic")]
+    quic: Option<Box<crate::relay::quic::Pool>>,
     fixed: bool,
     cache: Mutex<Cache>,
     refresh: AtomicBool,
@@ -70,6 +72,10 @@ impl std::fmt::Display for RelayEndpoint {
 }
 
 impl RelayEndpoint {
+    pub(crate) fn name(&self) -> &str {
+        &self.0.name
+    }
+
     pub(crate) fn validate(&self) -> bool {
         if self.0.fixed {
             return true;
@@ -104,6 +110,8 @@ impl RelayEndpoint {
         let (success, _) = watch::channel(0);
         Self(Arc::new(RelayState {
             name,
+            #[cfg(feature = "relay-quic")]
+            quic: None,
             fixed,
             cache: Mutex::new(Cache {
                 resolved_at: addresses.as_ref().map(|_| Instant::now()),
@@ -169,6 +177,14 @@ impl RelayEndpoint {
     pub(crate) fn transport_failed(&self) {
         self.0.refresh.store(true, Ordering::Release);
         self.0.failed.store(true, Ordering::Release);
+        self.invalidate_cached_transport();
+    }
+
+    pub(crate) fn invalidate_cached_transport(&self) {
+        #[cfg(feature = "relay-quic")]
+        if let Some(pool) = &self.0.quic {
+            pool.invalidate();
+        }
     }
 
     pub(crate) fn protocol_succeeded(&self) {
@@ -281,8 +297,74 @@ impl RelayEndpoint {
         }
     }
 
-    pub(crate) async fn connect(&self) -> std::io::Result<tokio::net::TcpStream> {
-        crate::addr::connect_tcp(&self.addresses().await?).await
+    pub(crate) async fn connect(
+        &self,
+        credential: pb_mapper_core::checksum::Credential,
+    ) -> std::io::Result<pb_mapper_protocol::transport::RelayStream> {
+        self.connect_addresses(&self.addresses().await?, credential)
+            .await
+    }
+    pub(crate) async fn connect_addresses(
+        &self,
+        addresses: &ResolvedAddrs,
+        credential: pb_mapper_core::checksum::Credential,
+    ) -> std::io::Result<pb_mapper_protocol::transport::RelayStream> {
+        #[cfg(feature = "relay-quic")]
+        if let Some(pool) = &self.0.quic {
+            return pool
+                .connect(addresses, credential, self.network_generation())
+                .await
+                .map(|stream| pb_mapper_protocol::transport::RelayStream::Quic(Box::new(stream)));
+        }
+        let _ = credential;
+        crate::addr::connect_tcp(addresses).await.map(Into::into)
+    }
+    pub(crate) fn transport(&self) -> crate::relay::RelayTransport {
+        #[cfg(feature = "relay-quic")]
+        if self.0.quic.is_some() {
+            return crate::relay::RelayTransport::Quic;
+        }
+        crate::relay::RelayTransport::Tcp
+    }
+    pub(crate) fn with_transport(
+        &self,
+        transport: crate::relay::RelayTransport,
+    ) -> std::io::Result<Self> {
+        if transport == self.transport() {
+            return Ok(self.clone());
+        }
+        let initial = self
+            .0
+            .name
+            .parse::<SocketAddr>()
+            .ok()
+            .map(ResolvedAddrs::from);
+        let endpoint = Self::new(self.0.name.clone(), initial.is_some(), initial);
+        if transport == crate::relay::RelayTransport::Quic {
+            #[cfg(feature = "relay-quic")]
+            {
+                let mut endpoint = endpoint;
+                Arc::get_mut(&mut endpoint.0)
+                    .unwrap_or_else(|| unreachable!("new endpoint"))
+                    .quic = Some(Box::default());
+                return Ok(endpoint);
+            }
+            #[cfg(not(feature = "relay-quic"))]
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "SDK built without relay-quic",
+                ));
+            }
+        }
+        Ok(endpoint)
+    }
+    pub(crate) async fn relay_diagnostics(&self) -> crate::relay::RelayDiagnostics {
+        #[cfg(feature = "relay-quic")]
+        if let Some(pool) = &self.0.quic {
+            return pool.diagnostics().await;
+        }
+        crate::relay::RelayDiagnostics::empty(self.transport())
     }
 }
 

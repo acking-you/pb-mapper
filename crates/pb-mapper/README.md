@@ -74,6 +74,13 @@ needs no setup.
 
 ## Paths
 
+The relay carrier defaults to TCP. Select QUIC with
+`client.with_relay_transport(RelayTransport::Quic)?` before registering or
+connecting, and inspect `client.relay_diagnostics().await` for connection reuse,
+RTT, loss and byte counters. The relay needs `--quic-listen IP:UDPPORT`;
+authenticated discovery still requires its TCP port. The `relay-quic` feature
+is independent of `p2p`; disabling both removes QUIC dependencies.
+
 With the default `p2p` feature, `register` allows direct sessions and `connect`
 uses `PathPolicy::Auto`. A connection goes direct when the relay serves hole
 punching (its default), both ends allow it, and the NATs can be punched;

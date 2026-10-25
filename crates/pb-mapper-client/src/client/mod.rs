@@ -529,16 +529,7 @@ async fn probe_remote_key(
     timeout: Duration,
 ) -> std::result::Result<(), ProbeFailure> {
     match tokio::time::timeout(timeout, async {
-        let addresses = remote_addr
-            .addresses()
-            .await
-            .map_err(|error| ProbeFailure {
-                reason: error.to_string(),
-                permanent: false,
-                kind: RecoveryFailure::Dns,
-                protocol_replied: false,
-            })?;
-        probe_remote_key_once(&addresses, key, namespace, credential).await
+        probe_remote_key_once(remote_addr, key, namespace, credential).await
     })
     .await
     {
@@ -553,7 +544,7 @@ async fn probe_remote_key(
 }
 
 async fn probe_remote_key_once(
-    remote_addr: &ResolvedAddrs,
+    remote_addr: &RelayEndpoint,
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
@@ -619,16 +610,14 @@ async fn probe_remote_key_once(
 }
 
 async fn fetch_remote_status(
-    remote_addr: &ResolvedAddrs,
+    remote_addr: &RelayEndpoint,
     req: PbConnStatusReq,
     namespace: Option<u64>,
     credential: Credential,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
-    let mut stream = crate::addr::connect_tcp(remote_addr)
-        .await
-        .map_err(|error| {
-            ProbeFailure::transient(format!("connect remote stream failed: {error}"))
-        })?;
+    let mut stream = remote_addr.connect(credential).await.map_err(|error| {
+        ProbeFailure::transient(format!("connect remote stream failed: {error}"))
+    })?;
     get_status_with_credential(&mut stream, req, namespace, &credential)
         .await
         .map_err(|error| ProbeFailure::from_status_error("get status failed", error))

@@ -177,11 +177,22 @@ impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
         self
     }
 
-    async fn read_msg_inner(&mut self) -> Result<&'_ [u8]> {
-        self.frame
-            .header(self.reader)
-            .await
-            .context(MsgNetworkReadCheckSumSnafu)?;
+    async fn read_msg_inner<const ALLOW_EOF: bool>(&mut self) -> Result<Option<&'_ [u8]>> {
+        if ALLOW_EOF {
+            if !self
+                .frame
+                .header_or_eof(self.reader)
+                .await
+                .context(MsgNetworkReadCheckSumSnafu)?
+            {
+                return Ok(None);
+            }
+        } else {
+            self.frame
+                .header(self.reader)
+                .await
+                .context(MsgNetworkReadCheckSumSnafu)?;
+        }
         let header = self.frame.header;
         let checksum = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         let datalen = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
@@ -202,13 +213,15 @@ impl<'a, T: AsyncReadExt + Unpin> NormalMessageReader<'a, T> {
             .await
             .context(MsgNetworkReadBodySnafu)?;
         self.frame.finish();
-        Ok(self.buffer.buffer())
+        Ok(Some(self.buffer.buffer()))
     }
 }
 
 impl<'a, T: AsyncReadExt + Unpin> MessageReader for NormalMessageReader<'a, T> {
     async fn read_msg(&mut self) -> Result<&'_ [u8]> {
-        self.read_msg_inner().await
+        self.read_msg_inner::<false>()
+            .await
+            .map(|message| message.unwrap_or_default())
     }
 }
 
@@ -274,17 +287,29 @@ impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> CodecMessageReader<'a, T, D> {
     }
 }
 
-impl<'a, T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageReader<'a, T, D> {
-    async fn read_msg(&mut self) -> Result<&'_ [u8]> {
-        let n = self.reader.read_msg().await?.len();
-        let v = self
-            .decryptor
+impl<T: AsyncReadExt + Unpin, D: Decryptor> CodecMessageReader<'_, T, D> {
+    /// Byte-stream framing permits FIN between records. Control/datagram readers remain strict.
+    pub(crate) async fn read_stream(&mut self) -> Result<&'_ [u8]> {
+        let Some(message) = self.reader.read_msg_inner::<true>().await? else {
+            return Ok(&[]);
+        };
+        let n = message.len();
+        self.decrypt(n)
+    }
+    fn decrypt(&mut self, n: usize) -> Result<&'_ [u8]> {
+        self.decryptor
             .decrypt(&mut self.reader.buffer.buffer_mut()[..n])
+            .map(|bytes| &*bytes)
             .map_err(|e| error::Error::MsgCodec {
                 action: "decrypt",
                 detail: format!("got {e} when we read msg"),
-            })?;
-        Ok(v)
+            })
+    }
+}
+impl<T: AsyncReadExt + Unpin, D: Decryptor> MessageReader for CodecMessageReader<'_, T, D> {
+    async fn read_msg(&mut self) -> Result<&'_ [u8]> {
+        let n = self.reader.read_msg().await?.len();
+        self.decrypt(n)
     }
 }
 
@@ -394,3 +419,7 @@ pub fn get_decodec(key: &[u8]) -> Result<Aes256GcmDeCodec> {
 }
 
 pub mod direct;
+
+#[cfg(feature = "relay-quic")]
+pub mod quic;
+pub mod transport;

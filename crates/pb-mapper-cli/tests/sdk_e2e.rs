@@ -116,8 +116,23 @@ async fn register_echo(
 
 #[tokio::test]
 async fn sdk_tcp_tunnel_round_trips() {
+    #[cfg(feature = "relay-quic")]
+    let relay = Relay::start_with_quic("sdk-tcp-tunnel").await;
+    #[cfg(not(feature = "relay-quic"))]
     let relay = Relay::start("sdk-tcp-tunnel").await;
-    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
+    // The pre-QUIC configuration/request literals must still compile, and a
+    // QUIC-capable relay must not change an existing client's default carrier.
+    let client = Client::new(ClientConfig {
+        server: relay.addr().to_string(),
+        credential: pb_mapper_testkit::TEST_ADMIN_KEY.into(),
+        keep_alive: false,
+        namespace: None,
+    })
+    .unwrap();
+    assert_eq!(
+        client.relay_transport(),
+        pb_mapper_client::sdk::RelayTransport::Tcp
+    );
 
     let echo_addr = spawn_tcp_echo().await;
     let registration = client
@@ -151,6 +166,14 @@ async fn sdk_tcp_tunnel_round_trips() {
     connection.wait_ready_timeout(READY_TIMEOUT).await.unwrap();
 
     run_raw_tcp_echo(listen_addr, 8, None).await;
+
+    assert_eq!(
+        connection.diagnostics().relay_transport,
+        pb_mapper_client::sdk::RelayTransport::Tcp
+    );
+    let diagnostics = client.relay_diagnostics().await;
+    assert_eq!(diagnostics.connections_created, 0);
+    assert!(diagnostics.connections.is_empty());
 
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();

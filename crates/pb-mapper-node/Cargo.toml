@@ -15,7 +15,7 @@ workspace = true
 [dependencies]
 napi = { version = "3.12.2", default-features = false, features = ["napi8", "async"] }
 napi-derive = "3.6.3"
-pb-mapper-client = { workspace = true, features = ["p2p"] }
+pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic"] }
 serde_json.workspace = true
 # Already linked through the SDK; named here only for the status watch types.
 tokio.workspace = true

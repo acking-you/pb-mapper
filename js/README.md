@@ -41,6 +41,13 @@ await reg.stop();
 
 ## Paths
 
+The relay carrier remains TCP by default. Set `relayTransport: "quic"` in
+`new Client(...)` to use QUIC for registration, connection and SDK requests.
+The relay must enable `--quic-listen IP:UDPPORT`; authenticated discovery still
+needs its TCP port. `await client.relayDiagnostics()` exposes pooled connection
+reuse, RTT, loss and byte counters; tunnel `diagnostics().relayTransport` shows
+the selected carrier. This setting is independent of the direct/relay policy.
+
 `register` allows direct sessions and `connect` uses `path: "auto"` by
 default: try UDP hole punching and mutually authenticated QUIC, and fall back
 to the relay if setup fails before commit. After commit a failed connection

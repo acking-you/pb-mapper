@@ -16,13 +16,17 @@ use uni_stream::addr::ToSocketAddrs;
 /// Race a small number of TCP candidates so a blackholed first address cannot
 /// hide a working IPv4/IPv6 alternative. Callers retain their overall deadline.
 pub(crate) async fn connect_tcp(addrs: &ResolvedAddrs) -> std::io::Result<tokio::net::TcpStream> {
-    race_candidates(addrs.as_slice(), |addr| {
+    race_candidates(addrs.as_slice(), Duration::from_secs(2), |addr| {
         tokio::net::TcpStream::connect(addr)
     })
     .await
 }
 
-async fn race_candidates<T, F, Fut>(addrs: &[SocketAddr], dial: F) -> std::io::Result<T>
+pub(crate) async fn race_candidates<T, F, Fut>(
+    addrs: &[SocketAddr],
+    candidate_timeout: Duration,
+    dial: F,
+) -> std::io::Result<T>
 where
     T: Send + 'static,
     F: Fn(SocketAddr) -> Fut,
@@ -43,7 +47,7 @@ where
             if let Some(addr) = remaining.next() {
                 let future = dial(*addr);
                 attempts.spawn(async move {
-                    tokio::time::timeout(Duration::from_secs(2), future)
+                    tokio::time::timeout(candidate_timeout, future)
                         .await
                         .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
                 });
@@ -129,7 +133,7 @@ mod tests {
             "127.0.0.1:2".parse().unwrap(),
         ];
         let started = tokio::time::Instant::now();
-        let result = race_candidates(&candidates, |addr| {
+        let result = race_candidates(&candidates, Duration::from_secs(2), |addr| {
             let active = active.clone();
             async move {
                 active.fetch_add(1, Ordering::SeqCst);
@@ -154,7 +158,7 @@ mod tests {
         let candidates = (1..=5)
             .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
             .collect::<Vec<_>>();
-        let result = race_candidates(&candidates, |addr| {
+        let result = race_candidates(&candidates, Duration::from_secs(2), |addr| {
             let active = active.clone();
             async move {
                 assert!(active.fetch_add(1, Ordering::SeqCst) < 2);
@@ -179,7 +183,7 @@ mod tests {
             "127.0.0.1:1".parse().unwrap(),
             "127.0.0.1:2".parse().unwrap(),
         ];
-        let dial = race_candidates(&candidates, |_| {
+        let dial = race_candidates(&candidates, Duration::from_secs(2), |_| {
             let active = active.clone();
             async move {
                 active.fetch_add(1, Ordering::SeqCst);

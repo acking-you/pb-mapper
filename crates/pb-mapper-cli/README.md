@@ -30,6 +30,12 @@ pb-mapper status sessions --server relay.example.com:7666
 Open both `7666/tcp` and `7666/udp` on the relay. Add `--relay-only` to
 `server`, `register` or `connect` to keep that side on the relay.
 
+The relay carrier defaults to TCP. For optional QUIC relay, start `server`
+with `--quic-listen 0.0.0.0:7667`, open UDP 7667, and add
+`--relay-transport quic` to `register` and/or `connect`. Keep TCP 7666 for
+authenticated discovery. `--relay-only` disables peer-to-peer direct sessions
+while still permitting the explicit QUIC relay listener.
+
 Set `MSG_HEADER_KEY` to the administrator key or to a temporary `pbmt1_`
 credential issued with `pb-mapper admin key issue`. See the
 [user guide](https://github.com/acking-you/pb-mapper/blob/master/docs/user-guide.md)

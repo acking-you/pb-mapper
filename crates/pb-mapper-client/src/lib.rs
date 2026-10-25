@@ -10,3 +10,5 @@ mod recovery;
 
 #[cfg(feature = "p2p")]
 mod direct;
+
+mod relay;

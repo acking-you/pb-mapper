@@ -18,9 +18,10 @@ publish = ["crates-io"]
 pb-mapper-client.workspace = true
 
 [features]
-# Direct QUIC with relay fallback is the default path. Turning `p2p` off keeps
-# every connection on the relay and drops quinn, rcgen and stun-proto.
-default = ["p2p"]
+relay-quic = ["pb-mapper-client/relay-quic"]
+# Direct QUIC with relay fallback is the default path; the relay carrier is TCP.
+# Disabling both `p2p` and `relay-quic` drops quinn, rcgen and stun-proto.
+default = ["p2p", "relay-quic"]
 p2p = ["pb-mapper-client/p2p"]
 
 [dev-dependencies]

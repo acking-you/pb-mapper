@@ -287,6 +287,7 @@ relay; upgrade them, or start the relay with `--direct-advertise PUBLIC_IP:7666`
 
 ## Documentation
 
+- [Optional QUIC relay](docs/relay-quic.zh-CN.md) (Chinese): TCP remains the default; CLI selection, Rust/Node SDKs, diagnostics and implementation
 - [User guide](docs/user-guide.md): every command and flag
 - [Weak-network recovery](docs/weak-network-recovery.md): deadlines, resource bounds, fault tests
 - [Authentication and protocol v2](docs/authentication-v2.md)

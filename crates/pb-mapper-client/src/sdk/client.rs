@@ -127,6 +127,35 @@ impl Client {
         }
     }
 
+    /// Select the relay carrier for subsequent work. Existing handles retain their carrier.
+    /// TCP remains the default. QUIC requires the relay-quic feature and a QUIC-enabled relay.
+    pub fn with_relay_transport(&self, transport: super::RelayTransport) -> Result<Self> {
+        if transport == self.relay_transport() {
+            return Ok(self.clone());
+        }
+        let endpoint = self
+            .inner
+            .endpoint
+            .with_transport(transport)
+            .map_err(|error| Error::invalid_config(error.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(ClientInner {
+                server: self.inner.server.clone(),
+                endpoint,
+                credential: RwLock::new(self.credential()),
+                keep_alive: self.inner.keep_alive,
+                namespace: self.inner.namespace,
+            }),
+        })
+    }
+    pub fn relay_transport(&self) -> super::RelayTransport {
+        self.inner.endpoint.transport()
+    }
+    /// Sample current QUIC counters without a background observer or per-packet work.
+    pub async fn relay_diagnostics(&self) -> super::RelayDiagnostics {
+        self.inner.endpoint.relay_diagnostics().await
+    }
+
     /// Notify workers after a host network/resume event. This does not mark services healthy.
     pub fn notify_network_change(&self) {
         self.inner.endpoint.notify_network_change();
@@ -415,24 +444,21 @@ impl Client {
         let endpoint = &self.inner.endpoint;
         let result = tokio::time::timeout(io_timeout, async {
             let _permit = endpoint.control_permit().await;
-            let addresses = endpoint.addresses().await.context(ConnectSnafu {
+            let mut stream = endpoint.connect(credential).await.context(ConnectSnafu {
                 addr: self.inner.server.clone(),
             })?;
-            let mut stream = crate::addr::connect_tcp(&addresses)
-                .await
-                .context(ConnectSnafu {
-                    addr: self.inner.server.clone(),
-                })?;
             get_status_with_credential(&mut stream, request, self.inner.namespace, &credential)
                 .await
                 .context(StatusSnafu)
         })
         .await
-        .map_err(|_| Error::TimedOut {
+        .unwrap_or(Err(Error::TimedOut {
             timeout: io_timeout,
-        })?;
+        }));
         if result.is_ok() {
             endpoint.protocol_succeeded();
+        } else {
+            endpoint.invalidate_cached_transport();
         }
         result
     }
