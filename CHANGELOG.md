@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.3] - 2026-10-25
+- With the administrator key, see and connect to every temporary credential's services, not only your own. A relay whose services were all registered by temporary credentials no longer shows none. The galaxy, the Tunnels count, the editor's suggestions and the Relay page list every service the administrator can reach. A credential's service carries its owner's tag and connects in one click into that credential's namespace, and the connection says whose service it reaches. The FFI's `pb_mapper_connect_service` takes the namespace, saved with the connection, and the connection list reports the namespace each running connection was started in, so one that outlives a change of credential is still told apart; the control CLI's `connect` takes `--namespace`.
+- Say after an update whether it installed. On Windows the installer reopens the app from the background, where it could come up out of sight, so the update seemed to fail, and a declined permission prompt looked the same. The app now brings itself forward after an update and says "Updated to pb-mapper 0.9.3", or that the update did not install and what to do.
+- The CLI, both SDKs and the wire protocol are unchanged.
+
 ## [0.9.2] - 2026-10-25
 - Give the app a **Relay** page, between Tunnels and Logs, for the relay as a whole. Its head says whether the relay answers and how fast, who this computer is to it (administrator, temporary credential #n, or neither) and what it holds. Its sections are the relay's **services**, searchable, with Connect and the connections held for each; its **connections** and direct sessions; and the relay **this computer** can run itself, with its key, moved here from Settings. The rail's relay status and the galaxy's relay star open it.
 - With the administrator key, the app does everything `pb-mapper admin` does. **Credentials**: issue one with a name and a lifetime (shown once, with a setup string for the computer it is for), reveal, renew, revoke and clean up. **Security**: credential statistics, allowing older clients, rotating the administrator key, and resetting every credential. Sections follow what the relay says the credential is, and a temporary credential is told what the administrator key would add.
