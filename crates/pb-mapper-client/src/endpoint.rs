@@ -1,6 +1,7 @@
 //! Shared relay resolution and bounded setup admission; no established data is owned here.
 
 use crate::network::NetworkHints;
+use crate::relay::RelayTransport;
 use pb_mapper_core::config::ResolvedAddrs;
 use std::{
     collections::HashMap,
@@ -89,29 +90,50 @@ impl RelayEndpoint {
         })
     }
     pub(crate) fn shared(name: &str) -> Self {
-        static RELAYS: LazyLock<StdMutex<HashMap<String, Weak<RelayState>>>> =
+        Self::registered(name, RelayTransport::Tcp)
+    }
+
+    /// One endpoint per relay name and carrier in this process, for as long
+    /// as anything holds it: every client of that relay shares its DNS
+    /// cache, its setup budget and, over QUIC, its connections.
+    fn registered(name: &str, transport: RelayTransport) -> Self {
+        type Registry = HashMap<(String, RelayTransport), Weak<RelayState>>;
+        static RELAYS: LazyLock<StdMutex<Registry>> =
             LazyLock::new(|| StdMutex::new(HashMap::new()));
         let mut relays = RELAYS.lock().unwrap_or_else(|e| e.into_inner());
         relays.retain(|_, state| state.strong_count() > 0);
-        if let Some(state) = relays.get(name).and_then(Weak::upgrade) {
+        let key = (name.to_string(), transport);
+        if let Some(state) = relays.get(&key).and_then(Weak::upgrade) {
             return Self(state);
         }
         let initial = name.parse::<SocketAddr>().ok().map(ResolvedAddrs::from);
-        let relay = Self::new(name.to_string(), initial.is_some(), initial);
-        relays.insert(name.to_string(), Arc::downgrade(&relay.0));
+        let relay = Self::new(name.to_string(), initial.is_some(), initial, transport);
+        relays.insert(key, Arc::downgrade(&relay.0));
         relay
     }
 
     pub(crate) fn fixed(addresses: ResolvedAddrs) -> Self {
-        Self::new(addresses.to_string(), true, Some(addresses))
+        Self::new(
+            addresses.to_string(),
+            true,
+            Some(addresses),
+            RelayTransport::Tcp,
+        )
     }
 
-    fn new(name: String, fixed: bool, addresses: Option<ResolvedAddrs>) -> Self {
+    fn new(
+        name: String,
+        fixed: bool,
+        addresses: Option<ResolvedAddrs>,
+        transport: RelayTransport,
+    ) -> Self {
         let (success, _) = watch::channel(0);
+        #[cfg(not(feature = "relay-quic"))]
+        let _ = transport;
         Self(Arc::new(RelayState {
             name,
             #[cfg(feature = "relay-quic")]
-            quic: None,
+            quic: (transport == RelayTransport::Quic).then(Box::default),
             fixed,
             cache: Mutex::new(Cache {
                 resolved_at: addresses.as_ref().map(|_| Instant::now()),
@@ -322,50 +344,39 @@ impl RelayEndpoint {
             .map(Into::into)
             .map_err(Into::into)
     }
-    pub(crate) fn transport(&self) -> crate::relay::RelayTransport {
+    pub(crate) fn transport(&self) -> RelayTransport {
         #[cfg(feature = "relay-quic")]
         if self.0.quic.is_some() {
-            return crate::relay::RelayTransport::Quic;
+            return RelayTransport::Quic;
         }
-        crate::relay::RelayTransport::Tcp
+        RelayTransport::Tcp
     }
-    pub(crate) fn with_transport(
-        &self,
-        transport: crate::relay::RelayTransport,
-    ) -> std::io::Result<Self> {
+    /// The process's endpoint for this relay over `transport`. Only for an
+    /// endpoint from [`Self::shared`], whose name is what it is shared under.
+    pub(crate) fn with_transport(&self, transport: RelayTransport) -> std::io::Result<Self> {
         if transport == self.transport() {
             return Ok(self.clone());
         }
-        let initial = self
-            .0
-            .name
-            .parse::<SocketAddr>()
-            .ok()
-            .map(ResolvedAddrs::from);
-        let endpoint = Self::new(self.0.name.clone(), initial.is_some(), initial);
-        if transport == crate::relay::RelayTransport::Quic {
-            #[cfg(feature = "relay-quic")]
-            {
-                let mut endpoint = endpoint;
-                Arc::get_mut(&mut endpoint.0)
-                    .unwrap_or_else(|| unreachable!("new endpoint"))
-                    .quic = Some(Box::default());
-                return Ok(endpoint);
-            }
-            #[cfg(not(feature = "relay-quic"))]
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "SDK built without relay-quic",
-                ));
-            }
+        if cfg!(not(feature = "relay-quic")) && transport == RelayTransport::Quic {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "SDK built without relay-quic",
+            ));
         }
-        Ok(endpoint)
+        Ok(Self::registered(&self.0.name, transport))
+    }
+    /// The UDP port the relay offers QUIC on, asked over TCP whatever this
+    /// endpoint's carrier.
+    pub(crate) async fn quic_port(
+        &self,
+        credential: pb_mapper_core::checksum::Credential,
+    ) -> Result<Option<u16>, crate::relay::ConnectError> {
+        crate::relay::offered_quic_port(&self.addresses().await?, credential).await
     }
     pub(crate) async fn relay_diagnostics(&self) -> crate::relay::RelayDiagnostics {
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {
-            return pool.diagnostics().await;
+            return pool.diagnostics();
         }
         crate::relay::RelayDiagnostics::empty(self.transport())
     }
@@ -398,7 +409,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn resolver_endpoint(resolver: TestResolver) -> RelayEndpoint {
-        let mut endpoint = RelayEndpoint::new("relay.test:7666".into(), false, None);
+        let mut endpoint =
+            RelayEndpoint::new("relay.test:7666".into(), false, None, RelayTransport::Tcp);
         let state = Arc::get_mut(&mut endpoint.0).unwrap();
         state.resolver = Some(resolver);
         state.network = NetworkHints::isolated();

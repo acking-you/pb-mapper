@@ -65,9 +65,12 @@ test.skipIf(!hasRelay)(
         expect((await echoRoundTrip(listenAddr, payload)).equals(payload)).toBe(true);
       }));
       expect(connection.diagnostics().relayTransport).toBe("quic");
+      expect(client.relayTransport()).toBe("quic");
+      expect(await client.relayQuicPort()).toBeGreaterThan(0);
       const diagnostics = await client.relayDiagnostics();
       expect(diagnostics.transport).toBe("quic");
       expect(diagnostics.connectionsCreated).toBe(1);
+      expect(diagnostics.connections[0].pooled).toBe(true);
       expect(diagnostics.streamsReused).toBeGreaterThan(0);
       expect(diagnostics.connections[0].sentBytes).toBeGreaterThan(0);
       expect(diagnostics.connections[0].receivedBytes).toBeGreaterThan(0);
@@ -157,6 +160,7 @@ test.skipIf(!hasRelay)(
         expect(diagnostics.relayTransport).toBe("tcp");
         const relayDiagnostics = await client.relayDiagnostics();
         expect(relayDiagnostics.transport).toBe("tcp");
+        expect(await client.relayQuicPort()).toBeNull();
         expect(relayDiagnostics.connectionsCreated).toBe(0);
         expect(relayDiagnostics.connections).toEqual([]);
         expect(diagnostics.sdkVersion).toBe(manifest.version);

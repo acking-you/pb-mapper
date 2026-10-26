@@ -15,7 +15,15 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 pub const ALPN: &[u8] = b"pb-mapper/relay/1";
 pub const SERVER_NAME: &str = "pb-mapper-relay.invalid";
 pub const MAX_STREAMS: u32 = 1024;
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub use crate::transport::CONNECT_TIMEOUT;
+
+/// The connection-wide receive window once the relay has admitted a peer.
+pub const RECEIVE_WINDOW: u32 = 32 << 20;
+
+/// What an unauthenticated peer may make the relay buffer: its first frame
+/// and some slack. Raised to [`RECEIVE_WINDOW`] on admission, so a flood of
+/// handshakes that never authenticate cannot pin 8 MiB each.
+const PRE_ADMISSION_WINDOW: u32 = 256 << 10;
 
 fn transport(streams: u32, client: bool) -> Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
@@ -23,7 +31,14 @@ fn transport(streams: u32, client: bool) -> Arc<quinn::TransportConfig> {
         .max_concurrent_bidi_streams(streams.into())
         .max_concurrent_uni_streams(0u32.into())
         .stream_receive_window((8u32 << 20).into())
-        .receive_window((32u32 << 20).into())
+        .receive_window(
+            if client {
+                RECEIVE_WINDOW
+            } else {
+                PRE_ADMISSION_WINDOW
+            }
+            .into(),
+        )
         .send_window(32u64 << 20)
         .max_idle_timeout(Some(quinn::VarInt::from_u32(60_000).into()))
         .keep_alive_interval(client.then_some(Duration::from_secs(15)))

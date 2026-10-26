@@ -64,7 +64,9 @@ pub(super) async fn send_admin_request(
             // Nothing reached the relay, so re-sending cannot duplicate an
             // effect. Anything past that point is reported as-is.
             Err(error) => {
-                endpoint.invalidate_cached_transport();
+                if crate::sdk::client::is_carrier_failure(&error) {
+                    endpoint.invalidate_cached_transport();
+                }
                 if exchange.sent
                     || last_attempt
                     || matches!(

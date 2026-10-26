@@ -11,7 +11,11 @@ use tokio::{
     net::TcpStream,
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// Budget for setting a carrier up: QUIC discovery over TCP and the
+/// handshake after it, on the client; admission of it, on the relay.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayTransport {
     #[default]
@@ -61,13 +65,6 @@ impl RelayStream {
             }
             #[cfg(feature = "relay-quic")]
             Self::Quic(_) => Ok(()),
-        }
-    }
-    pub fn transport(&self) -> RelayTransport {
-        match self {
-            Self::Tcp(_) => RelayTransport::Tcp,
-            #[cfg(feature = "relay-quic")]
-            Self::Quic(_) => RelayTransport::Quic,
         }
     }
     pub fn into_split(self) -> (RelayReadHalf, RelayWriteHalf) {

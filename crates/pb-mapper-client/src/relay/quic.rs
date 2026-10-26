@@ -1,52 +1,135 @@
-use super::{ConnectError, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport};
-use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
-use pb_mapper_protocol::{
-    command::{MessageSerializer, PbConnRequest, PbConnResponse},
-    quic::*,
-    secure::ClientHeaderSession,
+//! Pooled QUIC carriers. A connection is dialled after authenticated TCP
+//! discovery, pinned to the certificate discovery named, bound to the
+//! credential by the TLS exporter, and then shared: each relay stream is one
+//! bidirectional QUIC stream on it.
+use super::{
+    ConnectError, QUIC_UNAVAILABLE, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport,
 };
+use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
+use pb_mapper_protocol::{command::PbErrorResponse, quic::*, secure::ClientHeaderSession};
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::{
-        Arc, Mutex as StateMutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex as StateMutex, MutexGuard, Weak},
+    time::Duration,
 };
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::Instant};
+
+/// Connections cached per pool; past this the oldest is retired.
+const MAX_ENTRIES: usize = 16;
+
+/// A pooled connection with no stream open for this long is closed. The
+/// relay holds an admission slot for each, and the client's keep-alive would
+/// otherwise keep an unused one open for as long as the process lives.
+const IDLE_CLOSE: Duration = Duration::from_secs(30);
+const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
+/// References past which a connection is not handed out again, and another
+/// is dialled rather than waiting for stream credit. Each stream holds one,
+/// two once split, so this keeps under the relay's per-connection limit.
+const REFERENCES_PER_CONNECTION: usize = MAX_STREAMS as usize;
 
 struct Entry {
     credential: Credential,
     runtime: tokio::runtime::Id,
     generation: u64,
     shared: Arc<QuicConnection>,
+    last_open: Instant,
 }
+
+impl Entry {
+    fn is_open(&self) -> bool {
+        self.shared.connection.close_reason().is_none()
+    }
+}
+
 #[derive(Default)]
 struct State {
     entries: Vec<Entry>,
+    /// Connections no longer handed out that streams opened before still
+    /// hold, for diagnostics to list while they carry traffic.
+    retired: Vec<Weak<QuicConnection>>,
     created: u64,
     opened: u64,
     reused: u64,
     error: Option<String>,
+    /// The last cold dial that failed, for the callers queued behind it.
+    failed: Option<FailedDial>,
+    sweeping: bool,
 }
+
+/// A dial that failed, kept so that the callers that queued behind it fail
+/// with it, rather than each spending the setup budget on the same relay.
+struct FailedDial {
+    at: Instant,
+    credential: Credential,
+    generation: u64,
+    rejected: Option<PbErrorResponse>,
+    transport: (io::ErrorKind, String),
+}
+
+impl FailedDial {
+    fn new(error: &ConnectError, credential: Credential, generation: u64) -> Self {
+        let (rejected, transport) = match error {
+            ConnectError::Rejected { response } => (
+                Some(response.clone()),
+                (io::ErrorKind::PermissionDenied, String::new()),
+            ),
+            ConnectError::Transport { source } => (None, (source.kind(), source.to_string())),
+        };
+        Self {
+            at: Instant::now(),
+            credential,
+            generation,
+            rejected,
+            transport,
+        }
+    }
+
+    fn error(&self) -> ConnectError {
+        match &self.rejected {
+            Some(response) => ConnectError::Rejected {
+                response: response.clone(),
+            },
+            None => io::Error::new(self.transport.0, self.transport.1.clone()).into(),
+        }
+    }
+}
+
+impl State {
+    fn retire(&mut self, entry: Entry) {
+        self.retired.push(Arc::downgrade(&entry.shared));
+    }
+
+    fn prune_retired(&mut self) {
+        self.retired.retain(|connection| {
+            connection
+                .upgrade()
+                .is_some_and(|connection| connection.connection.close_reason().is_none())
+        });
+    }
+}
+
+fn lock(state: &StateMutex<State>) -> MutexGuard<'_, State> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[derive(Default)]
 pub(crate) struct Pool {
-    state: StateMutex<State>,
+    state: Arc<StateMutex<State>>,
     setup: Mutex<()>,
-    stale: AtomicBool,
 }
 
 impl Pool {
-    /// Retire cached carriers after a control failure without cancelling sibling
-    /// streams. Their independent owners keep established sessions alive.
+    /// Retire every cached carrier after a transport failure, so that the
+    /// next stream dials afresh. Established streams keep theirs.
     pub fn invalidate(&self) {
-        self.stale.store(true, Ordering::Release);
-    }
-
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        let mut state = lock(&self.state);
+        for entry in std::mem::take(&mut state.entries) {
+            state.retire(entry);
+        }
     }
 
     fn cached(
@@ -55,24 +138,29 @@ impl Pool {
         credential: Credential,
         generation: u64,
     ) -> Option<Arc<QuicConnection>> {
-        let mut state = self.state();
-        if self.stale.swap(false, Ordering::AcqRel) {
-            state.entries.clear();
+        let mut state = lock(&self.state);
+        // Closed connections are dropped and an earlier network's retired;
+        // another runtime's are left for it.
+        for entry in std::mem::take(&mut state.entries) {
+            if !entry.is_open() {
+                continue;
+            }
+            if entry.generation < generation {
+                state.retire(entry);
+            } else {
+                state.entries.push(entry);
+            }
         }
         let runtime = tokio::runtime::Handle::current().id();
-        state.entries.retain(|entry| {
-            entry.shared.connection.close_reason().is_none()
-                && entry.runtime == runtime
+        let entry = state.entries.iter_mut().find(|entry| {
+            entry.runtime == runtime
                 && entry.generation == generation
-        });
-        state
-            .entries
-            .iter()
-            .find(|entry| {
-                entry.credential == credential
-                    && addrs.as_slice().contains(&entry.shared.relay_addr)
-            })
-            .map(|entry| entry.shared.clone())
+                && entry.credential == credential
+                && addrs.as_slice().contains(&entry.shared.relay_addr)
+                && Arc::strong_count(&entry.shared) <= REFERENCES_PER_CONNECTION
+        })?;
+        entry.last_open = Instant::now();
+        Some(entry.shared.clone())
     }
 
     pub async fn connect(
@@ -86,36 +174,26 @@ impl Pool {
         } else {
             // Serialize cold dials, but keep observations and cached opens independent
             // of network I/O. Recheck after acquiring admission to deduplicate callers.
+            let queued = Instant::now();
             let _setup = self.setup.lock().await;
-            if let Some(shared) = self.cached(addrs, credential, generation) {
-                (shared, true)
-            } else {
-                let shared = match crate::addr::race_candidates(
-                    addrs.as_slice(),
-                    CONNECT_TIMEOUT,
-                    move |addr| dial(addr, credential),
-                )
-                .await
-                {
-                    Ok(shared) => shared,
-                    Err(error) => {
-                        self.state().error = Some(error.to_string());
+            match self.cached(addrs, credential, generation) {
+                Some(shared) => (shared, true),
+                None => {
+                    // A dial that failed while this caller waited failed for it.
+                    let failed = lock(&self.state)
+                        .failed
+                        .as_ref()
+                        .filter(|failed| {
+                            failed.at >= queued
+                                && failed.credential == credential
+                                && failed.generation == generation
+                        })
+                        .map(FailedDial::error);
+                    if let Some(error) = failed {
                         return Err(error);
                     }
-                };
-                let mut state = self.state();
-                state.created += 1;
-                // Evict only the cache reference; active streams retain their owner.
-                if state.entries.len() >= 16 {
-                    state.entries.remove(0);
+                    (self.dial(addrs, credential, generation).await?, false)
                 }
-                state.entries.push(Entry {
-                    credential,
-                    runtime: tokio::runtime::Handle::current().id(),
-                    generation,
-                    shared: shared.clone(),
-                });
-                (shared, false)
             }
         };
         // Stream-credit waiting must not block other callers or observations.
@@ -123,46 +201,164 @@ impl Pool {
         let pair = match shared.connection.open_bi().await {
             Ok(pair) => pair,
             Err(error) => {
-                self.state().error = Some(error.to_string());
+                lock(&self.state).error = Some(error.to_string());
                 return Err(io::Error::other(error).into());
             }
         };
-        let mut state = self.state();
+        let mut state = lock(&self.state);
         state.opened += 1;
         state.reused += u64::from(reused);
         state.error = None;
         Ok(QuicStream::new(shared, pair))
     }
 
-    pub async fn diagnostics(&self) -> RelayDiagnostics {
-        let state = self.state();
+    async fn dial(
+        &self,
+        addrs: &ResolvedAddrs,
+        credential: Credential,
+        generation: u64,
+    ) -> Result<Arc<QuicConnection>, ConnectError> {
+        let dialled =
+            crate::addr::race_candidates(addrs.as_slice(), CONNECT_TIMEOUT, move |addr| {
+                dial(addr, credential)
+            })
+            .await;
+        let mut state = lock(&self.state);
+        let shared = match dialled {
+            Ok(shared) => shared,
+            Err(error) => {
+                let error = match error {
+                    // A relay this process has reached over QUIC before was
+                    // most likely restarted or rolled back without it: worth
+                    // waiting out, slowly, rather than ending the tunnels
+                    // that ran on it. One never reached over QUIC is final.
+                    ConnectError::Rejected { mut response }
+                        if response.code == QUIC_UNAVAILABLE && state.created > 0 =>
+                    {
+                        response.retryable = true;
+                        response.message = "the relay stopped offering QUIC".into();
+                        ConnectError::Rejected { response }
+                    }
+                    error => error,
+                };
+                state.error = Some(error.to_string());
+                state.failed = Some(FailedDial::new(&error, credential, generation));
+                return Err(error);
+            }
+        };
+        state.created += 1;
+        if state.entries.len() >= MAX_ENTRIES {
+            let oldest = state.entries.remove(0);
+            state.retire(oldest);
+        }
+        state.entries.push(Entry {
+            credential,
+            runtime: tokio::runtime::Handle::current().id(),
+            generation,
+            shared: shared.clone(),
+            last_open: Instant::now(),
+        });
+        let start_sweep = !std::mem::replace(&mut state.sweeping, true);
+        // Spawned with the lock released: a runtime shutting down drops the
+        // task at once, and its guard takes the lock to say so.
+        drop(state);
+        if start_sweep {
+            tokio::spawn(sweep(Sweeping(Arc::downgrade(&self.state))));
+        }
+        Ok(shared)
+    }
+
+    pub fn diagnostics(&self) -> RelayDiagnostics {
+        let mut state = lock(&self.state);
+        state.prune_retired();
+        let pooled = state
+            .entries
+            .iter()
+            .filter(|entry| entry.is_open())
+            .map(|entry| (entry.shared.clone(), true));
+        let retired = state
+            .retired
+            .iter()
+            .filter_map(Weak::upgrade)
+            .map(|connection| (connection, false));
         RelayDiagnostics {
             transport: RelayTransport::Quic,
             connections_created: state.created,
             streams_opened: state.opened,
             streams_reused: state.reused,
             last_error: state.error.clone(),
-            connections: state
-                .entries
-                .iter()
-                .filter(|entry| entry.shared.connection.close_reason().is_none())
-                .map(|entry| {
-                    let connection = &entry.shared.connection;
-                    let stats = connection.stats();
-                    QuicConnectionDiagnostics {
-                        connection_id: connection.stable_id() as u64,
-                        peer_addr: connection.remote_address(),
-                        rtt_us: connection.rtt().as_micros().min(u64::MAX.into()) as u64,
-                        congestion_window: stats.path.cwnd,
-                        mtu: stats.path.current_mtu,
-                        sent_packets: stats.path.sent_packets,
-                        lost_packets: stats.path.lost_packets,
-                        congestion_events: stats.path.congestion_events,
-                        sent_bytes: stats.udp_tx.bytes,
-                        received_bytes: stats.udp_rx.bytes,
-                    }
-                })
+            connections: pooled
+                .chain(retired)
+                .map(|(shared, pooled)| describe(&shared, pooled))
                 .collect(),
+        }
+    }
+}
+
+fn describe(shared: &QuicConnection, pooled: bool) -> QuicConnectionDiagnostics {
+    let connection = &shared.connection;
+    let stats = connection.stats();
+    QuicConnectionDiagnostics {
+        connection_id: connection.stable_id() as u64,
+        peer_addr: connection.remote_address(),
+        pooled,
+        rtt_us: connection.rtt().as_micros().min(u64::MAX.into()) as u64,
+        congestion_window: stats.path.cwnd,
+        mtu: stats.path.current_mtu,
+        sent_packets: stats.path.sent_packets,
+        lost_packets: stats.path.lost_packets,
+        congestion_events: stats.path.congestion_events,
+        sent_bytes: stats.udp_tx.bytes,
+        received_bytes: stats.udp_rx.bytes,
+    }
+}
+
+/// A sweep's claim on its pool. Made before the task is spawned, so that a
+/// task dropped unpolled, with its runtime, still lets a dial start another.
+struct Sweeping(Weak<StateMutex<State>>);
+
+impl Drop for Sweeping {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.upgrade() {
+            lock(&state).sweeping = false;
+        }
+    }
+}
+
+/// Close the pool's connections that have had no stream open for
+/// [`IDLE_CLOSE`], until the pool is gone or has none left; the next dial
+/// starts it again.
+async fn sweep(mut sweeping: Sweeping) {
+    let state = sweeping.0.clone();
+    let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        let Some(state) = state.upgrade() else {
+            return;
+        };
+        let mut state = lock(&state);
+        let now = Instant::now();
+        for mut entry in std::mem::take(&mut state.entries) {
+            // Any reference past the pool's own is a stream still open: the
+            // idle time counts from when the last one was seen.
+            if Arc::strong_count(&entry.shared) > 1 {
+                entry.last_open = now;
+            }
+            if now.duration_since(entry.last_open) >= IDLE_CLOSE {
+                entry.shared.connection.close(0u32.into(), b"idle");
+            } else if entry.is_open() {
+                state.entries.push(entry);
+            }
+        }
+        state.prune_retired();
+        if state.entries.is_empty() {
+            // Decided under the lock a dial takes to start a sweep, so the
+            // two cannot miss each other.
+            state.sweeping = false;
+            sweeping.0 = Weak::new();
+            return;
         }
     }
 }
@@ -181,51 +377,18 @@ async fn dial_inner(
     credential: Credential,
 ) -> Result<Arc<QuicConnection>, ConnectError> {
     // Bootstrap only identity metadata over the existing authenticated transport.
-    let mut tcp = tokio::net::TcpStream::connect(addr).await?;
-    tcp.set_nodelay(true)?;
-    let relay_addr = tcp.peer_addr()?;
-    let session = ClientHeaderSession::new_v2(&credential).map_err(io::Error::other)?;
-    let response = session
-        .exchange(
-            &mut tcp,
-            &PbConnRequest::QuicEndpoint
-                .encode()
-                .map_err(io::Error::other)?,
-            CONNECT_TIMEOUT,
-        )
-        .await
-        .map_err(io::Error::other)?;
-    let capability = match PbConnResponse::decode(&response).map_err(io::Error::other)? {
-        PbConnResponse::QuicEndpoint(Some(capability))
-            if capability.port != 0
-                && !capability.certificate.is_empty()
-                && capability.certificate.len() <= 4096 =>
-        {
-            capability
-        }
-        PbConnResponse::Error(error) => {
-            return Err(ConnectError::Rejected { response: error });
-        }
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "relay does not offer QUIC; select TCP explicitly to use this node",
-            )
-            .into());
-        }
-    };
-    drop(tcp);
+    let (relay_addr, capability) = super::discover(addr, credential).await?;
     let bind_ip = match relay_addr.ip() {
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
     };
     let endpoint = quinn::Endpoint::client(SocketAddr::new(bind_ip, 0))?;
     endpoint.set_default_client_config(client_config(&capability.certificate)?);
+    // The relay's own address with QUIC's port, keeping an IPv6 scope.
+    let mut quic_addr = relay_addr;
+    quic_addr.set_port(capability.port);
     let connection = endpoint
-        .connect(
-            SocketAddr::new(relay_addr.ip(), capability.port),
-            SERVER_NAME,
-        )
+        .connect(quic_addr, SERVER_NAME)
         .map_err(io::Error::other)?
         .await
         .map_err(io::Error::other)?;
@@ -246,7 +409,9 @@ async fn dial_inner(
         .await
         .map_err(io::Error::other)?;
     if reply != b"ready" {
-        if let Ok(PbConnResponse::Error(response)) = PbConnResponse::decode(&reply) {
+        if let Ok(pb_mapper_protocol::command::PbConnResponse::Error(response)) =
+            pb_mapper_protocol::command::MessageSerializer::decode(&reply)
+        {
             return Err(ConnectError::Rejected { response });
         }
         return Err(io::Error::new(

@@ -48,6 +48,9 @@ pub struct JsRelayDiagnostics {
 pub struct JsQuicConnectionDiagnostics {
     pub connection_id: f64,
     pub peer_addr: String,
+    /// `false` once the pool has retired it: it stays open only for the
+    /// streams already on it.
+    pub pooled: bool,
     pub rtt_us: f64,
     pub congestion_window: f64,
     pub mtu: u32,
@@ -58,14 +61,19 @@ pub struct JsQuicConnectionDiagnostics {
     pub received_bytes: f64,
 }
 
+/// The name of a relay carrier, as the JS API spells it.
+fn transport_name(transport: sdk::RelayTransport) -> String {
+    match transport {
+        sdk::RelayTransport::Tcp => "tcp",
+        sdk::RelayTransport::Quic => "quic",
+    }
+    .into()
+}
+
 impl From<sdk::RelayDiagnostics> for JsRelayDiagnostics {
     fn from(value: sdk::RelayDiagnostics) -> Self {
         Self {
-            transport: match value.transport {
-                sdk::RelayTransport::Tcp => "tcp",
-                sdk::RelayTransport::Quic => "quic",
-            }
-            .into(),
+            transport: transport_name(value.transport),
             connections_created: number(value.connections_created),
             streams_opened: number(value.streams_opened),
             streams_reused: number(value.streams_reused),
@@ -76,6 +84,7 @@ impl From<sdk::RelayDiagnostics> for JsRelayDiagnostics {
                 .map(|connection| JsQuicConnectionDiagnostics {
                     connection_id: number(connection.connection_id),
                     peer_addr: connection.peer_addr.to_string(),
+                    pooled: connection.pooled,
                     rtt_us: number(connection.rtt_us),
                     congestion_window: number(connection.congestion_window),
                     mtu: connection.mtu.into(),
@@ -217,11 +226,7 @@ impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
                     in_flight: attempt.in_flight,
                 }),
             }),
-            relay_transport: match value.relay_transport {
-                sdk::RelayTransport::Tcp => "tcp",
-                sdk::RelayTransport::Quic => "quic",
-            }
-            .into(),
+            relay_transport: transport_name(value.relay_transport),
             sdk_version: value.sdk_version.to_string(),
             last_attempt_phase: value.last_attempt_phase.as_str().to_string(),
             attempts: number(value.attempts),
@@ -537,6 +542,23 @@ impl Client {
     #[napi]
     pub async fn relay_diagnostics(&self) -> JsRelayDiagnostics {
         self.inner.relay_diagnostics().await.into()
+    }
+
+    /// The relay carrier this client uses: `tcp` or `quic`.
+    #[napi]
+    pub fn relay_transport(&self) -> String {
+        transport_name(self.inner.relay_transport())
+    }
+
+    /// The UDP port the relay offers QUIC on, or `null` when it offers none.
+    /// Asked over TCP whatever this client's carrier.
+    #[napi]
+    pub async fn relay_quic_port(&self) -> Result<Option<u32>> {
+        self.inner
+            .relay_quic_port()
+            .await
+            .map(|port| port.map(u32::from))
+            .map_err(to_napi)
     }
 
     #[napi]

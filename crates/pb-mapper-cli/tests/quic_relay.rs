@@ -133,6 +133,9 @@ async fn multiplexed_quic_streams_preserve_fin_and_report_real_statistics() {
     while let Some(result) = tasks.join_next().await {
         result.unwrap();
     }
+    // Another client of the relay shares the process's carrier.
+    let sibling = self::client(&relay, RelayTransport::Quic);
+    sibling.list_keys().await.unwrap();
     let before = client.relay_diagnostics().await;
     assert_eq!(before.transport, RelayTransport::Quic);
     assert_eq!(before.connections_created, 1);
@@ -197,14 +200,41 @@ async fn udp_service_over_quic_preserves_datagrams() {
 async fn explicit_quic_never_silently_uses_tcp() {
     let relay = Relay::start("quic-unavailable").await;
     let quic = client(&relay, RelayTransport::Quic);
-    assert!(quic.list_keys().await.is_err());
+    let tcp = client(&relay, RelayTransport::Tcp);
+    assert_eq!(tcp.relay_quic_port().await.unwrap(), None);
+    assert!(matches!(
+        quic.list_keys().await,
+        Err(pb_mapper_client::sdk::Error::Remote { code, retryable: false, .. })
+            if code == pb_mapper_client::sdk::QUIC_UNAVAILABLE
+    ));
     assert!(quic.relay_diagnostics().await.last_error.is_some());
     assert_eq!(quic.relay_diagnostics().await.connections_created, 0);
+    assert!(tcp.list_keys().await.is_ok());
+    // A tunnel asked to use QUIC there fails instead of retrying forever.
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registration = quic
+        .register(RegisterRequest {
+            key: "no-quic".into(),
+            local_addr: backend.local_addr().unwrap().to_string(),
+            transport: Transport::Tcp,
+            codec: false,
+            force_namespace: false,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        registration.wait_ready_timeout(READY_TIMEOUT).await,
+        Err(pb_mapper_client::sdk::Error::TunnelFailed { .. })
+    ));
+    registration.stop().await.unwrap();
+
+    let offering = Relay::start_with_quic("quic-offered").await;
     assert!(
-        client(&relay, RelayTransport::Tcp)
-            .list_keys()
+        client(&offering, RelayTransport::Tcp)
+            .relay_quic_port()
             .await
-            .is_ok()
+            .unwrap()
+            .is_some()
     );
 }
 
@@ -235,12 +265,14 @@ async fn revoked_credential_closes_quic_and_cannot_be_reused() {
             .unwrap()
             .is_err()
     );
+    // The pooled carrier takes no new stream once its credential is cancelled;
+    // a status query asks once more on a fresh one and gets the verdict.
     assert!(matches!(
         client.list_keys().await,
         Err(pb_mapper_client::sdk::Error::Remote {
             retryable: false,
             ..
-        }) | Err(pb_mapper_client::sdk::Error::Status { .. })
+        })
     ));
     // Existing workers must settle after revocation, including when recovery
     // reaches discovery instead of the original registration/status exchange.
@@ -336,21 +368,103 @@ async fn root_rotation_delivers_its_committed_response_and_reauthenticates() {
     assert_eq!(client.relay_diagnostics().await.connections_created, 2);
 }
 
+/// One QUIC connection admitted as the SDK's pool admits one, but held
+/// outside any pool: the relay's limits are past what one pool opens.
+/// Answers the refusal's code when the relay turns it away.
+async fn admit(
+    relay: &Relay,
+    credential: pb_mapper_core::checksum::Credential,
+) -> Result<(quinn::Endpoint, quinn::Connection), String> {
+    use pb_mapper_protocol::{
+        command::{MessageSerializer, PbConnRequest, PbConnResponse},
+        quic,
+        secure::ClientHeaderSession,
+    };
+    let mut tcp = TcpStream::connect(relay.addr()).await.unwrap();
+    let reply = ClientHeaderSession::new_v2(&credential)
+        .unwrap()
+        .exchange(
+            &mut tcp,
+            &PbConnRequest::QuicEndpoint.encode().unwrap(),
+            READY_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let PbConnResponse::QuicEndpoint(Some(capability)) = PbConnResponse::decode(&reply).unwrap()
+    else {
+        panic!("missing QUIC capability");
+    };
+    let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(quic::client_config(&capability.certificate).unwrap());
+    let peer = std::net::SocketAddr::new(relay.addr().ip(), capability.port);
+    let connection = endpoint
+        .connect(peer, quic::SERVER_NAME)
+        .unwrap()
+        .await
+        .unwrap();
+    let shared = std::sync::Arc::new(quic::QuicConnection {
+        connection: connection.clone(),
+        endpoint: endpoint.clone(),
+        relay_addr: relay.addr(),
+    });
+    let mut stream = quic::QuicStream::new(shared, connection.open_bi().await.unwrap());
+    let reply = ClientHeaderSession::new_v2(&credential)
+        .unwrap()
+        .exchange(
+            &mut stream,
+            &quic::binding(&connection).unwrap(),
+            READY_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    if reply == b"ready" {
+        return Ok((endpoint, connection));
+    }
+    match PbConnResponse::decode(&reply) {
+        Ok(PbConnResponse::Error(error)) if error.retryable => Err(error.code),
+        other => panic!("unexpected admission reply: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn saturated_quic_admission_returns_an_authenticated_retryable_rejection() {
     let relay = Relay::start_with_quic("quic-capacity").await;
+    // A temporary credential reaches its own share of the listener first.
+    let (_, tenant) = relay
+        .issue_credential(Duration::from_secs(600), "tenant")
+        .await;
     let mut admitted = Vec::new();
-    for _ in 0..128 {
-        let client = client(&relay, RelayTransport::Quic);
-        client.list_keys().await.unwrap();
-        admitted.push(client);
+    for _ in 0..16 {
+        admitted.push(admit(&relay, tenant).await.unwrap());
+    }
+    assert_eq!(
+        admit(&relay, tenant).await.err().as_deref(),
+        Some("quic_credential_capacity")
+    );
+    // The administrator key, which operators share between their machines,
+    // is bounded by the listener's total alone.
+    while admitted.len() < 128 {
+        admitted.push(admit(&relay, admin_credential()).await.unwrap());
     }
     let rejected = client(&relay, RelayTransport::Quic);
     assert!(matches!(rejected.list_keys().await,
         Err(pb_mapper_client::sdk::Error::Remote { code, retryable: true, .. }) if code == "quic_connection_capacity"));
     assert_eq!(rejected.relay_diagnostics().await.connections_created, 0);
     // Rejection must neither consume a slot nor close an admitted sibling.
-    assert!(admitted[0].list_keys().await.is_ok());
+    assert!(
+        admitted
+            .iter()
+            .all(|(_, connection)| connection.close_reason().is_none())
+    );
+    // A slot given back is a slot to take.
+    drop(admitted.pop());
+    tokio::time::timeout(READY_TIMEOUT, async {
+        while rejected.list_keys().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -368,6 +482,72 @@ async fn running_tunnels_recover_after_quic_relay_restart() {
         .await;
     exchange(addr, 2).await;
     assert!(client.relay_diagnostics().await.connections_created >= 2);
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+}
+
+/// A relay brought back without the QUIC it had — a rollback, a flag left
+/// off — stops a running QUIC tunnel only until QUIC is back: it backs off
+/// as from a refusal that may clear, and recovers.
+#[tokio::test]
+async fn running_tunnels_wait_out_a_relay_back_without_quic() {
+    use pb_mapper_client::sdk::RecoveryFailure;
+    use pb_mapper_server::{QuicServerConfig, RelayServerOptions};
+
+    let mut relay = Relay::start_with_quic("quic-rollback").await;
+    let client = client(&relay, RelayTransport::Quic);
+    let (backend, _echo) = echo().await;
+    let (registration, connection, addr) =
+        tunnel(&client, &client, backend, Transport::Tcp, false).await;
+    exchange(addr, 1).await;
+
+    relay
+        .restart_server_with_options(RelayServerOptions::default())
+        .await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !matches!(
+            registration.diagnostics().last_failure,
+            Some(RecoveryFailure::Rejected)
+        ) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the registration reaches the relay and hears it has no QUIC");
+    assert!(!matches!(registration.status(), TunnelStatus::Failed(_)));
+    assert!(!matches!(connection.status(), TunnelStatus::Failed(_)));
+
+    relay
+        .restart_server_with_options(RelayServerOptions {
+            direct: None,
+            quic: Some(QuicServerConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                advertise_port: 0,
+            }),
+        })
+        .await;
+    let mut status = registration.subscribe();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        status.wait_for(|status| matches!(status, TunnelStatus::Connected)),
+    )
+    .await
+    .expect("the registration comes back with QUIC")
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let mut socket = TcpStream::connect(addr).await.unwrap();
+            socket.write_all(b"x").await.unwrap();
+            if tokio::time::timeout(Duration::from_secs(2), socket.read_u8())
+                .await
+                .is_ok_and(|byte| byte.is_ok())
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("traffic flows over QUIC again");
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
 }

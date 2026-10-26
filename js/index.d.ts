@@ -33,6 +33,13 @@ export declare class Admin {
 export declare class Client {
   constructor(config: JsClientConfig)
   relayDiagnostics(): Promise<JsRelayDiagnostics>
+  /** The relay carrier this client uses: `tcp` or `quic`. */
+  relayTransport(): string
+  /**
+   * The UDP port the relay offers QUIC on, or `null` when it offers none.
+   * Asked over TCP whatever this client's carrier.
+   */
+  relayQuicPort(): Promise<number | null>
   server(): string
   /** Wake recovering tunnels after a host network or resume notification. */
   notifyNetworkChange(): void
@@ -225,6 +232,11 @@ export interface JsPathDiagnostics {
 export interface JsQuicConnectionDiagnostics {
   connectionId: number
   peerAddr: string
+  /**
+   * `false` once the pool has retired it: it stays open only for the
+   * streams already on it.
+   */
+  pooled: boolean
   rttUs: number
   congestionWindow: number
   mtu: number

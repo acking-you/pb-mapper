@@ -529,7 +529,18 @@ async fn probe_remote_key(
     timeout: Duration,
 ) -> std::result::Result<(), ProbeFailure> {
     match tokio::time::timeout(timeout, async {
-        probe_remote_key_once(remote_addr, key, namespace, credential).await
+        // Resolved once, here, so a name that does not resolve is reported
+        // as such rather than as the relay being unreachable.
+        let addresses = remote_addr
+            .addresses()
+            .await
+            .map_err(|error| ProbeFailure {
+                reason: error.to_string(),
+                permanent: false,
+                kind: RecoveryFailure::Dns,
+                protocol_replied: false,
+            })?;
+        probe_remote_key_once(remote_addr, &addresses, key, namespace, credential).await
     })
     .await
     {
@@ -545,12 +556,14 @@ async fn probe_remote_key(
 
 async fn probe_remote_key_once(
     remote_addr: &RelayEndpoint,
+    addresses: &ResolvedAddrs,
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
 ) -> std::result::Result<(), ProbeFailure> {
     match fetch_remote_status(
         remote_addr,
+        addresses,
         PbConnStatusReq::Service {
             direct_query: None,
             key: key.to_string(),
@@ -590,8 +603,14 @@ async fn probe_remote_key_once(
         }
     }
 
-    let status_resp =
-        fetch_remote_status(remote_addr, PbConnStatusReq::Keys, namespace, credential).await?;
+    let status_resp = fetch_remote_status(
+        remote_addr,
+        addresses,
+        PbConnStatusReq::Keys,
+        namespace,
+        credential,
+    )
+    .await?;
     let PbConnStatusResp::Keys(keys) = status_resp else {
         return Err(ProbeFailure::transient(format!(
             "expected keys status response, got {status_resp:?}"
@@ -611,12 +630,13 @@ async fn probe_remote_key_once(
 
 async fn fetch_remote_status(
     remote_addr: &RelayEndpoint,
+    addresses: &ResolvedAddrs,
     req: PbConnStatusReq,
     namespace: Option<u64>,
     credential: Credential,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
     let mut stream = remote_addr
-        .connect(credential)
+        .connect_addresses(addresses, credential)
         .await
         .map_err(|error| match error {
             crate::relay::ConnectError::Rejected { response } => ProbeFailure {

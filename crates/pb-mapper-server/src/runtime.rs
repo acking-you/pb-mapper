@@ -160,18 +160,39 @@ pub async fn run_server_on_listener_with_options(
         "pb-mapper server is listening"
     );
 
+    // Clients reach QUIC at the IP they reached TCP at, so a listener on the
+    // other address family is one some of them cannot use.
+    if let Some(quic) = &options.quic
+        && quic.listen.is_ipv6() != listen_addr.is_ipv6()
+    {
+        tracing::warn!(
+            event = "relay_quic_family_mismatch",
+            tcp = %listen_addr,
+            quic = %quic.listen,
+            "QUIC and TCP listen on different address families; clients on TCP's cannot use QUIC"
+        );
+    }
+    let quic_stop = CancellationToken::new();
     #[cfg(feature = "relay-quic")]
-    let (_quic_task, quic_capability) =
-        quic::start(options.quic, security.clone(), manager.get_task_sender()).await?;
+    let (quic_task, quic_capability) = quic::start(
+        options.quic,
+        security.clone(),
+        manager.get_task_sender(),
+        quic_stop.clone(),
+    )
+    .await?;
     #[cfg(not(feature = "relay-quic"))]
-    let quic_capability: Option<Arc<pb_mapper_protocol::command::QuicEndpoint>> = {
+    let (quic_task, quic_capability): (
+        Option<tokio_util::task::AbortOnDropHandle<()>>,
+        Option<Arc<pb_mapper_protocol::command::QuicEndpoint>>,
+    ) = {
         if options.quic.is_some() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "binary built without relay-quic",
             ));
         }
-        None
+        (None, None)
     };
     let task_sender = manager.get_task_sender();
     let shutdown_token_clone = shutdown_token.clone();
@@ -1265,6 +1286,11 @@ pub async fn run_server_on_listener_with_options(
     // still see auth.lock held.
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
+    // The QUIC listener drains its own connection tasks before it ends.
+    quic_stop.cancel();
+    if let Some(task) = quic_task {
+        let _ = task.await;
+    }
     abort_and_wait(
         [listener_handle, shutdown_handle, sweep_handle]
             .into_iter()

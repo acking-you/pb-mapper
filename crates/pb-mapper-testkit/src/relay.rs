@@ -114,6 +114,15 @@ impl Relay {
 
     /// Reopen the same persisted auth state and TCP address after a shutdown.
     pub async fn restart_server(&mut self, direct: Option<DirectServerConfig>) {
+        let quic = self.quic.clone();
+        self.restart_server_with_options(RelayServerOptions { direct, quic })
+            .await;
+    }
+
+    /// [`Self::restart_server`], with listeners of its own: a relay brought
+    /// back without the QUIC it had, say.
+    pub async fn restart_server_with_options(&mut self, options: RelayServerOptions) {
+        self.quic = options.quic.clone();
         if !self.task.is_finished() {
             self.stop_server().await;
         }
@@ -137,10 +146,6 @@ impl Relay {
         self.shutdown = CancellationToken::new();
         let shutdown = self.shutdown.clone();
         let auth = self.auth().clone();
-        let options = RelayServerOptions {
-            direct,
-            quic: self.quic.clone(),
-        };
         self.task = tokio::spawn(async move {
             run_server_on_listener_with_options(listener, shutdown, None, false, auth, options)
                 .await
