@@ -74,7 +74,7 @@ iroh 以稳定版 [v1.4.1 / `d6c6963b`](https://github.com/n0-computer/iroh/tree
 
 ## 3. 传输选型与依赖
 
-采用 Quinn 0.11.12，固定在包含 `quinn-proto 0.11.19` / `quinn-udp 0.5.16` 后续修复的稳定 tag。它提供 QUIC 拥塞控制、重传、流量控制和 TLS 1.3；[`Endpoint::new_with_abstract_socket`](https://github.com/quinn-rs/quinn/blob/8192ed399a26a6e8f0aba43d10ec8badaa5b905e/quinn/src/endpoint.rs#L133) 允许注入共享 UDP 收发适配器，适合与 STUN/探测共用端口。
+最初采用 Quinn 0.11.12；2026-10-26 已合并上游 main，升级到 `quinn 0.12.0` / `quinn-proto 0.12.0` / `quinn-udp 0.6.3`，并保留 fork 的 Windows 修复与性能优化。它提供 QUIC 拥塞控制、重传、流量控制和 TLS 1.3；[`Endpoint::new_with_abstract_socket`](https://github.com/quinn-rs/quinn/blob/8192ed399a26a6e8f0aba43d10ec8badaa5b905e/quinn/src/endpoint.rs#L133) 允许注入共享 UDP 收发适配器，适合与 STUN/探测共用端口。
 
 **QUIC 本身不提供本方案的候选发现、协调和 UDP 打洞。** STUN 先发现公网映射，server 帮双方交换候选；双方从各自承载数据的 UDP socket 向对方发送探测。在允许这种通信的 NAT/防火墙上，出站探测建立相应映射和过滤状态，对方的包随后能够到达本机。此时再完成 QUIC 握手，业务包沿两端的网络路径传输，不经过 pb-mapper server。[Tailscale 的原理说明](https://tailscale.com/blog/how-nat-traversal-works) 也把 UDP 穿透与打通后的流传输分开讨论。
 
@@ -84,9 +84,9 @@ iroh 以稳定版 [v1.4.1 / `d6c6963b`](https://github.com/n0-computer/iroh/tree
 
 | 新增直接依赖 | 版本 | 用途 |
 |---|---|---|
-| quinn | 0.11.12 | QUIC endpoint/connection/双向 stream；只启用 `runtime-tokio`、`rustls-ring` |
-| rcgen | 0.14.10 | 为本地 endpoint 生成临时证书；启用 `ring`，无需 PEM |
-| stun-proto | 2.0.3 | STUN 消息、事务与重传状态机；sans-I/O 接口交给项目自己的 socket 驱动 |
+| quinn | 0.12.0（上游开发提交） | QUIC endpoint/connection/双向 stream；只启用 `runtime-tokio`、`rustls-ring` |
+| rcgen | 0.15.0（上游开发提交） | 为本地 endpoint 生成临时证书；启用 `ring`，无需 PEM |
+| stun-proto | 2.0.4 | STUN 消息、事务与重传状态机；sans-I/O 接口交给项目自己的 socket 驱动 |
 
 三个仓库均已 fork 到 `acking-you` 并作为 submodule 引入，维护及默认分支统一为 `dev`，纯上游源码保留在各 fork 的 `upstream` 分支。现有 Tokio、ring、if-addrs 继续使用，新增传递依赖交给 Cargo。TLS 配置通过 Quinn [重新导出的 `quinn::rustls`](https://github.com/quinn-rs/quinn/blob/8192ed399a26a6e8f0aba43d10ec8badaa5b905e/quinn/src/lib.rs#L74) 使用；rustls 保留为传递依赖，不再单独声明、patch 或引入 submodule。通过 `quinn::udp`、`quinn::rustls::pki_types` 和 `stun_proto::types` 的 re-export 避免额外直接依赖。精确 commit、许可证、Cargo 接入及发布约束见 [依赖说明](../deps/README.md)。
 
@@ -94,7 +94,7 @@ iroh 以稳定版 [v1.4.1 / `d6c6963b`](https://github.com/n0-computer/iroh/tree
 
 | 项目 | stars / 最近 push | 决策与证据 |
 |---|---|---|
-| [Quinn](https://api.github.com/repos/quinn-rs/quinn) | 5,306 / 2026-10-23 | 采用成熟 0.11 维护线，保留共享 socket 接口；不因 iroh 使用 noq 就改用该 fork |
+| [Quinn](https://api.github.com/repos/quinn-rs/quinn) | 5,306 / 2026-10-23 | 最初采用 0.11 维护线；2026-10-26 按上游 main 升到 0.12 开发提交，并适配独占接收端与 UdpSender，继续共享同一绑定 socket |
 | [rcgen](https://api.github.com/repos/rustls/rcgen) | 510 / 2026-10-12 | 保留。职责小且集中；[Quinn 示例/测试](https://github.com/quinn-rs/quinn/blob/8192ed399a26a6e8f0aba43d10ec8badaa5b905e/quinn/Cargo.toml#L82) 和 [iroh-relay](https://github.com/n0-computer/iroh/blob/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/iroh-relay/Cargo.toml#L75) 均采用它 |
 | [stun-proto](https://api.github.com/repos/ystreet/stun-proto) | 17 / 2026-10-20 | 保留并 fork。sans-I/O 同时提供消息、事务、重传状态，与单 socket 驱动直接匹配；社区规模小是明确的维护风险 |
 | [webrtc-rs/webrtc](https://api.github.com/repos/webrtc-rs/webrtc) | 5,163 / 2026-10-11 | 已比较独立 `stun 0.17.2`，未采用。stars 属于整个仓库；[v0.17.x](https://github.com/webrtc-rs/webrtc/tree/v0.17.x/stun) 仍有维护，但默认分支已迁移架构，共享 socket 下还需适配事务和调度 |

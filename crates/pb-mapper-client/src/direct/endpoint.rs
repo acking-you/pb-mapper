@@ -27,7 +27,7 @@ impl Network {
             SocketAddr::from(([0, 0, 0, 0], 0)),
             SocketAddr::from(([0u16; 8], 0)),
         ] {
-            let socket = match Socket::bind(addr) {
+            let (socket, quic) = match Socket::bind(addr) {
                 Ok(s) => s,
                 Err(error) if addr.is_ipv6() => {
                     tracing::debug!(%error, "IPv6 direct socket unavailable");
@@ -43,7 +43,7 @@ impl Network {
             let endpoint = quinn::Endpoint::new_with_abstract_socket(
                 socket::endpoint_config(),
                 config,
-                socket.quic(),
+                Box::new(quic),
                 Arc::new(quinn::TokioRuntime),
             )?;
             if server {

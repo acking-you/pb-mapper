@@ -8,17 +8,21 @@ Quinn、rcgen、stun-proto 通过 `path + version` 接入 Cargo，构建使用�
 
 | 本地目录 | 维护仓库 | 上游 / 基线 | 固定 commit | 许可证 |
 |---|---|---|---|---|
-| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `quinn-proto-0.11.19` | `6cbaeaaa10182068f086239b62e8274db00ff08e` | MIT OR Apache-2.0 |
-| `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/dev) | [rustls/rcgen](https://github.com/rustls/rcgen), `v0.14.10` | `fd4687899528c7651ea0b0f433efd528e07daae5` | MIT OR Apache-2.0 |
-| `deps/stun-proto` | [acking-you/stun-proto](https://github.com/acking-you/stun-proto/tree/dev) | [ystreet/stun-proto](https://github.com/ystreet/stun-proto), `v2.0.3` | `01028487efb43cc17262ed94a59a58b01bd73696` | MIT OR Apache-2.0 |
+| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `main@12fe8094`（开发版） | `7c131852b9d45c91dc0ff483e618ccf7c330dd26` | MIT OR Apache-2.0 |
+| `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/dev) | [rustls/rcgen](https://github.com/rustls/rcgen), `main@b820c438`（开发版） | `b4a65cb06038656800b38fe592923b06ad0df77a` | MIT OR Apache-2.0 |
+| `deps/stun-proto` | [acking-you/stun-proto](https://github.com/acking-you/stun-proto/tree/dev) | [ystreet/stun-proto](https://github.com/ystreet/stun-proto), `v2.0.4 / main@9e47ca00` | `66dc8e0ae7179393d6b80373582893fa8bb0283e` | MIT OR Apache-2.0 |
 | `deps/kanal` | [acking-you/kanal](https://github.com/acking-you/kanal/tree/dev) | [fereidani/kanal](https://github.com/fereidani/kanal)，本地扩展发布为 `kanal-plus 0.2.0` | `e79d95d5163446c23d53befbc778aaf6d7d34e42` | MIT |
 | `deps/uni-stream` | [acking-you/uni-stream](https://github.com/acking-you/uni-stream/tree/dev) | 自研，`0.3.5` 发布后的已合并维护修复 | `796efc8c938e0eedb5006c2512fc5cf810fbbca4` | MIT |
 
-固定提交均须先推送到各自仓库，再更新 pb-mapper 的 gitlink。Quinn 在稳定 tag 上增加了 Windows IPv4 源地址提示的兼容修复（[PR #1](https://github.com/acking-you/quinn/pull/1)，由 `dev` 完整继承）；rcgen 和 stun-proto 保留原稳定 tag 的库源码。Quinn 仓库包含 `quinn 0.11.12`、`quinn-proto 0.11.19`、`quinn-udp 0.5.16`，选用该 tag 是为了纳入 0.11 系列后续修复。stun-proto 仓库包含配套 `stun-types`，使用其 re-export，无需额外直接依赖。
+固定提交均须先推送到各自仓库，再更新 pb-mapper 的 gitlink。2026-10-26 已把这三个 fork 的上游 `main` 合并到 `dev`，保留维护分支的 CI 配置。Quinn 仓库现在包含 `quinn 0.12.0`、`quinn-proto 0.12.0`、`quinn-udp 0.6.3`；rcgen 为 `0.15.0`；stun-proto 和同仓 `stun-types` 为 `2.0.4`。本次合并时 Quinn 0.12.0、rcgen 0.15.0 尚无发布 tag，这里固定的是上游开发提交，不是稳定发布版本。
 
-各 fork 的 `dev` 用于后续开发和直接修复；`upstream` 由原来未加本地补丁的 `main` 改名，只跟踪上游源码。分支改名不会自动同步上游，也不会把上游 `main` 的新版本引入当前稳定基线。需要贡献上游时，从合适的上游目标分支建立独立分支，只挑选相关修复，再向对应上游仓库提 PR。
+Quinn 保留 Windows IPv4 源地址提示兼容修复（fork [PR #1](https://github.com/acking-you/quinn/pull/1)，上游 [PR #2958](https://github.com/quinn-rs/quinn/pull/2958)），并采用已验证的新接口适配。另外使用 `parking_lot` 维护连接状态锁并保留 panic poisoning；发送端只在背压后创建可写等待 future。新增共享 Tokio socket 入口，避免重复注册 reactor。`fast-apple-datapath` 为显式启用的优化：仅在已验证的 Darwin 27（本次实测 macOS 27.0.1）且批量 API 符号齐备时自动启用，其他系统维持原路径；不支持的系统调用会关闭批量路径，已生成的分段报文不会被错误拼成一个数据报。rcgen 库源码与上游一致；stun-proto 另更新了基准的时间接口和示例的错误构造，以通过严格 Clippy，协议源码未添加本地补丁。
 
-Quinn、rcgen 和 stun-proto 的迁移只调整工作流分支条件，保留原固定版本的库源码。Kanal 的 `dev` 继承原 `dev/pb-mapper` 上已发布的 `kanal-plus 0.2.0`，保留批量接收和 owned stream 扩展。uni-stream 的 `dev` 继承原 `master` 上已合并的 DNS 和 MSRV 修复；当前 registry 的 `uni-stream 0.3.5` 来自 `c041f85`，这些后续维护提交尚不能视为该发布包的一部分。
+pb-mapper 适配 Quinn 0.12 的独占接收端与 `UdpSender`：Quinn 驱动拥有唯一接收端，通过 fork 的 `wrap_tokio_udp_socket` 共享同一个 Tokio UDP socket 和 reactor 注册，额外引用只负责 STUN / 探测发送；QUIC 数据仍原地分流，没有新增逐包任务、队列或拷贝。rcgen 0.15 返回的 `PrivateKeyDer` 直接保存在身份状态中，并在构造 TLS 配置时显式克隆。精确证书固定、TLS exporter 绑定以及直连提交/回退规则不变。
+
+各 fork 的 `dev` 用于后续开发和直接修复；`upstream` 只跟踪纯上游源码。需要贡献上游时，从合适的上游目标分支建立独立分支，只挑选相关修复，再向对应上游仓库提 PR。stun-proto 仓库包含配套 `stun-types`，使用其 re-export，无需额外直接依赖。
+
+Kanal 的 `dev` 继承原 `dev/pb-mapper` 上已发布的 `kanal-plus 0.2.0`，保留批量接收和 owned stream 扩展。uni-stream 的 `dev` 继承原 `master` 上已合并的 DNS 和 MSRV 修复；当前 registry 的 `uni-stream 0.3.5` 来自 `c041f85`，这些后续维护提交尚不能视为该发布包的一部分。本次未调整这两个依赖。
 
 已合并的工作分支及纯上游分支副本已清理。Kanal 和 uni-stream 各保留一个 `codex/cipherrelay-v1.2.22-deps` 分支：它们含有独立未合并的依赖调整，不能作为无用分支删除，也没有混入 pb-mapper 的维护基线。
 
@@ -74,9 +78,9 @@ stun-proto 社区规模较小，保留 fork 的直接修复能力，并跟踪上
 **根 Cargo.toml** 已将五个仓库加入 `[workspace].exclude`，防止依赖仓库的成员被主项目误纳入；`[workspace.dependencies]` 中使用：
 
 ```toml
-quinn = { path = "deps/quinn/quinn", version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rcgen = { path = "deps/rcgen/rcgen", version = "0.14.10", default-features = false, features = ["ring"] }
-stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.3" }
+quinn = { path = "deps/quinn/quinn", version = "0.12.0", default-features = false, features = ["runtime-tokio", "rustls-ring", "fast-apple-datapath"] }
+rcgen = { path = "deps/rcgen/rcgen", version = "0.15.0", default-features = false, features = ["ring"] }
+stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.4" }
 kanal = { package = "kanal-plus", version = "0.2.0" }
 uni-stream = "0.3.5"
 ```
@@ -85,9 +89,44 @@ uni-stream = "0.3.5"
 
 通过 `cargo metadata`/`cargo tree` 检查三个直接依赖 source 为本地路径、rustls 由 registry 解析且只有预期的一份、没有意外启用 aws-lc 或系统证书验证。依赖锁定后运行受影响测试，CI 已把 `deps/*` 和 `.gitmodules` 纳入 Rust/Node 变更触发范围；仅调整 gitlink 也必须验收。
 
-以上 path 方案适用于本仓库构建二进制。**发布 crates.io SDK 需要另行完成依赖发布闭环**：根 `[patch.crates-io]` 不会作为库的依赖配置传播给使用者；`path + version` 在发布时会解析 registry 版本。若 fork 有行为修改，应先合入上游并依赖包含修复的版本，或发布明确命名的 fork 包并统一改依赖，不能把尚未发布的本地修复当作下游已经获得。Kanal 已通过 `kanal-plus 0.2.0` 发布；Quinn、rcgen 和 stun-proto 没有发布单独命名的 fork 包。Quinn 的 Windows 修复仅由固定 Git/submodule 依赖提供，不应宣称 crates.io 用户已获得该补丁。
+以上 path 方案适用于本仓库构建二进制。本次使用的 Quinn / rcgen 开发版还必须确认相应 registry 版本已发布，才能发布依赖它们的 SDK。**发布 crates.io SDK 需要另行完成依赖发布闭环**：根 `[patch.crates-io]` 不会作为库的依赖配置传播给使用者；`path + version` 在发布时会解析 registry 版本。若 fork 有行为修改，应先合入上游并依赖包含修复的版本，或发布明确命名的 fork 包并统一改依赖，不能把尚未发布的本地修复当作下游已经获得。Kanal 已通过 `kanal-plus 0.2.0` 发布；Quinn、rcgen 和 stun-proto 没有发布单独命名的 fork 包。Quinn 的 Windows 修复仅由固定 Git/submodule 依赖提供，不应宣称 crates.io 用户已获得该补丁。
+
+## 本次升级的性能验证
+
+环境：Apple M3 Pro、macOS 27.0.1（26A434）/ Darwin 27.0.0、arm64、Rust 1.99.1，release 构建且 `CARGO_PROFILE_RELEASE_DEBUG=0`。基线为 Quinn `6cbaeaaa`，优化版为表中固定提交；两个版本使用同一份基准代码，固定 loopback 地址族，每个端点 2 个 Tokio worker，AES-128-GCM、ACK threshold 10、有序 `read_chunks`。每项交替顺序运行 3 次。下表是 **MiB/s 中位数（最小–最大）**，不是公网带宽或整个 pb-mapper 的端到端收益。
+
+| 场景 | 原版 0.11 | 优化版 0.12 | 中位数变化 |
+| --- | ---: | ---: | ---: |
+| IPv4，4 条串行流，每条 256 MiB | 217.33（214.07–224.61） | 256.52（255.35–256.77） | +18.0% |
+| IPv6，4 条串行流，每条 256 MiB | 196.62（194.61–197.31） | 232.90（231.97–233.42） | +18.5% |
+| IPv4，32 条流、并发 8，每条 96 MiB | 207.17（205.89–210.94） | 244.01（242.66–244.36） | +17.8% |
+| IPv4，10 万次串行请求，上下行各 1 KiB | 20.22（20.09–20.70） | 19.58（19.51–19.67） | -3.2% |
+
+大流量场景提升约 18%，短请求吞吐下降约 3%。仅合并上游、未加优化的短请求对照中位数为 19.77 MiB/s，与优化版接近；这组数据不能证明每个场景都改善，也不足以给某一项锁优化单独分配收益。单流 IPv4 的进程 CPU 时间中位数从 9.70 s 降至 8.19 s；并发场景峰值 RSS 中位数约从 11.38 MiB 增至 12.27 MiB，包含双方端点和基准统计数据。
+
+最初的 1000 次短请求过短，并发 32 MiB 测试也出现明显波动，因此分别延长到 10 万次和 96 MiB/流。原始样本没有删除，完整数据见 [results.json](../docs/benchmarks/2026-10-26-quinn/results.json) 和 [raw.txt](../docs/benchmarks/2026-10-26-quinn/raw.txt)。其中下载 P99 仅是读取该流剩余数据的耗时，不能当成请求往返延迟；0 µs 表示低于直方图精度。Linux/Windows 尚无这组性能对照，不能套用 macOS 的提升比例。
+
+复现时，在临时目录用 `git archive` 分别展开 Quinn 的 `6cbaeaaa` 和当前固定提交，把当前 `bench/Cargo.toml`、`bench/src/{lib,stats}.rs`、`bench/src/bin/bulk.rs` 同样复制到基线。各自执行 `CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --locked --release -p bench --bin bulk`；优化版追加 `--features quinn/fast-apple-datapath`。保存两个 `target/release/bulk`，交替运行下列命令各 3 次；macOS 可用 `/usr/bin/time -l` 记录进程 CPU 时间和峰值 RSS：
+
+```sh
+bulk --ipv4 --workers 2 --download-size 256M --streams 4
+bulk --workers 2 --download-size 256M --streams 4
+bulk --ipv4 --workers 2 --download-size 96M --streams 32 --max_streams 8
+bulk --ipv4 --workers 2 --upload-size 1024 --download-size 1024 --streams 100000
+```
 
 ## 已执行的检查
+
+本次上游升级与性能改动：
+
+- 主仓库格式检查、严格全 workspace Clippy 和全 feature 测试通过；Darwin 批量路径实际启用后，另通过 client 的 36 个单元测试和 CLI 的 3 个 direct_e2e 测试。
+- [Windows 原生验收](https://github.com/acking-you/pb-mapper/actions/runs/40303784019)通过：client/server/CLI 严格 Clippy、client 单元测试及 direct_e2e。Quinn 跨平台验证记录见 [CI](https://github.com/acking-you/quinn/actions/runs/40303636277)。
+- Quinn 的 [Coverage 工作流](https://github.com/acking-you/quinn/actions/runs/40303636380)在 Ubuntu 生成报告后，因 fork 没有配置 Codecov token 而上传失败；这与此前合并提交的失败原因一致，其余覆盖率矩阵任务被取消，不能算作通过。
+- Quinn、rcgen、stun-proto 的格式、严格 Clippy 和相关测试通过。Quinn 另覆盖锁中毒、发送背压、共享 socket、UDP 分段、空报文与批量关闭后的数据报边界。
+- Node release 构建和 12 个 JS 测试通过；addon 为 3,176,992 字节，低于 5.5 MiB 限制。3 个发布包边界测试通过。
+- 关闭默认 feature 后的 CLI 依赖树不包含 Quinn、rcgen、stun-proto；正常构建只使用 registry 的 rustls 0.23.46，未引入 aws-lc 或系统证书验证。
+
+以下为本次升级之前的分支迁移检查记录：
 
 2026-10-26 分支迁移在 macOS arm64、Rust 1.99.1、Bun 1.4.0 上验证：
 

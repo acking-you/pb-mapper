@@ -1,0 +1,394 @@
+{
+  "environment": {
+    "date": "2026-10-26",
+    "cpu": "Apple M3 Pro",
+    "os": "macOS 27.0.1 (26A434), Darwin 27.0.0",
+    "architecture": "aarch64-apple-darwin",
+    "rust": "1.99.1 (58cf8f9c3)",
+    "profile": "release, CARGO_PROFILE_RELEASE_DEBUG=0",
+    "workers_per_endpoint": 2,
+    "transport": "loopback, AES-128-GCM, ACK threshold 10, ordered read_chunks"
+  },
+  "revisions": {
+    "old": "6cbaeaaa10182068f086239b62e8274db00ff08e",
+    "upstream": "dfa39656d2bd7de2dce942b90a35c2267b52898b",
+    "final": "7c131852b9d45c91dc0ff483e618ccf7c330dd26"
+  },
+  "notes": [
+    "The old and final builds use identical benchmark sources from the final revision. The upstream control uses the same address/thread/stream options; its histogram still uses millisecond precision. Compare its aggregate throughput only.",
+    "Old/final order alternates on successive repeats. Every individual trial is retained.",
+    "The first concurrent-transfer set varied substantially; the follow-up increases each stream from 32 MiB to 96 MiB.",
+    "The 1000-stream request set is too brief for a stable throughput conclusion; the follow-up uses 100000 streams.",
+    "Download P99 is a stream-drain duration, not full request round-trip latency. Zero microseconds means below histogram resolution.",
+    "Peak RSS is the whole benchmark process, including retained per-stream statistics."
+  ],
+  "initial_trials": [
+    {
+      "case": "ipv4-single",
+      "repeat": 0,
+      "label": "old",
+      "mib_s": 224.61,
+      "p99": "1.17s",
+      "rss_bytes": 11665408,
+      "cpu_user": 2.05,
+      "cpu_system": 7.34
+    },
+    {
+      "case": "ipv4-single",
+      "repeat": 0,
+      "label": "final",
+      "mib_s": 256.77,
+      "p99": "1.01s",
+      "rss_bytes": 11845632,
+      "cpu_user": 1.74,
+      "cpu_system": 6.43
+    },
+    {
+      "case": "ipv4-single",
+      "repeat": 1,
+      "label": "final",
+      "mib_s": 255.35,
+      "p99": "1.03s",
+      "rss_bytes": 13139968,
+      "cpu_user": 1.76,
+      "cpu_system": 6.44
+    },
+    {
+      "case": "ipv4-single",
+      "repeat": 1,
+      "label": "old",
+      "mib_s": 217.33,
+      "p99": "1.19s",
+      "rss_bytes": 11108352,
+      "cpu_user": 2.1,
+      "cpu_system": 7.6
+    },
+    {
+      "case": "ipv4-single",
+      "repeat": 2,
+      "label": "old",
+      "mib_s": 214.07,
+      "p99": "1.25s",
+      "rss_bytes": 11223040,
+      "cpu_user": 2.17,
+      "cpu_system": 7.63
+    },
+    {
+      "case": "ipv4-single",
+      "repeat": 2,
+      "label": "final",
+      "mib_s": 256.52,
+      "p99": "1.04s",
+      "rss_bytes": 11943936,
+      "cpu_user": 1.75,
+      "cpu_system": 6.44
+    },
+    {
+      "case": "ipv6-single",
+      "repeat": 0,
+      "label": "old",
+      "mib_s": 194.61,
+      "p99": "1.36s",
+      "rss_bytes": 11173888,
+      "cpu_user": 2.28,
+      "cpu_system": 8.26
+    },
+    {
+      "case": "ipv6-single",
+      "repeat": 0,
+      "label": "final",
+      "mib_s": 231.97,
+      "p99": "1.13s",
+      "rss_bytes": 12009472,
+      "cpu_user": 1.88,
+      "cpu_system": 7.04
+    },
+    {
+      "case": "ipv6-single",
+      "repeat": 1,
+      "label": "final",
+      "mib_s": 233.42,
+      "p99": "1.13s",
+      "rss_bytes": 12009472,
+      "cpu_user": 1.86,
+      "cpu_system": 6.95
+    },
+    {
+      "case": "ipv6-single",
+      "repeat": 1,
+      "label": "old",
+      "mib_s": 196.62,
+      "p99": "1.34s",
+      "rss_bytes": 11173888,
+      "cpu_user": 2.28,
+      "cpu_system": 8.18
+    },
+    {
+      "case": "ipv6-single",
+      "repeat": 2,
+      "label": "old",
+      "mib_s": 197.31,
+      "p99": "1.32s",
+      "rss_bytes": 10993664,
+      "cpu_user": 2.25,
+      "cpu_system": 8.13
+    },
+    {
+      "case": "ipv6-single",
+      "repeat": 2,
+      "label": "final",
+      "mib_s": 232.9,
+      "p99": "1.14s",
+      "rss_bytes": 12156928,
+      "cpu_user": 1.88,
+      "cpu_system": 7.0
+    },
+    {
+      "case": "ipv4-multi",
+      "repeat": 0,
+      "label": "old",
+      "mib_s": 211.37,
+      "p99": "1.22s",
+      "rss_bytes": 11747328,
+      "cpu_user": 2.58,
+      "cpu_system": 9.18
+    },
+    {
+      "case": "ipv4-multi",
+      "repeat": 0,
+      "label": "final",
+      "mib_s": 245.43,
+      "p99": "1.05s",
+      "rss_bytes": 14696448,
+      "cpu_user": 2.11,
+      "cpu_system": 7.72
+    },
+    {
+      "case": "ipv4-multi",
+      "repeat": 1,
+      "label": "final",
+      "mib_s": 250.55,
+      "p99": "1.03s",
+      "rss_bytes": 12615680,
+      "cpu_user": 2.1,
+      "cpu_system": 7.57
+    },
+    {
+      "case": "ipv4-multi",
+      "repeat": 1,
+      "label": "old",
+      "mib_s": 146.54,
+      "p99": "2.12s",
+      "rss_bytes": 15859712,
+      "cpu_user": 2.8,
+      "cpu_system": 10.25
+    },
+    {
+      "case": "ipv4-multi",
+      "repeat": 2,
+      "label": "old",
+      "mib_s": 142.98,
+      "p99": "1.85s",
+      "rss_bytes": 13795328,
+      "cpu_user": 2.69,
+      "cpu_system": 9.61
+    },
+    {
+      "case": "ipv4-multi",
+      "repeat": 2,
+      "label": "final",
+      "mib_s": 182.49,
+      "p99": "1.56s",
+      "rss_bytes": 20873216,
+      "cpu_user": 2.08,
+      "cpu_system": 8.05
+    },
+    {
+      "case": "ipv4-latency",
+      "repeat": 0,
+      "label": "old",
+      "mib_s": 19.77,
+      "p99": "6.00µs",
+      "rss_bytes": 10174464,
+      "cpu_user": 0.01,
+      "cpu_system": 0.04
+    },
+    {
+      "case": "ipv4-latency",
+      "repeat": 0,
+      "label": "final",
+      "mib_s": 18.82,
+      "p99": "5.00µs",
+      "rss_bytes": 10354688,
+      "cpu_user": 0.01,
+      "cpu_system": 0.03
+    },
+    {
+      "case": "ipv4-latency",
+      "repeat": 1,
+      "label": "final",
+      "mib_s": 17.01,
+      "p99": "12.00µs",
+      "rss_bytes": 10141696,
+      "cpu_user": 0.01,
+      "cpu_system": 0.04
+    },
+    {
+      "case": "ipv4-latency",
+      "repeat": 1,
+      "label": "old",
+      "mib_s": 22.85,
+      "p99": "10.00µs",
+      "rss_bytes": 10076160,
+      "cpu_user": 0.01,
+      "cpu_system": 0.03
+    },
+    {
+      "case": "ipv4-latency",
+      "repeat": 2,
+      "label": "old",
+      "mib_s": 23.99,
+      "p99": "11.00µs",
+      "rss_bytes": 10010624,
+      "cpu_user": 0.01,
+      "cpu_system": 0.03
+    },
+    {
+      "case": "ipv4-latency",
+      "repeat": 2,
+      "label": "final",
+      "mib_s": 18.32,
+      "p99": "9.00µs",
+      "rss_bytes": 10125312,
+      "cpu_user": 0.02,
+      "cpu_system": 0.03
+    }
+  ],
+  "long_request_trials": [
+    {
+      "repeat": 0,
+      "label": "old",
+      "mib_s": 20.7,
+      "p99": [
+        "62.00µs",
+        "7.00µs"
+      ],
+      "rss_bytes": 18055168
+    },
+    {
+      "repeat": 0,
+      "label": "upstream",
+      "mib_s": 19.77,
+      "p99": [],
+      "rss_bytes": 18038784
+    },
+    {
+      "repeat": 0,
+      "label": "final",
+      "mib_s": 19.51,
+      "p99": [
+        "61.00µs",
+        "0.00ns"
+      ],
+      "rss_bytes": 18186240
+    },
+    {
+      "repeat": 1,
+      "label": "final",
+      "mib_s": 19.67,
+      "p99": [
+        "62.00µs",
+        "0.00ns"
+      ],
+      "rss_bytes": 18186240
+    },
+    {
+      "repeat": 1,
+      "label": "upstream",
+      "mib_s": 19.61,
+      "p99": [],
+      "rss_bytes": 18104320
+    },
+    {
+      "repeat": 1,
+      "label": "old",
+      "mib_s": 20.22,
+      "p99": [
+        "59.00µs",
+        "0.00ns"
+      ],
+      "rss_bytes": 18038784
+    },
+    {
+      "repeat": 2,
+      "label": "old",
+      "mib_s": 20.09,
+      "p99": [
+        "59.00µs",
+        "0.00ns"
+      ],
+      "rss_bytes": 18038784
+    },
+    {
+      "repeat": 2,
+      "label": "upstream",
+      "mib_s": 20.95,
+      "p99": [],
+      "rss_bytes": 18071552
+    },
+    {
+      "repeat": 2,
+      "label": "final",
+      "mib_s": 19.58,
+      "p99": [
+        "60.00µs",
+        "0.00ns"
+      ],
+      "rss_bytes": 18219008
+    }
+  ],
+  "long_concurrent_trials": [
+    {
+      "repeat": 0,
+      "label": "old",
+      "mib_s": 207.17,
+      "p99": "3.72s",
+      "rss_bytes": 11927552
+    },
+    {
+      "repeat": 0,
+      "label": "final",
+      "mib_s": 242.66,
+      "p99": "3.19s",
+      "rss_bytes": 12926976
+    },
+    {
+      "repeat": 1,
+      "label": "final",
+      "mib_s": 244.36,
+      "p99": "3.15s",
+      "rss_bytes": 12763136
+    },
+    {
+      "repeat": 1,
+      "label": "old",
+      "mib_s": 210.94,
+      "p99": "3.72s",
+      "rss_bytes": 11780096
+    },
+    {
+      "repeat": 2,
+      "label": "old",
+      "mib_s": 205.89,
+      "p99": "3.76s",
+      "rss_bytes": 12615680
+    },
+    {
+      "repeat": 2,
+      "label": "final",
+      "mib_s": 244.01,
+      "p99": "3.17s",
+      "rss_bytes": 12861440
+    }
+  ]
+}

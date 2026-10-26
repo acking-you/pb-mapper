@@ -1,0 +1,1661 @@
+=== quinn-final-active-ipv4-latency-0-final.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 1024000 bytes on 1000 streams in 51.89ms (18.82 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.59 MiB/s │   42.00µs
+ P0   │    4.44 MiB/s │   29.00µs
+ P10  │   19.39 MiB/s │   33.00µs
+ P50  │   23.66 MiB/s │   41.00µs
+ P90  │   28.91 MiB/s │   50.00µs
+ P99  │   31.64 MiB/s │  109.00µs
+ P100 │   33.50 MiB/s │  219.00µs
+Overall download stats:
+
+Transferred 1024000 bytes on 1000 streams in 51.89ms (18.82 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6015.94 MiB/s │    0.00ns
+ P0   │   44.47 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    5.00µs
+ P100 │ 7816.00 MiB/s │   21.00µs
+        0.13 real         0.01 user         0.03 sys
+            10354688  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 837  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2101  messages sent
+                2101  messages received
+                   0  signals received
+                   0  voluntary context switches
+                6414  involuntary context switches
+           393194268  instructions retired
+           180435360  cycles elapsed
+             3834360  peak memory footprint
+
+=== quinn-final-active-ipv4-latency-0-old.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 1024000 bytes on 1000 streams in 49.39ms (19.77 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.85 MiB/s │   40.00µs
+ P0   │    3.06 MiB/s │   27.00µs
+ P10  │   20.02 MiB/s │   31.00µs
+ P50  │   24.39 MiB/s │   40.00µs
+ P90  │   31.39 MiB/s │   48.00µs
+ P99  │   33.16 MiB/s │   84.00µs
+ P100 │   35.25 MiB/s │  319.00µs
+Overall download stats:
+
+Transferred 1024000 bytes on 1000 streams in 49.39ms (19.77 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 4752.97 MiB/s │    0.00ns
+ P0   │   35.88 MiB/s │    0.00ns
+ P10  │ 3908.00 MiB/s │    0.00ns
+ P50  │ 4696.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │    0.00ns
+ P99  │ 5884.00 MiB/s │    6.00µs
+ P100 │ 7816.00 MiB/s │   27.00µs
+        0.14 real         0.01 user         0.04 sys
+            10174464  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 650  page reclaims
+                 177  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2101  messages sent
+                2101  messages received
+                   0  signals received
+                   0  voluntary context switches
+                6355  involuntary context switches
+           400403228  instructions retired
+           190119687  cycles elapsed
+             3752440  peak memory footprint
+
+=== quinn-final-active-ipv4-latency-1-final.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 1024000 bytes on 1000 streams in 57.41ms (17.01 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.16 MiB/s │   46.00µs
+ P0   │    1.22 MiB/s │   28.00µs
+ P10  │   15.88 MiB/s │   32.00µs
+ P50  │   26.08 MiB/s │   37.00µs
+ P90  │   29.72 MiB/s │   61.00µs
+ P99  │   31.55 MiB/s │  166.00µs
+ P100 │   33.84 MiB/s │  802.00µs
+Overall download stats:
+
+Transferred 1024000 bytes on 1000 streams in 57.41ms (17.01 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6245.91 MiB/s │    0.00ns
+ P0   │    8.54 MiB/s │    0.00ns
+ P10  │ 5848.00 MiB/s │    0.00ns
+ P50  │ 5884.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │   12.00µs
+ P100 │ 7816.00 MiB/s │  114.00µs
+        0.14 real         0.01 user         0.04 sys
+            10141696  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 825  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2101  messages sent
+                2101  messages received
+                   0  signals received
+                   0  voluntary context switches
+                6758  involuntary context switches
+           400715413  instructions retired
+           206718245  cycles elapsed
+             3588552  peak memory footprint
+
+=== quinn-final-active-ipv4-latency-1-old.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 1024000 bytes on 1000 streams in 42.73ms (22.85 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   28.70 MiB/s │   34.00µs
+ P0   │    8.06 MiB/s │   28.00µs
+ P10  │   25.08 MiB/s │   30.00µs
+ P50  │   29.30 MiB/s │   33.00µs
+ P90  │   32.03 MiB/s │   38.00µs
+ P99  │   33.31 MiB/s │   57.00µs
+ P100 │   34.62 MiB/s │  121.00µs
+Overall download stats:
+
+Transferred 1024000 bytes on 1000 streams in 42.73ms (22.85 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5034.83 MiB/s │    0.00ns
+ P0   │    8.11 MiB/s │    0.00ns
+ P10  │ 3908.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │   10.00µs
+ P100 │ 11768.00 MiB/s │  120.00µs
+        0.12 real         0.01 user         0.03 sys
+            10076160  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 817  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2101  messages sent
+                2101  messages received
+                   0  signals received
+                   0  voluntary context switches
+                6270  involuntary context switches
+           387064634  instructions retired
+           176656517  cycles elapsed
+             3637728  peak memory footprint
+
+=== quinn-final-active-ipv4-latency-2-final.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 1024000 bytes on 1000 streams in 53.30ms (18.32 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.52 MiB/s │   44.00µs
+ P0   │    0.27 MiB/s │   29.00µs
+ P10  │   20.61 MiB/s │   32.00µs
+ P50  │   23.87 MiB/s │   40.00µs
+ P90  │   30.33 MiB/s │   47.00µs
+ P99  │   32.34 MiB/s │   66.00µs
+ P100 │   33.03 MiB/s │    3.64ms
+Overall download stats:
+
+Transferred 1024000 bytes on 1000 streams in 53.30ms (18.32 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5927.56 MiB/s │    0.00ns
+ P0   │   57.16 MiB/s │    0.00ns
+ P10  │ 4676.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    9.00µs
+ P100 │ 7816.00 MiB/s │   17.00µs
+        0.15 real         0.02 user         0.03 sys
+            10125312  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 823  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2098  messages sent
+                2098  messages received
+                   0  signals received
+                   0  voluntary context switches
+                6441  involuntary context switches
+           398200228  instructions retired
+           188393685  cycles elapsed
+             3588576  peak memory footprint
+
+=== quinn-final-active-ipv4-latency-2-old.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 1024000 bytes on 1000 streams in 40.71ms (23.99 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.72 MiB/s │   32.00µs
+ P0   │    9.84 MiB/s │   27.00µs
+ P10  │   26.55 MiB/s │   30.00µs
+ P50  │   30.36 MiB/s │   32.00µs
+ P90  │   32.31 MiB/s │   36.00µs
+ P99  │   33.94 MiB/s │   50.00µs
+ P100 │   35.62 MiB/s │   99.00µs
+Overall download stats:
+
+Transferred 1024000 bytes on 1000 streams in 40.71ms (23.99 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 4861.72 MiB/s │    0.00ns
+ P0   │   39.72 MiB/s │    0.00ns
+ P10  │ 3908.00 MiB/s │    0.00ns
+ P50  │ 4696.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │   11.00µs
+ P100 │ 7816.00 MiB/s │   24.00µs
+        0.13 real         0.01 user         0.03 sys
+            10010624  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 815  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2102  messages sent
+                2102  messages received
+                   0  signals received
+                   0  voluntary context switches
+                6226  involuntary context switches
+           386202761  instructions retired
+           168756077  cycles elapsed
+             3555784  peak memory footprint
+
+=== quinn-final-active-ipv4-multi-0-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 32 streams in 4.17s (245.43 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   30.70 MiB/s │     1.04s
+ P0   │   30.42 MiB/s │     1.03s
+ P10  │   30.44 MiB/s │     1.03s
+ P50  │   30.50 MiB/s │     1.04s
+ P90  │   31.03 MiB/s │     1.05s
+ P99  │   31.03 MiB/s │     1.05s
+ P100 │   31.03 MiB/s │     1.05s
+        4.25 real         2.11 user         7.72 sys
+            14696448  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1101  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              839704  messages sent
+              839704  messages received
+                   0  signals received
+                   0  voluntary context switches
+              481683  involuntary context switches
+         84015170596  instructions retired
+         30002173470  cycles elapsed
+             7143928  peak memory footprint
+
+=== quinn-final-active-ipv4-multi-0-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 32 streams in 4.84s (211.37 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   26.47 MiB/s │     1.21s
+ P0   │   26.14 MiB/s │     1.18s
+ P10  │   26.16 MiB/s │     1.20s
+ P50  │   26.56 MiB/s │     1.21s
+ P90  │   26.70 MiB/s │     1.22s
+ P99  │   27.06 MiB/s │     1.22s
+ P100 │   27.06 MiB/s │     1.22s
+        4.93 real         2.58 user         9.18 sys
+            11747328  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 918  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              827734  messages sent
+              827734  messages received
+                   0  signals received
+                   0  voluntary context switches
+              643015  involuntary context switches
+         92614523361  instructions retired
+         36007062768  cycles elapsed
+             4276704  peak memory footprint
+
+=== quinn-final-active-ipv4-multi-1-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 32 streams in 4.09s (250.55 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   31.35 MiB/s │     1.02s
+ P0   │   31.06 MiB/s │     1.02s
+ P10  │   31.08 MiB/s │     1.02s
+ P50  │   31.42 MiB/s │     1.02s
+ P90  │   31.50 MiB/s │     1.03s
+ P99  │   31.52 MiB/s │     1.03s
+ P100 │   31.52 MiB/s │     1.03s
+        4.17 real         2.10 user         7.57 sys
+            12615680  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 976  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              821757  messages sent
+              821757  messages received
+                   0  signals received
+                   0  voluntary context switches
+              470567  involuntary context switches
+         82603616946  instructions retired
+         29273668012  cycles elapsed
+             5046752  peak memory footprint
+
+=== quinn-final-active-ipv4-multi-1-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 32 streams in 6.99s (146.54 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   18.99 MiB/s │     1.74s
+ P0   │   15.09 MiB/s │     1.36s
+ P10  │   15.20 MiB/s │     1.36s
+ P50  │   16.55 MiB/s │     1.56s
+ P90  │   23.52 MiB/s │     2.11s
+ P99  │   23.55 MiB/s │     2.12s
+ P100 │   23.55 MiB/s │     2.12s
+        7.08 real         2.80 user        10.25 sys
+            15859712  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1170  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              859353  messages sent
+              855851  messages received
+                   0  signals received
+                   0  voluntary context switches
+              639031  involuntary context switches
+         94518704591  instructions retired
+         42430391801  cycles elapsed
+             8405496  peak memory footprint
+
+=== quinn-final-active-ipv4-multi-2-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 32 streams in 5.61s (182.49 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.00 MiB/s │     1.40s
+ P0   │   20.48 MiB/s │     1.24s
+ P10  │   20.50 MiB/s │     1.24s
+ P50  │   21.94 MiB/s │     1.35s
+ P90  │   25.84 MiB/s │     1.56s
+ P99  │   25.86 MiB/s │     1.56s
+ P100 │   25.86 MiB/s │     1.56s
+        5.71 real         2.08 user         8.05 sys
+            20873216  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1239  page reclaims
+                 245  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              834443  messages sent
+              831687  messages received
+                   0  signals received
+                   0  voluntary context switches
+              442626  involuntary context switches
+         82063630621  instructions retired
+         33550791147  cycles elapsed
+            13320696  peak memory footprint
+
+=== quinn-final-active-ipv4-multi-2-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 32 streams in 7.16s (142.98 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   17.91 MiB/s │     1.79s
+ P0   │   17.25 MiB/s │     1.73s
+ P10  │   17.28 MiB/s │     1.73s
+ P50  │   17.83 MiB/s │     1.77s
+ P90  │   18.48 MiB/s │     1.85s
+ P99  │   18.50 MiB/s │     1.85s
+ P100 │   18.50 MiB/s │     1.85s
+        7.25 real         2.69 user         9.61 sys
+            13795328  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1047  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              831579  messages sent
+              824770  messages received
+                   0  signals received
+                   0  voluntary context switches
+              623920  involuntary context switches
+         92149261029  instructions retired
+         40864650018  cycles elapsed
+             6324704  peak memory footprint
+
+=== quinn-final-active-ipv4-single-0-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 3.99s (256.77 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  256.95 MiB/s │  996.35ms
+ P0   │  253.38 MiB/s │  986.62ms
+ P10  │  253.50 MiB/s │  987.14ms
+ P50  │  257.00 MiB/s │  992.26ms
+ P90  │  259.50 MiB/s │     1.01s
+ P99  │  259.50 MiB/s │     1.01s
+ P100 │  259.50 MiB/s │     1.01s
+        4.14 real         1.74 user         6.43 sys
+            11845632  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 933  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              822055  messages sent
+              822055  messages received
+                   0  signals received
+                   0  voluntary context switches
+              171972  involuntary context switches
+         77645753069  instructions retired
+         25154355417  cycles elapsed
+             4276704  peak memory footprint
+
+=== quinn-final-active-ipv4-single-0-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.56s (224.61 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  225.12 MiB/s │     1.14s
+ P0   │  219.12 MiB/s │     1.06s
+ P10  │  219.25 MiB/s │     1.06s
+ P50  │  220.00 MiB/s │     1.16s
+ P90  │  241.00 MiB/s │     1.17s
+ P99  │  241.00 MiB/s │     1.17s
+ P100 │  241.00 MiB/s │     1.17s
+        4.66 real         2.05 user         7.34 sys
+            11665408  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 677  page reclaims
+                 240  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              823306  messages sent
+              822976  messages received
+                   0  signals received
+                   0  voluntary context switches
+              240278  involuntary context switches
+         85856327424  instructions retired
+         30322250183  cycles elapsed
+             4211192  peak memory footprint
+
+=== quinn-final-active-ipv4-single-1-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.01s (255.35 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  255.58 MiB/s │     1.00s
+ P0   │  248.38 MiB/s │  988.67ms
+ P10  │  248.50 MiB/s │  989.18ms
+ P50  │  256.50 MiB/s │  990.21ms
+ P90  │  259.00 MiB/s │     1.03s
+ P99  │  259.00 MiB/s │     1.03s
+ P100 │  259.00 MiB/s │     1.03s
+        4.09 real         1.76 user         6.44 sys
+            13139968  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1006  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              826834  messages sent
+              826627  messages received
+                   0  signals received
+                   0  voluntary context switches
+              177148  involuntary context switches
+         78255334144  instructions retired
+         25522650015  cycles elapsed
+             5571040  peak memory footprint
+
+=== quinn-final-active-ipv4-single-1-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.71s (217.33 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  217.44 MiB/s │     1.18s
+ P0   │  214.38 MiB/s │     1.16s
+ P10  │  214.50 MiB/s │     1.16s
+ P50  │  216.25 MiB/s │     1.17s
+ P90  │  220.25 MiB/s │     1.19s
+ P99  │  220.25 MiB/s │     1.19s
+ P100 │  220.25 MiB/s │     1.19s
+        4.79 real         2.10 user         7.60 sys
+            11108352  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 880  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              827375  messages sent
+              827375  messages received
+                   0  signals received
+                   0  voluntary context switches
+              231988  involuntary context switches
+         85358217754  instructions retired
+         29793020347  cycles elapsed
+             3654136  peak memory footprint
+
+=== quinn-final-active-ipv4-single-2-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 3.99s (256.52 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  256.77 MiB/s │  997.38ms
+ P0   │  246.62 MiB/s │  979.46ms
+ P10  │  246.75 MiB/s │  979.97ms
+ P50  │  259.50 MiB/s │  985.60ms
+ P90  │  261.25 MiB/s │     1.04s
+ P99  │  261.25 MiB/s │     1.04s
+ P100 │  261.25 MiB/s │     1.04s
+        4.07 real         1.75 user         6.44 sys
+            11943936  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 935  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              826772  messages sent
+              826772  messages received
+                   0  signals received
+                   0  voluntary context switches
+              174559  involuntary context switches
+         78192543487  instructions retired
+         25341634297  cycles elapsed
+             4375008  peak memory footprint
+
+=== quinn-final-active-ipv4-single-2-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.78s (214.07 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  214.31 MiB/s │     1.20s
+ P0   │  205.62 MiB/s │     1.17s
+ P10  │  205.75 MiB/s │     1.17s
+ P50  │  216.12 MiB/s │     1.18s
+ P90  │  218.87 MiB/s │     1.25s
+ P99  │  218.87 MiB/s │     1.25s
+ P100 │  218.87 MiB/s │     1.25s
+        4.87 real         2.17 user         7.63 sys
+            11223040  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 886  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              832238  messages sent
+              832238  messages received
+                   0  signals received
+                   0  voluntary context switches
+              235681  involuntary context switches
+         85976862047  instructions retired
+         30191166014  cycles elapsed
+             3768824  peak memory footprint
+
+=== quinn-final-active-ipv6-single-0-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.41s (231.97 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  232.16 MiB/s │     1.10s
+ P0   │  226.12 MiB/s │     1.09s
+ P10  │  226.25 MiB/s │     1.09s
+ P50  │  233.75 MiB/s │     1.09s
+ P90  │  234.50 MiB/s │     1.13s
+ P99  │  234.50 MiB/s │     1.13s
+ P100 │  234.50 MiB/s │     1.13s
+        4.50 real         1.88 user         7.04 sys
+            12009472  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 937  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              829808  messages sent
+              829808  messages received
+                   0  signals received
+                   0  voluntary context switches
+              213036  involuntary context switches
+         83303949497  instructions retired
+         27561234279  cycles elapsed
+             4456952  peak memory footprint
+
+=== quinn-final-active-ipv6-single-0-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 5.26s (194.61 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  194.81 MiB/s │     1.31s
+ P0   │  188.50 MiB/s │     1.30s
+ P10  │  188.62 MiB/s │     1.30s
+ P50  │  196.00 MiB/s │     1.30s
+ P90  │  197.50 MiB/s │     1.36s
+ P99  │  197.50 MiB/s │     1.36s
+ P100 │  197.50 MiB/s │     1.36s
+        5.34 real         2.28 user         8.26 sys
+            11173888  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 885  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              833639  messages sent
+              833639  messages received
+                   0  signals received
+                   0  voluntary context switches
+              297757  involuntary context switches
+         91094804615  instructions retired
+         32207229875  cycles elapsed
+             3719672  peak memory footprint
+
+=== quinn-final-active-ipv6-single-1-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.39s (233.42 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  233.66 MiB/s │     1.10s
+ P0   │  225.88 MiB/s │     1.08s
+ P10  │  226.00 MiB/s │     1.08s
+ P50  │  235.37 MiB/s │     1.08s
+ P90  │  237.25 MiB/s │     1.13s
+ P99  │  237.25 MiB/s │     1.13s
+ P100 │  237.25 MiB/s │     1.13s
+        4.47 real         1.86 user         6.95 sys
+            12009472  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 938  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              828804  messages sent
+              828804  messages received
+                   0  signals received
+                   0  voluntary context switches
+              205195  involuntary context switches
+         82749395176  instructions retired
+         27154173169  cycles elapsed
+             4456952  peak memory footprint
+
+=== quinn-final-active-ipv6-single-1-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 5.21s (196.62 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  196.81 MiB/s │     1.30s
+ P0   │  191.00 MiB/s │     1.28s
+ P10  │  191.12 MiB/s │     1.28s
+ P50  │  198.12 MiB/s │     1.29s
+ P90  │  199.50 MiB/s │     1.34s
+ P99  │  199.50 MiB/s │     1.34s
+ P100 │  199.50 MiB/s │     1.34s
+        5.29 real         2.28 user         8.18 sys
+            11173888  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 884  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              833579  messages sent
+              833579  messages received
+                   0  signals received
+                   0  voluntary context switches
+              300492  involuntary context switches
+         91199022387  instructions retired
+         32056198332  cycles elapsed
+             3719672  peak memory footprint
+
+=== quinn-final-active-ipv6-single-2-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.40s (232.90 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  233.12 MiB/s │     1.10s
+ P0   │  225.50 MiB/s │     1.09s
+ P10  │  225.62 MiB/s │     1.09s
+ P50  │  235.62 MiB/s │     1.09s
+ P90  │  235.87 MiB/s │     1.14s
+ P99  │  235.87 MiB/s │     1.14s
+ P100 │  235.87 MiB/s │     1.14s
+        4.48 real         1.88 user         7.00 sys
+            12156928  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 946  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              829847  messages sent
+              829847  messages received
+                   0  signals received
+                   0  voluntary context switches
+              208918  involuntary context switches
+         83222135480  instructions retired
+         27324316065  cycles elapsed
+             4604408  peak memory footprint
+
+=== quinn-final-active-ipv6-single-2-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 5.19s (197.31 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  197.44 MiB/s │     1.30s
+ P0   │  194.50 MiB/s │     1.29s
+ P10  │  194.62 MiB/s │     1.29s
+ P50  │  197.62 MiB/s │     1.29s
+ P90  │  199.00 MiB/s │     1.32s
+ P99  │  199.00 MiB/s │     1.32s
+ P100 │  199.00 MiB/s │     1.32s
+        5.27 real         2.25 user         8.13 sys
+            10993664  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 873  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              828675  messages sent
+              828675  messages received
+                   0  signals received
+                   0  voluntary context switches
+              297062  involuntary context switches
+         90692117268  instructions retired
+         31623882962  cycles elapsed
+             3539448  peak memory footprint
+
+=== quinn-short-0-final.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.01s (19.51 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.50 MiB/s │   41.00µs
+ P0   │    0.33 MiB/s │   27.00µs
+ P10  │   20.55 MiB/s │   37.00µs
+ P50  │   23.66 MiB/s │   41.00µs
+ P90  │   26.14 MiB/s │   47.00µs
+ P99  │   31.14 MiB/s │   61.00µs
+ P100 │   35.41 MiB/s │    3.00ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.01s (19.51 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5990.76 MiB/s │    0.00ns
+ P0   │   12.71 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │   76.00µs
+        5.10 real         1.51 user         3.42 sys
+            18186240  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1134  page reclaims
+                 186  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207718  messages sent
+              207718  messages received
+                   0  signals received
+                   0  voluntary context switches
+              614593  involuntary context switches
+         35003353473  instructions retired
+         14957315848  cycles elapsed
+            11649504  peak memory footprint
+
+=== quinn-short-0-old.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.72s (20.70 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   25.56 MiB/s │   39.00µs
+ P0   │    0.50 MiB/s │   26.00µs
+ P10  │   21.14 MiB/s │   30.00µs
+ P50  │   24.83 MiB/s │   39.00µs
+ P90  │   31.59 MiB/s │   46.00µs
+ P99  │   33.69 MiB/s │   62.00µs
+ P100 │   36.69 MiB/s │    1.96ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.72s (20.70 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5134.94 MiB/s │    0.00ns
+ P0   │   14.15 MiB/s │    0.00ns
+ P10  │ 3908.00 MiB/s │    0.00ns
+ P50  │ 4696.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    7.00µs
+ P100 │ 11768.00 MiB/s │   69.00µs
+        4.82 real         1.40 user         3.32 sys
+            18055168  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1131  page reclaims
+                 177  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207717  messages sent
+              207717  messages received
+                   0  signals received
+                   0  voluntary context switches
+              614705  involuntary context switches
+         34509187410  instructions retired
+         15030360815  cycles elapsed
+            11633144  peak memory footprint
+
+=== quinn-short-0-upstream.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.94s (19.77 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.03 MiB/s │    0.00ns
+ P0   │    0.04 MiB/s │    0.00ns
+ P10  │   20.89 MiB/s │    0.00ns
+ P50  │   24.17 MiB/s │    0.00ns
+ P90  │   26.83 MiB/s │    0.00ns
+ P100 │   35.91 MiB/s │   24.00ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.94s (19.77 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6112.29 MiB/s │    0.00ns
+ P0   │   13.35 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │    0.00ns
+        5.04 real         1.47 user         3.36 sys
+            18038784  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1124  page reclaims
+                 183  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207719  messages sent
+              207719  messages received
+                   0  signals received
+                   0  voluntary context switches
+              613892  involuntary context switches
+         34520367406  instructions retired
+         14630850526  cycles elapsed
+            11551224  peak memory footprint
+
+=== quinn-short-1-final.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.97s (19.67 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.60 MiB/s │   41.00µs
+ P0   │    0.38 MiB/s │   27.00µs
+ P10  │   20.58 MiB/s │   37.00µs
+ P50  │   23.80 MiB/s │   41.00µs
+ P90  │   26.28 MiB/s │   47.00µs
+ P99  │   31.02 MiB/s │   62.00µs
+ P100 │   35.37 MiB/s │    2.56ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.97s (19.67 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6169.04 MiB/s │    0.00ns
+ P0   │   14.59 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │   66.00µs
+        5.05 real         1.51 user         3.40 sys
+            18186240  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1314  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207718  messages sent
+              207718  messages received
+                   0  signals received
+                   0  voluntary context switches
+              614899  involuntary context switches
+         34966108101  instructions retired
+         14886396165  cycles elapsed
+            11649504  peak memory footprint
+
+=== quinn-short-1-old.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.83s (20.22 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.32 MiB/s │   40.00µs
+ P0   │    0.45 MiB/s │   26.00µs
+ P10  │   21.02 MiB/s │   35.00µs
+ P50  │   24.37 MiB/s │   40.00µs
+ P90  │   27.33 MiB/s │   46.00µs
+ P99  │   32.97 MiB/s │   59.00µs
+ P100 │   36.69 MiB/s │    2.16ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.83s (20.22 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5185.66 MiB/s │    0.00ns
+ P0   │    6.35 MiB/s │    0.00ns
+ P10  │ 4676.00 MiB/s │    0.00ns
+ P50  │ 4696.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  153.00µs
+        4.91 real         1.45 user         3.33 sys
+            18038784  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1303  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207716  messages sent
+              207716  messages received
+                   0  signals received
+                   0  voluntary context switches
+              614379  involuntary context switches
+         34408738304  instructions retired
+         14618673137  cycles elapsed
+            11616760  peak memory footprint
+
+=== quinn-short-1-upstream.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.98s (19.61 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.99 MiB/s │    0.00ns
+ P0   │    0.06 MiB/s │    0.00ns
+ P10  │   20.72 MiB/s │    0.00ns
+ P50  │   24.22 MiB/s │    0.00ns
+ P90  │   26.89 MiB/s │    0.00ns
+ P100 │   36.41 MiB/s │   17.00ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.98s (19.61 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6061.02 MiB/s │    0.00ns
+ P0   │   15.50 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │    0.00ns
+        5.06 real         1.47 user         3.37 sys
+            18104320  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1309  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207719  messages sent
+              207719  messages received
+                   0  signals received
+                   0  voluntary context switches
+              615551  involuntary context switches
+         34539482448  instructions retired
+         14760805396  cycles elapsed
+            11616760  peak memory footprint
+
+=== quinn-short-2-final.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.99s (19.58 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.34 MiB/s │   41.00µs
+ P0   │    0.43 MiB/s │   28.00µs
+ P10  │   20.37 MiB/s │   38.00µs
+ P50  │   23.64 MiB/s │   41.00µs
+ P90  │   25.66 MiB/s │   47.00µs
+ P99  │   30.25 MiB/s │   60.00µs
+ P100 │   34.44 MiB/s │    2.28ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.99s (19.58 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6090.97 MiB/s │    0.00ns
+ P0   │   23.02 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 23264.00 MiB/s │   42.00µs
+        5.07 real         1.50 user         3.34 sys
+            18219008  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1317  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207715  messages sent
+              207715  messages received
+                   0  signals received
+                   0  voluntary context switches
+              613464  involuntary context switches
+         34958919416  instructions retired
+         14675635451  cycles elapsed
+            11698680  peak memory footprint
+
+=== quinn-short-2-old.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.86s (20.09 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.17 MiB/s │   40.00µs
+ P0   │    0.47 MiB/s │   26.00µs
+ P10  │   20.86 MiB/s │   36.00µs
+ P50  │   24.30 MiB/s │   40.00µs
+ P90  │   27.11 MiB/s │   46.00µs
+ P99  │   32.62 MiB/s │   59.00µs
+ P100 │   36.25 MiB/s │    2.08ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.86s (20.09 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5043.13 MiB/s │    0.00ns
+ P0   │    8.33 MiB/s │    0.00ns
+ P10  │ 3908.00 MiB/s │    0.00ns
+ P50  │ 4696.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  117.00µs
+        4.94 real         1.46 user         3.34 sys
+            18038784  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1303  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207719  messages sent
+              207719  messages received
+                   0  signals received
+                   0  voluntary context switches
+              613552  involuntary context switches
+         34362677992  instructions retired
+         14621072169  cycles elapsed
+            11616760  peak memory footprint
+
+=== quinn-short-2-upstream.log ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.66s (20.95 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   25.67 MiB/s │    0.00ns
+ P0   │    0.46 MiB/s │    0.00ns
+ P10  │   21.37 MiB/s │    0.00ns
+ P50  │   24.89 MiB/s │    0.00ns
+ P90  │   31.39 MiB/s │    0.00ns
+ P100 │   36.31 MiB/s │    2.00ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.66s (20.95 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6206.22 MiB/s │    0.00ns
+ P0   │    0.31 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5884.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │    3.00ms
+        4.74 real         1.40 user         3.27 sys
+            18071552  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1306  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207717  messages sent
+              207717  messages received
+                   0  signals received
+                   0  voluntary context switches
+              614142  involuntary context switches
+         34589273914  instructions retired
+         14892148391  cycles elapsed
+            11567584  peak memory footprint
+
+=== quinn-multi-long-0-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.66s (242.66 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   30.34 MiB/s │     3.16s
+ P0   │   30.11 MiB/s │     3.14s
+ P10  │   30.14 MiB/s │     3.15s
+ P50  │   30.31 MiB/s │     3.16s
+ P90  │   30.52 MiB/s │     3.19s
+ P99  │   30.53 MiB/s │     3.19s
+ P100 │   30.53 MiB/s │     3.19s
+       12.76 real         6.47 user        23.50 sys
+            12926976  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 753  page reclaims
+                 249  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2563163  messages sent
+             2563162  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1469122  involuntary context switches
+        256609547551  instructions retired
+         91175069126  cycles elapsed
+             5374456  peak memory footprint
+
+=== quinn-multi-long-0-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 14.83s (207.17 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   25.92 MiB/s │     3.70s
+ P0   │   25.78 MiB/s │     3.68s
+ P10  │   25.81 MiB/s │     3.69s
+ P50  │   25.84 MiB/s │     3.70s
+ P90  │   26.05 MiB/s │     3.72s
+ P99  │   26.11 MiB/s │     3.72s
+ P100 │   26.11 MiB/s │     3.72s
+       14.92 real         8.06 user        28.04 sys
+            11927552  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 692  page reclaims
+                 240  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2525399  messages sent
+             2525399  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1953383  involuntary context switches
+        281780919323  instructions retired
+        109909416737  cycles elapsed
+             4473336  peak memory footprint
+
+=== quinn-multi-long-1-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.57s (244.36 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   30.55 MiB/s │     3.14s
+ P0   │   30.44 MiB/s │     3.13s
+ P10  │   30.45 MiB/s │     3.14s
+ P50  │   30.58 MiB/s │     3.14s
+ P90  │   30.64 MiB/s │     3.15s
+ P99  │   30.64 MiB/s │     3.15s
+ P100 │   30.64 MiB/s │     3.15s
+       12.66 real         6.41 user        23.41 sys
+            12763136  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 986  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2562314  messages sent
+             2562313  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1465842  involuntary context switches
+        256109873456  instructions retired
+         90960979845  cycles elapsed
+             5210616  peak memory footprint
+
+=== quinn-multi-long-1-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 14.56s (210.94 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   26.38 MiB/s │     3.64s
+ P0   │   25.80 MiB/s │     3.55s
+ P10  │   25.83 MiB/s │     3.55s
+ P50  │   26.02 MiB/s │     3.60s
+ P90  │   27.06 MiB/s │     3.72s
+ P99  │   27.06 MiB/s │     3.72s
+ P100 │   27.06 MiB/s │     3.72s
+       14.65 real         7.88 user        27.49 sys
+            11780096  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 922  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2496876  messages sent
+             2496876  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1943438  involuntary context switches
+        279193716018  instructions retired
+        108802015260  cycles elapsed
+             4325880  peak memory footprint
+
+=== quinn-multi-long-2-final.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.59s (244.01 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   30.51 MiB/s │     3.15s
+ P0   │   30.27 MiB/s │     3.12s
+ P10  │   30.30 MiB/s │     3.13s
+ P50  │   30.55 MiB/s │     3.14s
+ P90  │   30.72 MiB/s │     3.17s
+ P99  │   30.72 MiB/s │     3.17s
+ P100 │   30.72 MiB/s │     3.17s
+       12.67 real         6.43 user        23.34 sys
+            12861440  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 988  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2563359  messages sent
+             2563358  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1475608  involuntary context switches
+        256776740423  instructions retired
+         90446251112  cycles elapsed
+             5292512  peak memory footprint
+
+=== quinn-multi-long-2-old.log ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 14.92s (205.89 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   25.77 MiB/s │     3.73s
+ P0   │   25.55 MiB/s │     3.71s
+ P10  │   25.64 MiB/s │     3.71s
+ P50  │   25.75 MiB/s │     3.73s
+ P90  │   25.89 MiB/s │     3.75s
+ P99  │   25.89 MiB/s │     3.76s
+ P100 │   25.89 MiB/s │     3.76s
+       15.00 real         8.06 user        28.28 sys
+            12615680  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 971  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2582770  messages sent
+             2582770  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1996258  involuntary context switches
+        287991064220  instructions retired
+        110793845284  cycles elapsed
+             5161464  peak memory footprint
