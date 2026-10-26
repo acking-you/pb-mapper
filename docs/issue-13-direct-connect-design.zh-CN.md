@@ -88,7 +88,7 @@ iroh 以稳定版 [v1.4.1 / `d6c6963b`](https://github.com/n0-computer/iroh/tree
 | rcgen | 0.14.10 | 为本地 endpoint 生成临时证书；启用 `ring`，无需 PEM |
 | stun-proto | 2.0.3 | STUN 消息、事务与重传状态机；sans-I/O 接口交给项目自己的 socket 驱动 |
 
-三个仓库均已 fork 到 `acking-you` 并作为 submodule 引入，统一维护分支 `codex/pb-mapper-issue-13` 已推送。现有 Tokio、ring、if-addrs 继续使用，新增传递依赖交给 Cargo。TLS 配置通过 Quinn [重新导出的 `quinn::rustls`](https://github.com/quinn-rs/quinn/blob/8192ed399a26a6e8f0aba43d10ec8badaa5b905e/quinn/src/lib.rs#L74) 使用；rustls 保留为传递依赖，不再单独声明、patch 或引入 submodule。通过 `quinn::udp`、`quinn::rustls::pki_types` 和 `stun_proto::types` 的 re-export 避免额外直接依赖。精确 commit、许可证、Cargo 接入及发布约束见 [依赖说明](../deps/README.md)。
+三个仓库均已 fork 到 `acking-you` 并作为 submodule 引入，维护及默认分支统一为 `dev`，纯上游源码保留在各 fork 的 `upstream` 分支。现有 Tokio、ring、if-addrs 继续使用，新增传递依赖交给 Cargo。TLS 配置通过 Quinn [重新导出的 `quinn::rustls`](https://github.com/quinn-rs/quinn/blob/8192ed399a26a6e8f0aba43d10ec8badaa5b905e/quinn/src/lib.rs#L74) 使用；rustls 保留为传递依赖，不再单独声明、patch 或引入 submodule。通过 `quinn::udp`、`quinn::rustls::pki_types` 和 `stun_proto::types` 的 re-export 避免额外直接依赖。精确 commit、许可证、Cargo 接入及发布约束见 [依赖说明](../deps/README.md)。
 
 选型按接口适配、维护连续性、实际使用和社区规模一起判断。以下 stars 与最近仓库 push 日期为 **2026-10-23 的 GitHub API 快照**；仓库活跃不等于每个组件同样活跃，stars 也不能证明正确性：
 
