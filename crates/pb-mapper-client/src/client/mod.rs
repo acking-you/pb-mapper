@@ -615,9 +615,18 @@ async fn fetch_remote_status(
     namespace: Option<u64>,
     credential: Credential,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
-    let mut stream = remote_addr.connect(credential).await.map_err(|error| {
-        ProbeFailure::transient(format!("connect remote stream failed: {error}"))
-    })?;
+    let mut stream = remote_addr
+        .connect(credential)
+        .await
+        .map_err(|error| match error {
+            crate::relay::ConnectError::Rejected { response } => ProbeFailure {
+                reason: format!("{}: {}", response.code, response.message),
+                permanent: !response.retryable,
+                kind: RecoveryFailure::Rejected,
+                protocol_replied: true,
+            },
+            error => ProbeFailure::transient(format!("connect remote stream failed: {error}")),
+        })?;
     get_status_with_credential(&mut stream, req, namespace, &credential)
         .await
         .map_err(|error| ProbeFailure::from_status_error("get status failed", error))

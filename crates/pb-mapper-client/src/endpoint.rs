@@ -300,7 +300,7 @@ impl RelayEndpoint {
     pub(crate) async fn connect(
         &self,
         credential: pb_mapper_core::checksum::Credential,
-    ) -> std::io::Result<pb_mapper_protocol::transport::RelayStream> {
+    ) -> Result<pb_mapper_protocol::transport::RelayStream, crate::relay::ConnectError> {
         self.connect_addresses(&self.addresses().await?, credential)
             .await
     }
@@ -308,7 +308,7 @@ impl RelayEndpoint {
         &self,
         addresses: &ResolvedAddrs,
         credential: pb_mapper_core::checksum::Credential,
-    ) -> std::io::Result<pb_mapper_protocol::transport::RelayStream> {
+    ) -> Result<pb_mapper_protocol::transport::RelayStream, crate::relay::ConnectError> {
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {
             return pool
@@ -317,7 +317,10 @@ impl RelayEndpoint {
                 .map(|stream| pb_mapper_protocol::transport::RelayStream::Quic(Box::new(stream)));
         }
         let _ = credential;
-        crate::addr::connect_tcp(addresses).await.map(Into::into)
+        crate::addr::connect_tcp(addresses)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
     }
     pub(crate) fn transport(&self) -> crate::relay::RelayTransport {
         #[cfg(feature = "relay-quic")]

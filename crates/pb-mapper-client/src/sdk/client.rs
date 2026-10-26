@@ -22,7 +22,7 @@ use snafu::ResultExt;
 
 use super::Error;
 use super::admin::Admin;
-use super::error::{AddressSnafu, ConnectSnafu, Result, StatusSnafu};
+use super::error::{AddressSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
 use super::{ConnectOptions, PathPolicy, RegisterOptions};
@@ -444,9 +444,10 @@ impl Client {
         let endpoint = &self.inner.endpoint;
         let result = tokio::time::timeout(io_timeout, async {
             let _permit = endpoint.control_permit().await;
-            let mut stream = endpoint.connect(credential).await.context(ConnectSnafu {
-                addr: self.inner.server.clone(),
-            })?;
+            let mut stream = endpoint
+                .connect(credential)
+                .await
+                .map_err(|error| Error::from_connect(error, self.inner.server.clone()))?;
             get_status_with_credential(&mut stream, request, self.inner.namespace, &credential)
                 .await
                 .context(StatusSnafu)

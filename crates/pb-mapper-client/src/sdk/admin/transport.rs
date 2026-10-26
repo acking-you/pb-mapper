@@ -10,10 +10,9 @@ use pb_mapper_protocol::command::{
     AdminRequest, AdminResponse, MessageSerializer, PbConnRequest, PbConnResponse,
 };
 use pb_mapper_protocol::secure::ClientHeaderSession;
-use snafu::ResultExt;
 
 use super::super::Error;
-use super::super::error::{ConnectSnafu, Result};
+use super::super::error::Result;
 
 /// The relay refuses a first flight whose salt it has already seen, and answers
 /// with this code. It is retryable by construction: a fresh session gets a fresh
@@ -66,7 +65,16 @@ pub(super) async fn send_admin_request(
             // effect. Anything past that point is reported as-is.
             Err(error) => {
                 endpoint.invalidate_cached_transport();
-                if exchange.sent || last_attempt {
+                if exchange.sent
+                    || last_attempt
+                    || matches!(
+                        error,
+                        Error::Remote {
+                            retryable: false,
+                            ..
+                        }
+                    )
+                {
                     return Err(error);
                 }
                 continue;
@@ -119,9 +127,7 @@ impl Exchange {
         let mut stream = endpoint
             .connect_addresses(addrs, *credential)
             .await
-            .context(ConnectSnafu {
-                addr: addrs.to_string(),
-            })?;
+            .map_err(|error| Error::from_connect(error, addrs.to_string()))?;
         let session = ClientHeaderSession::new_v2(credential).map_err(protocol)?;
         self.write_request(&mut stream, &session, encoded).await?;
         let mut reader = session.response_reader(&mut stream).map_err(protocol)?;

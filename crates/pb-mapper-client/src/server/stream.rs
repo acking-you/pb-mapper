@@ -81,7 +81,9 @@ where
     )
     .await
     {
-        Ok(result) => result.context(ConnectRemoteStreamSnafu)?,
+        Ok(result) => result
+            .map_err(std::io::Error::from)
+            .context(ConnectRemoteStreamSnafu)?,
         Err(_) => ControlIoTimeoutSnafu {
             action: "connect remote stream",
             timeout,

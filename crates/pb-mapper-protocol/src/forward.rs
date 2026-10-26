@@ -716,6 +716,63 @@ impl StreamForward for UdpStreamImpl {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn encrypted_stream_fin_requires_complete_authenticated_frames() {
+        use crate::{data::DATA_PROTOCOL_V2, secure::HeaderProtocol};
+        for protocol in [None, Some(DATA_PROTOCOL_V2)] {
+            let codec = DataCodec::negotiate([7; 32], protocol, HeaderProtocol::V2).unwrap();
+            let (_, encoder) = codec.endpoint_codecs().unwrap();
+            let mut wire = Vec::new();
+            CodecMessageWriter::for_session_key(&mut wire, encoder, [8; 32])
+                .write_msg(b"response tail")
+                .await
+                .unwrap();
+            let (decoder, _) = codec.relay_codecs().unwrap();
+            let mut input = wire.as_slice();
+            let mut reader =
+                CodecForwardReader::new(&mut input, decoder).with_checksum_key([8; 32]);
+            assert_eq!(reader.read().await.unwrap(), b"response tail");
+            assert!(reader.read().await.unwrap().is_empty());
+
+            // EOF within either the header or encrypted body is never FIN.
+            for end in [3, wire.len() - 1] {
+                let (decoder, _) = codec.relay_codecs().unwrap();
+                let mut input = &wire[..end];
+                assert!(
+                    CodecForwardReader::new(&mut input, decoder)
+                        .with_checksum_key([8; 32])
+                        .read()
+                        .await
+                        .is_err()
+                );
+            }
+            *wire.last_mut().unwrap() ^= 1;
+            let (decoder, _) = codec.relay_codecs().unwrap();
+            let mut input = wire.as_slice();
+            assert!(
+                CodecForwardReader::new(&mut input, decoder)
+                    .with_checksum_key([8; 32])
+                    .read()
+                    .await
+                    .is_err()
+            );
+
+            // A complete authenticated empty record is valid; missing control
+            // and datagram frames still use the strict MessageReader API.
+            let (_, encoder) = codec.endpoint_codecs().unwrap();
+            let mut empty = Vec::new();
+            CodecMessageWriter::for_session_key(&mut empty, encoder, [8; 32])
+                .write_msg(&[])
+                .await
+                .unwrap();
+            let (decoder, _) = codec.relay_codecs().unwrap();
+            let mut input = empty.as_slice();
+            let mut reader = CodecMessageReader::for_session_key(&mut input, decoder, [8; 32]);
+            assert!(reader.read_msg().await.unwrap().is_empty());
+            assert!(reader.read_msg().await.is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn tcp_forward_disables_nagle_on_the_local_leg() {
         use tokio::net::{TcpListener, TcpStream};
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

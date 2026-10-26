@@ -84,6 +84,17 @@ enum Status {
     RejectedRetryable(String),
 }
 
+impl Status {
+    fn rejected(error: pb_mapper_protocol::command::PbErrorResponse) -> Self {
+        let reason = format!("{}: {}", error.code, error.message);
+        if error.retryable {
+            Self::RejectedRetryable(reason)
+        } else {
+            Self::Rejected(reason)
+        }
+    }
+}
+
 /// The two retry ladders a control worker climbs, and the reason they are two.
 ///
 /// A transport failure and a retryable rejection are not the same kind of
@@ -875,6 +886,12 @@ where
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
                     tracing::debug!(event = "local_server_dial_failed", %error, %key, worker_index);
+                    if let crate::relay::ConnectError::Rejected { response } = error {
+                        remote_addr.protocol_succeeded();
+                        diagnostics.responded(started.elapsed());
+                        backoff.timing.record(started.elapsed());
+                        return Err(Status::rejected(response));
+                    }
                     return Err(Status::ConnectRemote);
                 }
                 Err(_) => {
@@ -1023,12 +1040,7 @@ where
                     message = %error.message,
                     "pb server rejected service registration"
                 );
-                let reason = format!("{}: {}", error.code, error.message);
-                return Err(if error.retryable {
-                    Status::RejectedRetryable(reason)
-                } else {
-                    Status::Rejected(reason)
-                });
+                return Err(Status::rejected(error));
             }
             _ => snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail()),
         };

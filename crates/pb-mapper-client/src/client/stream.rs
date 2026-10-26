@@ -10,8 +10,8 @@ use tokio::time::Instant;
 use tracing::{Instrument, info_span, instrument};
 
 use super::error::{
-    ConnectRemoteStreamSnafu, DecodeSubcribeRespSnafu, EncodeSubcribeReqSnafu, Result,
-    SubcribeRespNotMatchSnafu, WriteSubcribeReqSnafu,
+    DecodeSubcribeRespSnafu, EncodeSubcribeReqSnafu, Result, SubcribeRespNotMatchSnafu,
+    WriteSubcribeReqSnafu,
 };
 use crate::client::error::CreateHeaderToolSnafu;
 use pb_mapper_core::checksum::Credential;
@@ -210,7 +210,18 @@ pub(crate) async fn subscribe_request(
     let mut remote_stream = remote_addr
         .connect(credential)
         .await
-        .context(ConnectRemoteStreamSnafu)?;
+        .map_err(|error| match error {
+            crate::relay::ConnectError::Transport { source } => {
+                super::error::Error::ConnectRemoteStream { source }
+            }
+            crate::relay::ConnectError::Rejected { response } => {
+                super::error::Error::SubscribeRemoteError {
+                    code: response.code,
+                    message: response.message,
+                    retryable: response.retryable,
+                }
+            }
+        })?;
 
     snafu_error_handle!(remote_stream.configure(keep_alive));
 

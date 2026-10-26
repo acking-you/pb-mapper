@@ -3,7 +3,7 @@
 
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, ConnectRequest, PathPolicy, RegisterOptions, RegisterRequest,
-    RelayTransport, Transport,
+    RelayTransport, Transport, TunnelStatus,
 };
 use pb_mapper_testkit::{READY_TIMEOUT, Relay, admin_credential};
 use std::time::Duration;
@@ -235,11 +235,92 @@ async fn revoked_credential_closes_quic_and_cannot_be_reused() {
             .unwrap()
             .is_err()
     );
-    assert!(client.list_keys().await.is_err());
+    assert!(matches!(
+        client.list_keys().await,
+        Err(pb_mapper_client::sdk::Error::Remote {
+            retryable: false,
+            ..
+        }) | Err(pb_mapper_client::sdk::Error::Status { .. })
+    ));
+    // Existing workers must settle after revocation, including when recovery
+    // reaches discovery instead of the original registration/status exchange.
+    for mut status in [registration.subscribe(), connection.subscribe()] {
+        tokio::time::timeout(
+            READY_TIMEOUT,
+            status.wait_for(|status| matches!(status, TunnelStatus::Failed(_))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
     // A different credential still authenticates on its own pooled connection.
     assert!(administrator.list_keys().await.is_ok());
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_discovery_terminates_new_tunnels_and_preserves_sdk_errors() {
+    let relay = Relay::start_with_quic("quic-discovery-rejected").await;
+    let (id, credential) = relay
+        .issue_credential(Duration::from_secs(600), "rejected")
+        .await;
+    relay.revoke(id).await;
+    let client = Client::from_credential(relay.addr().to_string(), credential, false, None)
+        .with_relay_transport(RelayTransport::Quic)
+        .unwrap();
+    assert!(matches!(
+        client.list_keys().await,
+        Err(pb_mapper_client::sdk::Error::Remote {
+            retryable: false,
+            ..
+        })
+    ));
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registration = client
+        .register_with_options(
+            RegisterRequest {
+                key: "rejected".into(),
+                local_addr: backend.local_addr().unwrap().to_string(),
+                transport: Transport::Tcp,
+                codec: false,
+                force_namespace: false,
+            },
+            RegisterOptions {
+                allow_direct: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let connection = client
+        .connect_with_options(
+            ConnectRequest {
+                key: "rejected".into(),
+                local_addr: "127.0.0.1:0".into(),
+                transport: Transport::Tcp,
+            },
+            ConnectOptions {
+                path: PathPolicy::RelayOnly,
+            },
+        )
+        .await
+        .unwrap();
+    let (registered, connected) = tokio::join!(
+        registration.wait_ready_timeout(READY_TIMEOUT),
+        connection.wait_ready_timeout(READY_TIMEOUT)
+    );
+    assert!(matches!(
+        registered,
+        Err(pb_mapper_client::sdk::Error::TunnelFailed { .. })
+    ));
+    assert!(matches!(
+        connected,
+        Err(pb_mapper_client::sdk::Error::TunnelFailed { .. })
+    ));
+    assert_eq!(client.relay_diagnostics().await.connections_created, 0);
+    registration.stop().await.unwrap();
+    connection.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -297,7 +378,7 @@ async fn quic_requires_the_discovered_certificate_and_exporter_bound_authenticat
     else {
         panic!("missing QUIC capability");
     };
-    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     let peer = std::net::SocketAddr::new(relay.addr().ip(), capability.port);
     let (_, unrelated_certificate) = quic::server_config().unwrap();
     endpoint.set_default_client_config(quic::client_config(&unrelated_certificate).unwrap());

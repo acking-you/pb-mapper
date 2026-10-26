@@ -66,6 +66,13 @@ pub enum Error {
 }
 
 impl Error {
+    pub(crate) fn from_connect(error: crate::relay::ConnectError, addr: String) -> Self {
+        match error {
+            crate::relay::ConnectError::Transport { source } => Self::Connect { addr, source },
+            crate::relay::ConnectError::Rejected { response } => Self::from_remote(response),
+        }
+    }
+
     pub(crate) fn invalid_config(message: impl Into<String>) -> Self {
         Self::InvalidConfig {
             message: message.into(),

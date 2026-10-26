@@ -1,4 +1,4 @@
-use super::{QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport};
+use super::{ConnectError, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport};
 use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
 use pb_mapper_protocol::{
     command::{MessageSerializer, PbConnRequest, PbConnResponse},
@@ -80,7 +80,7 @@ impl Pool {
         addrs: &ResolvedAddrs,
         credential: Credential,
         generation: u64,
-    ) -> io::Result<QuicStream> {
+    ) -> Result<QuicStream, ConnectError> {
         let (shared, reused) = if let Some(shared) = self.cached(addrs, credential, generation) {
             (shared, true)
         } else {
@@ -124,7 +124,7 @@ impl Pool {
             Ok(pair) => pair,
             Err(error) => {
                 self.state().error = Some(error.to_string());
-                return Err(io::Error::other(error));
+                return Err(io::Error::other(error).into());
             }
         };
         let mut state = self.state();
@@ -167,13 +167,19 @@ impl Pool {
     }
 }
 
-async fn dial(addr: SocketAddr, credential: Credential) -> io::Result<Arc<QuicConnection>> {
+async fn dial(
+    addr: SocketAddr,
+    credential: Credential,
+) -> Result<Arc<QuicConnection>, ConnectError> {
     tokio::time::timeout(CONNECT_TIMEOUT, dial_inner(addr, credential))
         .await
-        .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()))
+        .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut).into()))
 }
 
-async fn dial_inner(addr: SocketAddr, credential: Credential) -> io::Result<Arc<QuicConnection>> {
+async fn dial_inner(
+    addr: SocketAddr,
+    credential: Credential,
+) -> Result<Arc<QuicConnection>, ConnectError> {
     // Bootstrap only identity metadata over the existing authenticated transport.
     let mut tcp = tokio::net::TcpStream::connect(addr).await?;
     tcp.set_nodelay(true)?;
@@ -198,16 +204,14 @@ async fn dial_inner(addr: SocketAddr, credential: Credential) -> io::Result<Arc<
             capability
         }
         PbConnResponse::Error(error) => {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("{}: {}", error.code, error.message),
-            ));
+            return Err(ConnectError::Rejected { response: error });
         }
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "relay does not offer QUIC; select TCP explicitly to use this node",
-            ));
+            )
+            .into());
         }
     };
     drop(tcp);
@@ -215,7 +219,7 @@ async fn dial_inner(addr: SocketAddr, credential: Credential) -> io::Result<Arc<
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
     };
-    let mut endpoint = quinn::Endpoint::client(SocketAddr::new(bind_ip, 0))?;
+    let endpoint = quinn::Endpoint::client(SocketAddr::new(bind_ip, 0))?;
     endpoint.set_default_client_config(client_config(&capability.certificate)?);
     let connection = endpoint
         .connect(
@@ -245,7 +249,8 @@ async fn dial_inner(addr: SocketAddr, credential: Credential) -> io::Result<Arc<
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "QUIC authentication rejected",
-        ));
+        )
+        .into());
     }
     tracing::info!(event = "relay_quic_connected", %relay_addr, peer = %shared.connection.remote_address(), connection_id = shared.connection.stable_id());
     Ok(shared)

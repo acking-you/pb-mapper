@@ -650,34 +650,52 @@ mod tests {
             panic!("expected accepted offer");
         };
         grant.provider = peer;
-        // The first accepted session must be the one this test commits, rather
-        // than a losing candidate from the production address race.
+        // Race all discovered paths. A losing TLS handshake never sends a
+        // session binding, so only the winner may reach the commit worker.
+        let port = grant
+            .provider
+            .candidates
+            .iter()
+            .find(|addr| addr.is_ipv4() && addr.ip().is_loopback())
+            .unwrap()
+            .port();
         grant
             .provider
             .candidates
-            .retain(|addr| addr.is_ipv4() && addr.ip().is_loopback());
+            .push(std::net::SocketAddr::from(([127, 0, 0, 2], port)));
         let deadline = Instant::now() + Duration::from_secs(3);
         consumer.authorize(&grant, false, deadline).unwrap();
         events.send(SessionEvent::Granted).await.unwrap();
-        let (connection, incoming) = tokio::join!(
-            consumer.connect(&grant, deadline),
-            tokio::time::timeout_at(deadline, provider.accept())
-        );
-        let connection = connection.unwrap();
-        let incoming = incoming.unwrap().unwrap();
-        let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        send.write_all(b"bind").await.unwrap();
-        let (provider_send, mut provider_recv) = incoming.accept_bi().await.unwrap();
-        let mut bind = [0; 4];
-        provider_recv.read_exact(&mut bind).await.unwrap();
-        events
-            .send(SessionEvent::Incoming(Incoming {
-                connection: QuicGuard(incoming),
-                send: provider_send,
-                recv: provider_recv,
-                tag: endpoint::binding(&connection, &grant).unwrap(),
+        let dispatch = {
+            let provider = provider.clone();
+            let events = events.clone();
+            AbortOnDropHandle::new(tokio::spawn(async move {
+                let mut arrivals = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        connection = provider.accept() => {
+                            let Some(connection) = connection else { break };
+                            arrivals.spawn(tokio::time::timeout_at(deadline, session_bind(QuicGuard(connection))));
+                        }
+                        Some(result) = arrivals.join_next(), if !arrivals.is_empty() => {
+                            if let Ok(Ok(Ok((_, incoming)))) = result {
+                                events.send(SessionEvent::Incoming(incoming)).await.unwrap();
+                                break;
+                            }
+                        }
+                    }
+                }
             }))
+        };
+        let connection = consumer.connect(&grant, deadline).await.unwrap();
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        send.write_all(&grant.id).await.unwrap();
+        send.write_all(&endpoint::binding(&connection, &grant).unwrap())
             .await
+            .unwrap();
+        tokio::time::timeout_at(deadline, dispatch)
+            .await
+            .unwrap()
             .unwrap();
         assert_eq!(recv.read_u8().await.unwrap(), 1);
         assert!(

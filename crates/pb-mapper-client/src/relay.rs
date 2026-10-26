@@ -2,6 +2,35 @@
 pub use pb_mapper_protocol::transport::RelayTransport;
 use serde::Serialize;
 
+/// Carrier setup can already receive an authenticated refusal, before a
+/// registration, subscription or administrator request has been sent.
+#[derive(Debug, snafu::Snafu)]
+pub(crate) enum ConnectError {
+    #[snafu(display("{source}"))]
+    Transport { source: std::io::Error },
+    #[snafu(display("{}: {}", response.code, response.message))]
+    Rejected {
+        response: pb_mapper_protocol::command::PbErrorResponse,
+    },
+}
+
+impl From<std::io::Error> for ConnectError {
+    fn from(source: std::io::Error) -> Self {
+        Self::Transport { source }
+    }
+}
+
+impl From<ConnectError> for std::io::Error {
+    fn from(error: ConnectError) -> Self {
+        match error {
+            ConnectError::Transport { source } => source,
+            error @ ConnectError::Rejected { .. } => {
+                Self::new(std::io::ErrorKind::PermissionDenied, error)
+            }
+        }
+    }
+}
+
 #[cfg(feature = "relay-quic")]
 pub(crate) mod quic;
 
