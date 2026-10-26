@@ -8,7 +8,7 @@ Quinn、rcgen、stun-proto 通过 `path + version` 接入 Cargo，构建使用�
 
 | 本地目录 | 维护仓库 | 上游 / 基线 | 固定 commit | 许可证 |
 |---|---|---|---|---|
-| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `main@12fe8094`（开发版） | `14cfab9569a8e98becd16198b4d593e669e795e5` | MIT OR Apache-2.0 |
+| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `main@12fe8094`（开发版） | `91a87cdb65f8ccec42eaa83b6323ae3ea42a7f38` | MIT OR Apache-2.0 |
 | `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/dev) | [rustls/rcgen](https://github.com/rustls/rcgen), `main@b820c438`（开发版） | `b4a65cb06038656800b38fe592923b06ad0df77a` | MIT OR Apache-2.0 |
 | `deps/stun-proto` | [acking-you/stun-proto](https://github.com/acking-you/stun-proto/tree/dev) | [ystreet/stun-proto](https://github.com/ystreet/stun-proto), `v2.0.4 / main@9e47ca00` | `66dc8e0ae7179393d6b80373582893fa8bb0283e` | MIT OR Apache-2.0 |
 | `deps/kanal` | [acking-you/kanal](https://github.com/acking-you/kanal/tree/dev) | [fereidani/kanal](https://github.com/fereidani/kanal)，本地扩展发布为 `kanal-plus 0.2.0` | `e79d95d5163446c23d53befbc778aaf6d7d34e42` | MIT |
@@ -125,7 +125,7 @@ bulk --ipv4 --workers 2 --upload-size 1024 --download-size 1024 --streams 100000
 
 同一台 M3 Pro / macOS 27.0.1 / Rust 1.99.1 上，先前自适应版 `365fe202` 的 56 个样本中，IPv4 1 KiB 串行请求中位数为 19.71 MiB/s，原版 0.11 为 19.91 MiB/s，固定批量版为 18.98 MiB/s。接近旧版，但不能说完整恢复了旧版表现；该轮并发大流量也有下降，完整记录保存在 [results.json](../docs/benchmarks/2026-10-26-quinn-adaptive/results.json) 和 [raw.txt](../docs/benchmarks/2026-10-26-quinn-adaptive/raw.txt)。这轮起所有版本都使用新的完整请求计时，并排除直方图汇总时间，不能直接与上一节的计时口径混算。
 
-trait 重构另进行 60 次交替测量，每项每版本 4 次，仍为 loopback、每端点 2 个 worker、AES-128-GCM、ACK threshold 10。下表是 **MiB/s 中位数（最小–最大）**。固定批量为 `7c131852`，抽象前为 `365fe202`，trait 版的 macOS 产品代码为 `18eb2c71`；随后提交仅调整 Linux 内联与 WASI 测试条件，不改变本机测量代码。
+trait 重构另进行 60 次交替测量，每项每版本 4 次，仍为 loopback、每端点 2 个 worker、AES-128-GCM、ACK threshold 10。下表是 **MiB/s 中位数（最小–最大）**。固定批量为 `7c131852`，抽象前为 `365fe202`，trait 版的 macOS 产品代码为 `18eb2c71`；随后提交仅调整 Linux 内联、WASI 测试条件与 CI 配置，不改变本机测量代码。
 
 | 场景 | 固定批量 | 自适应、抽象前 | trait 版 |
 | --- | ---: | ---: | ---: |
@@ -152,7 +152,7 @@ python3 docs/benchmarks/2026-10-26-quinn-adaptive/measure.py --mode bulk \
   --out /tmp/quinn-bulk-new --repeats 8
 ```
 
-本轮本机验证：Quinn 严格 Clippy、UDP 普通与自适应路径测试、36 个运行时测试通过；pb-mapper 全 workspace 严格 Clippy、client 的 36 个单元测试和 3 个 direct_e2e 测试通过；Node 12 个测试通过，addon 3,193,504 字节，低于 5.5 MiB。Windows GNU、Linux GNU、Android arm64、iOS arm64 和 simulator 均通过库目标严格交叉 Clippy；iOS 27 模拟器实际执行普通 UDP 收发测试通过，私有批量路径未启用。WASI 库与测试编译也已验证。记录见 [validation.txt](../docs/benchmarks/2026-10-26-quinn-adaptive/validation.txt)。最终提交的跨平台原生及 Android 模拟器验证见 [Quinn CI](https://github.com/acking-you/quinn/actions/runs/40332959120)；另新增移动目标持续检查。Coverage 仍有 fork 未配置 Codecov token 的既有上传问题，不能算作通过。
+本轮本机验证：Quinn 严格 Clippy、UDP 普通与自适应路径测试、36 个运行时测试通过；pb-mapper 全 workspace 严格 Clippy、client 的 36 个单元测试和 3 个 direct_e2e 测试通过；Node 12 个测试通过，addon 3,193,504 字节，低于 5.5 MiB。Windows GNU、Linux GNU、Android arm64、iOS arm64 和 simulator 均通过库目标严格交叉 Clippy；iOS 27 模拟器实际执行普通 UDP 收发测试通过，私有批量路径未启用。WASI 库与测试编译也已验证。记录见 [validation.txt](../docs/benchmarks/2026-10-26-quinn-adaptive/validation.txt)。最终提交的跨平台原生及 Android 模拟器验证见 [Quinn CI](https://github.com/acking-you/quinn/actions/runs/40335255059)；另新增移动目标持续检查。[Coverage](https://github.com/acking-you/quinn/actions/runs/40335254809) 在三个平台执行完整覆盖率测试，并要求将 LCOV 报告保存为 GitHub Actions 附件，报告缺失会失败。Codecov 在切换到 GitHub OIDC 后仍返回 `Repository not found`；因此外部发布改为在服务端激活 fork 并设置仓库变量 `CODECOV_ENABLED=true` 后启用，启用后上传失败仍会使 CI 失败。未配置外部服务不会跳过覆盖率测试或 GitHub 报告保存。
 
 ## 已执行的检查
 
