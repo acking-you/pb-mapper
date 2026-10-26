@@ -246,6 +246,9 @@ async fn dial_inner(
         .await
         .map_err(io::Error::other)?;
     if reply != b"ready" {
+        if let Ok(PbConnResponse::Error(response)) = PbConnResponse::decode(&reply) {
+            return Err(ConnectError::Rejected { response });
+        }
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "QUIC authentication rejected",

@@ -3,9 +3,9 @@
 use super::{ManagerTask, ManagerTaskSender, QuicServerConfig};
 use pb_mapper_protocol::{
     MessageWriter,
-    command::QuicEndpoint,
+    command::{MessageSerializer, PbConnResponse, QuicEndpoint},
     quic::*,
-    secure::{HeaderProtocol, ServerSecurity},
+    secure::{HeaderProtocol, ServerHeaderSession, ServerSecurity},
     transport::RelayStream,
 };
 use std::{io, sync::Arc};
@@ -88,10 +88,18 @@ async fn handle_connection(
             .await
             .map_err(io::Error::other)?;
         let mut stream = QuicStream::new(shared.clone(), pair);
-        let initial = security
-            .read_initial(&mut stream)
-            .await
-            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.failure))?;
+        let initial = match security.read_initial(&mut stream).await {
+            Ok(initial) => initial,
+            Err(error) => {
+                if let Some(session) = error.response_session {
+                    reject(&mut stream, &session, &error.failure).await?;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    error.failure,
+                ));
+            }
+        };
         if initial.session.protocol() != HeaderProtocol::V2
             || initial.payload != binding(&shared.connection)?
         {
@@ -106,7 +114,18 @@ async fn handle_connection(
             .map_err(io::Error::other)?
             .cancellation_token()
             .map_err(io::Error::other)?;
-        let permit = connections.try_acquire_owned().map_err(io::Error::other)?;
+        let permit = match connections.try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let failure = pb_mapper_auth::AuthFailure::new(
+                    "quic_connection_capacity",
+                    "relay QUIC connection capacity reached",
+                    true,
+                );
+                reject(&mut stream, &initial.session, &failure).await?;
+                return Err(io::Error::other(failure));
+            }
+        };
         initial
             .session
             .response_writer(&mut stream)
@@ -153,4 +172,26 @@ async fn handle_connection(
         )
         .await;
     }
+}
+
+/// The enclosing handshake timeout bounds this drain and keeps its admission
+/// permit held. Closing the connection immediately would discard the refusal.
+async fn reject(
+    stream: &mut QuicStream,
+    session: &ServerHeaderSession,
+    failure: &pb_mapper_auth::AuthFailure,
+) -> io::Result<()> {
+    let response = PbConnResponse::error(&failure.code, &failure.message, failure.retryable)
+        .encode()
+        .map_err(io::Error::other)?;
+    session
+        .response_writer(stream)
+        .map_err(io::Error::other)?
+        .write_msg(&response)
+        .await
+        .map_err(io::Error::other)?;
+    let (_, send) = stream.split();
+    send.finish().map_err(io::Error::other)?;
+    send.stopped().await.map_err(io::Error::other)?;
+    Ok(())
 }

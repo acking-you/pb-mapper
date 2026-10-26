@@ -657,7 +657,7 @@ mod tests {
             .candidates
             .iter()
             .find(|addr| addr.is_ipv4() && addr.ip().is_loopback())
-            .unwrap()
+            .expect("test requires a discovered IPv4 loopback path")
             .port();
         grant
             .provider

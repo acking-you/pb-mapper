@@ -337,6 +337,23 @@ async fn root_rotation_delivers_its_committed_response_and_reauthenticates() {
 }
 
 #[tokio::test]
+async fn saturated_quic_admission_returns_an_authenticated_retryable_rejection() {
+    let relay = Relay::start_with_quic("quic-capacity").await;
+    let mut admitted = Vec::new();
+    for _ in 0..128 {
+        let client = client(&relay, RelayTransport::Quic);
+        client.list_keys().await.unwrap();
+        admitted.push(client);
+    }
+    let rejected = client(&relay, RelayTransport::Quic);
+    assert!(matches!(rejected.list_keys().await,
+        Err(pb_mapper_client::sdk::Error::Remote { code, retryable: true, .. }) if code == "quic_connection_capacity"));
+    assert_eq!(rejected.relay_diagnostics().await.connections_created, 0);
+    // Rejection must neither consume a slot nor close an admitted sibling.
+    assert!(admitted[0].list_keys().await.is_ok());
+}
+
+#[tokio::test]
 async fn running_tunnels_recover_after_quic_relay_restart() {
     let mut relay = Relay::start_with_quic("quic-restart").await;
     let client = client(&relay, RelayTransport::Quic);
