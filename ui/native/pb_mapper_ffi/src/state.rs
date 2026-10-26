@@ -19,154 +19,119 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex as SyncMutex;
 use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
-use pb_mapper_client::client::status::get_status;
 use pb_mapper_client::sdk::{
     Client, ConnectOptions, ConnectRequest, Connection, DirectStage, PathPolicy, RecoveryFailure,
-    RegisterOptions, RegisterRequest, Registration, Transport, TunnelDiagnostics, TunnelEventKind,
-    TunnelStatus,
+    RegisterOptions, RegisterRequest, Registration, RelayTransport, RemoteId, Transport,
+    TunnelDiagnostics, TunnelEventKind, TunnelStatus,
 };
-use pb_mapper_core::addr::each_addr;
 use pb_mapper_core::checksum::{
     Credential, get_process_credential, parse_credential, set_process_msg_header_key,
 };
 use pb_mapper_core::config::{ResolvedAddrs, resolve_addrs_async, resolve_pb_mapper_server_async};
-use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
-use pb_mapper_server::{DirectServerConfig, ServerStatusInfo, run_server_on_listener_with_direct};
+use pb_mapper_server::{
+    DirectServerConfig, QuicServerConfig, RelayServerOptions, ServerStatusInfo,
+    run_server_on_listener_with_options,
+};
 use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 
 use crate::ctl::Origin;
 use crate::error::CtlError;
 use crate::events;
+use crate::relay::{no_quic, sdk_error};
 
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 const FORCE_REFRESH_TIMEOUT: Duration = Duration::from_millis(5000);
 
-async fn fetch_real_status_with_addr(
-    server_addr: &str,
-) -> Result<(Vec<String>, RemoteIdData), CtlError> {
-    let (keys_result, remote_id_result) = tokio::join!(
-        get_server_keys_with_addr(server_addr),
-        get_remote_id_data_with_addr(server_addr),
-    );
+/// What the relay answered: its services, the routing table, and how long
+/// the services took to come back.
+type RelayAnswer = (Vec<String>, RemoteId, Duration);
 
-    // The reason as it is: Settings' Test shows it to the user, after its own
-    // "The relay didn't answer".
-    let services = keys_result.map_err(|e| CtlError::internal(e.to_string()))?;
-    let remote_id_data = remote_id_result.unwrap_or_else(|e| {
-        tracing::warn!("Failed to get remote-id data: {}, using empty data", e);
-        RemoteIdData {
-            server_map: String::new(),
-            active: String::new(),
-            idle: String::new(),
-        }
-    });
-
-    Ok((services, remote_id_data))
-}
-
-async fn get_server_keys_with_addr(server_addr: &str) -> Result<Vec<String>, CtlError> {
-    use tokio::net::TcpStream;
-
-    let addrs = resolve_addrs_async(server_addr).await.map_err(|e| {
-        CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
-    })?;
-
-    let mut stream = each_addr(addrs.as_slice(), TcpStream::connect)
-        .await
-        .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
-
-    let status_resp = get_status(&mut stream, PbConnStatusReq::Keys)
-        .await
-        .map_err(|e| CtlError::internal(format!("Failed to get status: {e}")))?;
-
-    match status_resp {
-        PbConnStatusResp::Keys(keys) => Ok(keys),
-        _ => Err(CtlError::protocol(
-            "Unexpected response type for Keys request",
-        )),
-    }
-}
-
-/// The connections the server is holding for one service key.
-///
-/// The UI used to render `server_map`, which is `format!("{map:?}")` on the
-/// server side — a Debug dump, and so not something anything should parse. The
-/// same data is already available structured through `PbConnStatusReq::Service`,
-/// which the CLI has always used and the FFI never exposed. No wire change:
-/// servers already answer this.
-async fn get_service_conns_with_addr(
-    server_addr: &str,
-    service_key: &str,
-) -> Result<Vec<ServiceConnInfo>, CtlError> {
-    let addrs = resolve_addrs_async(server_addr).await.map_err(|e| {
-        CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
-    })?;
-
-    let mut stream = each_addr(addrs.as_slice(), TcpStream::connect)
-        .await
-        .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
-
-    let status_resp = get_status(
-        &mut stream,
-        PbConnStatusReq::Service {
-            direct_query: None,
-            key: service_key.to_string(),
-        },
-    )
-    .await
-    .map_err(|e| CtlError::internal(format!("Failed to get status: {e}")))?;
-
-    match status_resp {
-        PbConnStatusResp::Service { connections, .. } => Ok(connections
-            .into_iter()
-            .map(|c| ServiceConnInfo {
-                conn_id: c.conn_id,
-                generation: c.generation,
-                protocol_version: c.protocol_version,
-                healthy: c.healthy,
-                last_rx_age_ms: c.last_rx_age_ms,
+/// What the relay holds, asked over the carrier this computer uses within
+/// [`FORCE_REFRESH_TIMEOUT`]; and with `ask_quic`, beside it and over TCP
+/// whichever carrier that is, what the relay says about QUIC: the UDP port it
+/// offers it on, or `None` for none, or nothing when it did not answer.
+async fn fetch_real_status(
+    client: &Client,
+    ask_quic: bool,
+) -> (Result<RelayAnswer, CtlError>, Option<Option<u16>>) {
+    let answer = async {
+        let keys = async {
+            let started = Instant::now();
+            (client.list_keys().await, started.elapsed())
+        };
+        let ((keys_result, latency), remote_id_result) = tokio::join!(keys, client.remote_id());
+        // The reason as it is: Settings' Test shows it to the user, after its
+        // own "The relay didn't answer".
+        let services = keys_result.map_err(sdk_error)?;
+        let remote_id = remote_id_result.unwrap_or_else(|e| {
+            tracing::warn!("Failed to get remote-id data: {}, using empty data", e);
+            RemoteId {
+                server_map: String::new(),
+                active: String::new(),
+                idle: String::new(),
+            }
+        });
+        Ok((services, remote_id, latency))
+    };
+    let answer = async {
+        tokio::time::timeout(FORCE_REFRESH_TIMEOUT, answer)
+            .await
+            .unwrap_or_else(|_| {
+                Err(CtlError::timeout(format!(
+                    "{} did not answer within {} seconds",
+                    client.server(),
+                    FORCE_REFRESH_TIMEOUT.as_secs()
+                )))
             })
-            .collect()),
-        _ => Err(CtlError::protocol(
-            "Unexpected response type for Service request",
-        )),
-    }
+    };
+    // Bounded by the SDK's own timeout; outside the one above, so a TCP
+    // question that stalls cannot make a relay that answered look silent.
+    let quic = async {
+        if !ask_quic {
+            return None;
+        }
+        client
+            .relay_quic_port()
+            .await
+            .inspect_err(|e| tracing::debug!("The relay did not say whether it offers QUIC: {e}"))
+            .ok()
+    };
+    tokio::join!(answer, quic)
 }
 
-async fn get_remote_id_data_with_addr(server_addr: &str) -> Result<RemoteIdData, CtlError> {
-    use tokio::net::TcpStream;
-
-    let addrs = resolve_addrs_async(server_addr).await.map_err(|e| {
-        CtlError::invalid_address(format!("Invalid server address {server_addr}: {e}"))
-    })?;
-
-    let mut stream = each_addr(addrs.as_slice(), TcpStream::connect)
-        .await
-        .map_err(|e| CtlError::server_unreachable(format!("Failed to connect to server: {e}")))?;
-
-    let status_resp = get_status(&mut stream, PbConnStatusReq::RemoteId)
-        .await
-        .map_err(|e| CtlError::internal(format!("Failed to get status: {e}")))?;
-
-    match status_resp {
-        PbConnStatusResp::RemoteId {
-            server_map,
-            active,
-            idle,
-        } => Ok(RemoteIdData {
-            server_map,
-            active,
-            idle,
-        }),
-        _ => Err(CtlError::protocol(
-            "Unexpected response type for RemoteId request",
-        )),
+/// Whether the relay can carry a tunnel now, asked before one starts so that
+/// a relay it cannot use is refused with its reason instead of retried: one
+/// that cannot be reached, refuses this credential for good, or over QUIC,
+/// offers no QUIC. Anything that may clear by itself — a slow answer, a
+/// refusal the relay calls retryable — is left to the tunnel's own retries.
+///
+/// One authenticated question over TCP, the one QUIC discovery asks. A bare
+/// connect would prove less, and the relay logs each as a failed login.
+async fn preflight(client: &Client) -> Result<(), CtlError> {
+    use pb_mapper_client::sdk::Error as SdkError;
+    match (client.relay_transport(), client.relay_quic_port().await) {
+        (
+            _,
+            Err(
+                error @ (SdkError::Connect { .. }
+                | SdkError::Address { .. }
+                | SdkError::Remote {
+                    retryable: false, ..
+                }),
+            ),
+        ) => Err(sdk_error(error)),
+        (_, Err(error)) => {
+            tracing::debug!("Starting a tunnel the relay could not be asked about: {error}");
+            Ok(())
+        }
+        (RelayTransport::Quic, Ok(None)) => Err(no_quic()),
+        _ => Ok(()),
     }
 }
 
@@ -238,6 +203,9 @@ pub struct AppConfig {
     pub server_address: String,
     pub keep_alive_enabled: bool,
     pub msg_header_key: String,
+    /// How this computer reaches the relay: TCP, as a config saved before
+    /// there was a choice, or QUIC. A tunnel keeps the one it started with.
+    pub relay_transport: RelayTransport,
 }
 
 impl Default for AppConfig {
@@ -246,6 +214,7 @@ impl Default for AppConfig {
             server_address: "localhost:7666".to_string(),
             keep_alive_enabled: true,
             msg_header_key: String::new(),
+            relay_transport: RelayTransport::Tcp,
         }
     }
 }
@@ -264,6 +233,9 @@ pub struct ServiceConfigInfo {
     /// How its sessions travel, while it runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathInfo>,
+    /// How it reaches the relay, while it runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_transport: Option<RelayTransport>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -288,6 +260,9 @@ pub struct ClientConfigInfo {
     /// How its sessions travel, while it runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathInfo>,
+    /// How it reaches the relay, while it runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_transport: Option<RelayTransport>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -377,6 +352,9 @@ pub struct LocalServerStatus {
     /// not whatever its port field last held.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// The UDP port it takes QUIC on, while it runs with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quic_port: Option<u16>,
     pub active_connections: u32,
     pub registered_services: u32,
     pub uptime_seconds: u64,
@@ -396,6 +374,12 @@ pub struct ServerStatusDetail {
     /// How long it took to answer, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
+    /// The UDP port the relay offers QUIC on, when it said it offers it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quic_port: Option<u16>,
+    /// Whether the relay said whether it offers QUIC, which it is asked over
+    /// TCP: so even when the carrier this computer uses does not get through.
+    pub quic_known: bool,
 }
 
 /// One control connection the server is holding for a service key.
@@ -427,13 +411,6 @@ pub struct ClientStatusResponse {
     pub service_key: String,
     pub status: String,
     pub message: String,
-}
-
-/// Helper struct to hold RemoteId response data
-struct RemoteIdData {
-    server_map: String,
-    active: String,
-    idle: String,
 }
 
 #[derive(Clone)]
@@ -509,6 +486,19 @@ impl PinnedTunnel {
     fn routed_namespace(&self) -> u64 {
         self.namespace.unwrap_or_else(|| self.credential.key_id())
     }
+
+    /// Whether it runs on `relay`: started under that address, or dialling
+    /// any address `endpoint` resolves to, since the same relay may have been
+    /// written another way (a hostname, its IP) when it started.
+    fn is_on(&self, relay: &str, endpoint: Option<&ResolvedAddrs>) -> bool {
+        self.relay == relay
+            || endpoint.is_some_and(|endpoint| {
+                self.endpoint
+                    .as_slice()
+                    .iter()
+                    .any(|addr| endpoint.as_slice().contains(addr))
+            })
+    }
 }
 
 /// A running tunnel, as the SDK runs it for the CLI too. Dropping it stops
@@ -543,6 +533,7 @@ impl TunnelHandle {
     /// Its state as the list shows it, and how its sessions travel.
     fn view(&self) -> TunnelView {
         let diagnostics = self.diagnostics();
+        let transport = diagnostics.relay_transport;
         let (status, message) = match self.status() {
             TunnelStatus::Connected => ("running", String::new()),
             // Still dialling, or failed and trying again: "failed" is what a
@@ -553,7 +544,7 @@ impl TunnelHandle {
                     .last_failure
                     .filter(|_| diagnostics.consecutive_failures > 0)
                 {
-                    Some(failure) => ("failed", failure_message(failure, self)),
+                    Some(failure) => ("failed", failure_message(failure, self, transport)),
                     None => ("retrying", "Connecting to the relay".to_string()),
                 }
             }
@@ -566,15 +557,27 @@ impl TunnelHandle {
             status,
             message,
             path: PathInfo::of(&diagnostics),
+            transport: Some(transport),
         }
     }
 }
 
 /// What the relay's last answer, or the lack of one, means for a tunnel.
-fn failure_message(failure: RecoveryFailure, handle: &TunnelHandle) -> String {
+/// Over QUIC the relay is reached on a UDP port of its own, which a network
+/// can block while TCP gets through, so that is named.
+fn failure_message(
+    failure: RecoveryFailure,
+    handle: &TunnelHandle,
+    transport: RelayTransport,
+) -> String {
+    let quic = transport == RelayTransport::Quic;
     match failure {
         RecoveryFailure::Dns => "The relay's address does not resolve",
+        RecoveryFailure::Transport if quic => {
+            "Cannot reach the relay over QUIC; check that it offers QUIC and its UDP port is open"
+        }
         RecoveryFailure::Transport => "Cannot reach the relay",
+        RecoveryFailure::Timeout if quic => "The relay did not answer over QUIC in time",
         RecoveryFailure::Timeout => "The relay did not answer in time",
         RecoveryFailure::ServiceUnavailable => match handle {
             TunnelHandle::Share(_) => "The relay cannot take this service now",
@@ -592,6 +595,7 @@ struct TunnelView {
     status: &'static str,
     message: String,
     path: Option<PathInfo>,
+    transport: Option<RelayTransport>,
 }
 
 impl TunnelView {
@@ -601,6 +605,7 @@ impl TunnelView {
             status: "stopped",
             message: message.to_string(),
             path: None,
+            transport: None,
         }
     }
 }
@@ -679,6 +684,16 @@ pub struct PbMapperState {
         Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<ServerStatusInfo>>>,
     server_start_time: Option<SystemTime>,
     server_port: Option<u16>,
+    server_quic_port: Option<u16>,
+    /// The client this window's own questions to the relay go through, kept
+    /// for as long as the relay settings it was made from stay as they are:
+    /// a QUIC connection, and the relay's resolved address, then outlive
+    /// one question. Tunnels share both with it.
+    relay_client: SyncMutex<Option<(AppConfig, Client)>>,
+    /// What the relay said about QUIC for these settings: asked again only by
+    /// a forced check (Settings' Test) or a change of settings, not every
+    /// periodic one, since a relay from before QUIC logs the question.
+    quic_offer: SyncMutex<Option<(AppConfig, Option<u16>)>>,
     registered_services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_runtime: HashMap<String, TunnelRuntime>,
@@ -717,13 +732,19 @@ pub async fn register_service(
     // 1. Claim the key and take what the slow work needs. Microseconds.
     //    `_claim` is held to the end of the function on purpose: dropping it
     //    early would release the key while the setup is still running.
-    //    The credential is captured with the relay address so a later config
-    //    change cannot pair a new key with the already-resolved socket.
-    let (_claim, server_address, credential) = {
+    //    The credential and carrier are captured with the relay address so a
+    //    later config change cannot pair a new key with the already-resolved
+    //    socket.
+    let (_claim, server_address, credential, relay_transport) = {
         let state = state.lock().await;
         let claim = state.claim_registering(&service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
-        (claim, state.config.server_address.clone(), credential)
+        (
+            claim,
+            state.config.server_address.clone(),
+            credential,
+            state.config.relay_transport,
+        )
     };
 
     // 2. The slow parts, with the lock released, ending with the tunnel
@@ -734,15 +755,12 @@ pub async fn register_service(
     let remote_addrs = resolve_pb_mapper_server_async(Some(&server_address))
         .await
         .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
-    // Preflight remote server connectivity to surface errors early.
-    each_addr(remote_addrs.as_slice(), TcpStream::connect)
-        .await
-        .map_err(|e| {
-            CtlError::server_unreachable(format!(
-                "Failed to connect to server {server_address}: {e}"
-            ))
-        })?;
-    let handle = Client::from_credential(&server_address, credential, enable_keep_alive, None)
+    let client = Client::from_credential(&server_address, credential, enable_keep_alive, None)
+        .with_relay_transport(relay_transport)
+        .map_err(sdk_refusal)?;
+    // Surface a relay this tunnel cannot use now, rather than retrying it.
+    preflight(&client).await?;
+    let handle = client
         .register_with_options(
             RegisterRequest {
                 key: service_key.clone(),
@@ -795,11 +813,16 @@ pub async fn connect_service(
     namespace: Option<u64>,
     allow_direct: bool,
 ) -> Result<(), CtlError> {
-    let (_claim, server_address, credential) = {
+    let (_claim, server_address, credential, relay_transport) = {
         let state = state.lock().await;
         let claim = state.claim_connecting(&service_key)?;
         let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
-        (claim, state.config.server_address.clone(), credential)
+        (
+            claim,
+            state.config.server_address.clone(),
+            credential,
+            state.config.relay_transport,
+        )
     };
 
     let local_addrs = resolve_addrs_async(&local_address)
@@ -822,7 +845,15 @@ pub async fn connect_service(
     bound.map_err(|e| {
         CtlError::address_in_use(format!("Failed to bind local address {local_address}: {e}"))
     })?;
-    let handle = Client::from_credential(&server_address, credential, enable_keep_alive, namespace)
+    let client = Client::from_credential(&server_address, credential, enable_keep_alive, namespace)
+        .with_relay_transport(relay_transport)
+        .map_err(sdk_refusal)?;
+    // A relay that is down is retried, as it always was: the connection
+    // listens locally meanwhile. One that offers no QUIC never will.
+    if relay_transport == RelayTransport::Quic {
+        preflight(&client).await?;
+    }
+    let handle = client
         .connect_with_options(
             ConnectRequest {
                 key: service_key.clone(),
@@ -898,15 +929,21 @@ mod tests {
     #[tokio::test]
     async fn ui_server_uses_its_writable_config_directory_and_reports_readiness() {
         let (_process_credential_guard, state, root) = temp_state("server-auth-path").await;
+        let quic_port = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| socket.local_addr())
+            .unwrap()
+            .port();
         let auth_dir = {
             let mut state = state.lock().await;
             let auth_dir = state.config_dir.join("auth");
             state
-                .start_server(0, false)
+                .start_server(0, false, Some(quic_port))
                 .await
                 .expect("UI server should bind and initialize authentication");
             assert!(state.server_handle.is_some());
-            assert!(state.get_local_server_status().await.is_running);
+            let status = state.get_local_server_status().await;
+            assert!(status.is_running);
+            assert_eq!(status.quic_port, Some(quic_port));
             auth_dir
         };
 
@@ -1114,6 +1151,118 @@ mod tests {
         drop(sessions);
         drop(state);
         drop(relay);
+        let _ = set_process_msg_header_key(None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With QUIC chosen, tunnels and the window's relay check go over it and
+    /// the list says so; switching back names the tunnels to move. A relay
+    /// that offers no QUIC is refused before a tunnel starts, not retried.
+    #[tokio::test]
+    async fn tunnels_and_checks_follow_the_chosen_carrier() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (_process_credential_guard, state, root) = temp_state("carrier").await;
+        let relay = pb_mapper_testkit::Relay::start_with_quic("ffi-carrier").await;
+        set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
+        {
+            let mut state = state.lock().await;
+            state.config.server_address = relay.addr().to_string();
+            state.config.relay_transport = RelayTransport::Quic;
+        }
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = echo.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let (mut read, mut write) = socket.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+
+        // Kept on the relay, so the bytes cross the QUIC carrier.
+        register_service(
+            &state,
+            "web".into(),
+            backend.clone(),
+            "TCP".into(),
+            true,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let port = pb_mapper_testkit::reserve_addr(pb_mapper_testkit::Transport::Tcp).await;
+        connect_service(
+            &state,
+            "web".into(),
+            port.to_string(),
+            "TCP".into(),
+            false,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(pb_mapper_testkit::READY_TIMEOUT, async {
+            loop {
+                let clients = state.lock().await.get_client_configs().await;
+                if clients.iter().all(|client| client.status == "running") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the connection comes up over QUIC");
+        let mut socket = tokio::net::TcpStream::connect(port).await.unwrap();
+        socket.write_all(b"quic").await.unwrap();
+        let mut echoed = [0; 4];
+        tokio::time::timeout(
+            pb_mapper_testkit::READY_TIMEOUT,
+            socket.read_exact(&mut echoed),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&echoed, b"quic");
+
+        {
+            let state = state.lock().await;
+            let share = &state.get_service_configs().await[0];
+            let client = &state.get_client_configs().await[0];
+            assert_eq!(share.relay_transport, Some(RelayTransport::Quic));
+            assert_eq!(client.relay_transport, Some(RelayTransport::Quic));
+            let detail = state.force_refresh_server_status().await.unwrap();
+            assert!(detail.server_available, "{:?}", detail.error);
+            assert!(detail.quic_port.is_some());
+            let admin = parse_credential(pb_mapper_testkit::TEST_ADMIN_KEY).unwrap();
+            let moving =
+                state.on_other_carrier(&relay.addr().to_string(), None, admin, RelayTransport::Tcp);
+            assert_eq!(moving.shares, ["web"]);
+            assert_eq!(moving.connections, ["web"]);
+        }
+
+        let tcp_only = pb_mapper_testkit::Relay::start("ffi-carrier-tcp-only").await;
+        set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
+        state.lock().await.config.server_address = tcp_only.addr().to_string();
+        let refused = register_service(
+            &state,
+            "cam".into(),
+            backend,
+            "TCP".into(),
+            false,
+            false,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code(), ErrorCode::ServerUnreachable, "{refused}");
+        assert!(refused.to_string().contains("QUIC"), "{refused}");
+
+        drop(socket);
+        drop((relay, tcp_only));
         let _ = set_process_msg_header_key(None);
         let _ = std::fs::remove_dir_all(&root);
     }

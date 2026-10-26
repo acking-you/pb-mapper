@@ -125,6 +125,44 @@ task per tunnel emits a change event when its state or which paths it uses
 changes, so the window follows a path as it is chosen. The embedded relay
 offers direct as `pb-mapper server` does, over UDP on its TCP port.
 
+### How this computer reaches the relay
+
+What crosses the relay rides a carrier: TCP, a connection per stream, or
+QUIC, every stream layered on one encrypted UDP connection. It is a property
+of this computer and its relay, like the address and the credential, so it
+lives with them — in Settings, and in the setup string — not in a tunnel's
+form. Each tunnel keeps the carrier it started with.
+
+- **Settings** has a TCP/QUIC switch under the credential, and under it one
+  line of what the relay last said: the UDP port it offers QUIC on, beside a
+  green dot; in the caution colour, that it does not, when QUIC is chosen;
+  otherwise what QUIC is. The line speaks only for the relay the address
+  field still names.
+- **Saving a new carrier** moves nothing by itself. Once the relay has
+  answered over the new carrier — never before, since moving tunnels to one
+  that does not get through would stop them — a dialog names how many
+  running tunnels are still on the old one and offers to start them again;
+  Later leaves them until they next start.
+- **The Relay page** shows the carrier beside the relay's state, quiet and
+  neutral: it is a way there, not a state to watch. Over QUIC the figures
+  gain the measured round trip and packet loss, and a line of fine print the
+  connections, streams and reuse, MTU and window, and the last QUIC error
+  until a connection opens. All of it comes from this computer's own
+  connections, so reading it asks the relay nothing. Over TCP, a relay that
+  offers QUIC gets one quiet line with Use QUIC beside it.
+- **A tunnel's path chip** names the carrier only when it is QUIC and the
+  traffic crosses the relay: *Relay · QUIC*. TCP is what a relay is reached
+  over unless said, and a direct path is QUIC of its own.
+- **This computer's relay** can offer QUIC on a UDP port of its own, next
+  to the TCP port; the TCP port's UDP twin already carries direct sessions.
+
+The window's own questions — the relay check, the Relay page — go over the
+chosen carrier through one client kept per relay setting, which shares its
+QUIC connection with the tunnels. Whether the relay offers QUIC is asked
+over TCP beside them, so Settings can say so even when QUIC does not get
+through — once per relay setting, and again on Test, since a relay from
+before QUIC logs the question.
+
 ## Layout
 
 The window is layered as in POCOX (`theme/glass.dart`):

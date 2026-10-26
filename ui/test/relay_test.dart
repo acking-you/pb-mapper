@@ -500,5 +500,100 @@ void main() {
       expect(find.byKey(const Key('settings-reveal')), findsNothing);
       await finish(tester);
     });
+
+    testWidgets('offers QUIC on a UDP port of its own', (tester) async {
+      final api = FakePbMapperApi();
+      await _open(tester, api);
+      await _section(tester, 'local');
+      await tester.enterText(find.byKey(const Key('local-port')), '17000');
+      await tester.tap(find.byKey(const Key('local-quic')));
+      await settle(tester);
+      await tester.enterText(find.byKey(const Key('local-quic-port')), '17000');
+      await tester.tap(find.byKey(const Key('local-toggle')));
+      await settle(tester);
+      expect(api.calls, isEmpty);
+      expect(find.text('QUIC needs a UDP port of its own'), findsOneWidget);
+
+      await tester.enterText(find.byKey(const Key('local-quic-port')), '17001');
+      await tester.tap(find.byKey(const Key('local-toggle')));
+      await settle(tester);
+      expect(api.calls, ['startServer(17000, quic 17001)']);
+      expect(find.textContaining('QUIC on UDP 17001'), findsOneWidget);
+      await finish(tester);
+    });
+  });
+
+  group('carrier', () {
+    testWidgets('over QUIC the head measures the link', (tester) async {
+      final api =
+          FakePbMapperApi(
+              config: const ConfigStatus(
+                serverAddress: 'lb7666.top:7666',
+                keepAliveEnabled: true,
+                msgHeaderKey: '',
+                relayTransport: RelayTransport.quic,
+              ),
+            )
+            ..link = const RelayLink(
+              transport: RelayTransport.quic,
+              connectionsCreated: 1,
+              streamsOpened: 42,
+              streamsReused: 40,
+              connections: [
+                QuicLinkConnection(
+                  id: 1,
+                  peer: '203.0.113.7:7667',
+                  pooled: true,
+                  rtt: Duration(microseconds: 12400),
+                  congestionWindow: 3 << 19,
+                  mtu: 1452,
+                  sentPackets: 1000,
+                  lostPackets: 1,
+                  congestionEvents: 0,
+                  sentBytes: 1 << 20,
+                  receivedBytes: 1 << 20,
+                ),
+              ],
+            );
+      await _open(tester, api);
+      expect(find.byKey(const Key('carrier-quic')), findsOneWidget);
+      expect(find.text('37 ms'), findsNothing);
+      expect(find.text('12 ms'), findsOneWidget);
+      expect(find.text('0.10 %'), findsOneWidget);
+      expect(
+        find.text(
+          '1 QUIC connection · 42 streams, 40 reused · MTU 1452 · '
+          'window 1.5 MiB',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('relay-also-quic')), findsNothing);
+      await finish(tester);
+    });
+
+    testWidgets('a TCP computer is offered the relay\'s QUIC, tunnels too', (
+      tester,
+    ) async {
+      final api = FakePbMapperApi(
+        clients: [
+          fakeClient(serviceKey: 'rdp', relayTransport: RelayTransport.tcp),
+        ],
+      );
+      await _open(tester, api);
+      expect(find.byKey(const Key('carrier-tcp')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('relay-use-quic')));
+      await settle(tester);
+      expect(api.calls, ['updateConfig(lb7666.top:7666, quic)']);
+      // Running on TCP, the connection moves only when asked.
+      await tester.tap(find.byKey(const Key('carrier-move-now')));
+      await settle(tester);
+      expect(api.calls.skip(1), [
+        'disconnectService(rdp)',
+        'connectService(rdp)',
+      ]);
+      expect(api.clients.single.relayTransport, RelayTransport.quic);
+      expect(find.byKey(const Key('carrier-quic')), findsOneWidget);
+      await finish(tester);
+    });
   });
 }

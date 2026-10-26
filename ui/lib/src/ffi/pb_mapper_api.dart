@@ -15,13 +15,44 @@ class OperationResult {
   final bool success;
   final String message;
 
-  const OperationResult({required this.success, required this.message});
+  /// What a successful call answered besides its word, when it did.
+  final Map<String, dynamic> data;
+
+  const OperationResult({
+    required this.success,
+    required this.message,
+    this.data = const {},
+  });
+}
+
+/// What saving the relay settings left to do: this computer's tunnels on
+/// that relay, under that credential, still on the carrier it had before.
+/// Each keeps it until started again.
+class CarrierMove {
+  const CarrierMove({this.shares = const [], this.connections = const []});
+
+  final List<String> shares;
+  final List<String> connections;
+
+  bool get isEmpty => shares.isEmpty && connections.isEmpty;
+  int get length => shares.length + connections.length;
+
+  factory CarrierMove.fromMap(Object? raw) {
+    final map = raw is Map ? raw : const {};
+    return CarrierMove(
+      shares: _asStringList(map['shares']),
+      connections: _asStringList(map['connections']),
+    );
+  }
 }
 
 class ConfigStatus {
   final String serverAddress;
   final bool keepAliveEnabled;
   final String msgHeaderKey;
+
+  /// How this computer reaches the relay.
+  final RelayTransport relayTransport;
   final bool isolatedRelayAdminKeySet;
   final String isolatedRelayAdminKey;
 
@@ -29,6 +60,7 @@ class ConfigStatus {
     required this.serverAddress,
     required this.keepAliveEnabled,
     required this.msgHeaderKey,
+    this.relayTransport = RelayTransport.tcp,
     this.isolatedRelayAdminKeySet = false,
     this.isolatedRelayAdminKey = '',
   });
@@ -41,6 +73,7 @@ class ConfigStatus {
       ),
       keepAliveEnabled: _asBool(map['keepAliveEnabled'], fallback: true),
       msgHeaderKey: _asString(map['msgHeaderKey']),
+      relayTransport: RelayTransport.parse(map['relayTransport']),
       isolatedRelayAdminKeySet: _asBool(
         map['isolatedRelayAdminKeySet'],
         fallback: false,
@@ -64,6 +97,9 @@ class ServiceConfigInfo {
 
   /// How its sessions travel, while it runs.
   final TunnelPath? path;
+
+  /// How it reaches the relay, while it runs.
+  final RelayTransport? relayTransport;
   final int createdAtMs;
   final int updatedAtMs;
 
@@ -77,6 +113,7 @@ class ServiceConfigInfo {
     required this.status,
     required this.statusMessage,
     this.path,
+    this.relayTransport,
     required this.createdAtMs,
     required this.updatedAtMs,
   });
@@ -92,6 +129,7 @@ class ServiceConfigInfo {
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
       path: TunnelPath.maybeFrom(map['path']),
+      relayTransport: RelayTransport.maybe(map['relayTransport']),
       createdAtMs: _asInt(map['createdAtMs']),
       updatedAtMs: _asInt(map['updatedAtMs']),
     );
@@ -119,6 +157,9 @@ class ClientConfigInfo {
 
   /// How its sessions travel, while it runs.
   final TunnelPath? path;
+
+  /// How it reaches the relay, while it runs.
+  final RelayTransport? relayTransport;
   final int createdAtMs;
   final int updatedAtMs;
 
@@ -133,6 +174,7 @@ class ClientConfigInfo {
     required this.status,
     required this.statusMessage,
     this.path,
+    this.relayTransport,
     required this.createdAtMs,
     required this.updatedAtMs,
   });
@@ -151,6 +193,7 @@ class ClientConfigInfo {
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
       path: TunnelPath.maybeFrom(map['path']),
+      relayTransport: RelayTransport.maybe(map['relayTransport']),
       createdAtMs: _asInt(map['createdAtMs']),
       updatedAtMs: _asInt(map['updatedAtMs']),
     );
@@ -266,6 +309,9 @@ class LocalServerStatus {
 
   /// The port it listens on, while it runs.
   final int? port;
+
+  /// The UDP port it takes QUIC on, while it runs with one.
+  final int? quicPort;
   final int activeConnections;
   final int registeredServices;
   final int uptimeSeconds;
@@ -273,6 +319,7 @@ class LocalServerStatus {
   const LocalServerStatus({
     required this.isRunning,
     this.port,
+    this.quicPort,
     required this.activeConnections,
     required this.registeredServices,
     required this.uptimeSeconds,
@@ -282,6 +329,7 @@ class LocalServerStatus {
     return LocalServerStatus(
       isRunning: _asBool(map['isRunning']),
       port: map['port'] == null ? null : _asInt(map['port']),
+      quicPort: map['quicPort'] == null ? null : _asInt(map['quicPort']),
       activeConnections: _asInt(map['activeConnections']),
       registeredServices: _asInt(map['registeredServices']),
       uptimeSeconds: _asInt(map['uptimeSeconds']),
@@ -302,6 +350,13 @@ class ServerStatusDetail {
   /// How long it took to answer, when it did.
   final int? latencyMs;
 
+  /// The UDP port it offers QUIC on, when it said it offers it.
+  final int? quicPort;
+
+  /// Whether it said whether it offers QUIC. It is asked over TCP, so this
+  /// holds even when QUIC itself does not get through.
+  final bool quicKnown;
+
   const ServerStatusDetail({
     required this.serverAvailable,
     required this.registeredServices,
@@ -310,6 +365,8 @@ class ServerStatusDetail {
     required this.idleConnections,
     this.error,
     this.latencyMs,
+    this.quicPort,
+    this.quicKnown = false,
   });
 
   factory ServerStatusDetail.fromMap(Map<String, dynamic> map) {
@@ -321,6 +378,8 @@ class ServerStatusDetail {
       idleConnections: _asString(map['idleConnections']),
       error: map['error'] as String?,
       latencyMs: map['latencyMs'] == null ? null : _asInt(map['latencyMs']),
+      quicPort: map['quicPort'] == null ? null : _asInt(map['quicPort']),
+      quicKnown: _asBool(map['quicKnown']),
     );
   }
 }
@@ -410,15 +469,21 @@ abstract interface class PbMapperApiClient {
 
   Future<ConfigStatus> fetchConfig();
   Future<String> revealIsolatedRelayAdminKey();
+
+  /// Save the relay settings. Its [OperationResult.data] carries a
+  /// [CarrierMove] under `move` when the carrier changed.
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,
     required String msgHeaderKey,
+    RelayTransport relayTransport = RelayTransport.tcp,
   });
 
+  /// Run a relay on [port]; with [quicPort], one that also takes QUIC there.
   Future<OperationResult> startServer({
     required int port,
     required bool keepAlive,
+    int? quicPort,
   });
   Future<OperationResult> stopServer();
   Future<LocalServerStatus> getLocalServerStatus();
@@ -470,6 +535,9 @@ abstract interface class PbMapperApiClient {
 
   /// Direct sessions the relay has heard about, in this credential's view.
   Future<List<DirectSession>> relaySessions();
+
+  /// How this computer reaches the relay now, from the connections it holds.
+  Future<RelayLink> relayLink();
 
   // Administrator key only.
   Future<RelayAuthStatus> adminAuthStatus();
@@ -544,11 +612,13 @@ class PbMapperApi implements PbMapperApiClient {
     required String serverAddress,
     required bool keepAlive,
     required String msgHeaderKey,
+    RelayTransport relayTransport = RelayTransport.tcp,
   }) async {
     final result = await _service.updateConfig(
       serverAddress: serverAddress,
       keepAlive: keepAlive,
       msgHeaderKey: msgHeaderKey,
+      relayTransport: relayTransport.name,
     );
     return _resultFrom(result);
   }
@@ -557,8 +627,13 @@ class PbMapperApi implements PbMapperApiClient {
   Future<OperationResult> startServer({
     required int port,
     required bool keepAlive,
+    int? quicPort,
   }) async {
-    final result = await _service.startServer(port: port, keepAlive: keepAlive);
+    final result = await _service.startServer(
+      port: port,
+      keepAlive: keepAlive,
+      quicPort: quicPort ?? 0,
+    );
     return _resultFrom(result);
   }
 
@@ -759,6 +834,7 @@ class PbMapperApi implements PbMapperApiClient {
     return OperationResult(
       success: result['success'] == true,
       message: _asString(result['message'], fallback: 'Unknown result'),
+      data: _asMap(result['data']),
     );
   }
 
@@ -796,6 +872,10 @@ class PbMapperApi implements PbMapperApiClient {
   @override
   Future<List<DirectSession>> relaySessions() =>
       _relayList('sessions', DirectSession.fromMap);
+
+  @override
+  Future<RelayLink> relayLink() async =>
+      RelayLink.fromMap(_asMap(await _relay('link')));
 
   @override
   Future<RelayAuthStatus> adminAuthStatus() async =>

@@ -715,7 +715,17 @@ void main() {
       updates: updates,
     );
     final check = find.byKey(const Key('settings-check-updates'));
-    await tester.ensureVisible(check);
+    // Below the relay card, past what the list builds before it scrolls.
+    await tester.scrollUntilVisible(
+      check,
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const Key('settings-list')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     await settle(tester);
     await tester.tap(check);
     await settle(tester);

@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:pb_mapper_ui/src/ffi/relay_models.dart' show RelayTransport;
+
 /// What a setup string carries: everything another computer needs to use a
 /// relay.
 class SetupPayload {
@@ -7,15 +9,20 @@ class SetupPayload {
     required this.address,
     required this.credential,
     this.keepAlive = true,
+    this.relayTransport = RelayTransport.tcp,
   });
 
   final String address;
   final String credential;
   final bool keepAlive;
+
+  /// How to reach the relay. A string from before there was a choice says
+  /// nothing, which is TCP.
+  final RelayTransport relayTransport;
 }
 
 /// The same base64 JSON the app has always exported, so a string copied from
-/// an older build still pastes.
+/// an older build still pastes, and an older build ignores the carrier.
 String encodeSetupString(SetupPayload payload) => base64Encode(
   utf8.encode(
     jsonEncode({
@@ -23,6 +30,7 @@ String encodeSetupString(SetupPayload payload) => base64Encode(
       'serverAddress': payload.address.trim(),
       'keepAliveEnabled': payload.keepAlive,
       'msgHeaderKey': payload.credential.trim(),
+      'relayTransport': payload.relayTransport.name,
       'exportedAt': DateTime.now().toIso8601String(),
     }),
   ),
@@ -49,5 +57,6 @@ SetupPayload decodeSetupString(String raw) {
       final String s => s.toLowerCase() == 'true' || s == '1',
       _ => true,
     },
+    relayTransport: RelayTransport.parse(decoded['relayTransport']),
   );
 }

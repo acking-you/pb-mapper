@@ -25,11 +25,36 @@ impl PbMapperState {
         })
     }
 
+    /// The client this window's questions to the relay go through, made
+    /// again only when the relay settings change. See `relay_client`.
+    pub(crate) fn relay_client(&self) -> Result<Client, CtlError> {
+        let mut cached = self.relay_client.lock();
+        if let Some((config, client)) = cached.as_ref()
+            && *config == self.config
+        {
+            return Ok(client.clone());
+        }
+        let credential = get_process_credential().map_err(|error| {
+            CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
+        })?;
+        let client = Client::from_credential(
+            &self.config.server_address,
+            credential,
+            self.config.keep_alive_enabled,
+            None,
+        )
+        .with_relay_transport(self.config.relay_transport)
+        .map_err(sdk_error)?;
+        *cached = Some((self.config.clone(), client.clone()));
+        Ok(client)
+    }
+
     pub async fn update_config(
         &mut self,
         server_address: String,
         keep_alive: bool,
         msg_header_key: String,
+        relay_transport: RelayTransport,
     ) -> Result<(), CtlError> {
         let msg_header_key = normalize_msg_header_key(msg_header_key)?;
         let previous = self.config.clone();
@@ -37,6 +62,7 @@ impl PbMapperState {
             server_address,
             keep_alive_enabled: keep_alive,
             msg_header_key,
+            relay_transport,
         };
         self.write_config_file(&candidate)?;
         self.config = candidate;
@@ -70,6 +96,7 @@ impl PbMapperState {
                 status: view.status.to_string(),
                 status_message: view.message,
                 path: view.path,
+                relay_transport: view.transport,
                 created_at_ms: config
                     .created_at
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -115,6 +142,7 @@ impl PbMapperState {
                 status: view.status.to_string(),
                 status_message: view.message,
                 path: view.path,
+                relay_transport: view.transport,
                 created_at_ms: config
                     .created_at
                     .duration_since(UNIX_EPOCH)
@@ -156,7 +184,11 @@ impl PbMapperState {
     }
 
     pub async fn get_local_server_status(&self) -> LocalServerStatus {
-        let is_running = self.server_handle.is_some();
+        // One that ended on its own is not running, whatever is left of it.
+        let is_running = self
+            .server_handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished());
         if !is_running {
             let status = LocalServerStatus::default();
             {
@@ -197,11 +229,13 @@ impl PbMapperState {
         let refreshing = self.local_server_status_refreshing.clone();
         let start_time = self.server_start_time;
         let port = self.server_port;
+        let quic_port = self.server_quic_port;
 
         tokio::spawn(async move {
             let mut status = LocalServerStatus {
                 is_running: true,
                 port,
+                quic_port,
                 uptime_seconds: start_time
                     .and_then(|ts| SystemTime::now().duration_since(ts).ok())
                     .map(|d| d.as_secs())
@@ -233,8 +267,10 @@ impl PbMapperState {
         });
     }
 
+    /// The periodic check: the relay's holdings, and what it said about QUIC
+    /// for these settings, asking only if it has not said yet.
     pub async fn get_server_status_detail(&self) -> Result<ServerStatusDetail, CtlError> {
-        self.force_refresh_server_status().await
+        self.refresh_server_status(false).await
     }
 
     /// The connections the server holds for one key, from the protocol's own
@@ -244,13 +280,23 @@ impl PbMapperState {
         service_key: String,
     ) -> Result<Vec<ServiceConnInfo>, CtlError> {
         let server_addr = self.config.server_address.clone();
-        match tokio::time::timeout(
-            FORCE_REFRESH_TIMEOUT,
-            get_service_conns_with_addr(&server_addr, &service_key),
-        )
-        .await
+        let client = self.relay_client()?;
+        match tokio::time::timeout(FORCE_REFRESH_TIMEOUT, client.service_status(&service_key)).await
         {
-            Ok(result) => result,
+            Ok(result) => result
+                .map(|connections| {
+                    connections
+                        .into_iter()
+                        .map(|c| ServiceConnInfo {
+                            conn_id: c.conn_id,
+                            generation: c.generation,
+                            protocol_version: c.protocol_version,
+                            healthy: c.healthy,
+                            last_rx_age_ms: c.last_rx_age_ms,
+                        })
+                        .collect()
+                })
+                .map_err(sdk_error),
             Err(_) => Err(CtlError::timeout(format!(
                 "Timed out asking {server_addr} about {service_key}"
             ))),
@@ -258,10 +304,14 @@ impl PbMapperState {
     }
 
     /// Perform a blocking status refresh — waits for the actual network result
-    /// instead of returning stale cache.
+    /// instead of returning stale cache — and asks the relay about QUIC again.
     pub async fn force_refresh_server_status(&self) -> Result<ServerStatusDetail, CtlError> {
-        let server_addr = self.config.server_address.clone();
-        let started = Instant::now();
+        self.refresh_server_status(true).await
+    }
+
+    /// Ask the relay what it holds. What it says about QUIC is asked only
+    /// when `force`d or not yet known for these settings.
+    async fn refresh_server_status(&self, force: bool) -> Result<ServerStatusDetail, CtlError> {
         let unavailable = |error: String| ServerStatusDetail {
             server_available: false,
             registered_services: Vec::new(),
@@ -270,33 +320,44 @@ impl PbMapperState {
             idle_connections: String::new(),
             error: Some(error),
             latency_ms: None,
+            quic_port: None,
+            quic_known: false,
         };
+        let client = match self.relay_client() {
+            Ok(client) => client,
+            Err(error) => return Ok(unavailable(error.to_string())),
+        };
+        let known = self
+            .quic_offer
+            .lock()
+            .as_ref()
+            .filter(|(config, _)| *config == self.config)
+            .map(|(_, port)| *port);
 
-        let detail = match tokio::time::timeout(
-            FORCE_REFRESH_TIMEOUT,
-            fetch_real_status_with_addr(&server_addr),
-        )
-        .await
-        {
-            Ok(Ok((services, remote_id_data))) => ServerStatusDetail {
+        let (answer, asked) = fetch_real_status(&client, force || known.is_none()).await;
+        if let Some(port) = asked {
+            *self.quic_offer.lock() = Some((self.config.clone(), port));
+        }
+        let quic = asked.or(known);
+        let detail = match answer {
+            Ok((services, remote_id, latency)) => ServerStatusDetail {
                 server_available: true,
                 registered_services: services,
-                server_map: remote_id_data.server_map,
-                active_connections: remote_id_data.active,
-                idle_connections: remote_id_data.idle,
+                server_map: remote_id.server_map,
+                active_connections: remote_id.active,
+                idle_connections: remote_id.idle,
                 error: None,
-                latency_ms: Some(started.elapsed().as_millis() as u64),
+                latency_ms: Some(latency.as_millis() as u64),
+                quic_port: quic.flatten(),
+                quic_known: quic.is_some(),
             },
-            Ok(Err(e)) => {
-                tracing::warn!("Force refresh failed: {}", e);
-                unavailable(e.to_string())
-            }
-            Err(_) => {
-                tracing::warn!("Force refresh timed out after {:?}", FORCE_REFRESH_TIMEOUT);
-                unavailable(format!(
-                    "{server_addr} did not answer within {} seconds",
-                    FORCE_REFRESH_TIMEOUT.as_secs()
-                ))
+            Err(e) => {
+                tracing::warn!("Relay status refresh failed: {}", e);
+                ServerStatusDetail {
+                    quic_port: quic.flatten(),
+                    quic_known: quic.is_some(),
+                    ..unavailable(e.to_string())
+                }
             }
         };
 

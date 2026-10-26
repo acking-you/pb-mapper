@@ -10,12 +10,14 @@ use crate::events;
 use crate::handle::PbMapperHandle;
 use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_string};
 
-/// Start pb-mapper server.
+/// Start pb-mapper server. A nonzero `quic_port` also takes QUIC on that
+/// UDP port; zero offers none.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_start_server(
     handle: *mut PbMapperHandle,
     port: u16,
     enable_keep_alive: c_int,
+    quic_port: u16,
 ) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -25,7 +27,13 @@ pub unsafe extern "C" fn pb_mapper_start_server(
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
-        state.start_server(port, enable_keep_alive != 0).await
+        state
+            .start_server(
+                port,
+                enable_keep_alive != 0,
+                (quic_port != 0).then_some(quic_port),
+            )
+            .await
     });
 
     match result {

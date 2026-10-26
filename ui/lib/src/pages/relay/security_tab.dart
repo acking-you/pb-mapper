@@ -340,7 +340,11 @@ Future<void> showRotationDialog(
   final key = rotation.key;
   final confirmed = rotation.confirmed;
   final setup = encodeSetupString(
-    SetupPayload(address: address, credential: key),
+    SetupPayload(
+      address: address,
+      credential: key,
+      relayTransport: relay.app.config.relayTransport,
+    ),
   );
   return showDialog<void>(
     context: context,

@@ -16,7 +16,8 @@ use std::time::Duration;
 use pb_mapper_auth::generate_admin_key;
 use pb_mapper_client::sdk::{
     Admin, AuthStatusInfo, Client, ConnectionInfo, Error as SdkError, IssuedKey, KeyMetadata,
-    LegacyProtocol, ServiceInfo, SessionObservation,
+    LegacyProtocol, QUIC_UNAVAILABLE, RelayDiagnostics, RelayTransport, ServiceInfo,
+    SessionObservation,
 };
 use pb_mapper_core::checksum::{Credential, get_process_credential, parse_credential};
 use pb_mapper_core::config::resolve_pb_mapper_server_async;
@@ -65,13 +66,12 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
         // The key a rotation retires: the tunnels still holding it are the
         // ones to start again on the new key.
         let retired = credential.as_ref().ok().copied();
-        let outcome = call(
-            &config.server_address,
-            config.keep_alive_enabled,
-            credential,
-            &request,
-        )
-        .await?;
+        let relay = Target {
+            server: &config.server_address,
+            keep_alive: config.keep_alive_enabled,
+            transport: config.relay_transport,
+        };
+        let outcome = call(&relay, credential, &request).await?;
         let mut data = outcome.data;
         // A rotated administrator key is the only one that relay accepts
         // now: this computer switches to it, or every later call would fail.
@@ -99,6 +99,7 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
                         config.server_address.clone(),
                         config.keep_alive_enabled,
                         key,
+                        config.relay_transport,
                     )
                     .await
                 {
@@ -189,11 +190,27 @@ fn str_arg<'a>(request: &'a Value, name: &str) -> Result<&'a str, CtlError> {
         .ok_or_else(|| CtlError::invalid_argument(format!("`{name}` must be text")))
 }
 
-/// The operation itself, against `server` with `credential`. Separate from
+/// The relay as Settings has it: where it is, and how it is reached.
+struct Target<'a> {
+    server: &'a str,
+    keep_alive: bool,
+    transport: RelayTransport,
+}
+
+impl Target<'_> {
+    /// A client of this relay as `credential`. Clients of one relay and
+    /// carrier share the process's connections to it, the tunnels' too.
+    fn client(&self, credential: Credential) -> Result<Client, CtlError> {
+        Client::from_credential(self.server, credential, self.keep_alive, None)
+            .with_relay_transport(self.transport)
+            .map_err(sdk_error)
+    }
+}
+
+/// The operation itself, against `relay` with `credential`. Separate from
 /// the export so a test can drive it against a relay of its own.
 async fn call(
-    server: &str,
-    keep_alive: bool,
+    relay: &Target<'_>,
     credential: Result<Credential, String>,
     request: &Value,
 ) -> Result<Outcome, CtlError> {
@@ -203,18 +220,19 @@ async fn call(
     if op == "credential" {
         return Ok(credential_json(&credential).into());
     }
+    let server = relay.server;
     if server.trim().is_empty() {
         return Err(CtlError::invalid_argument("No relay address is set"));
     }
     let credential = credential.map_err(|error| {
         CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
     })?;
-    let client = Client::from_credential(server, credential, keep_alive, None);
+    let client = relay.client(credential)?;
     // Rotation keeps its own time: a timeout here could drop the new key
     // while the relay installs it.
     if op == "rotate_root_key" {
         let admin = client.admin().map_err(sdk_error)?;
-        return rotate(server, keep_alive, credential, &admin).await;
+        return rotate(relay, credential, &admin).await;
     }
     tokio::time::timeout(CALL_TIMEOUT, dispatch(&client, op, request))
         .await
@@ -231,6 +249,11 @@ async fn dispatch(client: &Client, op: &str, request: &Value) -> Result<Outcome,
     if op == "sessions" {
         let sessions = client.sessions().await.map_err(sdk_error)?;
         return Ok(Value::Array(sessions.iter().map(session_json).collect()).into());
+    }
+    // How this computer reaches the relay, sampled from the connections it
+    // holds now: no question goes to the relay.
+    if op == "link" {
+        return Ok(link_json(&client.relay_diagnostics().await).into());
     }
 
     let admin = client.admin().map_err(sdk_error)?;
@@ -344,12 +367,8 @@ async fn dispatch(client: &Client, op: &str, request: &Value) -> Result<Outcome,
 /// have switched, so it is asked, with each key in turn, which it accepts.
 /// If it answers neither, the key comes back unconfirmed (`"confirmed":
 /// false`) for the person to keep, and this computer stays on the old one.
-async fn rotate(
-    server: &str,
-    keep_alive: bool,
-    old: Credential,
-    admin: &Admin,
-) -> Result<Outcome, CtlError> {
+async fn rotate(relay: &Target<'_>, old: Credential, admin: &Admin) -> Result<Outcome, CtlError> {
+    let server = relay.server;
     let candidate = generate_admin_key();
     let reason =
         match tokio::time::timeout(CALL_TIMEOUT, admin.rotate_root_key(Some(candidate.clone())))
@@ -370,10 +389,10 @@ async fn rotate(
             ),
         };
     let new = parse_credential(&candidate).map_err(CtlError::internal)?;
-    if accepts(server, keep_alive, new).await {
+    if accepts(relay, new).await {
         return Ok(rotated(candidate));
     }
-    if accepts(server, keep_alive, old).await {
+    if accepts(relay, old).await {
         return Err(CtlError::protocol(format!(
             "The relay kept its administrator key: {reason}"
         )));
@@ -389,8 +408,11 @@ fn rotated(key: String) -> Outcome {
 }
 
 /// Whether the relay takes `credential` as its administrator key now.
-async fn accepts(server: &str, keep_alive: bool, credential: Credential) -> bool {
-    let Ok(admin) = Client::from_credential(server, credential, keep_alive, None).admin() else {
+async fn accepts(relay: &Target<'_>, credential: Credential) -> bool {
+    let Ok(admin) = relay
+        .client(credential)
+        .and_then(|client| client.admin().map_err(sdk_error))
+    else {
         return false;
     };
     matches!(
@@ -399,7 +421,15 @@ async fn accepts(server: &str, keep_alive: bool, credential: Credential) -> bool
     )
 }
 
-fn sdk_error(error: SdkError) -> CtlError {
+/// Why nothing can reach this relay over QUIC, in the words the window shows.
+pub(crate) fn no_quic() -> CtlError {
+    CtlError::server_unreachable(
+        "The relay does not offer QUIC. Choose TCP in Settings, or give the relay a QUIC port",
+    )
+}
+
+/// What an SDK refusal means to the window, as a coded sentence.
+pub(crate) fn sdk_error(error: SdkError) -> CtlError {
     match error {
         SdkError::NotAdministrator => CtlError::invalid_argument(
             "This computer's credential is not the relay's administrator key",
@@ -408,11 +438,36 @@ fn sdk_error(error: SdkError) -> CtlError {
         SdkError::Address { .. } => CtlError::invalid_address(error.to_string()),
         SdkError::Connect { .. } => CtlError::server_unreachable(error.to_string()),
         SdkError::TimedOut { .. } => CtlError::timeout(error.to_string()),
+        SdkError::Remote { code, .. } if code == QUIC_UNAVAILABLE => no_quic(),
         SdkError::Remote { code, message, .. } => {
             CtlError::protocol(format!("The relay refused: {message} ({code})"))
         }
         other => CtlError::protocol(other.to_string()),
     }
+}
+
+/// The relay carrier as the Relay page shows it.
+fn link_json(link: &RelayDiagnostics) -> Value {
+    json!({
+        "transport": link.transport,
+        "connectionsCreated": link.connections_created,
+        "streamsOpened": link.streams_opened,
+        "streamsReused": link.streams_reused,
+        "lastError": link.last_error,
+        "connections": link.connections.iter().map(|c| json!({
+            "id": c.connection_id,
+            "peer": c.peer_addr.to_string(),
+            "pooled": c.pooled,
+            "rttUs": c.rtt_us,
+            "congestionWindow": c.congestion_window,
+            "mtu": c.mtu,
+            "sentPackets": c.sent_packets,
+            "lostPackets": c.lost_packets,
+            "congestionEvents": c.congestion_events,
+            "sentBytes": c.sent_bytes,
+            "receivedBytes": c.received_bytes,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn credential_json(credential: &Result<Credential, String>) -> Value {
@@ -515,15 +570,25 @@ mod tests {
     use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
     use pb_mapper_testkit::{Relay, TEST_ADMIN_KEY};
 
+    async fn run_over(
+        relay: &Relay,
+        transport: RelayTransport,
+        credential: &str,
+        request: Value,
+    ) -> Result<Outcome, CtlError> {
+        let server = relay.addr().to_string();
+        let target = Target {
+            server: &server,
+            keep_alive: false,
+            transport,
+        };
+        call(&target, parse_credential(credential), &request).await
+    }
+
     async fn run(relay: &Relay, credential: &str, request: Value) -> Result<Value, CtlError> {
-        call(
-            &relay.addr().to_string(),
-            false,
-            parse_credential(credential),
-            &request,
-        )
-        .await
-        .map(|outcome| outcome.data)
+        run_over(relay, RelayTransport::Tcp, credential, request)
+            .await
+            .map(|outcome| outcome.data)
     }
 
     #[tokio::test]
@@ -594,11 +659,11 @@ mod tests {
 
         // Rotation hands back the key the relay now takes, to be saved; the
         // old one stops working.
-        let rotated = call(
-            &relay.addr().to_string(),
-            false,
-            parse_credential(TEST_ADMIN_KEY),
-            &json!({ "op": "rotate_root_key" }),
+        let rotated = run_over(
+            &relay,
+            RelayTransport::Tcp,
+            TEST_ADMIN_KEY,
+            json!({ "op": "rotate_root_key" }),
         )
         .await
         .unwrap();
@@ -615,9 +680,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_relay_that_does_not_answer_is_reported() {
+        let target = Target {
+            server: "127.0.0.1:1",
+            keep_alive: false,
+            transport: RelayTransport::Tcp,
+        };
         let error = call(
-            "127.0.0.1:1",
-            false,
+            &target,
             parse_credential(TEST_ADMIN_KEY),
             &json!({ "op": "keys" }),
         )
@@ -625,5 +694,50 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.code(), crate::error::ErrorCode::ServerUnreachable);
+    }
+
+    /// Over QUIC the administrator's questions share one connection, which
+    /// the link reports with its measurements; a relay with no QUIC is
+    /// refused in words that say so, not as an unreachable one.
+    #[tokio::test]
+    async fn calls_go_over_quic_and_the_link_says_how() {
+        let _process_credential_guard = PROCESS_CREDENTIAL_TEST_LOCK.lock().await;
+        let relay = Relay::start_with_quic("ffi-relay-quic").await;
+        let quic = |request| run_over(&relay, RelayTransport::Quic, TEST_ADMIN_KEY, request);
+        // What the window's own client does: holds the process's pool for
+        // this relay while each call makes and drops a client of its own.
+        let _held = Client::from_credential(
+            relay.addr().to_string(),
+            parse_credential(TEST_ADMIN_KEY).unwrap(),
+            false,
+            None,
+        )
+        .with_relay_transport(RelayTransport::Quic)
+        .unwrap();
+
+        quic(json!({ "op": "auth_status" })).await.unwrap();
+        quic(json!({ "op": "keys" })).await.unwrap();
+        let link = quic(json!({ "op": "link" })).await.unwrap().data;
+        assert_eq!(link["transport"], "quic", "{link}");
+        assert_eq!(link["connectionsCreated"], 1, "{link}");
+        let connections = link["connections"].as_array().unwrap();
+        assert_eq!(connections.len(), 1, "{link}");
+        assert_eq!(connections[0]["pooled"], true, "{link}");
+        assert!(connections[0]["rttUs"].as_u64().is_some(), "{link}");
+
+        let tcp_only = Relay::start("ffi-relay-tcp-only").await;
+        let refused = run_over(
+            &tcp_only,
+            RelayTransport::Quic,
+            TEST_ADMIN_KEY,
+            json!({ "op": "keys" }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            refused.to_string().contains("does not offer QUIC"),
+            "{refused}"
+        );
     }
 }

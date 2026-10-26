@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart' show RelayTransport;
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 
 import 'fake_pb_mapper_api.dart';
@@ -93,6 +94,7 @@ void main() {
           'serverAddress': 'other.example:7666',
           'keepAliveEnabled': false,
           'msgHeaderKey': 'a' * 32,
+          'relayTransport': 'quic',
         }),
       ),
     );
@@ -101,8 +103,38 @@ void main() {
     await tester.enterText(find.byKey(const Key('setup-string')), payload);
     await tester.tap(find.byKey(const Key('setup-string-apply')));
     await settle(tester);
-    expect(api.calls, ['updateConfig(other.example:7666)']);
+    expect(api.calls, ['updateConfig(other.example:7666, quic)']);
     expect(api.config.keepAliveEnabled, isFalse);
+    await finish(tester);
+  });
+
+  testWidgets('the carrier says what the relay offers, and moves tunnels', (
+    tester,
+  ) async {
+    final api = FakePbMapperApi(
+      services: [
+        fakeService(serviceKey: 'nas', relayTransport: RelayTransport.tcp),
+      ],
+    );
+    await _open(tester, api);
+    expect(find.text('This relay offers QUIC on UDP 7667.'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('settings-carrier-quic')));
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await settle(tester);
+    expect(api.calls, ['updateConfig(lb7666.top:7666, quic)']);
+    // Kept on TCP when the answer is later.
+    await tester.tap(find.text('Later'));
+    await settle(tester);
+    expect(api.calls, hasLength(1));
+    expect(api.services.single.relayTransport, RelayTransport.tcp);
+    await finish(tester);
+
+    final bare = FakePbMapperApi()..relayQuicPort = null;
+    await _open(tester, bare);
+    expect(find.text('This relay offers TCP only.'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('settings-carrier-quic')));
+    await settle(tester);
+    expect(find.textContaining("doesn't offer QUIC"), findsOneWidget);
     await finish(tester);
   });
 

@@ -3,7 +3,7 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 
 export 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart'
-    show DirectStage, TunnelPath;
+    show DirectStage, RelayTransport, TunnelPath;
 
 /// Which end of a tunnel this computer is.
 enum TunnelKind {
@@ -51,6 +51,7 @@ class Tunnel {
     this.routedNamespace,
     this.allowDirect = true,
     this.path,
+    this.relayTransport,
   });
 
   factory Tunnel.fromService(ServiceConfigInfo s) => Tunnel(
@@ -65,6 +66,7 @@ class Tunnel {
     createdAtMs: s.createdAtMs,
     allowDirect: s.allowDirect,
     path: s.path,
+    relayTransport: s.relayTransport,
   );
 
   factory Tunnel.fromClient(ClientConfigInfo c) => Tunnel(
@@ -81,6 +83,7 @@ class Tunnel {
     routedNamespace: c.routedNamespace,
     allowDirect: c.allowDirect,
     path: c.path,
+    relayTransport: c.relayTransport,
   );
 
   final TunnelKind kind;
@@ -120,6 +123,13 @@ class Tunnel {
 
   /// How its sessions travel, while it runs.
   final TunnelPath? path;
+
+  /// How it reaches the relay, while it runs: the carrier it started with,
+  /// which a change in Settings does not move until it starts again.
+  final RelayTransport? relayTransport;
+
+  /// Whether what goes through the relay goes over QUIC.
+  bool get overQuic => relayTransport == RelayTransport.quic;
 
   /// Which way its traffic goes, for a tunnel that is up; null otherwise,
   /// and for a share no connection has reached directly.
@@ -185,7 +195,8 @@ class Tunnel {
       other.namespace == namespace &&
       other.routedNamespace == routedNamespace &&
       other.allowDirect == allowDirect &&
-      other.path == path;
+      other.path == path &&
+      other.relayTransport == relayTransport;
 
   @override
   int get hashCode => Object.hash(
@@ -201,6 +212,7 @@ class Tunnel {
     routedNamespace,
     allowDirect,
     path,
+    relayTransport,
   );
 }
 

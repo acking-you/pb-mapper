@@ -10,11 +10,14 @@ import 'package:pb_mapper_ui/src/shell/page_frame.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
+import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
+import 'package:pb_mapper_ui/src/theme/motion.dart';
 import 'package:pb_mapper_ui/src/updates/update_controller.dart';
 import 'package:pb_mapper_ui/src/updates/update_dialog.dart';
 import 'package:pb_mapper_ui/src/widgets/brand_mark.dart';
+import 'package:pb_mapper_ui/src/widgets/carrier.dart';
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -67,6 +70,7 @@ class _RelayCardState extends State<RelayCard> {
   final TextEditingController _address = TextEditingController();
   final TextEditingController _credential = TextEditingController();
   bool _keepAlive = true;
+  RelayTransport _transport = RelayTransport.tcp;
   bool _showCredential = false;
   bool _busy = false;
   bool _testing = false;
@@ -101,10 +105,15 @@ class _RelayCardState extends State<RelayCard> {
     _seed = config;
     _address.text = config.serverAddress;
     _credential.text = config.msgHeaderKey;
-    if (mounted) {
-      setState(() => _keepAlive = config.keepAliveEnabled);
-    } else {
+    void seed() {
       _keepAlive = config.keepAliveEnabled;
+      _transport = config.relayTransport;
+    }
+
+    if (mounted) {
+      setState(seed);
+    } else {
+      seed();
     }
   }
 
@@ -125,10 +134,12 @@ class _RelayCardState extends State<RelayCard> {
     if (_busy || !_validate()) return;
     final l10n = context.l10n;
     setState(() => _busy = true);
+    final from = _store.config.relayTransport;
     final result = await _store.saveRelay(
       address: _address.text,
       credential: _credential.text,
       keepAlive: _keepAlive,
+      relayTransport: _transport,
     );
     if (!mounted) return;
     setState(() {
@@ -153,6 +164,20 @@ class _RelayCardState extends State<RelayCard> {
         description: l10n.relayTestFailed(
           _store.relay?.error ?? l10n.relayNoReason,
         ),
+      );
+    }
+    // Tunnels keep the carrier they started with: offered only once the
+    // relay has answered over the new one.
+    final move = CarrierMove.fromMap(result.data['move']);
+    if (result.success &&
+        !move.isEmpty &&
+        _store.relayState == RelayState.online) {
+      await offerCarrierMove(
+        context,
+        _store,
+        move,
+        from: from,
+        to: _store.config.relayTransport,
       );
     }
   }
@@ -189,6 +214,7 @@ class _RelayCardState extends State<RelayCard> {
         address: _address.text,
         credential: _credential.text,
         keepAlive: _keepAlive,
+        relayTransport: _transport,
       ),
     );
     await Clipboard.setData(ClipboardData(text: payload));
@@ -215,6 +241,7 @@ class _RelayCardState extends State<RelayCard> {
         _address.text = address;
         _credential.text = credential;
         _keepAlive = keepAlive;
+        _transport = setup.relayTransport;
         _edited = true;
       });
       await _save();
@@ -298,6 +325,18 @@ class _RelayCardState extends State<RelayCard> {
               ),
             ),
           ),
+          const SizedBox(height: 14),
+          _CarrierChoice(
+            store: _store,
+            value: _transport,
+            // The hint speaks for the relay last asked, so only while the
+            // address field still names it.
+            sameRelay: () => _address.text.trim() == _store.relayAddress,
+            onChanged: (value) => setState(() {
+              _transport = value;
+              _edited = true;
+            }),
+          ),
           const SizedBox(height: 4),
           SwitchListTile(
             key: const Key('settings-keepalive'),
@@ -349,6 +388,104 @@ class _RelayCardState extends State<RelayCard> {
                 label: Text(l10n.pasteSetup),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// How this computer reaches the relay, and under it, in words, what the
+/// relay last said it offers: a dot only when it offers QUIC, the caution
+/// colour only when QUIC is chosen and it does not.
+class _CarrierChoice extends StatelessWidget {
+  const _CarrierChoice({
+    required this.store,
+    required this.value,
+    required this.sameRelay,
+    required this.onChanged,
+  });
+
+  final AppStore store;
+  final RelayTransport value;
+
+  /// Whether the fields still name the relay [store] last asked.
+  final bool Function() sameRelay;
+  final ValueChanged<RelayTransport> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _ChoiceRow(
+          label: l10n.relayCarrier,
+          child: GlassSegmented<RelayTransport>(
+            key: const Key('settings-carrier'),
+            expand: false,
+            selected: value,
+            onChanged: onChanged,
+            segments: [
+              for (final carrier in RelayTransport.values)
+                GlassSegment(
+                  key: Key('settings-carrier-${carrier.name}'),
+                  value: carrier,
+                  label: carrier.label,
+                  icon: carrierIcon(carrier),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 6),
+        ListenableBuilder(listenable: store, builder: _hint),
+      ],
+    );
+  }
+
+  Widget _hint(BuildContext context, Widget? _) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final known = store.relayQuicKnown && sameRelay();
+    final (Color? dot, String text, bool caution) = switch ((
+      known,
+      store.relayQuicPort,
+      value,
+    )) {
+      (true, final int port, _) => (
+        successColor(scheme),
+        l10n.relayOffersQuic(port),
+        false,
+      ),
+      (true, null, RelayTransport.quic) => (
+        cautionColor(scheme),
+        l10n.relayNoQuic,
+        true,
+      ),
+      (true, null, RelayTransport.tcp) => (null, l10n.relayTcpOnly, false),
+      _ => (null, l10n.relayCarrierHelp, false),
+    };
+    return AnimatedSwitcher(
+      duration: Motion.of(context, const Duration(milliseconds: 220)),
+      child: Row(
+        key: ValueKey(text),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (dot != null)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(top: 5, end: 8),
+              child: StatusDot(color: dot, size: 7),
+            ),
+          Expanded(
+            child: Text(
+              text,
+              key: const Key('settings-carrier-hint'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: caution ? dot : scheme.onSurfaceVariant,
+                fontSize: 12.5,
+              ),
+            ),
           ),
         ],
       ),

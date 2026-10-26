@@ -35,9 +35,12 @@ class RelayServiceRow {
 /// Relay page is on screen ([watch]), and after anything here changes.
 class RelayStore extends ChangeNotifier {
   RelayStore({required this.app, this.interval = const Duration(seconds: 10)})
-    : _seenConfig = (app.relayAddress, app.config.msgHeaderKey) {
+    : _seenConfig = _configOf(app) {
     app.addListener(_onApp);
   }
+
+  static (String, String, RelayTransport) _configOf(AppStore app) =>
+      (app.relayAddress, app.config.msgHeaderKey, app.config.relayTransport);
 
   final AppStore app;
   final Duration interval;
@@ -54,6 +57,10 @@ class RelayStore extends ChangeNotifier {
   List<RelayConnection> connections = const [];
   List<RelayKey> keys = const [];
   List<DirectSession> sessions = const [];
+
+  /// How this computer reaches the relay, as its own connections measure
+  /// it; null until read.
+  RelayLink? link;
   LocalServerStatus local = const LocalServerStatus(
     isRunning: false,
     activeConnections: 0,
@@ -86,7 +93,7 @@ class RelayStore extends ChangeNotifier {
   int _watchers = 0;
   Timer? _timer;
   bool _disposed = false;
-  (String, String) _seenConfig;
+  (String, String, RelayTransport) _seenConfig;
 
   /// Bumped when the relay or the credential changes. A read that began
   /// before then answers for a relay no longer shown, and is dropped.
@@ -115,10 +122,11 @@ class RelayStore extends ChangeNotifier {
     _timer = null;
   }
 
-  /// A new address or credential is a new relay, or a new identity on it:
-  /// nothing read before applies, and nothing still in flight may land.
+  /// A new address or credential is a new relay, or a new identity on it,
+  /// and a new carrier a new way there: nothing read before applies, and
+  /// nothing still in flight may land.
   void _onApp() {
-    final config = (app.relayAddress, app.config.msgHeaderKey);
+    final config = _configOf(app);
     if (config == _seenConfig) return;
     _seenConfig = config;
     _generation++;
@@ -126,6 +134,7 @@ class RelayStore extends ChangeNotifier {
     identityLoaded = false;
     sessions = const [];
     sessionsError = null;
+    link = null;
     _forgetAdmin();
     _notify();
     if (_watchers > 0) unawaited(refresh());
@@ -155,7 +164,7 @@ class RelayStore extends ChangeNotifier {
       await Future.wait([
         _loadLocal(),
         _loadIdentity(generation),
-        if (app.hasRelay) _loadSessions(generation),
+        if (app.hasRelay) ...[_loadSessions(generation), _loadLink(generation)],
       ]);
     } finally {
       loading = false;
@@ -194,6 +203,15 @@ class RelayStore extends ChangeNotifier {
     } catch (error) {
       if (generation == _generation) sessionsError = _reason(error);
     }
+  }
+
+  /// Read from this computer's own connections, so it costs the relay
+  /// nothing; a failure leaves the last reading.
+  Future<void> _loadLink(int generation) async {
+    try {
+      final read = await api.relayLink();
+      if (generation == _generation) link = read;
+    } catch (_) {}
   }
 
   Future<void> _loadLocal() async {
@@ -357,11 +375,18 @@ class RelayStore extends ChangeNotifier {
     _notify();
   }
 
+  /// Run the relay this computer offers; with [quicPort], one that also
+  /// takes QUIC there.
   Future<OperationResult> startLocalRelay({
     required int port,
     required bool keepAlive,
+    int? quicPort,
   }) async {
-    final result = await api.startServer(port: port, keepAlive: keepAlive);
+    final result = await api.startServer(
+      port: port,
+      keepAlive: keepAlive,
+      quicPort: quicPort,
+    );
     await _loadLocal();
     _notify();
     return result;

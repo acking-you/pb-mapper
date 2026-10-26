@@ -23,28 +23,40 @@ class LocalRelayTab extends StatefulWidget {
 
 class _LocalRelayTabState extends State<LocalRelayTab> {
   final TextEditingController _port = TextEditingController(text: '7666');
+  final TextEditingController _quicPort = TextEditingController(text: '7667');
   bool _keepAlive = true;
+  bool _offerQuic = false;
   bool _busy = false;
   String _key = '';
   String? _portError;
+  String? _quicPortError;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     // A relay already running keeps the port it was started on, whatever
     // this field held when the tab was last built.
-    final port = AppScope.of(context).relay.local.port;
-    if (port != null) _port.text = '$port';
+    final local = AppScope.of(context).relay.local;
+    if (local.port case final port?) _port.text = '$port';
+    if (local.quicPort case final quic?) {
+      _quicPort.text = '$quic';
+      _offerQuic = true;
+    }
   }
 
   @override
   void dispose() {
     _port.dispose();
+    _quicPort.dispose();
     super.dispose();
   }
 
-  int? get _portNumber {
-    final port = int.tryParse(_port.text.trim());
+  int? get _portNumber => _parsePort(_port.text);
+
+  int? get _quicPortNumber => _parsePort(_quicPort.text);
+
+  static int? _parsePort(String text) {
+    final port = int.tryParse(text.trim());
     return port != null && port > 0 && port < 65536 ? port : null;
   }
 
@@ -52,17 +64,30 @@ class _LocalRelayTabState extends State<LocalRelayTab> {
     final l10n = context.l10n;
     final running = relay.local.isRunning;
     final port = _portNumber;
-    if (!running && port == null) {
-      setState(() => _portError = l10n.localPortInvalid);
-      return;
+    final quicPort = _offerQuic ? _quicPortNumber : null;
+    if (!running) {
+      // Its own UDP port: the TCP port's carries direct sessions.
+      final quicError = !_offerQuic
+          ? null
+          : quicPort == null
+          ? l10n.localPortInvalid
+          : quicPort == port
+          ? l10n.localQuicPortClash
+          : null;
+      setState(() {
+        _portError = port == null ? l10n.localPortInvalid : null;
+        _quicPortError = quicError;
+      });
+      if (port == null || quicError != null) return;
     }
-    setState(() {
-      _busy = true;
-      _portError = null;
-    });
+    setState(() => _busy = true);
     final result = running
         ? await relay.stopLocalRelay()
-        : await relay.startLocalRelay(port: port!, keepAlive: _keepAlive);
+        : await relay.startLocalRelay(
+            port: port!,
+            keepAlive: _keepAlive,
+            quicPort: quicPort,
+          );
     if (!mounted) return;
     setState(() => _busy = false);
     if (!result.success) {
@@ -89,10 +114,15 @@ class _LocalRelayTabState extends State<LocalRelayTab> {
         : _key;
     if (!mounted || key.isEmpty) return;
     final address = '127.0.0.1:$port';
+    // QUIC stays chosen only where this relay offers it.
+    final carrier = relay.local.quicPort == null
+        ? RelayTransport.tcp
+        : relay.app.config.relayTransport;
     final result = await relay.app.saveRelay(
       address: address,
       credential: key,
       keepAlive: _keepAlive,
+      relayTransport: carrier,
     );
     if (!mounted) return;
     showToast(
@@ -148,6 +178,7 @@ class _LocalRelayTabState extends State<LocalRelayTab> {
                     ),
                     l10n.relayServiceConnections(local.activeConnections),
                     l10n.servicesCount(local.registeredServices),
+                    if (local.quicPort case final quic?) l10n.localQuicOn(quic),
                   ].join('  ·  '),
                   key: const Key('local-stats'),
                   style: theme.textTheme.bodyMedium,
@@ -181,6 +212,43 @@ class _LocalRelayTabState extends State<LocalRelayTab> {
                       onChanged: running || _busy
                           ? null
                           : (v) => setState(() => _keepAlive = v),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: 140,
+                    child: TextField(
+                      key: const Key('local-quic-port'),
+                      controller: _quicPort,
+                      enabled: _offerQuic && !running && !_busy,
+                      keyboardType: TextInputType.number,
+                      style: mono(fontSize: 13.5),
+                      decoration: InputDecoration(
+                        labelText: l10n.localQuicPort,
+                        errorText: _quicPortError,
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: SwitchListTile(
+                      key: const Key('local-quic'),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                      title: Text(l10n.localQuic),
+                      subtitle: Text(l10n.localQuicHelp),
+                      value: _offerQuic,
+                      onChanged: running || _busy
+                          ? null
+                          : (v) => setState(() {
+                              _offerQuic = v;
+                              _quicPortError = null;
+                            }),
                     ),
                   ),
                 ],
