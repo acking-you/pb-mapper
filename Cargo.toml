@@ -46,9 +46,9 @@ kanal = { package = "kanal-plus", version = "0.2.0" }
 parking_lot = "0.12"
 rand = "0.10"
 ring = "0.17.14"
-quinn = { path = "deps/quinn/quinn", version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rcgen = { path = "deps/rcgen/rcgen", version = "0.14.10", default-features = false, features = ["ring"] }
-stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.3" }
+quinn = { path = "deps/quinn/quinn", version = "0.12.0", default-features = false, features = ["runtime-tokio", "rustls-ring", "fast-apple-datapath"] }
+rcgen = { path = "deps/rcgen/rcgen", version = "0.15.0", default-features = false, features = ["ring"] }
+stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.4" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 snafu = "0.9.2"

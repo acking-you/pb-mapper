@@ -1,0 +1,1284 @@
+{
+  "environment": {
+    "cpu": "Apple M3 Pro",
+    "os": "macOS 27.0.1 (26A434), Darwin 27.0.0",
+    "arch": "aarch64",
+    "rust": "1.99.1",
+    "workers_per_endpoint": 2,
+    "network": "loopback",
+    "repeats": 4,
+    "release_debug": 0
+  },
+  "revisions": {
+    "batch": "7c131852b9d45c91dc0ff483e618ccf7c330dd26",
+    "adaptive": "365fe2026930d542ae35c2eedb065779c7b2444b",
+    "trait": "14cfab9569a8e98becd16198b4d593e669e795e5"
+  },
+  "notes": [
+    "Same updated benchmark harness on all three versions. All 60 samples retained.",
+    "The trait binary was built from 18eb2c71. Later commits change Linux inlining and a WASI test cfg only; macOS production code is identical.",
+    "Four repeats in rotating order on a shared development desktop. Range overlaps and CPU interference preclude claims of universal throughput improvement."
+  ],
+  "samples": [
+    {
+      "case": "ipv4-short",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 20.19,
+      "request_p50": "37.00\u00b5s",
+      "request_p99": "114.00\u00b5s",
+      "cpu_user": 1.49,
+      "cpu_system": 3.28,
+      "rss_bytes": 21741568,
+      "load_before": [
+        14.40478515625,
+        25.37646484375,
+        24.98779296875
+      ],
+      "load_after": [
+        13.6513671875,
+        25.0380859375,
+        24.87060546875
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 19.18,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "102.00\u00b5s",
+      "cpu_user": 1.53,
+      "cpu_system": 3.44,
+      "rss_bytes": 20856832,
+      "load_before": [
+        13.6513671875,
+        25.0380859375,
+        24.87060546875
+      ],
+      "load_after": [
+        12.87841796875,
+        24.6884765625,
+        24.748046875
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 0,
+      "label": "trait",
+      "mib_s": 19.5,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "76.00\u00b5s",
+      "cpu_user": 1.52,
+      "cpu_system": 3.39,
+      "rss_bytes": 20938752,
+      "load_before": [
+        12.87841796875,
+        24.6884765625,
+        24.748046875
+      ],
+      "load_after": [
+        12.0068359375,
+        24.3115234375,
+        24.61474609375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 19.23,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "88.00\u00b5s",
+      "cpu_user": 1.54,
+      "cpu_system": 3.41,
+      "rss_bytes": 20905984,
+      "load_before": [
+        12.0068359375,
+        24.3115234375,
+        24.61474609375
+      ],
+      "load_after": [
+        11.28515625,
+        23.95751953125,
+        24.48779296875
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 1,
+      "label": "trait",
+      "mib_s": 19.39,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "76.00\u00b5s",
+      "cpu_user": 1.51,
+      "cpu_system": 3.37,
+      "rss_bytes": 20873216,
+      "load_before": [
+        11.28515625,
+        23.95751953125,
+        24.48779296875
+      ],
+      "load_after": [
+        10.62158203125,
+        23.609375,
+        24.36181640625
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 19.71,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "64.00\u00b5s",
+      "cpu_user": 1.51,
+      "cpu_system": 3.23,
+      "rss_bytes": 20791296,
+      "load_before": [
+        10.62158203125,
+        23.609375,
+        24.36181640625
+      ],
+      "load_after": [
+        10.01123046875,
+        23.26708984375,
+        24.236328125
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 2,
+      "label": "trait",
+      "mib_s": 19.82,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "67.00\u00b5s",
+      "cpu_user": 1.49,
+      "cpu_system": 3.32,
+      "rss_bytes": 20791296,
+      "load_before": [
+        10.01123046875,
+        23.26708984375,
+        24.236328125
+      ],
+      "load_after": [
+        9.36962890625,
+        22.91357421875,
+        24.10595703125
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 19.51,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "69.00\u00b5s",
+      "cpu_user": 1.56,
+      "cpu_system": 3.28,
+      "rss_bytes": 20856832,
+      "load_before": [
+        9.36962890625,
+        22.91357421875,
+        24.10595703125
+      ],
+      "load_after": [
+        8.779296875,
+        22.56591796875,
+        23.97607421875
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 19.21,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "87.00\u00b5s",
+      "cpu_user": 1.52,
+      "cpu_system": 3.42,
+      "rss_bytes": 20971520,
+      "load_before": [
+        8.779296875,
+        22.56591796875,
+        23.97607421875
+      ],
+      "load_after": [
+        8.236328125,
+        22.22412109375,
+        23.84716796875
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 19.31,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "77.00\u00b5s",
+      "cpu_user": 1.54,
+      "cpu_system": 3.35,
+      "rss_bytes": 20889600,
+      "load_before": [
+        8.236328125,
+        22.22412109375,
+        23.84716796875
+      ],
+      "load_after": [
+        7.97705078125,
+        21.93798828125,
+        23.736328125
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 18.38,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "107.00\u00b5s",
+      "cpu_user": 1.56,
+      "cpu_system": 3.48,
+      "rss_bytes": 20889600,
+      "load_before": [
+        7.97705078125,
+        21.93798828125,
+        23.736328125
+      ],
+      "load_after": [
+        7.8984375,
+        21.68994140625,
+        23.63818359375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 3,
+      "label": "trait",
+      "mib_s": 19.4,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "77.00\u00b5s",
+      "cpu_user": 1.52,
+      "cpu_system": 3.4,
+      "rss_bytes": 20807680,
+      "load_before": [
+        7.8984375,
+        21.68994140625,
+        23.63818359375
+      ],
+      "load_after": [
+        10.068359375,
+        21.91064453125,
+        23.70458984375
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 85.56,
+      "request_p50": "284.00\u00b5s",
+      "request_p99": "667.00\u00b5s",
+      "cpu_user": 0.99,
+      "cpu_system": 2.32,
+      "rss_bytes": 23019520,
+      "load_before": [
+        10.068359375,
+        21.91064453125,
+        23.70458984375
+      ],
+      "load_after": [
+        9.822265625,
+        21.6630859375,
+        23.6064453125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 84.23,
+      "request_p50": "288.00\u00b5s",
+      "request_p99": "743.00\u00b5s",
+      "cpu_user": 1.02,
+      "cpu_system": 2.35,
+      "rss_bytes": 21889024,
+      "load_before": [
+        9.822265625,
+        21.6630859375,
+        23.6064453125
+      ],
+      "load_after": [
+        9.822265625,
+        21.6630859375,
+        23.6064453125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 0,
+      "label": "trait",
+      "mib_s": 87.61,
+      "request_p50": "283.00\u00b5s",
+      "request_p99": "594.00\u00b5s",
+      "cpu_user": 0.99,
+      "cpu_system": 2.29,
+      "rss_bytes": 22544384,
+      "load_before": [
+        9.822265625,
+        21.6630859375,
+        23.6064453125
+      ],
+      "load_after": [
+        9.822265625,
+        21.6630859375,
+        23.6064453125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 87.76,
+      "request_p50": "280.00\u00b5s",
+      "request_p99": "656.00\u00b5s",
+      "cpu_user": 0.99,
+      "cpu_system": 2.27,
+      "rss_bytes": 22528000,
+      "load_before": [
+        9.822265625,
+        21.6630859375,
+        23.6064453125
+      ],
+      "load_after": [
+        9.822265625,
+        21.6630859375,
+        23.6064453125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 1,
+      "label": "trait",
+      "mib_s": 86.21,
+      "request_p50": "281.00\u00b5s",
+      "request_p99": "658.00\u00b5s",
+      "cpu_user": 0.99,
+      "cpu_system": 2.31,
+      "rss_bytes": 22724608,
+      "load_before": [
+        9.822265625,
+        21.6630859375,
+        23.6064453125
+      ],
+      "load_after": [
+        9.35595703125,
+        21.36962890625,
+        23.4912109375
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 89.39,
+      "request_p50": "281.00\u00b5s",
+      "request_p99": "539.00\u00b5s",
+      "cpu_user": 1.0,
+      "cpu_system": 2.23,
+      "rss_bytes": 22282240,
+      "load_before": [
+        9.35595703125,
+        21.36962890625,
+        23.4912109375
+      ],
+      "load_after": [
+        9.35595703125,
+        21.36962890625,
+        23.4912109375
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 2,
+      "label": "trait",
+      "mib_s": 88.66,
+      "request_p50": "279.00\u00b5s",
+      "request_p99": "580.00\u00b5s",
+      "cpu_user": 0.99,
+      "cpu_system": 2.25,
+      "rss_bytes": 21889024,
+      "load_before": [
+        9.35595703125,
+        21.36962890625,
+        23.4912109375
+      ],
+      "load_after": [
+        9.35595703125,
+        21.36962890625,
+        23.4912109375
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 89.64,
+      "request_p50": "279.00\u00b5s",
+      "request_p99": "537.00\u00b5s",
+      "cpu_user": 0.99,
+      "cpu_system": 2.22,
+      "rss_bytes": 22216704,
+      "load_before": [
+        9.35595703125,
+        21.36962890625,
+        23.4912109375
+      ],
+      "load_after": [
+        9.35595703125,
+        21.36962890625,
+        23.4912109375
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 89.99,
+      "request_p50": "280.00\u00b5s",
+      "request_p99": "540.00\u00b5s",
+      "cpu_user": 0.99,
+      "cpu_system": 2.23,
+      "rss_bytes": 22462464,
+      "load_before": [
+        9.35595703125,
+        21.36962890625,
+        23.4912109375
+      ],
+      "load_after": [
+        10.2880859375,
+        21.36328125,
+        23.4765625
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 84.62,
+      "request_p50": "283.00\u00b5s",
+      "request_p99": "757.00\u00b5s",
+      "cpu_user": 1.01,
+      "cpu_system": 2.29,
+      "rss_bytes": 22331392,
+      "load_before": [
+        10.2880859375,
+        21.36328125,
+        23.4765625
+      ],
+      "load_after": [
+        10.2880859375,
+        21.36328125,
+        23.4765625
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 78.01,
+      "request_p50": "301.00\u00b5s",
+      "request_p99": "822.00\u00b5s",
+      "cpu_user": 1.06,
+      "cpu_system": 2.51,
+      "rss_bytes": 22331392,
+      "load_before": [
+        10.2880859375,
+        21.36328125,
+        23.4765625
+      ],
+      "load_after": [
+        10.2880859375,
+        21.36328125,
+        23.4765625
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 3,
+      "label": "trait",
+      "mib_s": 80.51,
+      "request_p50": "290.00\u00b5s",
+      "request_p99": "872.00\u00b5s",
+      "cpu_user": 1.02,
+      "cpu_system": 2.41,
+      "rss_bytes": 22364160,
+      "load_before": [
+        10.2880859375,
+        21.36328125,
+        23.4765625
+      ],
+      "load_after": [
+        10.2880859375,
+        21.36328125,
+        23.4765625
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 17.9,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "131.00\u00b5s",
+      "cpu_user": 1.58,
+      "cpu_system": 3.59,
+      "rss_bytes": 20840448,
+      "load_before": [
+        10.2880859375,
+        21.36328125,
+        23.4765625
+      ],
+      "load_after": [
+        9.7841796875,
+        21.07470703125,
+        23.3623046875
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 18.71,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "97.00\u00b5s",
+      "cpu_user": 1.52,
+      "cpu_system": 3.45,
+      "rss_bytes": 20889600,
+      "load_before": [
+        9.7841796875,
+        21.07470703125,
+        23.3623046875
+      ],
+      "load_after": [
+        9.56103515625,
+        20.8408203125,
+        23.26611328125
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 0,
+      "label": "trait",
+      "mib_s": 20.12,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "64.00\u00b5s",
+      "cpu_user": 1.47,
+      "cpu_system": 3.33,
+      "rss_bytes": 20774912,
+      "load_before": [
+        9.56103515625,
+        20.8408203125,
+        23.26611328125
+      ],
+      "load_after": [
+        8.955078125,
+        20.52783203125,
+        23.14111328125
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 20.05,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "61.00\u00b5s",
+      "cpu_user": 1.48,
+      "cpu_system": 3.33,
+      "rss_bytes": 20938752,
+      "load_before": [
+        8.955078125,
+        20.52783203125,
+        23.14111328125
+      ],
+      "load_after": [
+        8.55810546875,
+        20.25341796875,
+        23.02880859375
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 1,
+      "label": "trait",
+      "mib_s": 20.02,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "66.00\u00b5s",
+      "cpu_user": 1.48,
+      "cpu_system": 3.34,
+      "rss_bytes": 20856832,
+      "load_before": [
+        8.55810546875,
+        20.25341796875,
+        23.02880859375
+      ],
+      "load_after": [
+        8.03271484375,
+        19.9501953125,
+        22.9052734375
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 19.82,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "60.00\u00b5s",
+      "cpu_user": 1.51,
+      "cpu_system": 3.36,
+      "rss_bytes": 20856832,
+      "load_before": [
+        8.03271484375,
+        19.9501953125,
+        22.9052734375
+      ],
+      "load_after": [
+        7.78955078125,
+        19.70166015625,
+        22.80029296875
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 2,
+      "label": "trait",
+      "mib_s": 19.92,
+      "request_p50": "40.00\u00b5s",
+      "request_p99": "61.00\u00b5s",
+      "cpu_user": 1.48,
+      "cpu_system": 3.36,
+      "rss_bytes": 20856832,
+      "load_before": [
+        7.78955078125,
+        19.70166015625,
+        22.80029296875
+      ],
+      "load_after": [
+        7.24560546875,
+        19.39111328125,
+        22.67236328125
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 19.96,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "60.00\u00b5s",
+      "cpu_user": 1.5,
+      "cpu_system": 3.34,
+      "rss_bytes": 20758528,
+      "load_before": [
+        7.24560546875,
+        19.39111328125,
+        22.67236328125
+      ],
+      "load_after": [
+        6.7451171875,
+        19.08544921875,
+        22.544921875
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 18.25,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "135.00\u00b5s",
+      "cpu_user": 1.55,
+      "cpu_system": 3.57,
+      "rss_bytes": 20840448,
+      "load_before": [
+        6.7451171875,
+        19.08544921875,
+        22.544921875
+      ],
+      "load_after": [
+        7.85986328125,
+        18.91748046875,
+        22.44482421875
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 16.6,
+      "request_p50": "42.00\u00b5s",
+      "request_p99": "177.00\u00b5s",
+      "cpu_user": 1.68,
+      "cpu_system": 3.85,
+      "rss_bytes": 20774912,
+      "load_before": [
+        7.85986328125,
+        18.91748046875,
+        22.44482421875
+      ],
+      "load_after": [
+        7.71044921875,
+        18.70263671875,
+        22.34814453125
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 18.7,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "100.00\u00b5s",
+      "cpu_user": 1.53,
+      "cpu_system": 3.58,
+      "rss_bytes": 20922368,
+      "load_before": [
+        7.71044921875,
+        18.70263671875,
+        22.34814453125
+      ],
+      "load_after": [
+        7.4130859375,
+        18.45849609375,
+        22.240234375
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 3,
+      "label": "trait",
+      "mib_s": 19.08,
+      "request_p50": "41.00\u00b5s",
+      "request_p99": "86.00\u00b5s",
+      "cpu_user": 1.52,
+      "cpu_system": 3.53,
+      "rss_bytes": 20905984,
+      "load_before": [
+        7.4130859375,
+        18.45849609375,
+        22.240234375
+      ],
+      "load_after": [
+        7.1396484375,
+        18.21826171875,
+        22.13330078125
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 234.43,
+      "request_p50": "1.07s",
+      "request_p99": "1.17s",
+      "cpu_user": 1.84,
+      "cpu_system": 6.93,
+      "rss_bytes": 12599296,
+      "load_before": [
+        7.1396484375,
+        18.21826171875,
+        22.13330078125
+      ],
+      "load_after": [
+        6.96826171875,
+        17.99853515625,
+        22.03271484375
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 243.2,
+      "request_p50": "1.02s",
+      "request_p99": "1.11s",
+      "cpu_user": 1.8,
+      "cpu_system": 6.72,
+      "rss_bytes": 12763136,
+      "load_before": [
+        6.96826171875,
+        17.99853515625,
+        22.03271484375
+      ],
+      "load_after": [
+        8.251953125,
+        18.08154296875,
+        22.0380859375
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 0,
+      "label": "trait",
+      "mib_s": 232.51,
+      "request_p50": "1.06s",
+      "request_p99": "1.16s",
+      "cpu_user": 1.83,
+      "cpu_system": 7.03,
+      "rss_bytes": 12632064,
+      "load_before": [
+        8.251953125,
+        18.08154296875,
+        22.0380859375
+      ],
+      "load_after": [
+        8.251953125,
+        18.08154296875,
+        22.0380859375
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 244.08,
+      "request_p50": "1.03s",
+      "request_p99": "1.09s",
+      "cpu_user": 1.77,
+      "cpu_system": 6.68,
+      "rss_bytes": 13107200,
+      "load_before": [
+        8.251953125,
+        18.08154296875,
+        22.0380859375
+      ],
+      "load_after": [
+        8.0712890625,
+        17.880859375,
+        21.94384765625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 1,
+      "label": "trait",
+      "mib_s": 209.96,
+      "request_p50": "1.01s",
+      "request_p99": "1.65s",
+      "cpu_user": 1.92,
+      "cpu_system": 7.49,
+      "rss_bytes": 12730368,
+      "load_before": [
+        8.0712890625,
+        17.880859375,
+        21.94384765625
+      ],
+      "load_after": [
+        8.0654296875,
+        17.716796875,
+        21.86181640625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 241.94,
+      "request_p50": "1.05s",
+      "request_p99": "1.07s",
+      "cpu_user": 1.83,
+      "cpu_system": 6.85,
+      "rss_bytes": 12599296,
+      "load_before": [
+        8.0654296875,
+        17.716796875,
+        21.86181640625
+      ],
+      "load_after": [
+        10.14208984375,
+        17.98681640625,
+        21.9326171875
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 2,
+      "label": "trait",
+      "mib_s": 255.4,
+      "request_p50": "994.30ms",
+      "request_p99": "1.03s",
+      "cpu_user": 1.76,
+      "cpu_system": 6.39,
+      "rss_bytes": 12746752,
+      "load_before": [
+        10.14208984375,
+        17.98681640625,
+        21.9326171875
+      ],
+      "load_after": [
+        10.13037109375,
+        17.85400390625,
+        21.8623046875
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 247.19,
+      "request_p50": "1.02s",
+      "request_p99": "1.06s",
+      "cpu_user": 1.81,
+      "cpu_system": 6.63,
+      "rss_bytes": 12566528,
+      "load_before": [
+        10.13037109375,
+        17.85400390625,
+        21.8623046875
+      ],
+      "load_after": [
+        10.19970703125,
+        17.73974609375,
+        21.79833984375
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 230.87,
+      "request_p50": "1.08s",
+      "request_p99": "1.17s",
+      "cpu_user": 1.85,
+      "cpu_system": 6.94,
+      "rss_bytes": 12632064,
+      "load_before": [
+        10.19970703125,
+        17.73974609375,
+        21.79833984375
+      ],
+      "load_after": [
+        10.18359375,
+        17.61083984375,
+        21.72900390625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 241.58,
+      "request_p50": "1.06s",
+      "request_p99": "1.09s",
+      "cpu_user": 1.82,
+      "cpu_system": 6.85,
+      "rss_bytes": 12550144,
+      "load_before": [
+        10.18359375,
+        17.61083984375,
+        21.72900390625
+      ],
+      "load_after": [
+        10.24853515625,
+        17.5009765625,
+        21.666015625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 241.78,
+      "request_p50": "1.05s",
+      "request_p99": "1.09s",
+      "cpu_user": 1.81,
+      "cpu_system": 6.74,
+      "rss_bytes": 12402688,
+      "load_before": [
+        10.24853515625,
+        17.5009765625,
+        21.666015625
+      ],
+      "load_after": [
+        10.068359375,
+        17.3427734375,
+        21.5859375
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 3,
+      "label": "trait",
+      "mib_s": 233.05,
+      "request_p50": "1.07s",
+      "request_p99": "1.15s",
+      "cpu_user": 1.81,
+      "cpu_system": 6.81,
+      "rss_bytes": 12779520,
+      "load_before": [
+        10.068359375,
+        17.3427734375,
+        21.5859375
+      ],
+      "load_after": [
+        10.068359375,
+        17.3427734375,
+        21.5859375
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 229.91,
+      "request_p50": "3.33s",
+      "request_p99": "3.42s",
+      "cpu_user": 6.55,
+      "cpu_system": 24.05,
+      "rss_bytes": 14188544,
+      "load_before": [
+        10.068359375,
+        17.3427734375,
+        21.5859375
+      ],
+      "load_after": [
+        8.9267578125,
+        16.73681640625,
+        21.29541015625
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 252.14,
+      "request_p50": "3.02s",
+      "request_p99": "3.08s",
+      "cpu_user": 6.18,
+      "cpu_system": 22.3,
+      "rss_bytes": 14270464,
+      "load_before": [
+        8.9267578125,
+        16.73681640625,
+        21.29541015625
+      ],
+      "load_after": [
+        7.9765625,
+        16.14453125,
+        21.00390625
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 0,
+      "label": "trait",
+      "mib_s": 248.18,
+      "request_p50": "3.07s",
+      "request_p99": "3.18s",
+      "cpu_user": 6.21,
+      "cpu_system": 22.67,
+      "rss_bytes": 14303232,
+      "load_before": [
+        7.9765625,
+        16.14453125,
+        21.00390625
+      ],
+      "load_after": [
+        7.96044921875,
+        15.875,
+        20.85107421875
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 255.85,
+      "request_p50": "2.97s",
+      "request_p99": "3.09s",
+      "cpu_user": 6.16,
+      "cpu_system": 21.98,
+      "rss_bytes": 13729792,
+      "load_before": [
+        7.96044921875,
+        15.875,
+        20.85107421875
+      ],
+      "load_after": [
+        8.85986328125,
+        15.79833984375,
+        20.7646484375
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 1,
+      "label": "trait",
+      "mib_s": 236.77,
+      "request_p50": "3.28s",
+      "request_p99": "3.36s",
+      "cpu_user": 6.29,
+      "cpu_system": 23.22,
+      "rss_bytes": 16367616,
+      "load_before": [
+        8.85986328125,
+        15.79833984375,
+        20.7646484375
+      ],
+      "load_after": [
+        7.92333984375,
+        15.251953125,
+        20.482421875
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 236.22,
+      "request_p50": "3.27s",
+      "request_p99": "3.30s",
+      "cpu_user": 6.23,
+      "cpu_system": 23.27,
+      "rss_bytes": 16105472,
+      "load_before": [
+        7.92333984375,
+        15.251953125,
+        20.482421875
+      ],
+      "load_after": [
+        7.95166015625,
+        14.89697265625,
+        20.26416015625
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 2,
+      "label": "trait",
+      "mib_s": 225.49,
+      "request_p50": "3.31s",
+      "request_p99": "3.77s",
+      "cpu_user": 6.32,
+      "cpu_system": 23.84,
+      "rss_bytes": 20365312,
+      "load_before": [
+        7.95166015625,
+        14.89697265625,
+        20.26416015625
+      ],
+      "load_after": [
+        8.3525390625,
+        14.751953125,
+        20.1494140625
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 233.46,
+      "request_p50": "3.26s",
+      "request_p99": "3.41s",
+      "cpu_user": 6.48,
+      "cpu_system": 23.78,
+      "rss_bytes": 15040512,
+      "load_before": [
+        8.3525390625,
+        14.751953125,
+        20.1494140625
+      ],
+      "load_after": [
+        7.7685546875,
+        14.30712890625,
+        19.89599609375
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 236.78,
+      "request_p50": "3.22s",
+      "request_p99": "3.32s",
+      "cpu_user": 6.41,
+      "cpu_system": 23.73,
+      "rss_bytes": 14745600,
+      "load_before": [
+        7.7685546875,
+        14.30712890625,
+        19.89599609375
+      ],
+      "load_after": [
+        7.60302734375,
+        13.94873046875,
+        19.669921875
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 245.96,
+      "request_p50": "3.12s",
+      "request_p99": "3.17s",
+      "cpu_user": 6.32,
+      "cpu_system": 22.61,
+      "rss_bytes": 13516800,
+      "load_before": [
+        7.60302734375,
+        13.94873046875,
+        19.669921875
+      ],
+      "load_after": [
+        7.35009765625,
+        13.68603515625,
+        19.50927734375
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 234.01,
+      "request_p50": "3.25s",
+      "request_p99": "3.36s",
+      "cpu_user": 6.49,
+      "cpu_system": 23.79,
+      "rss_bytes": 14483456,
+      "load_before": [
+        7.35009765625,
+        13.68603515625,
+        19.50927734375
+      ],
+      "load_after": [
+        7.51953125,
+        13.4208984375,
+        19.31298828125
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 3,
+      "label": "trait",
+      "mib_s": 247.89,
+      "request_p50": "3.09s",
+      "request_p99": "3.17s",
+      "cpu_user": 6.18,
+      "cpu_system": 22.54,
+      "rss_bytes": 13500416,
+      "load_before": [
+        7.51953125,
+        13.4208984375,
+        19.31298828125
+      ],
+      "load_after": [
+        7.51904296875,
+        13.2255859375,
+        19.1748046875
+      ]
+    }
+  ]
+}

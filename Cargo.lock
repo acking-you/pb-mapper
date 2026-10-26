@@ -1760,16 +1760,17 @@ dependencies = [
 
 [[package]]
 name = "quinn"
-version = "0.11.12"
+version = "0.12.0"
 dependencies = [
  "bytes",
  "cfg_aliases",
+ "parking_lot",
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -1778,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.19"
+version = "0.12.0"
 dependencies = [
  "bytes",
  "getrandom 0.4.1",
@@ -1798,14 +1799,13 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.16"
+version = "0.6.3"
 dependencies = [
  "cfg_aliases",
  "libc",
- "once_cell",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "rcgen"
-version = "0.14.10"
+version = "0.15.0"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -2248,7 +2248,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "stun-proto"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "stun-types"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "byteorder",
  "crc",

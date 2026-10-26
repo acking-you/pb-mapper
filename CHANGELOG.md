@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+- Recover Windows direct handshakes when a wildcard-bound UDP socket rejects a redundant IPv4 source hint with error 10022. Retry only when Windows would select the same source, preserving the socket, port and authenticated direct/fallback behavior. This fix is included in repository builds through the pinned Quinn fork; registry SDK packages require a corresponding dependency release.
+
 ## [0.9.6] - 2026-10-26
 - Download and verify Android updates inside the app, then open the system installer. Continue automatically after install permission is granted, and reuse verified downloads after a denied permission or cancelled installer.
 - Build mobile releases locally with a pinned persistent Android certificate, following proxy-everything. Stop publishing CI-signed APKs and unsigned IPAs; verify APK identity, effective versionCode, signatures, and 16 KiB alignment before adding them to the signed release manifest.

@@ -1,0 +1,187 @@
+=== quinn-trait-test-fast.log ===
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.13s
+     Running unittests src/lib.rs (target/debug/deps/quinn_udp-4c78aea16135e556)
+
+running 6 tests
+test tests::effective_segment_size ... ok
+test cmsg::tests::roundtrip ... ok
+test imp::tests::recv_single_skips_truncated_datagrams ... ok
+test apple_fast::tests::disabled_batching_preserves_datagram_boundaries ... ok
+test imp::tests::recv_single_after_truncation_returns_would_block_instead_of_spin ... ok
+test imp::tests::adaptive_receive_preserves_bursts_and_returns_to_single ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tests.rs (target/debug/deps/tests-0babc73fcc87ae3e)
+
+running 13 tests
+test sndbuf_cmsg_boundary ... ok
+test sndbuf_cmsg_boundary_fast_path ... ok
+test large_single_datagram_is_not_segmented ... ok
+test basic_src_ip ... ok
+test socket_buffers ... ok
+test basic ... ok
+test apple_fast_datapath ... ok
+test ecn_v4_mapped_v6 ... ok
+test ecn_v6 ... ok
+test ecn_v4 ... ok
+test state_before_bind ... ok
+test ecn_v6_dualstack ... ok
+test gso ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests quinn_udp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== quinn-trait-test-default.log ===
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.47s
+     Running unittests src/lib.rs (target/debug/deps/quinn_udp-93085f7bfa182a6b)
+
+running 4 tests
+test tests::effective_segment_size ... ok
+test cmsg::tests::roundtrip ... ok
+test imp::tests::recv_single_after_truncation_returns_would_block_instead_of_spin ... ok
+test imp::tests::recv_single_skips_truncated_datagrams ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tests.rs (target/debug/deps/tests-ffc7fa17460eee94)
+
+running 11 tests
+test gso ... ignored
+test state_before_bind ... ok
+test basic_src_ip ... ok
+test basic ... ok
+test sndbuf_cmsg_boundary ... ok
+test large_single_datagram_is_not_segmented ... ok
+test socket_buffers ... ok
+test ecn_v4 ... ok
+test ecn_v4_mapped_v6 ... ok
+test ecn_v6 ... ok
+test ecn_v6_dualstack ... ok
+
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests quinn_udp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== quinn-trait-ios-quinn_udp-fcc8455b512531e2.log ===
+
+running 6 tests
+test tests::effective_segment_size ... ok
+test cmsg::tests::roundtrip ... ok
+test imp::tests::adaptive_receive_preserves_bursts_and_returns_to_single ... ok
+test imp::tests::recv_single_skips_truncated_datagrams ... ok
+test apple_fast::tests::disabled_batching_preserves_datagram_boundaries ... ok
+test imp::tests::recv_single_after_truncation_returns_would_block_instead_of_spin ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== quinn-trait-ios-tests-86da34073b9d101a.log ===
+
+running 13 tests
+test apple_fast_datapath ... ok
+test sndbuf_cmsg_boundary_fast_path ... ok
+test gso ... ok
+test basic_src_ip ... ok
+test state_before_bind ... ok
+test sndbuf_cmsg_boundary ... ok
+test large_single_datagram_is_not_segmented ... ok
+test ecn_v4 ... ok
+test socket_buffers ... ok
+test ecn_v6 ... ok
+test basic ... ok
+test ecn_v4_mapped_v6 ... ok
+test ecn_v6_dualstack ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== quinn-trait-aarch64-apple-darwin.log ===
+   Compiling libc v0.2.191
+    Checking once_cell v1.21.4
+    Checking log v0.4.34
+    Checking pin-project-lite v0.2.17
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Checking tracing-core v0.1.36
+    Checking tracing v0.1.44
+    Checking socket2 v0.6.5
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.99s
+
+=== quinn-trait-x86_64-unknown-linux-gnu.log ===
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.89s
+
+=== quinn-trait-x86_64-pc-windows-gnu.log ===
+    Checking once_cell v1.21.4
+    Checking windows-link v0.2.1
+   Compiling libc v0.2.191
+    Checking pin-project-lite v0.2.17
+    Checking log v0.4.34
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Checking windows-sys v0.61.2
+    Checking tracing-core v0.1.36
+    Checking tracing v0.1.44
+    Checking socket2 v0.6.5
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.02s
+
+=== quinn-trait-aarch64-apple-ios.log ===
+   Compiling libc v0.2.191
+    Checking once_cell v1.21.4
+    Checking log v0.4.34
+    Checking pin-project-lite v0.2.17
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Checking tracing-core v0.1.36
+    Checking tracing v0.1.44
+    Checking socket2 v0.6.5
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.65s
+
+=== quinn-trait-aarch64-apple-ios-sim.log ===
+   Compiling libc v0.2.191
+    Checking once_cell v1.21.4
+    Checking pin-project-lite v0.2.17
+    Checking log v0.4.34
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Checking tracing-core v0.1.36
+    Checking socket2 v0.6.5
+    Checking tracing v0.1.44
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.68s
+
+=== quinn-trait-aarch64-linux-android.log ===
+   Compiling libc v0.2.191
+    Checking once_cell v1.21.4
+    Checking log v0.4.34
+    Checking pin-project-lite v0.2.17
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Checking tracing-core v0.1.36
+    Checking socket2 v0.6.5
+    Checking tracing v0.1.44
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.12s
+
+=== quinn-trait-wasm32-wasip2.log ===
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
+
+=== quinn-trait-wasi-lib-tests.log ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s
+
+=== quinn-trait-wasi-test-build.log ===
+   Compiling once_cell v1.21.4
+   Compiling pin-project-lite v0.2.17
+   Compiling log v0.4.34
+   Compiling quinn-udp v0.6.3 (/Users/boliu/rust_pro/my_pro/pb-mapper/deps/quinn/quinn-udp)
+   Compiling libc v0.2.191
+   Compiling socket2 v0.6.5
+   Compiling tracing-core v0.1.36
+   Compiling tracing v0.1.44
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.24s
+  Executable unittests src/lib.rs (target/wasm32-wasip2/debug/deps/quinn_udp-3ec2138da97557bd.wasm)
+  Executable tests/tests.rs (target/wasm32-wasip2/debug/deps/tests-d308861aa0e2ea7f.wasm)

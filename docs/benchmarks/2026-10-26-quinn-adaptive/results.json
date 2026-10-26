@@ -1,0 +1,1202 @@
+{
+  "environment": {
+    "cpu": "Apple M3 Pro",
+    "os": "macOS 27.0.1 (26A434), Darwin 27.0.0",
+    "arch": "aarch64",
+    "rust": "1.99.1",
+    "workers_per_endpoint": 2,
+    "network": "loopback",
+    "repeats": 4,
+    "release_debug": 0
+  },
+  "revisions": {
+    "old": "6cbaeaaa10182068f086239b62e8274db00ff08e",
+    "batch": "7c131852b9d45c91dc0ff483e618ccf7c330dd26",
+    "single": "7c131852b9d45c91dc0ff483e618ccf7c330dd26 with receive-only recv_single control",
+    "adaptive": "365fe2026930d542ae35c2eedb065779c7b2444b"
+  },
+  "notes": [
+    "All versions use the updated bulk benchmark: whole-request latency, histogram aggregation excluded from elapsed throughput time.",
+    "single changes receive only; segmented sends still use sendmsg_x.",
+    "These 56 trials precede the trait refactor. All completed samples retained, including concurrent bulk regressions.",
+    "Shared desktop host; load averages recorded. Not WAN bandwidth or Windows/Linux performance."
+  ],
+  "samples": [
+    {
+      "case": "ipv4-short",
+      "repeat": 0,
+      "label": "old",
+      "mib_s": 19.5,
+      "request_p50": "40.00µs",
+      "request_p99": "86.00µs",
+      "cpu_user": 1.5,
+      "cpu_system": 3.39,
+      "rss_bytes": 20758528,
+      "load_before": [
+        9.0341796875,
+        10.17138671875,
+        8.66552734375
+      ],
+      "load_after": [
+        8.7109375,
+        10.08544921875,
+        8.64404296875
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 18.17,
+      "request_p50": "41.00µs",
+      "request_p99": "127.00µs",
+      "cpu_user": 1.61,
+      "cpu_system": 3.63,
+      "rss_bytes": 19300352,
+      "load_before": [
+        8.7109375,
+        10.08544921875,
+        8.64404296875
+      ],
+      "load_after": [
+        8.41357421875,
+        10.0009765625,
+        8.62255859375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 0,
+      "label": "single",
+      "mib_s": 15.68,
+      "request_p50": "41.00µs",
+      "request_p99": "184.00µs",
+      "cpu_user": 1.79,
+      "cpu_system": 4.2,
+      "rss_bytes": 19873792,
+      "load_before": [
+        8.41357421875,
+        10.0009765625,
+        8.62255859375
+      ],
+      "load_after": [
+        8.70068359375,
+        10.03369140625,
+        8.64208984375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 16.76,
+      "request_p50": "40.00µs",
+      "request_p99": "160.00µs",
+      "cpu_user": 1.7,
+      "cpu_system": 3.95,
+      "rss_bytes": 20168704,
+      "load_before": [
+        8.70068359375,
+        10.03369140625,
+        8.64208984375
+      ],
+      "load_after": [
+        8.404296875,
+        9.94970703125,
+        8.62060546875
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 17.96,
+      "request_p50": "40.00µs",
+      "request_p99": "134.00µs",
+      "cpu_user": 1.61,
+      "cpu_system": 3.64,
+      "rss_bytes": 20938752,
+      "load_before": [
+        8.404296875,
+        9.94970703125,
+        8.62060546875
+      ],
+      "load_after": [
+        8.29150390625,
+        9.900390625,
+        8.61083984375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 1,
+      "label": "single",
+      "mib_s": 20.3,
+      "request_p50": "40.00µs",
+      "request_p99": "60.00µs",
+      "cpu_user": 1.49,
+      "cpu_system": 3.23,
+      "rss_bytes": 20840448,
+      "load_before": [
+        8.29150390625,
+        9.900390625,
+        8.61083984375
+      ],
+      "load_after": [
+        8.26806640625,
+        9.86865234375,
+        8.60693359375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 19.53,
+      "request_p50": "40.00µs",
+      "request_p99": "82.00µs",
+      "cpu_user": 1.52,
+      "cpu_system": 3.34,
+      "rss_bytes": 20856832,
+      "load_before": [
+        8.26806640625,
+        9.86865234375,
+        8.60693359375
+      ],
+      "load_after": [
+        8.24658203125,
+        9.83740234375,
+        8.60302734375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 1,
+      "label": "old",
+      "mib_s": 20.28,
+      "request_p50": "39.00µs",
+      "request_p99": "74.00µs",
+      "cpu_user": 1.46,
+      "cpu_system": 3.28,
+      "rss_bytes": 20774912,
+      "load_before": [
+        8.24658203125,
+        9.83740234375,
+        8.60302734375
+      ],
+      "load_after": [
+        8.06640625,
+        9.7734375,
+        8.58740234375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 2,
+      "label": "single",
+      "mib_s": 20.09,
+      "request_p50": "40.00µs",
+      "request_p99": "62.00µs",
+      "cpu_user": 1.48,
+      "cpu_system": 3.29,
+      "rss_bytes": 20856832,
+      "load_before": [
+        8.06640625,
+        9.7734375,
+        8.58740234375
+      ],
+      "load_after": [
+        7.50048828125,
+        9.62744140625,
+        8.54248046875
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 20.0,
+      "request_p50": "40.00µs",
+      "request_p99": "63.00µs",
+      "cpu_user": 1.48,
+      "cpu_system": 3.24,
+      "rss_bytes": 20922368,
+      "load_before": [
+        7.50048828125,
+        9.62744140625,
+        8.54248046875
+      ],
+      "load_after": [
+        7.2197265625,
+        9.53369140625,
+        8.515625
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 2,
+      "label": "old",
+      "mib_s": 20.18,
+      "request_p50": "40.00µs",
+      "request_p99": "61.00µs",
+      "cpu_user": 1.46,
+      "cpu_system": 3.27,
+      "rss_bytes": 20791296,
+      "load_before": [
+        7.2197265625,
+        9.53369140625,
+        8.515625
+      ],
+      "load_after": [
+        7.04150390625,
+        9.4580078125,
+        8.49462890625
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 19.8,
+      "request_p50": "41.00µs",
+      "request_p99": "60.00µs",
+      "cpu_user": 1.52,
+      "cpu_system": 3.32,
+      "rss_bytes": 20922368,
+      "load_before": [
+        7.04150390625,
+        9.4580078125,
+        8.49462890625
+      ],
+      "load_after": [
+        6.7177734375,
+        9.3505859375,
+        8.46240234375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 19.9,
+      "request_p50": "40.00µs",
+      "request_p99": "61.00µs",
+      "cpu_user": 1.5,
+      "cpu_system": 3.31,
+      "rss_bytes": 20938752,
+      "load_before": [
+        6.7177734375,
+        9.3505859375,
+        8.46240234375
+      ],
+      "load_after": [
+        6.259765625,
+        9.2119140625,
+        8.41845703125
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 3,
+      "label": "old",
+      "mib_s": 19.65,
+      "request_p50": "40.00µs",
+      "request_p99": "72.00µs",
+      "cpu_user": 1.47,
+      "cpu_system": 3.28,
+      "rss_bytes": 20758528,
+      "load_before": [
+        6.259765625,
+        9.2119140625,
+        8.41845703125
+      ],
+      "load_after": [
+        6.07861328125,
+        9.125,
+        8.39208984375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 19.9,
+      "request_p50": "40.00µs",
+      "request_p99": "73.00µs",
+      "cpu_user": 1.52,
+      "cpu_system": 3.34,
+      "rss_bytes": 20905984,
+      "load_before": [
+        6.07861328125,
+        9.125,
+        8.39208984375
+      ],
+      "load_after": [
+        6.232421875,
+        9.10595703125,
+        8.3896484375
+      ]
+    },
+    {
+      "case": "ipv4-short",
+      "repeat": 3,
+      "label": "single",
+      "mib_s": 19.76,
+      "request_p50": "40.00µs",
+      "request_p99": "73.00µs",
+      "cpu_user": 1.5,
+      "cpu_system": 3.33,
+      "rss_bytes": 20791296,
+      "load_before": [
+        6.232421875,
+        9.10595703125,
+        8.3896484375
+      ],
+      "load_after": [
+        5.81298828125,
+        8.97119140625,
+        8.34619140625
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 91.53,
+      "request_p50": "275.00µs",
+      "request_p99": "498.00µs",
+      "cpu_user": 0.99,
+      "cpu_system": 2.19,
+      "rss_bytes": 22216704,
+      "load_before": [
+        5.81298828125,
+        8.97119140625,
+        8.34619140625
+      ],
+      "load_after": [
+        5.66748046875,
+        8.88818359375,
+        8.3203125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 0,
+      "label": "single",
+      "mib_s": 94.18,
+      "request_p50": "275.00µs",
+      "request_p99": "484.00µs",
+      "cpu_user": 0.99,
+      "cpu_system": 2.15,
+      "rss_bytes": 21200896,
+      "load_before": [
+        5.66748046875,
+        8.88818359375,
+        8.3203125
+      ],
+      "load_after": [
+        5.66748046875,
+        8.88818359375,
+        8.3203125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 91.65,
+      "request_p50": "276.00µs",
+      "request_p99": "502.00µs",
+      "cpu_user": 0.98,
+      "cpu_system": 2.19,
+      "rss_bytes": 22085632,
+      "load_before": [
+        5.66748046875,
+        8.88818359375,
+        8.3203125
+      ],
+      "load_after": [
+        5.66748046875,
+        8.88818359375,
+        8.3203125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 1,
+      "label": "single",
+      "mib_s": 93.92,
+      "request_p50": "275.00µs",
+      "request_p99": "527.00µs",
+      "cpu_user": 0.97,
+      "cpu_system": 2.14,
+      "rss_bytes": 21266432,
+      "load_before": [
+        5.66748046875,
+        8.88818359375,
+        8.3203125
+      ],
+      "load_after": [
+        5.66748046875,
+        8.88818359375,
+        8.3203125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 90.79,
+      "request_p50": "273.00µs",
+      "request_p99": "596.00µs",
+      "cpu_user": 0.95,
+      "cpu_system": 2.21,
+      "rss_bytes": 22364160,
+      "load_before": [
+        5.66748046875,
+        8.88818359375,
+        8.3203125
+      ],
+      "load_after": [
+        5.61376953125,
+        8.8232421875,
+        8.30078125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 85.16,
+      "request_p50": "284.00µs",
+      "request_p99": "695.00µs",
+      "cpu_user": 1.0,
+      "cpu_system": 2.35,
+      "rss_bytes": 22380544,
+      "load_before": [
+        5.61376953125,
+        8.8232421875,
+        8.30078125
+      ],
+      "load_after": [
+        5.61376953125,
+        8.8232421875,
+        8.30078125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 87.18,
+      "request_p50": "276.00µs",
+      "request_p99": "672.00µs",
+      "cpu_user": 0.97,
+      "cpu_system": 2.31,
+      "rss_bytes": 22085632,
+      "load_before": [
+        5.61376953125,
+        8.8232421875,
+        8.30078125
+      ],
+      "load_after": [
+        5.61376953125,
+        8.8232421875,
+        8.30078125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 86.16,
+      "request_p50": "278.00µs",
+      "request_p99": "661.00µs",
+      "cpu_user": 0.98,
+      "cpu_system": 2.33,
+      "rss_bytes": 22298624,
+      "load_before": [
+        5.61376953125,
+        8.8232421875,
+        8.30078125
+      ],
+      "load_after": [
+        5.61376953125,
+        8.8232421875,
+        8.30078125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 2,
+      "label": "single",
+      "mib_s": 86.55,
+      "request_p50": "286.00µs",
+      "request_p99": "677.00µs",
+      "cpu_user": 1.02,
+      "cpu_system": 2.34,
+      "rss_bytes": 21168128,
+      "load_before": [
+        5.61376953125,
+        8.8232421875,
+        8.30078125
+      ],
+      "load_after": [
+        5.404296875,
+        8.7265625,
+        8.26953125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 85.94,
+      "request_p50": "279.00µs",
+      "request_p99": "687.00µs",
+      "cpu_user": 0.99,
+      "cpu_system": 2.33,
+      "rss_bytes": 22233088,
+      "load_before": [
+        5.404296875,
+        8.7265625,
+        8.26953125
+      ],
+      "load_after": [
+        5.404296875,
+        8.7265625,
+        8.26953125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 3,
+      "label": "single",
+      "mib_s": 88.79,
+      "request_p50": "281.00µs",
+      "request_p99": "658.00µs",
+      "cpu_user": 1.01,
+      "cpu_system": 2.3,
+      "rss_bytes": 21217280,
+      "load_before": [
+        5.404296875,
+        8.7265625,
+        8.26953125
+      ],
+      "load_after": [
+        5.404296875,
+        8.7265625,
+        8.26953125
+      ]
+    },
+    {
+      "case": "ipv4-short-concurrent",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 80.21,
+      "request_p50": "293.00µs",
+      "request_p99": "798.00µs",
+      "cpu_user": 1.03,
+      "cpu_system": 2.49,
+      "rss_bytes": 22085632,
+      "load_before": [
+        5.404296875,
+        8.7265625,
+        8.26953125
+      ],
+      "load_after": [
+        5.404296875,
+        8.7265625,
+        8.26953125
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 18.97,
+      "request_p50": "41.00µs",
+      "request_p99": "82.00µs",
+      "cpu_user": 1.55,
+      "cpu_system": 3.45,
+      "rss_bytes": 20824064,
+      "load_before": [
+        5.404296875,
+        8.7265625,
+        8.26953125
+      ],
+      "load_after": [
+        5.21142578125,
+        8.63134765625,
+        8.23828125
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 19.38,
+      "request_p50": "40.00µs",
+      "request_p99": "84.00µs",
+      "cpu_user": 1.51,
+      "cpu_system": 3.45,
+      "rss_bytes": 20856832,
+      "load_before": [
+        5.21142578125,
+        8.63134765625,
+        8.23828125
+      ],
+      "load_after": [
+        5.5146484375,
+        8.63720703125,
+        8.24267578125
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 18.15,
+      "request_p50": "40.00µs",
+      "request_p99": "129.00µs",
+      "cpu_user": 1.58,
+      "cpu_system": 3.7,
+      "rss_bytes": 19120128,
+      "load_before": [
+        5.5146484375,
+        8.63720703125,
+        8.24267578125
+      ],
+      "load_after": [
+        5.39306640625,
+        8.56005859375,
+        8.2177734375
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 15.37,
+      "request_p50": "43.00µs",
+      "request_p99": "189.00µs",
+      "cpu_user": 1.81,
+      "cpu_system": 4.28,
+      "rss_bytes": 19120128,
+      "load_before": [
+        5.39306640625,
+        8.56005859375,
+        8.2177734375
+      ],
+      "load_after": [
+        5.77392578125,
+        8.5400390625,
+        8.21484375
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 17.1,
+      "request_p50": "41.00µs",
+      "request_p99": "145.00µs",
+      "cpu_user": 1.68,
+      "cpu_system": 3.92,
+      "rss_bytes": 20856832,
+      "load_before": [
+        5.77392578125,
+        8.5400390625,
+        8.21484375
+      ],
+      "load_after": [
+        6.1923828125,
+        8.58056640625,
+        8.23095703125
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 17.63,
+      "request_p50": "40.00µs",
+      "request_p99": "152.00µs",
+      "cpu_user": 1.59,
+      "cpu_system": 3.69,
+      "rss_bytes": 20905984,
+      "load_before": [
+        6.1923828125,
+        8.58056640625,
+        8.23095703125
+      ],
+      "load_after": [
+        6.1767578125,
+        8.53759765625,
+        8.2177734375
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 20.91,
+      "request_p50": "38.00µs",
+      "request_p99": "65.00µs",
+      "cpu_user": 1.43,
+      "cpu_system": 3.22,
+      "rss_bytes": 20971520,
+      "load_before": [
+        6.1767578125,
+        8.53759765625,
+        8.2177734375
+      ],
+      "load_after": [
+        6.16259765625,
+        8.4951171875,
+        8.20458984375
+      ]
+    },
+    {
+      "case": "ipv6-short",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 19.32,
+      "request_p50": "41.00µs",
+      "request_p99": "69.00µs",
+      "cpu_user": 1.53,
+      "cpu_system": 3.46,
+      "rss_bytes": 20905984,
+      "load_before": [
+        6.16259765625,
+        8.4951171875,
+        8.20458984375
+      ],
+      "load_after": [
+        5.9892578125,
+        8.42041015625,
+        8.1796875
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 258.29,
+      "request_p50": "973.82ms",
+      "request_p99": "1.01s",
+      "cpu_user": 1.77,
+      "cpu_system": 6.32,
+      "rss_bytes": 12681216,
+      "load_before": [
+        5.9892578125,
+        8.42041015625,
+        8.1796875
+      ],
+      "load_after": [
+        5.98974609375,
+        8.3798828125,
+        8.16650390625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 0,
+      "label": "single",
+      "mib_s": 214.03,
+      "request_p50": "1.18s",
+      "request_p99": "1.23s",
+      "cpu_user": 2.05,
+      "cpu_system": 7.98,
+      "rss_bytes": 13418496,
+      "load_before": [
+        5.98974609375,
+        8.3798828125,
+        8.16650390625
+      ],
+      "load_after": [
+        5.75,
+        8.29052734375,
+        8.13623046875
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 256.71,
+      "request_p50": "989.70ms",
+      "request_p99": "1.02s",
+      "cpu_user": 1.76,
+      "cpu_system": 6.42,
+      "rss_bytes": 12599296,
+      "load_before": [
+        5.75,
+        8.29052734375,
+        8.13623046875
+      ],
+      "load_after": [
+        5.93017578125,
+        8.28564453125,
+        8.13525390625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 1,
+      "label": "single",
+      "mib_s": 253.63,
+      "request_p50": "990.72ms",
+      "request_p99": "1.03s",
+      "cpu_user": 1.74,
+      "cpu_system": 6.68,
+      "rss_bytes": 11960320,
+      "load_before": [
+        5.93017578125,
+        8.28564453125,
+        8.13525390625
+      ],
+      "load_after": [
+        5.93017578125,
+        8.28564453125,
+        8.13525390625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 251.47,
+      "request_p50": "1.01s",
+      "request_p99": "1.04s",
+      "cpu_user": 1.79,
+      "cpu_system": 6.46,
+      "rss_bytes": 12615680,
+      "load_before": [
+        5.93017578125,
+        8.28564453125,
+        8.13525390625
+      ],
+      "load_after": [
+        5.775390625,
+        8.21435546875,
+        8.11083984375
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 255.7,
+      "request_p50": "992.26ms",
+      "request_p99": "1.01s",
+      "cpu_user": 1.77,
+      "cpu_system": 6.41,
+      "rss_bytes": 12697600,
+      "load_before": [
+        5.775390625,
+        8.21435546875,
+        8.11083984375
+      ],
+      "load_after": [
+        5.552734375,
+        8.12744140625,
+        8.08056640625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 257.96,
+      "request_p50": "984.06ms",
+      "request_p99": "1.03s",
+      "cpu_user": 1.77,
+      "cpu_system": 6.32,
+      "rss_bytes": 12632064,
+      "load_before": [
+        5.552734375,
+        8.12744140625,
+        8.08056640625
+      ],
+      "load_after": [
+        5.42822265625,
+        8.05859375,
+        8.056640625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 245.79,
+      "request_p50": "1.03s",
+      "request_p99": "1.08s",
+      "cpu_user": 1.79,
+      "cpu_system": 6.63,
+      "rss_bytes": 12730368,
+      "load_before": [
+        5.42822265625,
+        8.05859375,
+        8.056640625
+      ],
+      "load_after": [
+        5.3935546875,
+        8.0078125,
+        8.03857421875
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 2,
+      "label": "single",
+      "mib_s": 253.76,
+      "request_p50": "996.86ms",
+      "request_p99": "1.03s",
+      "cpu_user": 1.74,
+      "cpu_system": 6.65,
+      "rss_bytes": 11845632,
+      "load_before": [
+        5.3935546875,
+        8.0078125,
+        8.03857421875
+      ],
+      "load_after": [
+        5.36181640625,
+        7.95751953125,
+        8.0205078125
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 248.49,
+      "request_p50": "1.03s",
+      "request_p99": "1.04s",
+      "cpu_user": 1.8,
+      "cpu_system": 6.61,
+      "rss_bytes": 12500992,
+      "load_before": [
+        5.36181640625,
+        7.95751953125,
+        8.0205078125
+      ],
+      "load_after": [
+        5.36181640625,
+        7.95751953125,
+        8.0205078125
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 3,
+      "label": "single",
+      "mib_s": 247.78,
+      "request_p50": "1.02s",
+      "request_p99": "1.07s",
+      "cpu_user": 1.81,
+      "cpu_system": 7.0,
+      "rss_bytes": 13172736,
+      "load_before": [
+        5.36181640625,
+        7.95751953125,
+        8.0205078125
+      ],
+      "load_after": [
+        5.33251953125,
+        7.908203125,
+        8.00244140625
+      ]
+    },
+    {
+      "case": "ipv4-bulk",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 252.27,
+      "request_p50": "1.01s",
+      "request_p99": "1.04s",
+      "cpu_user": 1.77,
+      "cpu_system": 6.58,
+      "rss_bytes": 12369920,
+      "load_before": [
+        5.33251953125,
+        7.908203125,
+        8.00244140625
+      ],
+      "load_after": [
+        5.3857421875,
+        7.87646484375,
+        7.990234375
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 0,
+      "label": "batch",
+      "mib_s": 234.35,
+      "request_p50": "3.27s",
+      "request_p99": "3.34s",
+      "cpu_user": 6.22,
+      "cpu_system": 24.08,
+      "rss_bytes": 15056896,
+      "load_before": [
+        5.3857421875,
+        7.87646484375,
+        7.990234375
+      ],
+      "load_after": [
+        6.2705078125,
+        7.94775390625,
+        8.01318359375
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 0,
+      "label": "adaptive",
+      "mib_s": 178.93,
+      "request_p50": "3.75s",
+      "request_p99": "5.19s",
+      "cpu_user": 7.44,
+      "cpu_system": 29.41,
+      "rss_bytes": 17973248,
+      "load_before": [
+        6.2705078125,
+        7.94775390625,
+        8.01318359375
+      ],
+      "load_after": [
+        7.1396484375,
+        8.04931640625,
+        8.046875
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 1,
+      "label": "adaptive",
+      "mib_s": 177.59,
+      "request_p50": "4.11s",
+      "request_p99": "4.66s",
+      "cpu_user": 7.5,
+      "cpu_system": 30.34,
+      "rss_bytes": 18595840,
+      "load_before": [
+        7.1396484375,
+        8.04931640625,
+        8.046875
+      ],
+      "load_after": [
+        8.90234375,
+        8.412109375,
+        8.177734375
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 1,
+      "label": "batch",
+      "mib_s": 249.65,
+      "request_p50": "2.99s",
+      "request_p99": "3.32s",
+      "cpu_user": 6.19,
+      "cpu_system": 22.43,
+      "rss_bytes": 16531456,
+      "load_before": [
+        8.90234375,
+        8.412109375,
+        8.177734375
+      ],
+      "load_after": [
+        8.23486328125,
+        8.283203125,
+        8.13427734375
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 2,
+      "label": "batch",
+      "mib_s": 236.79,
+      "request_p50": "3.14s",
+      "request_p99": "3.39s",
+      "cpu_user": 6.5,
+      "cpu_system": 23.64,
+      "rss_bytes": 13975552,
+      "load_before": [
+        8.23486328125,
+        8.283203125,
+        8.13427734375
+      ],
+      "load_after": [
+        7.5361328125,
+        8.12255859375,
+        8.07861328125
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 2,
+      "label": "adaptive",
+      "mib_s": 240.06,
+      "request_p50": "3.19s",
+      "request_p99": "3.26s",
+      "cpu_user": 6.13,
+      "cpu_system": 23.6,
+      "rss_bytes": 14467072,
+      "load_before": [
+        7.5361328125,
+        8.12255859375,
+        8.07861328125
+      ],
+      "load_after": [
+        7.60693359375,
+        8.11767578125,
+        8.07763671875
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 3,
+      "label": "adaptive",
+      "mib_s": 215.63,
+      "request_p50": "3.47s",
+      "request_p99": "3.88s",
+      "cpu_user": 6.38,
+      "cpu_system": 26.65,
+      "rss_bytes": 23740416,
+      "load_before": [
+        7.60693359375,
+        8.11767578125,
+        8.07763671875
+      ],
+      "load_after": [
+        8.1240234375,
+        8.1953125,
+        8.10546875
+      ]
+    },
+    {
+      "case": "ipv4-concurrent",
+      "repeat": 3,
+      "label": "batch",
+      "mib_s": 225.26,
+      "request_p50": "3.40s",
+      "request_p99": "3.60s",
+      "cpu_user": 6.17,
+      "cpu_system": 25.49,
+      "rss_bytes": 16269312,
+      "load_before": [
+        8.1240234375,
+        8.1953125,
+        8.10546875
+      ],
+      "load_after": [
+        8.54296875,
+        8.283203125,
+        8.1376953125
+      ]
+    }
+  ]
+}

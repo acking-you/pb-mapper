@@ -7,10 +7,11 @@
 [submodule "deps/uni-stream"]
 	path = deps/uni-stream
 	url = https://github.com/acking-you/uni-stream.git
+	branch = dev
 [submodule "deps/kanal"]
 	path = deps/kanal
 	url = https://github.com/acking-you/kanal.git
-	branch = dev/pb-mapper
+	branch = dev
 [submodule "local-tools/Qwen3-TTS"]
 	path = local-tools/Qwen3-TTS
 	url = https://github.com/acking-you/Qwen3-TTS.git
@@ -20,12 +21,12 @@
 [submodule "deps/quinn"]
 	path = deps/quinn
 	url = https://github.com/acking-you/quinn.git
-	branch = codex/pb-mapper-issue-13
+	branch = dev
 [submodule "deps/rcgen"]
 	path = deps/rcgen
 	url = https://github.com/acking-you/rcgen.git
-	branch = codex/pb-mapper-issue-13
+	branch = dev
 [submodule "deps/stun-proto"]
 	path = deps/stun-proto
 	url = https://github.com/acking-you/stun-proto.git
-	branch = codex/pb-mapper-issue-13
+	branch = dev

@@ -3,14 +3,12 @@
 //! handled and removed in place inside the received batch, so QUIC packets
 //! reach Quinn with no extra task, channel, allocation or copy.
 use pb_mapper_protocol::direct::{SessionId, SessionSecret};
-use quinn::{
-    AsyncUdpSocket, Runtime, UdpPoller,
-    udp::{RecvMeta, Transmit},
-};
+#[cfg(test)]
+use quinn::udp::Transmit;
+use quinn::{AsyncUdpSocket, UdpSender, udp::RecvMeta};
 use ring::hmac;
 use std::{
     collections::HashMap,
-    future::poll_fn,
     io::{self, IoSliceMut},
     net::SocketAddr,
     pin::Pin,
@@ -70,9 +68,10 @@ struct Control {
 
 #[derive(Clone)]
 pub(super) struct Socket {
-    inner: Arc<dyn AsyncUdpSocket>,
+    inner: Arc<tokio::net::UdpSocket>,
     control: Arc<Control>,
-    quic: Arc<Demux>,
+    #[cfg(test)]
+    block_quic: Arc<std::sync::atomic::AtomicBool>,
 }
 impl std::fmt::Debug for Socket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,11 +82,9 @@ impl std::fmt::Debug for Socket {
 }
 
 /// The socket Quinn sees. Sends pass straight through; receives are filtered.
-struct Demux {
-    #[cfg(test)]
-    block_quic: std::sync::atomic::AtomicBool,
-    inner: Arc<dyn AsyncUdpSocket>,
-    control: Arc<Control>,
+pub(super) struct Demux {
+    inner: Box<dyn AsyncUdpSocket>,
+    control: Socket,
 }
 impl std::fmt::Debug for Demux {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,18 +92,18 @@ impl std::fmt::Debug for Demux {
     }
 }
 impl AsyncUdpSocket for Demux {
-    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
-        self.inner.clone().create_io_poller()
-    }
-    fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
+    fn create_sender(&self) -> Pin<Box<dyn UdpSender>> {
+        let sender = self.inner.create_sender();
+        #[cfg(not(test))]
+        return sender;
         #[cfg(test)]
-        if self.block_quic.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(());
-        }
-        self.inner.try_send(transmit)
+        Box::pin(TestSender {
+            inner: sender,
+            blocked: self.control.block_quic.clone(),
+        })
     }
     fn poll_recv(
-        &self,
+        &mut self,
         cx: &mut Context,
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
@@ -122,9 +119,6 @@ impl AsyncUdpSocket for Demux {
     }
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()
-    }
-    fn max_transmit_segments(&self) -> usize {
-        self.inner.max_transmit_segments()
     }
     fn max_receive_segments(&self) -> usize {
         self.inner.max_receive_segments()
@@ -152,12 +146,14 @@ impl Demux {
                 data.copy_within(offset..end, kept);
                 kept += end - offset;
             } else {
-                self.handle_control(&data[offset..end], meta.addr);
+                self.control.handle_control(&data[offset..end], meta.addr);
             }
             offset = end;
         }
         kept
     }
+}
+impl Socket {
     fn handle_control(&self, data: &[u8], source: SocketAddr) {
         if data.len() >= 20 && data[0] & 0xc0 == 0 && data[4..8] == STUN_COOKIE {
             self.handle_stun(data, source);
@@ -212,13 +208,7 @@ impl Demux {
                 _ => return,
             }
         };
-        let _ = self.inner.try_send(&Transmit {
-            destination: source,
-            ecn: None,
-            contents: &reply,
-            segment_size: None,
-            src_ip: None,
-        });
+        let _ = self.inner.try_send_to(&reply, source);
     }
     fn reply_allowed(&self) -> bool {
         let mut budget = self
@@ -239,10 +229,13 @@ fn is_quic(segment: &[u8]) -> bool {
 }
 
 impl Socket {
-    pub fn bind(addr: SocketAddr) -> io::Result<Self> {
+    pub fn bind(addr: SocketAddr) -> io::Result<(Self, Demux)> {
         let udp = std::net::UdpSocket::bind(addr)?;
         udp.set_nonblocking(true)?;
-        let inner = quinn::TokioRuntime.wrap_udp_socket(udp)?;
+        // Share one socket and one reactor registration. Quinn owns its only
+        // reader; control sends use Tokio's independent write waiters.
+        let control_socket = Arc::new(tokio::net::UdpSocket::from_std(udp)?);
+        let inner = quinn::TokioRuntime::wrap_tokio_udp_socket(control_socket.clone())?;
         let control = Arc::new(Control {
             probes: Mutex::new(HashMap::new()),
             stun: Mutex::new(HashMap::new()),
@@ -251,26 +244,22 @@ impl Socket {
                 used: 0,
             }),
         });
-        let quic = Arc::new(Demux {
-            #[cfg(test)]
-            block_quic: std::sync::atomic::AtomicBool::new(false),
-            inner: inner.clone(),
-            control: control.clone(),
-        });
-        Ok(Self {
-            inner,
+        let socket = Self {
+            inner: control_socket,
             control,
-            quic,
-        })
+            #[cfg(test)]
+            block_quic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let quic = Demux {
+            inner,
+            control: socket.clone(),
+        };
+        Ok((socket, quic))
     }
     #[cfg(test)]
     pub fn block_quic(&self) {
-        self.quic
-            .block_quic
+        self.block_quic
             .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-    pub fn quic(&self) -> Arc<dyn AsyncUdpSocket> {
-        self.quic.clone()
     }
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()
@@ -325,13 +314,7 @@ impl Socket {
         {
             // Probes are retried every 120 ms. A congested or unreachable
             // candidate must never hold up cancellation or a healthy QUIC path.
-            let _ = self.inner.try_send(&Transmit {
-                destination: *addr,
-                ecn: None,
-                contents: &bytes,
-                segment_size: None,
-                src_ip: None,
-            });
+            let _ = self.inner.try_send_to(&bytes, *addr);
         }
         let probes = self
             .control
@@ -368,7 +351,7 @@ impl Socket {
             let transmit = agent
                 .send_request(bytes, server, Instant::from_std(std::time::Instant::now()))
                 .map_err(io::Error::other)?;
-            send(&self.inner, &transmit.data, transmit.to).await?;
+            self.inner.send_to(&transmit.data, transmit.to).await?;
             loop {
                 tokio::select! {
                     bytes = rx.recv() => {
@@ -394,7 +377,7 @@ impl Socket {
                     () = tokio::time::sleep(Duration::from_millis(25)) => {
                         let now = Instant::from_std(std::time::Instant::now());
                         if let Some(transmit) = agent.poll_transmit(now) {
-                            send(&self.inner, transmit.data, transmit.to).await?;
+                            self.inner.send_to(transmit.data, transmit.to).await?;
                         }
                     }
                 }
@@ -418,33 +401,27 @@ impl Drop for StunGuard {
     }
 }
 
-async fn send(
-    socket: &Arc<dyn AsyncUdpSocket>,
-    bytes: &[u8],
-    destination: SocketAddr,
-) -> io::Result<()> {
-    let mut poller = socket.clone().create_io_poller();
-    poll_fn(|cx| {
-        loop {
-            match socket.try_send(&Transmit {
-                destination,
-                ecn: None,
-                contents: bytes,
-                segment_size: None,
-                src_ip: None,
-            }) {
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    match poller.as_mut().poll_writable(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                        Poll::Ready(Ok(())) => {}
-                    }
-                }
-                result => return Poll::Ready(result),
-            }
+#[cfg(test)]
+#[derive(Debug)]
+struct TestSender {
+    inner: Pin<Box<dyn UdpSender>>,
+    blocked: Arc<std::sync::atomic::AtomicBool>,
+}
+#[cfg(test)]
+impl UdpSender for TestSender {
+    fn poll_send(
+        mut self: Pin<&mut Self>,
+        transmit: &Transmit<'_>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.blocked.load(std::sync::atomic::Ordering::Relaxed) {
+            return Poll::Ready(Ok(()));
         }
-    })
-    .await
+        self.inner.as_mut().poll_send(transmit, cx)
+    }
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_transmit_segments()
+    }
 }
 fn packet(id: SessionId, nonce: [u8; 16], pong: bool, secret: SessionSecret) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(PROBE_LEN);
@@ -461,21 +438,74 @@ fn packet(id: SessionId, nonce: [u8; 16], pong: bool, secret: SessionSecret) -> 
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use std::future::poll_fn;
+
+    #[tokio::test]
+    async fn control_and_quic_share_the_bound_socket() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (socket, mut quic) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let local = socket.local_addr().unwrap();
+            let peer_addr = peer.local_addr().unwrap();
+            let mut buffer = [0; 1500];
+            let mut meta = [RecvMeta::default()];
+            let (mapped, ()) = tokio::join!(socket.mapped_addr(peer_addr), async {
+                let (len, from) = peer.recv_from(&mut buffer).await.unwrap();
+                assert_eq!(from, local);
+                let request = Message::from_bytes(&buffer[..len]).unwrap();
+                let mut response = Message::builder_success(&request, MessageWriteVec::new());
+                response
+                    .add_attribute(&XorMappedAddress::new(from, request.transaction_id()))
+                    .unwrap();
+                response.add_fingerprint().unwrap();
+                peer.send_to(&response.finish(), from).await.unwrap();
+                let count = poll_fn(|cx| {
+                    quic.poll_recv(cx, &mut [IoSliceMut::new(&mut buffer)], &mut meta)
+                })
+                .await
+                .unwrap();
+                assert_eq!(count, 1);
+                assert_eq!(meta[0].len, 0);
+            });
+            assert_eq!(mapped.unwrap(), local);
+
+            let packet = [0x40; 32];
+            let transmit = Transmit {
+                destination: peer_addr,
+                ecn: None,
+                contents: &packet,
+                segment_size: None,
+                src_ip: None,
+            };
+            let mut sender = quic.create_sender();
+            poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx))
+                .await
+                .unwrap();
+            let (len, from) = peer.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(from, local);
+            assert_eq!(&buffer[..len], &packet);
+            peer.send_to(&packet, from).await.unwrap();
+            poll_fn(|cx| quic.poll_recv(cx, &mut [IoSliceMut::new(&mut buffer)], &mut meta))
+                .await
+                .unwrap();
+            assert_eq!(&buffer[..meta[0].len], &packet);
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn coalesced_control_segments_are_removed_in_place() {
-        let socket = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (_, quic_socket) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let quic = [0x40_u8; 4];
         let mut stun = [0_u8; 4];
         stun[0] = 0x01;
         let mut batch = [quic, stun, [0x41; 4]].concat();
         batch.extend_from_slice(&[0x42; 2]);
-        let meta = RecvMeta {
-            len: batch.len(),
-            stride: 4,
-            ..RecvMeta::default()
-        };
-        let len = socket.quic.retain_quic(&mut batch, &meta);
+        let mut meta = RecvMeta::default();
+        meta.len = batch.len();
+        meta.stride = 4;
+        let len = quic_socket.retain_quic(&mut batch, &meta);
         assert_eq!(
             &batch[..len],
             &[0x40, 0x40, 0x40, 0x40, 0x41, 0x41, 0x41, 0x41, 0x42, 0x42]

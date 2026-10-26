@@ -1,7 +1,7 @@
 //! Pinned TLS QUIC primitives shared by relay clients and servers.
 use quinn::{Connection, Endpoint, RecvStream, SendStream, rustls};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::{
     io,
     net::SocketAddr,
@@ -32,7 +32,7 @@ fn transport(streams: u32, client: bool) -> Arc<quinn::TransportConfig> {
 }
 
 pub fn server_config() -> io::Result<(quinn::ServerConfig, Vec<u8>)> {
-    let rcgen::CertifiedKey { cert, signing_key } =
+    let (rcgen::CertifiedKey { cert, .. }, key) =
         rcgen::generate_simple_self_signed(vec![SERVER_NAME.into()]).map_err(io::Error::other)?;
     let certificate = cert.der().to_vec();
     let mut tls = rustls::ServerConfig::builder_with_provider(
@@ -41,10 +41,7 @@ pub fn server_config() -> io::Result<(quinn::ServerConfig, Vec<u8>)> {
     .with_protocol_versions(&[&rustls::version::TLS13])
     .map_err(io::Error::other)?
     .with_no_client_auth()
-    .with_single_cert(
-        vec![cert.der().clone()],
-        PrivatePkcs8KeyDer::from(signing_key.serialize_der()).into(),
-    )
+    .with_single_cert(vec![cert.der().clone()], key)
     .map_err(io::Error::other)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
     tls.max_early_data_size = 0;

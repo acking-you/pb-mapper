@@ -3,7 +3,7 @@
 use quinn::rustls::{
     self, DigitallySignedStruct, DistinguishedName, SignatureScheme,
     client::danger::HandshakeSignatureValid,
-    pki_types::{CertificateDer, PrivatePkcs8KeyDer, UnixTime},
+    pki_types::{CertificateDer, PrivateKeyDer, UnixTime},
     server::danger::{ClientCertVerified, ClientCertVerifier},
 };
 use std::{
@@ -14,17 +14,17 @@ use std::{
 
 pub(super) struct Identity {
     pub certificate: Vec<u8>,
-    key: Vec<u8>,
+    key: PrivateKeyDer<'static>,
     pub permissions: Arc<Permissions>,
 }
 impl Identity {
     pub fn new() -> io::Result<Self> {
-        let rcgen::CertifiedKey { cert, signing_key } =
+        let (rcgen::CertifiedKey { cert, .. }, key) =
             rcgen::generate_simple_self_signed(vec!["pb-mapper.invalid".into()])
                 .map_err(io::Error::other)?;
         Ok(Self {
             certificate: cert.der().to_vec(),
-            key: signing_key.serialize_der(),
+            key,
             permissions: Arc::new(Permissions::default()),
         })
     }
@@ -37,7 +37,7 @@ impl Identity {
         .with_client_cert_verifier(self.permissions.clone())
         .with_single_cert(
             vec![CertificateDer::from(self.certificate.clone())],
-            PrivatePkcs8KeyDer::from(self.key.clone()).into(),
+            self.key.clone_key(),
         )
         .map_err(io::Error::other)?;
         tls.alpn_protocols = vec![b"pb-mapper/direct/1".to_vec()];
@@ -61,7 +61,7 @@ impl Identity {
         .with_root_certificates(roots)
         .with_client_auth_cert(
             vec![CertificateDer::from(self.certificate.clone())],
-            PrivatePkcs8KeyDer::from(self.key.clone()).into(),
+            self.key.clone_key(),
         )
         .map_err(io::Error::other)?;
         tls.alpn_protocols = vec![b"pb-mapper/direct/1".to_vec()];

@@ -186,16 +186,22 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
 async fn peer_certificate_and_session_binding_are_both_required() {
     let provider = Network::new(true).unwrap();
     let consumer = Network::new(false).unwrap();
-    // No STUN server is needed for the TLS boundary test; loopback candidates
-    // come from the real bound sockets through discovery.
+    // Use one discovered loopback path for the TLS boundary test. With multiple
+    // candidates, the client's winning connection and the first server accept
+    // can be different TLS sessions, which correctly have different bindings.
     let stun: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
     let mut provider_peer = provider.peer(stun).await;
-    // Test one TLS session, not which address wins the candidate race. Otherwise
-    // accept() can return a losing handshake with a different TLS exporter.
-    provider_peer
-        .candidates
-        .retain(|addr| addr.is_ipv4() && addr.ip().is_loopback());
-    let consumer_peer = consumer.peer(stun).await;
+    let mut consumer_peer = consumer.peer(stun).await;
+    for peer in [&mut provider_peer, &mut consumer_peer] {
+        peer.candidates
+            .retain(|addr| addr.is_ipv4() && addr.ip().is_loopback());
+        peer.candidates.truncate(1);
+        assert_eq!(
+            peer.candidates.len(),
+            1,
+            "an IPv4 loopback path is required"
+        );
+    }
     let grant = SessionGrant {
         id: [1; 16],
         server_instance: [2; 16],
