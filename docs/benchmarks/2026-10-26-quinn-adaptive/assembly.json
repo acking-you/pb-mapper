@@ -1,0 +1,14 @@
+{
+  "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "baseline": "365fe2026930d542ae35c2eedb065779c7b2444b",
+  "candidate": "bfed7c55284df85010a8e37115b60e0893cf0db1",
+  "build": "CARGO_PROFILE_RELEASE_DEBUG=0 cargo rustc --offline --locked -p quinn-udp --release --target TARGET -- --emit=asm",
+  "notes": [
+    "Use separate CARGO_TARGET_DIR values for each checkout; shared build-script caches can invalidate this comparison.",
+    "macOS build enables fast-apple-datapath. Windows target is MSVC, Linux is GNU.",
+    "No trait objects or per-packet allocations introduced. Native API function pointers on Windows/Apple are preserved.",
+    "Windows receive and try_send instructions match after normalizing crate hashes, local label numbering and constant-data symbols.",
+    "Linux functions are not byte-identical: compiler inlining and symbol linkage differ. recv still directly contains recvmmsg; no receive policy state is stored.",
+    "macOS recv entry frame changes from 9168 to 48 bytes. These are entry frames, excluding callees, not total stack use or measured throughput."
+  ]
+}

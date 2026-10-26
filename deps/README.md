@@ -8,7 +8,7 @@ Quinn、rcgen、stun-proto 通过 `path + version` 接入 Cargo，构建使用�
 
 | 本地目录 | 维护仓库 | 上游 / 基线 | 固定 commit | 许可证 |
 |---|---|---|---|---|
-| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `main@12fe8094`（开发版） | `7c131852b9d45c91dc0ff483e618ccf7c330dd26` | MIT OR Apache-2.0 |
+| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `main@12fe8094`（开发版） | `14cfab9569a8e98becd16198b4d593e669e795e5` | MIT OR Apache-2.0 |
 | `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/dev) | [rustls/rcgen](https://github.com/rustls/rcgen), `main@b820c438`（开发版） | `b4a65cb06038656800b38fe592923b06ad0df77a` | MIT OR Apache-2.0 |
 | `deps/stun-proto` | [acking-you/stun-proto](https://github.com/acking-you/stun-proto/tree/dev) | [ystreet/stun-proto](https://github.com/ystreet/stun-proto), `v2.0.4 / main@9e47ca00` | `66dc8e0ae7179393d6b80373582893fa8bb0283e` | MIT OR Apache-2.0 |
 | `deps/kanal` | [acking-you/kanal](https://github.com/acking-you/kanal/tree/dev) | [fereidani/kanal](https://github.com/fereidani/kanal)，本地扩展发布为 `kanal-plus 0.2.0` | `e79d95d5163446c23d53befbc778aaf6d7d34e42` | MIT |
@@ -17,6 +17,10 @@ Quinn、rcgen、stun-proto 通过 `path + version` 接入 Cargo，构建使用�
 固定提交均须先推送到各自仓库，再更新 pb-mapper 的 gitlink。2026-10-26 已把这三个 fork 的上游 `main` 合并到 `dev`，保留维护分支的 CI 配置。Quinn 仓库现在包含 `quinn 0.12.0`、`quinn-proto 0.12.0`、`quinn-udp 0.6.3`；rcgen 为 `0.15.0`；stun-proto 和同仓 `stun-types` 为 `2.0.4`。本次合并时 Quinn 0.12.0、rcgen 0.15.0 尚无发布 tag，这里固定的是上游开发提交，不是稳定发布版本。
 
 Quinn 保留 Windows IPv4 源地址提示兼容修复（fork [PR #1](https://github.com/acking-you/quinn/pull/1)，上游 [PR #2958](https://github.com/quinn-rs/quinn/pull/2958)），并采用已验证的新接口适配。另外使用 `parking_lot` 维护连接状态锁并保留 panic poisoning；发送端只在背压后创建可写等待 future。新增共享 Tokio socket 入口，避免重复注册 reactor。`fast-apple-datapath` 为显式启用的优化：仅在已验证的 Darwin 27（本次实测 macOS 27.0.1）且批量 API 符号齐备时自动启用，其他系统维持原路径；不支持的系统调用会关闭批量路径，已生成的分段报文不会被错误拼成一个数据报。rcgen 库源码与上游一致；stun-proto 另更新了基准的时间接口和示例的错误构造，以通过严格 Clippy，协议源码未添加本地补丁。
+
+macOS 已验证的 Apple 快路径按同一 socket 上观察到的报文积压自动调整。新 socket 使用普通 `recvmsg`；连续三次成功接收、期间没有读空，才启用 `recvmsg_x` 批量接收。批量模式连续四次只收到单个报文时回到普通接收。普通模式读空会清除连续成功计数；批量模式暂时读空保留原选择，避免每一波突发流量都重新升档。发送端仍按实际分段选择：单报文用 `sendmsg`，已分段的一组报文用 `sendmsg_x`。该策略不依赖应用请求长度，没有计时器、负载探测系统调用或等待凑批；状态与批量 API 的可用性开关分离，因此负载变化不会重新启用因系统错误关闭的能力。
+
+批量机制现在通过内部 `DatagramIo` trait 静态选择，关联的 `ReceivePolicy` 分离负载策略；普通和固定批量策略都是零大小类型，只有 Apple 自适应策略保存计数。使用 const generic 选择单次/批量调用，没有 `dyn Trait`、新增逐包分配、队列或探测调用。Linux/Android 使用原生 `recvmmsg` 和支持时的 GSO/GRO；Windows 使用 `WSASendMsg` 的 USO 与按 Winsock provider 解析的 `WSARecvMsg`。Windows URO 保留显式启用，因为驱动缺失分段元数据的 [上游问题 #2041](https://github.com/quinn-rs/quinn/issues/2041) 仍未解决。iOS 默认使用公开的 `sendmsg`/`recvmsg`，没有自动开启未验证的私有批量 API。普通接收平台现在只预留一个接收缓冲区；Windows 的单个缓冲区仍可承载显式开启的 URO 合并数据。
 
 pb-mapper 适配 Quinn 0.12 的独占接收端与 `UdpSender`：Quinn 驱动拥有唯一接收端，通过 fork 的 `wrap_tokio_udp_socket` 共享同一个 Tokio UDP socket 和 reactor 注册，额外引用只负责 STUN / 探测发送；QUIC 数据仍原地分流，没有新增逐包任务、队列或拷贝。rcgen 0.15 返回的 `PrivateKeyDer` 直接保存在身份状态中，并在构造 TLS 配置时显式克隆。精确证书固定、TLS exporter 绑定以及直连提交/回退规则不变。
 
@@ -93,7 +97,7 @@ uni-stream = "0.3.5"
 
 ## 本次升级的性能验证
 
-环境：Apple M3 Pro、macOS 27.0.1（26A434）/ Darwin 27.0.0、arm64、Rust 1.99.1，release 构建且 `CARGO_PROFILE_RELEASE_DEBUG=0`。基线为 Quinn `6cbaeaaa`，优化版为表中固定提交；两个版本使用同一份基准代码，固定 loopback 地址族，每个端点 2 个 Tokio worker，AES-128-GCM、ACK threshold 10、有序 `read_chunks`。每项交替顺序运行 3 次。下表是 **MiB/s 中位数（最小–最大）**，不是公网带宽或整个 pb-mapper 的端到端收益。
+环境：Apple M3 Pro、macOS 27.0.1（26A434）/ Darwin 27.0.0、arm64、Rust 1.99.1，release 构建且 `CARGO_PROFILE_RELEASE_DEBUG=0`。基线为 Quinn `6cbaeaaa`，该轮固定批量版为 `7c131852`（以下数据记录自动调整之前的版本）；两个版本使用同一份基准代码，固定 loopback 地址族，每个端点 2 个 Tokio worker，AES-128-GCM、ACK threshold 10、有序 `read_chunks`。每项交替顺序运行 3 次。下表是 **MiB/s 中位数（最小–最大）**，不是公网带宽或整个 pb-mapper 的端到端收益。
 
 | 场景 | 原版 0.11 | 优化版 0.12 | 中位数变化 |
 | --- | ---: | ---: | ---: |
@@ -106,7 +110,7 @@ uni-stream = "0.3.5"
 
 最初的 1000 次短请求过短，并发 32 MiB 测试也出现明显波动，因此分别延长到 10 万次和 96 MiB/流。原始样本没有删除，完整数据见 [results.json](../docs/benchmarks/2026-10-26-quinn/results.json) 和 [raw.txt](../docs/benchmarks/2026-10-26-quinn/raw.txt)。其中下载 P99 仅是读取该流剩余数据的耗时，不能当成请求往返延迟；0 µs 表示低于直方图精度。Linux/Windows 尚无这组性能对照，不能套用 macOS 的提升比例。
 
-复现时，在临时目录用 `git archive` 分别展开 Quinn 的 `6cbaeaaa` 和当前固定提交，把当前 `bench/Cargo.toml`、`bench/src/{lib,stats}.rs`、`bench/src/bin/bulk.rs` 同样复制到基线。各自执行 `CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --locked --release -p bench --bin bulk`；优化版追加 `--features quinn/fast-apple-datapath`。保存两个 `target/release/bulk`，交替运行下列命令各 3 次；macOS 可用 `/usr/bin/time -l` 记录进程 CPU 时间和峰值 RSS：
+复现时，在临时目录用 `git archive` 分别展开 Quinn 的 `6cbaeaaa` 和 `7c131852`，把 `7c131852` 的 `bench/src/{lib,stats}.rs`、`bench/src/bin/bulk.rs` 复制到基线，并把基线 `bench/Cargo.toml` 的 Tokio feature 从 `rt` 改为 `rt-multi-thread`；保留基线自己的其余 manifest 配置。各自执行 `CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --locked --release -p bench --bin bulk`；优化版追加 `--features quinn/fast-apple-datapath`。保存两个 `target/release/bulk`，交替运行下列命令各 3 次；macOS 可用 `/usr/bin/time -l` 记录进程 CPU 时间和峰值 RSS：
 
 ```sh
 bulk --ipv4 --workers 2 --download-size 256M --streams 4
@@ -114,6 +118,41 @@ bulk --workers 2 --download-size 256M --streams 4
 bulk --ipv4 --workers 2 --download-size 96M --streams 32 --max_streams 8
 bulk --ipv4 --workers 2 --upload-size 1024 --download-size 1024 --streams 100000
 ```
+
+## 自适应接收与平台 trait 验证
+
+这一轮先实现按 socket 积压切换接收方式，再抽取平台机制与策略。代码见 [batch.rs](quinn/quinn-udp/src/batch.rs) 和各平台 `PlatformIo`；没有修改 socket 所有权、上层异步运行时或发送报文边界。Apple 批量接收单独保留栈帧，普通接收不再预留整组消息数组；Linux 的固定批量后端直接内联进接收入口。
+
+同一台 M3 Pro / macOS 27.0.1 / Rust 1.99.1 上，先前自适应版 `365fe202` 的 56 个样本中，IPv4 1 KiB 串行请求中位数为 19.71 MiB/s，原版 0.11 为 19.91 MiB/s，固定批量版为 18.98 MiB/s。接近旧版，但不能说完整恢复了旧版表现；该轮并发大流量也有下降，完整记录保存在 [results.json](../docs/benchmarks/2026-10-26-quinn-adaptive/results.json) 和 [raw.txt](../docs/benchmarks/2026-10-26-quinn-adaptive/raw.txt)。这轮起所有版本都使用新的完整请求计时，并排除直方图汇总时间，不能直接与上一节的计时口径混算。
+
+trait 重构另进行 60 次交替测量，每项每版本 4 次，仍为 loopback、每端点 2 个 worker、AES-128-GCM、ACK threshold 10。下表是 **MiB/s 中位数（最小–最大）**。固定批量为 `7c131852`，抽象前为 `365fe202`，trait 版的 macOS 产品代码为 `18eb2c71`；随后提交仅调整 Linux 内联与 WASI 测试条件，不改变本机测量代码。
+
+| 场景 | 固定批量 | 自适应、抽象前 | trait 版 |
+| --- | ---: | ---: | ---: |
+| IPv4，10 万次串行请求，上下行各 1 KiB | 19.61（19.31–20.19） | 19.20（18.38–19.23） | 19.45（19.39–19.82） |
+| IPv4，10 万次请求、并发 32，上下行各 1 KiB | 87.47（84.62–89.64） | 86.00（78.01–89.99） | 86.91（80.51–88.66） |
+| IPv6，10 万次串行请求，上下行各 1 KiB | 18.86（16.60–19.96） | 18.70（18.25–20.05） | 19.97（19.08–20.12） |
+| IPv4，4 条串行流，每条 256 MiB | 241.76（234.43–247.19） | 242.49（230.87–244.08） | 232.78（209.96–255.40） |
+| IPv4，32 条流、并发 8，每条 96 MiB | 234.84（229.91–245.96） | 244.46（234.01–255.85） | 242.33（225.49–248.18） |
+
+IPv4 串行短请求的完整请求 P99 中位数由抽象前 95 µs 变为 76 µs，IPv6 为 98.5 µs → 65 µs。这些是四次运行各自 P99 的中位数，不是合并直方图。样本区间有重叠，不能据此宣称所有负载都更快。尤其单流大流量首轮中位数下降约 4%；因此只对该场景追加 8 轮交替复核，抽象前为 245.60（215.17–252.95），trait 版为 250.96（239.60–269.87）MiB/s，方向发生反转。共享桌面的调度波动仍明显，既不能把首轮下降确定为代码回退，也不能把复核上涨确定为稳定收益。
+
+所有样本均保留：[trait 对照数据](../docs/benchmarks/2026-10-26-quinn-adaptive/traits.json)、[原始输出](../docs/benchmarks/2026-10-26-quinn-adaptive/traits-raw.txt)、[大流量复核](../docs/benchmarks/2026-10-26-quinn-adaptive/bulk-followup.json)、[复核原始输出](../docs/benchmarks/2026-10-26-quinn-adaptive/bulk-followup-raw.txt)。早期探测方案及因桌面负载干扰而停止的实验记录在 [exploratory.json](../docs/benchmarks/2026-10-26-quinn-adaptive/exploratory.json)，不用于最终收益结论。
+
+“零成本”在这里指静态分发、无需负载策略的平台不保存额外状态，以及没有新增逐包分配或探测操作，不表示所有目标的机器码或产物字节完全不变。[汇编记录](../docs/benchmarks/2026-10-26-quinn-adaptive/assembly.txt)显示：Windows MSVC 的 `recv` / `try_send` 入口归一化符号后指令相同；Linux 仍直接执行原生批量接收，内联布局有变化；本机 Apple `recv` 入口自身的栈帧从 9,168 字节降到 48 字节，后者不包括被调用函数的栈帧。工具链和构建条件见 [assembly.json](../docs/benchmarks/2026-10-26-quinn-adaptive/assembly.json)。这些静态证据不等于 Linux、Windows、Android 或 iOS 的实机吞吐提升。
+
+复现时分别展开上述提交，所有版本统一复制最终版 `bench/src/{lib,stats}.rs` 与 `bench/src/bin/bulk.rs`，使用独立 `CARGO_TARGET_DIR` 构建 release 二进制。原版 0.11 只把自身 manifest 的 Tokio `rt` feature 改成 `rt-multi-thread`，不要复制新 workspace 的 manifest。固定批量、自适应和 trait 版均开启 `quinn/fast-apple-datapath`。按需运行统一采集器：
+
+```sh
+python3 docs/benchmarks/2026-10-26-quinn-adaptive/measure.py --mode traits \
+  --batch /path/to/fixed-batch --adaptive /path/to/pre-trait --trait /path/to/trait \
+  --out /tmp/quinn-traits-new --repeats 4
+python3 docs/benchmarks/2026-10-26-quinn-adaptive/measure.py --mode bulk \
+  --adaptive /path/to/pre-trait --trait /path/to/trait \
+  --out /tmp/quinn-bulk-new --repeats 8
+```
+
+本轮本机验证：Quinn 严格 Clippy、UDP 普通与自适应路径测试、36 个运行时测试通过；pb-mapper 全 workspace 严格 Clippy、client 的 36 个单元测试和 3 个 direct_e2e 测试通过；Node 12 个测试通过，addon 3,193,504 字节，低于 5.5 MiB。Windows GNU、Linux GNU、Android arm64、iOS arm64 和 simulator 均通过库目标严格交叉 Clippy；iOS 27 模拟器实际执行普通 UDP 收发测试通过，私有批量路径未启用。WASI 库与测试编译也已验证。记录见 [validation.txt](../docs/benchmarks/2026-10-26-quinn-adaptive/validation.txt)。最终提交的跨平台原生及 Android 模拟器验证见 [Quinn CI](https://github.com/acking-you/quinn/actions/runs/40332959120)；另新增移动目标持续检查。Coverage 仍有 fork 未配置 Codecov token 的既有上传问题，不能算作通过。
 
 ## 已执行的检查
 

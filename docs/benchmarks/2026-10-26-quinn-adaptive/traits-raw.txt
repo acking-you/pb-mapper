@@ -1,0 +1,3659 @@
+=== ipv4-short-0-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.84s (20.19 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   26.12 MiB/s │   39.00µs
+ P0   │    0.25 MiB/s │   27.00µs
+ P10  │   20.39 MiB/s │   30.00µs
+ P50  │   26.55 MiB/s │   36.00µs
+ P90  │   31.59 MiB/s │   47.00µs
+ P99  │   33.25 MiB/s │  111.00µs
+ P100 │   35.25 MiB/s │    3.87ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.84s (20.19 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6031.47 MiB/s │    0.00ns
+ P0   │    7.48 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    7.00µs
+ P100 │ 11768.00 MiB/s │  130.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.84s (40.39 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   51.54 MiB/s │   40.00µs
+ P0   │    0.50 MiB/s │   29.00µs
+ P10  │   40.34 MiB/s │   31.00µs
+ P50  │   52.37 MiB/s │   37.00µs
+ P90  │   62.44 MiB/s │   48.00µs
+ P99  │   64.69 MiB/s │  114.00µs
+ P100 │   66.87 MiB/s │    3.87ms
+        4.94 real         1.49 user         3.28 sys
+            21741568  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1353  page reclaims
+                 184  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207735  messages sent
+              207735  messages received
+                   0  signals received
+                   0  voluntary context switches
+              633716  involuntary context switches
+         35684848976  instructions retired
+         15823942424  cycles elapsed
+            13697528  peak memory footprint
+
+=== ipv4-short-0-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.09s (19.18 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.90 MiB/s │   42.00µs
+ P0   │    0.42 MiB/s │   26.00µs
+ P10  │   19.61 MiB/s │   35.00µs
+ P50  │   24.27 MiB/s │   40.00µs
+ P90  │   27.58 MiB/s │   49.00µs
+ P99  │   32.87 MiB/s │  101.00µs
+ P100 │   36.47 MiB/s │    2.30ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.09s (19.18 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6070.74 MiB/s │    0.00ns
+ P0   │    4.20 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    4.00µs
+ P100 │ 11768.00 MiB/s │  232.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.09s (38.37 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.41 MiB/s │   42.00µs
+ P0   │    0.85 MiB/s │   28.00µs
+ P10  │   38.78 MiB/s │   35.00µs
+ P50  │   48.19 MiB/s │   40.00µs
+ P90  │   54.78 MiB/s │   50.00µs
+ P99  │   64.87 MiB/s │  102.00µs
+ P100 │   68.19 MiB/s │    2.31ms
+        5.19 real         1.53 user         3.44 sys
+            20856832  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1295  page reclaims
+                 185  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207724  messages sent
+              207724  messages received
+                   0  signals received
+                   1  voluntary context switches
+              630580  involuntary context switches
+         34688847874  instructions retired
+         15276828910  cycles elapsed
+            14352888  peak memory footprint
+
+=== ipv4-short-0-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.01s (19.50 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.69 MiB/s │   41.00µs
+ P0   │    0.41 MiB/s │   26.00µs
+ P10  │   20.19 MiB/s │   36.00µs
+ P50  │   24.12 MiB/s │   40.00µs
+ P90  │   26.58 MiB/s │   48.00µs
+ P99  │   31.55 MiB/s │   74.00µs
+ P100 │   36.47 MiB/s │    2.38ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.01s (19.50 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5970.71 MiB/s │    0.00ns
+ P0   │    6.82 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  143.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.01s (39.01 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.04 MiB/s │   42.00µs
+ P0   │    0.82 MiB/s │   28.00µs
+ P10  │   39.97 MiB/s │   37.00µs
+ P50  │   47.94 MiB/s │   40.00µs
+ P90  │   52.81 MiB/s │   48.00µs
+ P99  │   62.28 MiB/s │   76.00µs
+ P100 │   68.25 MiB/s │    2.38ms
+        5.54 real         1.52 user         3.39 sys
+            20938752  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1483  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207720  messages sent
+              207720  messages received
+                   0  signals received
+                   1  voluntary context switches
+              621865  involuntary context switches
+         34521875825  instructions retired
+         14867991700  cycles elapsed
+            14434808  peak memory footprint
+
+=== ipv4-short-1-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.08s (19.23 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.56 MiB/s │   42.00µs
+ P0   │    0.36 MiB/s │   27.00µs
+ P10  │   19.77 MiB/s │   36.00µs
+ P50  │   24.02 MiB/s │   40.00µs
+ P90  │   26.70 MiB/s │   49.00µs
+ P99  │   31.67 MiB/s │   86.00µs
+ P100 │   35.91 MiB/s │    2.74ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.08s (19.23 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6116.76 MiB/s │    0.00ns
+ P0   │    4.54 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  214.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.08s (38.45 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   46.78 MiB/s │   42.00µs
+ P0   │    0.71 MiB/s │   28.00µs
+ P10  │   39.12 MiB/s │   36.00µs
+ P50  │   47.75 MiB/s │   40.00µs
+ P90  │   53.03 MiB/s │   49.00µs
+ P99  │   62.53 MiB/s │   88.00µs
+ P100 │   68.37 MiB/s │    2.74ms
+        5.16 real         1.54 user         3.41 sys
+            20905984  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1481  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207724  messages sent
+              207724  messages received
+                   0  signals received
+                   0  voluntary context switches
+              626170  involuntary context switches
+         34566083055  instructions retired
+         15069464728  cycles elapsed
+            14402040  peak memory footprint
+
+=== ipv4-short-1-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.04s (19.39 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.70 MiB/s │   42.00µs
+ P0   │    0.25 MiB/s │   27.00µs
+ P10  │   20.08 MiB/s │   36.00µs
+ P50  │   24.19 MiB/s │   40.00µs
+ P90  │   26.67 MiB/s │   48.00µs
+ P99  │   31.27 MiB/s │   75.00µs
+ P100 │   35.91 MiB/s │    3.96ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.04s (19.39 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6037.47 MiB/s │    0.00ns
+ P0   │    7.64 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  127.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.04s (38.78 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.08 MiB/s │   42.00µs
+ P0   │    0.49 MiB/s │   28.00µs
+ P10  │   39.75 MiB/s │   36.00µs
+ P50  │   48.09 MiB/s │   40.00µs
+ P90  │   52.97 MiB/s │   49.00µs
+ P99  │   61.44 MiB/s │   76.00µs
+ P100 │   68.75 MiB/s │    3.96ms
+        5.12 real         1.51 user         3.37 sys
+            20873216  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1478  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207727  messages sent
+              207727  messages received
+                   0  signals received
+                   0  voluntary context switches
+              623631  involuntary context switches
+         34529355794  instructions retired
+         14814295004  cycles elapsed
+            14369272  peak memory footprint
+
+=== ipv4-short-1-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.95s (19.71 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.63 MiB/s │   41.00µs
+ P0   │    0.93 MiB/s │   28.00µs
+ P10  │   20.16 MiB/s │   37.00µs
+ P50  │   24.12 MiB/s │   40.00µs
+ P90  │   26.17 MiB/s │   48.00µs
+ P99  │   30.97 MiB/s │   63.00µs
+ P100 │   34.91 MiB/s │    1.05ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.95s (19.71 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6036.88 MiB/s │    0.00ns
+ P0   │    1.24 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  785.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.95s (39.43 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   46.93 MiB/s │   42.00µs
+ P0   │    1.86 MiB/s │   29.00µs
+ P10  │   39.94 MiB/s │   37.00µs
+ P50  │   47.94 MiB/s │   40.00µs
+ P90  │   51.97 MiB/s │   48.00µs
+ P99  │   61.28 MiB/s │   64.00µs
+ P100 │   65.87 MiB/s │    1.05ms
+        5.04 real         1.51 user         3.23 sys
+            20791296  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1475  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207720  messages sent
+              207720  messages received
+                   0  signals received
+                   0  voluntary context switches
+              617485  involuntary context switches
+         35286255988  instructions retired
+         14319281039  cycles elapsed
+            14320120  peak memory footprint
+
+=== ipv4-short-2-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.93s (19.82 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.02 MiB/s │   41.00µs
+ P0   │    0.70 MiB/s │   26.00µs
+ P10  │   20.44 MiB/s │   36.00µs
+ P50  │   24.33 MiB/s │   40.00µs
+ P90  │   26.92 MiB/s │   47.00µs
+ P99  │   32.62 MiB/s │   66.00µs
+ P100 │   36.47 MiB/s │    1.40ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.93s (19.82 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6138.78 MiB/s │    0.00ns
+ P0   │    9.53 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  102.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.93s (39.64 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.69 MiB/s │   41.00µs
+ P0   │    1.39 MiB/s │   28.00µs
+ P10  │   40.50 MiB/s │   36.00µs
+ P50  │   48.34 MiB/s │   40.00µs
+ P90  │   53.53 MiB/s │   48.00µs
+ P99  │   64.50 MiB/s │   67.00µs
+ P100 │   68.37 MiB/s │    1.40ms
+        5.01 real         1.49 user         3.32 sys
+            20791296  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1473  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207721  messages sent
+              207721  messages received
+                   0  signals received
+                   0  voluntary context switches
+              619971  involuntary context switches
+         34498326508  instructions retired
+         14618903012  cycles elapsed
+            14287352  peak memory footprint
+
+=== ipv4-short-2-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.01s (19.51 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.48 MiB/s │   42.00µs
+ P0   │    0.52 MiB/s │   28.00µs
+ P10  │   20.00 MiB/s │   37.00µs
+ P50  │   23.95 MiB/s │   40.00µs
+ P90  │   26.05 MiB/s │   48.00µs
+ P99  │   30.41 MiB/s │   68.00µs
+ P100 │   34.37 MiB/s │    1.86ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.01s (19.51 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5960.71 MiB/s │    0.00ns
+ P0   │    5.64 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  173.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.01s (39.02 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   46.64 MiB/s │   42.00µs
+ P0   │    1.05 MiB/s │   29.00µs
+ P10  │   39.62 MiB/s │   37.00µs
+ P50  │   47.59 MiB/s │   41.00µs
+ P90  │   51.81 MiB/s │   49.00µs
+ P99  │   59.97 MiB/s │   69.00µs
+ P100 │   65.44 MiB/s │    1.86ms
+        5.09 real         1.56 user         3.28 sys
+            20856832  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1477  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207720  messages sent
+              207720  messages received
+                   0  signals received
+                   0  voluntary context switches
+              619719  involuntary context switches
+         35305351550  instructions retired
+         14618516546  cycles elapsed
+            14385656  peak memory footprint
+
+=== ipv4-short-2-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.08s (19.21 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.95 MiB/s │   42.00µs
+ P0   │    0.11 MiB/s │   26.00µs
+ P10  │   19.81 MiB/s │   35.00µs
+ P50  │   24.25 MiB/s │   40.00µs
+ P90  │   27.48 MiB/s │   49.00µs
+ P99  │   32.94 MiB/s │   86.00µs
+ P100 │   36.28 MiB/s │    8.55ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.08s (19.21 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6138.17 MiB/s │    0.00ns
+ P0   │    0.33 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    4.00µs
+ P100 │ 11768.00 MiB/s │    2.95ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.08s (38.43 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.52 MiB/s │   42.00µs
+ P0   │    0.23 MiB/s │   28.00µs
+ P10  │   39.25 MiB/s │   35.00µs
+ P50  │   48.19 MiB/s │   40.00µs
+ P90  │   54.53 MiB/s │   49.00µs
+ P99  │   64.94 MiB/s │   87.00µs
+ P100 │   69.50 MiB/s │    8.55ms
+        5.16 real         1.52 user         3.42 sys
+            20971520  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1484  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207724  messages sent
+              207724  messages received
+                   0  signals received
+                   1  voluntary context switches
+              628476  involuntary context switches
+         34630472160  instructions retired
+         15225387125  cycles elapsed
+            13500896  peak memory footprint
+
+=== ipv4-short-3-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.06s (19.31 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.99 MiB/s │   42.00µs
+ P0   │    0.14 MiB/s │   27.00µs
+ P10  │   20.09 MiB/s │   34.00µs
+ P50  │   24.05 MiB/s │   40.00µs
+ P90  │   28.28 MiB/s │   48.00µs
+ P99  │   32.25 MiB/s │   76.00µs
+ P100 │   35.09 MiB/s │    6.89ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.06s (19.31 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 5957.60 MiB/s │    0.00ns
+ P0   │    6.69 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    5.00µs
+ P100 │ 11768.00 MiB/s │  146.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.06s (38.63 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.58 MiB/s │   42.00µs
+ P0   │    0.28 MiB/s │   29.00µs
+ P10  │   39.81 MiB/s │   35.00µs
+ P50  │   47.75 MiB/s │   40.00µs
+ P90  │   55.69 MiB/s │   49.00µs
+ P99  │   63.53 MiB/s │   77.00µs
+ P100 │   66.62 MiB/s │    6.89ms
+        5.14 real         1.54 user         3.35 sys
+            20889600  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1482  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207724  messages sent
+              207724  messages received
+                   0  signals received
+                   0  voluntary context switches
+              622885  involuntary context switches
+         35390510498  instructions retired
+         15121222927  cycles elapsed
+            14418424  peak memory footprint
+
+=== ipv4-short-3-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.31s (18.38 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.36 MiB/s │   44.00µs
+ P0   │    0.03 MiB/s │   27.00µs
+ P10  │   19.55 MiB/s │   36.00µs
+ P50  │   23.97 MiB/s │   40.00µs
+ P90  │   26.55 MiB/s │   50.00µs
+ P99  │   30.36 MiB/s │  104.00µs
+ P100 │   35.97 MiB/s │   36.67ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.31s (18.38 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6060.84 MiB/s │    0.00ns
+ P0   │    7.37 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    4.00µs
+ P100 │ 11768.00 MiB/s │  132.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.31s (36.76 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   46.38 MiB/s │   44.00µs
+ P0   │    0.05 MiB/s │   28.00µs
+ P10  │   38.62 MiB/s │   37.00µs
+ P50  │   47.66 MiB/s │   41.00µs
+ P90  │   52.81 MiB/s │   50.00µs
+ P99  │   59.97 MiB/s │  107.00µs
+ P100 │   68.06 MiB/s │   36.67ms
+        5.40 real         1.56 user         3.48 sys
+            20889600  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1479  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207729  messages sent
+              207729  messages received
+                   0  signals received
+                   0  voluntary context switches
+              632199  involuntary context switches
+         34674874284  instructions retired
+         15326253912  cycles elapsed
+            14369248  peak memory footprint
+
+=== ipv4-short-3-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.03s (19.40 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.72 MiB/s │   41.00µs
+ P0   │    0.41 MiB/s │   27.00µs
+ P10  │   20.11 MiB/s │   36.00µs
+ P50  │   24.14 MiB/s │   40.00µs
+ P90  │   26.77 MiB/s │   48.00µs
+ P99  │   31.86 MiB/s │   75.00µs
+ P100 │   36.03 MiB/s │    2.41ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.03s (19.40 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6096.52 MiB/s │    0.00ns
+ P0   │    5.24 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  186.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.03s (38.81 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.10 MiB/s │   42.00µs
+ P0   │    0.81 MiB/s │   28.00µs
+ P10  │   39.78 MiB/s │   36.00µs
+ P50  │   48.00 MiB/s │   40.00µs
+ P90  │   53.22 MiB/s │   49.00µs
+ P99  │   62.94 MiB/s │   77.00µs
+ P100 │   67.94 MiB/s │    2.41ms
+        5.12 real         1.52 user         3.40 sys
+            20807680  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1479  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207727  messages sent
+              207727  messages received
+                   0  signals received
+                   0  voluntary context switches
+              624433  involuntary context switches
+         34582080814  instructions retired
+         14930430321  cycles elapsed
+            14287328  peak memory footprint
+
+=== ipv4-short-concurrent-0-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.14s (85.56 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.85 MiB/s │  239.00µs
+ P0   │    0.11 MiB/s │   35.00µs
+ P10  │    2.76 MiB/s │  127.00µs
+ P50  │    4.27 MiB/s │  228.00µs
+ P90  │    7.67 MiB/s │  354.00µs
+ P99  │   13.47 MiB/s │  567.00µs
+ P100 │   27.17 MiB/s │    8.52ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.14s (85.56 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2978.40 MiB/s │   55.00µs
+ P0   │    0.34 MiB/s │    0.00ns
+ P10  │    5.19 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  188.00µs
+ P99  │ 7816.00 MiB/s │  335.00µs
+ P100 │ 11768.00 MiB/s │    2.88ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.14s (171.11 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.63 MiB/s │  295.00µs
+ P0   │    0.23 MiB/s │   40.00µs
+ P10  │    4.65 MiB/s │  171.00µs
+ P50  │    6.87 MiB/s │  284.00µs
+ P90  │   11.38 MiB/s │  420.00µs
+ P99  │   20.48 MiB/s │  667.00µs
+ P100 │   48.53 MiB/s │    8.52ms
+        1.22 real         0.99 user         2.32 sys
+            23019520  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1611  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194337  messages sent
+              194337  messages received
+                   0  signals received
+                   0  voluntary context switches
+              184703  involuntary context switches
+         24061580082  instructions retired
+         10500822269  cycles elapsed
+            16548344  peak memory footprint
+
+=== ipv4-short-concurrent-0-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.16s (84.23 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.78 MiB/s │  244.00µs
+ P0   │    0.42 MiB/s │   37.00µs
+ P10  │    2.69 MiB/s │  128.00µs
+ P50  │    4.21 MiB/s │  232.00µs
+ P90  │    7.58 MiB/s │  363.00µs
+ P99  │   13.22 MiB/s │  616.00µs
+ P100 │   26.05 MiB/s │    2.32ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.16s (84.23 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2862.94 MiB/s │   57.00µs
+ P0   │    0.85 MiB/s │    0.00ns
+ P10  │    5.02 MiB/s │    0.00ns
+ P50  │ 2934.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  194.00µs
+ P99  │ 7816.00 MiB/s │  352.00µs
+ P100 │ 11768.00 MiB/s │    1.15ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.16s (168.45 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.51 MiB/s │  301.00µs
+ P0   │    0.84 MiB/s │   40.00µs
+ P10  │    4.52 MiB/s │  173.00µs
+ P50  │    6.77 MiB/s │  288.00µs
+ P90  │   11.28 MiB/s │  432.00µs
+ P99  │   20.33 MiB/s │  743.00µs
+ P100 │   48.25 MiB/s │    2.32ms
+        1.24 real         1.02 user         2.35 sys
+            21889024  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1540  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194204  messages sent
+              194204  messages received
+                   0  signals received
+                   0  voluntary context switches
+              189233  involuntary context switches
+         24093920230  instructions retired
+         10612011072  cycles elapsed
+            15385080  peak memory footprint
+
+=== ipv4-short-concurrent-0-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.11s (87.61 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.87 MiB/s │  236.00µs
+ P0   │    0.45 MiB/s │   34.00µs
+ P10  │    2.80 MiB/s │  127.00µs
+ P50  │    4.28 MiB/s │  228.00µs
+ P90  │    7.68 MiB/s │  348.00µs
+ P99  │   13.44 MiB/s │  512.00µs
+ P100 │   27.94 MiB/s │    2.15ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.11s (87.61 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2925.98 MiB/s │   53.00µs
+ P0   │    0.39 MiB/s │    0.00ns
+ P10  │    5.17 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  189.00µs
+ P99  │ 7816.00 MiB/s │  325.00µs
+ P100 │ 11768.00 MiB/s │    2.52ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.11s (175.22 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.67 MiB/s │  290.00µs
+ P0   │    0.74 MiB/s │   44.00µs
+ P10  │    4.75 MiB/s │  171.00µs
+ P50  │    6.89 MiB/s │  283.00µs
+ P90  │   11.39 MiB/s │  411.00µs
+ P99  │   20.44 MiB/s │  594.00µs
+ P100 │   44.03 MiB/s │    2.62ms
+        1.20 real         0.99 user         2.29 sys
+            22544384  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1583  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194178  messages sent
+              194178  messages received
+                   0  signals received
+                   0  voluntary context switches
+              185325  involuntary context switches
+         24015385866  instructions retired
+         10302312509  cycles elapsed
+            16040440  peak memory footprint
+
+=== ipv4-short-concurrent-1-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.11s (87.76 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.94 MiB/s │  234.00µs
+ P0   │    0.40 MiB/s │   33.00µs
+ P10  │    2.85 MiB/s │  125.00µs
+ P50  │    4.34 MiB/s │  224.00µs
+ P90  │    7.80 MiB/s │  343.00µs
+ P99  │   13.59 MiB/s │  539.00µs
+ P100 │   29.20 MiB/s │    2.47ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.11s (87.76 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2937.08 MiB/s │   54.00µs
+ P0   │    1.00 MiB/s │    0.00ns
+ P10  │    5.18 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  188.00µs
+ P99  │ 7816.00 MiB/s │  330.00µs
+ P100 │ 23264.00 MiB/s │  974.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.11s (175.52 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.76 MiB/s │  289.00µs
+ P0   │    0.79 MiB/s │   46.00µs
+ P10  │    4.81 MiB/s │  170.00µs
+ P50  │    6.97 MiB/s │  280.00µs
+ P90  │   11.49 MiB/s │  406.00µs
+ P99  │   20.95 MiB/s │  656.00µs
+ P100 │   42.28 MiB/s │    2.47ms
+        1.20 real         0.99 user         2.27 sys
+            22528000  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1579  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194450  messages sent
+              194450  messages received
+                   0  signals received
+                   0  voluntary context switches
+              184366  involuntary context switches
+         24025390545  instructions retired
+         10257098739  cycles elapsed
+            16024056  peak memory footprint
+
+=== ipv4-short-concurrent-1-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.13s (86.21 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.87 MiB/s │  238.00µs
+ P0   │    0.29 MiB/s │   34.00µs
+ P10  │    2.76 MiB/s │  126.00µs
+ P50  │    4.26 MiB/s │  229.00µs
+ P90  │    7.75 MiB/s │  353.00µs
+ P99  │   13.52 MiB/s │  547.00µs
+ P100 │   28.56 MiB/s │    3.40ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.13s (86.21 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 3013.50 MiB/s │   54.00µs
+ P0   │    0.39 MiB/s │    0.00ns
+ P10  │    5.09 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  191.00µs
+ P99  │ 7816.00 MiB/s │  344.00µs
+ P100 │ 11768.00 MiB/s │    2.51ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.13s (172.42 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.72 MiB/s │  293.00µs
+ P0   │    0.57 MiB/s │   42.00µs
+ P10  │    4.65 MiB/s │  168.00µs
+ P50  │    6.93 MiB/s │  281.00µs
+ P90  │   11.61 MiB/s │  420.00µs
+ P99  │   20.87 MiB/s │  658.00µs
+ P100 │   46.34 MiB/s │    3.40ms
+        1.22 real         0.99 user         2.31 sys
+            22724608  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1592  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194563  messages sent
+              194563  messages received
+                   0  signals received
+                   0  voluntary context switches
+              185021  involuntary context switches
+         24035679165  instructions retired
+         10477399612  cycles elapsed
+            16204256  peak memory footprint
+
+=== ipv4-short-concurrent-1-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.09s (89.39 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.91 MiB/s │  232.00µs
+ P0   │    0.37 MiB/s │   34.00µs
+ P10  │    2.87 MiB/s │  126.00µs
+ P50  │    4.30 MiB/s │  226.00µs
+ P90  │    7.72 MiB/s │  340.00µs
+ P99  │   13.62 MiB/s │  461.00µs
+ P100 │   28.08 MiB/s │    2.62ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.09s (89.39 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2890.18 MiB/s │   52.00µs
+ P0   │    0.47 MiB/s │    0.00ns
+ P10  │    5.29 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  184.00µs
+ P99  │ 7816.00 MiB/s │  304.00µs
+ P100 │ 11768.00 MiB/s │    2.06ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.09s (178.78 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.77 MiB/s │  284.00µs
+ P0   │    0.74 MiB/s │   37.00µs
+ P10  │    4.89 MiB/s │  171.00µs
+ P50  │    6.94 MiB/s │  281.00µs
+ P90  │   11.40 MiB/s │  399.00µs
+ P99  │   21.28 MiB/s │  539.00µs
+ P100 │   51.81 MiB/s │    2.62ms
+        1.18 real         1.00 user         2.23 sys
+            22282240  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1565  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194353  messages sent
+              194353  messages received
+                   0  signals received
+                   1  voluntary context switches
+              184805  involuntary context switches
+         24156478857  instructions retired
+         10122864824  cycles elapsed
+            15811064  peak memory footprint
+
+=== ipv4-short-concurrent-2-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.10s (88.66 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.91 MiB/s │  234.00µs
+ P0   │    0.38 MiB/s │   38.00µs
+ P10  │    2.83 MiB/s │  126.00µs
+ P50  │    4.31 MiB/s │  226.00µs
+ P90  │    7.73 MiB/s │  344.00µs
+ P99  │   13.53 MiB/s │  494.00µs
+ P100 │   25.27 MiB/s │    2.58ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.10s (88.66 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2953.56 MiB/s │   51.00µs
+ P0   │    0.40 MiB/s │    0.00ns
+ P10  │    5.22 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  187.00µs
+ P99  │ 7816.00 MiB/s │  310.00µs
+ P100 │ 11768.00 MiB/s │    2.42ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.10s (177.32 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.79 MiB/s │  286.00µs
+ P0   │    0.75 MiB/s │   39.00µs
+ P10  │    4.82 MiB/s │  168.00µs
+ P50  │    6.98 MiB/s │  279.00µs
+ P90  │   11.60 MiB/s │  405.00µs
+ P99  │   20.87 MiB/s │  580.00µs
+ P100 │   49.34 MiB/s │    2.59ms
+        1.18 real         0.99 user         2.25 sys
+            21889024  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1542  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194021  messages sent
+              194021  messages received
+                   0  signals received
+                   0  voluntary context switches
+              185241  involuntary context switches
+         24025091933  instructions retired
+         10228109892  cycles elapsed
+            15385080  peak memory footprint
+
+=== ipv4-short-concurrent-2-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.09s (89.64 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.91 MiB/s │  232.00µs
+ P0   │    0.72 MiB/s │   31.00µs
+ P10  │    2.87 MiB/s │  126.00µs
+ P50  │    4.30 MiB/s │  227.00µs
+ P90  │    7.70 MiB/s │  340.00µs
+ P99  │   13.54 MiB/s │  470.00µs
+ P100 │   31.47 MiB/s │    1.35ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.09s (89.64 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2909.98 MiB/s │   51.00µs
+ P0   │    0.46 MiB/s │    0.00ns
+ P10  │    5.33 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  183.00µs
+ P99  │ 7816.00 MiB/s │  299.00µs
+ P100 │ 11768.00 MiB/s │    2.13ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.09s (179.29 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.77 MiB/s │  284.00µs
+ P0   │    0.84 MiB/s │   43.00µs
+ P10  │    4.91 MiB/s │  172.00µs
+ P50  │    6.98 MiB/s │  279.00µs
+ P90  │   11.35 MiB/s │  397.00µs
+ P99  │   20.97 MiB/s │  537.00µs
+ P100 │   44.44 MiB/s │    2.33ms
+        1.17 real         0.99 user         2.22 sys
+            22216704  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1562  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194049  messages sent
+              194049  messages received
+                   0  signals received
+                   0  voluntary context switches
+              183221  involuntary context switches
+         24090726228  instructions retired
+         10030811606  cycles elapsed
+            15745528  peak memory footprint
+
+=== ipv4-short-concurrent-2-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.09s (89.99 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.93 MiB/s │  230.00µs
+ P0   │    0.60 MiB/s │   34.00µs
+ P10  │    2.90 MiB/s │  126.00µs
+ P50  │    4.32 MiB/s │  226.00µs
+ P90  │    7.71 MiB/s │  337.00µs
+ P99  │   13.56 MiB/s │  459.00µs
+ P100 │   28.05 MiB/s │    1.62ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.09s (89.99 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2915.57 MiB/s │   52.00µs
+ P0   │    0.95 MiB/s │    0.00ns
+ P10  │    5.27 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  185.00µs
+ P99  │ 7816.00 MiB/s │  305.00µs
+ P100 │ 11768.00 MiB/s │    1.03ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.09s (179.97 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.76 MiB/s │  283.00µs
+ P0   │    1.20 MiB/s │   43.00µs
+ P10  │    4.95 MiB/s │  172.00µs
+ P50  │    6.97 MiB/s │  280.00µs
+ P90  │   11.35 MiB/s │  394.00µs
+ P99  │   20.48 MiB/s │  540.00µs
+ P100 │   44.56 MiB/s │    1.62ms
+        1.17 real         0.99 user         2.23 sys
+            22462464  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1575  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194213  messages sent
+              194213  messages received
+                   0  signals received
+                   1  voluntary context switches
+              183412  involuntary context switches
+         24008792525  instructions retired
+         10005224211  cycles elapsed
+            15958520  peak memory footprint
+
+=== ipv4-short-concurrent-3-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.15s (84.62 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.86 MiB/s │  243.00µs
+ P0   │    0.05 MiB/s │   30.00µs
+ P10  │    2.78 MiB/s │  126.00µs
+ P50  │    4.25 MiB/s │  229.00µs
+ P90  │    7.70 MiB/s │  351.00µs
+ P99  │   13.62 MiB/s │  593.00µs
+ P100 │   31.98 MiB/s │   20.14ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.15s (84.62 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2941.18 MiB/s │   56.00µs
+ P0   │    0.06 MiB/s │    0.00ns
+ P10  │    5.16 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  189.00µs
+ P99  │ 7816.00 MiB/s │  341.00µs
+ P100 │ 11768.00 MiB/s │   16.64ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.15s (169.25 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.66 MiB/s │  299.00µs
+ P0   │    0.10 MiB/s │   34.00µs
+ P10  │    4.68 MiB/s │  171.00µs
+ P50  │    6.90 MiB/s │  283.00µs
+ P90  │   11.42 MiB/s │  417.00µs
+ P99  │   20.81 MiB/s │  757.00µs
+ P100 │   55.87 MiB/s │   20.14ms
+        1.24 real         1.01 user         2.29 sys
+            22331392  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1569  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194454  messages sent
+              194454  messages received
+                   0  signals received
+                   0  voluntary context switches
+              187001  involuntary context switches
+         24150812017  instructions retired
+         10411192603  cycles elapsed
+            15860216  peak memory footprint
+
+=== ipv4-short-concurrent-3-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.25s (78.01 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.54 MiB/s │  262.00µs
+ P0   │    0.39 MiB/s │   36.00µs
+ P10  │    2.41 MiB/s │  133.00µs
+ P50  │    4.00 MiB/s │  244.00µs
+ P90  │    7.32 MiB/s │  405.00µs
+ P99  │   12.85 MiB/s │  695.00µs
+ P100 │   26.89 MiB/s │    2.49ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.25s (78.01 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2979.19 MiB/s │   61.00µs
+ P0   │    0.42 MiB/s │    0.00ns
+ P10  │    4.65 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  210.00µs
+ P99  │ 7816.00 MiB/s │  414.00µs
+ P100 │ 11768.00 MiB/s │    2.35ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.25s (156.01 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.18 MiB/s │  324.00µs
+ P0   │    0.73 MiB/s │   36.00µs
+ P10  │    3.98 MiB/s │  177.00µs
+ P50  │    6.48 MiB/s │  301.00µs
+ P90  │   11.04 MiB/s │  490.00µs
+ P99  │   19.98 MiB/s │  822.00µs
+ P100 │   52.87 MiB/s │    2.69ms
+        1.34 real         1.06 user         2.51 sys
+            22331392  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1568  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194034  messages sent
+              194034  messages received
+                   0  signals received
+                   0  voluntary context switches
+              190231  involuntary context switches
+         24090620283  instructions retired
+         11414192771  cycles elapsed
+            15811040  peak memory footprint
+
+=== ipv4-short-concurrent-3-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.21s (80.51 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    4.74 MiB/s │  252.00µs
+ P0   │    0.20 MiB/s │   33.00µs
+ P10  │    2.58 MiB/s │  128.00µs
+ P50  │    4.18 MiB/s │  233.00µs
+ P90  │    7.61 MiB/s │  378.00µs
+ P99  │   13.50 MiB/s │  710.00µs
+ P100 │   28.87 MiB/s │    4.90ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 1.21s (80.51 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 2948.16 MiB/s │   60.00µs
+ P0   │    0.35 MiB/s │    0.00ns
+ P10  │    4.84 MiB/s │    0.00ns
+ P50  │ 3346.00 MiB/s │    0.00ns
+ P90  │ 5884.00 MiB/s │  201.00µs
+ P99  │ 7816.00 MiB/s │  415.00µs
+ P100 │ 11768.00 MiB/s │    2.75ms
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 1.21s (161.02 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │    7.45 MiB/s │  313.00µs
+ P0   │    0.40 MiB/s │   38.00µs
+ P10  │    4.23 MiB/s │  171.00µs
+ P50  │    6.72 MiB/s │  290.00µs
+ P90  │   11.37 MiB/s │  461.00µs
+ P99  │   20.53 MiB/s │  872.00µs
+ P100 │   51.03 MiB/s │    4.90ms
+        1.30 real         1.02 user         2.41 sys
+            22364160  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1567  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              194250  messages sent
+              194250  messages received
+                   0  signals received
+                   0  voluntary context switches
+              190389  involuntary context switches
+         24064890211  instructions retired
+         10952186611  cycles elapsed
+            15860216  peak memory footprint
+
+=== ipv6-short-0-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.46s (17.90 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.38 MiB/s │   44.00µs
+ P0   │    0.08 MiB/s │   28.00µs
+ P10  │   18.86 MiB/s │   34.00µs
+ P50  │   23.56 MiB/s │   41.00µs
+ P90  │   28.59 MiB/s │   51.00µs
+ P99  │   31.86 MiB/s │  127.00µs
+ P100 │   34.75 MiB/s │   11.84ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.46s (17.90 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6219.13 MiB/s │    0.00ns
+ P0   │    1.38 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5884.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    7.00µs
+ P100 │ 11768.00 MiB/s │  707.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.46s (35.80 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   46.33 MiB/s │   45.00µs
+ P0   │    0.17 MiB/s │   29.00µs
+ P10  │   37.31 MiB/s │   34.00µs
+ P50  │   46.84 MiB/s │   41.00µs
+ P90  │   56.22 MiB/s │   52.00µs
+ P99  │   62.94 MiB/s │  131.00µs
+ P100 │   65.56 MiB/s │   11.84ms
+        5.54 real         1.58 user         3.59 sys
+            20840448  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1477  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207727  messages sent
+              207727  messages received
+                   0  signals received
+                   0  voluntary context switches
+              632242  involuntary context switches
+         36211735766  instructions retired
+         16175807451  cycles elapsed
+            14385656  peak memory footprint
+
+=== ipv6-short-0-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.22s (18.71 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.11 MiB/s │   43.00µs
+ P0   │    0.40 MiB/s │   28.00µs
+ P10  │   18.91 MiB/s │   36.00µs
+ P50  │   23.61 MiB/s │   41.00µs
+ P90  │   26.89 MiB/s │   51.00µs
+ P99  │   30.56 MiB/s │   94.00µs
+ P100 │   33.75 MiB/s │    2.44ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.22s (18.71 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6069.57 MiB/s │    0.00ns
+ P0   │    5.18 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    6.00µs
+ P100 │ 11768.00 MiB/s │  188.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.22s (37.42 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   45.85 MiB/s │   43.00µs
+ P0   │    0.80 MiB/s │   30.00µs
+ P10  │   37.41 MiB/s │   36.00µs
+ P50  │   46.94 MiB/s │   41.00µs
+ P90  │   53.34 MiB/s │   52.00µs
+ P99  │   60.34 MiB/s │   97.00µs
+ P100 │   63.62 MiB/s │    2.44ms
+        5.30 real         1.52 user         3.45 sys
+            20889600  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1480  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207725  messages sent
+              207725  messages received
+                   0  signals received
+                   0  voluntary context switches
+              630570  involuntary context switches
+         35309207655  instructions retired
+         15322731357  cycles elapsed
+            14385656  peak memory footprint
+
+=== ipv6-short-0-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.85s (20.12 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.19 MiB/s │   40.00µs
+ P0   │    0.61 MiB/s │   27.00µs
+ P10  │   20.42 MiB/s │   35.00µs
+ P50  │   24.34 MiB/s │   40.00µs
+ P90  │   27.48 MiB/s │   47.00µs
+ P99  │   32.37 MiB/s │   63.00µs
+ P100 │   35.53 MiB/s │    1.61ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.85s (20.12 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6221.78 MiB/s │    0.00ns
+ P0   │    9.18 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    5.00µs
+ P100 │ 11768.00 MiB/s │  106.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.85s (40.23 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   48.00 MiB/s │   41.00µs
+ P0   │    1.21 MiB/s │   29.00µs
+ P10  │   40.50 MiB/s │   35.00µs
+ P50  │   48.37 MiB/s │   40.00µs
+ P90  │   54.59 MiB/s │   48.00µs
+ P99  │   64.06 MiB/s │   64.00µs
+ P100 │   67.06 MiB/s │    1.61ms
+        4.94 real         1.47 user         3.33 sys
+            20774912  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1473  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207720  messages sent
+              207720  messages received
+                   0  signals received
+                   0  voluntary context switches
+              618427  involuntary context switches
+         35100769982  instructions retired
+         14672981372  cycles elapsed
+            14270968  peak memory footprint
+
+=== ipv6-short-1-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.87s (20.05 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.94 MiB/s │   41.00µs
+ P0   │    0.47 MiB/s │   27.00µs
+ P10  │   20.45 MiB/s │   36.00µs
+ P50  │   24.19 MiB/s │   40.00µs
+ P90  │   26.95 MiB/s │   47.00µs
+ P99  │   31.52 MiB/s │   60.00µs
+ P100 │   36.12 MiB/s │    2.09ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.87s (20.05 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6165.97 MiB/s │    0.00ns
+ P0   │   17.78 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │   54.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.87s (40.10 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.55 MiB/s │   41.00µs
+ P0   │    0.93 MiB/s │   29.00µs
+ P10  │   40.53 MiB/s │   36.00µs
+ P50  │   48.09 MiB/s │   40.00µs
+ P90  │   53.53 MiB/s │   48.00µs
+ P99  │   62.09 MiB/s │   61.00µs
+ P100 │   67.19 MiB/s │    2.09ms
+        4.95 real         1.48 user         3.33 sys
+            20938752  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1484  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207719  messages sent
+              207719  messages received
+                   0  signals received
+                   1  voluntary context switches
+              615371  involuntary context switches
+         35056609425  instructions retired
+         14549158103  cycles elapsed
+            14418400  peak memory footprint
+
+=== ipv6-short-1-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.88s (20.02 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   24.01 MiB/s │   41.00µs
+ P0   │    0.41 MiB/s │   27.00µs
+ P10  │   20.45 MiB/s │   35.00µs
+ P50  │   24.27 MiB/s │   40.00µs
+ P90  │   27.17 MiB/s │   47.00µs
+ P99  │   31.98 MiB/s │   65.00µs
+ P100 │   35.62 MiB/s │    2.37ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.88s (20.02 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6035.78 MiB/s │    0.00ns
+ P0   │    8.63 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  113.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.88s (40.03 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.69 MiB/s │   41.00µs
+ P0   │    0.82 MiB/s │   29.00µs
+ P10  │   40.56 MiB/s │   36.00µs
+ P50  │   48.25 MiB/s │   40.00µs
+ P90  │   54.03 MiB/s │   48.00µs
+ P99  │   63.19 MiB/s │   66.00µs
+ P100 │   67.00 MiB/s │    2.37ms
+        4.96 real         1.48 user         3.34 sys
+            20856832  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1477  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207720  messages sent
+              207720  messages received
+                   0  signals received
+                   0  voluntary context switches
+              615684  involuntary context switches
+         35066968912  instructions retired
+         14525938055  cycles elapsed
+            14336480  peak memory footprint
+
+=== ipv6-short-1-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.93s (19.82 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.50 MiB/s │   41.00µs
+ P0   │    0.52 MiB/s │   28.00µs
+ P10  │   20.33 MiB/s │   37.00µs
+ P50  │   23.69 MiB/s │   41.00µs
+ P90  │   26.41 MiB/s │   48.00µs
+ P99  │   29.75 MiB/s │   60.00µs
+ P100 │   34.53 MiB/s │    1.89ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.93s (19.82 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6215.41 MiB/s │    0.00ns
+ P0   │    7.43 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │  131.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.93s (39.64 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   46.69 MiB/s │   42.00µs
+ P0   │    1.03 MiB/s │   29.00µs
+ P10  │   40.31 MiB/s │   37.00µs
+ P50  │   47.09 MiB/s │   41.00µs
+ P90  │   52.50 MiB/s │   48.00µs
+ P99  │   58.53 MiB/s │   60.00µs
+ P100 │   66.12 MiB/s │    1.89ms
+        5.01 real         1.51 user         3.36 sys
+            20856832  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1478  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207717  messages sent
+              207717  messages received
+                   0  signals received
+                   1  voluntary context switches
+              613846  involuntary context switches
+         35888317046  instructions retired
+         14767919912  cycles elapsed
+            14385632  peak memory footprint
+
+=== ipv6-short-2-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.90s (19.92 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.81 MiB/s │   41.00µs
+ P0   │    0.47 MiB/s │   27.00µs
+ P10  │   20.44 MiB/s │   36.00µs
+ P50  │   24.05 MiB/s │   40.00µs
+ P90  │   26.80 MiB/s │   47.00µs
+ P99  │   31.42 MiB/s │   60.00µs
+ P100 │   35.41 MiB/s │    2.09ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.90s (19.92 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6044.67 MiB/s │    0.00ns
+ P0   │   17.17 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │   56.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.90s (39.85 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.29 MiB/s │   41.00µs
+ P0   │    0.93 MiB/s │   29.00µs
+ P10  │   40.47 MiB/s │   36.00µs
+ P50  │   47.84 MiB/s │   40.00µs
+ P90  │   53.22 MiB/s │   48.00µs
+ P99  │   62.03 MiB/s │   61.00µs
+ P100 │   67.37 MiB/s │    2.10ms
+        4.98 real         1.48 user         3.36 sys
+            20856832  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1477  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207721  messages sent
+              207721  messages received
+                   0  signals received
+                   0  voluntary context switches
+              615392  involuntary context switches
+         35069871767  instructions retired
+         14614679049  cycles elapsed
+            14336480  peak memory footprint
+
+=== ipv6-short-2-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.89s (19.96 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.69 MiB/s │   41.00µs
+ P0   │    0.52 MiB/s │   28.00µs
+ P10  │   20.44 MiB/s │   36.00µs
+ P50  │   23.80 MiB/s │   41.00µs
+ P90  │   26.73 MiB/s │   47.00µs
+ P99  │   31.02 MiB/s │   60.00µs
+ P100 │   34.44 MiB/s │    1.88ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 4.89s (19.96 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6272.56 MiB/s │    0.00ns
+ P0   │   13.08 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    0.00ns
+ P100 │ 11768.00 MiB/s │   74.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 4.89s (39.91 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   47.06 MiB/s │   41.00µs
+ P0   │    1.04 MiB/s │   29.00µs
+ P10  │   40.56 MiB/s │   36.00µs
+ P50  │   47.31 MiB/s │   41.00µs
+ P90  │   53.09 MiB/s │   48.00µs
+ P99  │   61.28 MiB/s │   60.00µs
+ P100 │   65.75 MiB/s │    1.88ms
+        4.98 real         1.50 user         3.34 sys
+            20758528  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1474  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207716  messages sent
+              207716  messages received
+                   0  signals received
+                   0  voluntary context switches
+              614147  involuntary context switches
+         35892351401  instructions retired
+         14681049649  cycles elapsed
+            14287328  peak memory footprint
+
+=== ipv6-short-2-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.35s (18.25 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.55 MiB/s │   44.00µs
+ P0   │    0.15 MiB/s │   27.00µs
+ P10  │   19.02 MiB/s │   35.00µs
+ P50  │   23.97 MiB/s │   40.00µs
+ P90  │   27.91 MiB/s │   51.00µs
+ P99  │   32.12 MiB/s │  132.00µs
+ P100 │   35.00 MiB/s │    6.51ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.35s (18.25 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6177.08 MiB/s │    0.00ns
+ P0   │    3.62 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    7.00µs
+ P100 │ 11768.00 MiB/s │  269.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.35s (36.49 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   46.68 MiB/s │   44.00µs
+ P0   │    0.30 MiB/s │   29.00µs
+ P10  │   37.59 MiB/s │   35.00µs
+ P50  │   47.66 MiB/s │   41.00µs
+ P90  │   55.09 MiB/s │   51.00µs
+ P99  │   63.34 MiB/s │  135.00µs
+ P100 │   66.87 MiB/s │    6.51ms
+        5.44 real         1.55 user         3.57 sys
+            20840448  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1479  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207730  messages sent
+              207730  messages received
+                   0  signals received
+                   0  voluntary context switches
+              634508  involuntary context switches
+         35364642516  instructions retired
+         15936061498  cycles elapsed
+            14369272  peak memory footprint
+
+=== ipv6-short-3-batch ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.88s (16.60 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   22.50 MiB/s │   48.00µs
+ P0   │    0.06 MiB/s │   28.00µs
+ P10  │   17.17 MiB/s │   35.00µs
+ P50  │   23.12 MiB/s │   42.00µs
+ P90  │   27.64 MiB/s │   56.00µs
+ P99  │   31.30 MiB/s │  173.00µs
+ P100 │   34.34 MiB/s │   15.51ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.88s (16.60 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6089.10 MiB/s │    0.00ns
+ P0   │    1.54 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    8.00µs
+ P100 │ 11768.00 MiB/s │  633.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.88s (33.20 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   44.57 MiB/s │   49.00µs
+ P0   │    0.13 MiB/s │   29.00µs
+ P10  │   33.81 MiB/s │   35.00µs
+ P50  │   45.94 MiB/s │   42.00µs
+ P90  │   54.59 MiB/s │   57.00µs
+ P99  │   61.84 MiB/s │  177.00µs
+ P100 │   66.06 MiB/s │   15.51ms
+        5.97 real         1.68 user         3.85 sys
+            20774912  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1477  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207737  messages sent
+              207737  messages received
+                   0  signals received
+                   0  voluntary context switches
+              654892  involuntary context switches
+         36512269176  instructions retired
+         17393917748  cycles elapsed
+            14352888  peak memory footprint
+
+=== ipv6-short-3-adaptive ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.22s (18.70 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.15 MiB/s │   43.00µs
+ P0   │    0.29 MiB/s │   27.00µs
+ P10  │   19.17 MiB/s │   36.00µs
+ P50  │   23.66 MiB/s │   41.00µs
+ P90  │   26.61 MiB/s │   50.00µs
+ P99  │   30.77 MiB/s │   97.00µs
+ P100 │   35.06 MiB/s │    3.34ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.22s (18.70 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6083.74 MiB/s │    0.00ns
+ P0   │    7.74 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    5.00µs
+ P100 │ 11768.00 MiB/s │  126.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.22s (37.39 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   45.95 MiB/s │   43.00µs
+ P0   │    0.58 MiB/s │   29.00µs
+ P10  │   37.94 MiB/s │   36.00µs
+ P50  │   47.03 MiB/s │   41.00µs
+ P90  │   52.87 MiB/s │   51.00µs
+ P99  │   60.72 MiB/s │  100.00µs
+ P100 │   66.12 MiB/s │    3.34ms
+        5.31 real         1.53 user         3.58 sys
+            20922368  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1479  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207728  messages sent
+              207728  messages received
+                   0  signals received
+                   0  voluntary context switches
+              629235  involuntary context switches
+         35285552306  instructions retired
+         15711170628  cycles elapsed
+            14402016  peak memory footprint
+
+=== ipv6-short-3-trait ===
+
+Client 0 stats:
+Overall upload stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.12s (19.08 MiB/s)
+
+Stream upload metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   23.41 MiB/s │   42.00µs
+ P0   │    0.40 MiB/s │   27.00µs
+ P10  │   19.56 MiB/s │   36.00µs
+ P50  │   23.78 MiB/s │   41.00µs
+ P90  │   26.86 MiB/s │   49.00µs
+ P99  │   31.55 MiB/s │   84.00µs
+ P100 │   35.22 MiB/s │    2.47ms
+Overall download stats:
+
+Transferred 102400000 bytes on 100000 streams in 5.12s (19.08 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │ 6044.52 MiB/s │    0.00ns
+ P0   │    4.32 MiB/s │    0.00ns
+ P10  │ 4696.00 MiB/s │    0.00ns
+ P50  │ 5848.00 MiB/s │    0.00ns
+ P90  │ 7816.00 MiB/s │    0.00ns
+ P99  │ 7816.00 MiB/s │    5.00µs
+ P100 │ 11768.00 MiB/s │  225.00µs
+Overall request stats:
+
+Transferred 204800000 bytes on 100000 streams in 5.12s (38.15 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   46.46 MiB/s │   43.00µs
+ P0   │    0.79 MiB/s │   29.00µs
+ P10  │   38.69 MiB/s │   36.00µs
+ P50  │   47.28 MiB/s │   41.00µs
+ P90  │   53.34 MiB/s │   50.00µs
+ P99  │   62.28 MiB/s │   86.00µs
+ P100 │   67.19 MiB/s │    2.47ms
+        5.21 real         1.52 user         3.53 sys
+            20905984  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1297  page reclaims
+                 185  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              207726  messages sent
+              207726  messages received
+                   0  signals received
+                   1  voluntary context switches
+              625530  involuntary context switches
+         35246354694  instructions retired
+         15409792368  cycles elapsed
+            14385632  peak memory footprint
+
+=== ipv4-bulk-0-batch ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.37s (234.43 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  234.97 MiB/s │     1.09s
+ P0   │  219.12 MiB/s │     1.05s
+ P10  │  219.25 MiB/s │     1.05s
+ P50  │  236.12 MiB/s │     1.07s
+ P90  │  244.62 MiB/s │     1.17s
+ P99  │  244.62 MiB/s │     1.17s
+ P100 │  244.62 MiB/s │     1.17s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.37s (234.43 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  234.84 MiB/s │     1.09s
+ P0   │  219.12 MiB/s │     1.05s
+ P10  │  219.25 MiB/s │     1.05s
+ P50  │  236.00 MiB/s │     1.07s
+ P90  │  244.37 MiB/s │     1.17s
+ P99  │  244.37 MiB/s │     1.17s
+ P100 │  244.37 MiB/s │     1.17s
+        4.45 real         1.84 user         6.93 sys
+            12599296  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 913  page reclaims
+                  63  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              817181  messages sent
+              817181  messages received
+                   0  signals received
+                   0  voluntary context switches
+              239777  involuntary context switches
+         77575838904  instructions retired
+         27696005967  cycles elapsed
+             4997624  peak memory footprint
+
+=== ipv4-bulk-0-adaptive ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.21s (243.20 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  244.05 MiB/s │     1.05s
+ P0   │  229.75 MiB/s │  979.97ms
+ P10  │  229.87 MiB/s │  980.48ms
+ P50  │  232.87 MiB/s │     1.01s
+ P90  │  261.25 MiB/s │     1.11s
+ P99  │  261.25 MiB/s │     1.11s
+ P100 │  261.25 MiB/s │     1.11s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.21s (243.20 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  243.89 MiB/s │     1.05s
+ P0   │  229.75 MiB/s │  980.99ms
+ P10  │  229.87 MiB/s │  981.50ms
+ P50  │  232.75 MiB/s │     1.02s
+ P90  │  261.00 MiB/s │     1.11s
+ P99  │  261.00 MiB/s │     1.11s
+ P100 │  261.00 MiB/s │     1.11s
+        4.29 real         1.80 user         6.72 sys
+            12763136  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 920  page reclaims
+                  63  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              818570  messages sent
+              818570  messages received
+                   0  signals received
+                   0  voluntary context switches
+              211553  involuntary context switches
+         77106787365  instructions retired
+         26535989105  cycles elapsed
+             5079544  peak memory footprint
+
+=== ipv4-bulk-0-trait ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.40s (232.51 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  233.03 MiB/s │     1.10s
+ P0   │  221.38 MiB/s │     1.05s
+ P10  │  221.50 MiB/s │     1.05s
+ P50  │  226.75 MiB/s │     1.06s
+ P90  │  243.50 MiB/s │     1.16s
+ P99  │  243.50 MiB/s │     1.16s
+ P100 │  243.50 MiB/s │     1.16s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.40s (232.51 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  232.88 MiB/s │     1.10s
+ P0   │  221.12 MiB/s │     1.05s
+ P10  │  221.25 MiB/s │     1.05s
+ P50  │  226.62 MiB/s │     1.06s
+ P90  │  243.37 MiB/s │     1.16s
+ P99  │  243.37 MiB/s │     1.16s
+ P100 │  243.37 MiB/s │     1.16s
+        4.48 real         1.83 user         7.03 sys
+            12632064  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 916  page reclaims
+                  63  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              817096  messages sent
+              817096  messages received
+                   0  signals received
+                   0  voluntary context switches
+              254918  involuntary context switches
+         77447688432  instructions retired
+         28461667313  cycles elapsed
+             4899320  peak memory footprint
+
+=== ipv4-bulk-1-adaptive ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.20s (244.08 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  244.44 MiB/s │     1.05s
+ P0   │  235.00 MiB/s │     1.01s
+ P10  │  235.12 MiB/s │     1.01s
+ P50  │  239.00 MiB/s │     1.03s
+ P90  │  254.25 MiB/s │     1.09s
+ P99  │  254.25 MiB/s │     1.09s
+ P100 │  254.25 MiB/s │     1.09s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.20s (244.08 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  244.31 MiB/s │     1.05s
+ P0   │  235.00 MiB/s │     1.01s
+ P10  │  235.12 MiB/s │     1.01s
+ P50  │  238.87 MiB/s │     1.03s
+ P90  │  254.00 MiB/s │     1.09s
+ P99  │  254.00 MiB/s │     1.09s
+ P100 │  254.00 MiB/s │     1.09s
+        4.28 real         1.77 user         6.68 sys
+            13107200  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1006  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              817905  messages sent
+              817905  messages received
+                   0  signals received
+                   0  voluntary context switches
+              224422  involuntary context switches
+         76901592987  instructions retired
+         26794909797  cycles elapsed
+             5259744  peak memory footprint
+
+=== ipv4-bulk-1-trait ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.88s (209.96 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  218.88 MiB/s │     1.22s
+ P0   │  154.75 MiB/s │     1.00s
+ P10  │  154.87 MiB/s │     1.00s
+ P50  │  211.62 MiB/s │     1.01s
+ P90  │  255.87 MiB/s │     1.65s
+ P99  │  255.87 MiB/s │     1.65s
+ P100 │  255.87 MiB/s │     1.65s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.88s (209.96 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  218.78 MiB/s │     1.22s
+ P0   │  154.75 MiB/s │     1.00s
+ P10  │  154.87 MiB/s │     1.00s
+ P50  │  211.62 MiB/s │     1.01s
+ P90  │  255.75 MiB/s │     1.65s
+ P99  │  255.75 MiB/s │     1.65s
+ P100 │  255.75 MiB/s │     1.65s
+        4.96 real         1.92 user         7.49 sys
+            12730368  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 981  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              819567  messages sent
+              819567  messages received
+                   0  signals received
+                   0  voluntary context switches
+              288832  involuntary context switches
+         77915657965  instructions retired
+         30437106897  cycles elapsed
+             5194232  peak memory footprint
+
+=== ipv4-bulk-1-batch ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.23s (241.94 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  242.09 MiB/s │     1.06s
+ P0   │  239.12 MiB/s │     1.05s
+ P10  │  239.25 MiB/s │     1.05s
+ P50  │  241.75 MiB/s │     1.05s
+ P90  │  244.25 MiB/s │     1.07s
+ P99  │  244.25 MiB/s │     1.07s
+ P100 │  244.25 MiB/s │     1.07s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.23s (241.94 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  241.97 MiB/s │     1.06s
+ P0   │  239.00 MiB/s │     1.05s
+ P10  │  239.12 MiB/s │     1.05s
+ P50  │  241.75 MiB/s │     1.05s
+ P90  │  244.12 MiB/s │     1.07s
+ P99  │  244.12 MiB/s │     1.07s
+ P100 │  244.12 MiB/s │     1.07s
+        4.32 real         1.83 user         6.85 sys
+            12599296  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 730  page reclaims
+                 249  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              817826  messages sent
+              817826  messages received
+                   0  signals received
+                   0  voluntary context switches
+              234551  involuntary context switches
+         77545174440  instructions retired
+         27546954923  cycles elapsed
+             4751864  peak memory footprint
+
+=== ipv4-bulk-2-trait ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.01s (255.40 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  255.70 MiB/s │     1.00s
+ P0   │  249.12 MiB/s │  990.72ms
+ P10  │  249.25 MiB/s │  991.23ms
+ P50  │  257.50 MiB/s │  992.77ms
+ P90  │  258.50 MiB/s │     1.03s
+ P99  │  258.50 MiB/s │     1.03s
+ P100 │  258.50 MiB/s │     1.03s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.01s (255.40 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  255.48 MiB/s │     1.00s
+ P0   │  249.00 MiB/s │  991.23ms
+ P10  │  249.12 MiB/s │  991.74ms
+ P50  │  257.25 MiB/s │  994.30ms
+ P90  │  258.25 MiB/s │     1.03s
+ P99  │  258.25 MiB/s │     1.03s
+ P100 │  258.25 MiB/s │     1.03s
+        4.09 real         1.76 user         6.39 sys
+            12746752  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 982  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              821053  messages sent
+              821053  messages received
+                   0  signals received
+                   0  voluntary context switches
+              190582  involuntary context switches
+         77418625889  instructions retired
+         25300336722  cycles elapsed
+             5046752  peak memory footprint
+
+=== ipv4-bulk-2-batch ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.14s (247.19 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  247.47 MiB/s │     1.03s
+ P0   │  241.62 MiB/s │     1.01s
+ P10  │  241.75 MiB/s │     1.01s
+ P50  │  244.75 MiB/s │     1.02s
+ P90  │  253.00 MiB/s │     1.06s
+ P99  │  253.00 MiB/s │     1.06s
+ P100 │  253.00 MiB/s │     1.06s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.14s (247.19 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  247.28 MiB/s │     1.04s
+ P0   │  241.38 MiB/s │     1.01s
+ P10  │  241.50 MiB/s │     1.01s
+ P50  │  244.50 MiB/s │     1.02s
+ P90  │  252.87 MiB/s │     1.06s
+ P99  │  252.87 MiB/s │     1.06s
+ P100 │  252.87 MiB/s │     1.06s
+        4.22 real         1.81 user         6.63 sys
+            12566528  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 973  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              819779  messages sent
+              819779  messages received
+                   0  signals received
+                   0  voluntary context switches
+              216040  involuntary context switches
+         77809316512  instructions retired
+         26421196090  cycles elapsed
+             4899296  peak memory footprint
+
+=== ipv4-bulk-2-adaptive ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.44s (230.87 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  231.25 MiB/s │     1.11s
+ P0   │  219.62 MiB/s │     1.07s
+ P10  │  219.75 MiB/s │     1.08s
+ P50  │  230.25 MiB/s │     1.08s
+ P90  │  238.25 MiB/s │     1.17s
+ P99  │  238.25 MiB/s │     1.17s
+ P100 │  238.25 MiB/s │     1.17s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.44s (230.87 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  231.09 MiB/s │     1.11s
+ P0   │  219.50 MiB/s │     1.08s
+ P10  │  219.62 MiB/s │     1.08s
+ P50  │  230.25 MiB/s │     1.08s
+ P90  │  238.00 MiB/s │     1.17s
+ P99  │  238.00 MiB/s │     1.17s
+ P100 │  238.00 MiB/s │     1.17s
+        4.52 real         1.85 user         6.94 sys
+            12632064  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 729  page reclaims
+                 248  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              822362  messages sent
+              822362  messages received
+                   0  signals received
+                   0  voluntary context switches
+              244152  involuntary context switches
+         77683648769  instructions retired
+         27938318982  cycles elapsed
+             4801016  peak memory footprint
+
+=== ipv4-bulk-3-batch ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.24s (241.58 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  242.09 MiB/s │     1.06s
+ P0   │  233.88 MiB/s │     1.01s
+ P10  │  234.00 MiB/s │     1.01s
+ P50  │  237.87 MiB/s │     1.06s
+ P90  │  254.25 MiB/s │     1.09s
+ P99  │  254.25 MiB/s │     1.09s
+ P100 │  254.25 MiB/s │     1.09s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.24s (241.58 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  241.81 MiB/s │     1.06s
+ P0   │  233.88 MiB/s │     1.01s
+ P10  │  234.00 MiB/s │     1.01s
+ P50  │  237.25 MiB/s │     1.06s
+ P90  │  254.12 MiB/s │     1.09s
+ P99  │  254.12 MiB/s │     1.09s
+ P100 │  254.12 MiB/s │     1.09s
+        4.32 real         1.82 user         6.85 sys
+            12550144  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 974  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              817604  messages sent
+              817604  messages received
+                   0  signals received
+                   0  voluntary context switches
+              239097  involuntary context switches
+         77545554873  instructions retired
+         27525451186  cycles elapsed
+             4850168  peak memory footprint
+
+=== ipv4-bulk-3-adaptive ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.24s (241.78 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  242.03 MiB/s │     1.06s
+ P0   │  236.00 MiB/s │     1.03s
+ P10  │  236.12 MiB/s │     1.03s
+ P50  │  239.75 MiB/s │     1.05s
+ P90  │  247.75 MiB/s │     1.08s
+ P99  │  247.75 MiB/s │     1.08s
+ P100 │  247.75 MiB/s │     1.08s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.24s (241.78 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  241.88 MiB/s │     1.06s
+ P0   │  236.00 MiB/s │     1.03s
+ P10  │  236.12 MiB/s │     1.03s
+ P50  │  239.50 MiB/s │     1.05s
+ P90  │  247.50 MiB/s │     1.09s
+ P99  │  247.50 MiB/s │     1.09s
+ P100 │  247.50 MiB/s │     1.09s
+        4.32 real         1.81 user         6.74 sys
+            12402688  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 959  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              818870  messages sent
+              818870  messages received
+                   0  signals received
+                   0  voluntary context switches
+              226601  involuntary context switches
+         77337280607  instructions retired
+         26993947022  cycles elapsed
+             4702688  peak memory footprint
+
+=== ipv4-bulk-3-trait ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.39s (233.05 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  233.56 MiB/s │     1.10s
+ P0   │  223.38 MiB/s │     1.04s
+ P10  │  223.50 MiB/s │     1.04s
+ P50  │  225.87 MiB/s │     1.07s
+ P90  │  245.12 MiB/s │     1.15s
+ P99  │  245.12 MiB/s │     1.15s
+ P100 │  245.12 MiB/s │     1.15s
+Overall request stats:
+
+Transferred 1073741824 bytes on 4 streams in 4.39s (233.05 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │  233.41 MiB/s │     1.10s
+ P0   │  223.25 MiB/s │     1.04s
+ P10  │  223.37 MiB/s │     1.04s
+ P50  │  225.62 MiB/s │     1.07s
+ P90  │  245.12 MiB/s │     1.15s
+ P99  │  245.12 MiB/s │     1.15s
+ P100 │  245.12 MiB/s │     1.15s
+        4.48 real         1.81 user         6.81 sys
+            12779520  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 740  page reclaims
+                 248  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+              823041  messages sent
+              823041  messages received
+                   0  signals received
+                   0  voluntary context switches
+              235445  involuntary context switches
+         77801279273  instructions retired
+         27417150841  cycles elapsed
+             4850168  peak memory footprint
+
+=== ipv4-concurrent-0-batch ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.36s (229.91 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   28.75 MiB/s │     3.34s
+ P0   │   28.09 MiB/s │     3.28s
+ P10  │   28.11 MiB/s │     3.28s
+ P50  │   28.78 MiB/s │     3.33s
+ P90  │   29.27 MiB/s │     3.42s
+ P99  │   29.27 MiB/s │     3.42s
+ P100 │   29.27 MiB/s │     3.42s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.36s (229.91 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   28.75 MiB/s │     3.34s
+ P0   │   28.08 MiB/s │     3.28s
+ P10  │   28.11 MiB/s │     3.28s
+ P50  │   28.78 MiB/s │     3.33s
+ P90  │   29.27 MiB/s │     3.42s
+ P99  │   29.27 MiB/s │     3.42s
+ P100 │   29.27 MiB/s │     3.42s
+       13.44 real         6.55 user        24.05 sys
+            14188544  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1071  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2554317  messages sent
+             2554317  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1522858  involuntary context switches
+        255729742586  instructions retired
+         95512140800  cycles elapsed
+             5816800  peak memory footprint
+
+=== ipv4-concurrent-0-adaptive ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.18s (252.14 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   31.53 MiB/s │     3.04s
+ P0   │   31.17 MiB/s │     3.01s
+ P10  │   31.20 MiB/s │     3.01s
+ P50  │   31.27 MiB/s │     3.02s
+ P90  │   31.91 MiB/s │     3.08s
+ P99  │   31.91 MiB/s │     3.08s
+ P100 │   31.91 MiB/s │     3.08s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.18s (252.14 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   31.53 MiB/s │     3.05s
+ P0   │   31.16 MiB/s │     3.01s
+ P10  │   31.19 MiB/s │     3.01s
+ P50  │   31.25 MiB/s │     3.02s
+ P90  │   31.89 MiB/s │     3.08s
+ P99  │   31.91 MiB/s │     3.08s
+ P100 │   31.91 MiB/s │     3.08s
+       12.27 real         6.18 user        22.30 sys
+            14270464  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 831  page reclaims
+                 248  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2460988  messages sent
+             2460988  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1438692  involuntary context switches
+        246680461087  instructions retired
+         87902994041  cycles elapsed
+             6210040  peak memory footprint
+
+=== ipv4-concurrent-0-trait ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.38s (248.18 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   31.04 MiB/s │     3.09s
+ P0   │   30.14 MiB/s │     3.06s
+ P10  │   30.17 MiB/s │     3.06s
+ P50  │   31.31 MiB/s │     3.07s
+ P90  │   31.39 MiB/s │     3.18s
+ P99  │   31.39 MiB/s │     3.18s
+ P100 │   31.39 MiB/s │     3.18s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.38s (248.18 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   31.03 MiB/s │     3.09s
+ P0   │   30.14 MiB/s │     3.06s
+ P10  │   30.17 MiB/s │     3.06s
+ P50  │   31.31 MiB/s │     3.07s
+ P90  │   31.39 MiB/s │     3.18s
+ P99  │   31.39 MiB/s │     3.18s
+ P100 │   31.39 MiB/s │     3.18s
+       12.47 real         6.21 user        22.67 sys
+            14303232  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 833  page reclaims
+                 248  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2503260  messages sent
+             2503260  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1483226  involuntary context switches
+        250618410548  instructions retired
+         90204486252  cycles elapsed
+             6160864  peak memory footprint
+
+=== ipv4-concurrent-1-adaptive ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.01s (255.85 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   32.00 MiB/s │     3.00s
+ P0   │   31.06 MiB/s │     2.97s
+ P10  │   31.09 MiB/s │     2.97s
+ P50  │   32.25 MiB/s │     2.97s
+ P90  │   32.37 MiB/s │     3.09s
+ P99  │   32.37 MiB/s │     3.09s
+ P100 │   32.37 MiB/s │     3.09s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.01s (255.85 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   31.99 MiB/s │     3.00s
+ P0   │   31.06 MiB/s │     2.97s
+ P10  │   31.08 MiB/s │     2.97s
+ P50  │   32.25 MiB/s │     2.97s
+ P90  │   32.34 MiB/s │     3.09s
+ P99  │   32.37 MiB/s │     3.09s
+ P100 │   32.37 MiB/s │     3.09s
+       12.10 real         6.16 user        21.98 sys
+            13729792  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 796  page reclaims
+                 250  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2462584  messages sent
+             2462584  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1429204  involuntary context switches
+        246827464573  instructions retired
+         86590336365  cycles elapsed
+             5620216  peak memory footprint
+
+=== ipv4-concurrent-1-trait ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.97s (236.77 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.64 MiB/s │     3.24s
+ P0   │   28.55 MiB/s │     3.05s
+ P10  │   28.56 MiB/s │     3.06s
+ P50  │   29.30 MiB/s │     3.28s
+ P90  │   31.44 MiB/s │     3.36s
+ P99  │   31.44 MiB/s │     3.36s
+ P100 │   31.44 MiB/s │     3.36s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.97s (236.77 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.64 MiB/s │     3.24s
+ P0   │   28.53 MiB/s │     3.05s
+ P10  │   28.56 MiB/s │     3.06s
+ P50  │   29.28 MiB/s │     3.28s
+ P90  │   31.44 MiB/s │     3.36s
+ P99  │   31.44 MiB/s │     3.36s
+ P100 │   31.44 MiB/s │     3.36s
+       13.06 real         6.29 user        23.22 sys
+            16367616  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1206  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2497442  messages sent
+             2496526  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1476542  involuntary context switches
+        248820500299  instructions retired
+         92571516162  cycles elapsed
+             7406072  peak memory footprint
+
+=== ipv4-concurrent-1-batch ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.00s (236.22 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.55 MiB/s │     3.25s
+ P0   │   29.12 MiB/s │     3.15s
+ P10  │   29.14 MiB/s │     3.16s
+ P50  │   29.33 MiB/s │     3.27s
+ P90  │   30.44 MiB/s │     3.30s
+ P99  │   30.45 MiB/s │     3.30s
+ P100 │   30.45 MiB/s │     3.30s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.00s (236.22 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.54 MiB/s │     3.25s
+ P0   │   29.12 MiB/s │     3.15s
+ P10  │   29.14 MiB/s │     3.16s
+ P50  │   29.31 MiB/s │     3.27s
+ P90  │   30.42 MiB/s │     3.30s
+ P99  │   30.44 MiB/s │     3.30s
+ P100 │   30.44 MiB/s │     3.30s
+       13.10 real         6.23 user        23.27 sys
+            16105472  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 947  page reclaims
+                 247  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2495032  messages sent
+             2493231  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1451570  involuntary context switches
+        248684296176  instructions retired
+         93865354332  cycles elapsed
+             7881184  peak memory footprint
+
+=== ipv4-concurrent-2-trait ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.62s (225.49 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   28.30 MiB/s │     3.41s
+ P0   │   25.47 MiB/s │     3.21s
+ P10  │   25.48 MiB/s │     3.21s
+ P50  │   28.77 MiB/s │     3.31s
+ P90  │   29.95 MiB/s │     3.77s
+ P99  │   29.95 MiB/s │     3.77s
+ P100 │   29.95 MiB/s │     3.77s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.62s (225.49 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   28.29 MiB/s │     3.41s
+ P0   │   25.45 MiB/s │     3.21s
+ P10  │   25.47 MiB/s │     3.21s
+ P50  │   28.75 MiB/s │     3.31s
+ P90  │   29.95 MiB/s │     3.77s
+ P99  │   29.95 MiB/s │     3.77s
+ P100 │   29.95 MiB/s │     3.77s
+       13.72 real         6.32 user        23.84 sys
+            20365312  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1448  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2492659  messages sent
+             2491022  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1468704  involuntary context switches
+        247248682592  instructions retired
+         95220256486  cycles elapsed
+             9798112  peak memory footprint
+
+=== ipv4-concurrent-2-batch ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.16s (233.46 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.21 MiB/s │     3.29s
+ P0   │   28.16 MiB/s │     3.23s
+ P10  │   28.19 MiB/s │     3.23s
+ P50  │   29.41 MiB/s │     3.26s
+ P90  │   29.75 MiB/s │     3.41s
+ P99  │   29.75 MiB/s │     3.41s
+ P100 │   29.75 MiB/s │     3.41s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.16s (233.46 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.20 MiB/s │     3.29s
+ P0   │   28.16 MiB/s │     3.23s
+ P10  │   28.17 MiB/s │     3.23s
+ P50  │   29.41 MiB/s │     3.26s
+ P90  │   29.75 MiB/s │     3.41s
+ P99  │   29.75 MiB/s │     3.41s
+ P100 │   29.75 MiB/s │     3.41s
+       13.24 real         6.48 user        23.78 sys
+            15040512  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1124  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2557505  messages sent
+             2557505  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1512696  involuntary context switches
+        256556942333  instructions retired
+         93903958890  cycles elapsed
+             6898168  peak memory footprint
+
+=== ipv4-concurrent-2-adaptive ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.97s (236.78 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.62 MiB/s │     3.24s
+ P0   │   28.97 MiB/s │     3.14s
+ P10  │   29.00 MiB/s │     3.14s
+ P50  │   29.11 MiB/s │     3.22s
+ P90  │   30.59 MiB/s │     3.31s
+ P99  │   30.59 MiB/s │     3.31s
+ P100 │   30.59 MiB/s │     3.31s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.97s (236.78 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.61 MiB/s │     3.24s
+ P0   │   28.95 MiB/s │     3.14s
+ P10  │   28.98 MiB/s │     3.14s
+ P50  │   29.09 MiB/s │     3.22s
+ P90  │   30.59 MiB/s │     3.31s
+ P99  │   30.59 MiB/s │     3.32s
+ P100 │   30.59 MiB/s │     3.32s
+       13.06 real         6.41 user        23.73 sys
+            14745600  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 860  page reclaims
+                 248  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2555907  messages sent
+             2555906  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1512039  involuntary context switches
+        254706455202  instructions retired
+         93648057957  cycles elapsed
+             6570464  peak memory footprint
+
+=== ipv4-concurrent-3-batch ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.49s (245.96 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   30.76 MiB/s │     3.12s
+ P0   │   30.31 MiB/s │     3.08s
+ P10  │   30.34 MiB/s │     3.08s
+ P50  │   30.75 MiB/s │     3.12s
+ P90  │   31.16 MiB/s │     3.17s
+ P99  │   31.16 MiB/s │     3.17s
+ P100 │   31.16 MiB/s │     3.17s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.49s (245.96 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   30.75 MiB/s │     3.12s
+ P0   │   30.31 MiB/s │     3.08s
+ P10  │   30.33 MiB/s │     3.08s
+ P50  │   30.75 MiB/s │     3.12s
+ P90  │   31.16 MiB/s │     3.17s
+ P99  │   31.16 MiB/s │     3.17s
+ P100 │   31.16 MiB/s │     3.17s
+       12.57 real         6.32 user        22.61 sys
+            13516800  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1032  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2446264  messages sent
+             2446264  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1452574  involuntary context switches
+        246919152037  instructions retired
+         89481798984  cycles elapsed
+             5226976  peak memory footprint
+
+=== ipv4-concurrent-3-adaptive ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.13s (234.01 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.27 MiB/s │     3.28s
+ P0   │   28.59 MiB/s │     3.22s
+ P10  │   28.61 MiB/s │     3.23s
+ P50  │   29.17 MiB/s │     3.25s
+ P90  │   29.75 MiB/s │     3.36s
+ P99  │   29.77 MiB/s │     3.36s
+ P100 │   29.77 MiB/s │     3.36s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 13.13s (234.01 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   29.26 MiB/s │     3.28s
+ P0   │   28.58 MiB/s │     3.23s
+ P10  │   28.61 MiB/s │     3.23s
+ P50  │   29.17 MiB/s │     3.25s
+ P90  │   29.73 MiB/s │     3.36s
+ P99  │   29.75 MiB/s │     3.36s
+ P100 │   29.75 MiB/s │     3.36s
+       13.21 real         6.49 user        23.79 sys
+            14483456  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1089  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2557332  messages sent
+             2557287  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1506451  involuntary context switches
+        255288223105  instructions retired
+         93566608542  cycles elapsed
+             6210040  peak memory footprint
+
+=== ipv4-concurrent-3-trait ===
+
+Client 0 stats:
+Overall download stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.39s (247.89 MiB/s)
+
+Stream download metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   31.00 MiB/s │     3.10s
+ P0   │   30.31 MiB/s │     3.02s
+ P10  │   30.34 MiB/s │     3.02s
+ P50  │   30.87 MiB/s │     3.09s
+ P90  │   31.75 MiB/s │     3.17s
+ P99  │   31.75 MiB/s │     3.17s
+ P100 │   31.75 MiB/s │     3.17s
+Overall request stats:
+
+Transferred 3221225472 bytes on 32 streams in 12.39s (247.89 MiB/s)
+
+Stream request metrics:
+
+      │  Throughput   │ Duration
+──────┼───────────────┼──────────
+ AVG  │   31.00 MiB/s │     3.10s
+ P0   │   30.31 MiB/s │     3.02s
+ P10  │   30.33 MiB/s │     3.02s
+ P50  │   30.86 MiB/s │     3.09s
+ P90  │   31.75 MiB/s │     3.17s
+ P99  │   31.75 MiB/s │     3.17s
+ P100 │   31.75 MiB/s │     3.17s
+       12.48 real         6.18 user        22.54 sys
+            13500416  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 784  page reclaims
+                 248  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+             2445901  messages sent
+             2445901  messages received
+                   0  signals received
+                   0  voluntary context switches
+             1450453  involuntary context switches
+        245304925857  instructions retired
+         89402426542  cycles elapsed
+             5259744  peak memory footprint
