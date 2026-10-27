@@ -1,6 +1,7 @@
 //! Shared relay resolution and bounded setup admission; no established data is owned here.
 
 use crate::network::NetworkHints;
+use crate::relay::CarrierId;
 use crate::relay::RelayTransport;
 use pb_mapper_core::config::ResolvedAddrs;
 use std::{
@@ -196,17 +197,26 @@ impl RelayEndpoint {
             .unwrap_or_else(|_| unreachable!("relay setup semaphore is never closed"))
     }
 
-    pub(crate) fn transport_failed(&self) {
+    pub(crate) fn transport_failed(&self, carrier: Option<CarrierId>) {
         self.0.refresh.store(true, Ordering::Release);
         self.0.failed.store(true, Ordering::Release);
-        self.invalidate_cached_transport();
+        self.carrier_failed(carrier);
     }
 
-    pub(crate) fn invalidate_cached_transport(&self) {
+    /// An attempt over `carrier` failed in transport: only that connection
+    /// can be to blame, and the pool retires it if the relay has gone silent
+    /// on it. An attempt that failed before choosing one — resolving the
+    /// relay, discovering or dialling QUIC — leaves the pool alone, there
+    /// being nothing in it to blame.
+    pub(crate) fn carrier_failed(&self, carrier: Option<CarrierId>) {
+        let Some(id) = carrier else { return };
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {
-            pool.invalidate();
+            pool.carrier_failed(id);
         }
+        // Without QUIC there is no carrier, and `CarrierId` has no values.
+        #[cfg(not(feature = "relay-quic"))]
+        match id {}
     }
 
     pub(crate) fn protocol_succeeded(&self) {
@@ -324,8 +334,10 @@ impl RelayEndpoint {
     pub(crate) async fn connect(
         &self,
         credential: pb_mapper_core::checksum::Credential,
+        carrier: &mut Option<CarrierId>,
     ) -> Result<pb_mapper_protocol::transport::RelayStream, crate::relay::ConnectError> {
-        self.connect_addresses(&self.addresses().await?, credential)
+        *carrier = None;
+        self.connect_addresses(&self.addresses().await?, credential, carrier)
             .await
     }
     /// A stream to the relay at `addresses` over this endpoint's carrier.
@@ -336,15 +348,22 @@ impl RelayEndpoint {
     /// `credential` matters here only over QUIC, where it chooses the pooled
     /// connection, whose first stream it was bound to when dialled; a TCP
     /// connection is anonymous until that first frame.
+    ///
+    /// `carrier` is that QUIC connection, set as soon as it is chosen, so
+    /// that a caller can charge a failure of this attempt to it with
+    /// [`Self::transport_failed`] — one its own deadline cut short included.
+    /// It stays `None` until then, and over TCP.
     pub(crate) async fn connect_addresses(
         &self,
         addresses: &ResolvedAddrs,
         credential: pb_mapper_core::checksum::Credential,
+        carrier: &mut Option<CarrierId>,
     ) -> Result<pb_mapper_protocol::transport::RelayStream, crate::relay::ConnectError> {
+        *carrier = None;
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {
             return pool
-                .connect(addresses, credential, self.network_generation())
+                .connect(addresses, credential, self.network_generation(), carrier)
                 .await
                 .map(|stream| pb_mapper_protocol::transport::RelayStream::Quic(Box::new(stream)));
         }
@@ -454,7 +473,7 @@ mod tests {
         tokio::time::advance(DNS_RETRY).await;
         assert_eq!(endpoint.addresses().await.unwrap().primary().port(), 7001);
         port.store(7002, Ordering::SeqCst);
-        endpoint.transport_failed();
+        endpoint.transport_failed(None);
         assert_eq!(endpoint.addresses().await.unwrap().primary().port(), 7001);
         tokio::time::advance(DNS_RETRY).await;
         assert_eq!(endpoint.addresses().await.unwrap().primary().port(), 7002);
@@ -570,7 +589,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        endpoint.transport_failed();
+        endpoint.transport_failed(None);
         endpoint.protocol_succeeded();
         tokio::time::timeout(Duration::from_millis(1), wake.changed())
             .await

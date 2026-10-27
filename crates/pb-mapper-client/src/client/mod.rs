@@ -4,6 +4,7 @@ pub(crate) mod stream;
 
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
+use crate::relay::CarrierId;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
@@ -365,15 +366,16 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                     probes.spawn(async move {
                         let _permit = probe_remote.control_permit().await;
                         let started = Instant::now();
-                        let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget).await;
-                        (started, started.elapsed(), result)
+                        let mut carrier = None;
+                        let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget, &mut carrier).await;
+                        (started, started.elapsed(), result, carrier)
                     });
                 }
                 Some(result) = probes.join_next() => {
-                    let (started, elapsed, result) = match result {
+                    let (started, elapsed, result, carrier) = match result {
                         Ok(result) => result,
                         Err(error) if error.is_cancelled() => continue,
-                        Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string()))),
+                        Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string())), None),
                     };
                     match result {
                         Ok(()) => {
@@ -412,7 +414,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                             if failure.protocol_replied {
                                 remote_addr.protocol_succeeded();
                                 diagnostics.responded(elapsed);
-                            } else { remote_addr.transport_failed(); }
+                            } else { remote_addr.transport_failed(carrier); }
                             consecutive_health_failures = consecutive_health_failures.saturating_add(1);
                             if !connected || consecutive_health_failures >= client_health_failure_threshold() {
                                 connected = false;
@@ -527,6 +529,7 @@ async fn probe_remote_key(
     namespace: Option<u64>,
     credential: Credential,
     timeout: Duration,
+    carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<(), ProbeFailure> {
     match tokio::time::timeout(timeout, async {
         // Resolved once, here, so a name that does not resolve is reported
@@ -540,7 +543,7 @@ async fn probe_remote_key(
                 kind: RecoveryFailure::Dns,
                 protocol_replied: false,
             })?;
-        probe_remote_key_once(remote_addr, &addresses, key, namespace, credential).await
+        probe_remote_key_once(remote_addr, &addresses, key, namespace, credential, carrier).await
     })
     .await
     {
@@ -560,6 +563,7 @@ async fn probe_remote_key_once(
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
+    carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<(), ProbeFailure> {
     match fetch_remote_status(
         remote_addr,
@@ -570,6 +574,7 @@ async fn probe_remote_key_once(
         },
         namespace,
         credential,
+        carrier,
     )
     .await
     {
@@ -609,6 +614,7 @@ async fn probe_remote_key_once(
         PbConnStatusReq::Keys,
         namespace,
         credential,
+        carrier,
     )
     .await?;
     let PbConnStatusResp::Keys(keys) = status_resp else {
@@ -634,9 +640,10 @@ async fn fetch_remote_status(
     req: PbConnStatusReq,
     namespace: Option<u64>,
     credential: Credential,
+    carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
     let mut stream = remote_addr
-        .connect_addresses(addresses, credential)
+        .connect_addresses(addresses, credential, carrier)
         .await
         .map_err(|error| match error {
             crate::relay::ConnectError::Rejected { response } => ProbeFailure {

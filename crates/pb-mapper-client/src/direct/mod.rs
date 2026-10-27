@@ -136,7 +136,7 @@ impl Consumer {
         if self.cooldown().active(Instant::now()) {
             return Ok(None);
         }
-        let mut stream = self.remote.connect(self.credential).await?;
+        let mut stream = self.remote.connect(self.credential, &mut None).await?;
         let response = crate::client::status::get_status_with_credential(
             &mut stream,
             PbConnStatusReq::Service {
@@ -295,6 +295,7 @@ impl Consumer {
                 self.keep_alive,
                 self.credential,
                 true,
+                &mut None,
             )
             .await
             .map_err(io_error)?;

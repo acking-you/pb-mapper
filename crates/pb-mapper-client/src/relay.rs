@@ -9,6 +9,16 @@ use pb_mapper_protocol::{
 use serde::Serialize;
 use std::{io, net::SocketAddr};
 
+#[cfg(feature = "relay-quic")]
+pub(crate) use quic::CarrierId;
+
+/// Without QUIC every relay stream is a TCP connection of its own, with no
+/// shared carrier to blame for a failure: an attempt's carrier is always
+/// `None`, and charging it compiles away.
+#[cfg(not(feature = "relay-quic"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CarrierId {}
+
 /// Carrier setup can already receive an authenticated refusal, before a
 /// registration, subscription or administrator request has been sent.
 #[derive(Debug, snafu::Snafu)]

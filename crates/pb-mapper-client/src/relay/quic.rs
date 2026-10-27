@@ -17,6 +17,7 @@ use pb_mapper_protocol::{command::PbErrorResponse, quic::*, secure::ClientHeader
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    num::NonZeroU64,
     sync::{Arc, Mutex as StateMutex, MutexGuard, Weak},
     time::Duration,
 };
@@ -43,7 +44,15 @@ const REFERENCES_PER_CONNECTION: usize = MAX_STREAMS as usize;
 /// a path that stopped delivering is caught by the failure it caused.
 const SILENCE: Duration = Duration::from_secs(2);
 
+/// Which of a pool's connections a relay stream went over: its place in
+/// the order the pool dialled them. Never reused, so a failure reported
+/// late, once its connection is gone, cannot name the one that replaced
+/// it; and a plain number, so recording it costs a stream nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CarrierId(NonZeroU64);
+
 struct Entry {
+    id: CarrierId,
     credential: Credential,
     runtime: tokio::runtime::Id,
     generation: u64,
@@ -61,8 +70,14 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(credential: Credential, generation: u64, shared: Arc<QuicConnection>) -> Self {
+    fn new(
+        id: CarrierId,
+        credential: Credential,
+        generation: u64,
+        shared: Arc<QuicConnection>,
+    ) -> Self {
         Self {
+            id,
             credential,
             runtime: tokio::runtime::Handle::current().id(),
             generation,
@@ -159,20 +174,22 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    /// After a transport failure, retire every connection the relay has
-    /// been silent on for [`SILENCE`], so that the next stream dials afresh
-    /// rather than waiting out Quinn's idle timeout on a path that no longer
-    /// delivers. One the relay is still heard on is working, whatever
-    /// failed — a slow service behind it, say — and stays: retiring it would
-    /// only leave its long-lived streams holding a relay slot beside its
-    /// replacement's. Established streams keep theirs either way.
-    pub fn invalidate(&self) {
+    /// A stream over `carrier` failed in transport. Retire that connection
+    /// if the relay has been silent on it for [`SILENCE`], so that the next
+    /// stream dials afresh rather than waiting out Quinn's idle timeout on a
+    /// path that no longer delivers. One the relay is still heard on is
+    /// working, whatever failed — a stream reset, a slow service behind it —
+    /// and stays: retiring it would only leave its long-lived streams
+    /// holding a relay slot beside its replacement's. No other connection is
+    /// looked at, so one tunnel's failure retires neither another
+    /// credential's connection nor, reported late, its own one's replacement.
+    pub fn carrier_failed(&self, carrier: CarrierId) {
         let mut state = lock(&self.state);
         let now = Instant::now();
-        for entry in &mut state.entries {
-            if entry.pooled && now.duration_since(entry.heard(now)) >= SILENCE {
-                entry.pooled = false;
-            }
+        if let Some(entry) = state.entries.iter_mut().find(|entry| entry.id == carrier)
+            && now.duration_since(entry.heard(now)) >= SILENCE
+        {
+            entry.pooled = false;
         }
     }
 
@@ -181,7 +198,7 @@ impl Pool {
         addrs: &ResolvedAddrs,
         credential: Credential,
         generation: u64,
-    ) -> Option<Arc<QuicConnection>> {
+    ) -> Option<(CarrierId, Arc<QuicConnection>)> {
         let mut state = lock(&self.state);
         // Closed connections are dropped and an earlier network's retired;
         // another runtime's are left for it.
@@ -203,24 +220,30 @@ impl Pool {
         let now = Instant::now();
         entry.last_open = now;
         entry.heard(now);
-        Some(entry.shared.clone())
+        Some((entry.id, entry.shared.clone()))
     }
 
+    /// A stream over a connection for `credential`. `carrier` is set to that
+    /// connection as soon as it is chosen, before waiting for stream credit,
+    /// which a path that stopped delivering withholds: dropped streams
+    /// return theirs only once the relay acknowledges them. A caller whose
+    /// deadline cancels the wait still knows which connection to blame.
     pub async fn connect(
         &self,
         addrs: &ResolvedAddrs,
         credential: Credential,
         generation: u64,
+        carrier: &mut Option<CarrierId>,
     ) -> Result<QuicStream, ConnectError> {
-        let (shared, reused) = if let Some(shared) = self.cached(addrs, credential, generation) {
-            (shared, true)
+        let (chosen, reused) = if let Some(chosen) = self.cached(addrs, credential, generation) {
+            (chosen, true)
         } else {
             // Serialize cold dials, but keep observations and cached opens independent
             // of network I/O. Recheck after acquiring admission to deduplicate callers.
             let queued = Instant::now();
             let _setup = self.setup.lock().await;
             match self.cached(addrs, credential, generation) {
-                Some(shared) => (shared, true),
+                Some(chosen) => (chosen, true),
                 None => {
                     // A dial that failed while this caller waited failed for it.
                     let failed = lock(&self.state)
@@ -239,6 +262,8 @@ impl Pool {
                 }
             }
         };
+        let (id, shared) = chosen;
+        *carrier = Some(id);
         // Stream-credit waiting must not block other callers or observations.
         // No request is replayed here, including when opening a pooled stream fails.
         let pair = match shared.connection.open_bi().await {
@@ -260,7 +285,7 @@ impl Pool {
         addrs: &ResolvedAddrs,
         credential: Credential,
         generation: u64,
-    ) -> Result<Arc<QuicConnection>, ConnectError> {
+    ) -> Result<(CarrierId, Arc<QuicConnection>), ConnectError> {
         let dialled =
             crate::addr::race_candidates(addrs.as_slice(), CONNECT_TIMEOUT, move |addr| {
                 dial(addr, credential)
@@ -289,6 +314,7 @@ impl Pool {
                 return Err(error);
             }
         };
+        let id = CarrierId(NonZeroU64::MIN.saturating_add(state.created));
         state.created += 1;
         if let Some(oldest) = (state.entries.iter().filter(|entry| entry.pooled).count()
             >= MAX_ENTRIES)
@@ -299,7 +325,7 @@ impl Pool {
         }
         state
             .entries
-            .push(Entry::new(credential, generation, shared.clone()));
+            .push(Entry::new(id, credential, generation, shared.clone()));
         let start_sweep = !std::mem::replace(&mut state.sweeping, true);
         // Spawned with the lock released: a runtime shutting down drops the
         // task at once, and its guard takes the lock to say so.
@@ -307,7 +333,7 @@ impl Pool {
         if start_sweep {
             tokio::spawn(sweep(Sweeping(Arc::downgrade(&self.state))));
         }
-        Ok(shared)
+        Ok((id, shared))
     }
 
     pub fn diagnostics(&self) -> RelayDiagnostics {
@@ -466,4 +492,83 @@ async fn dial_inner(
     }
     tracing::info!(event = "relay_quic_connected", %relay_addr, peer = %shared.connection.remote_address(), connection_id = shared.connection.stable_id());
     Ok(shared)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_retires_only_its_own_silent_carrier() {
+        let (mut config, certificate) = server_config().unwrap();
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_bidi_streams(0u32.into());
+        config.transport_config(Arc::new(transport));
+        let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = server.local_addr().unwrap();
+        let pool = Pool::default();
+        let mut peers = Vec::new();
+        // A carrier, another credential's, and the first one's replacement.
+        for (id, key) in [(1, 1), (2, 2), (3, 1)] {
+            let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            endpoint.set_default_client_config(client_config(&certificate).unwrap());
+            let (client, peer) =
+                tokio::join!(endpoint.connect(address, SERVER_NAME).unwrap(), async {
+                    server.accept().await.unwrap().await.unwrap()
+                });
+            let connection = client.unwrap();
+            peers.push(peer);
+            let shared = Arc::new(QuicConnection {
+                connection,
+                endpoint,
+                relay_addr: address,
+            });
+            lock(&pool.state).entries.push(Entry::new(
+                CarrierId(NonZeroU64::new(id).unwrap()),
+                Credential::Admin([key; 32]),
+                0,
+                shared,
+            ));
+        }
+        let addresses = ResolvedAddrs::from_candidates(vec![address]).unwrap();
+        let mut selected = None;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(1),
+                pool.connect(&addresses, Credential::Admin([1; 32]), 0, &mut selected),
+            )
+            .await
+            .is_err(),
+            "the peer offered no stream credit"
+        );
+        let selected = selected.expect("cancellation must retain the selected carrier");
+        let pooled = || {
+            lock(&pool.state)
+                .entries
+                .iter()
+                .map(|entry| entry.pooled)
+                .collect::<Vec<_>>()
+        };
+        // Make silence deterministic, independent of handshake ACK timing.
+        {
+            let mut state = lock(&pool.state);
+            assert_eq!(selected, state.entries[0].id);
+            for entry in &mut state.entries {
+                entry.received = received(&entry.shared);
+                entry.heard = Instant::now() - SILENCE;
+            }
+            state.entries[0].heard = Instant::now();
+        }
+        pool.carrier_failed(selected);
+        assert_eq!(pooled(), [true; 3], "a carrier still heard is working");
+        lock(&pool.state).entries[0].heard = Instant::now() - SILENCE;
+        pool.carrier_failed(selected);
+        pool.carrier_failed(selected);
+        assert_eq!(
+            pooled(),
+            [false, true, true],
+            "once silent it is retired; another credential's and its replacement are not"
+        );
+    }
 }

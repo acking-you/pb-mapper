@@ -39,7 +39,7 @@ impl Control {
         credential: Credential,
         namespace: Option<u64>,
     ) -> io::Result<Arc<Self>> {
-        let mut socket = remote.connect(credential).await?;
+        let mut socket = remote.connect(credential, &mut None).await?;
         let relay_ip = socket.peer_addr()?.ip();
         let session = ClientHeaderSession::new_v2(&credential).map_err(io_error)?;
         session

@@ -1,5 +1,6 @@
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::{RecoveryWake, RelayEndpoint};
+use crate::relay::CarrierId;
 pub mod error;
 mod stream;
 
@@ -359,7 +360,7 @@ async fn probe_remote_registration(
     let timeout = registration_probe_timeout();
     let result = tokio::time::timeout(timeout, async {
         let mut stream = endpoint
-            .connect_addresses(&remote_addr, credential)
+            .connect_addresses(&remote_addr, credential, &mut None)
             .await
             .map_err(|e| format!("connect remote status stream failed: {e}"))?;
         crate::client::status::get_status_with_credential(
@@ -702,6 +703,7 @@ async fn run_server_side_cli_worker<LocalStream>(
         }
         wake.acknowledge();
         diagnostics.attempt();
+        let mut carrier = None;
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream>(
             &mut backoff,
             run_config.clone(),
@@ -710,6 +712,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             &mut stream_tasks,
             &setup_slots,
             &mut wake,
+            &mut carrier,
         )
         .await
         {
@@ -741,7 +744,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             failure,
             RecoveryFailure::Transport | RecoveryFailure::Timeout | RecoveryFailure::Dns
         ) {
-            remote_addr.transport_failed();
+            remote_addr.transport_failed(carrier);
         }
         let (retry_interval, retry_count) = match status {
             Status::Cancelled => break 'outer,
@@ -828,7 +831,8 @@ async fn run_server_side_cli_worker<LocalStream>(
 
 // `backoff` is skipped: it is mutable retry state, and recording it would
 // print two ladders' internals on every span the worker enters.
-#[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots, wake))]
+#[allow(clippy::too_many_arguments)]
+#[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots, wake, carrier))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     backoff: &mut ControlBackoff,
     config: ServerCliRunConfig,
@@ -837,6 +841,7 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     stream_tasks: &mut JoinSet<()>,
     setup_slots: &Arc<tokio::sync::Semaphore>,
     wake: &mut RecoveryWake,
+    carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,
@@ -881,7 +886,7 @@ where
     let mut manager_stream = tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
         () = wake.network_changed() => return Err(Status::NetworkChanged),
-        result = tokio::time::timeout_at(deadline, remote_addr.connect_addresses(&addresses, credential)) => {
+        result = tokio::time::timeout_at(deadline, remote_addr.connect_addresses(&addresses, credential, carrier)) => {
             match result {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {

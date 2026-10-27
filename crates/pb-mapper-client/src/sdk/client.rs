@@ -7,6 +7,7 @@
 
 use crate::diagnostics::{Diagnostics, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
+use crate::relay::CarrierId;
 use std::sync::{Arc, RwLock};
 
 use pb_mapper_core::checksum::{Credential, parse_credential};
@@ -457,9 +458,9 @@ impl Client {
         // not occupy that budget for the legacy 30-second control I/O timeout.
         let io_timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
         let endpoint = &self.inner.endpoint;
-        let ask = || async {
+        let ask = async |carrier: &mut Option<CarrierId>| {
             let mut stream = endpoint
-                .connect(credential)
+                .connect(credential, carrier)
                 .await
                 .map_err(|error| Error::from_connect(error, self.inner.server.clone()))?;
             get_status_with_credential(
@@ -471,9 +472,12 @@ impl Client {
             .await
             .context(StatusSnafu)
         };
+        // Outside the deadline, so that a query it cuts short is charged to
+        // the connection the query went over too.
+        let mut carrier = None;
         let result = tokio::time::timeout(io_timeout, async {
             let _permit = endpoint.control_permit().await;
-            match ask().await {
+            match ask(&mut carrier).await {
                 // A pooled QUIC connection whose credential the relay has
                 // since cancelled takes no new streams, so the refusal never
                 // arrives on it. A status query is a read: asked once more on
@@ -482,8 +486,8 @@ impl Client {
                     if is_carrier_failure(&error)
                         && endpoint.transport() == super::RelayTransport::Quic =>
                 {
-                    endpoint.invalidate_cached_transport();
-                    ask().await
+                    endpoint.carrier_failed(carrier);
+                    ask(&mut carrier).await
                 }
                 result => result,
             }
@@ -495,7 +499,7 @@ impl Client {
         match &result {
             Ok(_) => endpoint.protocol_succeeded(),
             // The relay answered: the carrier works, whatever it said.
-            Err(error) if is_carrier_failure(error) => endpoint.invalidate_cached_transport(),
+            Err(error) if is_carrier_failure(error) => endpoint.carrier_failed(carrier),
             Err(_) => {}
         }
         result

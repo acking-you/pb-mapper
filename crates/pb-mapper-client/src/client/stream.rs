@@ -3,6 +3,7 @@ use crate::endpoint::RelayEndpoint;
 use std::sync::Arc;
 
 use crate::recovery::RecoveryTiming;
+use crate::relay::CarrierId;
 use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, mpsc};
@@ -98,11 +99,12 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
             .max(std::time::Duration::from_secs(3));
         let attempt_deadline = (Instant::now() + attempt_budget).min(deadline);
         wake.acknowledge();
+        let mut carrier = None;
         let result = tokio::select! {
             () = wake.network_changed(), if Instant::now() < deadline => continue,
             result = tokio::time::timeout_at(
             attempt_deadline,
-            subscribe(&key, remote_addr.clone(), keep_alive, namespace, credential, LocalStream::supports_data_v2()),
+            subscribe(&key, remote_addr.clone(), keep_alive, namespace, credential, LocalStream::supports_data_v2(), &mut carrier),
         ) => result,
         };
         match result {
@@ -120,14 +122,14 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
                 if error.remote_retryable().is_some() {
                     remote_addr.protocol_succeeded();
                 } else {
-                    remote_addr.transport_failed();
+                    remote_addr.transport_failed(carrier);
                 }
                 if !retryable || Instant::now() >= deadline {
                     return Err(error);
                 }
             }
             Err(_) => {
-                remote_addr.transport_failed();
+                remote_addr.transport_failed(carrier);
                 setup
                     .diagnostics
                     .failed(RecoveryFailure::Timeout, std::time::Duration::ZERO);
@@ -185,6 +187,7 @@ async fn subscribe(
     namespace: Option<u64>,
     credential: Credential,
     offered_v2: bool,
+    carrier: &mut Option<CarrierId>,
 ) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
     let request = match namespace {
         Some(namespace) => PbConnRequest::SubcribeScoped {
@@ -197,7 +200,15 @@ async fn subscribe(
             key: key.to_string(),
         },
     };
-    subscribe_request(request, remote_addr, keep_alive, credential, offered_v2).await
+    subscribe_request(
+        request,
+        remote_addr,
+        keep_alive,
+        credential,
+        offered_v2,
+        carrier,
+    )
+    .await
 }
 
 pub(crate) async fn subscribe_request(
@@ -206,9 +217,10 @@ pub(crate) async fn subscribe_request(
     keep_alive: bool,
     credential: Credential,
     offered_v2: bool,
+    carrier: &mut Option<CarrierId>,
 ) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
     let mut remote_stream = remote_addr
-        .connect(credential)
+        .connect(credential, carrier)
         .await
         .map_err(|error| match error {
             crate::relay::ConnectError::Transport { source } => {

@@ -1,5 +1,6 @@
 //! One-shot administrator request/response over a fresh protocol-v2 session.
 
+use crate::relay::CarrierId;
 use std::time::Duration;
 
 use crate::endpoint::RelayEndpoint;
@@ -65,7 +66,7 @@ pub(super) async fn send_admin_request(
             // effect. Anything past that point is reported as-is.
             Err(error) => {
                 if crate::sdk::client::is_carrier_failure(&error) {
-                    endpoint.invalidate_cached_transport();
+                    endpoint.carrier_failed(exchange.carrier);
                 }
                 if exchange.sent
                     || last_attempt
@@ -109,11 +110,15 @@ pub(super) async fn send_admin_request(
 /// failing, and it decides whether a retry is safe.
 struct Exchange {
     sent: bool,
+    carrier: Option<CarrierId>,
 }
 
 impl Exchange {
     fn new() -> Self {
-        Self { sent: false }
+        Self {
+            sent: false,
+            carrier: None,
+        }
     }
 
     /// Select a carrier stream before sending the administrator request.
@@ -127,7 +132,7 @@ impl Exchange {
         encoded: &[u8],
     ) -> Result<PbConnResponse> {
         let mut stream = endpoint
-            .connect_addresses(addrs, *credential)
+            .connect_addresses(addrs, *credential, &mut self.carrier)
             .await
             .map_err(|error| Error::from_connect(error, addrs.to_string()))?;
         let session = ClientHeaderSession::new_v2(credential).map_err(protocol)?;
