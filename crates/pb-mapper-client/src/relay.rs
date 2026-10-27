@@ -9,6 +9,28 @@ use pb_mapper_protocol::{
 use serde::Serialize;
 use std::{io, net::SocketAddr};
 
+/// An allocation identity retained across asynchronous failures. Unlike a
+/// numeric Quinn ID, it cannot be recycled while a failure still names it.
+/// The weak reference keeps neither the connection nor its UDP driver alive.
+#[derive(Clone, Debug)]
+pub(crate) struct CarrierId {
+    #[cfg(feature = "relay-quic")]
+    owner: std::sync::Weak<pb_mapper_protocol::quic::QuicConnection>,
+}
+
+#[cfg(feature = "relay-quic")]
+impl CarrierId {
+    fn new(owner: &std::sync::Arc<pb_mapper_protocol::quic::QuicConnection>) -> Self {
+        Self {
+            owner: std::sync::Arc::downgrade(owner),
+        }
+    }
+
+    fn matches(&self, owner: &std::sync::Arc<pb_mapper_protocol::quic::QuicConnection>) -> bool {
+        self.owner.as_ptr() == std::sync::Arc::as_ptr(owner)
+    }
+}
+
 /// Carrier setup can already receive an authenticated refusal, before a
 /// registration, subscription or administrator request has been sent.
 #[derive(Debug, snafu::Snafu)]

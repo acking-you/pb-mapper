@@ -1,6 +1,6 @@
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::{RecoveryWake, RelayEndpoint};
-use pb_mapper_protocol::transport::CarrierId;
+use crate::relay::CarrierId;
 pub mod error;
 mod stream;
 
@@ -360,7 +360,7 @@ async fn probe_remote_registration(
     let timeout = registration_probe_timeout();
     let result = tokio::time::timeout(timeout, async {
         let mut stream = endpoint
-            .connect_addresses(&remote_addr, credential)
+            .connect_addresses(&remote_addr, credential, &mut None)
             .await
             .map_err(|e| format!("connect remote status stream failed: {e}"))?;
         crate::client::status::get_status_with_credential(
@@ -886,7 +886,7 @@ where
     let mut manager_stream = tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
         () = wake.network_changed() => return Err(Status::NetworkChanged),
-        result = tokio::time::timeout_at(deadline, remote_addr.connect_addresses(&addresses, credential)) => {
+        result = tokio::time::timeout_at(deadline, remote_addr.connect_addresses(&addresses, credential, carrier)) => {
             match result {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
@@ -907,7 +907,6 @@ where
             }
         }
     };
-    *carrier = manager_stream.carrier_id();
     tracing::debug!(
         event = "local_server_connected_remote",
         key = %key,

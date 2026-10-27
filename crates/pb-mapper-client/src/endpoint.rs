@@ -1,9 +1,9 @@
 //! Shared relay resolution and bounded setup admission; no established data is owned here.
 
 use crate::network::NetworkHints;
+use crate::relay::CarrierId;
 use crate::relay::RelayTransport;
 use pb_mapper_core::config::ResolvedAddrs;
-use pb_mapper_protocol::transport::CarrierId;
 use std::{
     collections::HashMap,
     net::{SocketAddr, ToSocketAddrs},
@@ -326,8 +326,10 @@ impl RelayEndpoint {
     pub(crate) async fn connect(
         &self,
         credential: pb_mapper_core::checksum::Credential,
+        carrier: &mut Option<CarrierId>,
     ) -> Result<pb_mapper_protocol::transport::RelayStream, crate::relay::ConnectError> {
-        self.connect_addresses(&self.addresses().await?, credential)
+        *carrier = None;
+        self.connect_addresses(&self.addresses().await?, credential, carrier)
             .await
     }
     /// A stream to the relay at `addresses` over this endpoint's carrier.
@@ -338,15 +340,19 @@ impl RelayEndpoint {
     /// `credential` matters here only over QUIC, where it chooses the pooled
     /// connection, whose first stream it was bound to when dialled; a TCP
     /// connection is anonymous until that first frame.
+    /// `carrier` records the selected QUIC connection before waiting for stream
+    /// credit, so the caller can attribute cancellation as well as stream errors.
     pub(crate) async fn connect_addresses(
         &self,
         addresses: &ResolvedAddrs,
         credential: pb_mapper_core::checksum::Credential,
+        carrier: &mut Option<CarrierId>,
     ) -> Result<pb_mapper_protocol::transport::RelayStream, crate::relay::ConnectError> {
+        *carrier = None;
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {
             return pool
-                .connect(addresses, credential, self.network_generation())
+                .connect(addresses, credential, self.network_generation(), carrier)
                 .await
                 .map(|stream| pb_mapper_protocol::transport::RelayStream::Quic(Box::new(stream)));
         }

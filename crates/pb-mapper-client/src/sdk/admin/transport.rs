@@ -1,6 +1,6 @@
 //! One-shot administrator request/response over a fresh protocol-v2 session.
 
-use pb_mapper_protocol::transport::CarrierId;
+use crate::relay::CarrierId;
 use std::time::Duration;
 
 use crate::endpoint::RelayEndpoint;
@@ -132,10 +132,9 @@ impl Exchange {
         encoded: &[u8],
     ) -> Result<PbConnResponse> {
         let mut stream = endpoint
-            .connect_addresses(addrs, *credential)
+            .connect_addresses(addrs, *credential, &mut self.carrier)
             .await
             .map_err(|error| Error::from_connect(error, addrs.to_string()))?;
-        self.carrier = stream.carrier_id();
         let session = ClientHeaderSession::new_v2(credential).map_err(protocol)?;
         self.write_request(&mut stream, &session, encoded).await?;
         let mut reader = session.response_reader(&mut stream).map_err(protocol)?;

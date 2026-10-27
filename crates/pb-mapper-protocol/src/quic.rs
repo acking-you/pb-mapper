@@ -168,12 +168,6 @@ pub struct QuicConnection {
     pub relay_addr: SocketAddr,
 }
 
-impl QuicConnection {
-    pub fn carrier_id(self: &Arc<Self>) -> crate::transport::CarrierId {
-        crate::transport::CarrierId::new(self)
-    }
-}
-
 /// Which connection, and where to: Quinn's own `Debug` prints its whole
 /// connection state, kilobytes into any log line a stream appears in.
 impl std::fmt::Debug for QuicConnection {
@@ -202,9 +196,6 @@ impl std::fmt::Debug for QuicStream {
 impl QuicStream {
     pub fn new(owner: Arc<QuicConnection>, (send, recv): (SendStream, RecvStream)) -> Self {
         Self { recv, send, owner }
-    }
-    pub fn carrier_id(&self) -> crate::transport::CarrierId {
-        self.owner.carrier_id()
     }
     pub fn relay_addr(&self) -> SocketAddr {
         self.owner.relay_addr

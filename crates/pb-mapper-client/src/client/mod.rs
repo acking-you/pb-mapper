@@ -1,4 +1,4 @@
-use pb_mapper_protocol::transport::CarrierId;
+use crate::relay::CarrierId;
 pub mod error;
 pub mod status;
 pub(crate) mod stream;
@@ -660,9 +660,8 @@ async fn fetch_remote_status(
     credential: Credential,
     carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
-    *carrier = None;
     let mut stream = remote_addr
-        .connect_addresses(addresses, credential)
+        .connect_addresses(addresses, credential, carrier)
         .await
         .map_err(|error| match error {
             crate::relay::ConnectError::Rejected { response } => ProbeFailure {
@@ -674,7 +673,6 @@ async fn fetch_remote_status(
             },
             error => ProbeFailure::transient(format!("connect remote stream failed: {error}")),
         })?;
-    *carrier = stream.carrier_id();
     get_status_with_credential(&mut stream, req, namespace, &credential)
         .await
         .map_err(|error| ProbeFailure::from_status_error("get status failed", error))

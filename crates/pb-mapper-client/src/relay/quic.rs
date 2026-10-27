@@ -12,8 +12,8 @@
 use super::{
     ConnectError, QUIC_UNAVAILABLE, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport,
 };
+use crate::relay::CarrierId;
 use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
-use pb_mapper_protocol::transport::CarrierId;
 use pb_mapper_protocol::{command::PbErrorResponse, quic::*, secure::ClientHeaderSession};
 use std::{
     io,
@@ -160,9 +160,9 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    /// Retire only the failed stream's carrier, and only if the relay has
-    /// stopped replying on it. A stream reset or slow backend must not evict
-    /// a working carrier. Late failures from an already retired carrier are
+    /// Retire only the failed attempt's carrier, and only if it has closed
+    /// or the relay has stopped replying on it. A stream reset or slow backend
+    /// must not evict a working carrier. Late failures from an already retired carrier are
     /// harmless; its replacement and other credentials are never touched.
     pub fn transport_failed(&self, carrier: Option<&CarrierId>) {
         let Some(carrier) = carrier else { return };
@@ -213,6 +213,7 @@ impl Pool {
         addrs: &ResolvedAddrs,
         credential: Credential,
         generation: u64,
+        carrier: &mut Option<CarrierId>,
     ) -> Result<QuicStream, ConnectError> {
         let (shared, reused) = if let Some(shared) = self.cached(addrs, credential, generation) {
             (shared, true)
@@ -241,6 +242,10 @@ impl Pool {
                 }
             }
         };
+        // Record the carrier of a pending open too: dropped streams need peer
+        // acknowledgement before their credit returns, so a blackhole can
+        // stall here even when there are few remaining stream handles.
+        *carrier = Some(CarrierId::new(&shared));
         // Stream-credit waiting must not block other callers or observations.
         // No request is replayed here, including when opening a pooled stream fails.
         let pair = match shared.connection.open_bi().await {
@@ -477,12 +482,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn failures_only_retire_the_selected_silent_carrier() {
-        let (config, certificate) = server_config().unwrap();
+        let (mut config, certificate) = server_config().unwrap();
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_bidi_streams(0u32.into());
+        config.transport_config(Arc::new(transport));
         let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
         let address = server.local_addr().unwrap();
         let pool = Pool::default();
         let mut peers = Vec::new();
-        let mut ids = Vec::new();
         for key in [1, 2, 1] {
             let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
             endpoint.set_default_client_config(client_config(&certificate).unwrap());
@@ -497,11 +504,23 @@ mod tests {
                 endpoint,
                 relay_addr: address,
             });
-            ids.push(shared.carrier_id());
             lock(&pool.state)
                 .entries
                 .push(Entry::new(Credential::Admin([key; 32]), 0, shared));
         }
+        let addresses = ResolvedAddrs::from_candidates(vec![address]).unwrap();
+        let mut selected = None;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(1),
+                pool.connect(&addresses, Credential::Admin([1; 32]), 0, &mut selected),
+            )
+            .await
+            .is_err(),
+            "the peer offered no stream credit"
+        );
+        let selected = selected.expect("cancellation must retain the selected carrier");
+        assert!(selected.matches(&lock(&pool.state).entries[0].shared));
         // Make silence deterministic, independent of handshake ACK timing.
         {
             let mut state = lock(&pool.state);
@@ -512,14 +531,14 @@ mod tests {
             // A failure on a carrier that is still replying must preserve it.
             state.entries[0].heard = Instant::now();
         }
-        pool.transport_failed(Some(&ids[0]));
+        pool.transport_failed(Some(&selected));
         assert!(pool.diagnostics().connections.iter().all(|c| c.pooled));
         lock(&pool.state).entries[0].heard = Instant::now() - SILENCE;
         // DNS, discovery and admission failures selected no carrier at all.
         pool.transport_failed(None);
         assert!(pool.diagnostics().connections.iter().all(|c| c.pooled));
-        pool.transport_failed(Some(&ids[0]));
-        pool.transport_failed(Some(&ids[0]));
+        pool.transport_failed(Some(&selected));
+        pool.transport_failed(Some(&selected));
         let mut state = lock(&pool.state);
         assert!(!state.entries[0].pooled);
         assert!(state.entries[1].pooled, "another credential stays reusable");
@@ -535,7 +554,7 @@ mod tests {
             "a failure identity must not keep a carrier alive"
         );
         drop(state);
-        pool.transport_failed(Some(&ids[0]));
+        pool.transport_failed(Some(&selected));
         assert!(pool.diagnostics().connections.iter().all(|c| c.pooled));
     }
 }

@@ -77,7 +77,7 @@ where
     let deadline = tokio::time::Instant::now() + timeout;
     let mut remote_stream = match tokio::time::timeout_at(
         deadline,
-        endpoint.connect_addresses(&remote_addr, credential),
+        endpoint.connect_addresses(&remote_addr, credential, &mut None),
     )
     .await
     {

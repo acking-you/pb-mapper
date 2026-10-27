@@ -3,7 +3,8 @@ use crate::endpoint::RelayEndpoint;
 use std::sync::Arc;
 
 use crate::recovery::RecoveryTiming;
-use pb_mapper_protocol::transport::{CarrierId, RelayStream};
+use crate::relay::CarrierId;
+use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, mpsc};
 use tokio::time::Instant;
@@ -218,9 +219,8 @@ pub(crate) async fn subscribe_request(
     offered_v2: bool,
     carrier: &mut Option<CarrierId>,
 ) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
-    *carrier = None;
     let mut remote_stream = remote_addr
-        .connect(credential)
+        .connect(credential, carrier)
         .await
         .map_err(|error| match error {
             crate::relay::ConnectError::Transport { source } => {
@@ -235,7 +235,6 @@ pub(crate) async fn subscribe_request(
             }
         })?;
 
-    *carrier = remote_stream.carrier_id();
     snafu_error_handle!(remote_stream.configure(keep_alive));
 
     // start subcribe

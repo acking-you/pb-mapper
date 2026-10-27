@@ -23,28 +23,6 @@ pub enum RelayTransport {
     Quic,
 }
 
-/// An allocation identity retained across asynchronous failures. Unlike a
-/// numeric Quinn ID, it cannot be recycled while a failure still names it.
-/// The weak reference keeps neither the connection nor its UDP driver alive.
-#[derive(Clone, Debug)]
-pub struct CarrierId {
-    #[cfg(feature = "relay-quic")]
-    owner: std::sync::Weak<crate::quic::QuicConnection>,
-}
-
-#[cfg(feature = "relay-quic")]
-impl CarrierId {
-    pub(crate) fn new(owner: &std::sync::Arc<crate::quic::QuicConnection>) -> Self {
-        Self {
-            owner: std::sync::Arc::downgrade(owner),
-        }
-    }
-
-    pub fn matches(&self, owner: &std::sync::Arc<crate::quic::QuicConnection>) -> bool {
-        self.owner.as_ptr() == std::sync::Arc::as_ptr(owner)
-    }
-}
-
 #[derive(Debug)]
 pub enum RelayStream {
     Tcp(TcpStream),
@@ -59,15 +37,6 @@ impl From<TcpStream> for RelayStream {
 }
 
 impl RelayStream {
-    /// Process-local identity of the shared carrier, if this stream uses QUIC.
-    pub fn carrier_id(&self) -> Option<CarrierId> {
-        match self {
-            Self::Tcp(_) => None,
-            #[cfg(feature = "relay-quic")]
-            Self::Quic(stream) => Some(stream.carrier_id()),
-        }
-    }
-
     pub fn relay_addr(&self) -> io::Result<SocketAddr> {
         match self {
             Self::Tcp(stream) => stream.peer_addr(),

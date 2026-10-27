@@ -464,13 +464,11 @@ impl Client {
         let result = tokio::time::timeout(io_timeout, async {
             let _permit = endpoint.control_permit().await;
             for attempt in 0..2 {
-                carrier = None;
                 let result = async {
                     let mut stream = endpoint
-                        .connect(credential)
+                        .connect(credential, &mut carrier)
                         .await
                         .map_err(|error| Error::from_connect(error, self.inner.server.clone()))?;
-                    carrier = stream.carrier_id();
                     get_status_with_credential(
                         &mut stream,
                         request.clone(),
