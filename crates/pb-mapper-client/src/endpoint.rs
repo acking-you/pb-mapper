@@ -319,6 +319,8 @@ impl RelayEndpoint {
         }
     }
 
+    /// A stream to the relay over this endpoint's carrier, at its current
+    /// addresses. See [`Self::connect_addresses`].
     pub(crate) async fn connect(
         &self,
         credential: pb_mapper_core::checksum::Credential,
@@ -326,6 +328,14 @@ impl RelayEndpoint {
         self.connect_addresses(&self.addresses().await?, credential)
             .await
     }
+    /// A stream to the relay at `addresses` over this endpoint's carrier.
+    ///
+    /// Opening a stream authenticates no request. Every stream's first frame
+    /// is the caller's PBM2 request under `credential`, which the relay
+    /// authenticates before it dispatches anything, on either carrier.
+    /// `credential` matters here only over QUIC, where it chooses the pooled
+    /// connection, whose first stream it was bound to when dialled; a TCP
+    /// connection is anonymous until that first frame.
     pub(crate) async fn connect_addresses(
         &self,
         addresses: &ResolvedAddrs,
@@ -338,9 +348,7 @@ impl RelayEndpoint {
                 .await
                 .map(|stream| pb_mapper_protocol::transport::RelayStream::Quic(Box::new(stream)));
         }
-        // A TCP connection carries its credential in its own first frame,
-        // which the caller writes. Over QUIC the credential also chooses the
-        // pooled connection, whose first stream it is bound to.
+        // Anonymous until the caller's first frame; see above.
         let _ = credential;
         crate::addr::connect_tcp(addresses)
             .await
