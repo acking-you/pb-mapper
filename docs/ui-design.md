@@ -161,7 +161,10 @@ chosen carrier through one client kept per relay setting, which shares its
 QUIC connection with the tunnels. Whether the relay offers QUIC is asked
 over TCP beside them, so Settings can say so even when QUIC does not get
 through — once per relay setting, and again on Test, since a relay from
-before QUIC logs the question.
+before QUIC logs the question. The exception is a check over QUIC that
+gets no answer at all: then TCP is asked at once, and a relay that answers
+there and offers QUIC is reported as its UDP port not getting through —
+usually a firewall that opened only TCP — not as a relay that is silent.
 
 ## Layout
 

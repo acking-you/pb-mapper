@@ -334,7 +334,19 @@ impl PbMapperState {
             .filter(|(config, _)| *config == self.config)
             .map(|(_, port)| *port);
 
-        let (answer, asked) = fetch_real_status(&client, force || known.is_none()).await;
+        let (answer, mut asked) = fetch_real_status(&client, force || known.is_none()).await;
+        // Over QUIC, a relay that does not answer at all may still answer
+        // over TCP, and then it is UDP that does not get through. Asked here,
+        // on that failure only, so the window can say what to open; not of a
+        // relay already known to offer no QUIC, which the refusal says.
+        let quic_unanswered = self.config.relay_transport == RelayTransport::Quic
+            && matches!(&answer, Err(error) if matches!(
+                error.code(),
+                ErrorCode::ServerUnreachable | ErrorCode::Timeout
+            ));
+        if quic_unanswered && asked.is_none() && known != Some(None) {
+            asked = client.relay_quic_port().await.ok();
+        }
         if let Some(port) = asked {
             *self.quic_offer.lock() = Some((self.config.clone(), port));
         }
@@ -353,10 +365,18 @@ impl PbMapperState {
             },
             Err(e) => {
                 tracing::warn!("Relay status refresh failed: {}", e);
+                let error = match asked {
+                    Some(Some(port)) if quic_unanswered => format!(
+                        "The relay answers over TCP, but QUIC on UDP port {port} does not get \
+                         through. Open UDP {port} on the relay's firewall and on this network, \
+                         or choose TCP"
+                    ),
+                    _ => e.to_string(),
+                };
                 ServerStatusDetail {
                     quic_port: quic.flatten(),
                     quic_known: quic.is_some(),
-                    ..unavailable(e.to_string())
+                    ..unavailable(error)
                 }
             }
         };

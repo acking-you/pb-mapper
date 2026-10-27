@@ -41,7 +41,7 @@ use pb_mapper_server::{
 use uni_stream::stream::{ListenerProvider, TcpListenerProvider, UdpListenerProvider};
 
 use crate::ctl::Origin;
-use crate::error::CtlError;
+use crate::error::{CtlError, ErrorCode};
 use crate::events;
 use crate::relay::{no_quic, sdk_error};
 
@@ -1263,6 +1263,44 @@ mod tests {
 
         drop(socket);
         drop((relay, tcp_only));
+        let _ = set_process_msg_header_key(None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A relay that offers QUIC on a UDP port nothing gets through to — one
+    /// its firewall never opened — answers over TCP: the check says that it
+    /// is UDP, and which port, rather than that the relay is silent.
+    #[tokio::test]
+    async fn a_relay_whose_quic_port_is_blocked_is_named_as_such() {
+        let (_process_credential_guard, state, root) = temp_state("quic-blocked").await;
+        // Holds the port and reads nothing: every QUIC packet is dropped.
+        let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let blocked = blackhole.local_addr().unwrap().port();
+        let relay = pb_mapper_testkit::Relay::start_with_options(
+            "ffi-quic-blocked",
+            pb_mapper_server::RelayServerOptions {
+                direct: None,
+                quic: Some(QuicServerConfig {
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    advertise_port: blocked,
+                }),
+            },
+        )
+        .await;
+        set_process_msg_header_key(Some(pb_mapper_testkit::TEST_ADMIN_KEY)).unwrap();
+        {
+            let mut state = state.lock().await;
+            state.config.server_address = relay.addr().to_string();
+            state.config.relay_transport = RelayTransport::Quic;
+        }
+
+        let detail = state.lock().await.get_server_status_detail().await.unwrap();
+        assert!(!detail.server_available);
+        assert_eq!(detail.quic_port, Some(blocked));
+        let error = detail.error.unwrap();
+        assert!(error.contains(&format!("UDP {blocked}")), "{error}");
+
+        drop((relay, blackhole));
         let _ = set_process_msg_header_key(None);
         let _ = std::fs::remove_dir_all(&root);
     }

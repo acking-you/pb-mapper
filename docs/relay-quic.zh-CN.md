@@ -72,7 +72,7 @@ console.log(client.relayTransport(), await client.relayQuicPort()); // "quic" 76
 - **中继页**：头部在在线状态旁显示所用传输。使用 QUIC 时多出「往返时延」「丢包率」两项指标，并用一行小字给出连接数、流数与复用数、MTU、拥塞窗口及最近一次 QUIC 错误；这些来自本机连接，不向中继发请求。使用 TCP 而中继提供 QUIC 时，给出「改用 QUIC」。
 - **本机中继**：可开启「提供 QUIC」并指定单独的 UDP 端口（默认 7667；不能与 TCP 端口相同，后者的 UDP 用于直连协调）。运行时显示 QUIC 端口；端口被占用在启动时就报错，而不是让中继任务在后台退出。
 - **隧道**：经中继的路径标签带上传输，如「中继 · QUIC」「仅中继 · QUIC」；TCP 为默认，不额外标注。启动隧道前先经 TCP 向中继问一次 QUIC（一次带认证的请求，替代原先会被中继记为登录失败的裸连接）：连不上、凭据被永久拒绝，或选了 QUIC 而中继不提供，都直接报错；超时或可重试的拒绝交给隧道自己的重试。
-- **FFI**：`pb_mapper_update_config` 增加 `relay_transport`（`tcp`/`quic`），在 `data.move` 中返回仍在旧传输上的隧道；`pb_mapper_start_server` 增加 `quic_port`（0 表示不开启）；`pb_mapper_relay_call_json` 增加 `link` 操作。窗口自己的状态检查与中继页请求都经所选传输发出，并另经 TCP 询问 QUIC 端口（`quicPort`、`quicKnown`）；这一询问只在首次检查、设置变更或点击 Test 时发出，周期检查沿用上次回答，因为旧版中继会把它记为一条警告。延迟只计服务列表请求本身。窗口持有一个按中继设置缓存的 Client，使这些请求与隧道共用同一条 QUIC 连接。
+- **FFI**：`pb_mapper_update_config` 增加 `relay_transport`（`tcp`/`quic`），在 `data.move` 中返回仍在旧传输上的隧道；`pb_mapper_start_server` 增加 `quic_port`（0 表示不开启）；`pb_mapper_relay_call_json` 增加 `link` 操作。窗口自己的状态检查与中继页请求都经所选传输发出，并另经 TCP 询问 QUIC 端口（`quicPort`、`quicKnown`）；这一询问只在首次检查、设置变更或点击 Test 时发出，周期检查沿用上次回答，因为旧版中继会把它记为一条警告。例外是选了 QUIC 而中继经 QUIC 完全无应答（不可达或超时）时：此时再经 TCP 问一次，若 TCP 能答且中继提供 QUIC，错误直接指出是哪个 UDP 端口不通（多为防火墙或安全组只放行了 TCP），而不是笼统地说中继无应答。延迟只计服务列表请求本身。窗口持有一个按中继设置缓存的 Client，使这些请求与隧道共用同一条 QUIC 连接。
 
 ## 可观测性
 
