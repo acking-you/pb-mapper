@@ -10,7 +10,7 @@ resolver = "3"
 [workspace.package]
 # `version` must stay the first key here: `release.yml` and `docker-publish.yml`
 # both parse it positionally with awk to check the tag against it.
-version = "0.9.6"
+version = "0.9.7"
 authors = ["L_B__"]
 edition = "2024"
 rust-version = "1.99.1"
@@ -23,12 +23,12 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 [workspace.dependencies]
-pb-mapper-auth = { path = "crates/pb-mapper-auth", version = "0.9.6" }
-pb-mapper = { path = "crates/pb-mapper", version = "0.9.6" }
-pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.9.6" }
-pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.9.6" }
-pb-mapper-protocol = { path = "crates/pb-mapper-protocol", version = "0.9.6" }
-pb-mapper-server = { path = "crates/pb-mapper-server", version = "0.9.6" }
+pb-mapper-auth = { path = "crates/pb-mapper-auth", version = "0.9.7" }
+pb-mapper = { path = "crates/pb-mapper", version = "0.9.7" }
+pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.9.7" }
+pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.9.7" }
+pb-mapper-protocol = { path = "crates/pb-mapper-protocol", version = "0.9.7" }
+pb-mapper-server = { path = "crates/pb-mapper-server", version = "0.9.7" }
 pb-mapper-galaxy = { path = "ui/native/pb_mapper_galaxy" }
 # Test support only; never a dependency of a shipped crate.
 pb-mapper-testkit = { path = "crates/pb-mapper-testkit" }
@@ -46,8 +46,12 @@ kanal = { package = "kanal-plus", version = "0.2.0" }
 parking_lot = "0.12"
 rand = "0.10"
 ring = "0.17.14"
-quinn = { path = "deps/quinn/quinn", version = "0.12.0", default-features = false, features = ["runtime-tokio", "rustls-ring", "fast-apple-datapath"] }
-rcgen = { path = "deps/rcgen/rcgen", version = "0.15.0", default-features = false, features = ["ring"] }
+# Pinned forks, published by `release-sdk.yml` as quinn-plus (with
+# quinn-proto-plus and quinn-udp-plus) and rcgen-plus, under the crate names
+# the code imports. Bump a fork's version whenever its pinned source changes:
+# the release refuses to reuse a published version for different source.
+quinn = { package = "quinn-plus", path = "deps/quinn/quinn", version = "0.12.0", default-features = false, features = ["runtime-tokio", "rustls-ring", "fast-apple-datapath"] }
+rcgen = { package = "rcgen-plus", path = "deps/rcgen/rcgen", version = "0.15.0", default-features = false, features = ["ring"] }
 stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.4" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }

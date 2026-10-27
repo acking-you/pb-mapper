@@ -2,8 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-- Recover Windows direct handshakes when a wildcard-bound UDP socket rejects a redundant IPv4 source hint with error 10022. Retry only when Windows would select the same source, preserving the socket, port and authenticated direct/fallback behavior. This fix is included in repository builds through the pinned Quinn fork; registry SDK packages require a corresponding dependency release.
+## [0.9.7] - 2026-10-28
+- Reach the relay over QUIC as well as TCP. `pb-mapper server --quic-listen 0.0.0.0:7667` offers it (add `--quic-advertise-port` when NAT maps the port), and `register` and `connect` take `--relay-transport quic`. TCP stays the default, each end chooses for itself, and a client that asked for QUIC reports why it cannot have it instead of quietly using TCP. Discovery is one authenticated TCP request that returns the UDP port and the relay's certificate, so the TCP port is still needed; every tunnel of a process then shares one QUIC connection per relay and credential, pinned to that certificate and bound to the session's TLS exporter, with 0-RTT off. The relay bounds handshakes and connections, at most 16 per temporary credential, and says so with a retryable refusal of its own when full. See `docs/relay-quic.zh-CN.md`.
+- When a tunnel's stream fails, retire only the QUIC connection it used, and only once that connection has gone silent, rather than every pooled connection to the relay. A temporary credential with many tunnels no longer runs into its 16-connection limit after repeated failures. A failed name lookup leaves the pool alone.
+- Choose the relay carrier in the app. Settings offers TCP or QUIC and says whether the relay offers QUIC; on a switch, the app offers to start running tunnels again on the new carrier, since each keeps the one it started with and shows it. Over QUIC the Relay page shows the link's round trip, loss and streams, and the relay this computer runs can offer a QUIC port. The FFI's `pb_mapper_update_config` takes the carrier, `pb_mapper_start_server` takes a QUIC port, and the relay call has a `link` operation.
+- The Rust SDK gains `Client::with_relay_transport`, `relay_transport` and `relay_diagnostics`, and its status and administrator calls follow the client's carrier; the Node SDK takes `relayTransport` and reports the same diagnostics.
+- Sign the macOS app and disk images with a Developer ID and notarize them, so Gatekeeper opens them without a warning.
+- Recover Windows direct handshakes when a wildcard-bound UDP socket rejects a redundant IPv4 source hint with error 10022. Retry only when Windows would select the same source, preserving the socket, port and authenticated direct/fallback behavior.
+- Move to Quinn 0.12 and rcgen 0.15, with Quinn's UDP batching chosen per platform at compile time and adapted to the backlog on Apple systems. Bulk transfers ran about 18% faster on macOS loopback; see `deps/README.md` for the measurements and their limits.
+- The crates.io SDK now builds on the same Quinn and rcgen source as the binaries. The pinned forks are published as `quinn-plus` (with `quinn-proto-plus` and `quinn-udp-plus`) and `rcgen-plus`, imported under their usual crate names, so the Windows fix above reaches SDK users too.
 
 ## [0.9.6] - 2026-10-26
 - Download and verify Android updates inside the app, then open the system installer. Continue automatically after install permission is granted, and reuse verified downloads after a denied permission or cancelled installer.

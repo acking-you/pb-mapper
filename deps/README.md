@@ -2,14 +2,14 @@
 
 `deps/` 下的五个仓库统一使用 `dev` 作为维护分支和 GitHub 默认分支，`.gitmodules` 也指向 `dev`。Quinn、rcgen、stun-proto 和 Kanal 是 fork，另保留 `upstream` 分支跟踪纯上游源码；uni-stream 是自研仓库，没有外部上游或 `upstream` 分支。
 
-Quinn、rcgen、stun-proto 通过 `path + version` 接入 Cargo，构建使用子模块源码。Kanal 和 uni-stream 的子模块用于源码维护，产品仍使用 registry 中的 `kanal-plus 0.2.0` 和 `uni-stream 0.3.5`；切换维护分支不会改变已发布包，也不会自动升级产品的依赖。
+Quinn、rcgen、stun-proto 通过 `path + version` 接入 Cargo，构建使用子模块源码；Quinn 与 rcgen 以 `quinn-plus`、`rcgen-plus` 等包名发布到 crates.io（见下文“发布 SDK”）。Kanal 和 uni-stream 的子模块用于源码维护，产品仍使用 registry 中的 `kanal-plus 0.2.0` 和 `uni-stream 0.3.5`；切换维护分支不会改变已发布包，也不会自动升级产品的依赖。
 
 ## 固定版本
 
 | 本地目录 | 维护仓库 | 上游 / 基线 | 固定 commit | 许可证 |
 |---|---|---|---|---|
-| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `main@12fe8094`（开发版） | `91a87cdb65f8ccec42eaa83b6323ae3ea42a7f38` | MIT OR Apache-2.0 |
-| `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/dev) | [rustls/rcgen](https://github.com/rustls/rcgen), `main@b820c438`（开发版） | `b4a65cb06038656800b38fe592923b06ad0df77a` | MIT OR Apache-2.0 |
+| `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `main@12fe8094`（开发版），发布为 `quinn-plus`、`quinn-proto-plus`、`quinn-udp-plus` | `885075f0fa0f34fbf1ba72342f378ab34d99f2ad` | MIT OR Apache-2.0 |
+| `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/dev) | [rustls/rcgen](https://github.com/rustls/rcgen), `main@b820c438`（开发版），发布为 `rcgen-plus` | `f9dae611a6d9bb83320ec60ce6d0585473bbda44` | MIT OR Apache-2.0 |
 | `deps/stun-proto` | [acking-you/stun-proto](https://github.com/acking-you/stun-proto/tree/dev) | [ystreet/stun-proto](https://github.com/ystreet/stun-proto), `v2.0.4 / main@9e47ca00` | `66dc8e0ae7179393d6b80373582893fa8bb0283e` | MIT OR Apache-2.0 |
 | `deps/kanal` | [acking-you/kanal](https://github.com/acking-you/kanal/tree/dev) | [fereidani/kanal](https://github.com/fereidani/kanal)，本地扩展发布为 `kanal-plus 0.2.0` | `e79d95d5163446c23d53befbc778aaf6d7d34e42` | MIT |
 | `deps/uni-stream` | [acking-you/uni-stream](https://github.com/acking-you/uni-stream/tree/dev) | 自研，`0.3.5` 发布后的已合并维护修复 | `796efc8c938e0eedb5006c2512fc5cf810fbbca4` | MIT |
@@ -82,8 +82,8 @@ stun-proto 社区规模较小，保留 fork 的直接修复能力，并跟踪上
 **根 Cargo.toml** 已将五个仓库加入 `[workspace].exclude`，防止依赖仓库的成员被主项目误纳入；`[workspace.dependencies]` 中使用：
 
 ```toml
-quinn = { path = "deps/quinn/quinn", version = "0.12.0", default-features = false, features = ["runtime-tokio", "rustls-ring", "fast-apple-datapath"] }
-rcgen = { path = "deps/rcgen/rcgen", version = "0.15.0", default-features = false, features = ["ring"] }
+quinn = { package = "quinn-plus", path = "deps/quinn/quinn", version = "0.12.0", default-features = false, features = ["runtime-tokio", "rustls-ring", "fast-apple-datapath"] }
+rcgen = { package = "rcgen-plus", path = "deps/rcgen/rcgen", version = "0.15.0", default-features = false, features = ["ring"] }
 stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.4" }
 kanal = { package = "kanal-plus", version = "0.2.0" }
 uni-stream = "0.3.5"
@@ -93,7 +93,11 @@ uni-stream = "0.3.5"
 
 通过 `cargo metadata`/`cargo tree` 检查三个直接依赖 source 为本地路径、rustls 由 registry 解析且只有预期的一份、没有意外启用 aws-lc 或系统证书验证。依赖锁定后运行受影响测试，CI 已把 `deps/*` 和 `.gitmodules` 纳入 Rust/Node 变更触发范围；仅调整 gitlink 也必须验收。
 
-以上 path 方案适用于本仓库构建二进制。本次使用的 Quinn / rcgen 开发版还必须确认相应 registry 版本已发布，才能发布依赖它们的 SDK。**发布 crates.io SDK 需要另行完成依赖发布闭环**：根 `[patch.crates-io]` 不会作为库的依赖配置传播给使用者；`path + version` 在发布时会解析 registry 版本。若 fork 有行为修改，应先合入上游并依赖包含修复的版本，或发布明确命名的 fork 包并统一改依赖，不能把尚未发布的本地修复当作下游已经获得。Kanal 已通过 `kanal-plus 0.2.0` 发布；Quinn、rcgen 和 stun-proto 没有发布单独命名的 fork 包。Quinn 的 Windows 修复仅由固定 Git/submodule 依赖提供，不应宣称 crates.io 用户已获得该补丁。
+### 发布 SDK
+
+`path + version` 在发布时会解析 registry 版本，根 `[patch.crates-io]` 也不会传播给库的使用者，所以 SDK 用到的 fork 必须先以自己的包名发布。Quinn 的三个 crate 发布为 `quinn-plus`、`quinn-proto-plus`、`quinn-udp-plus`，rcgen 发布为 `rcgen-plus`，做法同 `kanal-plus`。库名不变（`quinn`、`quinn_proto`、`quinn_udp`、`rcgen`），pb-mapper 只在 `[workspace.dependencies]` 里写 `package = "quinn-plus"`，代码照旧 `use quinn::…`。
+
+`release-sdk.yml` 的 `publish-forks` 在发布 npm 之前，用 `scripts/release/publish-crates.sh` 按依赖顺序发布这些 fork。crates.io 上已有的版本，包内容（源码以及 Cargo 规范化后的 manifest，后者带有从 workspace 继承的依赖版本）与当前 gitlink 一致时跳过；不一致时整个发布失败。所以 **gitlink 改变了某个 fork crate 的源码，就要同时提升它的版本号**，否则 crates.io 用户拿不到新代码。stun-proto 的协议源码与 registry 上的 `2.0.4` 一致，仍直接使用 registry 版本。
 
 ## 本次升级的性能验证
 
