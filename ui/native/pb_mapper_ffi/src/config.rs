@@ -99,14 +99,17 @@ pub unsafe extern "C" fn pb_mapper_update_config(
     let result = handle.runtime.block_on(async move {
         // Where that relay is, to know its tunnels by address as well as by
         // name: resolved before the state is locked, since it can be slow,
-        // and only when the carrier looks about to change.
+        // and only when the carrier looks about to change. `None` is not
+        // looked up; `Some(None)` did not resolve.
         let current = state.lock().await.get_config_status().await.relay_transport;
-        let endpoint = if current == relay_transport {
+        let looked_up = if current == relay_transport {
             None
         } else {
-            resolve_pb_mapper_server_async(Some(&server_address))
-                .await
-                .ok()
+            Some(
+                resolve_pb_mapper_server_async(Some(&server_address))
+                    .await
+                    .ok(),
+            )
         };
         // Compared, written, and the tunnels to move named, under one lock:
         // two saves at once cannot both see the old carrier, or both miss
@@ -122,15 +125,25 @@ pub unsafe extern "C" fn pb_mapper_update_config(
                 relay_transport,
             )
             .await?;
-        let moving = match get_process_credential() {
-            Ok(credential) if changed => state.on_other_carrier(
-                &server_address,
-                endpoint.as_ref(),
-                credential,
-                relay_transport,
-            ),
-            _ => Default::default(),
+        let credential = match get_process_credential() {
+            Ok(credential) if changed => credential,
+            _ => return Ok(Default::default()),
         };
+        let endpoint = match looked_up {
+            Some(endpoint) => endpoint,
+            // Another save changed the carrier between that look and this
+            // lock, so the change was not foreseen: looked up now, with the
+            // lock held, rather than naming tunnels by address text alone.
+            None => resolve_pb_mapper_server_async(Some(&server_address))
+                .await
+                .ok(),
+        };
+        let moving = state.on_other_carrier(
+            &server_address,
+            endpoint.as_ref(),
+            credential,
+            relay_transport,
+        );
         Ok::<_, CtlError>(moving)
     });
 

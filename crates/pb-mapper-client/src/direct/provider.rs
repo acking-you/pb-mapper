@@ -679,7 +679,9 @@ mod tests {
                         }
                         Some(result) = arrivals.join_next(), if !arrivals.is_empty() => {
                             if let Ok(Ok(Ok((_, incoming)))) = result {
-                                events.send(SessionEvent::Incoming(incoming)).await.unwrap();
+                                // A test that already gave up reports its own
+                                // timeout; a send failure here would hide it.
+                                let _ = events.send(SessionEvent::Incoming(incoming)).await;
                                 break;
                             }
                         }
