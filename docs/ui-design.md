@@ -300,31 +300,25 @@ proxy-everything's (`ui/lib/src/updates/`):
    release without one is offered only as a link to its page.
 3. **Fetch.** The one package for this device, hashed as it streams in; the
    size and SHA-256 must match the manifest's, or it is deleted.
-4. **Apply**, per platform:
-
-   | Installed as | Update |
-   |---|---|
-   | Windows installer | Quit, then a hidden PowerShell waits for the process to exit, runs the Inno Setup installer with `/SILENT` (it elevates itself when the install is machine-wide, so Windows asks for permission), writes setup's log to `setup.log` beside the download, and opens the app again. The PowerShell is started by the FFI's `pb_mapper_spawn_hidden_powershell_v1` with a console of its own that has no window: started as a detached Dart process it had no console at all and exited without running a line, so no update installed until 0.9.5 |
-   | Windows portable zip, Linux zip | Saved to Downloads and shown |
-   | Linux AppImage | Swapped in place (staged beside it, renamed over it) and reopened; saved to Downloads instead when its folder is not writable |
-   | macOS | The disk image is saved to Downloads and opened, to drag into Applications: the DMGs are not Developer ID signed, so the app does not replace its own bundle |
-   | Android | The APK opens in the browser. Release APKs are signed with CI's throwaway debug key, so the system would refuse to install one over another from inside the app |
-   | iOS | None: the IPA is an unsigned development build |
+4. **Apply**, with the platform's own installer. What each platform does, and
+   why, is in [UI updates and mobile releases](ui-updates.md).
 
    Debug builds stop after step 3 rather than replace themselves.
 
 ### Releasing with updates
 
-- `ui/pubspec.yaml`'s `version` is the workspace version, with build number
-  `major * 10000 + minor * 100 + patch` (Android's version code only grows).
-  Bump it with `Cargo.toml`: `test/version_test.dart` fails on a mismatch, and
-  the release workflow refuses a tag that does not match it. An app built with
-  a stale version would offer the same update forever.
-- `release-ui.yml`'s last job, `publish-manifest`, downloads the release's ten
-  packages, writes and signs the manifest with
+- `ui/pubspec.yaml`'s build-name is the workspace version. Bump it with
+  `Cargo.toml`: `test/version_test.dart` fails on a mismatch, and the release
+  workflow refuses a tag that does not match it. An app built with a stale
+  version would offer the same update forever. The build number is a separate
+  counter that only grows; `docs/ui-updates.md` records the next one.
+- `release-ui.yml`'s last job, `publish-manifest`, downloads the release's
+  desktop packages, writes and signs the manifest with
   `scripts/release/ui_release_manifest.py`, verifies the signature against
   `scripts/release/update_signing_key.pub.pem`, and attaches both files. It
   needs the repository secret `UPDATE_SIGNING_KEY`: the private key, in PEM.
+  Android APKs are built and signed locally, attached afterwards, and added to
+  the manifest by `publish-android.yml`, as `docs/ui-updates.md` describes.
 - The public key is also compiled into the app (`updatePublicKey` in
   `lib/src/updates/release.dart`). Rotating the key means shipping a release
   signed with the old key that carries the new public key, before any release
