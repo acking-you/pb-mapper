@@ -14,15 +14,17 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use pb_mapper_client::sdk::Client;
+use pb_mapper_core::codec::Aes256GcmEnCodec;
 use pb_mapper_core::config::{
     PB_MAPPER_SERVER_LEASE_SWEEP_INTERVAL, PB_MAPPER_SERVER_LEASE_TIMEOUT,
 };
 use pb_mapper_protocol::command::{MessageSerializer, PbServerRequest};
 use pb_mapper_protocol::{
-    MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
+    CodecMessageWriter, MessageReader, MessageWriter, get_header_msg_reader, get_header_msg_writer,
 };
 use pb_mapper_testkit::{Relay, V2ControlSpec, admin_credential, register_v2_control};
 use tokio::net::TcpStream;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::time::{Instant, timeout};
 
 /// The lease the relay hands out in this binary, and how often it sweeps.
@@ -63,30 +65,51 @@ fn short_lease_env() {
     *ENV;
 }
 
-/// Register a v2 control connection and wait for the relay to publish it.
+/// Register a v2 control connection, wait for the relay to publish it, and
+/// hand back the writer the connection continues with.
 ///
 /// The heartbeat is far under the defaults to match this binary's short lease,
 /// and the wait is this file's own readiness requirement rather than part of
 /// registering — a case here starts timing sweeps from the moment the relay
 /// reports the key.
-async fn register_and_await_v2_control(
+async fn register_and_await_v2_control<'a>(
     relay: &Relay,
     reader: &mut impl MessageReader,
-    writer: &mut impl MessageWriter,
+    write_half: &'a mut OwnedWriteHalf,
     key: &str,
-) {
-    register_v2_control(
-        reader,
-        writer,
-        key,
-        V2ControlSpec::new()
-            .instance_id("lease-reclaim-test")
-            .heartbeat(20, 60),
-    )
-    .await;
-    relay
-        .wait_for_registration(key, admin_credential(), None)
+) -> CodecMessageWriter<'a, OwnedWriteHalf, Aes256GcmEnCodec> {
+    {
+        let mut writer = get_header_msg_writer(&mut *write_half).unwrap();
+        register_v2_control(
+            reader,
+            &mut writer,
+            key,
+            V2ControlSpec::new()
+                .instance_id("lease-reclaim-test")
+                .heartbeat(20, 60),
+        )
         .await;
+    }
+    // Continuation frames need a fresh writer; see `register_v2_control`.
+    let mut writer = get_header_msg_writer(write_half).unwrap();
+    // Renewed while waiting: on a slow runner the first status answer can
+    // come after a lease this short has lapsed, and a key swept before anyone
+    // saw it is never reported. Only the sleep is ever cancelled, so no frame
+    // is left half written or a reply half read.
+    let registered = relay.wait_for_registration(key, admin_credential(), None);
+    tokio::pin!(registered);
+    for seq in 0.. {
+        writer
+            .write_msg(&PbServerRequest::PingV2 { seq }.encode().unwrap())
+            .await
+            .unwrap();
+        reader.read_msg().await.unwrap();
+        tokio::select! {
+            () = &mut registered => break,
+            () = tokio::time::sleep(CONTROL_FRAME_INTERVAL) => {}
+        }
+    }
+    writer
 }
 
 async fn is_registered(relay: &Relay, key: &str) -> bool {
@@ -107,11 +130,7 @@ async fn sweep_reclaims_a_registration_that_reads_but_never_renews() {
     let control = TcpStream::connect(relay.addr()).await.unwrap();
     let (mut read_half, mut write_half) = control.into_split();
     let mut reader = get_header_msg_reader(&mut read_half).unwrap();
-    {
-        let mut writer = get_header_msg_writer(&mut write_half).unwrap();
-        register_and_await_v2_control(&relay, &mut reader, &mut writer, key).await;
-    }
-    let mut writer = get_header_msg_writer(&mut write_half).unwrap();
+    let mut writer = register_and_await_v2_control(&relay, &mut reader, &mut write_half, key).await;
 
     // The wedge this sweep exists for. Frames the relay can read but not decode
     // keep its reader loop returning, so the per-connection idle timeout — which
@@ -145,11 +164,7 @@ async fn sweep_leaves_a_registration_that_keeps_pinging() {
     let control = TcpStream::connect(relay.addr()).await.unwrap();
     let (mut read_half, mut write_half) = control.into_split();
     let mut reader = get_header_msg_reader(&mut read_half).unwrap();
-    {
-        let mut writer = get_header_msg_writer(&mut write_half).unwrap();
-        register_and_await_v2_control(&relay, &mut reader, &mut writer, key).await;
-    }
-    let mut writer = get_header_msg_writer(&mut write_half).unwrap();
+    let mut writer = register_and_await_v2_control(&relay, &mut reader, &mut write_half, key).await;
 
     // Well past the two sweeps that retire a registration which has gone quiet,
     // pinging throughout — which is all a healthy client does to renew its lease.
