@@ -2,6 +2,13 @@
 //! discovery, pinned to the certificate discovery named, bound to the
 //! credential by the TLS exporter, and then shared: each relay stream is one
 //! bidirectional QUIC stream on it.
+//!
+//! The pool holds every connection it dialled until it closes it, retired or
+//! not. Quinn closes a connection the moment its last handle drops, and that
+//! discards what its streams had written but not yet delivered: a response
+//! tail, say, on a connection no longer handed out whose last stream just
+//! finished. So no stream's drop is ever what closes a connection here; the
+//! sweep is, once nothing has been open on it for [`IDLE_CLOSE`].
 use super::{
     ConnectError, QUIC_UNAVAILABLE, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport,
 };
@@ -15,12 +22,13 @@ use std::{
 };
 use tokio::{sync::Mutex, time::Instant};
 
-/// Connections cached per pool; past this the oldest is retired.
+/// Connections handed out per pool; past this the oldest is retired.
 const MAX_ENTRIES: usize = 16;
 
-/// A pooled connection with no stream open for this long is closed. The
-/// relay holds an admission slot for each, and the client's keep-alive would
-/// otherwise keep an unused one open for as long as the process lives.
+/// A connection with no stream open for this long is closed. The relay
+/// holds an admission slot for each, and the client's keep-alive would
+/// otherwise keep an unused one open for as long as the process lives. A
+/// retired one waits as long, so that its last streams finish delivering.
 const IDLE_CLOSE: Duration = Duration::from_secs(30);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -29,26 +37,68 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 /// two once split, so this keeps under the relay's per-connection limit.
 const REFERENCES_PER_CONNECTION: usize = MAX_STREAMS as usize;
 
+/// How long the relay may be silent on a connection before a transport
+/// failure retires it: well past a round trip and an acknowledgement's
+/// delay on a slow path, and short of every setup budget (3 s or more), so
+/// a path that stopped delivering is caught by the failure it caused.
+const SILENCE: Duration = Duration::from_secs(2);
+
 struct Entry {
     credential: Credential,
     runtime: tokio::runtime::Id,
     generation: u64,
     shared: Arc<QuicConnection>,
+    /// Whether new streams still go over it. A retired connection stays
+    /// open for the streams already on it.
+    pooled: bool,
+    /// When a stream was last handed out on it, or last seen open.
     last_open: Instant,
+    /// The datagrams it had received when last looked at, and when a look
+    /// last found more: the last time the relay was heard on it, as near as
+    /// the pool has looked.
+    received: u64,
+    heard: Instant,
 }
 
 impl Entry {
+    fn new(credential: Credential, generation: u64, shared: Arc<QuicConnection>) -> Self {
+        Self {
+            credential,
+            runtime: tokio::runtime::Handle::current().id(),
+            generation,
+            received: received(&shared),
+            shared,
+            pooled: true,
+            last_open: Instant::now(),
+            heard: Instant::now(),
+        }
+    }
+
     fn is_open(&self) -> bool {
         self.shared.connection.close_reason().is_none()
     }
+
+    /// When the relay was last heard on it, looking now: anything it sent
+    /// counts, an acknowledgement at least, if the path still works.
+    fn heard(&mut self, now: Instant) -> Instant {
+        let received = received(&self.shared);
+        if received > self.received {
+            self.received = received;
+            self.heard = now;
+        }
+        self.heard
+    }
+}
+
+fn received(shared: &QuicConnection) -> u64 {
+    shared.connection.stats().udp_rx.datagrams
 }
 
 #[derive(Default)]
 struct State {
+    /// Every connection not yet closed: those handed out first, in the order
+    /// they were dialled, and those retired.
     entries: Vec<Entry>,
-    /// Connections no longer handed out that streams opened before still
-    /// hold, for diagnostics to list while they carry traffic.
-    retired: Vec<Weak<QuicConnection>>,
     created: u64,
     opened: u64,
     reused: u64,
@@ -96,20 +146,6 @@ impl FailedDial {
     }
 }
 
-impl State {
-    fn retire(&mut self, entry: Entry) {
-        self.retired.push(Arc::downgrade(&entry.shared));
-    }
-
-    fn prune_retired(&mut self) {
-        self.retired.retain(|connection| {
-            connection
-                .upgrade()
-                .is_some_and(|connection| connection.connection.close_reason().is_none())
-        });
-    }
-}
-
 fn lock(state: &StateMutex<State>) -> MutexGuard<'_, State> {
     state
         .lock()
@@ -123,12 +159,20 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    /// Retire every cached carrier after a transport failure, so that the
-    /// next stream dials afresh. Established streams keep theirs.
+    /// After a transport failure, retire every connection the relay has
+    /// been silent on for [`SILENCE`], so that the next stream dials afresh
+    /// rather than waiting out Quinn's idle timeout on a path that no longer
+    /// delivers. One the relay is still heard on is working, whatever
+    /// failed — a slow service behind it, say — and stays: retiring it would
+    /// only leave its long-lived streams holding a relay slot beside its
+    /// replacement's. Established streams keep theirs either way.
     pub fn invalidate(&self) {
         let mut state = lock(&self.state);
-        for entry in std::mem::take(&mut state.entries) {
-            state.retire(entry);
+        let now = Instant::now();
+        for entry in &mut state.entries {
+            if entry.pooled && now.duration_since(entry.heard(now)) >= SILENCE {
+                entry.pooled = false;
+            }
         }
     }
 
@@ -141,25 +185,24 @@ impl Pool {
         let mut state = lock(&self.state);
         // Closed connections are dropped and an earlier network's retired;
         // another runtime's are left for it.
-        for entry in std::mem::take(&mut state.entries) {
-            if !entry.is_open() {
-                continue;
-            }
+        state.entries.retain_mut(|entry| {
             if entry.generation < generation {
-                state.retire(entry);
-            } else {
-                state.entries.push(entry);
+                entry.pooled = false;
             }
-        }
+            entry.is_open()
+        });
         let runtime = tokio::runtime::Handle::current().id();
         let entry = state.entries.iter_mut().find(|entry| {
-            entry.runtime == runtime
+            entry.pooled
+                && entry.runtime == runtime
                 && entry.generation == generation
                 && entry.credential == credential
                 && addrs.as_slice().contains(&entry.shared.relay_addr)
                 && Arc::strong_count(&entry.shared) <= REFERENCES_PER_CONNECTION
         })?;
-        entry.last_open = Instant::now();
+        let now = Instant::now();
+        entry.last_open = now;
+        entry.heard(now);
         Some(entry.shared.clone())
     }
 
@@ -247,17 +290,16 @@ impl Pool {
             }
         };
         state.created += 1;
-        if state.entries.len() >= MAX_ENTRIES {
-            let oldest = state.entries.remove(0);
-            state.retire(oldest);
+        if let Some(oldest) = (state.entries.iter().filter(|entry| entry.pooled).count()
+            >= MAX_ENTRIES)
+            .then(|| state.entries.iter_mut().find(|entry| entry.pooled))
+            .flatten()
+        {
+            oldest.pooled = false;
         }
-        state.entries.push(Entry {
-            credential,
-            runtime: tokio::runtime::Handle::current().id(),
-            generation,
-            shared: shared.clone(),
-            last_open: Instant::now(),
-        });
+        state
+            .entries
+            .push(Entry::new(credential, generation, shared.clone()));
         let start_sweep = !std::mem::replace(&mut state.sweeping, true);
         // Spawned with the lock released: a runtime shutting down drops the
         // task at once, and its guard takes the lock to say so.
@@ -269,28 +311,30 @@ impl Pool {
     }
 
     pub fn diagnostics(&self) -> RelayDiagnostics {
-        let mut state = lock(&self.state);
-        state.prune_retired();
-        let pooled = state
+        let state = lock(&self.state);
+        let open = |entry: &&Entry| entry.is_open();
+        // Those handed out first, then those retired.
+        let connections = state
             .entries
             .iter()
-            .filter(|entry| entry.is_open())
-            .map(|entry| (entry.shared.clone(), true));
-        let retired = state
-            .retired
-            .iter()
-            .filter_map(Weak::upgrade)
-            .map(|connection| (connection, false));
+            .filter(|entry| entry.pooled)
+            .filter(open)
+            .chain(
+                state
+                    .entries
+                    .iter()
+                    .filter(|entry| !entry.pooled)
+                    .filter(open),
+            )
+            .map(|entry| describe(&entry.shared, entry.pooled))
+            .collect();
         RelayDiagnostics {
             transport: RelayTransport::Quic,
             connections_created: state.created,
             streams_opened: state.opened,
             streams_reused: state.reused,
             last_error: state.error.clone(),
-            connections: pooled
-                .chain(retired)
-                .map(|(shared, pooled)| describe(&shared, pooled))
-                .collect(),
+            connections,
         }
     }
 }
@@ -325,9 +369,9 @@ impl Drop for Sweeping {
     }
 }
 
-/// Close the pool's connections that have had no stream open for
-/// [`IDLE_CLOSE`], until the pool is gone or has none left; the next dial
-/// starts it again.
+/// Close the pool's connections, handed out or retired, that have had no
+/// stream open for [`IDLE_CLOSE`], until the pool is gone or has none left;
+/// the next dial starts it again.
 async fn sweep(mut sweeping: Sweeping) {
     let state = sweeping.0.clone();
     let mut tick = tokio::time::interval(SWEEP_INTERVAL);
@@ -340,19 +384,19 @@ async fn sweep(mut sweeping: Sweeping) {
         };
         let mut state = lock(&state);
         let now = Instant::now();
-        for mut entry in std::mem::take(&mut state.entries) {
+        state.entries.retain_mut(|entry| {
             // Any reference past the pool's own is a stream still open: the
             // idle time counts from when the last one was seen.
             if Arc::strong_count(&entry.shared) > 1 {
                 entry.last_open = now;
             }
+            entry.heard(now);
             if now.duration_since(entry.last_open) >= IDLE_CLOSE {
                 entry.shared.connection.close(0u32.into(), b"idle");
-            } else if entry.is_open() {
-                state.entries.push(entry);
+                return false;
             }
-        }
-        state.prune_retired();
+            entry.is_open()
+        });
         if state.entries.is_empty() {
             // Decided under the lock a dial takes to start a sweep, so the
             // two cannot miss each other.
