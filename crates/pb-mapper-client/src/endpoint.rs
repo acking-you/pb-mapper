@@ -209,13 +209,14 @@ impl RelayEndpoint {
     /// relay, discovering or dialling QUIC — leaves the pool alone, there
     /// being nothing in it to blame.
     pub(crate) fn carrier_failed(&self, carrier: Option<CarrierId>) {
-        let Some(carrier) = carrier else { return };
+        let Some(id) = carrier else { return };
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {
-            pool.carrier_failed(carrier);
+            pool.carrier_failed(id);
         }
+        // Without QUIC there is no carrier, and `CarrierId` has no values.
         #[cfg(not(feature = "relay-quic"))]
-        match carrier {}
+        match id {}
     }
 
     pub(crate) fn protocol_succeeded(&self) {
