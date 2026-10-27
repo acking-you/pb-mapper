@@ -17,12 +17,23 @@ pub const SERVER_NAME: &str = "pb-mapper-relay.invalid";
 pub const MAX_STREAMS: u32 = 1024;
 pub use crate::transport::CONNECT_TIMEOUT;
 
+/// What one stream may have in flight unread: 4 MiB, a stream per 4 MiB of
+/// round trip, as much as a TCP carrier's autotuned buffer allows.
+const STREAM_RECEIVE_WINDOW: u32 = 4 << 20;
+
 /// The connection-wide receive window once the relay has admitted a peer.
-pub const RECEIVE_WINDOW: u32 = 32 << 20;
+///
+/// Every tunnel of a client shares its connection, and bytes received but
+/// not yet forwarded count against this window whichever stream they are
+/// on. A stream whose far end stops reading holds a full
+/// [`STREAM_RECEIVE_WINDOW`] here, so this is sixteen of them: fewer
+/// stalled downloads cannot hold back the client's other tunnels, its
+/// registrations' heartbeats among them.
+pub const RECEIVE_WINDOW: u32 = 16 * STREAM_RECEIVE_WINDOW;
 
 /// What an unauthenticated peer may make the relay buffer: its first frame
 /// and some slack. Raised to [`RECEIVE_WINDOW`] on admission, so a flood of
-/// handshakes that never authenticate cannot pin 8 MiB each.
+/// handshakes that never authenticate cannot pin a stream window each.
 const PRE_ADMISSION_WINDOW: u32 = 256 << 10;
 
 fn transport(streams: u32, client: bool) -> Arc<quinn::TransportConfig> {
@@ -30,15 +41,15 @@ fn transport(streams: u32, client: bool) -> Arc<quinn::TransportConfig> {
     config
         .max_concurrent_bidi_streams(streams.into())
         .max_concurrent_uni_streams(0u32.into())
-        .stream_receive_window((8u32 << 20).into())
-        .receive_window(
-            if client {
-                RECEIVE_WINDOW
-            } else {
-                PRE_ADMISSION_WINDOW
-            }
-            .into(),
-        )
+        .stream_receive_window(STREAM_RECEIVE_WINDOW.into())
+        // A client buffers only for streams it opened itself, a stream
+        // window each, so it does not cap the sum: a relay stream that the
+        // local application stops reading never stalls the others.
+        .receive_window(if client {
+            quinn::VarInt::MAX
+        } else {
+            PRE_ADMISSION_WINDOW.into()
+        })
         .send_window(32u64 << 20)
         .max_idle_timeout(Some(quinn::VarInt::from_u32(60_000).into()))
         .keep_alive_interval(client.then_some(Duration::from_secs(15)))

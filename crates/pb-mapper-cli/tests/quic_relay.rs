@@ -52,10 +52,25 @@ async fn tunnel(
     pb_mapper_client::sdk::Connection,
     std::net::SocketAddr,
 ) {
+    tunnel_as("echo", publisher, consumer, backend, transport, codec).await
+}
+
+async fn tunnel_as(
+    key: &str,
+    publisher: &Client,
+    consumer: &Client,
+    backend: std::net::SocketAddr,
+    transport: Transport,
+    codec: bool,
+) -> (
+    pb_mapper_client::sdk::Registration,
+    pb_mapper_client::sdk::Connection,
+    std::net::SocketAddr,
+) {
     let registration = publisher
         .register_with_options(
             RegisterRequest {
-                key: "echo".into(),
+                key: key.into(),
                 local_addr: backend.to_string(),
                 transport,
                 codec,
@@ -80,7 +95,7 @@ async fn tunnel(
     let connection = consumer
         .connect_with_options(
             ConnectRequest {
-                key: "echo".into(),
+                key: key.into(),
                 local_addr: local_addr.to_string(),
                 transport,
             },
@@ -154,6 +169,74 @@ async fn multiplexed_quic_streams_preserve_fin_and_report_real_statistics() {
     assert_eq!(client.relay_diagnostics().await.connections_created, 1);
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
+}
+
+/// Every tunnel of a client shares its QUIC connection, and a download whose
+/// reader stops holds its stream's window full at both ends. Eight of them,
+/// twice what the connection window first allowed for, must leave a new
+/// stream on another tunnel as quick as ever, not waiting out a timeout.
+#[tokio::test]
+async fn stalled_downloads_do_not_hold_back_other_tunnels() {
+    const STALLED: usize = 8;
+    let relay = Relay::start_with_quic("quic-stalled").await;
+    let client = client(&relay, RelayTransport::Quic);
+    let firehose = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let firehose_addr = firehose.local_addr().unwrap();
+    let _firehose = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut writers = tokio::task::JoinSet::new();
+        loop {
+            let (mut stream, _) = firehose.accept().await.unwrap();
+            writers.spawn(async move {
+                let chunk = vec![7; 64 << 10];
+                while stream.write_all(&chunk).await.is_ok() {}
+            });
+        }
+    }));
+    let (backend, _echo) = echo().await;
+    let (bulk_registration, bulk_connection, bulk) = tunnel_as(
+        "bulk",
+        &client,
+        &client,
+        firehose_addr,
+        Transport::Tcp,
+        false,
+    )
+    .await;
+    let (registration, connection, addr) =
+        tunnel(&client, &client, backend, Transport::Tcp, false).await;
+
+    let mut stalled = Vec::new();
+    for _ in 0..STALLED {
+        let mut socket = TcpStream::connect(bulk).await.unwrap();
+        socket.read_u8().await.unwrap();
+        stalled.push(socket);
+    }
+    // Until the stalled streams hold what the old 32 MiB window had in all.
+    tokio::time::timeout(READY_TIMEOUT, async {
+        while client
+            .relay_diagnostics()
+            .await
+            .connections
+            .iter()
+            .map(|connection| connection.received_bytes)
+            .sum::<u64>()
+            < 32 << 20
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the stalled downloads fill their windows");
+
+    tokio::time::timeout(Duration::from_secs(2), exchange(addr, 9))
+        .await
+        .expect("stalled streams must not hold back another tunnel's");
+    assert_eq!(client.relay_diagnostics().await.connections_created, 1);
+    drop(stalled);
+    connection.stop().await.unwrap();
+    registration.stop().await.unwrap();
+    bulk_connection.stop().await.unwrap();
+    bulk_registration.stop().await.unwrap();
 }
 
 #[tokio::test]
