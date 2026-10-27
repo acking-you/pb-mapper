@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.8] - 2026-10-28
+- Publish the SDKs with everything in 0.9.7. Its SDK release stopped at a documentation check before anything was published, so crates.io and npm move from 0.9.6 straight to 0.9.8, and this is also the first release with Android packages since 0.9.6. The app, CLI and wire protocol are otherwise as in 0.9.7.
+- Build the documentation on every pull request, as the SDK release does, so a broken doc link fails there rather than on a release tag.
+
 ## [0.9.7] - 2026-10-28
 - Reach the relay over QUIC as well as TCP. `pb-mapper server --quic-listen 0.0.0.0:7667` offers it (add `--quic-advertise-port` when NAT maps the port), and `register` and `connect` take `--relay-transport quic`. TCP stays the default, each end chooses for itself, and a client that asked for QUIC reports why it cannot have it instead of quietly using TCP. Discovery is one authenticated TCP request that returns the UDP port and the relay's certificate, so the TCP port is still needed; every tunnel of a process then shares one QUIC connection per relay and credential, pinned to that certificate and bound to the session's TLS exporter, with 0-RTT off. The relay bounds handshakes and connections, at most 16 per temporary credential, and says so with a retryable refusal of its own when full. See `docs/relay-quic.zh-CN.md`.
 - When a tunnel's stream fails, retire only the QUIC connection it used, and only once that connection has gone silent, rather than every pooled connection to the relay. A temporary credential with many tunnels no longer runs into its 16-connection limit after repeated failures. A failed name lookup leaves the pool alone.

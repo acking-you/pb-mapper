@@ -20,7 +20,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # The build-name matches Cargo.toml. The build-number is an independent,
 # increasing package counter: rebuilds also consume a number. Never derive it
 # from the version again. The next release must use a greater build-number.
-version: 0.9.7+908
+version: 0.9.8+909
 
 environment:
   sdk: ^3.9.0
