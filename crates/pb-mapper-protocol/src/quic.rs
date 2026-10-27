@@ -25,8 +25,8 @@ const STREAM_RECEIVE_WINDOW: u32 = 4 << 20;
 ///
 /// Every tunnel of a client shares its connection, and bytes received but
 /// not yet forwarded count against this window whichever stream they are
-/// on. A stream whose far end stops reading holds a full
-/// [`STREAM_RECEIVE_WINDOW`] here, so this is sixteen of them: fewer
+/// on. A stream whose far end stops reading holds a full 4 MiB stream
+/// window here, so this is sixteen of them: fewer
 /// stalled downloads cannot hold back the client's other tunnels, its
 /// registrations' heartbeats among them.
 pub const RECEIVE_WINDOW: u32 = 16 * STREAM_RECEIVE_WINDOW;

@@ -133,6 +133,13 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features
 
+      # The SDK release refuses to publish unless the docs build cleanly, so
+      # a broken doc link has to fail here, not on the release tag.
+      - name: Build docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
   node-e2e:
     needs: changes
     if: needs.changes.outputs.node == 'true'
