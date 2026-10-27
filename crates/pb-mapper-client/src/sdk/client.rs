@@ -487,7 +487,7 @@ impl Client {
                     && endpoint.transport() == super::RelayTransport::Quic
                     && result.as_ref().is_err_and(is_carrier_failure)
                 {
-                    endpoint.invalidate_cached_transport(carrier);
+                    endpoint.invalidate_cached_transport(carrier.as_ref());
                 } else {
                     return result;
                 }
@@ -502,7 +502,7 @@ impl Client {
             Ok(_) => endpoint.protocol_succeeded(),
             // The relay answered: the carrier works, whatever it said.
             Err(error) if is_carrier_failure(error) => {
-                endpoint.invalidate_cached_transport(carrier)
+                endpoint.invalidate_cached_transport(carrier.as_ref())
             }
             Err(_) => {}
         }

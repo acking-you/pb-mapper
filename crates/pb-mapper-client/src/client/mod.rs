@@ -1,3 +1,4 @@
+use pb_mapper_protocol::transport::CarrierId;
 pub mod error;
 pub mod status;
 pub(crate) mod stream;
@@ -412,7 +413,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                             if failure.protocol_replied {
                                 remote_addr.protocol_succeeded();
                                 diagnostics.responded(elapsed);
-                            } else { remote_addr.transport_failed(failure.carrier); }
+                            } else { remote_addr.transport_failed(failure.carrier.as_ref()); }
                             consecutive_health_failures = consecutive_health_failures.saturating_add(1);
                             if !connected || consecutive_health_failures >= client_health_failure_threshold() {
                                 connected = false;
@@ -475,7 +476,7 @@ struct ProbeFailure {
     permanent: bool,
     kind: RecoveryFailure,
     protocol_replied: bool,
-    carrier: Option<u64>,
+    carrier: Option<CarrierId>,
 }
 
 impl ProbeFailure {
@@ -578,7 +579,7 @@ async fn probe_remote_key_once(
     key: &str,
     namespace: Option<u64>,
     credential: Credential,
-    carrier: &mut Option<u64>,
+    carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<(), ProbeFailure> {
     match fetch_remote_status(
         remote_addr,
@@ -657,7 +658,7 @@ async fn fetch_remote_status(
     req: PbConnStatusReq,
     namespace: Option<u64>,
     credential: Credential,
-    carrier: &mut Option<u64>,
+    carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<PbConnStatusResp, ProbeFailure> {
     *carrier = None;
     let mut stream = remote_addr

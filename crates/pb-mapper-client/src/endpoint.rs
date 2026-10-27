@@ -3,6 +3,7 @@
 use crate::network::NetworkHints;
 use crate::relay::RelayTransport;
 use pb_mapper_core::config::ResolvedAddrs;
+use pb_mapper_protocol::transport::CarrierId;
 use std::{
     collections::HashMap,
     net::{SocketAddr, ToSocketAddrs},
@@ -196,13 +197,13 @@ impl RelayEndpoint {
             .unwrap_or_else(|_| unreachable!("relay setup semaphore is never closed"))
     }
 
-    pub(crate) fn transport_failed(&self, carrier: Option<u64>) {
+    pub(crate) fn transport_failed(&self, carrier: Option<&CarrierId>) {
         self.0.refresh.store(true, Ordering::Release);
         self.0.failed.store(true, Ordering::Release);
         self.invalidate_cached_transport(carrier);
     }
 
-    pub(crate) fn invalidate_cached_transport(&self, carrier: Option<u64>) {
+    pub(crate) fn invalidate_cached_transport(&self, carrier: Option<&CarrierId>) {
         let _ = carrier;
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {

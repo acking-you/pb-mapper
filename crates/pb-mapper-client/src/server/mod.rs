@@ -1,5 +1,6 @@
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::{RecoveryWake, RelayEndpoint};
+use pb_mapper_protocol::transport::CarrierId;
 pub mod error;
 mod stream;
 
@@ -743,7 +744,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             failure,
             RecoveryFailure::Transport | RecoveryFailure::Timeout | RecoveryFailure::Dns
         ) {
-            remote_addr.transport_failed(carrier);
+            remote_addr.transport_failed(carrier.as_ref());
         }
         let (retry_interval, retry_count) = match status {
             Status::Cancelled => break 'outer,
@@ -840,7 +841,7 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     stream_tasks: &mut JoinSet<()>,
     setup_slots: &Arc<tokio::sync::Semaphore>,
     wake: &mut RecoveryWake,
-    carrier: &mut Option<u64>,
+    carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,

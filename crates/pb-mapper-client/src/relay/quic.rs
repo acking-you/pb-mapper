@@ -13,6 +13,7 @@ use super::{
     ConnectError, QUIC_UNAVAILABLE, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport,
 };
 use pb_mapper_core::{checksum::Credential, config::ResolvedAddrs};
+use pb_mapper_protocol::transport::CarrierId;
 use pb_mapper_protocol::{command::PbErrorResponse, quic::*, secure::ClientHeaderSession};
 use std::{
     io,
@@ -163,14 +164,14 @@ impl Pool {
     /// stopped replying on it. A stream reset or slow backend must not evict
     /// a working carrier. Late failures from an already retired carrier are
     /// harmless; its replacement and other credentials are never touched.
-    pub fn transport_failed(&self, carrier: Option<u64>) {
+    pub fn transport_failed(&self, carrier: Option<&CarrierId>) {
         let Some(carrier) = carrier else { return };
         let mut state = lock(&self.state);
         let now = Instant::now();
         if let Some(entry) = state
             .entries
             .iter_mut()
-            .find(|entry| entry.pooled && entry.shared.connection.stable_id() as u64 == carrier)
+            .find(|entry| entry.pooled && carrier.matches(&entry.shared))
             && (!entry.is_open() || now.duration_since(entry.heard(now)) >= SILENCE)
         {
             entry.pooled = false;
@@ -490,17 +491,16 @@ mod tests {
                     server.accept().await.unwrap().await.unwrap()
                 });
             let connection = client.unwrap();
-            ids.push(connection.stable_id() as u64);
             peers.push(peer);
-            lock(&pool.state).entries.push(Entry::new(
-                Credential::Admin([key; 32]),
-                0,
-                Arc::new(QuicConnection {
-                    connection,
-                    endpoint,
-                    relay_addr: address,
-                }),
-            ));
+            let shared = Arc::new(QuicConnection {
+                connection,
+                endpoint,
+                relay_addr: address,
+            });
+            ids.push(shared.carrier_id());
+            lock(&pool.state)
+                .entries
+                .push(Entry::new(Credential::Admin([key; 32]), 0, shared));
         }
         // Make silence deterministic, independent of handshake ACK timing.
         {
@@ -512,20 +512,30 @@ mod tests {
             // A failure on a carrier that is still replying must preserve it.
             state.entries[0].heard = Instant::now();
         }
-        pool.transport_failed(Some(ids[0]));
+        pool.transport_failed(Some(&ids[0]));
         assert!(pool.diagnostics().connections.iter().all(|c| c.pooled));
         lock(&pool.state).entries[0].heard = Instant::now() - SILENCE;
         // DNS, discovery and admission failures selected no carrier at all.
         pool.transport_failed(None);
         assert!(pool.diagnostics().connections.iter().all(|c| c.pooled));
-        pool.transport_failed(Some(ids[0]));
-        pool.transport_failed(Some(ids[0]));
-        let state = lock(&pool.state);
+        pool.transport_failed(Some(&ids[0]));
+        pool.transport_failed(Some(&ids[0]));
+        let mut state = lock(&pool.state);
         assert!(!state.entries[0].pooled);
         assert!(state.entries[1].pooled, "another credential stays reusable");
         assert!(
             state.entries[2].pooled,
             "a late failure cannot retire the replacement"
         );
+        let retired = state.entries.remove(0);
+        let weak = Arc::downgrade(&retired.shared);
+        drop(retired);
+        assert!(
+            weak.upgrade().is_none(),
+            "a failure identity must not keep a carrier alive"
+        );
+        drop(state);
+        pool.transport_failed(Some(&ids[0]));
+        assert!(pool.diagnostics().connections.iter().all(|c| c.pooled));
     }
 }
