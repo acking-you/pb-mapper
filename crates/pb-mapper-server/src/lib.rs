@@ -1,8 +1,8 @@
 //! Relay server domain model and module wiring.
 //!
 //! ```text
-//! TCP listener -> connection authentication/dispatch -> ManagerTask queue
-//!                                                    -> routing runtime
+//! TCP / QUIC listener -> connection authentication/dispatch -> ManagerTask queue
+//!                                                         -> routing runtime
 //! registered control connection <------ ConnTask ----+------> subscriber
 //! ```
 //!
@@ -25,8 +25,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use error::Result;
+use pb_mapper_protocol::transport::RelayStream;
 use snafu::{OptionExt, ResultExt};
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
@@ -63,7 +64,7 @@ use uni_stream::stream::{set_tcp_keep_alive, set_tcp_nodelay};
 pub enum ManagerTask {
     Direct(direct::DirectTask),
     Accept {
-        stream: TcpStream,
+        stream: RelayStream,
         peer_addr: SocketAddr,
     },
     Register {
@@ -97,7 +98,7 @@ pub enum ManagerTask {
     Stream {
         data_protocol: Option<u16>,
         key: ImutableKey,
-        stream: TcpStream,
+        stream: RelayStream,
         session: ServerHeaderSession,
         server_id: RemoteConnId,
         client_id: RemoteConnId,
@@ -216,7 +217,7 @@ pub enum ConnTask {
         data_protocol: Option<u16>,
         server_id: RemoteConnId,
         server_generation: u64,
-        stream: TcpStream,
+        stream: RelayStream,
         session: ServerHeaderSession,
     },
     StatusResp(PbConnResponse),
@@ -548,10 +549,27 @@ async fn send_subcribe_retry(
     }
 }
 
+#[cfg(feature = "relay-quic")]
+mod quic;
 mod runtime;
+
+/// Optional QUIC listener, separate from the direct STUN UDP port.
+#[derive(Clone, Debug)]
+pub struct QuicServerConfig {
+    pub listen: SocketAddr,
+    /// Zero advertises the bound port; set for a NAT port mapping.
+    pub advertise_port: u16,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RelayServerOptions {
+    pub direct: Option<DirectServerConfig>,
+    pub quic: Option<QuicServerConfig>,
+}
+
 pub use runtime::{
     run_server, run_server_on_listener, run_server_on_listener_with_direct,
-    run_server_with_auth_config, run_server_with_shutdown,
+    run_server_on_listener_with_options, run_server_with_auth_config, run_server_with_shutdown,
 };
 mod connection;
 use connection::{

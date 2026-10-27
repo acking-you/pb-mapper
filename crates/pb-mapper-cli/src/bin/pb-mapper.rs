@@ -37,7 +37,7 @@ use pb_mapper_core::config::{
 use pb_mapper_protocol::command::{
     AdminConnectionPage, AdminRequest, AdminResponse, AdminServicePage,
 };
-use pb_mapper_server::run_server_with_shutdown;
+
 use tokio_util::sync::CancellationToken;
 
 #[global_allocator]
@@ -72,11 +72,17 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ServerArgs {
+    /// Enable QUIC relay on a separate UDP address (e.g. 0.0.0.0:7667).
+    #[arg(long)]
+    quic_listen: Option<SocketAddr>,
+    /// Public UDP port when NAT maps the QUIC listener to another port.
+    #[arg(long, requires = "quic_listen", default_value_t = 0)]
+    quic_advertise_port: u16,
     /// Port exposed to registering services and connecting clients. Direct
     /// coordination listens on the same port number over UDP.
     #[arg(short, long, visible_alias = "pb-mapper-port", default_value_t = 7666)]
     port: u16,
-    /// Serve the relay only: no UDP port and no direct coordination.
+    /// Disable direct coordination; explicit --quic-listen remains available.
     #[arg(
         long,
         visible_alias = "disable-direct",
@@ -203,12 +209,21 @@ struct StatusArgs {
 
 #[derive(Debug, Args)]
 struct RelayArgs {
+    /// Carrier between this endpoint and the relay; independent of TCP/UDP service type.
+    #[arg(long, value_enum, default_value_t = RelayTransportArg::Tcp)]
+    relay_transport: RelayTransportArg,
     /// Relay address. Falls back to PB_MAPPER_SERVER.
     #[arg(short, long, visible_alias = "pb-mapper-server", value_name = "ADDR")]
     server: Option<String>,
     /// Enable TCP keep-alive. PB_MAPPER_KEEP_ALIVE=ON is also supported.
     #[arg(long, default_value_t = false)]
     keep_alive: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RelayTransportArg {
+    Tcp,
+    Quic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -357,24 +372,21 @@ async fn run_server(args: ServerArgs) -> Result<(), Box<dyn Error>> {
     };
     let shutdown = CancellationToken::new();
     let keep_alive = args.keep_alive || keep_alive_from_env();
-    match direct_config(&args, ip_addr) {
-        Some(config) => {
-            let auth = pb_mapper_auth::AuthRuntime::from_process(auth_config).await?;
-            let listener = tokio::net::TcpListener::bind((ip_addr, args.port)).await?;
-            pb_mapper_server::run_server_on_listener_with_direct(
-                listener,
-                shutdown,
-                None,
-                keep_alive,
-                auth,
-                Some(config),
-            )
-            .await?;
-        }
-        None => {
-            run_server_with_shutdown((ip_addr, args.port), shutdown, None, keep_alive).await?;
-        }
-    }
+    let options = pb_mapper_server::RelayServerOptions {
+        direct: direct_config(&args, ip_addr),
+        quic: args
+            .quic_listen
+            .map(|listen| pb_mapper_server::QuicServerConfig {
+                listen,
+                advertise_port: args.quic_advertise_port,
+            }),
+    };
+    let auth = pb_mapper_auth::AuthRuntime::from_process(auth_config).await?;
+    let listener = tokio::net::TcpListener::bind((ip_addr, args.port)).await?;
+    pb_mapper_server::run_server_on_listener_with_options(
+        listener, shutdown, None, keep_alive, auth, options,
+    )
+    .await?;
     Ok(())
 }
 
@@ -423,7 +435,11 @@ fn tunnel_client(relay: &RelayArgs, namespace: Option<u64>) -> Result<Client, Bo
         credential,
         relay.keep_alive || keep_alive_from_env(),
         namespace,
-    ))
+    )
+    .with_relay_transport(match relay.relay_transport {
+        RelayTransportArg::Tcp => pb_mapper_client::sdk::RelayTransport::Tcp,
+        RelayTransportArg::Quic => pb_mapper_client::sdk::RelayTransport::Quic,
+    })?)
 }
 
 fn sdk_transport(transport: Transport) -> pb_mapper_client::sdk::Transport {
@@ -450,7 +466,10 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
             },
         )
         .await?;
-    monitor_tunnel(registration.subscribe(), || registration.diagnostics()).await?;
+    monitor_tunnel(&client, registration.subscribe(), || {
+        registration.diagnostics()
+    })
+    .await?;
     registration.stop().await?;
     Ok(())
 }
@@ -473,12 +492,13 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
             },
         )
         .await?;
-    monitor_tunnel(connection.subscribe(), || connection.diagnostics()).await?;
+    monitor_tunnel(&client, connection.subscribe(), || connection.diagnostics()).await?;
     connection.stop().await?;
     Ok(())
 }
 
 async fn monitor_tunnel(
+    client: &Client,
     mut status: tokio::sync::watch::Receiver<TunnelStatus>,
     diagnostics: impl Fn() -> TunnelDiagnostics,
 ) -> Result<(), Box<dyn Error>> {
@@ -496,7 +516,7 @@ async fn monitor_tunnel(
             result = status.changed() => { if result.is_err() { return Ok(()); } },
             _ = interval.tick() => {
                 let snapshot = diagnostics();
-                tracing::info!(event = "tunnel_diagnostics", status = ?state, diagnostics = %serde_json::to_string(&snapshot)?, "tunnel recovery snapshot");
+                tracing::info!(event = "tunnel_diagnostics", status = ?state, diagnostics = %serde_json::to_string(&snapshot)?, relay = %serde_json::to_string(&client.relay_diagnostics().await)?, "tunnel recovery snapshot");
             },
         }
     }
@@ -698,6 +718,7 @@ mod tests {
             panic!("expected register command");
         };
         assert!(!defaults.relay_only);
+        assert_eq!(defaults.relay.relay_transport, RelayTransportArg::Tcp);
         assert!(
             Cli::try_parse_from(register.iter().chain(&["--allow-direct"])).is_ok(),
             "0.7 opt-in flag is accepted"
@@ -724,6 +745,7 @@ mod tests {
             panic!("expected connect command");
         };
         assert_eq!(defaults.path, PathArg::Auto);
+        assert_eq!(defaults.relay.relay_transport, RelayTransportArg::Tcp);
         assert!(!defaults.relay_only);
         assert!(Cli::try_parse_from(connect.iter().chain(&["--path", "auto"])).is_ok());
         assert!(Cli::try_parse_from(connect.iter().chain(&["--relay-only"])).is_ok());
@@ -761,6 +783,7 @@ mod tests {
             panic!("expected server command");
         };
         assert_eq!(defaults.auth_state_dir, None);
+        assert_eq!(defaults.quic_listen, None);
         assert_eq!(defaults.max_temporary_keys, None);
         assert_eq!(defaults.max_temporary_key_ttl, None);
         assert_eq!(defaults.legacy_protocol, None);

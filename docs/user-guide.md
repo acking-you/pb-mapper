@@ -8,6 +8,14 @@ pb-mapper exposes local TCP/UDP services through a public relay using a service 
 
 ## How it works
 
+The relay carrier defaults to TCP. To opt in to QUIC, start the server with
+`--quic-listen 0.0.0.0:7667` and add `--relay-transport quic` to `register` and/or
+`connect`. Keep TCP 7666 accessible for authenticated discovery and open UDP
+7667. `--quic-advertise-port` overrides the public UDP port for NAT mappings.
+This is independent of direct connections and the local TCP/UDP service type;
+`--relay-only` disables direct coordination while allowing the explicit QUIC
+listener. See [QUIC relay, SDKs and diagnostics](relay-quic.zh-CN.md) (Chinese).
+
 ```mermaid
 flowchart LR
     A["Local TCP or UDP service"] --> B["pb-mapper register"]

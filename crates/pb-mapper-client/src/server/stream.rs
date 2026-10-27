@@ -8,6 +8,7 @@ use super::error::{
     DecodePbConnStreamRespSnafu, EncodePbConnStreamReqSnafu, PbConnStreamRespNotMatchSnafu, Result,
     WritePbConnStreamReqSnafu,
 };
+use crate::endpoint::RelayEndpoint;
 use crate::server::error::CreateHeaderToolSnafu;
 use pb_mapper_core::checksum::Credential;
 use pb_mapper_core::config::{ResolvedAddrs, control_io_timeout};
@@ -16,7 +17,7 @@ use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnRespon
 use pb_mapper_protocol::data::{DATA_PROTOCOL_V2, DataCodec};
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
-use uni_stream::stream::{StreamProvider, StreamSplit, set_tcp_keep_alive, set_tcp_nodelay};
+use uni_stream::stream::{StreamProvider, StreamSplit};
 
 /// Where one forwarded session dials, both ends resolved.
 ///
@@ -32,16 +33,15 @@ pub struct StreamConnect {
     pub idle_timeout: Option<std::time::Duration>,
 }
 
-/// Handle a stream connection and establish a forward network traffic forwarding.
-/// This function handles both local and remote streams, sets up message writers and readers,
-/// and starts forwarding network traffic between the two endpoints.
-#[instrument(skip(connect, setup_permit), fields(key = %key))]
-pub async fn handle_stream<LocalStream: StreamProvider>(
+/// Forward a stream using the carrier and relay selected by its registration.
+#[instrument(skip(connect, setup_permit, endpoint), fields(key = %key))]
+pub(crate) async fn handle_stream_on_endpoint<LocalStream: StreamProvider>(
     key: Arc<str>,
     client_id: u32,
     server_generation: u64,
     connect: StreamConnect,
     setup_permit: tokio::sync::OwnedSemaphorePermit,
+    endpoint: RelayEndpoint,
 ) -> Result<()>
 where
     LocalStream::Item: StreamForward,
@@ -75,22 +75,22 @@ where
 
     let timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut remote_stream =
-        match tokio::time::timeout_at(deadline, crate::addr::connect_tcp(&remote_addr)).await {
-            Ok(result) => result.context(ConnectRemoteStreamSnafu)?,
-            Err(_) => ControlIoTimeoutSnafu {
-                action: "connect remote stream",
-                timeout,
-            }
-            .fail()?,
-        };
-    if keep_alive {
-        snafu_error_handle!(
-            set_tcp_keep_alive(&remote_stream),
-            "remote stream set keepalive"
-        );
-    }
-    snafu_error_handle!(set_tcp_nodelay(&remote_stream), "remote stream set nodelay");
+    let mut remote_stream = match tokio::time::timeout_at(
+        deadline,
+        endpoint.connect_addresses(&remote_addr, credential),
+    )
+    .await
+    {
+        Ok(result) => result
+            .map_err(std::io::Error::from)
+            .context(ConnectRemoteStreamSnafu)?,
+        Err(_) => ControlIoTimeoutSnafu {
+            action: "connect remote stream",
+            timeout,
+        }
+        .fail()?,
+    };
+    snafu_error_handle!(remote_stream.configure(keep_alive));
 
     // Use the credential captured at registration. A later UI/process key
     // change must not move these streams into another namespace.
@@ -144,24 +144,25 @@ where
     };
     drop(setup_permit);
 
-    let (client_reader, client_writer) = remote_stream.split();
-    let (server_reader, server_writer) = local_stream.split();
+    pb_mapper_protocol::with_relay_stream!(&mut remote_stream, remote_stream, {
+        let (client_reader, client_writer) = remote_stream.split();
+        let (server_reader, server_writer) = local_stream.split();
 
-    let forward = <LocalStream::Item as StreamForward>::forward_local_to_remote_with_codec(
-        codec_key,
-        *credential.key(),
-        server_reader,
-        server_writer,
-        client_reader,
-        client_writer,
-    );
-    let result = match idle_timeout {
-        Some(timeout) => {
-            pb_mapper_protocol::forward::with_tunnel_idle_timeout(timeout, forward).await
-        }
-        None => forward.await,
-    };
-    snafu_error_handle!(result);
-
+        let forward = <LocalStream::Item as StreamForward>::forward_local_to_remote_with_codec(
+            codec_key,
+            *credential.key(),
+            server_reader,
+            server_writer,
+            client_reader,
+            client_writer,
+        );
+        let result = match idle_timeout {
+            Some(timeout) => {
+                pb_mapper_protocol::forward::with_tunnel_idle_timeout(timeout, forward).await
+            }
+            None => forward.await,
+        };
+        snafu_error_handle!(result);
+    });
     Ok(())
 }

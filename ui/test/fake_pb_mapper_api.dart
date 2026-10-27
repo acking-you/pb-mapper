@@ -72,25 +72,56 @@ class FakePbMapperApi implements PbMapperApiClient {
     required String serverAddress,
     required bool keepAlive,
     required String msgHeaderKey,
+    RelayTransport relayTransport = RelayTransport.tcp,
   }) async {
-    calls.add('updateConfig($serverAddress)');
+    calls.add(
+      relayTransport == RelayTransport.tcp
+          ? 'updateConfig($serverAddress)'
+          : 'updateConfig($serverAddress, ${relayTransport.name})',
+    );
     if (_refused() case final refused?) return refused;
+    final moved = relayTransport != config.relayTransport;
     config = ConfigStatus(
       serverAddress: serverAddress,
       keepAliveEnabled: keepAlive,
       msgHeaderKey: msgHeaderKey,
+      relayTransport: relayTransport,
     );
-    return _ok;
+    // As the Rust side names them: running tunnels on another carrier.
+    bool other(RelayTransport? running) =>
+        moved && running != null && running != relayTransport;
+    return OperationResult(
+      success: true,
+      message: 'ok',
+      data: {
+        'move': {
+          'shares': [
+            for (final s in services)
+              if (other(s.relayTransport)) s.serviceKey,
+          ],
+          'connections': [
+            for (final c in clients)
+              if (other(c.relayTransport)) c.serviceKey,
+          ],
+        },
+      },
+    );
   }
 
   @override
   Future<OperationResult> startServer({
     required int port,
     required bool keepAlive,
+    int? quicPort,
   }) async {
-    calls.add('startServer($port)');
+    calls.add(
+      quicPort == null
+          ? 'startServer($port)'
+          : 'startServer($port, quic $quicPort)',
+    );
     if (_refused() case final refused?) return refused;
     localRelayPort = port;
+    localRelayQuicPort = quicPort;
     return _ok;
   }
 
@@ -98,17 +129,20 @@ class FakePbMapperApi implements PbMapperApiClient {
   Future<OperationResult> stopServer() async {
     calls.add('stopServer');
     localRelayPort = null;
+    localRelayQuicPort = null;
     return _ok;
   }
 
   /// The port of the relay this app can run itself, while it runs.
   int? localRelayPort;
+  int? localRelayQuicPort;
   bool get localRelayRunning => localRelayPort != null;
 
   @override
   Future<LocalServerStatus> getLocalServerStatus() async => LocalServerStatus(
     isRunning: localRelayRunning,
     port: localRelayPort,
+    quicPort: localRelayQuicPort,
     activeConnections: localRelayRunning ? 2 : 0,
     registeredServices: localRelayRunning ? 1 : 0,
     uptimeSeconds: localRelayRunning ? 3720 : 0,
@@ -128,7 +162,19 @@ class FakePbMapperApi implements PbMapperApiClient {
         idleConnections: '',
         error: relayUp ? null : 'connection refused',
         latencyMs: relayUp ? 18 : null,
+        quicPort: relayUp ? relayQuicPort : null,
+        quicKnown: relayUp,
       );
+
+  /// The UDP port the relay offers QUIC on; null for one with no QUIC.
+  int? relayQuicPort = 7667;
+
+  /// How this computer reaches the relay, as its connections measure it.
+  RelayLink? link;
+
+  @override
+  Future<RelayLink> relayLink() async =>
+      link ?? RelayLink(transport: config.relayTransport);
 
   @override
   Future<ServerStatusDetail> forceRefreshServerStatus() async =>
@@ -177,6 +223,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         encrypted: enableEncryption,
         status: startStatus,
         allowDirect: allowDirect,
+        relayTransport: config.relayTransport,
       ),
     ];
     return _ok;
@@ -242,6 +289,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         status: startStatus,
         namespace: namespace,
         allowDirect: allowDirect,
+        relayTransport: config.relayTransport,
       ),
     ];
     return _ok;
@@ -604,6 +652,7 @@ ClientConfigInfo fakeClient({
   int? routedNamespace,
   bool allowDirect = true,
   TunnelPath? path,
+  RelayTransport? relayTransport,
 }) => ClientConfigInfo(
   serviceKey: serviceKey,
   localAddress: localAddress,
@@ -613,6 +662,7 @@ ClientConfigInfo fakeClient({
   routedNamespace: routedNamespace,
   allowDirect: allowDirect,
   path: path,
+  relayTransport: status == 'stopped' ? null : relayTransport,
   status: status,
   statusMessage: message,
   createdAtMs: 1,
@@ -629,6 +679,7 @@ ServiceConfigInfo fakeService({
   String message = '',
   bool allowDirect = true,
   TunnelPath? path,
+  RelayTransport? relayTransport,
 }) => ServiceConfigInfo(
   serviceKey: serviceKey,
   localAddress: localAddress,
@@ -639,6 +690,7 @@ ServiceConfigInfo fakeService({
   status: status,
   statusMessage: message,
   path: path,
+  relayTransport: status == 'stopped' ? null : relayTransport,
   createdAtMs: 1,
   updatedAtMs: 1,
 );

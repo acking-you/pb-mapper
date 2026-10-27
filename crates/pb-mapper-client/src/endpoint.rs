@@ -1,6 +1,7 @@
 //! Shared relay resolution and bounded setup admission; no established data is owned here.
 
 use crate::network::NetworkHints;
+use crate::relay::RelayTransport;
 use pb_mapper_core::config::ResolvedAddrs;
 use std::{
     collections::HashMap,
@@ -35,6 +36,8 @@ struct Cache {
 
 struct RelayState {
     name: String,
+    #[cfg(feature = "relay-quic")]
+    quic: Option<Box<crate::relay::quic::Pool>>,
     fixed: bool,
     cache: Mutex<Cache>,
     refresh: AtomicBool,
@@ -70,6 +73,10 @@ impl std::fmt::Display for RelayEndpoint {
 }
 
 impl RelayEndpoint {
+    pub(crate) fn name(&self) -> &str {
+        &self.0.name
+    }
+
     pub(crate) fn validate(&self) -> bool {
         if self.0.fixed {
             return true;
@@ -83,27 +90,50 @@ impl RelayEndpoint {
         })
     }
     pub(crate) fn shared(name: &str) -> Self {
-        static RELAYS: LazyLock<StdMutex<HashMap<String, Weak<RelayState>>>> =
+        Self::registered(name, RelayTransport::Tcp)
+    }
+
+    /// One endpoint per relay name and carrier in this process, for as long
+    /// as anything holds it: every client of that relay shares its DNS
+    /// cache, its setup budget and, over QUIC, its connections.
+    fn registered(name: &str, transport: RelayTransport) -> Self {
+        type Registry = HashMap<(String, RelayTransport), Weak<RelayState>>;
+        static RELAYS: LazyLock<StdMutex<Registry>> =
             LazyLock::new(|| StdMutex::new(HashMap::new()));
         let mut relays = RELAYS.lock().unwrap_or_else(|e| e.into_inner());
         relays.retain(|_, state| state.strong_count() > 0);
-        if let Some(state) = relays.get(name).and_then(Weak::upgrade) {
+        let key = (name.to_string(), transport);
+        if let Some(state) = relays.get(&key).and_then(Weak::upgrade) {
             return Self(state);
         }
         let initial = name.parse::<SocketAddr>().ok().map(ResolvedAddrs::from);
-        let relay = Self::new(name.to_string(), initial.is_some(), initial);
-        relays.insert(name.to_string(), Arc::downgrade(&relay.0));
+        let relay = Self::new(name.to_string(), initial.is_some(), initial, transport);
+        relays.insert(key, Arc::downgrade(&relay.0));
         relay
     }
 
     pub(crate) fn fixed(addresses: ResolvedAddrs) -> Self {
-        Self::new(addresses.to_string(), true, Some(addresses))
+        Self::new(
+            addresses.to_string(),
+            true,
+            Some(addresses),
+            RelayTransport::Tcp,
+        )
     }
 
-    fn new(name: String, fixed: bool, addresses: Option<ResolvedAddrs>) -> Self {
+    fn new(
+        name: String,
+        fixed: bool,
+        addresses: Option<ResolvedAddrs>,
+        transport: RelayTransport,
+    ) -> Self {
         let (success, _) = watch::channel(0);
+        #[cfg(not(feature = "relay-quic"))]
+        let _ = transport;
         Self(Arc::new(RelayState {
             name,
+            #[cfg(feature = "relay-quic")]
+            quic: (transport == RelayTransport::Quic).then(Box::default),
             fixed,
             cache: Mutex::new(Cache {
                 resolved_at: addresses.as_ref().map(|_| Instant::now()),
@@ -169,6 +199,14 @@ impl RelayEndpoint {
     pub(crate) fn transport_failed(&self) {
         self.0.refresh.store(true, Ordering::Release);
         self.0.failed.store(true, Ordering::Release);
+        self.invalidate_cached_transport();
+    }
+
+    pub(crate) fn invalidate_cached_transport(&self) {
+        #[cfg(feature = "relay-quic")]
+        if let Some(pool) = &self.0.quic {
+            pool.invalidate();
+        }
     }
 
     pub(crate) fn protocol_succeeded(&self) {
@@ -281,8 +319,77 @@ impl RelayEndpoint {
         }
     }
 
-    pub(crate) async fn connect(&self) -> std::io::Result<tokio::net::TcpStream> {
-        crate::addr::connect_tcp(&self.addresses().await?).await
+    /// A stream to the relay over this endpoint's carrier, at its current
+    /// addresses. See [`Self::connect_addresses`].
+    pub(crate) async fn connect(
+        &self,
+        credential: pb_mapper_core::checksum::Credential,
+    ) -> Result<pb_mapper_protocol::transport::RelayStream, crate::relay::ConnectError> {
+        self.connect_addresses(&self.addresses().await?, credential)
+            .await
+    }
+    /// A stream to the relay at `addresses` over this endpoint's carrier.
+    ///
+    /// Opening a stream authenticates no request. Every stream's first frame
+    /// is the caller's PBM2 request under `credential`, which the relay
+    /// authenticates before it dispatches anything, on either carrier.
+    /// `credential` matters here only over QUIC, where it chooses the pooled
+    /// connection, whose first stream it was bound to when dialled; a TCP
+    /// connection is anonymous until that first frame.
+    pub(crate) async fn connect_addresses(
+        &self,
+        addresses: &ResolvedAddrs,
+        credential: pb_mapper_core::checksum::Credential,
+    ) -> Result<pb_mapper_protocol::transport::RelayStream, crate::relay::ConnectError> {
+        #[cfg(feature = "relay-quic")]
+        if let Some(pool) = &self.0.quic {
+            return pool
+                .connect(addresses, credential, self.network_generation())
+                .await
+                .map(|stream| pb_mapper_protocol::transport::RelayStream::Quic(Box::new(stream)));
+        }
+        // Anonymous until the caller's first frame; see above.
+        let _ = credential;
+        crate::addr::connect_tcp(addresses)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+    pub(crate) fn transport(&self) -> RelayTransport {
+        #[cfg(feature = "relay-quic")]
+        if self.0.quic.is_some() {
+            return RelayTransport::Quic;
+        }
+        RelayTransport::Tcp
+    }
+    /// The process's endpoint for this relay over `transport`. Only for an
+    /// endpoint from [`Self::shared`], whose name is what it is shared under.
+    pub(crate) fn with_transport(&self, transport: RelayTransport) -> std::io::Result<Self> {
+        if transport == self.transport() {
+            return Ok(self.clone());
+        }
+        if cfg!(not(feature = "relay-quic")) && transport == RelayTransport::Quic {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "SDK built without relay-quic",
+            ));
+        }
+        Ok(Self::registered(&self.0.name, transport))
+    }
+    /// The UDP port the relay offers QUIC on, asked over TCP whatever this
+    /// endpoint's carrier.
+    pub(crate) async fn quic_port(
+        &self,
+        credential: pb_mapper_core::checksum::Credential,
+    ) -> Result<Option<u16>, crate::relay::ConnectError> {
+        crate::relay::offered_quic_port(&self.addresses().await?, credential).await
+    }
+    pub(crate) async fn relay_diagnostics(&self) -> crate::relay::RelayDiagnostics {
+        #[cfg(feature = "relay-quic")]
+        if let Some(pool) = &self.0.quic {
+            return pool.diagnostics();
+        }
+        crate::relay::RelayDiagnostics::empty(self.transport())
     }
 }
 
@@ -313,7 +420,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn resolver_endpoint(resolver: TestResolver) -> RelayEndpoint {
-        let mut endpoint = RelayEndpoint::new("relay.test:7666".into(), false, None);
+        let mut endpoint =
+            RelayEndpoint::new("relay.test:7666".into(), false, None, RelayTransport::Tcp);
         let state = Arc::get_mut(&mut endpoint.0).unwrap();
         state.resolver = Some(resolver);
         state.network = NetworkHints::isolated();

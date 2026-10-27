@@ -13,17 +13,48 @@
 use super::*;
 
 impl PbMapperState {
+    /// Run a relay on `port`. With `quic_port` it also takes QUIC there, on
+    /// a UDP port of its own: the TCP port's UDP twin carries direct sessions.
     pub async fn start_server(
         &mut self,
         port: u16,
         enable_keep_alive: bool,
+        quic_port: Option<u16>,
     ) -> Result<(), CtlError> {
-        if self.server_handle.is_some() {
+        if self
+            .server_handle
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+        {
             return Err(CtlError::already_exists("Server is already running"));
         }
+        self.reap_finished_server().await;
 
         let ip_addr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
         let bind_addr = std::net::SocketAddr::new(ip_addr, port);
+
+        // Refused here, in words, rather than by a relay task that dies on
+        // its own while the window shows it running.
+        let quic = match quic_port {
+            Some(quic_port) if quic_port == port => {
+                return Err(CtlError::invalid_argument(format!(
+                    "QUIC needs a UDP port of its own; {port} carries direct sessions"
+                )));
+            }
+            Some(quic_port) => {
+                let listen = std::net::SocketAddr::new(ip_addr, quic_port);
+                std::net::UdpSocket::bind(listen).map(drop).map_err(|e| {
+                    CtlError::address_in_use(format!(
+                        "UDP port {quic_port} for QUIC is unavailable: {e}"
+                    ))
+                })?;
+                Some(QuicServerConfig {
+                    listen,
+                    advertise_port: 0,
+                })
+            }
+            None => None,
+        };
 
         let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
             CtlError::address_in_use(format!("Failed to bind server on {bind_addr}: {e}"))
@@ -70,13 +101,13 @@ impl PbMapperState {
 
         self.server_auth = Some(auth.clone());
         let handle = tokio::spawn(async move {
-            if let Err(e) = run_server_on_listener_with_direct(
+            if let Err(e) = run_server_on_listener_with_options(
                 listener,
                 shutdown_token_clone,
                 Some(status_receiver),
                 enable_keep_alive,
                 auth,
-                direct,
+                RelayServerOptions { direct, quic },
             )
             .await
             {
@@ -89,12 +120,14 @@ impl PbMapperState {
         self.server_status_sender = Some(status_sender);
         self.server_start_time = Some(SystemTime::now());
         self.server_port = Some(port);
+        self.server_quic_port = quic_port;
 
         {
             let mut cache = self.local_server_status_cache.write().await;
             *cache = LocalServerStatus {
                 is_running: true,
                 port: Some(port),
+                quic_port,
                 ..LocalServerStatus::default()
             };
         }
@@ -105,6 +138,24 @@ impl PbMapperState {
 
         tracing::info!("pb-mapper server started successfully");
         Ok(())
+    }
+
+    /// Clear what a relay that ended on its own left behind — a listener
+    /// lost to another process, say — so that it can be started again.
+    async fn reap_finished_server(&mut self) {
+        if !self.server_handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        self.server_handle = None;
+        self.server_shutdown_token = None;
+        self.server_status_sender = None;
+        if let Some(auth) = self.server_auth.take() {
+            auth.shutdown_actor().await;
+        }
+        self.server_start_time = None;
+        self.server_port = None;
+        self.server_quic_port = None;
+        *self.local_server_status_cache.write().await = LocalServerStatus::default();
     }
 
     pub async fn stop_server(&mut self) -> Result<(), CtlError> {
@@ -141,6 +192,7 @@ impl PbMapperState {
 
             self.server_start_time = None;
             self.server_port = None;
+            self.server_quic_port = None;
 
             {
                 let mut cache = self.local_server_status_cache.write().await;
@@ -232,22 +284,13 @@ impl PbMapperState {
         endpoint: Option<&ResolvedAddrs>,
         retired: Credential,
     ) -> RelayTunnels {
-        let on_relay = |pin: &PinnedTunnel| {
-            pin.relay == relay
-                || endpoint.is_some_and(|endpoint| {
-                    pin.endpoint
-                        .as_slice()
-                        .iter()
-                        .any(|addr| endpoint.as_slice().contains(addr))
-                })
-        };
         let mut found = RelayTunnels::default();
         for (runtimes, restart) in [
             (&self.service_runtime, &mut found.shares),
             (&self.client_runtime, &mut found.connections),
         ] {
             for (key, runtime) in runtimes {
-                if !on_relay(&runtime.pin) {
+                if !runtime.pin.is_on(relay, endpoint) {
                     continue;
                 }
                 if runtime.pin.credential == retired {
@@ -260,6 +303,36 @@ impl PbMapperState {
         found.shares.sort();
         found.connections.sort();
         found.stranded.sort();
+        found
+    }
+
+    /// This computer's tunnels on `relay` under `credential` that reach it
+    /// over another carrier than `transport`: the ones to start again for
+    /// them to move to it. A tunnel on another relay or credential is not
+    /// this change's to move.
+    pub fn on_other_carrier(
+        &self,
+        relay: &str,
+        endpoint: Option<&ResolvedAddrs>,
+        credential: Credential,
+        transport: RelayTransport,
+    ) -> RelayTunnels {
+        let mut found = RelayTunnels::default();
+        for (runtimes, moving) in [
+            (&self.service_runtime, &mut found.shares),
+            (&self.client_runtime, &mut found.connections),
+        ] {
+            for (key, runtime) in runtimes {
+                if runtime.pin.is_on(relay, endpoint)
+                    && runtime.pin.credential == credential
+                    && runtime.handle.diagnostics().relay_transport != transport
+                {
+                    moving.push(key.clone());
+                }
+            }
+        }
+        found.shares.sort();
+        found.connections.sort();
         found
     }
 

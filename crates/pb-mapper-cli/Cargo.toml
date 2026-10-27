@@ -35,12 +35,14 @@ tracing.workspace = true
 uni-stream.workspace = true
 
 [dev-dependencies]
+quinn.workspace = true
 pb-mapper-testkit.workspace = true
 
 rand.workspace = true
 
 [features]
-default = ["p2p"]
+relay-quic = ["pb-mapper-client/relay-quic", "pb-mapper-server/relay-quic", "pb-mapper-protocol/relay-quic"]
+default = ["p2p", "relay-quic"]
 p2p = ["pb-mapper-client/p2p", "pb-mapper-server/p2p"]
 udp-timeout = [
     "uni-stream/udp-timeout",
@@ -51,3 +53,7 @@ udp-timeout = [
 
 [lints]
 workspace = true
+
+[[example]]
+name = "relay_transport_bench"
+required-features = ["relay-quic"]

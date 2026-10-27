@@ -37,6 +37,7 @@ pb-mapper-server = { workspace = true, features = ["p2p"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]
+relay-quic = ["dep:quinn", "pb-mapper-protocol/relay-quic"]
 p2p = ["dep:quinn", "dep:rcgen", "dep:stun-proto", "dep:ring"]
 udp-timeout = ["uni-stream/udp-timeout", "pb-mapper-protocol/udp-timeout"]
 

@@ -21,6 +21,12 @@ abstract final class AppIcons {
 
   /// Some sessions direct, some through the relay.
   static const IconData mixedPath = LucideIcons.split300;
+
+  // How this computer reaches the relay: a stream per tunnel, or every
+  // stream layered on one QUIC connection.
+  static const IconData carrierTcp = LucideIcons.arrowRightLeft300;
+  static const IconData carrierQuic = LucideIcons.layers300;
+  static const IconData latency = LucideIcons.activity300;
   static const IconData computer = LucideIcons.laptop300;
   static const IconData service = LucideIcons.server300;
 

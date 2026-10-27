@@ -8,6 +8,13 @@ direct peer-to-peer sessions between endpoints and stays their relay
 fallback. `DirectServerConfig::advertise` may leave the IP unspecified, in
 which case clients pair the announced port with the relay address they dialed.
 
+Optional QUIC relay uses the independent `relay-quic` feature and
+`run_server_on_listener_with_options` with
+`RelayServerOptions { direct, quic: Some(QuicServerConfig { listen, advertise_port: 0 }) }`.
+Use a separate UDP port from direct coordination. TCP remains available for old
+clients and authenticated certificate discovery; existing entry points keep
+their TCP behavior.
+
 Applications embedding the relay can depend on the library directly:
 
 ```toml

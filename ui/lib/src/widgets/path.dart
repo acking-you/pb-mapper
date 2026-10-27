@@ -238,8 +238,23 @@ IconData pathIcon(PathMode mode) => switch (mode) {
   PathMode.relay || PathMode.relayOnly => AppIcons.relay,
 };
 
-/// What [tunnel]'s path is called, in a word or two.
+/// Whether [mode] sends traffic through the relay, where the carrier
+/// matters: a direct path is its own QUIC, past the relay.
+bool _crossesRelay(PathMode? mode) => switch (mode) {
+  PathMode.relay || PathMode.relayOnly || PathMode.mixed => true,
+  _ => false,
+};
+
+/// What [tunnel]'s path is called, in a word or two; with the carrier when
+/// that is QUIC, TCP being what a relay is reached over unless said.
 String pathLabel(BuildContext context, Tunnel tunnel) {
+  final label = _pathLabel(context, tunnel);
+  return tunnel.overQuic && _crossesRelay(tunnel.pathMode)
+      ? '$label · ${RelayTransport.quic.label}'
+      : label;
+}
+
+String _pathLabel(BuildContext context, Tunnel tunnel) {
   final l10n = context.l10n;
   final path = tunnel.path;
   return switch (tunnel.pathMode) {
@@ -260,6 +275,13 @@ String pathLabel(BuildContext context, Tunnel tunnel) {
 
 /// What [tunnel]'s path means, and when it is the relay after all, why.
 String pathDetail(BuildContext context, Tunnel tunnel) {
+  final detail = _pathDetail(context, tunnel);
+  return tunnel.overQuic && _crossesRelay(tunnel.pathMode)
+      ? '$detail ${context.l10n.pathOverQuic}'
+      : detail;
+}
+
+String _pathDetail(BuildContext context, Tunnel tunnel) {
   final l10n = context.l10n;
   final path = tunnel.path;
   final share = tunnel.kind == TunnelKind.share;

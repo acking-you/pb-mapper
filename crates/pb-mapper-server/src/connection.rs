@@ -35,7 +35,7 @@ pub(super) async fn handle_listener(
         snafu_error_handle!(set_tcp_nodelay(&stream), "remote stream set nodelay");
         task_sender
             .send(ManagerTask::Accept {
-                stream,
+                stream: stream.into(),
                 peer_addr: addr,
             })
             .await
@@ -44,48 +44,61 @@ pub(super) async fn handle_listener(
     }
 }
 
-#[instrument(skip(manager_task_sender, conn, security), fields(conn_id = %conn_id, peer_addr = %peer_addr))]
+/// Count a first frame that failed to authenticate against its peer's log
+/// budget, and log it when the budget allows: one record, whichever carrier
+/// it arrived on.
+pub(super) fn log_auth_failure(
+    security: &ServerSecurity,
+    peer_addr: SocketAddr,
+    conn: &dyn std::fmt::Display,
+    error: &pb_mapper_protocol::secure::ServerInitialError,
+) {
+    let key_id = error
+        .response_session
+        .as_ref()
+        .map(|session| session.key_id())
+        .or(error.presented_key_id)
+        .unwrap_or(ADMIN_KEY_ID);
+    let decision = security.record_failure_log(peer_addr.ip(), key_id, &error.failure.code);
+    if decision.suppressed > 0 {
+        tracing::warn!(
+            event = "auth_failures_suppressed",
+            peer_ip = %peer_addr.ip(),
+            key_id = key_id.as_u64(),
+            reason = %error.failure.code,
+            suppressed = decision.suppressed,
+            "suppressed repeated authentication failures in the previous window"
+        );
+    }
+    if decision.emit {
+        tracing::warn!(
+            event = "auth_failed",
+            auth_stage = "initial_frame",
+            conn_id = %conn,
+            peer_addr = %peer_addr,
+            key_id = key_id.as_u64(),
+            reason = %error.failure.code,
+            retryable = error.failure.retryable,
+            error = %error.failure.message,
+            "connection authentication failed"
+        );
+    }
+}
+
+#[instrument(skip(manager_task_sender, conn, security, quic_capability), fields(conn_id = %conn_id, peer_addr = %peer_addr))]
 pub(super) async fn handle_conn(
     conn_id: RemoteConnId,
     peer_addr: SocketAddr,
     manager_task_sender: ManagerTaskSender,
-    mut conn: TcpStream,
+    mut conn: RelayStream,
     security: ServerSecurity,
+    quic_capability: Option<Arc<pb_mapper_protocol::command::QuicEndpoint>>,
 ) -> Result<()> {
     let timeout = control_io_timeout();
     let initial = match tokio::time::timeout(timeout, security.read_initial(&mut conn)).await {
         Err(_) => TaskCenterInitRequestTimeoutSnafu { conn_id, timeout }.fail()?,
         Ok(Err(error)) => {
-            let key_id = error
-                .response_session
-                .as_ref()
-                .map(|session| session.key_id())
-                .or(error.presented_key_id)
-                .unwrap_or(ADMIN_KEY_ID);
-            let decision = security.record_failure_log(peer_addr.ip(), key_id, &error.failure.code);
-            if decision.suppressed > 0 {
-                tracing::warn!(
-                    event = "auth_failures_suppressed",
-                    peer_ip = %peer_addr.ip(),
-                    key_id = key_id.as_u64(),
-                    reason = %error.failure.code,
-                    suppressed = decision.suppressed,
-                    "suppressed repeated authentication failures in the previous window"
-                );
-            }
-            if decision.emit {
-                tracing::warn!(
-                    event = "auth_failed",
-                    auth_stage = "initial_frame",
-                    conn_id = %conn_id,
-                    peer_addr = %peer_addr,
-                    key_id = key_id.as_u64(),
-                    reason = %error.failure.code,
-                    retryable = error.failure.retryable,
-                    error = %error.failure.message,
-                    "connection authentication failed"
-                );
-            }
+            log_auth_failure(&security, peer_addr, &conn_id, &error);
             if let Some(session) = error.response_session {
                 write_protocol_error(&mut conn, &session, &error.failure).await;
             }
@@ -216,6 +229,15 @@ pub(super) async fn handle_conn(
         }
     };
     match init_request {
+        PbConnRequest::QuicEndpoint => {
+            let response =
+                PbConnResponse::QuicEndpoint(quic_capability.as_deref().cloned()).encode();
+            if let Ok(response) = response
+                && let Ok(mut writer) = session.response_writer(&mut conn)
+            {
+                let _ = tokio::time::timeout(timeout, writer.write_msg(&response)).await;
+            }
+        }
         PbConnRequest::DirectControl { .. } => {
             if session.protocol() != HeaderProtocol::V2 {
                 return Ok(());
@@ -530,7 +552,7 @@ pub(super) async fn handle_conn(
 }
 
 async fn scope_service_or_reject(
-    conn: &mut TcpStream,
+    conn: &mut RelayStream,
     session: &ServerHeaderSession,
     auth_context: &AuthContext,
     namespace: u64,
@@ -546,7 +568,7 @@ async fn scope_service_or_reject(
 }
 
 async fn run_while_credential_active<F, Fut>(
-    mut conn: TcpStream,
+    mut conn: RelayStream,
     session: ServerHeaderSession,
     auth_context: &AuthContext,
     conn_id: RemoteConnId,
@@ -554,7 +576,7 @@ async fn run_while_credential_active<F, Fut>(
     work: F,
 ) -> Result<()>
 where
-    F: FnOnce(TcpStream, ServerHeaderSession) -> Fut,
+    F: FnOnce(RelayStream, ServerHeaderSession) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
     let cancellation = match auth_context.cancellation_token() {
@@ -579,7 +601,7 @@ where
 }
 
 async fn write_protocol_error(
-    conn: &mut TcpStream,
+    conn: &mut RelayStream,
     session: &ServerHeaderSession,
     failure: &pb_mapper_auth::AuthFailure,
 ) {

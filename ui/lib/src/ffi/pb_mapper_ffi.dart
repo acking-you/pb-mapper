@@ -39,14 +39,21 @@ typedef _PbMapperCliMainDart =
 /// Returned by `pb_mapper_cli_main` when argv is not a command.
 const int kNotACommand = -1;
 
+/// `quicPort` 0 runs the relay without QUIC.
 typedef _PbMapperStartServerNative =
     Pointer<Utf8> Function(
       Pointer<Void> handle,
       Uint16 port,
       Int32 enableKeepAlive,
+      Uint16 quicPort,
     );
 typedef _PbMapperStartServerDart =
-    Pointer<Utf8> Function(Pointer<Void> handle, int port, int enableKeepAlive);
+    Pointer<Utf8> Function(
+      Pointer<Void> handle,
+      int port,
+      int enableKeepAlive,
+      int quicPort,
+    );
 
 typedef _PbMapperStopServerNative =
     Pointer<Utf8> Function(Pointer<Void> handle);
@@ -120,12 +127,14 @@ typedef _PbMapperDeleteClientConfigDart =
 typedef _PbMapperGetConfigNative = Pointer<Utf8> Function(Pointer<Void> handle);
 typedef _PbMapperGetConfigDart = Pointer<Utf8> Function(Pointer<Void> handle);
 
+/// `relayTransport` is `tcp` or `quic`.
 typedef _PbMapperUpdateConfigNative =
     Pointer<Utf8> Function(
       Pointer<Void> handle,
       Pointer<Utf8> serverAddress,
       Int32 enableKeepAlive,
       Pointer<Utf8> msgHeaderKey,
+      Pointer<Utf8> relayTransport,
     );
 typedef _PbMapperUpdateConfigDart =
     Pointer<Utf8> Function(
@@ -133,6 +142,7 @@ typedef _PbMapperUpdateConfigDart =
       Pointer<Utf8> serverAddress,
       int enableKeepAlive,
       Pointer<Utf8> msgHeaderKey,
+      Pointer<Utf8> relayTransport,
     );
 
 typedef _PbMapperGetServiceConfigsNative =

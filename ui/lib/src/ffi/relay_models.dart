@@ -2,6 +2,142 @@
 // computer is to the relay, the relay's inventories, its credentials and its
 // security state. Re-exported by pb_mapper_api.dart.
 
+/// How this computer reaches the relay: a TCP connection per stream, or
+/// QUIC, which carries every stream over one encrypted UDP connection. Each
+/// tunnel keeps the one it started with.
+enum RelayTransport {
+  tcp,
+  quic;
+
+  /// The carrier [raw] names; TCP for anything else, as the Rust side
+  /// defaults.
+  static RelayTransport parse(Object? raw) => maybe(raw) ?? RelayTransport.tcp;
+
+  /// The carrier [raw] names, or null.
+  static RelayTransport? maybe(Object? raw) => switch (raw) {
+    'tcp' => RelayTransport.tcp,
+    'quic' => RelayTransport.quic,
+    _ => null,
+  };
+
+  /// What it is called, in any language.
+  String get label => switch (this) {
+    RelayTransport.tcp => 'TCP',
+    RelayTransport.quic => 'QUIC',
+  };
+}
+
+/// How this computer reaches the relay now, measured on the connections it
+/// holds: nothing is asked of the relay. Over TCP there is nothing to
+/// measure, and [connections] is empty.
+class RelayLink {
+  const RelayLink({
+    required this.transport,
+    this.connectionsCreated = 0,
+    this.streamsOpened = 0,
+    this.streamsReused = 0,
+    this.lastError,
+    this.connections = const [],
+  });
+
+  final RelayTransport transport;
+
+  /// QUIC handshakes since the app started.
+  final int connectionsCreated;
+
+  /// Streams opened, and of those, how many went over a connection that
+  /// was already up instead of a new handshake.
+  final int streamsOpened;
+  final int streamsReused;
+
+  /// Why the last connection or stream could not be opened, until one is.
+  final String? lastError;
+  final List<QuicLinkConnection> connections;
+
+  /// The connection most streams go over: the busiest one the pool still
+  /// hands out.
+  QuicLinkConnection? get primary {
+    QuicLinkConnection? best;
+    for (final c in connections) {
+      if (best == null ||
+          (c.pooled && !best.pooled) ||
+          (c.pooled == best.pooled && c.sentBytes > best.sentBytes)) {
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  factory RelayLink.fromMap(Map<String, dynamic> map) => RelayLink(
+    transport: RelayTransport.parse(map['transport']),
+    connectionsCreated: _int(map['connectionsCreated']) ?? 0,
+    streamsOpened: _int(map['streamsOpened']) ?? 0,
+    streamsReused: _int(map['streamsReused']) ?? 0,
+    lastError: map['lastError'] as String?,
+    connections: [
+      if (map['connections'] case final List list)
+        for (final item in list.whereType<Map>())
+          QuicLinkConnection.fromMap(Map<String, dynamic>.from(item)),
+    ],
+  );
+}
+
+/// One QUIC connection to the relay, as Quinn measures it.
+class QuicLinkConnection {
+  const QuicLinkConnection({
+    required this.id,
+    required this.peer,
+    required this.pooled,
+    required this.rtt,
+    required this.congestionWindow,
+    required this.mtu,
+    required this.sentPackets,
+    required this.lostPackets,
+    required this.congestionEvents,
+    required this.sentBytes,
+    required this.receivedBytes,
+  });
+
+  final int id;
+
+  /// The relay's UDP address.
+  final String peer;
+
+  /// Whether new streams still go over it; a retired one stays open only
+  /// for the streams already on it.
+  final bool pooled;
+  final Duration rtt;
+
+  /// Bytes it may have in flight before an acknowledgement.
+  final int congestionWindow;
+  final int mtu;
+  final int sentPackets;
+  final int lostPackets;
+  final int congestionEvents;
+
+  /// On the wire, with QUIC's own overhead and retransmissions.
+  final int sentBytes;
+  final int receivedBytes;
+
+  /// The share of packets sent that were declared lost, 0 to 1.
+  double get lossRate => sentPackets == 0 ? 0 : lostPackets / sentPackets;
+
+  factory QuicLinkConnection.fromMap(Map<String, dynamic> map) =>
+      QuicLinkConnection(
+        id: _int(map['id']) ?? 0,
+        peer: '${map['peer'] ?? ''}',
+        pooled: map['pooled'] != false,
+        rtt: Duration(microseconds: _int(map['rttUs']) ?? 0),
+        congestionWindow: _int(map['congestionWindow']) ?? 0,
+        mtu: _int(map['mtu']) ?? 0,
+        sentPackets: _int(map['sentPackets']) ?? 0,
+        lostPackets: _int(map['lostPackets']) ?? 0,
+        congestionEvents: _int(map['congestionEvents']) ?? 0,
+        sentBytes: _int(map['sentBytes']) ?? 0,
+        receivedBytes: _int(map['receivedBytes']) ?? 0,
+      );
+}
+
 /// A relay call that failed. [message] is for a person; [code] is the FFI's
 /// error code (`SERVER_UNREACHABLE`, `INVALID_ARGUMENT`, …), for code.
 class RelayCallException implements Exception {

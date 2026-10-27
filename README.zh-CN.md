@@ -221,6 +221,7 @@ for (let s = conn.status(); s !== "stopped" && !s.startsWith("failed");) {
 
 ## 文档
 
+- [可选 QUIC 中继](docs/relay-quic.zh-CN.md)：默认 TCP、CLI 开关、Rust/Node SDK、可观测接口与性能实测
 - [使用手册](docs/user-guide.zh-CN.md)：所有命令与参数
 - [弱网恢复](docs/weak-network-recovery.md)：超时、资源边界与故障测试
 - [认证与 V2 协议](docs/authentication-v2.zh-CN.md)

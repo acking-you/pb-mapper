@@ -160,8 +160,12 @@ pub struct TunnelEvent {
 const EVENT_CAPACITY: usize = 16;
 
 /// A point-in-time view of this tunnel and its process-shared relay budget.
+/// Non-exhaustive: fields are added as the SDK observes more.
 #[derive(Clone, Debug, Serialize)]
+#[non_exhaustive]
 pub struct TunnelDiagnostics {
+    /// The carrier this tunnel reaches the relay over, fixed when it started.
+    pub relay_transport: crate::relay::RelayTransport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direct: Option<PathDiagnostics>,
     pub sdk_version: &'static str,
@@ -402,6 +406,7 @@ impl Diagnostics {
             in_flight: state.in_flight,
         });
         TunnelDiagnostics {
+            relay_transport: endpoint.transport(),
             direct: state
                 .direct
                 .clone()

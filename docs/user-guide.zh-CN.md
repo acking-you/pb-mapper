@@ -8,6 +8,8 @@ pb-mapper 通过“服务 key”将本地 TCP/UDP 服务暴露到公网中继。
 
 ## 运转机制
 
+中继默认仍为 TCP。服务端添加 `--quic-listen 0.0.0.0:7667`，注册端或连接端添加 `--relay-transport quic` 可显式启用 QUIC。保留 TCP 7666 用于认证发现，并开放 UDP 7667；NAT 端口映射可用 `--quic-advertise-port` 指定。此选项独立于直连策略和业务 TCP/UDP 类型，`--relay-only` 不禁用显式配置的 QUIC 中继。详见 [QUIC 中继、SDK 和可观测接口](relay-quic.zh-CN.md)。
+
 ```mermaid
 flowchart LR
     A["本地 TCP 或 UDP 服务"] --> B["pb-mapper register"]

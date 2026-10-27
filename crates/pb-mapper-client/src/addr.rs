@@ -10,23 +10,35 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::relay::ConnectError;
 use pb_mapper_core::config::ResolvedAddrs;
 use uni_stream::addr::ToSocketAddrs;
 
 /// Race a small number of TCP candidates so a blackholed first address cannot
 /// hide a working IPv4/IPv6 alternative. Callers retain their overall deadline.
 pub(crate) async fn connect_tcp(addrs: &ResolvedAddrs) -> std::io::Result<tokio::net::TcpStream> {
-    race_candidates(addrs.as_slice(), |addr| {
-        tokio::net::TcpStream::connect(addr)
-    })
+    race_candidates(
+        addrs.as_slice(),
+        Duration::from_secs(2),
+        |addr| async move {
+            tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(Into::into)
+        },
+    )
     .await
+    .map_err(Into::into)
 }
 
-async fn race_candidates<T, F, Fut>(addrs: &[SocketAddr], dial: F) -> std::io::Result<T>
+pub(crate) async fn race_candidates<T, F, Fut>(
+    addrs: &[SocketAddr],
+    candidate_timeout: Duration,
+    dial: F,
+) -> Result<T, ConnectError>
 where
     T: Send + 'static,
     F: Fn(SocketAddr) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<T>> + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, ConnectError>> + Send + 'static,
 {
     // A single address keeps the caller's adaptive setup budget.
     if let [addr] = addrs {
@@ -35,7 +47,10 @@ where
     let mut remaining = addrs.iter();
     let mut attempts = tokio::task::JoinSet::new();
     let mut next_attempt = tokio::time::Instant::now();
-    let mut last_error = std::io::Error::new(std::io::ErrorKind::NotFound, "no TCP addresses");
+    let mut last_error = ConnectError::from(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no relay addresses",
+    ));
     loop {
         if attempts.is_empty()
             || (attempts.len() < 2 && tokio::time::Instant::now() >= next_attempt)
@@ -43,9 +58,11 @@ where
             if let Some(addr) = remaining.next() {
                 let future = dial(*addr);
                 attempts.spawn(async move {
-                    tokio::time::timeout(Duration::from_secs(2), future)
+                    tokio::time::timeout(candidate_timeout, future)
                         .await
-                        .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
+                        .unwrap_or_else(|_| {
+                            Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+                        })
                 });
                 next_attempt = tokio::time::Instant::now() + Duration::from_millis(250);
             } else if attempts.is_empty() {
@@ -55,8 +72,12 @@ where
         tokio::select! {
             Some(result) = attempts.join_next() => match result {
                 Ok(Ok(stream)) => return Ok(stream),
+                // Candidates name the same logical relay. Its authenticated
+                // verdict must reach recovery before the caller's deadline;
+                // waiting for a blackholed alternative would erase it again.
+                Ok(Err(error @ ConnectError::Rejected { .. })) => return Err(error),
                 Ok(Err(error)) => last_error = error,
-                Err(error) => last_error = std::io::Error::other(error),
+                Err(error) => last_error = std::io::Error::other(error).into(),
             },
             () = tokio::time::sleep_until(next_attempt), if attempts.len() < 2 && remaining.len() > 0 => {}
         }
@@ -129,7 +150,7 @@ mod tests {
             "127.0.0.1:2".parse().unwrap(),
         ];
         let started = tokio::time::Instant::now();
-        let result = race_candidates(&candidates, |addr| {
+        let result = race_candidates(&candidates, Duration::from_secs(2), |addr| {
             let active = active.clone();
             async move {
                 active.fetch_add(1, Ordering::SeqCst);
@@ -154,7 +175,7 @@ mod tests {
         let candidates = (1..=5)
             .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
             .collect::<Vec<_>>();
-        let result = race_candidates(&candidates, |addr| {
+        let result = race_candidates(&candidates, Duration::from_secs(2), |addr| {
             let active = active.clone();
             async move {
                 assert!(active.fetch_add(1, Ordering::SeqCst) < 2);
@@ -179,12 +200,12 @@ mod tests {
             "127.0.0.1:1".parse().unwrap(),
             "127.0.0.1:2".parse().unwrap(),
         ];
-        let dial = race_candidates(&candidates, |_| {
+        let dial = race_candidates(&candidates, Duration::from_secs(2), |_| {
             let active = active.clone();
             async move {
                 active.fetch_add(1, Ordering::SeqCst);
                 let _guard = Active(active);
-                std::future::pending::<std::io::Result<()>>().await
+                std::future::pending::<Result<(), ConnectError>>().await
             }
         });
         assert!(
@@ -194,5 +215,32 @@ mod tests {
         );
         tokio::task::yield_now().await;
         assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authenticated_rejection_is_not_hidden_by_the_callers_deadline() {
+        let candidates = [
+            SocketAddr::from(([127, 0, 0, 1], 1)),
+            SocketAddr::from(([127, 0, 0, 1], 2)),
+        ];
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            race_candidates(&candidates, Duration::from_secs(2), |addr| async move {
+                if addr.port() == 1 {
+                    return Err(ConnectError::Rejected {
+                        response: pb_mapper_protocol::command::PbErrorResponse {
+                            code: "revoked".into(),
+                            message: "credential revoked".into(),
+                            retryable: false,
+                            server_time: 0,
+                        },
+                    });
+                }
+                std::future::pending::<Result<(), ConnectError>>().await
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(ConnectError::Rejected { response }) if !response.retryable));
     }
 }

@@ -151,6 +151,7 @@ pub struct ConnectOptions {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "p2p"), derive(Default))]
 pub struct RegisterOptions {
     /// Accept direct sessions from authorized consumers. Defaults to `true`
     /// with the `p2p` feature. Allowing it costs nothing until a consumer asks:
@@ -159,10 +160,11 @@ pub struct RegisterOptions {
     pub idle_timeout: Option<std::time::Duration>,
 }
 
+#[cfg(feature = "p2p")]
 impl Default for RegisterOptions {
     fn default() -> Self {
         Self {
-            allow_direct: cfg!(feature = "p2p"),
+            allow_direct: true,
             idle_timeout: None,
         }
     }

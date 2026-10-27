@@ -226,6 +226,7 @@ async fn run(
                 Some(json!({
                     "serverAddress": config.server_address,
                     "keepAliveEnabled": config.keep_alive_enabled,
+                    "relayTransport": config.relay_transport,
                     "msgHeaderKeySet": !config.msg_header_key.is_empty(),
                     "isolatedRelayAdminKeySet": isolated_admin_key.is_some(),
                 })),

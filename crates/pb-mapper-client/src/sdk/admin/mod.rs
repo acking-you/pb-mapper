@@ -116,7 +116,7 @@ impl Admin {
         request: AdminRequest,
         io_timeout: Duration,
     ) -> Result<AdminResponse> {
-        send_admin_request(&self.inner.server, self.credential(), request, io_timeout).await
+        send_admin_request(&self.inner.endpoint, self.credential(), request, io_timeout).await
     }
 
     admin_rpc!(

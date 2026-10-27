@@ -74,6 +74,21 @@ needs no setup.
 
 ## Paths
 
+The relay carrier defaults to TCP. Select QUIC with
+`client.with_relay_transport(RelayTransport::Quic)?` before registering or
+connecting, and inspect `client.relay_diagnostics().await` for connection reuse,
+RTT, loss and byte counters. Clients of the same relay and carrier in one
+process share one pool, so every tunnel rides one QUIC connection per
+credential; a connection left without streams closes after 30 seconds.
+`client.relay_quic_port().await?` asks, over TCP, whether the relay offers QUIC
+before you switch. The relay needs `--quic-listen IP:UDPPORT`; authenticated
+discovery still requires its TCP port. Against a relay without it, QUIC fails
+with `Error::Remote { code: QUIC_UNAVAILABLE, retryable: false, .. }`, and a
+tunnel ends as failed rather than retrying — unless this process has reached
+that relay over QUIC before, when the refusal is retryable and running tunnels
+wait for QUIC to come back. The `relay-quic` feature is
+independent of `p2p`; disabling both removes QUIC dependencies.
+
 With the default `p2p` feature, `register` allows direct sessions and `connect`
 uses `PathPolicy::Auto`. A connection goes direct when the relay serves hole
 punching (its default), both ends allow it, and the NATs can be punched;

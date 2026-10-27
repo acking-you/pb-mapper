@@ -3,15 +3,15 @@ use crate::endpoint::RelayEndpoint;
 use std::sync::Arc;
 
 use crate::recovery::RecoveryTiming;
+use pb_mapper_protocol::transport::RelayStream;
 use snafu::ResultExt;
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, mpsc};
 use tokio::time::Instant;
 use tracing::{Instrument, info_span, instrument};
 
 use super::error::{
-    ConnectRemoteStreamSnafu, DecodeSubcribeRespSnafu, EncodeSubcribeReqSnafu, Result,
-    SubcribeRespNotMatchSnafu, WriteSubcribeReqSnafu,
+    DecodeSubcribeRespSnafu, EncodeSubcribeReqSnafu, Result, SubcribeRespNotMatchSnafu,
+    WriteSubcribeReqSnafu,
 };
 use crate::client::error::CreateHeaderToolSnafu;
 use pb_mapper_core::checksum::Credential;
@@ -21,7 +21,7 @@ use pb_mapper_protocol::command::{MessageSerializer, PbConnRequest, PbConnRespon
 use pb_mapper_protocol::data::{DATA_PROTOCOL_V2, DataCodec};
 use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
-use uni_stream::stream::{NetworkStream, set_tcp_keep_alive, set_tcp_nodelay};
+use uni_stream::stream::NetworkStream;
 
 pub(super) struct StreamSetup {
     pub permit: OwnedSemaphorePermit,
@@ -159,20 +159,22 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
         crate::diagnostics::PathUsage(setup.diagnostics.clone(), path)
     });
     let span = info_span!("forward", "client:{client_id} <-> server_id:{server_id}");
-    let (client_reader, client_writer) = local_stream.split();
-    let (server_reader, server_writer) = remote_stream.split();
-    snafu_error_handle!(
-        <LocalStream as StreamForward>::forward_local_to_remote_with_codec(
-            codec_key,
-            *credential.key(),
-            client_reader,
-            client_writer,
-            server_reader,
-            server_writer,
-        )
-        .instrument(span)
-        .await
-    );
+    pb_mapper_protocol::with_relay_stream!(&mut remote_stream, remote_stream, {
+        let (client_reader, client_writer) = local_stream.split();
+        let (server_reader, server_writer) = remote_stream.split();
+        snafu_error_handle!(
+            <LocalStream as StreamForward>::forward_local_to_remote_with_codec(
+                codec_key,
+                *credential.key(),
+                client_reader,
+                client_writer,
+                server_reader,
+                server_writer,
+            )
+            .instrument(span)
+            .await
+        );
+    });
     Ok(())
 }
 
@@ -183,7 +185,7 @@ async fn subscribe(
     namespace: Option<u64>,
     credential: Credential,
     offered_v2: bool,
-) -> Result<(TcpStream, Option<DataCodec>, u32, u32)> {
+) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
     let request = match namespace {
         Some(namespace) => PbConnRequest::SubcribeScoped {
             data_protocol: offered_v2.then_some(DATA_PROTOCOL_V2),
@@ -204,19 +206,24 @@ pub(crate) async fn subscribe_request(
     keep_alive: bool,
     credential: Credential,
     offered_v2: bool,
-) -> Result<(TcpStream, Option<DataCodec>, u32, u32)> {
+) -> Result<(RelayStream, Option<DataCodec>, u32, u32)> {
     let mut remote_stream = remote_addr
-        .connect()
+        .connect(credential)
         .await
-        .context(ConnectRemoteStreamSnafu)?;
+        .map_err(|error| match error {
+            crate::relay::ConnectError::Transport { source } => {
+                super::error::Error::ConnectRemoteStream { source }
+            }
+            crate::relay::ConnectError::Rejected { response } => {
+                super::error::Error::SubscribeRemoteError {
+                    code: response.code,
+                    message: response.message,
+                    retryable: response.retryable,
+                }
+            }
+        })?;
 
-    if keep_alive {
-        snafu_error_handle!(
-            set_tcp_keep_alive(&remote_stream),
-            "remote stream set keepalive"
-        );
-    }
-    snafu_error_handle!(set_tcp_nodelay(&remote_stream), "remote stream set nodelay");
+    snafu_error_handle!(remote_stream.configure(keep_alive));
 
     // start subcribe
     let (codec_key, client_id, server_id) = {

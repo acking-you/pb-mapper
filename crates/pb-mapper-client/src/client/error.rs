@@ -78,7 +78,8 @@ impl Error {
     /// connection says the relay's answer is final.
     pub fn remote_retryable(&self) -> Option<bool> {
         match self {
-            Self::StatusRemoteError { retryable, .. } => Some(*retryable),
+            Self::StatusRemoteError { retryable, .. }
+            | Self::SubscribeRemoteError { retryable, .. } => Some(*retryable),
             _ => None,
         }
     }

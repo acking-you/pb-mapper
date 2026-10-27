@@ -38,6 +38,54 @@ function clientFor(relay, credential = relay.adminKey) {
 }
 
 test.skipIf(!hasRelay)(
+  "napi QUIC relay multiplexes streams and exposes live diagnostics",
+  async () => {
+    const relay = await startRelay({ quic: true });
+    const echo = await startEchoServer();
+    const client = new Client({
+      server: relay.address,
+      credential: relay.adminKey,
+      relayTransport: "quic",
+    });
+    let registration;
+    let connection;
+    try {
+      registration = await client.register({
+        key: "quic-echo", localAddr: echo.address, transport: "tcp", codec: true,
+        allowDirect: false,
+      });
+      await registration.waitReady(READY_MS);
+      const listenAddr = await reserveListenAddress();
+      connection = await client.connect({
+        key: "quic-echo", localAddr: listenAddr, transport: "tcp", path: "relay-only",
+      });
+      await connection.waitReady(READY_MS);
+      await Promise.all([1, 2, 3].map(async (n) => {
+        const payload = Buffer.alloc(64 * 1024, n);
+        expect((await echoRoundTrip(listenAddr, payload)).equals(payload)).toBe(true);
+      }));
+      expect(connection.diagnostics().relayTransport).toBe("quic");
+      expect(client.relayTransport()).toBe("quic");
+      expect(await client.relayQuicPort()).toBeGreaterThan(0);
+      const diagnostics = await client.relayDiagnostics();
+      expect(diagnostics.transport).toBe("quic");
+      expect(diagnostics.connectionsCreated).toBe(1);
+      expect(diagnostics.connections[0].pooled).toBe(true);
+      expect(diagnostics.streamsReused).toBeGreaterThan(0);
+      expect(diagnostics.connections[0].sentBytes).toBeGreaterThan(0);
+      expect(diagnostics.connections[0].receivedBytes).toBeGreaterThan(0);
+      expect(JSON.stringify(diagnostics)).not.toContain(relay.adminKey);
+    } finally {
+      await connection?.stop();
+      await registration?.stop();
+      await echo.close();
+      await relay.stop();
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!hasRelay)(
   "napi idle policy preserves registration lifecycle with a zero deadline",
   async () => {
     await withRelay(async (relay) => {
@@ -109,6 +157,12 @@ test.skipIf(!hasRelay)(
         await registration.waitReady(READY_MS);
         expect(registration.status()).toBe("connected");
         const diagnostics = registration.diagnostics();
+        expect(diagnostics.relayTransport).toBe("tcp");
+        const relayDiagnostics = await client.relayDiagnostics();
+        expect(relayDiagnostics.transport).toBe("tcp");
+        expect(await client.relayQuicPort()).toBeNull();
+        expect(relayDiagnostics.connectionsCreated).toBe(0);
+        expect(relayDiagnostics.connections).toEqual([]);
         expect(diagnostics.sdkVersion).toBe(manifest.version);
         expect(diagnostics.attempts).toBeGreaterThan(0);
         expect(diagnostics.lastSuccessAgeMs).toBeGreaterThanOrEqual(0);

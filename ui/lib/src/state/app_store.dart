@@ -447,17 +447,22 @@ class AppStore extends ChangeNotifier {
     return find(kind, key);
   }
 
-  /// Save the relay's address and this computer's credential, then ask the
-  /// relay whether it answers.
+  /// Save the relay's address, this computer's credential and how it
+  /// reaches the relay — the carrier it has unless [relayTransport] says
+  /// otherwise — then ask the relay whether it answers. When the carrier
+  /// changed, the result's `move` lists the tunnels still on the old one:
+  /// see [moveCarrier].
   Future<OperationResult> saveRelay({
     required String address,
     required String credential,
     required bool keepAlive,
+    RelayTransport? relayTransport,
   }) async {
     final result = await api.updateConfig(
       serverAddress: address.trim(),
       keepAlive: keepAlive,
       msgHeaderKey: credential.trim(),
+      relayTransport: relayTransport ?? config.relayTransport,
     );
     await _loadConfig();
     relay = null;
@@ -465,6 +470,24 @@ class AppStore extends ChangeNotifier {
     await checkRelay(force: true);
     return result;
   }
+
+  /// Start [move]'s tunnels again, so that they reach the relay over the
+  /// carrier Settings names now; their open sessions reconnect. Returns
+  /// those that did not start, each with why.
+  Future<List<String>> moveCarrier(CarrierMove move) => restart(
+    shares: move.shares,
+    connections: move.connections,
+    relay: config.serverAddress,
+    credential: config.msgHeaderKey,
+  );
+
+  /// The UDP port the relay offers QUIC on, as it last said; null when it
+  /// offers none, or has not said. See [relayQuicKnown].
+  int? get relayQuicPort => relay?.quicPort;
+
+  /// Whether the relay has said whether it offers QUIC. It is asked over
+  /// TCP, so it can say so while QUIC itself does not get through.
+  bool get relayQuicKnown => relay?.quicKnown ?? false;
 
   void _notify() {
     if (!_disposed) notifyListeners();

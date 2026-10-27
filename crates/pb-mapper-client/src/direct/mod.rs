@@ -136,7 +136,7 @@ impl Consumer {
         if self.cooldown().active(Instant::now()) {
             return Ok(None);
         }
-        let mut stream = self.remote.connect().await?;
+        let mut stream = self.remote.connect(self.credential).await?;
         let response = crate::client::status::get_status_with_credential(
             &mut stream,
             PbConnStatusReq::Service {
@@ -341,7 +341,7 @@ enum DataPath {
         _network: Arc<Network>,
     },
     Relay {
-        socket: tokio::net::TcpStream,
+        socket: pb_mapper_protocol::transport::RelayStream,
         codec: Option<DataCodec>,
     },
 }
@@ -381,19 +381,21 @@ impl Prepared {
                     framing_key,
                     _network,
                 } => forward_quic(local, send, recv, framing_key, None).await,
-                DataPath::Relay { socket, codec } => {
-                    let (read, write) = local.split();
-                    let (remote_read, remote_write) = socket.into_split();
-                    L::forward_local_to_remote_with_codec(
-                        codec,
-                        *credential.key(),
-                        read,
-                        write,
-                        remote_read,
-                        remote_write,
-                    )
-                    .await
-                    .map_err(io_error)
+                DataPath::Relay { mut socket, codec } => {
+                    pb_mapper_protocol::with_relay_stream!(&mut socket, socket, {
+                        let (read, write) = local.split();
+                        let (remote_read, remote_write) = socket.split();
+                        L::forward_local_to_remote_with_codec(
+                            codec,
+                            *credential.key(),
+                            read,
+                            write,
+                            remote_read,
+                            remote_write,
+                        )
+                        .await
+                        .map_err(io_error)
+                    })
                 }
             }
         };

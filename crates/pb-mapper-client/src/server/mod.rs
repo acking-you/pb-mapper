@@ -18,7 +18,7 @@ use self::error::{
     EncodeRegisterReqSnafu, EncodeStreamAckMsgSnafu, ReadRegisterRespSnafu, ReadStreamReqSnafu,
     RegisterRespNotMatchSnafu, SendRegisterReqSnafu, WritePingMsgSnafu, WriteStreamAckMsgSnafu,
 };
-use self::stream::{StreamConnect, handle_stream};
+use self::stream::{StreamConnect, handle_stream_on_endpoint};
 use crate::addr::resolve_tunnel_ends;
 use crate::recovery::{RecoveryTiming, jitter};
 use pb_mapper_core::checksum::{Credential, get_process_credential};
@@ -40,7 +40,7 @@ use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use pb_mapper_protocol::{MessageReader, MessageWriter};
 use uni_stream::addr::ToSocketAddrs;
-use uni_stream::stream::{StreamProvider, set_tcp_keep_alive, set_tcp_nodelay};
+use uni_stream::stream::StreamProvider;
 
 fn get_ping_message(protocol_version: u16, seq: u64) -> error::Result<Vec<u8>> {
     if protocol_version >= CONTROL_PROTOCOL_V2 {
@@ -82,6 +82,17 @@ enum Status {
     /// limit. Worth retrying, but slowly: the relay is reachable and answering,
     /// and reconnecting hard only adds load to what has to drain.
     RejectedRetryable(String),
+}
+
+impl Status {
+    fn rejected(error: pb_mapper_protocol::command::PbErrorResponse) -> Self {
+        let reason = format!("{}: {}", error.code, error.message);
+        if error.retryable {
+            Self::RejectedRetryable(reason)
+        } else {
+            Self::Rejected(reason)
+        }
+    }
 }
 
 /// The two retry ladders a control worker climbs, and the reason they are two.
@@ -339,6 +350,7 @@ fn new_client_instance_id(worker_index: usize) -> String {
 
 async fn probe_remote_registration(
     remote_addr: ResolvedAddrs,
+    endpoint: RelayEndpoint,
     key: Arc<str>,
     registration: ControlRegistration,
     namespace: Option<u64>,
@@ -346,7 +358,8 @@ async fn probe_remote_registration(
 ) -> RegistrationProbeResult {
     let timeout = registration_probe_timeout();
     let result = tokio::time::timeout(timeout, async {
-        let mut stream = crate::addr::connect_tcp(&remote_addr)
+        let mut stream = endpoint
+            .connect_addresses(&remote_addr, credential)
             .await
             .map_err(|e| format!("connect remote status stream failed: {e}"))?;
         crate::client::status::get_status_with_credential(
@@ -868,11 +881,17 @@ where
     let mut manager_stream = tokio::select! {
         () = shutdown.cancelled() => return Err(Status::Cancelled),
         () = wake.network_changed() => return Err(Status::NetworkChanged),
-        result = tokio::time::timeout_at(deadline, crate::addr::connect_tcp(&addresses)) => {
+        result = tokio::time::timeout_at(deadline, remote_addr.connect_addresses(&addresses, credential)) => {
             match result {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
                     tracing::debug!(event = "local_server_dial_failed", %error, %key, worker_index);
+                    if let crate::relay::ConnectError::Rejected { response } = error {
+                        remote_addr.protocol_succeeded();
+                        diagnostics.responded(started.elapsed());
+                        backoff.timing.record(started.elapsed());
+                        return Err(Status::rejected(response));
+                    }
                     return Err(Status::ConnectRemote);
                 }
                 Err(_) => {
@@ -894,19 +913,10 @@ where
         "local server connected to pb server"
     );
 
-    if keep_alive {
-        snafu_error_handle!(
-            set_tcp_keep_alive(&manager_stream),
-            "manager stream set tcp keep alive"
-        );
-    }
-    snafu_error_handle!(
-        set_tcp_nodelay(&manager_stream),
-        "manager stream set tcp nodelay"
-    );
+    snafu_error_handle!(manager_stream.configure(keep_alive));
 
     let registered_addr = manager_stream
-        .peer_addr()
+        .relay_addr()
         .map(ResolvedAddrs::from)
         .unwrap_or(addresses);
     diagnostics.phase(RecoveryPhase::Handshake);
@@ -1030,12 +1040,7 @@ where
                     message = %error.message,
                     "pb server rejected service registration"
                 );
-                let reason = format!("{}: {}", error.code, error.message);
-                return Err(if error.retryable {
-                    Status::RejectedRetryable(reason)
-                } else {
-                    Status::Rejected(reason)
-                });
+                return Err(Status::rejected(error));
             }
             _ => snafu_error_get_or_return_ok!(RegisterRespNotMatchSnafu {}.fail()),
         };
@@ -1174,6 +1179,7 @@ where
                             credential,
                             idle_timeout,
                         },
+                        remote_addr.clone(),
                         key.clone(),
                         registration.conn_id,
                         &write_tx,
@@ -1235,6 +1241,7 @@ where
                         let _permit = probe_endpoint.control_permit().await;
                         probe_remote_registration(
                             probe_remote,
+                            probe_endpoint.clone(),
                             probe_key,
                             registration,
                             namespace,
@@ -1358,6 +1365,7 @@ async fn handle_ping_interval<T: MessageWriter>(
 async fn handle_request<LocalStream: StreamProvider>(
     msg: &[u8],
     target: StreamConnect,
+    relay_endpoint: RelayEndpoint,
     key: Arc<str>,
     conn_id: u32,
     write_tx: &tokio::sync::mpsc::Sender<LocalControlWrite>,
@@ -1422,8 +1430,14 @@ where
             // in-flight forwarded sessions with it, so `stop()` returning means no
             // stream of this tunnel is still moving bytes.
             stream_tasks.spawn(async move {
-                let forward =
-                    handle_stream::<LocalStream>(key, client_id, server_generation, target, permit);
+                let forward = handle_stream_on_endpoint::<LocalStream>(
+                    key,
+                    client_id,
+                    server_generation,
+                    target,
+                    permit,
+                    relay_endpoint,
+                );
                 tokio::select! {
                     () = stream_shutdown.cancelled() => {}
                     result = forward => snafu_error_handle!(result),

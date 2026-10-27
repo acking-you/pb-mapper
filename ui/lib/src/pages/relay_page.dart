@@ -5,6 +5,8 @@ import 'package:pb_mapper_ui/src/pages/relay/connections_tab.dart';
 import 'package:pb_mapper_ui/src/pages/relay/credentials_tab.dart'
     show CredentialsTab, issueCredential;
 import 'package:pb_mapper_ui/src/pages/relay/local_tab.dart';
+import 'package:pb_mapper_ui/src/pages/relay/relay_format.dart'
+    show formatBytes, formatLoss, formatRtt;
 import 'package:pb_mapper_ui/src/pages/relay/security_tab.dart'
     show SecurityTab, showRotationDialog;
 import 'package:pb_mapper_ui/src/pages/relay/services_tab.dart';
@@ -17,6 +19,7 @@ import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
+import 'package:pb_mapper_ui/src/widgets/carrier.dart';
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
 
@@ -207,6 +210,10 @@ class _Hero extends StatelessWidget {
     final online = store.relayState == RelayState.online;
     final identity = relay.identity;
     final auth = relay.authStatus;
+    final carrier = store.config.relayTransport;
+    final quic = carrier == RelayTransport.quic;
+    // Measured on the connection most streams take, while there is one.
+    final measured = quic ? relay.link?.primary : null;
 
     final head = Row(
       children: [
@@ -243,6 +250,7 @@ class _Hero extends StatelessWidget {
                   RelayChip(state: store.relayState),
                   if (online && status?.latencyMs != null)
                     Text(l10n.relayLatency(status!.latencyMs!), style: muted),
+                  if (store.hasRelay) CarrierChip(carrier: carrier),
                   if (relay.identityLoaded) _RoleChip(identity: identity),
                 ],
               ),
@@ -262,6 +270,10 @@ class _Hero extends StatelessWidget {
       (l10n.relayStatSessions, online ? '${relay.sessions.length}' : '—'),
       if (relay.isAdmin && auth != null)
         (l10n.relayStatCredentials, '${auth.activeKeys} / ${auth.capacity}'),
+      if (measured != null) ...[
+        (l10n.relayLinkRtt, formatRtt(measured.rtt)),
+        (l10n.relayLinkLoss, formatLoss(measured.lossRate)),
+      ],
     ];
 
     return RaisedSurface(
@@ -281,6 +293,13 @@ class _Hero extends StatelessWidget {
                   _Stat(label: label, value: value),
               ],
             ),
+            if (quic && store.hasRelay && relay.link != null) ...[
+              const SizedBox(height: 12),
+              _QuicLink(link: relay.link!),
+            ] else if (!quic && online && store.relayQuicPort != null) ...[
+              const SizedBox(height: 12),
+              _AlsoQuic(store: store, port: store.relayQuicPort!),
+            ],
             if (store.relayState == RelayState.offline) ...[
               const SizedBox(height: 12),
               Text(
@@ -321,6 +340,97 @@ class _Hero extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The QUIC connection this computer reaches the relay over, in one line of
+/// fine print under the figures: how many there are, how much they carry,
+/// and the path they measure. A failure to open one, until one opens.
+class _QuicLink extends StatelessWidget {
+  const _QuicLink({required this.link});
+
+  final RelayLink link;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final muted = theme.textTheme.bodySmall?.copyWith(
+      color: scheme.onSurfaceVariant,
+    );
+    final primary = link.primary;
+    return Row(
+      key: const Key('relay-link'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(AppIcons.carrierQuic, size: 15, color: onSurfaceMuted(scheme)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                primary == null
+                    ? l10n.relayLinkIdle
+                    : l10n.relayLinkSummary(
+                        link.connections.length,
+                        link.streamsOpened,
+                        link.streamsReused,
+                        primary.mtu,
+                        formatBytes(primary.congestionWindow),
+                      ),
+                style: muted,
+              ),
+              if (link.lastError case final error?) ...[
+                const SizedBox(height: 4),
+                Text(
+                  l10n.relayLinkError(error),
+                  key: const Key('relay-link-error'),
+                  style: muted?.copyWith(color: cautionColor(scheme)),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A relay that offers QUIC to a computer that reaches it over TCP: said
+/// once, quietly, with the switch beside it.
+class _AlsoQuic extends StatelessWidget {
+  const _AlsoQuic({required this.store, required this.port});
+
+  final AppStore store;
+  final int port;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Row(
+      key: const Key('relay-also-quic'),
+      children: [
+        Icon(AppIcons.carrierQuic, size: 15, color: onSurfaceMuted(scheme)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            l10n.relayAlsoQuic(port),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+        TextButton(
+          key: const Key('relay-use-quic'),
+          onPressed: () => useCarrier(context, store, RelayTransport.quic),
+          child: Text(l10n.relayUseQuic),
+        ),
+      ],
     );
   }
 }

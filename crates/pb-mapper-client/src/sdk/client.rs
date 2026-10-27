@@ -22,7 +22,7 @@ use snafu::ResultExt;
 
 use super::Error;
 use super::admin::Admin;
-use super::error::{AddressSnafu, ConnectSnafu, Result, StatusSnafu};
+use super::error::{AddressSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
 use super::{ConnectOptions, PathPolicy, RegisterOptions};
@@ -125,6 +125,50 @@ impl Client {
                 namespace,
             }),
         }
+    }
+
+    /// Select the relay carrier for subsequent work. Existing handles retain their carrier.
+    /// TCP remains the default. QUIC requires the relay-quic feature and a QUIC-enabled relay.
+    pub fn with_relay_transport(&self, transport: super::RelayTransport) -> Result<Self> {
+        if transport == self.relay_transport() {
+            return Ok(self.clone());
+        }
+        let endpoint = self
+            .inner
+            .endpoint
+            .with_transport(transport)
+            .map_err(|error| Error::invalid_config(error.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(ClientInner {
+                server: self.inner.server.clone(),
+                endpoint,
+                credential: RwLock::new(self.credential()),
+                keep_alive: self.inner.keep_alive,
+                namespace: self.inner.namespace,
+            }),
+        })
+    }
+    pub fn relay_transport(&self) -> super::RelayTransport {
+        self.inner.endpoint.transport()
+    }
+    /// Sample current QUIC counters without a background observer or per-packet work.
+    /// Clients of the same relay and carrier in this process share one pool.
+    pub async fn relay_diagnostics(&self) -> super::RelayDiagnostics {
+        self.inner.endpoint.relay_diagnostics().await
+    }
+
+    /// The UDP port the relay offers QUIC on, or `None` when it offers none:
+    /// one started without a QUIC listener, or one from before QUIC. Asked
+    /// over TCP whatever this client's carrier, so a TCP client can learn
+    /// whether QUIC would work before switching to it.
+    pub async fn relay_quic_port(&self) -> Result<Option<u16>> {
+        let timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
+        tokio::time::timeout(timeout, self.inner.endpoint.quic_port(self.credential()))
+            .await
+            .unwrap_or(Err(
+                std::io::Error::from(std::io::ErrorKind::TimedOut).into()
+            ))
+            .map_err(|error| Error::from_connect(error, self.inner.server.clone()))
     }
 
     /// Notify workers after a host network/resume event. This does not mark services healthy.
@@ -413,28 +457,58 @@ impl Client {
         // not occupy that budget for the legacy 30-second control I/O timeout.
         let io_timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
         let endpoint = &self.inner.endpoint;
+        let ask = || async {
+            let mut stream = endpoint
+                .connect(credential)
+                .await
+                .map_err(|error| Error::from_connect(error, self.inner.server.clone()))?;
+            get_status_with_credential(
+                &mut stream,
+                request.clone(),
+                self.inner.namespace,
+                &credential,
+            )
+            .await
+            .context(StatusSnafu)
+        };
         let result = tokio::time::timeout(io_timeout, async {
             let _permit = endpoint.control_permit().await;
-            let addresses = endpoint.addresses().await.context(ConnectSnafu {
-                addr: self.inner.server.clone(),
-            })?;
-            let mut stream = crate::addr::connect_tcp(&addresses)
-                .await
-                .context(ConnectSnafu {
-                    addr: self.inner.server.clone(),
-                })?;
-            get_status_with_credential(&mut stream, request, self.inner.namespace, &credential)
-                .await
-                .context(StatusSnafu)
+            match ask().await {
+                // A pooled QUIC connection whose credential the relay has
+                // since cancelled takes no new streams, so the refusal never
+                // arrives on it. A status query is a read: asked once more on
+                // a fresh connection, it gets the relay's verdict.
+                Err(error)
+                    if is_carrier_failure(&error)
+                        && endpoint.transport() == super::RelayTransport::Quic =>
+                {
+                    endpoint.invalidate_cached_transport();
+                    ask().await
+                }
+                result => result,
+            }
         })
         .await
-        .map_err(|_| Error::TimedOut {
+        .unwrap_or(Err(Error::TimedOut {
             timeout: io_timeout,
-        })?;
-        if result.is_ok() {
-            endpoint.protocol_succeeded();
+        }));
+        match &result {
+            Ok(_) => endpoint.protocol_succeeded(),
+            // The relay answered: the carrier works, whatever it said.
+            Err(error) if is_carrier_failure(error) => endpoint.invalidate_cached_transport(),
+            Err(_) => {}
         }
         result
+    }
+}
+
+/// Whether `error` says the carrier failed, rather than that the relay
+/// answered with a refusal.
+pub(crate) fn is_carrier_failure(error: &Error) -> bool {
+    match error {
+        Error::Remote { .. } => false,
+        Error::Status { source } => source.remote_retryable().is_none(),
+        _ => true,
     }
 }
 

@@ -193,6 +193,7 @@ class _CredentialRow extends StatelessWidget {
                     SetupPayload(
                       address: store.relayAddress,
                       credential: issued.credential,
+                      relayTransport: store.config.relayTransport,
                     ),
                   ),
                   l10n.credentialSetupCopied,
@@ -487,7 +488,11 @@ Future<void> showCredentialDialog(
   final scheme = theme.colorScheme;
   final name = credentialName(context, issued);
   final setup = encodeSetupString(
-    SetupPayload(address: store.relayAddress, credential: issued.credential),
+    SetupPayload(
+      address: store.relayAddress,
+      credential: issued.credential,
+      relayTransport: store.config.relayTransport,
+    ),
   );
   return showDialog<void>(
     context: context,

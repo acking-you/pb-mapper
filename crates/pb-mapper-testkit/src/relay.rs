@@ -10,7 +10,9 @@ use pb_mapper_auth::{
 use pb_mapper_client::client::status::get_status_with_credential;
 use pb_mapper_core::checksum::{Credential, parse_credential};
 use pb_mapper_protocol::command::{PbConnStatusReq, PbConnStatusResp};
-use pb_mapper_server::{DirectServerConfig, run_server_on_listener_with_direct};
+use pb_mapper_server::{
+    DirectServerConfig, QuicServerConfig, RelayServerOptions, run_server_on_listener_with_options,
+};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
@@ -27,6 +29,7 @@ use crate::{READY_TIMEOUT, admin_key_bytes, auth_config, init_test_env};
 /// makes it cancel every outstanding lease — so a live relay has to hold one.
 pub struct Relay {
     addr: SocketAddr,
+    quic: Option<QuicServerConfig>,
     auth: Option<AuthRuntime>,
     admin: AuthContext,
     shutdown: CancellationToken,
@@ -41,6 +44,24 @@ impl Relay {
     }
 
     pub async fn start_with_direct(label: &str, direct: Option<DirectServerConfig>) -> Self {
+        Self::start_with_options(label, RelayServerOptions { direct, quic: None }).await
+    }
+
+    pub async fn start_with_quic(label: &str) -> Self {
+        Self::start_with_options(
+            label,
+            RelayServerOptions {
+                direct: None,
+                quic: Some(QuicServerConfig {
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    advertise_port: 0,
+                }),
+            },
+        )
+        .await
+    }
+
+    pub async fn start_with_options(label: &str, options: RelayServerOptions) -> Self {
         init_test_env();
         let config = auth_config(label);
         let _ = std::fs::remove_dir_all(&config.state_dir);
@@ -59,14 +80,15 @@ impl Relay {
         let shutdown = CancellationToken::new();
         let server_auth = auth.clone();
         let server_shutdown = shutdown.clone();
+        let quic = options.quic.clone();
         let task = tokio::spawn(async move {
-            if let Err(error) = run_server_on_listener_with_direct(
+            if let Err(error) = run_server_on_listener_with_options(
                 listener,
                 server_shutdown,
                 None,
                 false,
                 server_auth,
-                direct,
+                options,
             )
             .await
             {
@@ -76,6 +98,7 @@ impl Relay {
 
         Self {
             addr,
+            quic,
             auth: Some(auth),
             admin,
             shutdown,
@@ -91,12 +114,27 @@ impl Relay {
 
     /// Reopen the same persisted auth state and TCP address after a shutdown.
     pub async fn restart_server(&mut self, direct: Option<DirectServerConfig>) {
+        let quic = self.quic.clone();
+        self.restart_server_with_options(RelayServerOptions { direct, quic })
+            .await;
+    }
+
+    /// [`Self::restart_server`], with listeners of its own: a relay brought
+    /// back without the QUIC it had, say.
+    pub async fn restart_server_with_options(&mut self, options: RelayServerOptions) {
+        self.quic = options.quic.clone();
         if !self.task.is_finished() {
             self.stop_server().await;
         }
-        drop(self.auth.take());
-        self.auth = Some(
-            AuthRuntime::start(
+        if let Some(auth) = self.auth.take() {
+            auth.shutdown_actor().await;
+        }
+        // Every handle holds the state directory's lock, and the stopped
+        // relay's last ones go with tasks that finish a few milliseconds
+        // after it returns: wait for the lock, not for a fixed time.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let auth = loop {
+            match AuthRuntime::start(
                 admin_key_bytes(),
                 pb_mapper_auth::AuthConfig {
                     state_dir: self.state_dir.clone(),
@@ -104,8 +142,16 @@ impl Relay {
                 },
             )
             .await
-            .unwrap(),
-        );
+            {
+                Err(failure)
+                    if failure.code == "auth_state_locked" && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                result => break result.unwrap(),
+            }
+        };
+        self.auth = Some(auth);
         self.admin = self
             .auth()
             .authenticate_presented(ADMIN_KEY_ID, &admin_key_bytes())
@@ -115,7 +161,7 @@ impl Relay {
         let shutdown = self.shutdown.clone();
         let auth = self.auth().clone();
         self.task = tokio::spawn(async move {
-            run_server_on_listener_with_direct(listener, shutdown, None, false, auth, direct)
+            run_server_on_listener_with_options(listener, shutdown, None, false, auth, options)
                 .await
                 .unwrap();
         });

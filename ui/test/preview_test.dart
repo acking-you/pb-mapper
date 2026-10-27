@@ -93,6 +93,61 @@ FakePbMapperApi _busy() => FakePbMapperApi(
   },
 );
 
+/// [api] reaching its relay over QUIC: the setting, every running tunnel,
+/// and a measured connection.
+FakePbMapperApi _overQuic(FakePbMapperApi api) => api
+  ..config = ConfigStatus(
+    serverAddress: api.config.serverAddress,
+    keepAliveEnabled: true,
+    msgHeaderKey: api.config.msgHeaderKey,
+    relayTransport: RelayTransport.quic,
+    isolatedRelayAdminKeySet: api.config.isolatedRelayAdminKeySet,
+  )
+  ..services = [
+    for (final s in api.services)
+      fakeService(
+        serviceKey: s.serviceKey,
+        localAddress: s.localAddress,
+        status: s.status,
+        message: s.statusMessage,
+        allowDirect: s.allowDirect,
+        path: s.path,
+        relayTransport: RelayTransport.quic,
+      ),
+  ]
+  ..clients = [
+    for (final c in api.clients)
+      fakeClient(
+        serviceKey: c.serviceKey,
+        localAddress: c.localAddress,
+        status: c.status,
+        allowDirect: c.allowDirect,
+        path: c.path,
+        relayTransport: RelayTransport.quic,
+      ),
+  ]
+  ..link = const RelayLink(
+    transport: RelayTransport.quic,
+    connectionsCreated: 1,
+    streamsOpened: 186,
+    streamsReused: 185,
+    connections: [
+      QuicLinkConnection(
+        id: 1,
+        peer: '203.0.113.7:7667',
+        pooled: true,
+        rtt: Duration(microseconds: 23800),
+        congestionWindow: 1887436,
+        mtu: 1452,
+        sentPackets: 48210,
+        lostPackets: 17,
+        congestionEvents: 2,
+        sentBytes: 61865984,
+        receivedBytes: 208666624,
+      ),
+    ],
+  );
+
 /// [_busy] as the relay's administrator sees it.
 FakePbMapperApi _relayBusy({RelayRole role = RelayRole.admin}) {
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -160,10 +215,12 @@ Future<void> _relay(
   Size size = const Size(1280, 820),
   Locale locale = const Locale('en'),
   RelayRole role = RelayRole.admin,
+  bool quic = false,
 }) async {
+  final api = _relayBusy(role: role);
   await pumpApp(
     tester,
-    _relayBusy(role: role),
+    quic ? _overQuic(api) : api,
     themeMode: theme,
     page: AppPage.relay,
     size: size,
@@ -310,6 +367,82 @@ void main() {
 
   testWidgets('relay this computer', (tester) async {
     await _relay(tester, 'relay_local_light', section: 'local');
+  });
+
+  testWidgets('relay over quic light', (tester) async {
+    await _relay(tester, 'relay_quic_light', quic: true);
+  });
+
+  testWidgets('relay over quic dark', (tester) async {
+    await _relay(tester, 'relay_quic_dark', quic: true, theme: ThemeMode.dark);
+  });
+
+  testWidgets('relay offering quic to tcp', (tester) async {
+    await _relay(tester, 'relay_offers_quic_light');
+  });
+
+  testWidgets('phone relay quic zh', (tester) async {
+    await _relay(
+      tester,
+      'phone_relay_quic_zh',
+      quic: true,
+      size: const Size(393, 852),
+      locale: const Locale('zh'),
+    );
+  });
+
+  testWidgets('settings quic', (tester) async {
+    await pumpApp(tester, _overQuic(_busy()), page: AppPage.settings);
+    await _capture(tester, 'settings_quic_light');
+    await finish(tester);
+  });
+
+  testWidgets('settings quic on a relay without it', (tester) async {
+    await pumpApp(
+      tester,
+      _overQuic(_busy())..relayQuicPort = null,
+      page: AppPage.settings,
+      themeMode: ThemeMode.dark,
+    );
+    await _capture(tester, 'settings_no_quic_dark');
+    await finish(tester);
+  });
+
+  testWidgets('tunnels over quic', (tester) async {
+    await pumpApp(tester, _overQuic(_busy()), page: AppPage.tunnels);
+    await _capture(tester, 'tunnels_quic_light');
+    await finish(tester);
+  });
+
+  testWidgets('relay this computer with quic', (tester) async {
+    final api = _relayBusy()
+      ..localRelayPort = 7666
+      ..localRelayQuicPort = 7667;
+    await pumpApp(tester, api, page: AppPage.relay);
+    final tab = find.byKey(const Key('relay-section-local'));
+    await tester.ensureVisible(tab);
+    await tester.tap(tab);
+    await settle(tester);
+    await _capture(tester, 'relay_local_quic_light');
+    await finish(tester);
+  });
+
+  testWidgets('carrier move dialog', (tester) async {
+    final api = _relayBusy()
+      ..clients = [
+        for (final c in _busy().clients)
+          fakeClient(
+            serviceKey: c.serviceKey,
+            localAddress: c.localAddress,
+            status: c.status,
+            relayTransport: RelayTransport.tcp,
+          ),
+      ];
+    await pumpApp(tester, api, page: AppPage.relay);
+    await tester.tap(find.byKey(const Key('relay-use-quic')));
+    await settle(tester);
+    await _capture(tester, 'carrier_move_light');
+    await finish(tester);
   });
 
   testWidgets('relay as a temporary credential', (tester) async {

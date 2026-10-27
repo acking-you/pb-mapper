@@ -45,6 +45,34 @@ String formatAgo(BuildContext context, Duration span) => span.inSeconds < 5
 String formatIn(BuildContext context, Duration span) =>
     context.l10n.timeIn(formatSpan(context, span));
 
+/// A round trip to the tenth of a millisecond while that still says
+/// something: "0.4 ms", "8.2 ms", "37 ms".
+String formatRtt(Duration rtt) {
+  final ms = rtt.inMicroseconds / 1000;
+  return ms < 10 ? '${ms.toStringAsFixed(1)} ms' : '${ms.round()} ms';
+}
+
+/// A share of packets lost, as a percentage with the precision a small one
+/// needs: "0 %", "0.03 %", "1.2 %".
+String formatLoss(double rate) {
+  final percent = rate * 100;
+  if (percent == 0) return '0 %';
+  return '${percent.toStringAsFixed(percent < 1 ? 2 : 1)} %';
+}
+
+/// [bytes] in the largest binary unit it fills: "512 B", "64 KiB", "1.5 MiB".
+String formatBytes(int bytes) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  var value = bytes.toDouble();
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  final digits = unit == 0 || value >= 10 ? 0 : 1;
+  return '${value.toStringAsFixed(digits)} ${units[unit]}';
+}
+
 DateTime fromUnix(int seconds) =>
     DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
 

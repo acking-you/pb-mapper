@@ -235,6 +235,13 @@ The design and its rules are in `docs/ui-design.md`.
     not probed; `watch_tunnel` emits the change events. Dropping a handle
     stops its tunnel. `pb_mapper_register_service` and
     `pb_mapper_connect_service` take `allow_direct`, saved with the tunnel
+  - The relay carrier (TCP or QUIC, `relay-quic`) is app config, set by
+    `pb_mapper_update_config` with the address and credential; a tunnel
+    keeps the one it started with and reports it as `relayTransport`.
+    `pb_mapper_start_server` takes a `quic_port` (0: none). The window's
+    own relay questions go through `relay_client()`, cached per config,
+    which shares the process's QUIC connection with the tunnels. See
+    "How this computer reaches the relay" in `docs/ui-design.md`
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
 
 - **`native/pb_mapper_galaxy/`**: The galaxy's per-frame geometry. Its
@@ -329,10 +336,13 @@ Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
   a connection can carry a `namespace` (FFI `pb_mapper_connect_service`,
   `ClientConfigData.namespace`), and services are told apart by namespace and
   name (`RemoteService` in `lib/src/state/remote_service.dart`)
-  Also the relay this computer can run itself, and its key
+  Over QUIC, the link's round trip, loss and streams, measured locally.
+  Also the relay this computer can run itself, with an optional QUIC port,
+  and its key
 - **Logs**: the Rust log, by minimum level and word, following new lines
-- **Settings**: relay address, credential, default keep-alive, a copyable setup
-  string for another computer, theme and language
+- **Settings**: relay address, credential, the carrier (TCP or QUIC) with
+  what the relay offers, default keep-alive, a copyable setup string for
+  another computer, theme and language
 - **First run**: relay, then share-or-connect, then that one form
 
 Sharing and connecting are one editor with a Share/Connect switch; its More

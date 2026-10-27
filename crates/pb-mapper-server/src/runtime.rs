@@ -110,7 +110,31 @@ pub async fn run_server_on_listener_with_direct(
     auth: AuthRuntime,
     direct_config: Option<DirectServerConfig>,
 ) -> std::io::Result<()> {
-    let (capability, stun_task) = direct::bind(direct_config).await?;
+    run_server_on_listener_with_options(
+        listener,
+        shutdown_token,
+        status_channel,
+        keep_alive,
+        auth,
+        RelayServerOptions {
+            direct: direct_config,
+            quic: None,
+        },
+    )
+    .await
+}
+
+pub async fn run_server_on_listener_with_options(
+    listener: TcpListener,
+    shutdown_token: CancellationToken,
+    status_channel: Option<
+        tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<ServerStatusInfo>>,
+    >,
+    keep_alive: bool,
+    auth: AuthRuntime,
+    options: RelayServerOptions,
+) -> std::io::Result<()> {
+    let (capability, stun_task) = direct::bind(options.direct).await?;
     let mut direct_state = direct::DirectState::new(capability);
     let security = ServerSecurity::new(auth);
     let mut manager = ServerMananger::new(RemoteIdProvider::new());
@@ -136,6 +160,40 @@ pub async fn run_server_on_listener_with_direct(
         "pb-mapper server is listening"
     );
 
+    // Clients reach QUIC at the IP they reached TCP at, so a listener on the
+    // other address family is one some of them cannot use.
+    if let Some(quic) = &options.quic
+        && quic.listen.is_ipv6() != listen_addr.is_ipv6()
+    {
+        tracing::warn!(
+            event = "relay_quic_family_mismatch",
+            tcp = %listen_addr,
+            quic = %quic.listen,
+            "QUIC and TCP listen on different address families; clients on TCP's cannot use QUIC"
+        );
+    }
+    let quic_stop = CancellationToken::new();
+    #[cfg(feature = "relay-quic")]
+    let (quic_task, quic_capability) = quic::start(
+        options.quic,
+        security.clone(),
+        manager.get_task_sender(),
+        quic_stop.clone(),
+    )
+    .await?;
+    #[cfg(not(feature = "relay-quic"))]
+    let (quic_task, quic_capability): (
+        Option<tokio_util::task::AbortOnDropHandle<()>>,
+        Option<Arc<pb_mapper_protocol::command::QuicEndpoint>>,
+    ) = {
+        if options.quic.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "binary built without relay-quic",
+            ));
+        }
+        (None, None)
+    };
     let task_sender = manager.get_task_sender();
     let shutdown_token_clone = shutdown_token.clone();
 
@@ -519,11 +577,19 @@ pub async fn run_server_on_listener_with_direct(
                 );
                 let manager_task_sender = manager.get_task_sender().for_connection();
                 let security = security.clone();
+                let quic_capability = quic_capability.clone();
                 while connection_tasks.try_join_next().is_some() {}
                 connection_tasks.spawn(async move {
                     snafu_error_handle!(
-                        handle_conn(conn_id, peer_addr, manager_task_sender, stream, security)
-                            .await
+                        handle_conn(
+                            conn_id,
+                            peer_addr,
+                            manager_task_sender,
+                            stream,
+                            security,
+                            quic_capability
+                        )
+                        .await
                     );
                 });
             }
@@ -1220,6 +1286,11 @@ pub async fn run_server_on_listener_with_direct(
     // still see auth.lock held.
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
+    // The QUIC listener drains its own connection tasks before it ends.
+    quic_stop.cancel();
+    if let Some(task) = quic_task {
+        let _ = task.await;
+    }
     abort_and_wait(
         [listener_handle, shutdown_handle, sweep_handle]
             .into_iter()
@@ -1472,7 +1543,7 @@ mod tests {
             let shutdown_token = shutdown_token.clone();
             async move { run_server_on_listener(listener, shutdown_token, None, false, auth).await }
         });
-        let _client = TcpStream::connect(addr).await.unwrap();
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(80)).await;
         shutdown_token.cancel();
         tokio::time::timeout(Duration::from_secs(2), server)
