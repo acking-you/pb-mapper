@@ -126,9 +126,15 @@ impl Relay {
         if !self.task.is_finished() {
             self.stop_server().await;
         }
-        drop(self.auth.take());
-        self.auth = Some(
-            AuthRuntime::start(
+        if let Some(auth) = self.auth.take() {
+            auth.shutdown_actor().await;
+        }
+        // Every handle holds the state directory's lock, and the stopped
+        // relay's last ones go with tasks that finish a few milliseconds
+        // after it returns: wait for the lock, not for a fixed time.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let auth = loop {
+            match AuthRuntime::start(
                 admin_key_bytes(),
                 pb_mapper_auth::AuthConfig {
                     state_dir: self.state_dir.clone(),
@@ -136,8 +142,16 @@ impl Relay {
                 },
             )
             .await
-            .unwrap(),
-        );
+            {
+                Err(failure)
+                    if failure.code == "auth_state_locked" && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                result => break result.unwrap(),
+            }
+        };
+        self.auth = Some(auth);
         self.admin = self
             .auth()
             .authenticate_presented(ADMIN_KEY_ID, &admin_key_bytes())
