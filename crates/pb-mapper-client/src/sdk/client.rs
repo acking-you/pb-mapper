@@ -7,6 +7,7 @@
 
 use crate::diagnostics::{Diagnostics, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
+use crate::relay::CarrierId;
 use std::sync::{Arc, RwLock};
 
 use pb_mapper_core::checksum::{Credential, parse_credential};
@@ -457,40 +458,39 @@ impl Client {
         // not occupy that budget for the legacy 30-second control I/O timeout.
         let io_timeout = control_io_timeout().min(std::time::Duration::from_secs(5));
         let endpoint = &self.inner.endpoint;
-        // Keep the selected carrier outside the timed future, so cancellation
-        // can retire that carrier too. Reset before each attempt: failure to
-        // obtain a stream cannot be blamed on the previous attempt's carrier.
+        let ask = async |carrier: &mut Option<CarrierId>| {
+            let mut stream = endpoint
+                .connect(credential, carrier)
+                .await
+                .map_err(|error| Error::from_connect(error, self.inner.server.clone()))?;
+            get_status_with_credential(
+                &mut stream,
+                request.clone(),
+                self.inner.namespace,
+                &credential,
+            )
+            .await
+            .context(StatusSnafu)
+        };
+        // Outside the deadline, so that a query it cuts short is charged to
+        // the connection the query went over too.
         let mut carrier = None;
         let result = tokio::time::timeout(io_timeout, async {
             let _permit = endpoint.control_permit().await;
-            for attempt in 0..2 {
-                let result = async {
-                    let mut stream = endpoint
-                        .connect(credential, &mut carrier)
-                        .await
-                        .map_err(|error| Error::from_connect(error, self.inner.server.clone()))?;
-                    get_status_with_credential(
-                        &mut stream,
-                        request.clone(),
-                        self.inner.namespace,
-                        &credential,
-                    )
-                    .await
-                    .context(StatusSnafu)
-                }
-                .await;
-                // Only reads may be repeated after a carrier failure. A fresh
-                // carrier can reveal a credential refusal on a closed one.
-                if attempt == 0
-                    && endpoint.transport() == super::RelayTransport::Quic
-                    && result.as_ref().is_err_and(is_carrier_failure)
+            match ask(&mut carrier).await {
+                // A pooled QUIC connection whose credential the relay has
+                // since cancelled takes no new streams, so the refusal never
+                // arrives on it. A status query is a read: asked once more on
+                // a fresh connection, it gets the relay's verdict.
+                Err(error)
+                    if is_carrier_failure(&error)
+                        && endpoint.transport() == super::RelayTransport::Quic =>
                 {
-                    endpoint.invalidate_cached_transport(carrier.as_ref());
-                } else {
-                    return result;
+                    endpoint.carrier_failed(carrier);
+                    ask(&mut carrier).await
                 }
+                result => result,
             }
-            unreachable!("the second status attempt always returns")
         })
         .await
         .unwrap_or(Err(Error::TimedOut {
@@ -499,9 +499,7 @@ impl Client {
         match &result {
             Ok(_) => endpoint.protocol_succeeded(),
             // The relay answered: the carrier works, whatever it said.
-            Err(error) if is_carrier_failure(error) => {
-                endpoint.invalidate_cached_transport(carrier.as_ref())
-            }
+            Err(error) if is_carrier_failure(error) => endpoint.carrier_failed(carrier),
             Err(_) => {}
         }
         result

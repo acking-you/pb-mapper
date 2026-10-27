@@ -1,10 +1,10 @@
-use crate::relay::CarrierId;
 pub mod error;
 pub mod status;
 pub(crate) mod stream;
 
 use crate::diagnostics::{Diagnostics, RecoveryFailure, RecoveryPhase};
 use crate::endpoint::RelayEndpoint;
+use crate::relay::CarrierId;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
@@ -366,15 +366,16 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                     probes.spawn(async move {
                         let _permit = probe_remote.control_permit().await;
                         let started = Instant::now();
-                        let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget).await;
-                        (started, started.elapsed(), result)
+                        let mut carrier = None;
+                        let result = probe_remote_key(&probe_remote, &probe_key, namespace, credential, budget, &mut carrier).await;
+                        (started, started.elapsed(), result, carrier)
                     });
                 }
                 Some(result) = probes.join_next() => {
-                    let (started, elapsed, result) = match result {
+                    let (started, elapsed, result, carrier) = match result {
                         Ok(result) => result,
                         Err(error) if error.is_cancelled() => continue,
-                        Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string()))),
+                        Err(error) => (Instant::now(), Duration::ZERO, Err(ProbeFailure::transient(error.to_string())), None),
                     };
                     match result {
                         Ok(()) => {
@@ -413,7 +414,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
                             if failure.protocol_replied {
                                 remote_addr.protocol_succeeded();
                                 diagnostics.responded(elapsed);
-                            } else { remote_addr.transport_failed(failure.carrier.as_ref()); }
+                            } else { remote_addr.transport_failed(carrier); }
                             consecutive_health_failures = consecutive_health_failures.saturating_add(1);
                             if !connected || consecutive_health_failures >= client_health_failure_threshold() {
                                 connected = false;
@@ -476,7 +477,6 @@ struct ProbeFailure {
     permanent: bool,
     kind: RecoveryFailure,
     protocol_replied: bool,
-    carrier: Option<CarrierId>,
 }
 
 impl ProbeFailure {
@@ -496,7 +496,6 @@ impl ProbeFailure {
             permanent: false,
             kind: RecoveryFailure::Transport,
             protocol_replied: false,
-            carrier: None,
         }
     }
 
@@ -514,7 +513,6 @@ impl ProbeFailure {
                 RecoveryFailure::Transport
             },
             protocol_replied,
-            carrier: None,
         }
     }
 }
@@ -531,9 +529,9 @@ async fn probe_remote_key(
     namespace: Option<u64>,
     credential: Credential,
     timeout: Duration,
+    carrier: &mut Option<CarrierId>,
 ) -> std::result::Result<(), ProbeFailure> {
-    let mut carrier = None;
-    let result = match tokio::time::timeout(timeout, async {
+    match tokio::time::timeout(timeout, async {
         // Resolved once, here, so a name that does not resolve is reported
         // as such rather than as the relay being unreachable.
         let addresses = remote_addr
@@ -544,17 +542,8 @@ async fn probe_remote_key(
                 permanent: false,
                 kind: RecoveryFailure::Dns,
                 protocol_replied: false,
-                carrier: None,
             })?;
-        probe_remote_key_once(
-            remote_addr,
-            &addresses,
-            key,
-            namespace,
-            credential,
-            &mut carrier,
-        )
-        .await
+        probe_remote_key_once(remote_addr, &addresses, key, namespace, credential, carrier).await
     })
     .await
     {
@@ -564,13 +553,8 @@ async fn probe_remote_key(
             permanent: false,
             kind: RecoveryFailure::Timeout,
             protocol_replied: false,
-            carrier: None,
         }),
-    };
-    result.map_err(|mut failure| {
-        failure.carrier = carrier;
-        failure
-    })
+    }
 }
 
 async fn probe_remote_key_once(
@@ -603,7 +587,6 @@ async fn probe_remote_key_once(
                 permanent: false,
                 kind: RecoveryFailure::ServiceUnavailable,
                 protocol_replied: true,
-                carrier: None,
             });
         }
         Ok(status_resp) => {
@@ -647,7 +630,6 @@ async fn probe_remote_key_once(
             permanent: false,
             kind: RecoveryFailure::ServiceUnavailable,
             protocol_replied: true,
-            carrier: None,
         })
     }
 }
@@ -669,7 +651,6 @@ async fn fetch_remote_status(
                 permanent: !response.retryable,
                 kind: RecoveryFailure::Rejected,
                 protocol_replied: true,
-                carrier: None,
             },
             error => ProbeFailure::transient(format!("connect remote stream failed: {error}")),
         })?;
@@ -770,7 +751,6 @@ mod recovery_tests {
             permanent: false,
             kind: RecoveryFailure::ServiceUnavailable,
             protocol_replied: true,
-            carrier: None,
         };
         for _ in 0..20 {
             missing.update_timing(&mut timing, Duration::from_millis(40));

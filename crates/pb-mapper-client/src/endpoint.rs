@@ -197,18 +197,25 @@ impl RelayEndpoint {
             .unwrap_or_else(|_| unreachable!("relay setup semaphore is never closed"))
     }
 
-    pub(crate) fn transport_failed(&self, carrier: Option<&CarrierId>) {
+    pub(crate) fn transport_failed(&self, carrier: Option<CarrierId>) {
         self.0.refresh.store(true, Ordering::Release);
         self.0.failed.store(true, Ordering::Release);
-        self.invalidate_cached_transport(carrier);
+        self.carrier_failed(carrier);
     }
 
-    pub(crate) fn invalidate_cached_transport(&self, carrier: Option<&CarrierId>) {
-        let _ = carrier;
+    /// An attempt over `carrier` failed in transport: only that connection
+    /// can be to blame, and the pool retires it if the relay has gone silent
+    /// on it. An attempt that failed before choosing one — resolving the
+    /// relay, discovering or dialling QUIC — leaves the pool alone, there
+    /// being nothing in it to blame.
+    pub(crate) fn carrier_failed(&self, carrier: Option<CarrierId>) {
+        let Some(carrier) = carrier else { return };
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {
-            pool.transport_failed(carrier);
+            pool.carrier_failed(carrier);
         }
+        #[cfg(not(feature = "relay-quic"))]
+        match carrier {}
     }
 
     pub(crate) fn protocol_succeeded(&self) {
@@ -340,8 +347,11 @@ impl RelayEndpoint {
     /// `credential` matters here only over QUIC, where it chooses the pooled
     /// connection, whose first stream it was bound to when dialled; a TCP
     /// connection is anonymous until that first frame.
-    /// `carrier` records the selected QUIC connection before waiting for stream
-    /// credit, so the caller can attribute cancellation as well as stream errors.
+    ///
+    /// `carrier` is that QUIC connection, set as soon as it is chosen, so
+    /// that a caller can charge a failure of this attempt to it with
+    /// [`Self::transport_failed`] — one its own deadline cut short included.
+    /// It stays `None` until then, and over TCP.
     pub(crate) async fn connect_addresses(
         &self,
         addresses: &ResolvedAddrs,

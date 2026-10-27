@@ -744,7 +744,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             failure,
             RecoveryFailure::Transport | RecoveryFailure::Timeout | RecoveryFailure::Dns
         ) {
-            remote_addr.transport_failed(carrier.as_ref());
+            remote_addr.transport_failed(carrier);
         }
         let (retry_interval, retry_count) = match status {
             Status::Cancelled => break 'outer,

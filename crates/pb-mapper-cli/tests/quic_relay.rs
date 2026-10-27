@@ -881,21 +881,18 @@ async fn retiring_twenty_registrations_does_not_accumulate_quic_carriers() {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
         .await
         .expect("each share must register again");
+        // A stream reset leaves its carrier healthy, so every share comes
+        // back on the one connection the credential already holds.
         let snapshot = client.relay_diagnostics().await;
-        println!(
-            "{key}: live={}, created={}",
-            snapshot.connections.len(),
-            snapshot.connections_created
-        );
-        assert!(snapshot.connections.len() <= 2, "{snapshot:?}");
         assert_eq!(
-            snapshot.connections_created, 1,
-            "a stream reset leaves its carrier healthy"
+            (snapshot.connections.len(), snapshot.connections_created),
+            (1, 1),
+            "{key}: {snapshot:?}"
         );
     }
     for (_, registration) in shares {

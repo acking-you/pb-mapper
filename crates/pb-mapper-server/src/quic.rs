@@ -2,7 +2,7 @@
 //! requests on either carrier; credentials are checked again on every stream.
 use super::{ManagerTask, ManagerTaskSender, QuicServerConfig};
 use crate::connection::log_auth_failure;
-use pb_mapper_auth::KeyId;
+use pb_mapper_auth::{AuthFailure, KeyId};
 use pb_mapper_protocol::{
     MessageWriter,
     command::{MessageSerializer, PbConnResponse, QuicEndpoint},
@@ -78,21 +78,28 @@ impl Admission {
         })
     }
 
-    /// A slot for `key`, or the code of the limit it reached.
-    fn admit(self: &Arc<Self>, key: KeyId) -> Result<Admitted, &'static str> {
-        let total = self
-            .total
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| "quic_connection_capacity")?;
+    /// A slot for `key`, or the retryable refusal of the limit it reached.
+    fn admit(self: &Arc<Self>, key: KeyId) -> Result<Admitted, AuthFailure> {
+        let full = || {
+            AuthFailure::new(
+                "quic_connection_capacity",
+                "relay QUIC connection capacity reached",
+                true,
+            )
+        };
+        let total = self.total.clone().try_acquire_owned().map_err(|_| full())?;
         if !key.is_admin() && self.total.available_permits() < ADMIN_RESERVED {
-            return Err("quic_connection_capacity");
+            return Err(full());
         }
         if !key.is_admin() {
             let mut per_key = self.per_key.lock().unwrap_or_else(|e| e.into_inner());
             let held = per_key.entry(key).or_default();
             if *held >= CONNECTIONS_PER_CREDENTIAL {
-                return Err("quic_credential_capacity");
+                return Err(AuthFailure::new(
+                    "quic_credential_capacity",
+                    "this credential has reached its relay QUIC connection limit",
+                    true,
+                ));
             }
             *held += 1;
         }
@@ -332,16 +339,7 @@ async fn handle_connection(
             .map_err(io::Error::other)?;
         let permit = match admission.admit(initial.session.key_id()) {
             Ok(permit) => permit,
-            Err(code) => {
-                let failure = pb_mapper_auth::AuthFailure::new(
-                    code,
-                    if code == "quic_credential_capacity" {
-                        "this credential has reached its relay QUIC connection limit"
-                    } else {
-                        "relay QUIC connection capacity reached"
-                    },
-                    true,
-                );
+            Err(failure) => {
                 reject(&mut stream, &initial.session, &failure).await?;
                 return Err(io::Error::other(failure));
             }
@@ -401,7 +399,7 @@ async fn handle_connection(
 async fn reject(
     stream: &mut QuicStream,
     session: &ServerHeaderSession,
-    failure: &pb_mapper_auth::AuthFailure,
+    failure: &AuthFailure,
 ) -> io::Result<()> {
     let response = PbConnResponse::error(&failure.code, &failure.message, failure.retryable)
         .encode()

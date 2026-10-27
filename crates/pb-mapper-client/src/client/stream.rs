@@ -122,14 +122,14 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
                 if error.remote_retryable().is_some() {
                     remote_addr.protocol_succeeded();
                 } else {
-                    remote_addr.transport_failed(carrier.as_ref());
+                    remote_addr.transport_failed(carrier);
                 }
                 if !retryable || Instant::now() >= deadline {
                     return Err(error);
                 }
             }
             Err(_) => {
-                remote_addr.transport_failed(carrier.as_ref());
+                remote_addr.transport_failed(carrier);
                 setup
                     .diagnostics
                     .failed(RecoveryFailure::Timeout, std::time::Duration::ZERO);

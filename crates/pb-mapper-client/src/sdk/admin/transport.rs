@@ -66,7 +66,7 @@ pub(super) async fn send_admin_request(
             // effect. Anything past that point is reported as-is.
             Err(error) => {
                 if crate::sdk::client::is_carrier_failure(&error) {
-                    endpoint.invalidate_cached_transport(exchange.carrier.as_ref());
+                    endpoint.carrier_failed(exchange.carrier);
                 }
                 if exchange.sent
                     || last_attempt
