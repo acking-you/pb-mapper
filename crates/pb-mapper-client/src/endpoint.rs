@@ -338,6 +338,9 @@ impl RelayEndpoint {
                 .await
                 .map(|stream| pb_mapper_protocol::transport::RelayStream::Quic(Box::new(stream)));
         }
+        // A TCP connection carries its credential in its own first frame,
+        // which the caller writes. Over QUIC the credential also chooses the
+        // pooled connection, whose first stream it is bound to.
         let _ = credential;
         crate::addr::connect_tcp(addresses)
             .await

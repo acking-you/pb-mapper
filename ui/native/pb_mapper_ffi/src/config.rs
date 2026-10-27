@@ -97,37 +97,39 @@ pub unsafe extern "C" fn pb_mapper_update_config(
     let handle = unsafe { &mut *handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
-        // Read and written under one lock, so that two saves at once cannot
-        // both see the old carrier, or both miss the change.
-        let changed = {
-            let mut state = state.lock().await;
-            let changed = state.get_config_status().await.relay_transport != relay_transport;
-            state
-                .update_config(
-                    server_address.clone(),
-                    enable_keep_alive != 0,
-                    msg_header_key,
-                    relay_transport,
-                )
-                .await?;
-            changed
-        };
-        if !changed {
-            return Ok(Default::default());
-        }
         // Where that relay is, to know its tunnels by address as well as by
-        // name. Resolved with the state unlocked: it can be slow.
-        let endpoint = resolve_pb_mapper_server_async(Some(&server_address))
-            .await
-            .ok();
+        // name: resolved before the state is locked, since it can be slow,
+        // and only when the carrier looks about to change.
+        let current = state.lock().await.get_config_status().await.relay_transport;
+        let endpoint = if current == relay_transport {
+            None
+        } else {
+            resolve_pb_mapper_server_async(Some(&server_address))
+                .await
+                .ok()
+        };
+        // Compared, written, and the tunnels to move named, under one lock:
+        // two saves at once cannot both see the old carrier, or both miss
+        // the change, and the tunnels named are the ones on another carrier
+        // than the one this save wrote.
+        let mut state = state.lock().await;
+        let changed = state.get_config_status().await.relay_transport != relay_transport;
+        state
+            .update_config(
+                server_address.clone(),
+                enable_keep_alive != 0,
+                msg_header_key,
+                relay_transport,
+            )
+            .await?;
         let moving = match get_process_credential() {
-            Ok(credential) => state.lock().await.on_other_carrier(
+            Ok(credential) if changed => state.on_other_carrier(
                 &server_address,
                 endpoint.as_ref(),
                 credential,
                 relay_transport,
             ),
-            Err(_) => Default::default(),
+            _ => Default::default(),
         };
         Ok::<_, CtlError>(moving)
     });

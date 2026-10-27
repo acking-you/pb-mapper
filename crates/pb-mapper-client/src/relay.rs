@@ -86,6 +86,18 @@ pub(crate) async fn discover(
         {
             Ok((relay_addr, endpoint))
         }
+        // Named apart from an unexpected answer: a misconfigured relay is
+        // found by what it advertised.
+        PbConnResponse::QuicEndpoint(Some(endpoint)) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the relay advertised an unusable QUIC endpoint: UDP port {}, \
+                 a {}-byte certificate",
+                endpoint.port,
+                endpoint.certificate.len()
+            ),
+        )
+        .into()),
         PbConnResponse::QuicEndpoint(None) => Err(quic_unavailable()),
         PbConnResponse::Error(error) if error.code == REQUEST_DECODE_FAILED => {
             Err(quic_unavailable())
