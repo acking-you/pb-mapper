@@ -144,7 +144,7 @@ pub struct ServerRegistration {
 
 /// Maintaining a connection to the server.
 /// This connection is used to send channel request
-#[instrument(skip(registration, task_sender, session))]
+#[instrument(skip(registration, task_sender, conn, session))]
 pub async fn handle_server_conn(
     registration: ServerRegistration,
     task_sender: ManagerTaskSender,

@@ -162,18 +162,36 @@ pub fn binding(connection: &Connection) -> io::Result<[u8; 32]> {
 }
 
 /// Streams retain their UDP driver independently of the pool/control connection.
-#[derive(Debug)]
 pub struct QuicConnection {
     pub connection: Connection,
     pub endpoint: Endpoint,
     pub relay_addr: SocketAddr,
 }
 
-#[derive(Debug)]
+/// Which connection, and where to: Quinn's own `Debug` prints its whole
+/// connection state, kilobytes into any log line a stream appears in.
+impl std::fmt::Debug for QuicConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicConnection")
+            .field("id", &self.connection.stable_id())
+            .field("peer", &self.connection.remote_address())
+            .finish()
+    }
+}
+
 pub struct QuicStream {
     recv: RecvStream,
     send: SendStream,
     owner: Arc<QuicConnection>,
+}
+
+impl std::fmt::Debug for QuicStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicStream")
+            .field("connection", &self.owner)
+            .field("stream", &self.send.id())
+            .finish()
+    }
 }
 impl QuicStream {
     pub fn new(owner: Arc<QuicConnection>, (send, recv): (SendStream, RecvStream)) -> Self {
