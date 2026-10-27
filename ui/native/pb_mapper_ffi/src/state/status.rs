@@ -366,10 +366,12 @@ impl PbMapperState {
             Err(e) => {
                 tracing::warn!("Relay status refresh failed: {}", e);
                 let error = match asked {
+                    // Shown after "The relay isn't answering:", so it leads
+                    // with what does not get through.
                     Some(Some(port)) if quic_unanswered => format!(
-                        "The relay answers over TCP, but QUIC on UDP port {port} does not get \
-                         through. Open UDP {port} on the relay's firewall and on this network, \
-                         or choose TCP"
+                        "QUIC on UDP port {port} does not get through, though the relay \
+                         answers over TCP. Open UDP {port} on the relay's firewall and on this \
+                         network, or choose TCP"
                     ),
                     _ => e.to_string(),
                 };
