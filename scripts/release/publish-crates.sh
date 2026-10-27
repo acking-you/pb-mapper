@@ -34,16 +34,17 @@ for dir in "$@"; do
     exit 1
   fi
 
-  # Compare sources only: Cargo regenerates the normalized manifest and the
-  # lockfile, and records the commit it packaged from.
+  # Compare the normalized manifest too: it carries what a member inherits from
+  # its workspace, such as dependency versions. Skip only the commit Cargo
+  # records and the lockfile, which follows the registry at packaging time.
   cargo package --locked --no-verify --registry crates-io --manifest-path "$manifest"
   rm -rf "$scratch/local" "$scratch/published"
   mkdir -p "$scratch/local" "$scratch/published"
   tar -xzf "$target/package/$name-$version.crate" -C "$scratch/local"
   curl -fsSL "https://static.crates.io/crates/$name/$name-$version.crate" | tar -xz -C "$scratch/published"
-  if ! diff -r --exclude=.cargo_vcs_info.json --exclude=Cargo.toml --exclude=Cargo.lock \
+  if ! diff -r --exclude=.cargo_vcs_info.json --exclude=Cargo.lock \
     "$scratch/local/$name-$version" "$scratch/published/$name-$version"; then
-    echo "::error::$name@$version is already on crates.io with different source; bump its version"
+    echo "::error::$name@$version is already on crates.io with different source or manifest; bump its version"
     exit 1
   fi
   echo "$name@$version is already on crates.io with this source"

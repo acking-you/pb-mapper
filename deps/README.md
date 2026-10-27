@@ -97,7 +97,7 @@ uni-stream = "0.3.5"
 
 `path + version` 在发布时会解析 registry 版本，根 `[patch.crates-io]` 也不会传播给库的使用者，所以 SDK 用到的 fork 必须先以自己的包名发布。Quinn 的三个 crate 发布为 `quinn-plus`、`quinn-proto-plus`、`quinn-udp-plus`，rcgen 发布为 `rcgen-plus`，做法同 `kanal-plus`。库名不变（`quinn`、`quinn_proto`、`quinn_udp`、`rcgen`），pb-mapper 只在 `[workspace.dependencies]` 里写 `package = "quinn-plus"`，代码照旧 `use quinn::…`。
 
-`release-sdk.yml` 的 `publish-forks` 在发布 npm 之前，用 `scripts/release/publish-crates.sh` 按依赖顺序发布这些 fork。crates.io 上已有的版本，源码与当前 gitlink 一致时跳过；不一致时整个发布失败。所以 **gitlink 改变了某个 fork crate 的源码，就要同时提升它的版本号**，否则 crates.io 用户拿不到新代码。stun-proto 的协议源码与 registry 上的 `2.0.4` 一致，仍直接使用 registry 版本。
+`release-sdk.yml` 的 `publish-forks` 在发布 npm 之前，用 `scripts/release/publish-crates.sh` 按依赖顺序发布这些 fork。crates.io 上已有的版本，包内容（源码以及 Cargo 规范化后的 manifest，后者带有从 workspace 继承的依赖版本）与当前 gitlink 一致时跳过；不一致时整个发布失败。所以 **gitlink 改变了某个 fork crate 的源码，就要同时提升它的版本号**，否则 crates.io 用户拿不到新代码。stun-proto 的协议源码与 registry 上的 `2.0.4` 一致，仍直接使用 registry 版本。
 
 ## 本次升级的性能验证
 
