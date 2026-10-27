@@ -196,16 +196,17 @@ impl RelayEndpoint {
             .unwrap_or_else(|_| unreachable!("relay setup semaphore is never closed"))
     }
 
-    pub(crate) fn transport_failed(&self) {
+    pub(crate) fn transport_failed(&self, carrier: Option<u64>) {
         self.0.refresh.store(true, Ordering::Release);
         self.0.failed.store(true, Ordering::Release);
-        self.invalidate_cached_transport();
+        self.invalidate_cached_transport(carrier);
     }
 
-    pub(crate) fn invalidate_cached_transport(&self) {
+    pub(crate) fn invalidate_cached_transport(&self, carrier: Option<u64>) {
+        let _ = carrier;
         #[cfg(feature = "relay-quic")]
         if let Some(pool) = &self.0.quic {
-            pool.invalidate();
+            pool.transport_failed(carrier);
         }
     }
 
@@ -454,7 +455,7 @@ mod tests {
         tokio::time::advance(DNS_RETRY).await;
         assert_eq!(endpoint.addresses().await.unwrap().primary().port(), 7001);
         port.store(7002, Ordering::SeqCst);
-        endpoint.transport_failed();
+        endpoint.transport_failed(None);
         assert_eq!(endpoint.addresses().await.unwrap().primary().port(), 7001);
         tokio::time::advance(DNS_RETRY).await;
         assert_eq!(endpoint.addresses().await.unwrap().primary().port(), 7002);
@@ -570,7 +571,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        endpoint.transport_failed();
+        endpoint.transport_failed(None);
         endpoint.protocol_succeeded();
         tokio::time::timeout(Duration::from_millis(1), wake.changed())
             .await

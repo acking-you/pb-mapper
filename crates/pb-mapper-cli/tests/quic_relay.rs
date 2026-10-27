@@ -817,3 +817,88 @@ async fn stalled_discovery_does_not_block_sdk_observations() {
     assert_eq!(snapshot.connections_created, 0);
     drop(request);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retiring_twenty_registrations_does_not_accumulate_quic_carriers() {
+    let relay = Relay::start_with_quic("quic-registration-retirement").await;
+    let (id, credential) = relay
+        .issue_credential(Duration::from_secs(3600), "many-shares")
+        .await;
+    let client = Client::from_credential(relay.addr().to_string(), credential, false, None)
+        .with_relay_transport(RelayTransport::Quic)
+        .unwrap();
+    let observer = Client::from_credential(relay.addr().to_string(), credential, false, None);
+    let admin = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None)
+        .admin()
+        .unwrap();
+    let (backend, _echo) = echo().await;
+    let mut shares = Vec::new();
+    for i in 0..20 {
+        let key = format!("share-{i:02}");
+        let registration = client
+            .register_with_options(
+                RegisterRequest {
+                    key: key.clone(),
+                    local_addr: backend.to_string(),
+                    transport: Transport::Tcp,
+                    codec: false,
+                    force_namespace: false,
+                },
+                RegisterOptions {
+                    allow_direct: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        registration
+            .wait_ready_timeout(READY_TIMEOUT)
+            .await
+            .unwrap();
+        shares.push((key, registration));
+    }
+    for (key, _) in &shares {
+        let previous = observer.service_status(key).await.unwrap();
+        assert!(
+            admin
+                .retire_connections(Some(id.as_u64()), key.clone(), None)
+                .await
+                .unwrap()
+                > 0
+        );
+        // Observe replacement generations, not a transient watch status which
+        // may already have recovered before the test subscribes.
+        tokio::time::timeout(READY_TIMEOUT, async {
+            loop {
+                let current = observer.service_status(key).await.unwrap();
+                if !current.is_empty()
+                    && current.iter().all(|c| {
+                        c.healthy
+                            && !previous.iter().any(|old| {
+                                old.conn_id == c.conn_id && old.generation == c.generation
+                            })
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("each share must register again");
+        let snapshot = client.relay_diagnostics().await;
+        println!(
+            "{key}: live={}, created={}",
+            snapshot.connections.len(),
+            snapshot.connections_created
+        );
+        assert!(snapshot.connections.len() <= 2, "{snapshot:?}");
+        assert_eq!(
+            snapshot.connections_created, 1,
+            "a stream reset leaves its carrier healthy"
+        );
+    }
+    for (_, registration) in shares {
+        registration.stop().await.unwrap();
+    }
+}

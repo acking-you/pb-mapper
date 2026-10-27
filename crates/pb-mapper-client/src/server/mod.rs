@@ -702,6 +702,7 @@ async fn run_server_side_cli_worker<LocalStream>(
         }
         wake.acknowledge();
         diagnostics.attempt();
+        let mut carrier = None;
         let status = if let Err(status) = run_server_side_cli_inner::<LocalStream>(
             &mut backoff,
             run_config.clone(),
@@ -710,6 +711,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             &mut stream_tasks,
             &setup_slots,
             &mut wake,
+            &mut carrier,
         )
         .await
         {
@@ -741,7 +743,7 @@ async fn run_server_side_cli_worker<LocalStream>(
             failure,
             RecoveryFailure::Transport | RecoveryFailure::Timeout | RecoveryFailure::Dns
         ) {
-            remote_addr.transport_failed();
+            remote_addr.transport_failed(carrier);
         }
         let (retry_interval, retry_count) = match status {
             Status::Cancelled => break 'outer,
@@ -828,7 +830,8 @@ async fn run_server_side_cli_worker<LocalStream>(
 
 // `backoff` is skipped: it is mutable retry state, and recording it would
 // print two ladders' internals on every span the worker enters.
-#[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots, wake))]
+#[allow(clippy::too_many_arguments)]
+#[instrument(skip(backoff, report, shutdown, stream_tasks, setup_slots, wake, carrier))]
 async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     backoff: &mut ControlBackoff,
     config: ServerCliRunConfig,
@@ -837,6 +840,7 @@ async fn run_server_side_cli_inner<LocalStream: StreamProvider>(
     stream_tasks: &mut JoinSet<()>,
     setup_slots: &Arc<tokio::sync::Semaphore>,
     wake: &mut RecoveryWake,
+    carrier: &mut Option<u64>,
 ) -> std::result::Result<(), Status>
 where
     LocalStream::Item: StreamForward,
@@ -902,6 +906,7 @@ where
             }
         }
     };
+    *carrier = manager_stream.carrier_id();
     tracing::debug!(
         event = "local_server_connected_remote",
         key = %key,

@@ -295,6 +295,7 @@ impl Consumer {
                 self.keep_alive,
                 self.credential,
                 true,
+                &mut None,
             )
             .await
             .map_err(io_error)?;

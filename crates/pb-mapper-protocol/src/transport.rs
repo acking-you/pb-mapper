@@ -37,6 +37,15 @@ impl From<TcpStream> for RelayStream {
 }
 
 impl RelayStream {
+    /// Process-local identity of the shared carrier, if this stream uses QUIC.
+    pub fn carrier_id(&self) -> Option<u64> {
+        match self {
+            Self::Tcp(_) => None,
+            #[cfg(feature = "relay-quic")]
+            Self::Quic(stream) => Some(stream.carrier_id()),
+        }
+    }
+
     pub fn relay_addr(&self) -> io::Result<SocketAddr> {
         match self {
             Self::Tcp(stream) => stream.peer_addr(),

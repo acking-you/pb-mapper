@@ -28,6 +28,10 @@ FFI_TARGET_DIR="${ROOT_DIR}/ui/native/macos"
 mkdir -p "${FFI_TARGET_DIR}"
 cp "${STAGED_LIB}" "${FFI_TARGET_DIR}/${FFI_LIB_NAME}"
 
+# Set the install name before Xcode links the app against this library. Rust's
+# absolute build path would otherwise be recorded in the executable too.
+install_name_tool -id "@rpath/${FFI_LIB_NAME}" "${FFI_TARGET_DIR}/${FFI_LIB_NAME}"
+
 # arm64 binaries must carry a signature to run at all, so the linker ad-hoc
 # signs them; x86_64 has no such rule and comes out unsigned. Xcode then fails
 # the app's CodeSign step on the unsigned nested dylib ("code object is not

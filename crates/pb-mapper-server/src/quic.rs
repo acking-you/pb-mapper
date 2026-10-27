@@ -335,7 +335,11 @@ async fn handle_connection(
             Err(code) => {
                 let failure = pb_mapper_auth::AuthFailure::new(
                     code,
-                    "relay QUIC connection capacity reached",
+                    if code == "quic_credential_capacity" {
+                        "this credential has reached its relay QUIC connection limit"
+                    } else {
+                        "relay QUIC connection capacity reached"
+                    },
                     true,
                 );
                 reject(&mut stream, &initial.session, &failure).await?;

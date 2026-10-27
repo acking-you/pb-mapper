@@ -65,7 +65,7 @@ pub(super) async fn send_admin_request(
             // effect. Anything past that point is reported as-is.
             Err(error) => {
                 if crate::sdk::client::is_carrier_failure(&error) {
-                    endpoint.invalidate_cached_transport();
+                    endpoint.invalidate_cached_transport(exchange.carrier);
                 }
                 if exchange.sent
                     || last_attempt
@@ -109,11 +109,15 @@ pub(super) async fn send_admin_request(
 /// failing, and it decides whether a retry is safe.
 struct Exchange {
     sent: bool,
+    carrier: Option<u64>,
 }
 
 impl Exchange {
     fn new() -> Self {
-        Self { sent: false }
+        Self {
+            sent: false,
+            carrier: None,
+        }
     }
 
     /// Select a carrier stream before sending the administrator request.
@@ -130,6 +134,7 @@ impl Exchange {
             .connect_addresses(addrs, *credential)
             .await
             .map_err(|error| Error::from_connect(error, addrs.to_string()))?;
+        self.carrier = stream.carrier_id();
         let session = ClientHeaderSession::new_v2(credential).map_err(protocol)?;
         self.write_request(&mut stream, &session, encoded).await?;
         let mut reader = session.response_reader(&mut stream).map_err(protocol)?;

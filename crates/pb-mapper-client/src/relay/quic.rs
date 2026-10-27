@@ -159,20 +159,21 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    /// After a transport failure, retire every connection the relay has
-    /// been silent on for [`SILENCE`], so that the next stream dials afresh
-    /// rather than waiting out Quinn's idle timeout on a path that no longer
-    /// delivers. One the relay is still heard on is working, whatever
-    /// failed — a slow service behind it, say — and stays: retiring it would
-    /// only leave its long-lived streams holding a relay slot beside its
-    /// replacement's. Established streams keep theirs either way.
-    pub fn invalidate(&self) {
+    /// Retire only the failed stream's carrier, and only if the relay has
+    /// stopped replying on it. A stream reset or slow backend must not evict
+    /// a working carrier. Late failures from an already retired carrier are
+    /// harmless; its replacement and other credentials are never touched.
+    pub fn transport_failed(&self, carrier: Option<u64>) {
+        let Some(carrier) = carrier else { return };
         let mut state = lock(&self.state);
         let now = Instant::now();
-        for entry in &mut state.entries {
-            if entry.pooled && now.duration_since(entry.heard(now)) >= SILENCE {
-                entry.pooled = false;
-            }
+        if let Some(entry) = state
+            .entries
+            .iter_mut()
+            .find(|entry| entry.pooled && entry.shared.connection.stable_id() as u64 == carrier)
+            && (!entry.is_open() || now.duration_since(entry.heard(now)) >= SILENCE)
+        {
+            entry.pooled = false;
         }
     }
 
@@ -466,4 +467,65 @@ async fn dial_inner(
     }
     tracing::info!(event = "relay_quic_connected", %relay_addr, peer = %shared.connection.remote_address(), connection_id = shared.connection.stable_id());
     Ok(shared)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn failures_only_retire_the_selected_silent_carrier() {
+        let (config, certificate) = server_config().unwrap();
+        let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = server.local_addr().unwrap();
+        let pool = Pool::default();
+        let mut peers = Vec::new();
+        let mut ids = Vec::new();
+        for key in [1, 2, 1] {
+            let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            endpoint.set_default_client_config(client_config(&certificate).unwrap());
+            let (client, peer) =
+                tokio::join!(endpoint.connect(address, SERVER_NAME).unwrap(), async {
+                    server.accept().await.unwrap().await.unwrap()
+                });
+            let connection = client.unwrap();
+            ids.push(connection.stable_id() as u64);
+            peers.push(peer);
+            lock(&pool.state).entries.push(Entry::new(
+                Credential::Admin([key; 32]),
+                0,
+                Arc::new(QuicConnection {
+                    connection,
+                    endpoint,
+                    relay_addr: address,
+                }),
+            ));
+        }
+        // Make silence deterministic, independent of handshake ACK timing.
+        {
+            let mut state = lock(&pool.state);
+            for entry in &mut state.entries {
+                entry.received = received(&entry.shared);
+                entry.heard = Instant::now() - SILENCE;
+            }
+            // A failure on a carrier that is still replying must preserve it.
+            state.entries[0].heard = Instant::now();
+        }
+        pool.transport_failed(Some(ids[0]));
+        assert!(pool.diagnostics().connections.iter().all(|c| c.pooled));
+        lock(&pool.state).entries[0].heard = Instant::now() - SILENCE;
+        // DNS, discovery and admission failures selected no carrier at all.
+        pool.transport_failed(None);
+        assert!(pool.diagnostics().connections.iter().all(|c| c.pooled));
+        pool.transport_failed(Some(ids[0]));
+        pool.transport_failed(Some(ids[0]));
+        let state = lock(&pool.state);
+        assert!(!state.entries[0].pooled);
+        assert!(state.entries[1].pooled, "another credential stays reusable");
+        assert!(
+            state.entries[2].pooled,
+            "a late failure cannot retire the replacement"
+        );
+    }
 }

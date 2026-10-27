@@ -5,6 +5,11 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
+    inputs:
+      macos_verify_only:
+        description: 'Build, sign and notarize both macOS architectures without publishing a release'
+        type: boolean
+        default: false
 
 env:
   UI_VERSION: ${{ github.ref_name }}
@@ -60,6 +65,7 @@ jobs:
           path: ui_release_notes.md
 
   build-windows:
+    if: ${{ !inputs.macos_verify_only }}
     runs-on: windows-latest
     needs: [get-release]
     steps:
@@ -111,7 +117,7 @@ jobs:
             throw "FFI hash mismatch. source=$srcHash bundle=$dstHash"
           }
       - name: Upload Windows artifacts
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
@@ -121,6 +127,7 @@ jobs:
           files: ui/dist/*/*
 
   build-linux:
+    if: ${{ !inputs.macos_verify_only }}
     runs-on: ubuntu-22.04
     needs: [get-release]
     steps:
@@ -169,11 +176,11 @@ jobs:
           cd ui
 
           # Create directory structure for packaging
-          mkdir -p dist/${UI_VERSION}
+          mkdir -p "dist/${UI_VERSION}"
 
           # Create ZIP package
           cd build/linux/x64/release/bundle
-          zip -r ../../../../../dist/${UI_VERSION}/pb-mapper-linux.zip .
+          zip -r "../../../../../dist/${UI_VERSION}/pb-mapper-linux.zip" .
 
           # Create AppImage (basic)
           cd ../../../../../
@@ -215,9 +222,9 @@ jobs:
           # Build AppImage
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
-          ./appimagetool-x86_64.AppImage AppDir dist/${UI_VERSION}/pb-mapper-linux.AppImage
+          ./appimagetool-x86_64.AppImage AppDir "dist/${UI_VERSION}/pb-mapper-linux.AppImage"
       - name: Upload Linux artifacts
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
@@ -249,9 +256,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ui-release-notes
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.44.9
@@ -260,9 +264,25 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-      - name: Install appdmg
+      - name: Check signing configuration
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
         run: |
-          npm install -g appdmg
+          python3 - <<'PY'
+          import os
+          required = ('MACOS_CERTIFICATE_P12_BASE64', 'MACOS_CERTIFICATE_PASSWORD',
+                      'APPLE_NOTARY_PRIVATE_KEY', 'MACOS_SIGNING_IDENTITY', 'APPLE_TEAM_ID',
+                      'APPLE_NOTARY_KEY_ID', 'APPLE_NOTARY_ISSUER_ID')
+          missing = [key for key in required if not os.environ.get(key)]
+          if missing:
+              raise SystemExit('Missing signing configuration: ' + ', '.join(missing))
+          PY
       - name: Build latest macOS FFI
         run: |
           make build-pb-mapper-ffi-macos
@@ -292,34 +312,54 @@ jobs:
             echo "FFI hash mismatch: src=${SRC_HASH} dst=${DST_HASH}"
             exit 1
           fi
-      - name: Package macOS artifacts
+      - name: Sign, notarize and verify macOS package
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
         run: |
-          cd ui
-          PROJECT_DIR=$(pwd)
-          cd build/macos/Build/Products/Release
-          cat>appdmg.json<<EOF
-          {
-            "title": "pb-mapper",
-            "icon": "pb-mapper.app/Contents/Resources/AppIcon.icns",
-            "contents": [
-              { "x": 448, "y": 344, "type": "link", "path": "/Applications" },
-              { "x": 192, "y": 344, "type": "file", "path": "pb-mapper.app" }
-            ]
-          }
-          EOF
-          mkdir dist
-          DMG="pb-mapper-macos-${{ matrix.arch }}.dmg"
-          echo "DMG_ASSET=ui/build/macos/Build/Products/Release/dist/${DMG}" >> $GITHUB_ENV
-          appdmg appdmg.json "dist/${DMG}"
+          python3 scripts/release/macos_package.py \
+            --app ui/build/macos/Build/Products/Release/pb-mapper.app \
+            --arch '${{ matrix.arch }}' \
+            --output 'ui/dist/pb-mapper-macos-${{ matrix.arch }}.dmg'
+      - name: Clean up temporary signing credentials
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil, subprocess
+          for directory in pathlib.Path(os.environ['RUNNER_TEMP']).glob('pb-mapper-signing-*'):
+              keychain = directory / 'signing.keychain-db'
+              if keychain.exists():
+                  subprocess.run(['security', 'delete-keychain', str(keychain)], check=True)
+              shutil.rmtree(directory)
+          PY
+      - name: Upload signing verification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-verification
+          path: ui/dist/*-verification/
+          if-no-files-found: ignore
+      - name: Upload verified macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-dmg
+          path: ui/dist/pb-mapper-macos-${{ matrix.arch }}.dmg
+          if-no-files-found: error
       - name: Upload macOS artifacts
-        uses: softprops/action-gh-release@v1
+        if: ${{ !inputs.macos_verify_only }}
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}-ui
           target_commitish: ${{ github.sha }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
           body_path: ui_release_notes.md
           files: |
-            ${{env.DMG_ASSET}}
+            ui/dist/pb-mapper-macos-${{ matrix.arch }}.dmg
 
   # The app updates itself only from a release whose manifest this key signs,
   # and installs only files whose size and SHA-256 the manifest lists. A

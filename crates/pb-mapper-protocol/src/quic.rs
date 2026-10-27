@@ -197,6 +197,9 @@ impl QuicStream {
     pub fn new(owner: Arc<QuicConnection>, (send, recv): (SendStream, RecvStream)) -> Self {
         Self { recv, send, owner }
     }
+    pub fn carrier_id(&self) -> u64 {
+        self.owner.connection.stable_id() as u64
+    }
     pub fn relay_addr(&self) -> SocketAddr {
         self.owner.relay_addr
     }
