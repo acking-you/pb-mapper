@@ -152,6 +152,32 @@ jobs:
           path: js/pb-mapper.*.node
           if-no-files-found: error
 
+  # The SDK crates name the pinned forks by version, so those versions must be
+  # on crates.io first. Done before npm, so a fork that cannot be published
+  # stops the release before anything of pb-mapper's own is out.
+  publish-forks:
+    name: Publish pinned forks to crates.io
+    needs: [release-preflight, rust-quality, node-bindings]
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+
+      - name: Publish forks in dependency order
+        run: |
+          scripts/release/publish-crates.sh \
+            deps/quinn/quinn-udp \
+            deps/quinn/quinn-proto \
+            deps/quinn/quinn \
+            deps/rcgen/rcgen
+
   publish-rust:
     name: Publish Rust SDK to crates.io
     needs: [publish-node]
@@ -168,40 +194,19 @@ jobs:
           toolchain: 1.99.1
 
       - name: Publish crates in dependency order
-        shell: bash
         run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-
-          wait_for_crate() {
-            local package="$1"
-            for attempt in $(seq 1 30); do
-              if cargo info --registry crates-io "${package}@${version}" >/dev/null 2>&1; then
-                return 0
-              fi
-              echo "Waiting for ${package}@${version} in the crates.io index (${attempt}/30)"
-              sleep 10
-            done
-            echo "::error::${package}@${version} did not reach the crates.io index"
-            return 1
-          }
-
-          for package in \
-            pb-mapper-core \
-            pb-mapper-auth \
-            pb-mapper-protocol \
-            pb-mapper-server \
-            pb-mapper-client \
-            pb-mapper \
-            pb-mapper-cli
-          do
-            cargo publish --locked --registry crates-io -p "$package"
-            wait_for_crate "$package"
-          done
+          scripts/release/publish-crates.sh \
+            crates/pb-mapper-core \
+            crates/pb-mapper-auth \
+            crates/pb-mapper-protocol \
+            crates/pb-mapper-server \
+            crates/pb-mapper-client \
+            crates/pb-mapper \
+            crates/pb-mapper-cli
 
   publish-node:
     name: Publish Node SDK to npm
-    needs: [release-preflight, rust-quality, node-bindings]
+    needs: [publish-forks]
     runs-on: ubuntu-latest
     env:
       NPM_CONFIG_PROVENANCE: "true"

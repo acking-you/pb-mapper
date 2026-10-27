@@ -54,8 +54,8 @@ Use Flutter 3.44.9, matching the desktop release and Flutter checks. Bump the
 workspace/UI release version and pubspec build number for a real release;
 never reuse a published build. Flutter split APKs add ABI-specific offsets to
 the build number, so compare **effective** versionCodes in the APKs.
-Build 906 was consumed by the local repair; release 0.9.6 uses build 907.
-The next distribution must use at least 908. The build counter
+Build 906 was consumed by the local repair; release 0.9.6 uses build 907 and
+0.9.7 uses 908. The next distribution must use at least 909. The build counter
 is independent of the public version, as in proxy-everything.
 
 1. Rebuild the Android Rust library with `make build-pb-mapper-ffi-android`
@@ -72,7 +72,7 @@ is independent of the public version, as in proxy-everything.
    alignment. Pass the last locally signed release for upgrade comparison:
 
    ```sh
-   python scripts/release/android_package.py ui/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk --build-tools /path/to/Android/Sdk/build-tools/36.0.0 --version 0.9.6 --previous /path/to/previous/pb-mapper-arm64-v8a.apk
+   python scripts/release/android_package.py ui/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk --build-tools /path/to/Android/Sdk/build-tools/36.0.0 --version 0.9.7 --previous /path/to/previous/pb-mapper-arm64-v8a.apk
    ```
 
 4. Copy the verified APK into an ignored staging directory as
@@ -83,13 +83,14 @@ is independent of the public version, as in proxy-everything.
    `--clobber`, then run **Publish verified Android updates**:
 
    ```sh
-   gh release upload v0.9.6-ui release/pb-mapper-*.apk
-   gh workflow run publish-android.yml -f tag=v0.9.6 -F establish_signing_baseline=true
+   gh release upload v0.9.7-ui release/pb-mapper-*.apk
+   gh workflow run publish-android.yml -f tag=v0.9.7 -f previous_release=v0.9.6-ui
    ```
 
-   For later releases, use `-f previous_release=v0.9.6-ui` instead of the
-   baseline flag. CI verifies the existing manifest's signature and source
-   commit, then the attached APKs' pinned certificate, identity, alignment and
+   `previous_release` names the last fixed-key release; only v0.9.6, the first,
+   ran with `-F establish_signing_baseline=true` instead. CI verifies the
+   existing manifest's signature and source commit, then the attached APKs'
+   pinned certificate, identity, alignment and
    increasing versionCode. It signs the extended manifest using the existing
    `UPDATE_SIGNING_KEY` secret. The Android private key stays local. Re-running
    permits byte-identical APKs, never replacement of a published package.
