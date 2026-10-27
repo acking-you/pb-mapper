@@ -23,7 +23,7 @@
 | Variable | `APPLE_NOTARY_KEY_ID` | 公证 API key ID |
 | Variable | `APPLE_NOTARY_ISSUER_ID` | 公证 API issuer UUID |
 
-每次作业使用临时钥匙串，完成或失败后清理。凭据不进入源码、构建产物或验证日志。公证被拒绝或等待超时时保留 submission ID；被拒绝时另保存 Apple 诊断日志。
+每次作业使用临时钥匙串，完成或失败后清理。凭据不进入源码、构建产物或验证日志。公证被拒绝或等待超时时保留 submission ID；被拒绝时另保存 Apple 诊断日志。票据下载与校验遇到临时网络错误时，按 5、15、45 秒间隔最多重试三次；签名或票据本身的错误直接失败。
 
 合并前或轮换凭据后，可在修复分支上手动运行 `release-ui.yml`，设置 `macos_verify_only=true`。这会验证两种架构并上传 Actions artifacts，不创建或修改 GitHub Release。验证日志位于 `macos-<arch>-verification` artifact。
 

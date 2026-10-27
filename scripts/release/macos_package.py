@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 
 
 def run(*args):
@@ -23,6 +24,21 @@ def run(*args):
         # Never include command arguments: security/notarytool receive credentials.
         raise RuntimeError(f"{Path(args[0]).name} failed:\n{result.stdout}\n{result.stderr}")
     return result.stdout + result.stderr
+
+
+
+def stapler(action, path):
+    # Even validation contacts Apple's ticket service. Retry transient URL
+    # transport errors, never a rejected signature or invalid/missing ticket.
+    for delay in (5, 15, 45, None):
+        try:
+            return run("xcrun", "stapler", action, path)
+        except RuntimeError as error:
+            if delay is None or not re.search(
+                    r"NSURLErrorDomain Code=-(?:1001|1003|1004|1005|1006|1009)\b", str(error)):
+                raise
+            print(f"Apple ticket service network failure; retrying {action} in {delay}s…", flush=True)
+            time.sleep(delay)
 
 
 def required(name):
@@ -168,7 +184,7 @@ def verify_mounted_app(image, work, expected_info, team, logs):
         if f"TeamIdentifier={team}" not in signature or "Authority=Developer ID Application:" not in signature:
             raise RuntimeError("Mounted application is missing the expected Developer ID signature")
         report += signature
-        report += run("xcrun", "stapler", "validate", app)
+        report += stapler("validate", app)
         report += run("spctl", "--assess", "--type", "execute", "--verbose=4", app)
         if shutil.which("syspolicy_check"):
             report += run("syspolicy_check", "distribution", app)
@@ -220,8 +236,8 @@ def package(args):
             archive = work / "pb-mapper-app.zip"
             run("ditto", "-c", "-k", "--keepParent", app, archive)
             notarize(archive, auth, logs)
-            run("xcrun", "stapler", "staple", app)
-            run("xcrun", "stapler", "validate", app)
+            stapler("staple", app)
+            stapler("validate", app)
             run("spctl", "--assess", "--type", "execute", "--verbose=2", app)
             (stage / "Applications").symlink_to("/Applications")
             candidate = work / output.name
@@ -229,8 +245,8 @@ def package(args):
                 "-format", "UDZO", candidate)
             run("codesign", "--sign", identity, "--timestamp", *signing, candidate)
             notarize(candidate, auth, logs)
-            run("xcrun", "stapler", "staple", candidate)
-            run("xcrun", "stapler", "validate", candidate)
+            stapler("staple", candidate)
+            stapler("validate", candidate)
             run("hdiutil", "verify", candidate)
             run("codesign", "--verify", "--strict", candidate)
             run("spctl", "--assess", "--type", "open", "--context", "context:primary-signature",

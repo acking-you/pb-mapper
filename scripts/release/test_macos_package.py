@@ -14,6 +14,26 @@ import macos_package
 
 
 class ReleaseSafetyTests(unittest.TestCase):
+    def test_ticket_validation_recovers_from_a_temporary_network_failure(self):
+        error = RuntimeError('NSURLErrorDomain Code=-1005 "The network connection was lost."')
+        with patch.object(macos_package, 'run', side_effect=[error, 'validated']) as run, \
+                patch.object(macos_package.time, 'sleep') as sleep:
+            self.assertEqual(macos_package.stapler('validate', Path('release.dmg')), 'validated')
+            self.assertEqual(run.call_count, 2)
+            sleep.assert_called_once_with(5)
+
+    def test_ticket_retries_are_bounded_and_do_not_retry_invalid_tickets(self):
+        for message, attempts in [('NSURLErrorDomain Code=-1005', 4), ('Invalid ticket: Error 65', 1)]:
+            with self.subTest(message=message):
+                error = RuntimeError(message)
+                with patch.object(macos_package, 'run', side_effect=error) as run, \
+                        patch.object(macos_package.time, 'sleep') as sleep:
+                    with self.assertRaises(RuntimeError) as caught:
+                        macos_package.stapler('validate', Path('release.dmg'))
+                    self.assertIs(caught.exception, error)
+                    self.assertEqual(run.call_count, attempts)
+                    self.assertEqual(sleep.call_count, attempts - 1)
+
     def test_mounted_app_assessment_failure_is_fatal_and_detaches_image(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
