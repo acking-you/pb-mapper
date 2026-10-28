@@ -69,6 +69,7 @@ typedef _PbMapperRegisterServiceNative =
       Int32 enableKeepAlive,
       // Nonzero lets connections reach it directly.
       Int32 allowDirect,
+      Int32 portMapping,
     );
 typedef _PbMapperRegisterServiceDart =
     Pointer<Utf8> Function(
@@ -79,6 +80,7 @@ typedef _PbMapperRegisterServiceDart =
       int enableEncryption,
       int enableKeepAlive,
       int allowDirect,
+      int portMapping,
     );
 
 typedef _PbMapperUnregisterServiceNative =
@@ -102,6 +104,7 @@ typedef _PbMapperConnectServiceNative =
       Int64 namespace,
       // Nonzero tries a direct path before the relay.
       Int32 allowDirect,
+      Int32 portMapping,
     );
 typedef _PbMapperConnectServiceDart =
     Pointer<Utf8> Function(
@@ -112,6 +115,7 @@ typedef _PbMapperConnectServiceDart =
       int enableKeepAlive,
       int namespace,
       int allowDirect,
+      int portMapping,
     );
 
 typedef _PbMapperDisconnectServiceNative =
@@ -278,7 +282,7 @@ class PbMapperFFI {
       .lookupFunction<
         _PbMapperRegisterServiceNative,
         _PbMapperRegisterServiceDart
-      >('pb_mapper_register_service');
+      >('pb_mapper_register_service_with_options');
 
   late final pbMapperUnregisterService = lib
       .lookupFunction<
@@ -296,7 +300,7 @@ class PbMapperFFI {
       .lookupFunction<
         _PbMapperConnectServiceNative,
         _PbMapperConnectServiceDart
-      >('pb_mapper_connect_service');
+      >('pb_mapper_connect_service_with_options');
 
   late final pbMapperDisconnectService = lib
       .lookupFunction<
@@ -344,6 +348,12 @@ class PbMapperFFI {
       >('pb_mapper_get_service_conns_json');
 
   /// Every relay status and administrator operation, as `{"op": …}` JSON.
+  late final pbMapperDiagnosticsCall = lib
+      .lookupFunction<
+        _PbMapperGetServiceStatusNative,
+        _PbMapperGetServiceStatusDart
+      >('pb_mapper_diagnostics_call_json');
+
   late final pbMapperRelayCall = lib
       .lookupFunction<
         _PbMapperGetServiceStatusNative,

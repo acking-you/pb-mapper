@@ -2168,7 +2168,7 @@ dependencies = [
  "pb-mapper-core",
  "pb-mapper-protocol",
  "pb-mapper-server",
- "portmapper",
+ "portmapper-plus",
  "quinn-plus",
  "rand 0.10.2",
  "rcgen-plus",
@@ -2239,6 +2239,7 @@ dependencies = [
  "pb-mapper-client",
  "serde_json",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2372,10 +2373,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "portmapper"
+name = "portmapper-plus"
 version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bad81f18ea1635a873d8cbb62904d7752f0b82001dae5cc3a774c82b0b208cf7"
 dependencies = [
  "base64 0.23.1",
  "bytes",

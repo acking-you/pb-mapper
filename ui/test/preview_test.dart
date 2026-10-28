@@ -247,6 +247,73 @@ void main() {
     await loadRealFonts();
   });
 
+  for (final (name, size) in [
+    ('desktop', const Size(1280, 820)),
+    ('phone', const Size(390, 844)),
+  ]) {
+    testWidgets('port mapping $name', (tester) async {
+      final api =
+          FakePbMapperApi(
+              services: [
+                fakeService(serviceKey: 'nas-files', portMapping: true),
+              ],
+            )
+            ..diagnosticUpdates = Stream.value(
+              DiagnosticUpdate(
+                snapshot: {
+                  'events': [
+                    for (final (seq, stage) in [
+                      (1, 'discovering'),
+                      (2, 'gateway_found'),
+                      (3, 'discovered'),
+                      (4, 'requesting'),
+                      (5, 'active'),
+                    ])
+                      {
+                        'seq': seq,
+                        'kind': {
+                          'kind': 'port_mapping',
+                          'mapping': {
+                            'stage': stage,
+                            'active': stage == 'active',
+                            'protocol': 'pcp',
+                            'local_port': 52183,
+                            'external_addr': '203.0.113.7:52183',
+                          },
+                        },
+                      },
+                  ],
+                },
+              ),
+            );
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.tunnels,
+        size: size,
+        locale: const Locale('zh'),
+      );
+      await tester.tap(find.byKey(const Key('menu-share:nas-files')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('menu-diagnostics')));
+      await settle(tester);
+      await _capture(tester, 'port_mapping_diagnostics_$name');
+      await tester.tap(find.byTooltip('关闭').last);
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('menu-share:nas-files')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('menu-edit')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('tunnel-more')));
+      await settle(tester);
+      await tester.ensureVisible(find.byKey(const Key('tunnel-port-mapping')));
+      await settle(tester);
+      await _capture(tester, 'port_mapping_editor_$name');
+      expect(tester.takeException(), isNull);
+      await finish(tester);
+    });
+  }
+
   for (final (name, theme) in [
     ('light', ThemeMode.light),
     ('dark', ThemeMode.dark),

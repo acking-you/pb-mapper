@@ -1,4 +1,27 @@
 {
+  "diagnosticStage": "{stage, select, disabled{已关闭} waiting_for_direct{等待创建直连端点} relay_only{仅中继模式，不申请映射} discovering{发现地址与协议} gateway_found{已找到网关} discovered{协议探测完成} requesting{申请端口映射} active{映射已生效} renewing{续租中} expired{租期已过期} retrying{重试映射} network_changed{网络发生变化} releasing{释放映射} released{已确认释放映射} release_sent{释放请求已发送，未确认} failed{映射失败} release_failed{释放映射失败} cancelled{操作已取消} stopped{已停止} starting{启动中} capacity{等待连接容量} resolving{解析中继地址} connecting{连接中继} handshake{中继握手认证} ready{已就绪} backoff{等待重试} negotiating{协商直连} punching{建立直连路径} committing{提交直连会话} relay_ready{中继已就绪} relay_failed{中继连接失败} direct_established{直连会话已建立} direct_fallback{回退中继} session_started{会话开始} session_closed{会话结束} other{状态更新}}",
+  "portMapping": "自动端口映射",
+  "diagnosticsRefresh": "刷新状态快照",
+  "@diagnosticStage": {
+    "placeholders": {
+      "stage": {
+        "type": "String"
+      }
+    }
+  },
+  "diagnosticsLagged": "读取过慢，已跳过 {count} 条事件。请刷新快照以确认当前状态。",
+  "@diagnosticsLagged": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "diagnosticsWaiting": "等待诊断事件",
+  "diagnosticsCopy": "复制诊断信息",
+  "portMappingRelayOnly": "启用直连后才会申请端口映射。仅中继模式下会保留你的选择。",
+  "tunnelDiagnostics": "监控诊断",
+
   "@@locale": "zh",
   "appTitle": "pb-mapper",
 

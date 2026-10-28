@@ -34,6 +34,104 @@ fn number(value: u64) -> f64 {
     value.min((1_u64 << 53) - 1) as f64
 }
 
+fn path_name(path: sdk::SessionPath) -> &'static str {
+    match path {
+        sdk::SessionPath::Direct => "direct",
+        sdk::SessionPath::Relay => "relay",
+    }
+}
+
+#[napi(object)]
+pub struct JsPortMappingEvent {
+    pub stage: String,
+    pub network_generation: f64,
+    pub local_port: Option<u32>,
+    pub gateway: Option<String>,
+    pub protocol: Option<String>,
+    pub available_protocols: Vec<String>,
+    pub external_addr: Option<String>,
+    pub active: bool,
+    pub lease_lifetime_ms: Option<f64>,
+    pub retry_in_ms: Option<f64>,
+    pub error: Option<String>,
+}
+
+impl From<sdk::PortMappingEvent> for JsPortMappingEvent {
+    fn from(value: sdk::PortMappingEvent) -> Self {
+        Self {
+            stage: value.stage.as_str().into(),
+            network_generation: number(value.network_generation),
+            local_port: value.local_port.map(u32::from),
+            gateway: value.gateway.map(|v| v.to_string()),
+            protocol: value.protocol.map(|v| v.as_str().into()),
+            available_protocols: value
+                .available_protocols
+                .into_iter()
+                .map(|v| v.as_str().into())
+                .collect(),
+            external_addr: value.external_addr.map(|v| v.to_string()),
+            active: value.active,
+            lease_lifetime_ms: value.lease_lifetime_ms.map(number),
+            retry_in_ms: value.retry_in_ms.map(number),
+            error: value.error,
+        }
+    }
+}
+
+#[napi(object)]
+pub struct JsPortMappingDiagnostics {
+    pub current: JsPortMappingEvent,
+    pub attempts: f64,
+    pub renewals: f64,
+    pub failures: f64,
+}
+
+/// Pull-based diagnostics feed. No JS callback queue grows while a reader is idle.
+#[napi]
+pub struct DiagnosticsSubscription {
+    receiver: tokio::sync::Mutex<sdk::DiagnosticsSubscription>,
+    closed: tokio_util::sync::CancellationToken,
+}
+
+#[napi]
+impl DiagnosticsSubscription {
+    /// Next transition, or null when closed. Timeouts reject without consuming
+    /// an event. Lag rejects with the skipped count; refresh diagnostics() and
+    /// continue reading. Calls on one subscription are serialized.
+    #[napi]
+    pub async fn next(&self, timeout_ms: Option<u32>) -> Result<Option<JsTunnelEvent>> {
+        let receive = async {
+            let mut receiver = self.receiver.lock().await;
+            match receiver.recv().await {
+                Ok(event) => Ok(Some(event.into())),
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => Ok(None),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    Err(Error::from_reason(format!(
+                        "diagnostics lagged by {skipped} events; refresh diagnostics()"
+                    )))
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            () = self.closed.cancelled() => Ok(None),
+            result = async {
+                match timeout_ms {
+                    Some(ms) => tokio::time::timeout(Duration::from_millis(ms.into()), receive).await
+                        .map_err(|_| Error::from_reason("diagnostics timed out"))?,
+                    None => receive.await,
+                }
+            } => result,
+        }
+    }
+
+    /// Close the subscription and wake pending reads.
+    #[napi]
+    pub fn close(&self) {
+        self.closed.cancel();
+    }
+}
+
 #[napi(object)]
 pub struct JsRelayDiagnostics {
     pub transport: String,
@@ -127,6 +225,9 @@ pub struct JsPathDiagnostics {
 /// entry, counted by `repeats`.
 #[napi(object)]
 pub struct JsTunnelEvent {
+    pub phase: Option<String>,
+    pub path: Option<String>,
+    pub mapping: Option<JsPortMappingEvent>,
     /// Increases with every recorded event, a fold included: remember the
     /// highest one handled to tell which entries are new.
     pub seq: f64,
@@ -152,6 +253,9 @@ pub struct JsTunnelEvent {
 impl From<sdk::TunnelEvent> for JsTunnelEvent {
     fn from(event: sdk::TunnelEvent) -> Self {
         let mut js = Self {
+            phase: None,
+            path: None,
+            mapping: None,
             seq: number(event.seq),
             age_ms: number(event.age_ms),
             repeats: event.repeats,
@@ -163,6 +267,27 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
             stage: None,
         };
         js.kind = match event.kind {
+            sdk::TunnelEventKind::PhaseChanged { phase } => {
+                js.phase = Some(phase.as_str().into());
+                "phase_changed"
+            }
+            sdk::TunnelEventKind::DirectStageChanged { stage } => {
+                js.stage = Some(stage.as_str().into());
+                "direct_stage_changed"
+            }
+            sdk::TunnelEventKind::SessionStarted { path } => {
+                js.path = Some(path_name(path).into());
+                "session_started"
+            }
+            sdk::TunnelEventKind::SessionClosed { path } => {
+                js.path = Some(path_name(path).into());
+                "session_closed"
+            }
+            sdk::TunnelEventKind::PortMapping { mapping } => {
+                js.mapping = Some((*mapping).into());
+                "port_mapping"
+            }
+            sdk::TunnelEventKind::Stopped => "stopped",
             sdk::TunnelEventKind::RelayReady { latency_ms } => {
                 js.latency_ms = Some(number(latency_ms));
                 "relay_ready"
@@ -192,6 +317,7 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
 
 #[napi(object)]
 pub struct JsTunnelDiagnostics {
+    pub port_mapping: Option<JsPortMappingDiagnostics>,
     pub relay_transport: String,
     pub direct: Option<JsPathDiagnostics>,
     pub sdk_version: String,
@@ -213,6 +339,12 @@ pub struct JsTunnelDiagnostics {
 impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
     fn from(value: sdk::TunnelDiagnostics) -> Self {
         Self {
+            port_mapping: value.port_mapping.map(|mapping| JsPortMappingDiagnostics {
+                current: mapping.current.into(),
+                attempts: number(mapping.attempts),
+                renewals: number(mapping.renewals),
+                failures: number(mapping.failures),
+            }),
             direct: value.direct.map(|d| JsPathDiagnostics {
                 direct_sessions: number(d.direct_sessions),
                 relay_sessions: number(d.relay_sessions),
@@ -302,6 +434,8 @@ fn status_label(status: &TunnelStatus) -> String {
 
 #[napi(object)]
 pub struct JsClientConfig {
+    /// Request gateway UDP port mapping for direct endpoints (default false).
+    pub port_mapping: Option<bool>,
     /// Relay carrier: tcp (default) or quic, independent of the local service protocol.
     pub relay_transport: Option<String>,
     pub server: String,
@@ -535,6 +669,8 @@ impl Client {
         .map_err(to_napi)?;
         let inner = inner
             .with_relay_transport(relay_transport)
+            .map_err(to_napi)?
+            .with_port_mapping(config.port_mapping.unwrap_or(false))
             .map_err(to_napi)?;
         Ok(Self { inner })
     }
@@ -738,6 +874,15 @@ macro_rules! tunnel_class {
             #[napi]
             pub fn diagnostics(&self) -> JsTunnelDiagnostics {
                 self.inner.diagnostics().into()
+            }
+
+            /// Independent bounded stream, with recent history replayed first.
+            #[napi]
+            pub fn subscribe_diagnostics(&self) -> DiagnosticsSubscription {
+                DiagnosticsSubscription {
+                    receiver: tokio::sync::Mutex::new(self.inner.subscribe_diagnostics()),
+                    closed: tokio_util::sync::CancellationToken::new(),
+                }
             }
 
             /// Resolves with the next status this tunnel reports, rendered as

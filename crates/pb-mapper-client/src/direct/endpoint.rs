@@ -38,7 +38,11 @@ pub(super) struct Network {
     mapping: Option<super::mapping::Mapping>,
 }
 impl Network {
-    pub fn new(server: bool, port_mapping: bool) -> io::Result<Arc<Self>> {
+    pub fn new(
+        server: bool,
+        port_mapping: bool,
+        diagnostics: crate::diagnostics::Diagnostics,
+    ) -> io::Result<Arc<Self>> {
         let identity = Identity::new()?;
         let (tx, rx) = mpsc::channel(64);
         let mut transports = Vec::new();
@@ -108,12 +112,12 @@ impl Network {
                     .filter(SocketAddr::is_ipv4)
                     .and_then(|addr| std::num::NonZeroU16::new(addr.port()))
             });
-            port.map(|port| super::mapping::Mapping::new(port, network.clone()))
+            port.map(|port| super::mapping::Mapping::new(port, network.clone(), diagnostics))
         } else {
             None
         };
         #[cfg(not(feature = "port-mapping"))]
-        let _ = port_mapping;
+        let _ = (port_mapping, diagnostics);
         Ok(Arc::new(Self {
             identity,
             transports,
@@ -404,7 +408,8 @@ mod tests {
     #[tokio::test]
     async fn discovery_invalidation_survives_in_flight_stun_and_coalesces_refresh() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let mut network = Network::new(false, false).unwrap();
+            let mut network =
+                Network::new(false, false, crate::diagnostics::Diagnostics::default()).unwrap();
             Arc::get_mut(&mut network).unwrap().network = crate::network::NetworkHints::isolated();
             let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let server = stun.local_addr().unwrap();

@@ -25,7 +25,7 @@ pb-mapper-auth.workspace = true
 # Direct sessions, as the CLI has them: a connection tries a direct path
 # first and falls back to the relay, and the embedded relay offers one. The
 # relay itself is reached over TCP or, when Settings says so, QUIC.
-pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic"] }
+pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic", "port-mapping"] }
 pb-mapper-core.workspace = true
 pb-mapper-galaxy.workspace = true
 pb-mapper-protocol.workspace = true

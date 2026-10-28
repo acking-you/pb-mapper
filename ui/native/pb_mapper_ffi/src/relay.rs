@@ -58,7 +58,7 @@ pub unsafe extern "C" fn pb_mapper_relay_call_json(
         Err(error) => return err_ctl(&error),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let config = state.lock().await.get_config_status().await;

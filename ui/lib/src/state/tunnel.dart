@@ -50,6 +50,7 @@ class Tunnel {
     this.namespace,
     this.routedNamespace,
     this.allowDirect = true,
+    this.portMapping = false,
     this.path,
     this.relayTransport,
   });
@@ -65,6 +66,7 @@ class Tunnel {
     message: s.statusMessage,
     createdAtMs: s.createdAtMs,
     allowDirect: s.allowDirect,
+    portMapping: s.portMapping,
     path: s.path,
     relayTransport: s.relayTransport,
   );
@@ -82,6 +84,7 @@ class Tunnel {
     namespace: c.namespace,
     routedNamespace: c.routedNamespace,
     allowDirect: c.allowDirect,
+    portMapping: c.portMapping,
     path: c.path,
     relayTransport: c.relayTransport,
   );
@@ -120,6 +123,7 @@ class Tunnel {
   /// session tries a direct path before the relay; for a share, whether it
   /// lets connections reach it that way.
   final bool allowDirect;
+  final bool portMapping;
 
   /// How its sessions travel, while it runs.
   final TunnelPath? path;
@@ -179,6 +183,7 @@ class Tunnel {
     keepAlive: keepAlive,
     namespace: namespace,
     allowDirect: allowDirect,
+    portMapping: portMapping,
   );
 
   @override
@@ -195,6 +200,7 @@ class Tunnel {
       other.namespace == namespace &&
       other.routedNamespace == routedNamespace &&
       other.allowDirect == allowDirect &&
+      other.portMapping == portMapping &&
       other.path == path &&
       other.relayTransport == relayTransport;
 
@@ -211,6 +217,7 @@ class Tunnel {
     namespace,
     routedNamespace,
     allowDirect,
+    portMapping,
     path,
     relayTransport,
   );
@@ -249,6 +256,7 @@ class TunnelDraft {
     this.keepAlive = true,
     this.namespace,
     this.allowDirect = true,
+    this.portMapping = false,
   });
 
   final TunnelKind kind;
@@ -263,6 +271,7 @@ class TunnelDraft {
 
   /// See [Tunnel.allowDirect].
   final bool allowDirect;
+  final bool portMapping;
 
   /// The address a fresh form starts with: the conventional local service
   /// port for a share, a free-looking one for a connection.

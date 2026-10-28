@@ -1,3 +1,4 @@
+import 'tunnel_diagnostics.dart';
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/galaxy/planet_glyph.dart';
@@ -346,7 +347,7 @@ class _ToggleButtonState extends State<_ToggleButton> {
   }
 }
 
-enum _MenuAction { edit, copyKey, copyAddress, delete }
+enum _MenuAction { edit, diagnostics, copyKey, copyAddress, delete }
 
 class _TunnelMenu extends StatelessWidget {
   const _TunnelMenu({required this.tunnel, required this.store});
@@ -380,12 +381,18 @@ class _TunnelMenu extends StatelessWidget {
       icon: const Icon(AppIcons.more, size: 18),
       onSelected: (action) => switch (action) {
         _MenuAction.edit => openTunnelEditor(context, existing: tunnel),
+        _MenuAction.diagnostics => openTunnelDiagnostics(
+          context,
+          store,
+          tunnel,
+        ),
         _MenuAction.copyKey => copyText(context, tunnel.key),
         _MenuAction.copyAddress => copyText(context, tunnel.localAddress),
         _MenuAction.delete => deleteTunnel(context, store, tunnel),
       },
       itemBuilder: (context) => [
         item(_MenuAction.edit, AppIcons.edit, l10n.edit),
+        item(_MenuAction.diagnostics, AppIcons.latency, l10n.tunnelDiagnostics),
         item(_MenuAction.copyKey, AppIcons.copy, l10n.copyKey),
         item(_MenuAction.copyAddress, AppIcons.copy, l10n.copyAddress),
         const PopupMenuDivider(),

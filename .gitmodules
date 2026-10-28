@@ -30,3 +30,7 @@
 	path = deps/stun-proto
 	url = https://github.com/acking-you/stun-proto.git
 	branch = dev
+[submodule "deps/portmapper"]
+	path = deps/portmapper
+	url = https://github.com/acking-you/net-tools.git
+	branch = dev

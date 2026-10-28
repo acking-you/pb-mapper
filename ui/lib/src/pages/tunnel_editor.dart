@@ -164,6 +164,7 @@ class _TunnelFormState extends State<TunnelForm> {
       widget.existing?.keepAlive ?? widget.store.config.keepAliveEnabled;
   late int? _namespace = widget.existing?.namespace ?? widget.initialNamespace;
   late bool _direct = widget.existing?.allowDirect ?? true;
+  late bool _portMapping = widget.existing?.portMapping ?? false;
   bool _more = false;
   bool _busy = false;
   String? _keyError;
@@ -246,6 +247,7 @@ class _TunnelFormState extends State<TunnelForm> {
       keepAlive: _keepAlive,
       namespace: _kind == TunnelKind.connect ? _namespace : null,
       allowDirect: _direct,
+      portMapping: _portMapping,
     );
     setState(() => _busy = true);
     // Replacing goes the way an edit does: the old connection stops first,
@@ -304,18 +306,6 @@ class _TunnelFormState extends State<TunnelForm> {
           ),
           const SizedBox(height: 10),
         ],
-        AnimatedSwitcher(
-          duration: Motion.of(context, Motion.fast),
-          child: Text(
-            share ? l10n.kindShareHint : l10n.kindConnectHint,
-            key: ValueKey(_kind),
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-              fontSize: 12.5,
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
         _Field(
           key: const Key('tunnel-key'),
           controller: _key,
@@ -478,23 +468,30 @@ class _TunnelFormState extends State<TunnelForm> {
           _SwitchRow(
             key: const Key('tunnel-encryption'),
             title: l10n.encryption,
-            subtitle: l10n.encryptionHelp,
+            hint: l10n.encryptionHelp,
             value: _encrypted,
             onChanged: (v) => setState(() => _encrypted = v),
           ),
         _SwitchRow(
           key: const Key('tunnel-direct'),
           title: share ? l10n.directAllow : l10n.directPrefer,
-          subtitle: share ? l10n.directAllowHelp : l10n.directPreferHelp,
+          hint: share ? l10n.directAllowHelp : l10n.directPreferHelp,
           value: _direct,
           onChanged: (v) => setState(() => _direct = v),
         ),
         _SwitchRow(
           key: const Key('tunnel-keepalive'),
           title: l10n.keepAlive,
-          subtitle: l10n.keepAliveHelp,
+          hint: l10n.keepAliveHelp,
           value: _keepAlive,
           onChanged: (v) => setState(() => _keepAlive = v),
+        ),
+        _SwitchRow(
+          key: const Key('tunnel-port-mapping'),
+          title: l10n.portMapping,
+          hint: _direct ? null : l10n.portMappingRelayOnly,
+          value: _portMapping,
+          onChanged: _direct ? (v) => setState(() => _portMapping = v) : null,
         ),
       ],
     );
@@ -725,29 +722,29 @@ class _Disclosure extends StatelessWidget {
   }
 }
 
-/// A setting that is on or off, with its explanation beneath.
+/// A compact setting; optional help appears only on hover or long press.
 class _SwitchRow extends StatelessWidget {
   const _SwitchRow({
     super.key,
     required this.title,
-    required this.subtitle,
+    this.hint,
     required this.value,
     required this.onChanged,
   });
 
   final String title;
-  final String subtitle;
+  final String? hint;
   final bool value;
-  final ValueChanged<bool> onChanged;
+  final ValueChanged<bool>? onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return SwitchListTile(
+    final tile = SwitchListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 4),
       title: Text(title),
-      subtitle: Text(subtitle),
       value: value,
       onChanged: onChanged,
     );
+    return hint == null ? tile : Tooltip(message: hint!, child: tile);
   }
 }

@@ -164,10 +164,26 @@ pub struct ServiceConfigData {
     /// allows it, as `register` does.
     #[serde(default = "direct_by_default")]
     pub allow_direct: bool,
+    #[serde(default)]
+    pub port_mapping: bool,
 }
 
 fn direct_by_default() -> bool {
     true
+}
+
+#[derive(Clone, Copy)]
+pub struct DirectOptions {
+    pub allow_direct: bool,
+    pub port_mapping: bool,
+}
+impl Default for DirectOptions {
+    fn default() -> Self {
+        Self {
+            allow_direct: true,
+            port_mapping: false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -190,6 +206,8 @@ pub struct ClientConfigData {
     /// `connect --relay-only`.
     #[serde(default = "direct_by_default")]
     pub allow_direct: bool,
+    #[serde(default)]
+    pub port_mapping: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -228,6 +246,8 @@ pub struct ServiceConfigInfo {
     pub enable_encryption: bool,
     pub enable_keep_alive: bool,
     pub allow_direct: bool,
+    #[serde(default)]
+    pub port_mapping: bool,
     pub status: String,
     pub status_message: String,
     /// How its sessions travel, while it runs.
@@ -255,6 +275,8 @@ pub struct ClientConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routed_namespace: Option<u64>,
     pub allow_direct: bool,
+    #[serde(default)]
+    pub port_mapping: bool,
     pub status: String,
     pub status_message: String,
     /// How its sessions travel, while it runs.
@@ -328,18 +350,6 @@ impl PathInfo {
             attempt: direct.attempt.map(|attempt| attempt.stage),
             last,
         })
-    }
-
-    /// What a change of is worth telling the window about: which paths are
-    /// in use, an attempt and how the last one ended, but not the counts.
-    fn shape(&self) -> (bool, bool, Option<DirectStage>, Option<bool>) {
-        (
-            self.active_direct > 0,
-            self.active_relay > 0,
-            self.attempt,
-            self.last
-                .map(|last| matches!(last, PathOutcome::Direct { .. })),
-        )
     }
 }
 
@@ -509,6 +519,12 @@ enum TunnelHandle {
 }
 
 impl TunnelHandle {
+    fn subscribe_diagnostics(&self) -> pb_mapper_client::sdk::DiagnosticsSubscription {
+        match self {
+            Self::Share(handle) => handle.subscribe_diagnostics(),
+            Self::Connect(handle) => handle.subscribe_diagnostics(),
+        }
+    }
     fn status(&self) -> TunnelStatus {
         match self {
             Self::Share(handle) => handle.status(),
@@ -646,6 +662,7 @@ struct RegisterCommit {
     enable_encryption: bool,
     enable_keep_alive: bool,
     allow_direct: bool,
+    port_mapping: bool,
     handle: Registration,
     pin: PinnedTunnel,
 }
@@ -658,6 +675,7 @@ struct ConnectCommit {
     protocol: String,
     enable_keep_alive: bool,
     allow_direct: bool,
+    port_mapping: bool,
     handle: Connection,
     pin: PinnedTunnel,
 }
@@ -727,8 +745,12 @@ pub async fn register_service(
     protocol: String,
     enable_encryption: bool,
     enable_keep_alive: bool,
-    allow_direct: bool,
+    direct: DirectOptions,
 ) -> Result<(), CtlError> {
+    let DirectOptions {
+        allow_direct,
+        port_mapping,
+    } = direct;
     // 1. Claim the key and take what the slow work needs. Microseconds.
     //    `_claim` is held to the end of the function on purpose: dropping it
     //    early would release the key while the setup is still running.
@@ -757,6 +779,8 @@ pub async fn register_service(
         .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
     let client = Client::from_credential(&server_address, credential, enable_keep_alive, None)
         .with_relay_transport(relay_transport)
+        .map_err(sdk_refusal)?
+        .with_port_mapping(port_mapping)
         .map_err(sdk_refusal)?;
     // Surface a relay this tunnel cannot use now, rather than retrying it.
     preflight(&client).await?;
@@ -788,6 +812,7 @@ pub async fn register_service(
             enable_encryption,
             enable_keep_alive,
             allow_direct,
+            port_mapping,
             handle,
             pin: PinnedTunnel {
                 credential,
@@ -811,8 +836,12 @@ pub async fn connect_service(
     protocol: String,
     enable_keep_alive: bool,
     namespace: Option<u64>,
-    allow_direct: bool,
+    direct: DirectOptions,
 ) -> Result<(), CtlError> {
+    let DirectOptions {
+        allow_direct,
+        port_mapping,
+    } = direct;
     let (_claim, server_address, credential, relay_transport) = {
         let state = state.lock().await;
         let claim = state.claim_connecting(&service_key)?;
@@ -847,6 +876,8 @@ pub async fn connect_service(
     })?;
     let client = Client::from_credential(&server_address, credential, enable_keep_alive, namespace)
         .with_relay_transport(relay_transport)
+        .map_err(sdk_refusal)?
+        .with_port_mapping(port_mapping)
         .map_err(sdk_refusal)?;
     // A relay that is down is retried, as it always was: the connection
     // listens locally meanwhile. One that offers no QUIC never will.
@@ -880,6 +911,7 @@ pub async fn connect_service(
             protocol,
             enable_keep_alive,
             allow_direct,
+            port_mapping,
             handle,
             pin: PinnedTunnel {
                 credential,
@@ -1059,7 +1091,10 @@ mod tests {
                 "TCP".into(),
                 true,
                 false,
-                direct,
+                DirectOptions {
+                    allow_direct: direct,
+                    port_mapping: false,
+                },
             )
             .await
             .unwrap();
@@ -1071,7 +1106,10 @@ mod tests {
                 "TCP".into(),
                 false,
                 None,
-                true,
+                DirectOptions {
+                    allow_direct: true,
+                    port_mapping: false,
+                },
             )
             .await
             .unwrap();
@@ -1189,7 +1227,10 @@ mod tests {
             "TCP".into(),
             true,
             false,
-            false,
+            DirectOptions {
+                allow_direct: false,
+                port_mapping: true,
+            },
         )
         .await
         .unwrap();
@@ -1201,7 +1242,10 @@ mod tests {
             "TCP".into(),
             false,
             None,
-            false,
+            DirectOptions {
+                allow_direct: false,
+                port_mapping: true,
+            },
         )
         .await
         .unwrap();
@@ -1234,6 +1278,22 @@ mod tests {
             let client = &state.get_client_configs().await[0];
             assert_eq!(share.relay_transport, Some(RelayTransport::Quic));
             assert_eq!(client.relay_transport, Some(RelayTransport::Quic));
+            assert!(share.port_mapping && client.port_mapping);
+            let (diagnostics, _) = state.tunnel_diagnostics("web", false).unwrap();
+            let mapping = diagnostics.port_mapping.unwrap();
+            assert_eq!(
+                mapping.current.stage,
+                pb_mapper_client::sdk::PortMappingStage::RelayOnly
+            );
+            assert_eq!(mapping.attempts, 0);
+            let mut legacy =
+                serde_json::to_value(&state.load_service_configs().services["web"]).unwrap();
+            legacy.as_object_mut().unwrap().remove("port_mapping");
+            assert!(
+                !serde_json::from_value::<ServiceConfigData>(legacy)
+                    .unwrap()
+                    .port_mapping
+            );
             let detail = state.force_refresh_server_status().await.unwrap();
             assert!(detail.server_available, "{:?}", detail.error);
             assert!(detail.quic_port.is_some());
@@ -1254,7 +1314,10 @@ mod tests {
             "TCP".into(),
             false,
             false,
-            true,
+            DirectOptions {
+                allow_direct: true,
+                port_mapping: false,
+            },
         )
         .await
         .unwrap_err();
@@ -1328,7 +1391,10 @@ mod tests {
             "TCP".to_string(),
             false,
             false,
-            true,
+            DirectOptions {
+                allow_direct: true,
+                port_mapping: false,
+            },
         )
         .await
         .expect_err("a claimed key must be refused");
@@ -1374,7 +1440,10 @@ mod tests {
             "TCP".to_string(),
             false,
             false,
-            true,
+            DirectOptions {
+                allow_direct: true,
+                port_mapping: false,
+            },
         )
         .await
         .expect_err("an unparseable local address should fail");
@@ -1393,7 +1462,10 @@ mod tests {
             "TCP".to_string(),
             false,
             false,
-            true,
+            DirectOptions {
+                allow_direct: true,
+                port_mapping: false,
+            },
         )
         .await
         .expect_err("still an unparseable address");

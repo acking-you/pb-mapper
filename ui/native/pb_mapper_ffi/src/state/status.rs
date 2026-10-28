@@ -13,6 +13,28 @@
 use super::*;
 
 impl PbMapperState {
+    pub(crate) fn tunnel_diagnostics(
+        &self,
+        key: &str,
+        share: bool,
+    ) -> Result<
+        (
+            TunnelDiagnostics,
+            pb_mapper_client::sdk::DiagnosticsSubscription,
+        ),
+        CtlError,
+    > {
+        let runtimes = if share {
+            &self.service_runtime
+        } else {
+            &self.client_runtime
+        };
+        let runtime = runtimes
+            .get(key)
+            .ok_or_else(|| CtlError::not_found("tunnel is not running"))?;
+        let receiver = runtime.handle.subscribe_diagnostics();
+        Ok((runtime.handle.diagnostics(), receiver))
+    }
     pub async fn get_config_status(&self) -> AppConfig {
         self.config.clone()
     }
@@ -93,6 +115,7 @@ impl PbMapperState {
                 enable_encryption: config.enable_encryption,
                 enable_keep_alive: config.enable_keep_alive,
                 allow_direct: config.allow_direct,
+                port_mapping: config.port_mapping,
                 status: view.status.to_string(),
                 status_message: view.message,
                 path: view.path,
@@ -139,6 +162,7 @@ impl PbMapperState {
                     .get(service_key)
                     .map(|runtime| runtime.pin.routed_namespace()),
                 allow_direct: config.allow_direct,
+                port_mapping: config.port_mapping,
                 status: view.status.to_string(),
                 status_message: view.message,
                 path: view.path,

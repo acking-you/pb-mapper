@@ -9,7 +9,13 @@ use crate::endpoint::RelayEndpoint;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant};
+
+mod mapping;
+pub use mapping::{
+    PortMappingDiagnostics, PortMappingEvent, PortMappingProtocol, PortMappingStage,
+};
 
 /// The phase most recently entered by a tunnel worker.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -107,11 +113,29 @@ pub struct DirectAttempt {
 }
 
 /// What happened, in a [`TunnelEvent`].
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TunnelEventKind {
+    PhaseChanged {
+        phase: RecoveryPhase,
+    },
+    DirectStageChanged {
+        stage: DirectStage,
+    },
+    SessionStarted {
+        path: pb_mapper_protocol::direct::SessionPath,
+    },
+    SessionClosed {
+        path: pb_mapper_protocol::direct::SessionPath,
+    },
+    PortMapping {
+        mapping: Box<PortMappingEvent>,
+    },
+    Stopped,
     /// The relay answered for the first time, or again after failures.
-    RelayReady { latency_ms: u64 },
+    RelayReady {
+        latency_ms: u64,
+    },
     /// A relay attempt failed; the next one is `retry_in_ms` away (zero when
     /// the worker retries at once or the failure is final).
     RelayFailed {
@@ -121,9 +145,13 @@ pub enum TunnelEventKind {
     /// The local network changed; recovery restarts at once.
     NetworkChanged,
     /// A session took the direct path.
-    DirectEstablished { setup_ms: u64 },
+    DirectEstablished {
+        setup_ms: u64,
+    },
     /// A session gave up on direct at `stage` and used the relay.
-    DirectFallback { stage: DirectStage },
+    DirectFallback {
+        stage: DirectStage,
+    },
 }
 
 impl TunnelEventKind {
@@ -143,7 +171,7 @@ impl TunnelEventKind {
 /// One entry of a tunnel's recent history, oldest first in
 /// [`TunnelDiagnostics::events`]. Consecutive repeats fold into one entry, so
 /// a long outage cannot push out what came before it.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct TunnelEvent {
     /// Increases with every recorded event, a fold included, so a poller can
     /// tell what it has not seen yet.
@@ -159,11 +187,32 @@ pub struct TunnelEvent {
 /// How many entries a tunnel's history keeps.
 const EVENT_CAPACITY: usize = 16;
 
+/// Independent, bounded subscription to control-path events. The recent
+/// snapshot is replayed first, then every new event (without folding).
+/// A slow reader receives `RecvError::Lagged`; refresh `diagnostics()` to
+/// reconcile state. Stopping the tunnel closes the stream after cleanup.
+pub struct DiagnosticsSubscription {
+    replay: VecDeque<TunnelEvent>,
+    receiver: broadcast::Receiver<TunnelEvent>,
+}
+
+impl DiagnosticsSubscription {
+    pub async fn recv(&mut self) -> Result<TunnelEvent, broadcast::error::RecvError> {
+        if let Some(event) = self.replay.pop_front() {
+            return Ok(event);
+        }
+        self.receiver.recv().await
+    }
+}
+
 /// A point-in-time view of this tunnel and its process-shared relay budget.
 /// Non-exhaustive: fields are added as the SDK observes more.
 #[derive(Clone, Debug, Serialize)]
 #[non_exhaustive]
 pub struct TunnelDiagnostics {
+    /// Absent when automatic gateway mapping was not requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_mapping: Option<PortMappingDiagnostics>,
     /// The carrier this tunnel reaches the relay over, fixed when it started.
     pub relay_transport: crate::relay::RelayTransport,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,7 +250,7 @@ pub struct PathDiagnostics {
     pub attempt: Option<DirectAttempt>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Event {
     seq: u64,
     at: Instant,
@@ -210,6 +259,11 @@ struct Event {
 }
 
 struct State {
+    mapping: Option<Box<PortMappingDiagnostics>>,
+    subscribers: Option<broadcast::Sender<TunnelEvent>>,
+    closed: bool,
+    stopping: bool,
+    mapping_running: bool,
     direct: Option<PathDiagnostics>,
     phase: RecoveryPhase,
     attempts: u64,
@@ -231,13 +285,31 @@ struct State {
 }
 
 impl State {
+    fn close(&mut self) {
+        if !self.closed {
+            self.record(TunnelEventKind::Stopped);
+            self.closed = true;
+            self.subscribers = None;
+        }
+    }
     fn record(&mut self, kind: TunnelEventKind) {
+        if self.closed {
+            return;
+        }
         self.seq = self.seq.wrapping_add(1);
+        if let Some(subscribers) = &self.subscribers {
+            let _ = subscribers.send(TunnelEvent {
+                seq: self.seq,
+                age_ms: 0,
+                repeats: 1,
+                kind: kind.clone(),
+            });
+        }
         let event = Event {
             seq: self.seq,
             at: Instant::now(),
             repeats: 1,
-            kind,
+            kind: kind.clone(),
         };
         if let Some(last) = self
             .events
@@ -263,6 +335,11 @@ pub(crate) struct Diagnostics(Arc<Mutex<State>>);
 impl Default for Diagnostics {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(State {
+            mapping: None,
+            subscribers: None,
+            closed: false,
+            stopping: false,
+            mapping_running: false,
             direct: None,
             phase: RecoveryPhase::Starting,
             attempts: 0,
@@ -282,6 +359,83 @@ impl Default for Diagnostics {
 }
 
 impl Diagnostics {
+    #[cfg(feature = "port-mapping")]
+    pub(crate) fn mapping_started(&self) {
+        self.state().mapping_running = true;
+    }
+
+    #[cfg(feature = "port-mapping")]
+    pub(crate) fn mapping_finished(&self) {
+        let mut state = self.state();
+        state.mapping_running = false;
+        if state.stopping {
+            state.close();
+        }
+    }
+    pub(crate) fn subscribe(&self) -> DiagnosticsSubscription {
+        let mut state = self.state();
+        let receiver = if state.closed {
+            let (_, receiver) = broadcast::channel(1);
+            receiver
+        } else {
+            state
+                .subscribers
+                .get_or_insert_with(|| broadcast::channel(128).0)
+                .subscribe()
+        };
+        let replay = state
+            .events
+            .iter()
+            .map(|e| TunnelEvent {
+                seq: e.seq,
+                age_ms: ms(e.at.elapsed()),
+                repeats: e.repeats,
+                kind: e.kind.clone(),
+            })
+            .collect();
+        DiagnosticsSubscription { replay, receiver }
+    }
+
+    pub(crate) fn mapping_requested(&self, enabled: bool, direct: bool, generation: u64) {
+        if enabled {
+            self.mapping_update(PortMappingEvent::new(
+                if direct {
+                    PortMappingStage::WaitingForDirect
+                } else {
+                    PortMappingStage::RelayOnly
+                },
+                generation,
+            ));
+        }
+    }
+
+    pub(crate) fn mapping_update(&self, mut event: PortMappingEvent) {
+        if let Some(error) = &mut event.error {
+            *error = error.chars().take(256).collect();
+        }
+        let mut state = self.state();
+        if state.closed {
+            return;
+        }
+        let mapping = state.mapping.get_or_insert_with(|| {
+            Box::new(PortMappingDiagnostics {
+                current: event.clone(),
+                attempts: 0,
+                renewals: 0,
+                failures: 0,
+            })
+        });
+        match event.stage {
+            PortMappingStage::Requesting => mapping.attempts += 1,
+            PortMappingStage::Renewing => mapping.renewals += 1,
+            PortMappingStage::Failed | PortMappingStage::ReleaseFailed => mapping.failures += 1,
+            _ => {}
+        }
+        mapping.current = event.clone();
+        state.record(TunnelEventKind::PortMapping {
+            mapping: Box::new(event),
+        });
+    }
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -305,6 +459,7 @@ impl Diagnostics {
                 p.active_relay += 1;
             }
         }
+        state.record(TunnelEventKind::SessionStarted { path });
     }
     #[cfg(feature = "p2p")]
     pub(crate) fn path_closed(&self, path: pb_mapper_protocol::direct::SessionPath) {
@@ -318,6 +473,7 @@ impl Diagnostics {
                 p.active_relay = p.active_relay.saturating_sub(1)
             }
         }
+        state.record(TunnelEventKind::SessionClosed { path });
     }
     /// Begin a direct attempt; the guard reports its stages and outcome.
     #[cfg(feature = "p2p")]
@@ -328,6 +484,9 @@ impl Diagnostics {
         state.direct.get_or_insert_default();
         state.in_flight = state.in_flight.saturating_add(1);
         state.attempt = Some((DirectStage::Negotiating, started));
+        state.record(TunnelEventKind::DirectStageChanged {
+            stage: DirectStage::Negotiating,
+        });
         DirectAttemptGuard {
             diagnostics: self.clone(),
             stage: DirectStage::Negotiating,
@@ -344,16 +503,40 @@ impl Diagnostics {
         state.latency = Some(elapsed);
     }
     pub(crate) fn phase(&self, phase: RecoveryPhase) {
-        self.state().phase = phase;
+        let mut state = self.state();
+        if phase == RecoveryPhase::Stopped {
+            state.stopping = true;
+            state.phase = phase;
+            if !state.mapping_running {
+                state.close();
+            }
+            return;
+        }
+        if state.stopping {
+            return;
+        }
+        if state.phase != phase {
+            state.phase = phase;
+            state.record(TunnelEventKind::PhaseChanged { phase });
+        }
     }
     pub(crate) fn attempt(&self) {
         let mut state = self.state();
+        if state.stopping {
+            return;
+        }
         state.attempts = state.attempts.saturating_add(1);
         state.retry = None;
         state.phase = RecoveryPhase::Capacity;
+        state.record(TunnelEventKind::PhaseChanged {
+            phase: RecoveryPhase::Capacity,
+        });
     }
     pub(crate) fn succeeded(&self, elapsed: Duration) {
         let mut state = self.state();
+        if state.stopping {
+            return;
+        }
         state.phase = RecoveryPhase::Ready;
         state.failures = 0;
         state.success = Some(Instant::now());
@@ -368,6 +551,9 @@ impl Diagnostics {
     }
     pub(crate) fn failed(&self, failure: RecoveryFailure, retry: Duration) -> bool {
         let mut state = self.state();
+        if state.stopping {
+            return false;
+        }
         state.failures = state.failures.saturating_add(1);
         let emit = state.failure != Some(failure) || state.failures.is_power_of_two();
         state.phase = RecoveryPhase::Backoff;
@@ -406,6 +592,7 @@ impl Diagnostics {
             in_flight: state.in_flight,
         });
         TunnelDiagnostics {
+            port_mapping: state.mapping.as_deref().cloned(),
             relay_transport: endpoint.transport(),
             direct: state
                 .direct
@@ -434,7 +621,7 @@ impl Diagnostics {
                     seq: event.seq,
                     age_ms: ms(now.saturating_duration_since(event.at)),
                     repeats: event.repeats,
-                    kind: event.kind,
+                    kind: event.kind.clone(),
                 })
                 .collect(),
         }
@@ -458,7 +645,9 @@ pub(crate) struct DirectAttemptGuard {
 impl DirectAttemptGuard {
     pub(crate) fn stage(&mut self, stage: DirectStage) {
         self.stage = stage;
-        self.diagnostics.state().attempt = Some((stage, self.started));
+        let mut state = self.diagnostics.state();
+        state.attempt = Some((stage, self.started));
+        state.record(TunnelEventKind::DirectStageChanged { stage });
     }
     pub(crate) fn established(self) {
         let setup_ms = ms(self.started.elapsed());
@@ -583,6 +772,24 @@ mod tests {
             kinds(&diagnostics)[..],
             [
                 (
+                    TunnelEventKind::DirectStageChanged {
+                        stage: DirectStage::Negotiating
+                    },
+                    1
+                ),
+                (
+                    TunnelEventKind::DirectStageChanged {
+                        stage: DirectStage::Punching
+                    },
+                    1
+                ),
+                (
+                    TunnelEventKind::DirectStageChanged {
+                        stage: DirectStage::Negotiating
+                    },
+                    1
+                ),
+                (
                     TunnelEventKind::DirectFallback {
                         stage: DirectStage::Punching
                     },
@@ -591,5 +798,47 @@ mod tests {
                 (TunnelEventKind::DirectEstablished { .. }, 1),
             ]
         ));
+    }
+
+    #[tokio::test]
+    async fn subscribers_replay_then_receive_unfolded_events_and_explicit_lag() {
+        let diagnostics = Diagnostics::default();
+        diagnostics.network_changed(1);
+        let mut fast = diagnostics.subscribe();
+        let mut slow = diagnostics.subscribe();
+        assert_eq!(fast.recv().await.unwrap().seq, 1);
+        assert_eq!(slow.recv().await.unwrap().seq, 1);
+        for generation in 2..=140 {
+            diagnostics.network_changed(generation);
+            let event = fast.recv().await.unwrap();
+            assert_eq!((event.seq, event.repeats), (generation, 1));
+        }
+        assert!(matches!(
+            slow.recv().await,
+            Err(broadcast::error::RecvError::Lagged(11))
+        ));
+        diagnostics.phase(RecoveryPhase::Stopped);
+        assert_eq!(fast.recv().await.unwrap().kind, TunnelEventKind::Stopped);
+        assert_eq!(fast.recv().await, Err(broadcast::error::RecvError::Closed));
+    }
+
+    #[cfg(feature = "port-mapping")]
+    #[tokio::test]
+    async fn shutdown_waits_for_mapping_cleanup_before_closing_diagnostics() {
+        let diagnostics = Diagnostics::default();
+        diagnostics.mapping_started();
+        let mut events = diagnostics.subscribe();
+        diagnostics.phase(RecoveryPhase::Stopped);
+        diagnostics.mapping_update(PortMappingEvent::new(PortMappingStage::Released, 1));
+        diagnostics.mapping_finished();
+        assert!(matches!(
+            events.recv().await.unwrap().kind,
+            TunnelEventKind::PortMapping { .. }
+        ));
+        assert_eq!(events.recv().await.unwrap().kind, TunnelEventKind::Stopped);
+        assert_eq!(
+            events.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        );
     }
 }

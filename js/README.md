@@ -63,6 +63,39 @@ and credential revocation; local `stop()` closes them.
 
 ## Listening for changes
 
+Automatic gateway mapping is off by default. Set `portMapping: true` in
+`new Client({ server, credential, portMapping: true })` to request a UDP mapping
+when a direct endpoint is created. Both register and connect use this setting;
+relay-only tunnels leave the router alone. No extra build flag is needed for
+the Node package. `diagnostics().portMapping` shows current state and counters.
+
+```ts
+const events = conn.subscribeDiagnostics();
+try {
+  for (;;) {
+    const event = await events.next(); // null after tunnel cleanup
+    if (event === null) break;
+    console.log(event);
+  }
+} finally {
+  events.close(); // also cancels pending next() calls
+}
+```
+
+Each subscription replays recent history and then receives each transition,
+without polling or folding live events. Its queue holds 128 events. A slow
+reader gets a rejection naming the skipped count; refresh `diagnostics()` and
+continue reading. `next(timeoutMs)` rejects on timeout without consuming an
+event. Status and diagnostics are independent subscriptions.
+
+Mapping events include discovery, gateway/protocol selection, requests,
+activation, renewal (even if the address is unchanged), expiry, retries,
+network changes, cancellation and cleanup. `event.mapping` contains the
+generation, local port, gateway, protocol, external address, lifetime,
+active flag and bounded error. A failed renewal can leave `active: true`
+until expiry. `release_sent` is an unacknowledged PCP/NAT-PMP deletion;
+`released` is a confirmed UPnP deletion; `release_failed` is not success.
+
 ```ts
 // Resolves on every status change; once the tunnel settles as "stopped" or
 // "failed:<reason>", every call resolves at once, which ends the loop.
@@ -75,8 +108,10 @@ while (status !== "stopped" && !status.startsWith("failed")) {
 
 `diagnostics()` is a credential-free snapshot for dashboards and logs:
 
-- `events`: the last 16 of `relay_ready`, `relay_failed`, `network_changed`,
-  `direct_established` and `direct_fallback`, each with a `seq` so a poller
+- `events`: the last 16 transitions, including `phase_changed`,
+  `direct_stage_changed`, `session_started`, `session_closed`, `port_mapping`,
+  `relay_ready`, `relay_failed`, `network_changed`, `direct_established`,
+  `direct_fallback` and `stopped`, each with a `seq` so a poller
   can print only new ones, plus `latencyMs`, `failure`, `retryInMs`,
   `setupMs` or `stage` as they apply;
 - `direct`: sessions per path, active sessions, fallbacks, and the attempt in

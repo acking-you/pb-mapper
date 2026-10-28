@@ -12,6 +12,27 @@ behavior and migration from older CI-signed APKs.
 
 ## Using Rust Inside Flutter
 
+Both share and connect editors include **Automatic port mapping** under
+**More options**, off by default. The choice persists across editing and restart.
+Turning off direct connections disables the control while preserving its value.
+The native library includes PCP/NAT-PMP/UPnP support; no gateway work runs until
+an opted-in tunnel creates a direct endpoint.
+
+Open **Diagnostics** from a tunnel's menu or overview panel for live connection
+and mapping stages. Current state stays visible; expand an event for its raw
+fields, or copy the snapshot and retained events as JSON. The panel retains up
+to 128 events and reports subscriber lag explicitly.
+
+Dart callers use `registerService(..., portMapping: true)` or
+`connectService(..., portMapping: true)` and subscribe through
+`api.diagnostics(key: key, share: true)`. Canceling the stream closes its native
+subscription, including a pending read. The C ABI retains the old register and
+connect functions (mapping off) and adds `_with_options` variants. Its
+`pb_mapper_diagnostics_call_json` accepts `subscribe {key, share}`,
+`next {id, timeout_ms}` and `close {id}`; `next` returns `event`, `lagged`,
+`timeout` or `closed` inside the normal response envelope. Free every response
+with `pb_mapper_free_string`; the runtime handle must outlive concurrent calls.
+
 This project uses raw `dart:ffi` to call into a Rust FFI library (`pb-mapper-ffi`)
 located under `ui/native`.
 

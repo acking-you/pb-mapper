@@ -72,6 +72,8 @@ export declare class Connection {
    * load, the direct attempt in flight, and recent events.
    */
   diagnostics(): JsTunnelDiagnostics
+  /** Independent bounded stream, with recent history replayed first. */
+  subscribeDiagnostics(): DiagnosticsSubscription
   /**
    * Resolves with the next status this tunnel reports, rendered as
    * `status()` renders it: an event listener for status changes.
@@ -97,6 +99,18 @@ export declare class Connection {
   stop(): Promise<void>
 }
 
+/** Pull-based diagnostics feed. No JS callback queue grows while a reader is idle. */
+export declare class DiagnosticsSubscription {
+  /**
+   * Next transition, or null when closed. Timeouts reject without consuming
+   * an event. Lag rejects with the skipped count; refresh diagnostics() and
+   * continue reading. Calls on one subscription are serialized.
+   */
+  next(timeoutMs?: number | undefined | null): Promise<JsTunnelEvent | null>
+  /** Close the subscription and wake pending reads. */
+  close(): void
+}
+
 /** A live `register` tunnel: a local service published on the relay. */
 export declare class Registration {
   /** The service key this tunnel is bound to. */
@@ -111,6 +125,8 @@ export declare class Registration {
    * load, the direct attempt in flight, and recent events.
    */
   diagnostics(): JsTunnelDiagnostics
+  /** Independent bounded stream, with recent history replayed first. */
+  subscribeDiagnostics(): DiagnosticsSubscription
   /**
    * Resolves with the next status this tunnel reports, rendered as
    * `status()` renders it: an event listener for status changes.
@@ -156,6 +172,8 @@ export interface JsAuthStatus {
 }
 
 export interface JsClientConfig {
+  /** Request gateway UDP port mapping for direct endpoints (default false). */
+  portMapping?: boolean
   /** Relay carrier: tcp (default) or quic, independent of the local service protocol. */
   relayTransport?: string
   server: string
@@ -229,6 +247,27 @@ export interface JsPathDiagnostics {
   attempt?: JsDirectAttempt
 }
 
+export interface JsPortMappingDiagnostics {
+  current: JsPortMappingEvent
+  attempts: number
+  renewals: number
+  failures: number
+}
+
+export interface JsPortMappingEvent {
+  stage: string
+  networkGeneration: number
+  localPort?: number
+  gateway?: string
+  protocol?: string
+  availableProtocols: Array<string>
+  externalAddr?: string
+  active: boolean
+  leaseLifetimeMs?: number
+  retryInMs?: number
+  error?: string
+}
+
 export interface JsQuicConnectionDiagnostics {
   connectionId: number
   peerAddr: string
@@ -293,6 +332,7 @@ export interface JsServiceInfo {
 }
 
 export interface JsTunnelDiagnostics {
+  portMapping?: JsPortMappingDiagnostics
   relayTransport: string
   direct?: JsPathDiagnostics
   sdkVersion: string
@@ -316,6 +356,9 @@ export interface JsTunnelDiagnostics {
  * entry, counted by `repeats`.
  */
 export interface JsTunnelEvent {
+  phase?: string
+  path?: string
+  mapping?: JsPortMappingEvent
   /**
    * Increases with every recorded event, a fold included: remember the
    * highest one handled to tell which entries are new.

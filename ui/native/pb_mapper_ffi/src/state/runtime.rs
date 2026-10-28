@@ -224,6 +224,7 @@ impl PbMapperState {
             enable_encryption,
             enable_keep_alive,
             allow_direct,
+            port_mapping,
             handle,
             pin,
         } = commit;
@@ -242,7 +243,10 @@ impl PbMapperState {
             &protocol,
             enable_encryption,
             enable_keep_alive,
-            allow_direct,
+            DirectOptions {
+                allow_direct,
+                port_mapping,
+            },
         )
         .map_err(|e| CtlError::io(format!("Failed to save service configuration: {e}")))?;
 
@@ -373,6 +377,7 @@ impl PbMapperState {
             protocol,
             enable_keep_alive,
             allow_direct,
+            port_mapping,
             handle,
             pin,
         } = commit;
@@ -417,7 +422,10 @@ impl PbMapperState {
             &protocol,
             enable_keep_alive,
             namespace,
-            allow_direct,
+            DirectOptions {
+                allow_direct,
+                port_mapping,
+            },
         ) {
             // The client is up either way, so this is a warning and not a
             // failure: losing the config costs the entry after a restart.
@@ -476,34 +484,23 @@ impl PbMapperState {
     }
 }
 
-/// Tell the window when `handle`'s state or path changes, until the tunnel
-/// ends. Its status is published as it happens; which path its sessions
-/// take is read once a second, since a session's path is settled without a
-/// status change. Holds the handle weakly, so it never keeps a tunnel alive.
+/// Refresh on SDK transitions. A lag invalidates the snapshot too.
+/// Receivers do not keep the tunnel alive; no polling timer is needed.
 fn watch_tunnel(handle: &Arc<TunnelHandle>, kind: events::ChangeKind, key: &str) {
-    let tunnel = Arc::downgrade(handle);
     let mut status = handle.subscribe();
+    let mut diagnostics = handle.subscribe_diagnostics();
     let key = key.to_string();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut seen = None;
+        let mut status_open = true;
         loop {
             let live = tokio::select! {
-                changed = status.changed() => changed.is_ok(),
-                _ = tick.tick() => true,
+                changed = status.changed(), if status_open => {
+                    status_open = changed.is_ok();
+                    true
+                },
+                event = diagnostics.recv() => !matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)),
             };
-            let Some(handle) = tunnel.upgrade() else {
-                return;
-            };
-            let view = handle.view();
-            drop(handle);
-            // The message is left out: a failing tunnel's says when it tries
-            // again, which is not worth a reload of the list each second.
-            let now = (view.status, view.path.map(|path| path.shape()));
-            if seen.replace(now).is_some_and(|before| before != now) {
-                events::emit(kind, Some(&key), Origin::Internal);
-            }
+            events::emit(kind, Some(&key), Origin::Internal);
             if !live {
                 return;
             }

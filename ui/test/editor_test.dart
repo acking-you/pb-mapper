@@ -21,6 +21,43 @@ TextEditingController _controller(WidgetTester tester, String key) => tester
     .controller!;
 
 void main() {
+  testWidgets(
+    'mapping is opt-in and survives editing while relay-only disables its control',
+    (tester) async {
+      final api = FakePbMapperApi();
+      await _openEditor(tester, api);
+      await tester.enterText(find.byKey(const Key('tunnel-key')), 'mapped');
+      await tester.tap(find.byKey(const Key('tunnel-more')));
+      await settle(tester);
+      SwitchListTile mapping() => tester.widget<SwitchListTile>(
+        find.descendant(
+          of: find.byKey(const Key('tunnel-port-mapping')),
+          matching: find.byType(SwitchListTile),
+        ),
+      );
+      expect(mapping().value, isFalse);
+      await tester.ensureVisible(find.byKey(const Key('tunnel-port-mapping')));
+      await tester.tap(find.byKey(const Key('tunnel-port-mapping')));
+      await tester.tap(find.byKey(const Key('tunnel-direct')));
+      await settle(tester);
+      expect(mapping().value, isTrue);
+      expect(mapping().onChanged, isNull);
+      await tester.ensureVisible(find.byKey(const Key('tunnel-submit')));
+      await tester.tap(find.byKey(const Key('tunnel-submit')));
+      await settle(tester);
+      expect(api.services.single.portMapping, isTrue);
+      expect(api.services.single.allowDirect, isFalse);
+      await tester.tap(find.byKey(const Key('menu-share:mapped')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('menu-edit')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('tunnel-submit')));
+      await settle(tester);
+      expect(api.services.single.portMapping, isTrue);
+      await finish(tester);
+    },
+  );
+
   testWidgets('an empty key is refused before anything reaches Rust', (
     tester,
   ) async {

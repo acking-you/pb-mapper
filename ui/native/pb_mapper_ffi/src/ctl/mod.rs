@@ -52,6 +52,10 @@ pub struct RegisterArgs {
     #[arg(long, default_value_t = false)]
     #[serde(default)]
     pub relay_only: bool,
+    /// Request a gateway UDP mapping for direct connections (off by default).
+    #[arg(long)]
+    #[serde(default)]
+    pub port_mapping: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, clap::Args)]
@@ -77,6 +81,10 @@ pub struct ConnectArgs {
     #[arg(long, default_value_t = false)]
     #[serde(default)]
     pub relay_only: bool,
+    /// Request a gateway UDP mapping for direct connections (off by default).
+    #[arg(long)]
+    #[serde(default)]
+    pub port_mapping: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, clap::Subcommand)]
@@ -242,7 +250,10 @@ async fn run(
                 protocol(args.udp),
                 !args.no_encrypt,
                 args.keep_alive,
-                !args.relay_only,
+                state::DirectOptions {
+                    allow_direct: !args.relay_only,
+                    port_mapping: args.port_mapping,
+                },
             )
             .await?;
             Ok(proto::Response::ok(
@@ -264,7 +275,10 @@ async fn run(
                 protocol(args.udp),
                 args.keep_alive,
                 args.namespace,
-                !args.relay_only,
+                state::DirectOptions {
+                    allow_direct: !args.relay_only,
+                    port_mapping: args.port_mapping,
+                },
             )
             .await?;
             Ok(proto::Response::ok(

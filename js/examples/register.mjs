@@ -16,6 +16,7 @@ const client = new Client({
   server: process.env.PB_MAPPER_SERVER,
   credential: process.env.MSG_HEADER_KEY,
   keepAlive: true,
+  portMapping: process.argv.includes("--port-mapping"),
 });
 const registration = await client.register({
   key,

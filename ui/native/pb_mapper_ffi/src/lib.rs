@@ -6,6 +6,7 @@ mod cli;
 mod client;
 mod config;
 mod ctl;
+mod diagnostics;
 mod error;
 mod events;
 mod galaxy;
@@ -22,12 +23,14 @@ mod update;
 use better_mimalloc_rs::MiMalloc;
 pub use cli::{NOT_A_COMMAND, pb_mapper_cli_main};
 pub use client::{
-    pb_mapper_connect_service, pb_mapper_delete_client_config, pb_mapper_disconnect_service,
+    pb_mapper_connect_service, pb_mapper_connect_service_with_options,
+    pb_mapper_delete_client_config, pb_mapper_disconnect_service,
     pb_mapper_get_client_configs_json, pb_mapper_get_client_status_json,
 };
 pub use config::{
     pb_mapper_get_config_json, pb_mapper_reveal_isolated_admin_key, pb_mapper_update_config,
 };
+pub use diagnostics::pb_mapper_diagnostics_call_json;
 pub use events::pb_mapper_set_change_callback;
 pub use galaxy::pb_mapper_galaxy_frame_v1;
 pub use handle::{
@@ -42,7 +45,8 @@ pub use server::{
 };
 pub use service::{
     pb_mapper_delete_service_config, pb_mapper_get_service_configs_json,
-    pb_mapper_get_service_status_json, pb_mapper_register_service, pb_mapper_unregister_service,
+    pb_mapper_get_service_status_json, pb_mapper_register_service,
+    pb_mapper_register_service_with_options, pb_mapper_unregister_service,
 };
 pub use update::pb_mapper_ed25519_verify_v1;
 

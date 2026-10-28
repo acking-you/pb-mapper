@@ -311,6 +311,11 @@ impl Client {
             .await?;
         let credential = self.credential();
         let port_mapping = self.inner.port_mapping;
+        worker.diagnostics.mapping_requested(
+            port_mapping,
+            allow_direct,
+            crate::network::NetworkHints::shared().generation(),
+        );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
@@ -378,6 +383,11 @@ impl Client {
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
         let port_mapping = self.inner.port_mapping;
+        worker.diagnostics.mapping_requested(
+            port_mapping,
+            options.path == PathPolicy::Auto,
+            crate::network::NetworkHints::shared().generation(),
+        );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_client_side_cli_recovering_with_path::<TcpListenerProvider>(

@@ -184,7 +184,9 @@ jobs:
           bun install --frozen-lockfile
           bun run build:release
           bun test
-          bun -e "const fs = require('fs'); const f = fs.readdirSync('.').find((n) => n.endsWith('.node')); const s = fs.statSync(f).size; console.log(f, s); if (s > 5.5 * 1024 * 1024) { console.error('addon larger than 5.5 MiB'); process.exit(1); }"
+          # Includes optional PCP/NAT-PMP/UPnP support (HTTP/XML for UPnP).
+          # Measured Linux x64 release-node size: 6,244,712 bytes, Rust 1.99.1.
+          bun -e "const fs = require('fs'); const f = fs.readdirSync('.').find((n) => n.endsWith('.node')); const s = fs.statSync(f).size; console.log(f, s); if (s > 7 * 1024 * 1024) { console.error('addon larger than 7 MiB'); process.exit(1); }"
 
   flutter-syntax-check:
     needs: changes

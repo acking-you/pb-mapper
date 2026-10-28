@@ -9,6 +9,12 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 /// what later reads return, so a view can be driven through a whole flow:
 /// register, see it listed, stop it, see it stopped.
 class FakePbMapperApi implements PbMapperApiClient {
+  Stream<DiagnosticUpdate> diagnosticUpdates = const Stream.empty();
+  @override
+  Stream<DiagnosticUpdate> diagnostics({
+    required String key,
+    required bool share,
+  }) => diagnosticUpdates;
   FakePbMapperApi({
     this.services = const [],
     this.clients = const [],
@@ -206,6 +212,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool enableEncryption,
     required bool enableKeepAlive,
     bool allowDirect = true,
+    bool portMapping = false,
   }) async {
     calls.add(
       allowDirect
@@ -223,6 +230,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         encrypted: enableEncryption,
         status: startStatus,
         allowDirect: allowDirect,
+        portMapping: portMapping,
         relayTransport: config.relayTransport,
       ),
     ];
@@ -240,6 +248,8 @@ class FakePbMapperApi implements PbMapperApiClient {
                 serviceKey: s.serviceKey,
                 localAddress: s.localAddress,
                 status: 'stopped',
+                allowDirect: s.allowDirect,
+                portMapping: s.portMapping,
               )
             : s,
     ];
@@ -272,6 +282,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool enableKeepAlive,
     int? namespace,
     bool allowDirect = true,
+    bool portMapping = false,
   }) async {
     final target = namespace == null ? serviceKey : '$serviceKey@$namespace';
     calls.add(
@@ -289,6 +300,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         status: startStatus,
         namespace: namespace,
         allowDirect: allowDirect,
+        portMapping: portMapping,
         relayTransport: config.relayTransport,
       ),
     ];
@@ -307,6 +319,7 @@ class FakePbMapperApi implements PbMapperApiClient {
                 status: 'stopped',
                 namespace: c.namespace,
                 allowDirect: c.allowDirect,
+                portMapping: c.portMapping,
               )
             : c,
     ];
@@ -651,6 +664,7 @@ ClientConfigInfo fakeClient({
   int? namespace,
   int? routedNamespace,
   bool allowDirect = true,
+  bool portMapping = false,
   TunnelPath? path,
   RelayTransport? relayTransport,
 }) => ClientConfigInfo(
@@ -661,6 +675,7 @@ ClientConfigInfo fakeClient({
   namespace: namespace,
   routedNamespace: routedNamespace,
   allowDirect: allowDirect,
+  portMapping: portMapping,
   path: path,
   relayTransport: status == 'stopped' ? null : relayTransport,
   status: status,
@@ -678,6 +693,7 @@ ServiceConfigInfo fakeService({
   String status = 'running',
   String message = '',
   bool allowDirect = true,
+  bool portMapping = false,
   TunnelPath? path,
   RelayTransport? relayTransport,
 }) => ServiceConfigInfo(
@@ -687,6 +703,7 @@ ServiceConfigInfo fakeService({
   enableEncryption: encrypted,
   enableKeepAlive: true,
   allowDirect: allowDirect,
+  portMapping: portMapping,
   status: status,
   statusMessage: message,
   path: path,

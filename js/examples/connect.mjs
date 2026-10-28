@@ -15,23 +15,25 @@ const client = new Client({
   server: process.env.PB_MAPPER_SERVER,
   credential: process.env.MSG_HEADER_KEY,
   keepAlive: true,
+  portMapping: process.argv.includes("--port-mapping"),
 });
 const connection = await client.connect({ key, localAddr, transport, path });
 process.once("SIGINT", () => connection.stop());
 
-// Events: print each one once, by sequence number.
-let seen = 0;
-const events = setInterval(() => {
-  const { events, direct } = connection.diagnostics();
-  for (const event of events.filter((e) => e.seq > seen)) {
-    seen = event.seq;
-    const detail = event.setupMs ?? event.latencyMs ?? event.stage ?? event.failure ?? "";
-    console.log(`event: ${event.kind} ${detail}`);
+const events = connection.subscribeDiagnostics();
+const monitoring = (async () => {
+  for (;;) {
+    try {
+      const event = await events.next();
+      if (event === null) break;
+      console.log(JSON.stringify(event));
+    } catch (error) {
+      // A slow reader sees an explicit gap and reconciles the snapshot.
+      console.error(error);
+      console.log(JSON.stringify(connection.diagnostics()));
+    }
   }
-  if (direct?.attempt) {
-    console.log(`direct attempt: ${direct.attempt.stage} for ${direct.attempt.elapsedMs} ms`);
-  }
-}, 500);
+})();
 
 // Status: resolves on every change and ends once the tunnel settles.
 let status = connection.status();
@@ -40,5 +42,6 @@ while (status !== "stopped" && !status.startsWith("failed")) {
   status = await connection.nextStatus();
   console.log(`status: ${status}`);
 }
-clearInterval(events);
+await monitoring;
+events.close();
 console.log(JSON.stringify(connection.diagnostics(), null, 2));

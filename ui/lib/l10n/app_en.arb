@@ -1,4 +1,27 @@
 {
+  "diagnosticStage": "{stage, select, disabled{Disabled} waiting_for_direct{Waiting for a direct endpoint} relay_only{Inactive in relay-only mode} discovering{Discovering addresses and protocols} gateway_found{Gateway found} discovered{Protocol discovery completed} requesting{Requesting mapping} active{Mapping active} renewing{Renewing lease} expired{Lease expired} retrying{Retrying mapping} network_changed{Network changed} releasing{Releasing mapping} released{Mapping release confirmed} release_sent{Release request sent; not confirmed} failed{Mapping failed} release_failed{Mapping release failed} cancelled{Operation cancelled} stopped{Stopped} starting{Starting} capacity{Waiting for setup capacity} resolving{Resolving relay address} connecting{Connecting to relay} handshake{Authenticating relay connection} ready{Ready} backoff{Waiting to retry} negotiating{Negotiating direct connection} punching{Establishing direct path} committing{Committing direct session} relay_ready{Relay ready} relay_failed{Relay connection failed} direct_established{Direct session established} direct_fallback{Falling back to relay} session_started{Session started} session_closed{Session closed} other{Status update}}",
+  "portMapping": "Automatic port mapping",
+  "diagnosticsRefresh": "Refresh snapshot",
+  "@diagnosticStage": {
+    "placeholders": {
+      "stage": {
+        "type": "String"
+      }
+    }
+  },
+  "diagnosticsLagged": "{count} events were skipped because the reader fell behind. Refresh the snapshot to reconcile current state.",
+  "@diagnosticsLagged": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "diagnosticsWaiting": "Waiting for events",
+  "diagnosticsCopy": "Copy diagnostics",
+  "portMappingRelayOnly": "Enable direct connections to use port mapping. Your choice is saved while relay-only is selected.",
+  "tunnelDiagnostics": "Diagnostics",
+
   "@@locale": "en",
   "appTitle": "pb-mapper",
 

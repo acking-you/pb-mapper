@@ -84,7 +84,7 @@ mapping. Reachable global IPv6 can bypass IPv4 NAT, subject to UDP firewall
 rules. If neither peer's first packet can arrive, or UDP is blocked, relay
 fallback remains necessary.
 
-Gateway port mapping is optional and excluded from default builds. Build with
+Gateway port mapping is optional and off by default. CLI builds exclude it unless built with
 `cargo build -p pb-mapper-cli --features port-mapping`, then add `--port-mapping`
 to `register` or `connect` to request PCP, NAT-PMP or UPnP mappings for the direct
 UDP socket. The library renews leases; a host network change rediscovers the
@@ -94,7 +94,19 @@ mapping. Relay-only tunnels never request mappings. Mapping the home router
 alone does not guarantee traversal of an upstream carrier NAT; it must permit
 punching, provide a mapping, or support a mechanism such as a PCP proxy. Rust SDK
 users enable the same Cargo feature and call `client.with_port_mapping(true)?`;
-existing request structs are unchanged.
+existing request structs are unchanged. Node and Flutter builds include the capability:
+set Node's `ClientConfig.portMapping` to `true`, or enable **Automatic port mapping**
+under a tunnel's **More options**. Both share and connect tunnels save the choice;
+relay-only mode suspends mapping without discarding it.
+
+Rust handles expose `subscribe_diagnostics()`, Node handles expose
+`subscribeDiagnostics()`, and Dart exposes `diagnostics(key: ..., share: ...)`.
+The UI opens **Diagnostics** from the tunnel menu or overview panel. These feeds
+report discovery, gateway/protocol selection, requests, renewals, expiration,
+failures, network changes and cleanup, together with connection stages.
+Each subscriber has a bounded queue and receives an explicit lag indication if
+it falls behind. PCP/NAT-PMP cleanup reports a deletion **sent**; UPnP reports a
+confirmed deletion only after the gateway responds.
 
 ## Prerequisites
 

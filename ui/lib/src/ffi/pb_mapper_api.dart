@@ -8,8 +8,10 @@ import 'package:pb_mapper_ui/src/common/polling.dart' show FirstWhereOrNull;
 
 import 'pb_mapper_service.dart';
 import 'relay_models.dart';
+import 'diagnostics_models.dart';
 
 export 'relay_models.dart';
+export 'diagnostics_models.dart';
 
 class OperationResult {
   final bool success;
@@ -92,6 +94,7 @@ class ServiceConfigInfo {
 
   /// Whether connections may reach it directly rather than through the relay.
   final bool allowDirect;
+  final bool portMapping;
   final String status;
   final String statusMessage;
 
@@ -110,6 +113,7 @@ class ServiceConfigInfo {
     required this.enableEncryption,
     required this.enableKeepAlive,
     this.allowDirect = true,
+    this.portMapping = false,
     required this.status,
     required this.statusMessage,
     this.path,
@@ -126,6 +130,7 @@ class ServiceConfigInfo {
       enableEncryption: _asBool(map['enableEncryption']),
       enableKeepAlive: _asBool(map['enableKeepAlive']),
       allowDirect: _asBool(map['allowDirect'], fallback: true),
+      portMapping: _asBool(map['portMapping']),
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
       path: TunnelPath.maybeFrom(map['path']),
@@ -152,6 +157,7 @@ class ClientConfigInfo {
 
   /// Whether each session tries a direct path before the relay.
   final bool allowDirect;
+  final bool portMapping;
   final String status;
   final String statusMessage;
 
@@ -171,6 +177,7 @@ class ClientConfigInfo {
     this.namespace,
     this.routedNamespace,
     this.allowDirect = true,
+    this.portMapping = false,
     required this.status,
     required this.statusMessage,
     this.path,
@@ -190,6 +197,7 @@ class ClientConfigInfo {
           ? null
           : _asInt(map['routedNamespace']),
       allowDirect: _asBool(map['allowDirect'], fallback: true),
+      portMapping: _asBool(map['portMapping']),
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
       path: TunnelPath.maybeFrom(map['path']),
@@ -465,6 +473,12 @@ class ServiceConnInfo {
 /// forgets a method fails to compile here; a fake that inherited from the real
 /// class would quietly fall through to the FFI instead.
 abstract interface class PbMapperApiClient {
+  /// Independent bounded SDK event stream. Cancelling releases its native
+  /// subscription. Refresh the snapshot after an explicit lag notification.
+  Stream<DiagnosticUpdate> diagnostics({
+    required String key,
+    required bool share,
+  });
   Future<OperationResult> setAppDirectoryPath(String path);
 
   Future<ConfigStatus> fetchConfig();
@@ -505,6 +519,7 @@ abstract interface class PbMapperApiClient {
     required bool enableEncryption,
     required bool enableKeepAlive,
     bool allowDirect = true,
+    bool portMapping = false,
   });
   Future<OperationResult> unregisterService(String serviceKey);
   Future<OperationResult> deleteServiceConfig(String serviceKey);
@@ -523,6 +538,7 @@ abstract interface class PbMapperApiClient {
     required bool enableKeepAlive,
     int? namespace,
     bool allowDirect = true,
+    bool portMapping = false,
   });
   Future<OperationResult> disconnectService(String serviceKey);
   Future<OperationResult> deleteClientConfig(String serviceKey);
@@ -573,6 +589,13 @@ abstract interface class PbMapperApiClient {
 }
 
 class PbMapperApi implements PbMapperApiClient {
+  @override
+  Stream<DiagnosticUpdate> diagnostics({
+    required String key,
+    required bool share,
+  }) => _service
+      .diagnostics(key: key, share: share)
+      .map(DiagnosticUpdate.fromMap);
   static final PbMapperApi _instance = PbMapperApi._internal();
   factory PbMapperApi() => _instance;
   PbMapperApi._internal();
@@ -740,6 +763,7 @@ class PbMapperApi implements PbMapperApiClient {
     required bool enableEncryption,
     required bool enableKeepAlive,
     bool allowDirect = true,
+    bool portMapping = false,
   }) async {
     final result = await _service.registerService(
       serviceKey: serviceKey,
@@ -748,6 +772,7 @@ class PbMapperApi implements PbMapperApiClient {
       enableEncryption: enableEncryption,
       enableKeepAlive: enableKeepAlive,
       allowDirect: allowDirect,
+      portMapping: portMapping,
     );
     return _resultFrom(result);
   }
@@ -806,6 +831,7 @@ class PbMapperApi implements PbMapperApiClient {
     required bool enableKeepAlive,
     int? namespace,
     bool allowDirect = true,
+    bool portMapping = false,
   }) async {
     final result = await _service.connectService(
       serviceKey: serviceKey,
@@ -814,6 +840,7 @@ class PbMapperApi implements PbMapperApiClient {
       enableKeepAlive: enableKeepAlive,
       namespace: namespace,
       allowDirect: allowDirect,
+      portMapping: portMapping,
     );
     return _resultFrom(result);
   }

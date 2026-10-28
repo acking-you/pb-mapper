@@ -61,7 +61,8 @@ Requires a Tokio runtime. The `pb-mapper` CLI and relay live in the
 | Publish / reach a TCP or UDP service | `Client::register`, `Client::connect`, `Transport::{Tcp, Udp}` |
 | Choose the path | `RegisterOptions { allow_direct }`, `ConnectOptions { path: PathPolicy::{Auto, RelayOnly} }` |
 | Reclaim abandoned TCP data connections | `register_with_idle_timeout`, `RegisterOptions { idle_timeout }` |
-| Listen to a tunnel | `subscribe()` (a `watch` of `TunnelStatus`), `diagnostics()` with `events`, `direct.attempt` and path counters |
+| Listen to a tunnel | `subscribe()` for status, `subscribe_diagnostics()` for each transition, `diagnostics()` for a snapshot |
+| Request gateway mapping | `client.with_port_mapping(true)?` with the optional `port-mapping` Cargo feature; off by default |
 | Wake recovery after a network change or resume | `Client::notify_network_change` |
 | Inspect a namespace | `list_keys`, `service_status`, `sessions`, `remote_id` |
 | Manage credentials (administrator key) | `admin()`: `issue_key`, `show_key`, `reveal_key`, `renew_key`, `revoke_key`, `list_keys_all`, `gc_keys`, `auth_status` |
@@ -73,6 +74,29 @@ Each row has a runnable example in
 needs no setup.
 
 ## Paths
+
+Port mapping is opt-in, independently on each endpoint. Enable the
+`port-mapping` Cargo feature, then call `client.with_port_mapping(true)?`
+before registering or connecting. Existing request literals are unchanged.
+The mapper starts only when a direct UDP endpoint is needed; relay-only
+tunnels never request a lease. Unsupported gateways leave normal direct and
+relay fallback available.
+
+`handle.subscribe_diagnostics().recv().await` replays up to 16 recent entries,
+then delivers every new control-path event through a bounded 128-event queue.
+`RecvError::Lagged(count)` reports lost events explicitly: reconcile with
+`handle.diagnostics()` and continue. Independent subscribers have independent
+positions. Stop closes the stream after mapping cleanup, including when the
+handle is dropped; no observation keeps the tunnel alive.
+
+Events cover relay setup phases, direct stages, session start/end, fallback,
+network changes, and port mapping discovery, protocol choice, request,
+activation, renewal, expiry, retry, cancellation and release. Mapping events
+carry the network generation, protocol, local/external addresses, lease
+lifetime and bounded errors. `active` remains true when renewal fails but
+the existing lease is still usable. `release_sent` means PCP/NAT-PMP deletion
+was sent without acknowledgement; `released` means UPnP confirmed it.
+`release_failed` never claims the router deleted the lease.
 
 The relay carrier defaults to TCP. Select QUIC with
 `client.with_relay_transport(RelayTransport::Quic)?` before registering or

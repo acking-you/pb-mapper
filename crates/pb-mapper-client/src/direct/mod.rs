@@ -202,7 +202,9 @@ impl Consumer {
             };
             let network = self
                 .network
-                .get_or_try_init(|| async { Network::new(false, self.port_mapping) })
+                .get_or_try_init(|| async {
+                    Network::new(false, self.port_mapping, self.diagnostics.clone())
+                })
                 .await?
                 .clone();
             attempt.stage(DirectStage::Discovering);

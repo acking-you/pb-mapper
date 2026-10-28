@@ -4,7 +4,7 @@
 //! handle, and the status channel it publishes to. A handle observes and stops
 //! its tunnel; it never drives the traffic itself.
 
-use crate::diagnostics::{Diagnostics, TunnelDiagnostics};
+use crate::diagnostics::{Diagnostics, DiagnosticsSubscription, RecoveryPhase, TunnelDiagnostics};
 use crate::endpoint::RelayEndpoint;
 use std::time::Duration;
 
@@ -69,6 +69,7 @@ impl LiveTunnel {
                 Ok(Err(join_error)) if join_error.is_cancelled() => {}
                 Ok(Err(join_error)) => {
                     slot.take();
+                    self.diagnostics.phase(RecoveryPhase::Stopped);
                     return Err(Error::protocol(format!("tunnel task failed: {join_error}")));
                 }
                 Err(_) => {
@@ -78,6 +79,7 @@ impl LiveTunnel {
             }
             slot.take();
         }
+        self.diagnostics.phase(RecoveryPhase::Stopped);
         Ok(())
     }
 }
@@ -88,6 +90,7 @@ impl Drop for LiveTunnel {
         if let Some(handle) = self.join.get_mut().take() {
             handle.abort();
         }
+        self.diagnostics.phase(RecoveryPhase::Stopped);
     }
 }
 
@@ -135,6 +138,12 @@ macro_rules! tunnel_handle {
             /// Credential-free recovery counters, running SDK version and shared relay load.
             pub fn diagnostics(&self) -> TunnelDiagnostics {
                 self.inner.diagnostics.snapshot(&self.inner.endpoint)
+            }
+
+            /// Replay recent diagnostics, then receive every transition.
+            /// Each subscriber has a bounded queue and explicit lag errors.
+            pub fn subscribe_diagnostics(&self) -> DiagnosticsSubscription {
+                self.inner.diagnostics.subscribe()
             }
 
             /// Subscribe to status changes. Useful for N-API event bridges.

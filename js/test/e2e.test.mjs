@@ -37,6 +37,35 @@ function clientFor(relay, credential = relay.adminKey) {
   });
 }
 
+test.skipIf(!hasRelay)("napi mapping opt-in and independent diagnostic subscriptions stop cleanly", async () => {
+  await withRelay(async (relay) => {
+    const client = new Client({ server: relay.address, credential: relay.adminKey, portMapping: true });
+    const echo = await startEchoServer();
+    const registration = await client.register({ key: "mapping-events", localAddr: echo.address, transport: "tcp", allowDirect: false });
+    const first = registration.subscribeDiagnostics();
+    const second = registration.subscribeDiagnostics();
+    try {
+      await registration.waitReady(READY_MS);
+      expect(registration.diagnostics().portMapping.current.stage).toBe("relay_only");
+      const a = await first.next(READY_MS);
+      const b = await second.next(READY_MS);
+      expect(a.seq).toBe(b.seq);
+      expect(a.mapping.stage).toBe("relay_only");
+      first.close();
+      expect(await first.next(READY_MS)).toBeNull();
+      await registration.stop();
+      const seen = [];
+      for (let event; (event = await second.next(READY_MS));) seen.push(event);
+      expect(seen.at(-1).kind).toBe("stopped");
+      expect(seen.some(e => e.kind === "relay_ready")).toBe(true);
+      expect(JSON.stringify(seen)).not.toContain(relay.adminKey);
+    } finally {
+      first.close(); second.close();
+      await registration.stop(); await echo.close();
+    }
+  });
+}, 30_000);
+
 test.skipIf(!hasRelay)(
   "napi QUIC relay multiplexes streams and exposes live diagnostics",
   async () => {

@@ -25,6 +25,31 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
     namespace: i64,
     allow_direct: c_int,
 ) -> *mut c_char {
+    unsafe {
+        pb_mapper_connect_service_with_options(
+            handle,
+            service_key,
+            local_address,
+            protocol,
+            enable_keep_alive,
+            namespace,
+            allow_direct,
+            0,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pb_mapper_connect_service_with_options(
+    handle: *mut PbMapperHandle,
+    service_key: *const c_char,
+    local_address: *const c_char,
+    protocol: *const c_char,
+    enable_keep_alive: c_int,
+    namespace: i64,
+    allow_direct: c_int,
+    port_mapping: c_int,
+) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
     }
@@ -42,7 +67,7 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     // See `pb_mapper_register_service`: the connect path releases the state lock
     // for its slow phase, so the caller must not be holding it.
@@ -57,7 +82,10 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
             protocol,
             enable_keep_alive != 0,
             u64::try_from(namespace).ok(),
-            allow_direct != 0,
+            crate::state::DirectOptions {
+                allow_direct: allow_direct != 0,
+                port_mapping: port_mapping != 0,
+            },
         )
         .await
     });
@@ -86,7 +114,7 @@ pub unsafe extern "C" fn pb_mapper_disconnect_service(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
@@ -117,7 +145,7 @@ pub unsafe extern "C" fn pb_mapper_delete_client_config(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
@@ -142,7 +170,7 @@ pub unsafe extern "C" fn pb_mapper_get_client_configs_json(
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let clients: Vec<ClientConfigInfo> = handle.runtime.block_on(async move {
         let state = state.lock().await;
@@ -167,7 +195,7 @@ pub unsafe extern "C" fn pb_mapper_get_client_status_json(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let status: ClientStatusResponse = handle.runtime.block_on(async move {
         let state = state.lock().await;
