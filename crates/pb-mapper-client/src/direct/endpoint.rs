@@ -374,3 +374,69 @@ pub(super) fn framing_key(
         .map_err(|_| io::Error::other("TLS framing exporter unavailable"))?;
     Ok(key)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use stun_proto::types::{
+        attribute::XorMappedAddress,
+        message::{Message, MessageWrite, MessageWriteExt, MessageWriteVec},
+    };
+    use tokio::net::UdpSocket;
+
+    async fn respond(stun: &UdpSocket, mapped: SocketAddr, invalidate: Option<&Network>) {
+        let mut buffer = [0; 2048];
+        let (len, from) = stun.recv_from(&mut buffer).await.unwrap();
+        // Receipt of the actual request proves discovery owns the cache lock.
+        if let Some(network) = invalidate {
+            network.invalidate();
+        }
+        let request = Message::from_bytes(&buffer[..len]).unwrap();
+        let mut response = Message::builder_success(&request, MessageWriteVec::new());
+        response
+            .add_attribute(&XorMappedAddress::new(mapped, request.transaction_id()))
+            .unwrap();
+        response.add_fingerprint().unwrap();
+        stun.send_to(&response.finish(), from).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_invalidation_survives_in_flight_stun_and_coalesces_refresh() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut network = Network::new(false, false).unwrap();
+            Arc::get_mut(&mut network).unwrap().network = crate::network::NetworkHints::isolated();
+            let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let server = stun.local_addr().unwrap();
+            let old = "192.0.2.10:40001".parse().unwrap();
+            let new = "192.0.2.10:40002".parse().unwrap();
+            let (first, ()) =
+                tokio::join!(network.peer(server), respond(&stun, old, Some(&network)));
+            assert_eq!(first.candidates[0], old);
+
+            // Both waiters must share one fresh lookup; neither may reuse old.
+            let (first, second, ()) = tokio::join!(
+                network.peer(server),
+                network.peer(server),
+                respond(&stun, new, None)
+            );
+            assert_eq!(first.candidates[0], new);
+            assert_eq!(second.candidates, first.candidates);
+            assert_eq!(network.peer(server).await.candidates, first.candidates);
+            assert_eq!(
+                stun.try_recv_from(&mut [0; 2048]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+
+            // An idle cache must also observe the shared network generation,
+            // including on providers that do not call Consumer::invalidate.
+            network.network.notify();
+            let refreshed = "192.0.2.10:40003".parse().unwrap();
+            let (peer, ()) = tokio::join!(network.peer(server), respond(&stun, refreshed, None));
+            assert_eq!(peer.candidates[0], refreshed);
+            network.shutdown().await;
+        })
+        .await
+        .unwrap();
+    }
+}

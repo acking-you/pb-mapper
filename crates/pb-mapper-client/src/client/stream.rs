@@ -145,7 +145,7 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
         }
         tokio::select! {
             () = tokio::time::sleep_until((Instant::now() + crate::recovery::jitter(retry.next_delay())).min(deadline)) => {},
-            () = wake.changed() => retry.reset(),
+            _ = wake.changed() => retry.reset(),
         }
     };
     drop(global_permit);

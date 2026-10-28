@@ -322,10 +322,12 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break 'outer,
-                () = wake.changed() => {
-                    diagnostics.network_changed(remote_addr.network_generation());
-                    #[cfg(feature = "p2p")]
-                    if let Some(direct) = &direct { direct.invalidate(); }
+                generation = wake.changed() => {
+                    if let Some(generation) = generation {
+                        diagnostics.network_changed(generation);
+                        #[cfg(feature = "p2p")]
+                        if let Some(direct) = &direct { direct.invalidate(); }
+                    }
                     probes.abort_all();
                     next_probe = Instant::now();
                     retry_backoff.reset();

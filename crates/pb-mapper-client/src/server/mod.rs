@@ -817,8 +817,10 @@ async fn run_server_side_cli_worker<LocalStream>(
         tokio::select! {
             () = shutdown.cancelled() => break 'outer,
             () = tokio::time::sleep(retry_interval) => {},
-            () = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => {
-                diagnostics.network_changed(remote_addr.network_generation());
+            generation = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => {
+                if let Some(generation) = generation {
+                    diagnostics.network_changed(generation);
+                }
                 backoff.transport.reset();
             }
         }

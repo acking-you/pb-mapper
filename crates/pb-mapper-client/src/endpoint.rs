@@ -426,9 +426,22 @@ impl RecoveryWake {
         let _ = self.network.changed().await;
         self.network.borrow_and_update();
     }
-    pub(crate) async fn changed(&mut self) {
-        tokio::select! { _ = self.network.changed() => {}, _ = self.success.changed() => {} }
-        self.acknowledge();
+    /// Wake recovery for either signal, returning a generation only when the
+    /// local network changed. A relay reply alone says nothing about P2P reachability.
+    pub(crate) async fn changed(&mut self) -> Option<u64> {
+        let network_woke = tokio::select! {
+            biased;
+            _ = self.success.changed() => false,
+            _ = self.network.changed() => true,
+        };
+        let generation = {
+            let network = self.network.borrow_and_update();
+            // Success can win select while a network change is also pending.
+            // Observe and acknowledge that generation together, so it isn't lost.
+            (network_woke || network.has_changed()).then_some(*network)
+        };
+        self.success.borrow_and_update();
+        generation
     }
 }
 
@@ -558,9 +571,12 @@ mod tests {
         // Simulate the observed long outage without changing the host network.
         tokio::time::advance(Duration::from_secs(130)).await;
         endpoint.notify_network_change();
-        tokio::time::timeout(Duration::from_millis(1), wake.changed())
-            .await
-            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(1), wake.changed())
+                .await
+                .unwrap(),
+            Some(endpoint.network_generation())
+        );
         for _ in 0..100 {
             let mut permits = Vec::new();
             for _ in 0..CONTROL_SETUPS {
@@ -578,7 +594,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn only_recovery_after_failure_broadcasts_protocol_success() {
+    async fn recovery_wakes_distinguish_and_coalesce_network_changes() {
         let endpoint = resolver_endpoint(Arc::new(|| {
             Box::pin(async { Err(std::io::ErrorKind::NotFound.into()) })
         }));
@@ -591,14 +607,171 @@ mod tests {
         );
         endpoint.transport_failed(None);
         endpoint.protocol_succeeded();
-        tokio::time::timeout(Duration::from_millis(1), wake.changed())
-            .await
-            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(1), wake.changed())
+                .await
+                .unwrap(),
+            None
+        );
         endpoint.protocol_succeeded();
         assert!(
             tokio::time::timeout(Duration::from_millis(1), wake.changed())
                 .await
                 .is_err()
         );
+        endpoint.transport_failed(None);
+        endpoint.protocol_succeeded();
+        endpoint.notify_network_change();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(1), wake.changed())
+                .await
+                .unwrap(),
+            Some(endpoint.network_generation())
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), wake.changed())
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(feature = "p2p")]
+    #[tokio::test]
+    async fn relay_recovery_preserves_direct_cooldown_until_network_changes() {
+        use crate::sdk::{Client, ConnectRequest, RegisterOptions, RegisterRequest, Transport};
+        use pb_mapper_auth::{AuthConfig, AuthRuntime};
+        use pb_mapper_core::checksum::Credential;
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::{TcpListener, TcpStream},
+        };
+        use tokio_util::sync::CancellationToken;
+
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let credential = Credential::Admin(pb_mapper_core::checksum::gen_random_key());
+            let state_dir = std::env::temp_dir().join(format!(
+                "pb-cooldown-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            let auth = AuthRuntime::start(
+                *credential.key(),
+                AuthConfig {
+                    state_dir: state_dir.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let relay_addr = listener.local_addr().unwrap();
+            let relay = AbortOnDropHandle::new(tokio::spawn(
+                pb_mapper_server::run_server_on_listener_with_direct(
+                    listener,
+                    CancellationToken::new(),
+                    None,
+                    false,
+                    auth,
+                    None,
+                ),
+            ));
+            let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let backend_addr = backend.local_addr().unwrap();
+            let echo = AbortOnDropHandle::new(tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = backend.accept().await.unwrap();
+                    let mut byte = [0; 1];
+                    stream.read_exact(&mut byte).await.unwrap();
+                    stream.write_all(&byte).await.unwrap();
+                }
+            }));
+            let mut client =
+                Client::from_credential(relay_addr.to_string(), credential, false, None);
+            let mut endpoint = RelayEndpoint::fixed(relay_addr.into());
+            Arc::get_mut(&mut endpoint.0).unwrap().network = NetworkHints::isolated();
+            Arc::get_mut(&mut client.inner).unwrap().endpoint = endpoint;
+            let registration = client
+                .register_with_options(
+                    RegisterRequest {
+                        key: "cooldown".into(),
+                        local_addr: backend_addr.to_string(),
+                        transport: Transport::Tcp,
+                        codec: true,
+                        force_namespace: false,
+                    },
+                    RegisterOptions {
+                        allow_direct: false,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            registration
+                .wait_ready_timeout(Duration::from_secs(3))
+                .await
+                .unwrap();
+            // The SDK owns its listener and cannot accept a bound socket.
+            let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let local = reservation.local_addr().unwrap();
+            drop(reservation);
+            let tunnel = client
+                .connect(ConnectRequest {
+                    key: "cooldown".into(),
+                    local_addr: local.to_string(),
+                    transport: Transport::Tcp,
+                })
+                .await
+                .unwrap();
+            tunnel
+                .wait_ready_timeout(Duration::from_secs(3))
+                .await
+                .unwrap();
+            let exchange = async || {
+                let mut stream = TcpStream::connect(local).await.unwrap();
+                stream.write_all(b"x").await.unwrap();
+                let mut response = [0; 1];
+                stream.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response, b"x");
+            };
+            exchange().await;
+            assert_eq!(tunnel.diagnostics().direct.unwrap().fallbacks, 1);
+            exchange().await;
+            let before = tunnel.diagnostics();
+            assert_eq!(before.direct.unwrap().fallbacks, 1);
+
+            // A shared endpoint's recovery must wake the worker's health probe,
+            // without claiming that this tunnel's direct path became reachable.
+            let endpoint = &client.inner.endpoint;
+            endpoint.transport_failed(None);
+            endpoint.protocol_succeeded();
+            while tunnel.diagnostics().attempts == before.attempts {
+                tokio::task::yield_now().await;
+            }
+            exchange().await;
+            let recovered = tunnel.diagnostics();
+            assert_eq!(recovered.network_generation, before.network_generation);
+            assert_eq!(recovered.direct.unwrap().fallbacks, 1);
+
+            endpoint.notify_network_change();
+            while !tunnel.diagnostics().events.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    crate::diagnostics::TunnelEventKind::NetworkChanged
+                )
+            }) {
+                tokio::task::yield_now().await;
+            }
+            exchange().await;
+            let changed = tunnel.diagnostics();
+            assert_ne!(changed.network_generation, before.network_generation);
+            assert_eq!(changed.direct.unwrap().fallbacks, 2);
+            tunnel.stop().await.unwrap();
+            registration.stop().await.unwrap();
+            drop(echo);
+            drop(relay);
+            let _ = std::fs::remove_dir_all(state_dir);
+        })
+        .await
+        .unwrap();
     }
 }
