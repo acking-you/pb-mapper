@@ -1,7 +1,10 @@
 //! Client-owned direct sessions. Control sockets never own an established data task.
+mod candidates;
 mod control;
 mod endpoint;
 mod identity;
+#[cfg(feature = "port-mapping")]
+mod mapping;
 mod provider;
 mod reports;
 mod socket;
@@ -87,6 +90,7 @@ pub(crate) struct Consumer {
     network: OnceCell<Arc<Network>>,
     diagnostics: Diagnostics,
     cooldown: std::sync::Mutex<Cooldown>,
+    port_mapping: bool,
 }
 impl Consumer {
     pub fn new(
@@ -96,6 +100,7 @@ impl Consumer {
         is_datagram: bool,
         keep_alive: bool,
         diagnostics: Diagnostics,
+        port_mapping: bool,
     ) -> Arc<Self> {
         let control = Arc::new(Mutex::new(None::<Arc<Control>>));
         let reports = Arc::new(reports::Latest::default());
@@ -121,6 +126,7 @@ impl Consumer {
             network: OnceCell::new(),
             diagnostics,
             cooldown: std::sync::Mutex::default(),
+            port_mapping,
         })
     }
     fn cooldown(&self) -> std::sync::MutexGuard<'_, Cooldown> {
@@ -196,7 +202,7 @@ impl Consumer {
             };
             let network = self
                 .network
-                .get_or_try_init(|| async { Network::new(false) })
+                .get_or_try_init(|| async { Network::new(false, self.port_mapping) })
                 .await?
                 .clone();
             attempt.stage(DirectStage::Discovering);

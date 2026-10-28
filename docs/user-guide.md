@@ -65,9 +65,9 @@ Control connections use leases and a receive watchdog. After the tolerance windo
 Each new connection first tries a peer-to-peer path. The consumer asks the relay
 for a session grant, both ends learn their public UDP address from the relay's
 STUN service, punch through their NATs, and open a mutually authenticated QUIC
-connection. Only then does the publisher dial its local service. If any step
-fails, the connection uses the relay path above, before any application byte is
-sent, so nothing is replayed and the backend is dialed once. After a fallback the
+connection. The publisher dials its local service only after StartDirect.
+Failures before that commit point use the relay; failures after it never replay
+the request or dial the backend again. After a fallback the
 tunnel sends its next connections straight to the relay for a while (10 s,
 doubling to 5 min, cleared by a direct success or a network change).
 
@@ -76,6 +76,25 @@ number over UDP, and every role allows it by default. `--relay-only` on
 `server`, `register` or `connect` turns it off for that side. Established direct
 sessions belong to the two endpoints: a relay restart or a revoked credential
 stops new setups but does not cut them, while stopping the local tunnel does.
+
+Nested NAT can work when the mapping and filtering rules permit it. Candidate
+selection preserves both IPv4 and IPv6, and authenticated probes trigger a
+return-path check of their actual source address, even if STUN saw a different
+mapping. Reachable global IPv6 can bypass IPv4 NAT, subject to UDP firewall
+rules. If neither peer's first packet can arrive, or UDP is blocked, relay
+fallback remains necessary.
+
+Gateway port mapping is optional and excluded from default builds. Build with
+`cargo build -p pb-mapper-cli --features port-mapping`, then add `--port-mapping`
+to `register` or `connect` to request PCP, NAT-PMP or UPnP mappings for the direct
+UDP socket. The library renews leases; a host network change rediscovers the
+gateway, and local stop attempts to release the lease. Discovery does not extend
+the setup budget: the first connection may relay before later ones can use the
+mapping. Relay-only tunnels never request mappings. Mapping the home router
+alone does not guarantee traversal of an upstream carrier NAT; it must permit
+punching, provide a mapping, or support a mechanism such as a PCP proxy. Rust SDK
+users enable the same Cargo feature and call `client.with_port_mapping(true)?`;
+existing request structs are unchanged.
 
 ## Prerequisites
 

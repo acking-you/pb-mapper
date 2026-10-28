@@ -44,6 +44,7 @@ hickory-resolver = { version = "0.26.1" }
 # the local crate name so server code does not need to know the package name.
 kanal = { package = "kanal-plus", version = "0.2.0" }
 parking_lot = "0.12"
+portmapper = { version = "0.20.0", default-features = false }
 rand = "0.10"
 ring = "0.17.14"
 # Pinned forks, published by `release-sdk.yml` as quinn-plus (with

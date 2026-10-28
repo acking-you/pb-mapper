@@ -79,6 +79,7 @@ pub(crate) struct ClientInner {
     pub(crate) credential: RwLock<Credential>,
     pub(crate) keep_alive: bool,
     pub(crate) namespace: Option<u64>,
+    pub(crate) port_mapping: bool,
 }
 
 /// Session against one deployed relay.
@@ -124,6 +125,7 @@ impl Client {
                 credential: RwLock::new(credential),
                 keep_alive,
                 namespace,
+                port_mapping: false,
             }),
         }
     }
@@ -146,11 +148,33 @@ impl Client {
                 credential: RwLock::new(self.credential()),
                 keep_alive: self.inner.keep_alive,
                 namespace: self.inner.namespace,
+                port_mapping: self.inner.port_mapping,
             }),
         })
     }
     pub fn relay_transport(&self) -> super::RelayTransport {
         self.inner.endpoint.transport()
+    }
+    /// Allow PCP, NAT-PMP or UPnP to map subsequent tunnels' direct UDP sockets.
+    /// Off by default; requires the `port-mapping` Cargo feature. Relay-only
+    /// tunnels never create a mapping. Existing handles retain their setting.
+    pub fn with_port_mapping(&self, enabled: bool) -> Result<Self> {
+        if enabled && !cfg!(feature = "port-mapping") {
+            return Err(Error::invalid_config("built without port-mapping support"));
+        }
+        if enabled == self.inner.port_mapping {
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            inner: Arc::new(ClientInner {
+                server: self.inner.server.clone(),
+                endpoint: self.inner.endpoint.clone(),
+                credential: RwLock::new(self.credential()),
+                keep_alive: self.inner.keep_alive,
+                namespace: self.inner.namespace,
+                port_mapping: enabled,
+            }),
+        })
     }
     /// Sample current QUIC counters without a background observer or per-packet work.
     /// Clients of the same relay and carrier in this process share one pool.
@@ -286,6 +310,7 @@ impl Client {
             .prepare_worker(&request.key, &request.local_addr)
             .await?;
         let credential = self.credential();
+        let port_mapping = self.inner.port_mapping;
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
@@ -299,6 +324,7 @@ impl Client {
                     context.diagnostics,
                     idle_timeout,
                     allow_direct,
+                    port_mapping,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -313,6 +339,7 @@ impl Client {
                     context.diagnostics,
                     idle_timeout,
                     allow_direct,
+                    port_mapping,
                 )
             }),
         };
@@ -350,6 +377,7 @@ impl Client {
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
+        let port_mapping = self.inner.port_mapping;
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
@@ -364,6 +392,7 @@ impl Client {
                     context.diagnostics,
                     options.path,
                     is_datagram,
+                    port_mapping,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -379,6 +408,7 @@ impl Client {
                     context.diagnostics,
                     options.path,
                     is_datagram,
+                    port_mapping,
                 )
             }),
         };

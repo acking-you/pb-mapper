@@ -18,6 +18,7 @@ publish = ["crates-io"]
 pb-mapper-client.workspace = true
 
 [features]
+port-mapping = ["p2p", "pb-mapper-client/port-mapping"]
 relay-quic = ["pb-mapper-client/relay-quic"]
 # Direct QUIC with relay fallback is the default path; the relay carrier is TCP.
 # Disabling both `p2p` and `relay-quic` drops quinn, rcgen and stun-proto.

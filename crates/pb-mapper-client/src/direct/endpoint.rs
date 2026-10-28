@@ -1,24 +1,44 @@
 use super::{
+    candidates::Candidates,
     identity::Identity,
     socket::{self, Socket},
 };
-use pb_mapper_protocol::direct::{MAX_CANDIDATES, PeerInfo, SessionGrant, valid_candidate};
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use pb_mapper_protocol::direct::{PeerInfo, SessionGrant, valid_candidate};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     sync::{Mutex, mpsc},
     task::JoinSet,
     time::Instant,
 };
 
+struct Discovery {
+    at: Instant,
+    server: SocketAddr,
+    generation: (u64, u64),
+    candidates: Candidates,
+}
+
 pub(super) struct Network {
     pub identity: Identity,
     transports: Vec<(Socket, quinn::Endpoint)>,
     incoming: Mutex<mpsc::Receiver<quinn::Connection>>,
     acceptors: Vec<tokio_util::task::AbortOnDropHandle<()>>,
-    cached: Mutex<Option<(Instant, SocketAddr, Vec<SocketAddr>)>>,
+    cached: Mutex<Option<Discovery>>,
+    generation: AtomicU64,
+    network: Arc<crate::network::NetworkHints>,
+    #[cfg(feature = "port-mapping")]
+    mapping: Option<super::mapping::Mapping>,
 }
 impl Network {
-    pub fn new(server: bool) -> io::Result<Arc<Self>> {
+    pub fn new(server: bool, port_mapping: bool) -> io::Result<Arc<Self>> {
         let identity = Identity::new()?;
         let (tx, rx) = mpsc::channel(64);
         let mut transports = Vec::new();
@@ -78,33 +98,59 @@ impl Network {
             }
             transports.push((socket, endpoint));
         }
+        let network = crate::network::NetworkHints::shared();
+        #[cfg(feature = "port-mapping")]
+        let mapping = if port_mapping {
+            let port = transports.iter().find_map(|(socket, _)| {
+                socket
+                    .local_addr()
+                    .ok()
+                    .filter(SocketAddr::is_ipv4)
+                    .and_then(|addr| std::num::NonZeroU16::new(addr.port()))
+            });
+            port.map(|port| super::mapping::Mapping::new(port, network.clone()))
+        } else {
+            None
+        };
+        #[cfg(not(feature = "port-mapping"))]
+        let _ = port_mapping;
         Ok(Arc::new(Self {
             identity,
             transports,
             incoming: Mutex::new(rx),
             acceptors,
             cached: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            network,
+            #[cfg(feature = "port-mapping")]
+            mapping,
         }))
     }
     pub async fn peer(&self, stun: SocketAddr) -> PeerInfo {
         let mut cached = self.cached.lock().await;
-        if let Some((at, server, candidates)) = &*cached
-            && *server == stun
-            && at.elapsed() < Duration::from_secs(10)
+        let generation = (
+            self.generation.load(Ordering::Acquire),
+            self.network.generation(),
+        );
+        if let Some(discovery) = &*cached
+            && discovery.server == stun
+            && discovery.generation == generation
+            && discovery.at.elapsed() < Duration::from_secs(10)
         {
             return PeerInfo {
                 certificate: self.identity.certificate.clone(),
-                candidates: candidates.clone(),
+                candidates: discovery.candidates.select(self.mapped_addr()),
             };
         }
-        let mut candidates = Vec::new();
+        let mut reflexive = None;
+        let mut hosts = Vec::new();
         for (socket, _) in &self.transports {
             if socket
                 .local_addr()
                 .is_ok_and(|a| a.is_ipv4() == stun.is_ipv4())
             {
                 match socket.mapped_addr(stun).await {
-                    Ok(addr) => candidates.push(addr),
+                    Ok(addr) => reflexive = Some(addr),
                     Err(error) => tracing::debug!(%error, "STUN discovery unavailable"),
                 }
             }
@@ -121,19 +167,25 @@ impl Network {
                             continue;
                         }
                         let addr = SocketAddr::new(ip, local.port());
-                        if valid_candidate(&addr) && !candidates.contains(&addr) {
-                            candidates.push(addr);
+                        if valid_candidate(&addr) {
+                            hosts.push(addr);
                         }
                     }
                 }
             }
         }
-        candidates.truncate(MAX_CANDIDATES);
-        tracing::debug!(%stun, ?candidates, "direct candidates discovered");
-        *cached = Some((Instant::now(), stun, candidates.clone()));
+        let candidates = Candidates::new(reflexive, hosts);
+        let selected = candidates.select(self.mapped_addr());
+        tracing::debug!(%stun, candidates = ?selected, "direct candidates discovered");
+        *cached = Some(Discovery {
+            at: Instant::now(),
+            server: stun,
+            generation,
+            candidates,
+        });
         PeerInfo {
             certificate: self.identity.certificate.clone(),
-            candidates,
+            candidates: selected,
         }
     }
     #[cfg(test)]
@@ -143,9 +195,16 @@ impl Network {
         }
     }
     pub fn invalidate(&self) {
-        if let Ok(mut cached) = self.cached.try_lock() {
-            *cached = None;
+        // Discovery holds the cache lock across STUN. A generation also
+        // invalidates an in-flight result instead of losing the notification.
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+    fn mapped_addr(&self) -> Option<SocketAddr> {
+        #[cfg(feature = "port-mapping")]
+        if let Some(mapping) = &self.mapping {
+            return mapping.address();
         }
+        None
     }
     pub fn authorize(
         &self,
@@ -196,6 +255,10 @@ impl Network {
             }
         })
         .await;
+        #[cfg(feature = "port-mapping")]
+        if let Some(mapping) = &self.mapping {
+            mapping.shutdown().await;
+        }
     }
     pub async fn connect(
         &self,

@@ -209,6 +209,9 @@ struct StatusArgs {
 
 #[derive(Debug, Args)]
 struct RelayArgs {
+    /// Request a gateway mapping for direct UDP (requires a port-mapping build).
+    #[arg(long, conflicts_with = "relay_only")]
+    port_mapping: bool,
     /// Carrier between this endpoint and the relay; independent of TCP/UDP service type.
     #[arg(long, value_enum, default_value_t = RelayTransportArg::Tcp)]
     relay_transport: RelayTransportArg,
@@ -439,7 +442,8 @@ fn tunnel_client(relay: &RelayArgs, namespace: Option<u64>) -> Result<Client, Bo
     .with_relay_transport(match relay.relay_transport {
         RelayTransportArg::Tcp => pb_mapper_client::sdk::RelayTransport::Tcp,
         RelayTransportArg::Quic => pb_mapper_client::sdk::RelayTransport::Quic,
-    })?)
+    })?
+    .with_port_mapping(relay.port_mapping)?)
 }
 
 fn sdk_transport(transport: Transport) -> pb_mapper_client::sdk::Transport {

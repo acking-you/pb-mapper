@@ -51,6 +51,7 @@ impl Provider {
         shutdown: CancellationToken,
         idle: Option<Duration>,
         diagnostics: Diagnostics,
+        port_mapping: bool,
     ) -> Arc<Self>
     where
         L::Item: StreamForward,
@@ -72,6 +73,7 @@ impl Provider {
                 idle,
                 diagnostics,
                 actor_active,
+                port_mapping,
             )
             .await;
         }));
@@ -111,6 +113,7 @@ async fn run<L: StreamProvider + Send + 'static>(
     idle: Option<Duration>,
     diagnostics: Diagnostics,
     active: Arc<AtomicUsize>,
+    port_mapping: bool,
 ) where
     L::Item: StreamForward,
 {
@@ -136,7 +139,7 @@ async fn run<L: StreamProvider + Send + 'static>(
                             continue;
                         }
                         let admitted =
-                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply);
+                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply, port_mapping);
                         let Some(net) = admitted else { continue };
                         let (tx, rx) = mpsc::channel(8);
                         let id = grant.id;
@@ -205,6 +208,7 @@ fn admit_offer(
     sessions: usize,
     network: &mut Option<Arc<Network>>,
     reply: &Reply,
+    port_mapping: bool,
 ) -> Option<Arc<Network>> {
     let reject = |reason: String| {
         send(
@@ -228,7 +232,7 @@ fn admit_offer(
     if let Some(network) = network {
         return Some(network.clone());
     }
-    match Network::new(true) {
+    match Network::new(true, port_mapping) {
         Ok(created) => Some(network.insert(created).clone()),
         Err(error) => reject(error.to_string()),
     }
@@ -607,8 +611,8 @@ mod tests {
 
     #[tokio::test]
     async fn committed_direct_cannot_acknowledge_relay_or_dial_backend_twice() {
-        let provider = Network::new(true).unwrap();
-        let consumer = Network::new(false).unwrap();
+        let provider = Network::new(true, false).unwrap();
+        let consumer = Network::new(false, false).unwrap();
         let stun = "127.0.0.1:9".parse().unwrap();
         let mut grant = SessionGrant {
             id: random_session_id(),

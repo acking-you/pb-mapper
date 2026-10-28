@@ -2,7 +2,7 @@
 //! probes. Quinn's endpoint driver is its only reader: control datagrams are
 //! handled and removed in place inside the received batch, so QUIC packets
 //! reach Quinn with no extra task, channel, allocation or copy.
-use pb_mapper_protocol::direct::{SessionId, SessionSecret};
+use pb_mapper_protocol::direct::{MAX_CANDIDATES, SessionId, SessionSecret, valid_candidate};
 #[cfg(test)]
 use quinn::udp::Transmit;
 use quinn::{AsyncUdpSocket, UdpSender, udp::RecvMeta};
@@ -49,6 +49,8 @@ struct ProbeState {
     nonce: [u8; 16],
     expires: tokio::time::Instant,
     learned: Vec<SocketAddr>,
+    /// Authenticated sources still awaiting our own nonce challenge.
+    triggered: Vec<SocketAddr>,
 }
 struct StunPending {
     source: SocketAddr,
@@ -174,6 +176,9 @@ impl Socket {
         }
     }
     fn handle_probe(&self, data: &[u8], source: SocketAddr) {
+        if !valid_candidate(&source) {
+            return;
+        }
         let Ok(id) = <[u8; 16]>::try_from(&data[8..24]) else {
             return;
         };
@@ -195,14 +200,28 @@ impl Socket {
             }
             match data[40] {
                 0 if self.reply_allowed() => {
+                    // A destination-dependent NAT may send from a different
+                    // mapping than STUN found. Replying alone only validates
+                    // the path for the sender. Challenge this source on our
+                    // next probe tick before it can become a QUIC candidate.
+                    if !probe.learned.contains(&source)
+                        && !probe.triggered.contains(&source)
+                        && probe.triggered.len() + probe.learned.len() < MAX_CANDIDATES
+                    {
+                        probe.triggered.push(source);
+                    }
                     let nonce = data[24..40].try_into().unwrap_or([0; 16]);
                     packet(id, nonce, true, probe.key)
                 }
                 1 if data[24..40] == probe.nonce
                     && !probe.learned.contains(&source)
-                    && probe.learned.len() < 8 =>
+                    && probe.learned.len() < MAX_CANDIDATES =>
                 {
+                    probe.triggered.retain(|addr| *addr != source);
                     probe.learned.push(source);
+                    probe
+                        .triggered
+                        .truncate(MAX_CANDIDATES - probe.learned.len());
                     return;
                 }
                 _ => return,
@@ -282,6 +301,7 @@ impl Socket {
                 nonce,
                 expires,
                 learned: Vec::new(),
+                triggered: Vec::new(),
             },
         );
     }
@@ -295,36 +315,36 @@ impl Socket {
     /// Send one authenticated probe to each candidate of this address family
     /// and return the paths that have answered so far.
     pub fn probe(&self, id: SessionId, candidates: &[SocketAddr]) -> Vec<SocketAddr> {
-        let bytes = {
+        let (bytes, triggered, learned) = {
             let probes = self
                 .control
                 .probes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let Some(probe) = probes.get(&id) else {
+            let Some(probe) = probes
+                .get(&id)
+                .filter(|p| p.expires > tokio::time::Instant::now())
+            else {
                 return vec![];
             };
-            packet(id, probe.nonce, false, probe.key)
+            (
+                packet(id, probe.nonce, false, probe.key),
+                probe.triggered.clone(),
+                probe.learned.clone(),
+            )
         };
         let family = self.local_addr().map(|local| local.is_ipv4());
-        for addr in candidates
+        for addr in triggered
             .iter()
-            .filter(|a| family.as_ref().is_ok_and(|v4| *v4 == a.is_ipv4()))
-            .take(8)
+            .chain(candidates.iter().filter(|addr| !triggered.contains(addr)))
+            .filter(|a| valid_candidate(a) && family.as_ref().is_ok_and(|v4| *v4 == a.is_ipv4()))
+            .take(2 * MAX_CANDIDATES)
         {
             // Probes are retried every 120 ms. A congested or unreachable
             // candidate must never hold up cancellation or a healthy QUIC path.
             let _ = self.inner.try_send_to(&bytes, *addr);
         }
-        let probes = self
-            .control
-            .probes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        probes
-            .get(&id)
-            .map(|p| p.learned.clone())
-            .unwrap_or_default()
+        learned
     }
     /// STUN Binding over this socket. Responses arrive through the Quinn
     /// endpoint driver, which runs for as long as the endpoint exists.
@@ -423,14 +443,14 @@ impl UdpSender for TestSender {
         self.inner.max_transmit_segments()
     }
 }
-fn packet(id: SessionId, nonce: [u8; 16], pong: bool, secret: SessionSecret) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(PROBE_LEN);
-    bytes.extend_from_slice(PROBE);
-    bytes.extend_from_slice(&id);
-    bytes.extend_from_slice(&nonce);
-    bytes.push(u8::from(pong));
-    let mac = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &secret.0), &bytes);
-    bytes.extend_from_slice(mac.as_ref());
+fn packet(id: SessionId, nonce: [u8; 16], pong: bool, secret: SessionSecret) -> [u8; PROBE_LEN] {
+    let mut bytes = [0; PROBE_LEN];
+    bytes[..8].copy_from_slice(PROBE);
+    bytes[8..24].copy_from_slice(&id);
+    bytes[24..40].copy_from_slice(&nonce);
+    bytes[40] = u8::from(pong);
+    let mac = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &secret.0), &bytes[..41]);
+    bytes[41..].copy_from_slice(mac.as_ref());
     bytes
 }
 
@@ -439,6 +459,87 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use std::future::poll_fn;
+
+    #[tokio::test]
+    async fn authenticated_source_requires_our_return_path_challenge() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (consumer, _) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let (provider, _) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let id = [4; 16];
+            let secret = SessionSecret([5; 32]);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            consumer.authorize(id, secret, deadline);
+            provider.authorize(id, secret, deadline);
+            consumer.inner.writable().await.unwrap();
+            provider.inner.writable().await.unwrap();
+            let mut buffer = [0; 1500];
+            // Only the provider knows a working candidate. Its source address
+            // was not advertised to the consumer (as with a changed NAT port).
+            provider.probe(id, &[consumer.local_addr().unwrap()]);
+            let (len, source) = consumer.inner.recv_from(&mut buffer).await.unwrap();
+            consumer.handle_control(&buffer[..len], source);
+            assert!(consumer.probe(id, &[]).is_empty());
+            // The provider receives our Pong and then our own challenge.
+            for _ in 0..2 {
+                let (len, source) = provider.inner.recv_from(&mut buffer).await.unwrap();
+                provider.handle_control(&buffer[..len], source);
+            }
+            let (len, source) = consumer.inner.recv_from(&mut buffer).await.unwrap();
+            consumer.handle_control(&buffer[..len], source);
+            assert_eq!(consumer.probe(id, &[]), [provider.local_addr().unwrap()]);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn triggered_candidates_are_authenticated_bounded_and_expire() {
+        let (socket, _) = Socket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let id = [6; 16];
+        let secret = SessionSecret([7; 32]);
+        socket.authorize(
+            id,
+            secret,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        let source = "127.0.0.1:9000".parse().unwrap();
+        socket.handle_probe(&packet(id, [8; 16], false, SessionSecret([9; 32])), source);
+        socket.handle_probe(&packet([0; 16], [8; 16], false, secret), source);
+        assert!(
+            socket.control.probes.lock().unwrap()[&id]
+                .triggered
+                .is_empty()
+        );
+        for port in 9000..9020 {
+            socket.handle_probe(
+                &packet(id, [8; 16], false, secret),
+                SocketAddr::from(([127, 0, 0, 1], port)),
+            );
+        }
+        assert_eq!(
+            socket.control.probes.lock().unwrap()[&id].triggered.len(),
+            MAX_CANDIDATES
+        );
+        // A valid MAC alone is not proof that our challenge reached this source.
+        socket.handle_probe(&packet(id, [8; 16], true, secret), source);
+        assert!(
+            socket.control.probes.lock().unwrap()[&id]
+                .learned
+                .is_empty()
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let nonce = socket.control.probes.lock().unwrap()[&id].nonce;
+        socket.handle_probe(&packet(id, nonce, true, secret), source);
+        assert!(socket.probe(id, &[source]).is_empty());
+        assert!(
+            socket.control.probes.lock().unwrap()[&id]
+                .learned
+                .is_empty()
+        );
+        socket.forget(&id);
+        socket.handle_probe(&packet(id, [8; 16], false, secret), source);
+        assert!(socket.control.probes.lock().unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn control_and_quic_share_the_bound_socket() {

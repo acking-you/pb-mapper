@@ -1,0 +1,54 @@
+name: NAT traversal
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'deps/**'
+      - 'Cargo.*'
+      - 'scripts/test_nat_traversal.py'
+      - '.github/workflows/nat-traversal.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'crates/**'
+      - 'deps/**'
+      - 'Cargo.*'
+      - 'scripts/test_nat_traversal.py'
+      - '.github/workflows/nat-traversal.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  nested-nat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            target/
+          key: ${{ runner.os }}-nat-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build with optional gateway mapping
+        run: cargo build --locked -p pb-mapper-cli --features port-mapping
+      - name: Install network test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables iputils-ping tcpdump
+      - name: Exercise isolated networks
+        shell: bash
+        run: |
+          sudo python3 scripts/test_nat_traversal.py --binary target/debug/pb-mapper 2>&1 | tee target/nat-acceptance.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nat-traversal-logs
+          path: |
+            target/nat-acceptance.log
+            target/nat-acceptance/**/*.log

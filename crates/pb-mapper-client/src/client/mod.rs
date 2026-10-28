@@ -233,6 +233,7 @@ pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvid
         diagnostics,
         crate::sdk::PathPolicy::RelayOnly,
         false,
+        false,
     )
     .await;
 }
@@ -250,6 +251,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     diagnostics: Diagnostics,
     path: crate::sdk::PathPolicy,
     is_datagram: bool,
+    port_mapping: bool,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {
@@ -281,10 +283,11 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             is_datagram,
             keep_alive,
             diagnostics.clone(),
+            port_mapping,
         )
     });
     #[cfg(not(feature = "p2p"))]
-    let _ = (path, is_datagram);
+    let _ = (path, is_datagram, port_mapping);
     let mut retry_backoff = RetryBackoff::new(Duration::from_millis(100), Duration::from_secs(2));
     let mut stream_tasks = JoinSet::new();
     let setup_slots = Arc::new(Semaphore::new(64));
