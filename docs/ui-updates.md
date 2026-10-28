@@ -8,18 +8,20 @@ The system still asks for installation consent.
 | Platform / installation | Update action |
 | --- | --- |
 | Android | Download to private cache, check package ID, certificate and increasing effective versionCode, request permission to install packages, then open Android's installer using a read-only content URI. Returning from permission settings continues automatically. Retry reuses and rechecks the downloaded APK. |
-| Windows installer | Download and verify, quit, run Inno Setup, reopen. The next launch checks whether the requested version actually installed. |
+| Windows installer | Download and verify, then quit: a hidden PowerShell waits for the app to exit, runs the Inno Setup installer with `/SILENT` (it elevates itself for a machine-wide install, so Windows asks for permission), writes `setup.log` beside the download and reopens the app. The FFI's `pb_mapper_spawn_hidden_powershell_v1` starts it with a windowless console of its own; as a detached Dart process it had no console and exited without running a line, so no update installed before 0.9.5. The next launch checks whether the requested version actually installed. |
 | Windows portable | Download and verify the ZIP, select it in Explorer for replacement by the user. |
 | Linux x64 AppImage | Download and verify, replace the AppImage, reopen; save to Downloads if its location cannot be written. |
 | Linux x64 portable | Download and verify the ZIP, open Downloads. Other architectures report no package. |
 | macOS Intel / Apple Silicon | Download the matching DMG, verify it, save it to Downloads and open the system disk-image installer. Drag the app into Applications. |
 | iOS | Use a properly signed development, TestFlight or App Store distribution. An unsigned IPA is not an installable consumer update. |
 
-macOS currently uses a sandboxed app and has no configured Developer ID / Apple
-notarization release identity. Unlike CipherRelay's signed, notarized bundle
-replacement, pb-mapper therefore opens the DMG for installation. It does not
-silently replace bundles or disable Gatekeeper. An opener failure is reported
-as failure, rather than saying the installation opened successfully.
+Since 0.9.7 the macOS app and its DMG are signed with the project's Developer
+ID, notarized and stapled, and the mounted DMG passes Gatekeeper before it is
+uploaded ([macOS signing](macos-signing.zh-CN.md)). The app is sandboxed, so
+unlike CipherRelay it cannot replace its own bundle in Applications: it opens
+the verified DMG for installation instead, and never removes quarantine or
+disables Gatekeeper. An opener failure is reported as failure, rather than
+saying the installation opened successfully.
 
 ## Android signing baseline
 
