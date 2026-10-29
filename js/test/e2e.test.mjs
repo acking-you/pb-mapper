@@ -37,27 +37,29 @@ function clientFor(relay, credential = relay.adminKey) {
   });
 }
 
-test.skipIf(!hasRelay)("napi mapping opt-in and independent diagnostic subscriptions stop cleanly", async () => {
+test.skipIf(!hasRelay)("event readers are independent, close on their own and end with the tunnel", async () => {
   await withRelay(async (relay) => {
-    const client = new Client({ server: relay.address, credential: relay.adminKey, portMapping: true });
+    const client = clientFor(relay);
     const echo = await startEchoServer();
-    const registration = await client.register({ key: "mapping-events", localAddr: echo.address, transport: "tcp", allowDirect: false });
-    const first = registration.subscribeDiagnostics();
-    const second = registration.subscribeDiagnostics();
+    const registration = await client.register({
+      key: "events", localAddr: echo.address, transport: "tcp", allowDirect: false, portMapping: true,
+    });
+    const first = registration.subscribeEvents();
+    const second = registration.subscribeEvents();
     try {
       await registration.waitReady(READY_MS);
-      expect(registration.diagnostics().portMapping.current.stage).toBe("relay_only");
+      // Mapping needs direct: a relay-only share never asks the gateway.
+      expect(registration.diagnostics().portMapping).toBeUndefined();
       const a = await first.next(READY_MS);
       const b = await second.next(READY_MS);
       expect(a.seq).toBe(b.seq);
-      expect(a.mapping.stage).toBe("relay_only");
       first.close();
       expect(await first.next(READY_MS)).toBeNull();
       await registration.stop();
-      const seen = [];
+      const seen = [b];
       for (let event; (event = await second.next(READY_MS));) seen.push(event);
       expect(seen.at(-1).kind).toBe("stopped");
-      expect(seen.some(e => e.kind === "relay_ready")).toBe(true);
+      expect(seen.some((e) => e.kind === "relay_ready")).toBe(true);
       expect(JSON.stringify(seen)).not.toContain(relay.adminKey);
     } finally {
       first.close(); second.close();

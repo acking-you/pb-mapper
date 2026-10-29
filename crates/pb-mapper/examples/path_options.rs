@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RegisterOptions {
                 allow_direct: false,
                 idle_timeout: Some(Duration::from_secs(90)),
+                ..Default::default()
             },
         )
         .await?;
@@ -79,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             ConnectOptions {
                 path: PathPolicy::RelayOnly,
+                ..Default::default()
             },
         )
         .await?;
@@ -92,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             ConnectOptions {
                 path: PathPolicy::Auto,
+                ..Default::default()
             },
         )
         .await?;

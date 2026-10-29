@@ -479,19 +479,21 @@ class _TunnelFormState extends State<TunnelForm> {
           value: _direct,
           onChanged: (v) => setState(() => _direct = v),
         ),
+        // A part of going direct: set beneath it, and kept while it is off.
+        _SwitchRow(
+          key: const Key('tunnel-port-mapping'),
+          title: l10n.portMapping,
+          hint: _direct ? l10n.portMappingHelp : l10n.portMappingNeedsDirect,
+          value: _portMapping,
+          inset: true,
+          onChanged: _direct ? (v) => setState(() => _portMapping = v) : null,
+        ),
         _SwitchRow(
           key: const Key('tunnel-keepalive'),
           title: l10n.keepAlive,
           hint: l10n.keepAliveHelp,
           value: _keepAlive,
           onChanged: (v) => setState(() => _keepAlive = v),
-        ),
-        _SwitchRow(
-          key: const Key('tunnel-port-mapping'),
-          title: l10n.portMapping,
-          hint: _direct ? null : l10n.portMappingRelayOnly,
-          value: _portMapping,
-          onChanged: _direct ? (v) => setState(() => _portMapping = v) : null,
         ),
       ],
     );
@@ -722,29 +724,34 @@ class _Disclosure extends StatelessWidget {
   }
 }
 
-/// A compact setting; optional help appears only on hover or long press.
+/// A setting that is on or off: its name at rest, what it does on hover or
+/// a long press. Null [onChanged] shows it held as it is.
 class _SwitchRow extends StatelessWidget {
   const _SwitchRow({
     super.key,
     required this.title,
-    this.hint,
+    required this.hint,
     required this.value,
     required this.onChanged,
+    this.inset = false,
   });
 
   final String title;
-  final String? hint;
+  final String hint;
   final bool value;
   final ValueChanged<bool>? onChanged;
 
+  /// Set in under the setting above, which it belongs to.
+  final bool inset;
+
   @override
-  Widget build(BuildContext context) {
-    final tile = SwitchListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+  Widget build(BuildContext context) => Tooltip(
+    message: hint,
+    child: SwitchListTile(
+      contentPadding: EdgeInsetsDirectional.only(start: inset ? 22 : 4, end: 4),
       title: Text(title),
       value: value,
       onChanged: onChanged,
-    );
-    return hint == null ? tile : Tooltip(message: hint!, child: tile);
-  }
+    ),
+  );
 }

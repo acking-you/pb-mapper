@@ -203,7 +203,7 @@ impl Consumer {
             let network = self
                 .network
                 .get_or_try_init(|| async {
-                    Network::new(false, self.port_mapping, self.diagnostics.clone())
+                    Network::new(false, self.port_mapping.then(|| self.diagnostics.clone()))
                 })
                 .await?
                 .clone();
@@ -379,7 +379,7 @@ impl Prepared {
             seq: 0,
             diagnostics: self.diagnostics,
         };
-        report.diagnostics.path_started(path);
+        report.diagnostics.session_opened(path);
         report.active();
         let forwarding = async {
             match self.path {
@@ -470,7 +470,7 @@ impl ConsumerReport {
 }
 impl Drop for ConsumerReport {
     fn drop(&mut self) {
-        self.diagnostics.path_closed(self.path);
+        self.diagnostics.session_closed(self.path);
         self.update(SessionState::Closed);
     }
 }

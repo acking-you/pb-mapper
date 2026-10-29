@@ -703,5 +703,5 @@ module.exports = nativeBinding
 module.exports.Admin = nativeBinding.Admin
 module.exports.Client = nativeBinding.Client
 module.exports.Connection = nativeBinding.Connection
-module.exports.DiagnosticsSubscription = nativeBinding.DiagnosticsSubscription
 module.exports.Registration = nativeBinding.Registration
+module.exports.TunnelEvents = nativeBinding.TunnelEvents

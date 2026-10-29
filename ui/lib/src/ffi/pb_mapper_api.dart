@@ -8,10 +8,10 @@ import 'package:pb_mapper_ui/src/common/polling.dart' show FirstWhereOrNull;
 
 import 'pb_mapper_service.dart';
 import 'relay_models.dart';
-import 'diagnostics_models.dart';
+import 'tunnel_events.dart';
 
 export 'relay_models.dart';
-export 'diagnostics_models.dart';
+export 'tunnel_events.dart';
 
 class OperationResult {
   final bool success;
@@ -473,12 +473,6 @@ class ServiceConnInfo {
 /// forgets a method fails to compile here; a fake that inherited from the real
 /// class would quietly fall through to the FFI instead.
 abstract interface class PbMapperApiClient {
-  /// Independent bounded SDK event stream. Cancelling releases its native
-  /// subscription. Refresh the snapshot after an explicit lag notification.
-  Stream<DiagnosticUpdate> diagnostics({
-    required String key,
-    required bool share,
-  });
   Future<OperationResult> setAppDirectoryPath(String path);
 
   Future<ConfigStatus> fetchConfig();
@@ -511,7 +505,8 @@ abstract interface class PbMapperApiClient {
   Future<List<ServiceConnInfo>> getServiceConns(String serviceKey);
 
   /// Share [serviceKey]. With [allowDirect], connections may reach it
-  /// directly rather than through the relay.
+  /// directly rather than through the relay, and with [portMapping] as well
+  /// the gateway is asked to map the direct UDP port.
   Future<OperationResult> registerService({
     required String serviceKey,
     required String localAddress,
@@ -530,7 +525,8 @@ abstract interface class PbMapperApiClient {
   /// Connect to [serviceKey]. [namespace] is the temporary credential whose
   /// service it is, which only the administrator key may name; null for this
   /// credential's own. With [allowDirect] each session tries a direct path
-  /// before the relay.
+  /// before the relay, and with [portMapping] as well the gateway is asked to
+  /// map the direct UDP port.
   Future<OperationResult> connectService({
     required String serviceKey,
     required String localAddress,
@@ -542,6 +538,15 @@ abstract interface class PbMapperApiClient {
   });
   Future<OperationResult> disconnectService(String serviceKey);
   Future<OperationResult> deleteClientConfig(String serviceKey);
+
+  /// A running share's ([share]) or connection's events as they happen, each
+  /// with its diagnostics as they stand by then; the first update carries
+  /// the diagnostics alone. Fails at once for a tunnel that is not running,
+  /// and ends when it stops. Cancelling ends the reader in Rust.
+  Stream<TunnelEventsUpdate> tunnelEvents({
+    required String serviceKey,
+    required bool share,
+  });
 
   // --- The relay as a whole (`pb_mapper_relay_call_json`). Each throws a
   // [RelayCallException] when the relay or the credential says no.
@@ -589,13 +594,6 @@ abstract interface class PbMapperApiClient {
 }
 
 class PbMapperApi implements PbMapperApiClient {
-  @override
-  Stream<DiagnosticUpdate> diagnostics({
-    required String key,
-    required bool share,
-  }) => _service
-      .diagnostics(key: key, share: share)
-      .map(DiagnosticUpdate.fromMap);
   static final PbMapperApi _instance = PbMapperApi._internal();
   factory PbMapperApi() => _instance;
   PbMapperApi._internal();
@@ -856,6 +854,14 @@ class PbMapperApi implements PbMapperApiClient {
     final result = await _service.deleteClientConfig(serviceKey);
     return _resultFrom(result);
   }
+
+  @override
+  Stream<TunnelEventsUpdate> tunnelEvents({
+    required String serviceKey,
+    required bool share,
+  }) => _service
+      .tunnelEvents(serviceKey: serviceKey, share: share)
+      .map(TunnelEventsUpdate.fromMap);
 
   OperationResult _resultFrom(Map<String, dynamic> result) {
     return OperationResult(

@@ -817,8 +817,8 @@ async fn run_server_side_cli_worker<LocalStream>(
         tokio::select! {
             () = shutdown.cancelled() => break 'outer,
             () = tokio::time::sleep(retry_interval) => {},
-            generation = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => {
-                if let Some(generation) = generation {
+            woke = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => {
+                if let crate::endpoint::Wake::Network(generation) = woke {
                     diagnostics.network_changed(generation);
                 }
                 backoff.transport.reset();

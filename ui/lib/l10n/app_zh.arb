@@ -1,27 +1,4 @@
 {
-  "diagnosticStage": "{stage, select, disabled{已关闭} waiting_for_direct{等待创建直连端点} relay_only{仅中继模式，不申请映射} discovering{发现地址与协议} gateway_found{已找到网关} discovered{协议探测完成} requesting{申请端口映射} active{映射已生效} renewing{续租中} expired{租期已过期} retrying{重试映射} network_changed{网络发生变化} releasing{释放映射} released{已确认释放映射} release_sent{释放请求已发送，未确认} failed{映射失败} release_failed{释放映射失败} cancelled{操作已取消} stopped{已停止} starting{启动中} capacity{等待连接容量} resolving{解析中继地址} connecting{连接中继} handshake{中继握手认证} ready{已就绪} backoff{等待重试} negotiating{协商直连} punching{建立直连路径} committing{提交直连会话} relay_ready{中继已就绪} relay_failed{中继连接失败} direct_established{直连会话已建立} direct_fallback{回退中继} session_started{会话开始} session_closed{会话结束} other{状态更新}}",
-  "portMapping": "自动端口映射",
-  "diagnosticsRefresh": "刷新状态快照",
-  "@diagnosticStage": {
-    "placeholders": {
-      "stage": {
-        "type": "String"
-      }
-    }
-  },
-  "diagnosticsLagged": "读取过慢，已跳过 {count} 条事件。请刷新快照以确认当前状态。",
-  "@diagnosticsLagged": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "diagnosticsWaiting": "等待诊断事件",
-  "diagnosticsCopy": "复制诊断信息",
-  "portMappingRelayOnly": "启用直连后才会申请端口映射。仅中继模式下会保留你的选择。",
-  "tunnelDiagnostics": "监控诊断",
-
   "@@locale": "zh",
   "appTitle": "pb-mapper",
 
@@ -80,6 +57,50 @@
   "directPreferHelp": "网络允许时，每个连接直接到达共享方；不通时经中继。",
   "directAllow": "允许直连",
   "directAllowHelp": "连接可以直接到达本机，流量不经中继转发。",
+  "portMapping": "端口映射",
+  "portMappingHelp": "请求本网络的路由器开放一个 UDP 端口（UPnP、NAT-PMP 或 PCP），让更多连接能够直连。",
+  "portMappingNeedsDirect": "开启直连后生效。",
+  "tunnelDiagnostics": "诊断",
+  "diagnosticsCopy": "复制诊断报告",
+  "diagnosticsCopied": "诊断报告已复制",
+  "diagnosticsUnavailable": "隧道运行时才能查看诊断。",
+  "diagnosticsEvents": "事件",
+  "diagnosticsNoEvents": "暂时没有事件，发生时会显示在这里。",
+  "diagnosticsMissed": "有 {count} 条事件来不及列出，上方数据已是最新。",
+  "@diagnosticsMissed": {"placeholders": {"count": {"type": "int"}}},
+  "diagnosticsRelay": "中继 {latency}",
+  "@diagnosticsRelay": {"placeholders": {"latency": {"type": "String"}}},
+  "diagnosticsRelayFailures": "连接失败 {count} 次",
+  "@diagnosticsRelayFailures": {"placeholders": {"count": {"type": "int"}}},
+  "diagnosticsSessions": "直连 {direct} · 中继 {relay}",
+  "@diagnosticsSessions": {"placeholders": {"direct": {"type": "int"}, "relay": {"type": "int"}}},
+  "diagnosticsDirectSessions": "直连 {count}",
+  "@diagnosticsDirectSessions": {"placeholders": {"count": {"type": "int"}}},
+  "diagnosticsFallbacks": "回退 {count} 次",
+  "@diagnosticsFallbacks": {"placeholders": {"count": {"type": "int"}}},
+  "portMappingOff": "此隧道未开启。",
+  "portMappingStage": "{stage, select, waiting_for_direct{等待首个直连} discovering{正在寻找路由器} gateway_found{已找到路由器} discovered{已识别路由器协议} requesting{正在请求映射} active{已映射} renewing{正在续租} expired{租期已过} retrying{稍后重试} network_changed{网络已变化} releasing{正在释放} released{已释放} release_sent{已发送释放请求} failed{路由器未映射} release_failed{释放失败} cancelled{已取消} stopped{已停止} other{{stage}}}",
+  "@portMappingStage": {"placeholders": {"stage": {"type": "String"}}},
+  "portMappingLease": "租期 {span}",
+  "@portMappingLease": {"placeholders": {"span": {"type": "String"}}},
+  "portMappingRouter": "路由器 {address}",
+  "@portMappingRouter": {"placeholders": {"address": {"type": "String"}}},
+  "portMappingFigures": "请求 {attempts} 次 · 续租 {renewals} 次 · 失败 {failures} 次",
+  "@portMappingFigures": {"placeholders": {"attempts": {"type": "int"}, "renewals": {"type": "int"}, "failures": {"type": "int"}}},
+  "tunnelEventTitle": "{kind, select, relay_ready{中继已响应} relay_failed{中继未响应} network_changed{网络已变化} direct_established{已直连} direct_fallback{改走中继} stopped{已停止} other{{kind}}}",
+  "@tunnelEventTitle": {"placeholders": {"kind": {"type": "String"}}},
+  "tunnelEventDirectStage": "建立直连：{stage}",
+  "@tunnelEventDirectStage": {"placeholders": {"stage": {"type": "String"}}},
+  "tunnelEventAtStage": "阶段：{stage}",
+  "@tunnelEventAtStage": {"placeholders": {"stage": {"type": "String"}}},
+  "tunnelEventSetup": "用时 {ms} 毫秒",
+  "@tunnelEventSetup": {"placeholders": {"ms": {"type": "int"}}},
+  "tunnelEventRetryIn": "{span}后重试",
+  "@tunnelEventRetryIn": {"placeholders": {"span": {"type": "String"}}},
+  "relayPhase": "{phase, select, starting{正在启动} capacity{等待空闲名额} resolving{解析中继地址} connecting{连接中继} handshake{中继认证} ready{中继就绪} backoff{等待重试} stopped{已停止} other{{phase}}}",
+  "@relayPhase": {"placeholders": {"phase": {"type": "String"}}},
+  "relayFailure": "{failure, select, dns{地址无法解析} transport{无法连接} timeout{响应超时} service_unavailable{暂时无法接受} rejected{已拒绝} network_changed{网络已变化} other{{failure}}}",
+  "@relayFailure": {"placeholders": {"failure": {"type": "String"}}},
   "pathDirect": "直连",
   "pathRelay": "中继",
   "pathMixed": "直连 {direct} · 中继 {relay}",

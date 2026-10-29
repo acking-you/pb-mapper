@@ -4,7 +4,7 @@
 //! handle, and the status channel it publishes to. A handle observes and stops
 //! its tunnel; it never drives the traffic itself.
 
-use crate::diagnostics::{Diagnostics, DiagnosticsSubscription, RecoveryPhase, TunnelDiagnostics};
+use crate::diagnostics::{Diagnostics, TunnelDiagnostics, TunnelEvents};
 use crate::endpoint::RelayEndpoint;
 use std::time::Duration;
 
@@ -69,7 +69,7 @@ impl LiveTunnel {
                 Ok(Err(join_error)) if join_error.is_cancelled() => {}
                 Ok(Err(join_error)) => {
                     slot.take();
-                    self.diagnostics.phase(RecoveryPhase::Stopped);
+                    self.diagnostics.stop();
                     return Err(Error::protocol(format!("tunnel task failed: {join_error}")));
                 }
                 Err(_) => {
@@ -79,7 +79,7 @@ impl LiveTunnel {
             }
             slot.take();
         }
-        self.diagnostics.phase(RecoveryPhase::Stopped);
+        self.diagnostics.stop();
         Ok(())
     }
 }
@@ -90,7 +90,7 @@ impl Drop for LiveTunnel {
         if let Some(handle) = self.join.get_mut().take() {
             handle.abort();
         }
-        self.diagnostics.phase(RecoveryPhase::Stopped);
+        self.diagnostics.stop();
     }
 }
 
@@ -140,9 +140,9 @@ macro_rules! tunnel_handle {
                 self.inner.diagnostics.snapshot(&self.inner.endpoint)
             }
 
-            /// Replay recent diagnostics, then receive every transition.
-            /// Each subscriber has a bounded queue and explicit lag errors.
-            pub fn subscribe_diagnostics(&self) -> DiagnosticsSubscription {
+            /// The events kept in [`TunnelDiagnostics::events`], then every
+            /// event as it happens, until the tunnel stops.
+            pub fn subscribe_events(&self) -> TunnelEvents {
                 self.inner.diagnostics.subscribe()
             }
 

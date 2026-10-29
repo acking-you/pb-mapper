@@ -1,10 +1,11 @@
 // Reach a registered service on a local port and listen to the tunnel.
 //
 //   PB_MAPPER_SERVER=relay.example.com:7666 MSG_HEADER_KEY=<credential> \
-//     node examples/connect.mjs web 127.0.0.1:9090 [tcp|udp] [--relay-only]
+//     node examples/connect.mjs web 127.0.0.1:9090 [tcp|udp] [--relay-only] [--port-mapping]
 //
 // Each connection to the local port tries direct first and falls back to the
-// relay. This prints every status change and every new tunnel event.
+// relay; `--port-mapping` asks the router to map the direct UDP port. This
+// prints every status change and every tunnel event.
 import { Client } from "pb-mapper";
 
 const [key = "web", localAddr = "127.0.0.1:9090", transport = "tcp"] =
@@ -15,12 +16,14 @@ const client = new Client({
   server: process.env.PB_MAPPER_SERVER,
   credential: process.env.MSG_HEADER_KEY,
   keepAlive: true,
-  portMapping: process.argv.includes("--port-mapping"),
 });
-const connection = await client.connect({ key, localAddr, transport, path });
+const portMapping = process.argv.includes("--port-mapping");
+const connection = await client.connect({ key, localAddr, transport, path, portMapping });
 process.once("SIGINT", () => connection.stop());
 
-const events = connection.subscribeDiagnostics();
+// Events: the outcomes kept so far, then each one as it happens. `next()`
+// resolves null once the tunnel has stopped.
+const events = connection.subscribeEvents();
 const monitoring = (async () => {
   for (;;) {
     try {
@@ -28,8 +31,8 @@ const monitoring = (async () => {
       if (event === null) break;
       console.log(JSON.stringify(event));
     } catch (error) {
-      // A slow reader sees an explicit gap and reconciles the snapshot.
-      console.error(error);
+      // Fell behind: say how far, and take the current state from a snapshot.
+      console.error(error.message);
       console.log(JSON.stringify(connection.diagnostics()));
     }
   }

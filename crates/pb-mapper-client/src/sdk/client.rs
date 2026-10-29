@@ -5,7 +5,7 @@
 //! transport's worker — so that lifecycle lives in one place (`TunnelWorker`)
 //! and each call site is left with only the worker it invokes.
 
-use crate::diagnostics::{Diagnostics, RecoveryPhase};
+use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
 use crate::relay::CarrierId;
 use std::sync::{Arc, RwLock};
@@ -79,7 +79,6 @@ pub(crate) struct ClientInner {
     pub(crate) credential: RwLock<Credential>,
     pub(crate) keep_alive: bool,
     pub(crate) namespace: Option<u64>,
-    pub(crate) port_mapping: bool,
 }
 
 /// Session against one deployed relay.
@@ -125,7 +124,6 @@ impl Client {
                 credential: RwLock::new(credential),
                 keep_alive,
                 namespace,
-                port_mapping: false,
             }),
         }
     }
@@ -148,33 +146,11 @@ impl Client {
                 credential: RwLock::new(self.credential()),
                 keep_alive: self.inner.keep_alive,
                 namespace: self.inner.namespace,
-                port_mapping: self.inner.port_mapping,
             }),
         })
     }
     pub fn relay_transport(&self) -> super::RelayTransport {
         self.inner.endpoint.transport()
-    }
-    /// Allow PCP, NAT-PMP or UPnP to map subsequent tunnels' direct UDP sockets.
-    /// Off by default; requires the `port-mapping` Cargo feature. Relay-only
-    /// tunnels never create a mapping. Existing handles retain their setting.
-    pub fn with_port_mapping(&self, enabled: bool) -> Result<Self> {
-        if enabled && !cfg!(feature = "port-mapping") {
-            return Err(Error::invalid_config("built without port-mapping support"));
-        }
-        if enabled == self.inner.port_mapping {
-            return Ok(self.clone());
-        }
-        Ok(Self {
-            inner: Arc::new(ClientInner {
-                server: self.inner.server.clone(),
-                endpoint: self.inner.endpoint.clone(),
-                credential: RwLock::new(self.credential()),
-                keep_alive: self.inner.keep_alive,
-                namespace: self.inner.namespace,
-                port_mapping: enabled,
-            }),
-        })
     }
     /// Sample current QUIC counters without a background observer or per-packet work.
     /// Clients of the same relay and carrier in this process share one pool.
@@ -262,8 +238,10 @@ impl Client {
         }
         self.register_inner(
             request,
-            Some(idle_timeout),
-            RegisterOptions::default().allow_direct,
+            RegisterOptions {
+                idle_timeout: Some(idle_timeout),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -278,6 +256,7 @@ impl Client {
         if options.allow_direct && !cfg!(feature = "p2p") {
             return Err(Error::invalid_config("built without p2p support"));
         }
+        check_port_mapping(options.port_mapping)?;
         if let Some(timeout) = options.idle_timeout
             && (request.transport.is_datagram()
                 || tokio::time::Instant::now().checked_add(timeout).is_none())
@@ -286,20 +265,23 @@ impl Client {
                 "idle deadline requires TCP and a representable duration",
             ));
         }
-        self.register_inner(request, options.idle_timeout, options.allow_direct)
-            .await
+        self.register_inner(request, options).await
     }
 
     async fn register_inner(
         &self,
         request: RegisterRequest,
-        idle_timeout: Option<std::time::Duration>,
-        allow_direct: bool,
+        options: RegisterOptions,
     ) -> Result<Registration> {
+        let RegisterOptions {
+            allow_direct,
+            idle_timeout,
+            port_mapping,
+        } = options;
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
         }
-        let options = ServerTunnelOptions {
+        let tunnel = ServerTunnelOptions {
             need_codec: request.codec,
             is_datagram: request.transport.is_datagram(),
             keep_alive: self.inner.keep_alive,
@@ -310,19 +292,14 @@ impl Client {
             .prepare_worker(&request.key, &request.local_addr)
             .await?;
         let credential = self.credential();
-        let port_mapping = self.inner.port_mapping;
-        worker.diagnostics.mapping_requested(
-            port_mapping,
-            allow_direct,
-            crate::network::NetworkHints::shared().generation(),
-        );
+        let port_mapping = worker.port_mapping(port_mapping && allow_direct);
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
-                    options,
+                    tunnel,
                     Some(context.status_callback),
                     Some(credential),
                     context.shutdown,
@@ -337,7 +314,7 @@ impl Client {
                     context.local_addr,
                     context.remote_addr,
                     context.key,
-                    options,
+                    tunnel,
                     Some(context.status_callback),
                     Some(credential),
                     context.shutdown,
@@ -372,6 +349,7 @@ impl Client {
         if options.path == PathPolicy::Auto && !cfg!(feature = "p2p") {
             return Err(Error::invalid_config("built without p2p support"));
         }
+        check_port_mapping(options.port_mapping)?;
         let is_datagram = request.transport.is_datagram();
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
@@ -382,12 +360,8 @@ impl Client {
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
-        let port_mapping = self.inner.port_mapping;
-        worker.diagnostics.mapping_requested(
-            port_mapping,
-            options.path == PathPolicy::Auto,
-            crate::network::NetworkHints::shared().generation(),
-        );
+        let port_mapping =
+            worker.port_mapping(options.port_mapping && options.path == PathPolicy::Auto);
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
@@ -556,6 +530,14 @@ pub(crate) fn is_carrier_failure(error: &Error) -> bool {
     }
 }
 
+/// Refuse a port mapping that this build cannot make, rather than ignore it.
+fn check_port_mapping(requested: bool) -> Result<()> {
+    if requested && !cfg!(feature = "port-mapping") {
+        return Err(Error::invalid_config("built without port-mapping support"));
+    }
+    Ok(())
+}
+
 /// Resolve one endpoint to every address it names.
 ///
 /// The list, not just its first entry: a worker handed the whole list dials each
@@ -620,6 +602,16 @@ struct TunnelWorker {
 }
 
 impl TunnelWorker {
+    /// Whether this tunnel maps its direct endpoint's port, noted in its
+    /// diagnostics from the start when it does.
+    fn port_mapping(&self, enabled: bool) -> bool {
+        if enabled {
+            self.diagnostics
+                .port_mapping_requested(crate::network::NetworkHints::shared().generation());
+        }
+        enabled
+    }
+
     fn spawn<F, Fut>(self, start: F) -> LiveTunnel
     where
         F: FnOnce(WorkerContext) -> Fut + Send + 'static,
@@ -647,7 +639,7 @@ impl TunnelWorker {
                 diagnostics: worker_diagnostics.clone(),
             })
             .await;
-            worker_diagnostics.phase(RecoveryPhase::Stopped);
+            worker_diagnostics.stop();
             settle_stopped(&status_tx);
         });
         LiveTunnel::new(shutdown, join, status_rx, endpoint, diagnostics)

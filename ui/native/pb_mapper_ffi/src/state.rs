@@ -164,6 +164,8 @@ pub struct ServiceConfigData {
     /// allows it, as `register` does.
     #[serde(default = "direct_by_default")]
     pub allow_direct: bool,
+    /// Whether to ask the gateway to map the direct UDP port. Off unless
+    /// turned on, and kept while direct is off, to apply when it is on again.
     #[serde(default)]
     pub port_mapping: bool,
 }
@@ -172,18 +174,12 @@ fn direct_by_default() -> bool {
     true
 }
 
+/// How a tunnel may go past the relay, as it is saved with the tunnel.
 #[derive(Clone, Copy)]
 pub struct DirectOptions {
     pub allow_direct: bool,
+    /// Only acted on while `allow_direct` is.
     pub port_mapping: bool,
-}
-impl Default for DirectOptions {
-    fn default() -> Self {
-        Self {
-            allow_direct: true,
-            port_mapping: false,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -206,6 +202,7 @@ pub struct ClientConfigData {
     /// `connect --relay-only`.
     #[serde(default = "direct_by_default")]
     pub allow_direct: bool,
+    /// As [`ServiceConfigData::port_mapping`].
     #[serde(default)]
     pub port_mapping: bool,
 }
@@ -246,7 +243,6 @@ pub struct ServiceConfigInfo {
     pub enable_encryption: bool,
     pub enable_keep_alive: bool,
     pub allow_direct: bool,
-    #[serde(default)]
     pub port_mapping: bool,
     pub status: String,
     pub status_message: String,
@@ -275,7 +271,6 @@ pub struct ClientConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routed_namespace: Option<u64>,
     pub allow_direct: bool,
-    #[serde(default)]
     pub port_mapping: bool,
     pub status: String,
     pub status_message: String,
@@ -350,6 +345,18 @@ impl PathInfo {
             attempt: direct.attempt.map(|attempt| attempt.stage),
             last,
         })
+    }
+
+    /// What a change of is worth telling the window about: which paths are
+    /// in use, an attempt and how the last one ended, but not the counts.
+    fn shape(&self) -> (bool, bool, Option<DirectStage>, Option<bool>) {
+        (
+            self.active_direct > 0,
+            self.active_relay > 0,
+            self.attempt,
+            self.last
+                .map(|last| matches!(last, PathOutcome::Direct { .. })),
+        )
     }
 }
 
@@ -513,18 +520,12 @@ impl PinnedTunnel {
 
 /// A running tunnel, as the SDK runs it for the CLI too. Dropping it stops
 /// the tunnel.
-enum TunnelHandle {
+pub(crate) enum TunnelHandle {
     Share(Registration),
     Connect(Connection),
 }
 
 impl TunnelHandle {
-    fn subscribe_diagnostics(&self) -> pb_mapper_client::sdk::DiagnosticsSubscription {
-        match self {
-            Self::Share(handle) => handle.subscribe_diagnostics(),
-            Self::Connect(handle) => handle.subscribe_diagnostics(),
-        }
-    }
     fn status(&self) -> TunnelStatus {
         match self {
             Self::Share(handle) => handle.status(),
@@ -532,10 +533,17 @@ impl TunnelHandle {
         }
     }
 
-    fn diagnostics(&self) -> TunnelDiagnostics {
+    pub(crate) fn diagnostics(&self) -> TunnelDiagnostics {
         match self {
             Self::Share(handle) => handle.diagnostics(),
             Self::Connect(handle) => handle.diagnostics(),
+        }
+    }
+
+    pub(crate) fn subscribe_events(&self) -> pb_mapper_client::sdk::TunnelEvents {
+        match self {
+            Self::Share(handle) => handle.subscribe_events(),
+            Self::Connect(handle) => handle.subscribe_events(),
         }
     }
 
@@ -779,8 +787,6 @@ pub async fn register_service(
         .map_err(|e| CtlError::invalid_address(format!("Invalid server address: {e}")))?;
     let client = Client::from_credential(&server_address, credential, enable_keep_alive, None)
         .with_relay_transport(relay_transport)
-        .map_err(sdk_refusal)?
-        .with_port_mapping(port_mapping)
         .map_err(sdk_refusal)?;
     // Surface a relay this tunnel cannot use now, rather than retrying it.
     preflight(&client).await?;
@@ -796,6 +802,7 @@ pub async fn register_service(
             RegisterOptions {
                 allow_direct,
                 idle_timeout: None,
+                port_mapping,
             },
         )
         .await
@@ -876,8 +883,6 @@ pub async fn connect_service(
     })?;
     let client = Client::from_credential(&server_address, credential, enable_keep_alive, namespace)
         .with_relay_transport(relay_transport)
-        .map_err(sdk_refusal)?
-        .with_port_mapping(port_mapping)
         .map_err(sdk_refusal)?;
     // A relay that is down is retried, as it always was: the connection
     // listens locally meanwhile. One that offers no QUIC never will.
@@ -897,6 +902,7 @@ pub async fn connect_service(
                 } else {
                     PathPolicy::RelayOnly
                 },
+                port_mapping,
             },
         )
         .await
@@ -1278,14 +1284,10 @@ mod tests {
             let client = &state.get_client_configs().await[0];
             assert_eq!(share.relay_transport, Some(RelayTransport::Quic));
             assert_eq!(client.relay_transport, Some(RelayTransport::Quic));
+            // Saved with each tunnel, but one kept on the relay asks no gateway.
             assert!(share.port_mapping && client.port_mapping);
-            let (diagnostics, _) = state.tunnel_diagnostics("web", false).unwrap();
-            let mapping = diagnostics.port_mapping.unwrap();
-            assert_eq!(
-                mapping.current.stage,
-                pb_mapper_client::sdk::PortMappingStage::RelayOnly
-            );
-            assert_eq!(mapping.attempts, 0);
+            let tunnel = state.running_tunnel(false, "web").unwrap();
+            assert!(tunnel.diagnostics().port_mapping.is_none());
             let mut legacy =
                 serde_json::to_value(&state.load_service_configs().services["web"]).unwrap();
             legacy.as_object_mut().unwrap().remove("port_mapping");

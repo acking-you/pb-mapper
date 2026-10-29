@@ -14,33 +14,11 @@ use crate::state::{ClientConfigInfo, ClientStatusResponse};
 /// Connect client to service. `namespace` is the temporary credential whose
 /// service it is, for the administrator key; negative for this credential's
 /// own namespace. A nonzero `allow_direct` has each session try a direct
-/// path before the relay; zero keeps them all on the relay.
+/// path before the relay; zero keeps them all on the relay. A nonzero
+/// `port_mapping` asks the gateway to map the direct UDP port, while direct
+/// is allowed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_connect_service(
-    handle: *mut PbMapperHandle,
-    service_key: *const c_char,
-    local_address: *const c_char,
-    protocol: *const c_char,
-    enable_keep_alive: c_int,
-    namespace: i64,
-    allow_direct: c_int,
-) -> *mut c_char {
-    unsafe {
-        pb_mapper_connect_service_with_options(
-            handle,
-            service_key,
-            local_address,
-            protocol,
-            enable_keep_alive,
-            namespace,
-            allow_direct,
-            0,
-        )
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pb_mapper_connect_service_with_options(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
     local_address: *const c_char,

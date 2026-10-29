@@ -84,29 +84,33 @@ mapping. Reachable global IPv6 can bypass IPv4 NAT, subject to UDP firewall
 rules. If neither peer's first packet can arrive, or UDP is blocked, relay
 fallback remains necessary.
 
-Gateway port mapping is optional and off by default. CLI builds exclude it unless built with
-`cargo build -p pb-mapper-cli --features port-mapping`, then add `--port-mapping`
-to `register` or `connect` to request PCP, NAT-PMP or UPnP mappings for the direct
-UDP socket. The library renews leases; a host network change rediscovers the
-gateway, and local stop attempts to release the lease. Discovery does not extend
-the setup budget: the first connection may relay before later ones can use the
-mapping. Relay-only tunnels never request mappings. Mapping the home router
-alone does not guarantee traversal of an upstream carrier NAT; it must permit
-punching, provide a mapping, or support a mechanism such as a PCP proxy. Rust SDK
-users enable the same Cargo feature and call `client.with_port_mapping(true)?`;
-existing request structs are unchanged. Node and Flutter builds include the capability:
-set Node's `ClientConfig.portMapping` to `true`, or enable **Automatic port mapping**
-under a tunnel's **More options**. Both share and connect tunnels save the choice;
-relay-only mode suspends mapping without discarding it.
+Gateway port mapping is optional and off by default. A tunnel that asks for
+it has the router map its direct UDP port with PCP, NAT-PMP or UPnP; the
+library renews the lease, looks for the router again after a network change,
+and releases the lease when the tunnel stops. It never holds up a session: the
+first connection may use the relay before later ones can use the mapping. A
+relay-only tunnel never asks. Mapping the home router alone does not get
+through an upstream carrier NAT, which must permit punching, map a port
+itself, or offer something like a PCP proxy.
 
-Rust handles expose `subscribe_diagnostics()`, Node handles expose
-`subscribeDiagnostics()`, and Dart exposes `diagnostics(key: ..., share: ...)`.
-The UI opens **Diagnostics** from the tunnel menu or overview panel. These feeds
-report discovery, gateway/protocol selection, requests, renewals, expiration,
-failures, network changes and cleanup, together with connection stages.
-Each subscriber has a bounded queue and receives an explicit lag indication if
-it falls behind. PCP/NAT-PMP cleanup reports a deletion **sent**; UPnP reports a
-confirmed deletion only after the gateway responds.
+- CLI: build with `cargo build -p pb-mapper-cli --features port-mapping`, then
+  add `--port-mapping` to `register` or `connect`.
+- Rust SDK: the same Cargo feature, and `port_mapping: true` in
+  `RegisterOptions` or `ConnectOptions`.
+- Node: `portMapping: true` in the `register` or `connect` request.
+- App: **Port mapping**, under **Allow direct connections** (or **Try direct
+  first**) in a tunnel's **More options**. The choice is saved with the tunnel
+  and kept while direct is off.
+
+To watch a tunnel, Rust handles have `subscribe_events()` and Node handles
+`subscribeEvents()`: the outcomes a tunnel kept, then every event as it
+happens, including relay phases, direct stages and each change of the port
+mapping. Each reader has its own bounded queue and is told how many events it
+missed if it falls behind. In the app, a running tunnel's **Diagnostics**,
+from its menu or its panel in the overview, shows the same live, and copies
+it as a JSON report. A PCP or NAT-PMP release is reported as **sent**, since
+those routers do not acknowledge it; a UPnP one as released once the router
+answers.
 
 ## Prerequisites
 

@@ -101,6 +101,7 @@ async fn tunnel_as(
             },
             ConnectOptions {
                 path: PathPolicy::RelayOnly,
+                ..Default::default()
             },
         )
         .await
@@ -417,6 +418,7 @@ async fn rejected_discovery_terminates_new_tunnels_and_preserves_sdk_errors() {
             },
             ConnectOptions {
                 path: PathPolicy::RelayOnly,
+                ..Default::default()
             },
         )
         .await

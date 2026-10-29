@@ -1,9 +1,9 @@
-import 'tunnel_diagnostics.dart';
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/galaxy/planet_glyph.dart';
 import 'package:pb_mapper_ui/src/pages/relay/relay_format.dart' show ownerName;
 import 'package:pb_mapper_ui/src/pages/tunnel_actions.dart';
+import 'package:pb_mapper_ui/src/pages/tunnel_diagnostics.dart';
 import 'package:pb_mapper_ui/src/pages/tunnel_editor.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/page_frame.dart';
@@ -364,9 +364,11 @@ class _TunnelMenu extends StatelessWidget {
       IconData icon,
       String label, {
       bool danger = false,
+      bool enabled = true,
     }) => PopupMenuItem(
       key: Key('menu-${value.name}'),
       value: value,
+      enabled: enabled,
       child: Row(
         children: [
           Icon(icon, size: 17, color: danger ? scheme.error : null),
@@ -392,7 +394,13 @@ class _TunnelMenu extends StatelessWidget {
       },
       itemBuilder: (context) => [
         item(_MenuAction.edit, AppIcons.edit, l10n.edit),
-        item(_MenuAction.diagnostics, AppIcons.latency, l10n.tunnelDiagnostics),
+        // A stopped tunnel has nothing to report.
+        item(
+          _MenuAction.diagnostics,
+          AppIcons.diagnostics,
+          l10n.tunnelDiagnostics,
+          enabled: tunnel.isLive,
+        ),
         item(_MenuAction.copyKey, AppIcons.copy, l10n.copyKey),
         item(_MenuAction.copyAddress, AppIcons.copy, l10n.copyAddress),
         const PopupMenuDivider(),

@@ -139,7 +139,7 @@ async fn run<L: StreamProvider + Send + 'static>(
                             continue;
                         }
                         let admitted =
-                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply, port_mapping, &diagnostics);
+                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply, port_mapping.then_some(&diagnostics));
                         let Some(net) = admitted else { continue };
                         let (tx, rx) = mpsc::channel(8);
                         let id = grant.id;
@@ -201,7 +201,6 @@ async fn run<L: StreamProvider + Send + 'static>(
     }
 }
 /// Validate an offer and lazily create the shared endpoint, or reject it.
-#[allow(clippy::too_many_arguments)]
 fn admit_offer(
     grant: &SessionGrant,
     key: &str,
@@ -209,8 +208,7 @@ fn admit_offer(
     sessions: usize,
     network: &mut Option<Arc<Network>>,
     reply: &Reply,
-    port_mapping: bool,
-    diagnostics: &Diagnostics,
+    port_mapping: Option<&Diagnostics>,
 ) -> Option<Arc<Network>> {
     let reject = |reason: String| {
         send(
@@ -234,7 +232,7 @@ fn admit_offer(
     if let Some(network) = network {
         return Some(network.clone());
     }
-    match Network::new(true, port_mapping, diagnostics.clone()) {
+    match Network::new(true, port_mapping.cloned()) {
         Ok(created) => Some(network.insert(created).clone()),
         Err(error) => reject(error.to_string()),
     }
@@ -391,7 +389,7 @@ where
         seq: 0,
         diagnostics,
     };
-    report.diagnostics.path_started(SessionPath::Direct);
+    report.diagnostics.session_opened(SessionPath::Direct);
     report.tick();
     tracing::info!(event="session_path_selected",path="direct",service=%grant.service,peer=%incoming.connection.0.remote_address());
     let forwarding = super::forward_quic(local, incoming.send, incoming.recv, framing, idle);
@@ -552,7 +550,7 @@ impl Report {
 }
 impl Drop for Report {
     fn drop(&mut self) {
-        self.diagnostics.path_closed(SessionPath::Direct);
+        self.diagnostics.session_closed(SessionPath::Direct);
         self.update(SessionState::Closed);
     }
 }
@@ -613,10 +611,8 @@ mod tests {
 
     #[tokio::test]
     async fn committed_direct_cannot_acknowledge_relay_or_dial_backend_twice() {
-        let provider =
-            Network::new(true, false, crate::diagnostics::Diagnostics::default()).unwrap();
-        let consumer =
-            Network::new(false, false, crate::diagnostics::Diagnostics::default()).unwrap();
+        let provider = Network::new(true, None).unwrap();
+        let consumer = Network::new(false, None).unwrap();
         let stun = "127.0.0.1:9".parse().unwrap();
         let mut grant = SessionGrant {
             id: random_session_id(),

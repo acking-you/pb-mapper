@@ -426,23 +426,36 @@ impl RecoveryWake {
         let _ = self.network.changed().await;
         self.network.borrow_and_update();
     }
-    /// Wake recovery for either signal, returning a generation only when the
-    /// local network changed. A relay reply alone says nothing about P2P reachability.
-    pub(crate) async fn changed(&mut self) -> Option<u64> {
+    /// Wait for either signal, and say which it was.
+    pub(crate) async fn changed(&mut self) -> Wake {
         let network_woke = tokio::select! {
             biased;
             _ = self.success.changed() => false,
             _ = self.network.changed() => true,
         };
-        let generation = {
+        let wake = {
             let network = self.network.borrow_and_update();
-            // Success can win select while a network change is also pending.
-            // Observe and acknowledge that generation together, so it isn't lost.
-            (network_woke || network.has_changed()).then_some(*network)
+            // Success can win the race while a network change is pending as
+            // well: take both together, so the change is not lost.
+            if network_woke || network.has_changed() {
+                Wake::Network(*network)
+            } else {
+                Wake::Relay
+            }
         };
         self.success.borrow_and_update();
-        generation
+        wake
     }
+}
+
+/// Why a [`RecoveryWake`] woke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wake {
+    /// The local network changed, to this generation.
+    Network(u64),
+    /// The relay answered again after failures. That says nothing about
+    /// whether a direct path would get through now.
+    Relay,
 }
 
 #[cfg(test)]
@@ -575,7 +588,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(1), wake.changed())
                 .await
                 .unwrap(),
-            Some(endpoint.network_generation())
+            Wake::Network(endpoint.network_generation())
         );
         for _ in 0..100 {
             let mut permits = Vec::new();
@@ -611,7 +624,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(1), wake.changed())
                 .await
                 .unwrap(),
-            None
+            Wake::Relay
         );
         endpoint.protocol_succeeded();
         assert!(
@@ -626,7 +639,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(1), wake.changed())
                 .await
                 .unwrap(),
-            Some(endpoint.network_generation())
+            Wake::Network(endpoint.network_generation())
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(1), wake.changed())

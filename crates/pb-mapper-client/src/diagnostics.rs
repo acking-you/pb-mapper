@@ -2,19 +2,21 @@
 //!
 //! Besides counters, a tunnel keeps the direct attempt it is making right now
 //! and a short history of what happened to it ([`TunnelEvent`]), so a caller can
-//! show recovery as it unfolds instead of a bare "retrying". Both are written
-//! only on control-path transitions, never per packet.
+//! show recovery as it unfolds instead of a bare "retrying"; [`TunnelEvents`]
+//! delivers each event as it happens. All are written only on control-path
+//! transitions, never per packet.
 
 use crate::endpoint::RelayEndpoint;
+use pb_mapper_protocol::direct::SessionPath;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant};
 
-mod mapping;
-pub use mapping::{
-    PortMappingDiagnostics, PortMappingEvent, PortMappingProtocol, PortMappingStage,
+mod port_mapping;
+pub use port_mapping::{
+    PortMappingDiagnostics, PortMappingProtocol, PortMappingStage, PortMappingStatus,
 };
 
 /// The phase most recently entered by a tunnel worker.
@@ -113,29 +115,16 @@ pub struct DirectAttempt {
 }
 
 /// What happened, in a [`TunnelEvent`].
+///
+/// The first six are outcomes, kept in [`TunnelDiagnostics::events`] as well
+/// as delivered to [`TunnelEvents`]. The rest are steps along the way,
+/// delivered live only: kept, they would crowd the outcomes out of a history
+/// of 16.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TunnelEventKind {
-    PhaseChanged {
-        phase: RecoveryPhase,
-    },
-    DirectStageChanged {
-        stage: DirectStage,
-    },
-    SessionStarted {
-        path: pb_mapper_protocol::direct::SessionPath,
-    },
-    SessionClosed {
-        path: pb_mapper_protocol::direct::SessionPath,
-    },
-    PortMapping {
-        mapping: Box<PortMappingEvent>,
-    },
-    Stopped,
     /// The relay answered for the first time, or again after failures.
-    RelayReady {
-        latency_ms: u64,
-    },
+    RelayReady { latency_ms: u64 },
     /// A relay attempt failed; the next one is `retry_in_ms` away (zero when
     /// the worker retries at once or the failure is final).
     RelayFailed {
@@ -145,13 +134,22 @@ pub enum TunnelEventKind {
     /// The local network changed; recovery restarts at once.
     NetworkChanged,
     /// A session took the direct path.
-    DirectEstablished {
-        setup_ms: u64,
-    },
+    DirectEstablished { setup_ms: u64 },
     /// A session gave up on direct at `stage` and used the relay.
-    DirectFallback {
-        stage: DirectStage,
-    },
+    DirectFallback { stage: DirectStage },
+    /// The tunnel stopped, and whatever it was cleaning up has reported. The
+    /// last event of every stream.
+    Stopped,
+    /// A relay attempt entered `phase`.
+    PhaseChanged { phase: RecoveryPhase },
+    /// A direct attempt entered `stage`.
+    DirectStageChanged { stage: DirectStage },
+    /// A session opened on `path`.
+    SessionOpened { path: SessionPath },
+    /// A session on `path` closed.
+    SessionClosed { path: SessionPath },
+    /// The gateway mapping of the tunnel's direct endpoint changed.
+    PortMappingChanged { mapping: Box<PortMappingStatus> },
 }
 
 impl TunnelEventKind {
@@ -166,15 +164,27 @@ impl TunnelEventKind {
             _ => false,
         }
     }
+
+    /// Whether this is a step delivered live only, never kept in the history.
+    fn is_live_only(&self) -> bool {
+        matches!(
+            self,
+            Self::PhaseChanged { .. }
+                | Self::DirectStageChanged { .. }
+                | Self::SessionOpened { .. }
+                | Self::SessionClosed { .. }
+                | Self::PortMappingChanged { .. }
+        )
+    }
 }
 
-/// One entry of a tunnel's recent history, oldest first in
-/// [`TunnelDiagnostics::events`]. Consecutive repeats fold into one entry, so
-/// a long outage cannot push out what came before it.
+/// One event of a tunnel. In [`TunnelDiagnostics::events`], oldest first,
+/// consecutive repeats fold into one entry, so a long outage cannot push out
+/// what came before it; [`TunnelEvents`] delivers every occurrence.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct TunnelEvent {
-    /// Increases with every recorded event, a fold included, so a poller can
-    /// tell what it has not seen yet.
+    /// Increases with every event, a fold included, so a reader can tell
+    /// what it has not seen yet. A stream and the history share it.
     pub seq: u64,
     /// Time since the latest occurrence.
     pub age_ms: u64,
@@ -187,36 +197,67 @@ pub struct TunnelEvent {
 /// How many entries a tunnel's history keeps.
 const EVENT_CAPACITY: usize = 16;
 
-/// Independent, bounded subscription to control-path events. The recent
-/// snapshot is replayed first, then every new event (without folding).
-/// A slow reader receives `RecvError::Lagged`; refresh `diagnostics()` to
-/// reconcile state. Stopping the tunnel closes the stream after cleanup.
-pub struct DiagnosticsSubscription {
+/// How many events a subscriber may fall behind before it misses some.
+const STREAM_CAPACITY: usize = 128;
+
+/// A tunnel's events as they happen, after the history it has kept: from
+/// `subscribe_events` on a [`Registration`](crate::sdk::Registration) or a
+/// [`Connection`](crate::sdk::Connection).
+///
+/// Every subscriber reads at its own pace from its own queue. One that falls
+/// more than 128 events behind is told how many it missed, and goes on from
+/// there. A subscription does not keep its tunnel alive: once the tunnel
+/// stops and its cleanup has reported, the stream ends.
+pub struct TunnelEvents {
     replay: VecDeque<TunnelEvent>,
     receiver: broadcast::Receiver<TunnelEvent>,
 }
 
-impl DiagnosticsSubscription {
-    pub async fn recv(&mut self) -> Result<TunnelEvent, broadcast::error::RecvError> {
+impl TunnelEvents {
+    /// The next event, or `None` once the stream has ended. An error says
+    /// events were missed; the tunnel's `diagnostics()` is the state to
+    /// reconcile with, and the stream goes on. Cancel-safe.
+    pub async fn recv(&mut self) -> Option<Result<TunnelEvent, EventsLagged>> {
         if let Some(event) = self.replay.pop_front() {
-            return Ok(event);
+            return Some(Ok(event));
         }
-        self.receiver.recv().await
+        match self.receiver.recv().await {
+            Ok(event) => Some(Ok(event)),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                Some(Err(EventsLagged { skipped }))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
     }
 }
+
+/// A [`TunnelEvents`] subscriber fell behind and missed `skipped` events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventsLagged {
+    pub skipped: u64,
+}
+
+impl std::fmt::Display for EventsLagged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "missed {} tunnel events", self.skipped)
+    }
+}
+
+impl std::error::Error for EventsLagged {}
 
 /// A point-in-time view of this tunnel and its process-shared relay budget.
 /// Non-exhaustive: fields are added as the SDK observes more.
 #[derive(Clone, Debug, Serialize)]
 #[non_exhaustive]
 pub struct TunnelDiagnostics {
-    /// Absent when automatic gateway mapping was not requested.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub port_mapping: Option<PortMappingDiagnostics>,
     /// The carrier this tunnel reaches the relay over, fixed when it started.
     pub relay_transport: crate::relay::RelayTransport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direct: Option<PathDiagnostics>,
+    /// Present when the tunnel maps its direct endpoint's port: asked for,
+    /// with direct allowed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_mapping: Option<PortMappingDiagnostics>,
     pub sdk_version: &'static str,
     /// Most recent worker phase; use tunnel status for aggregate readiness.
     pub last_attempt_phase: RecoveryPhase,
@@ -233,7 +274,8 @@ pub struct TunnelDiagnostics {
     /// Shared across this process for the same configured relay address.
     pub active_control_setups: usize,
     pub active_data_setups: usize,
-    /// Recent history, oldest first; at most 16 entries.
+    /// The latest outcomes, oldest first; at most 16 entries. Steps along the
+    /// way are only in [`TunnelEvents`]; see [`TunnelEventKind`].
     pub events: Vec<TunnelEvent>,
 }
 
@@ -250,7 +292,6 @@ pub struct PathDiagnostics {
     pub attempt: Option<DirectAttempt>,
 }
 
-#[derive(Clone)]
 struct Event {
     seq: u64,
     at: Instant,
@@ -258,13 +299,36 @@ struct Event {
     kind: TunnelEventKind,
 }
 
+impl Event {
+    fn public(&self, now: Instant) -> TunnelEvent {
+        TunnelEvent {
+            seq: self.seq,
+            age_ms: ms(now.saturating_duration_since(self.at)),
+            repeats: self.repeats,
+            kind: self.kind.clone(),
+        }
+    }
+}
+
+/// How far a tunnel is from the end of its event stream.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lifecycle {
+    Running,
+    /// Stopped, while a cleanup that reports may still be running.
+    Stopping,
+    /// The stream has ended.
+    Closed,
+}
+
 struct State {
-    mapping: Option<Box<PortMappingDiagnostics>>,
-    subscribers: Option<broadcast::Sender<TunnelEvent>>,
-    closed: bool,
-    stopping: bool,
-    mapping_running: bool,
+    lifecycle: Lifecycle,
+    /// Cleanups that hold the stream open past a stop.
+    cleanups: usize,
+    /// Present while someone subscribes: a tunnel nobody listens to sends
+    /// nothing, and records no live-only event.
+    stream: Option<broadcast::Sender<TunnelEvent>>,
     direct: Option<PathDiagnostics>,
+    port_mapping: Option<PortMappingDiagnostics>,
     phase: RecoveryPhase,
     attempts: u64,
     failures: u64,
@@ -285,36 +349,35 @@ struct State {
 }
 
 impl State {
-    fn close(&mut self) {
-        if !self.closed {
-            self.record(TunnelEventKind::Stopped);
-            self.closed = true;
-            self.subscribers = None;
-        }
-    }
     fn record(&mut self, kind: TunnelEventKind) {
-        if self.closed {
+        let live_only = kind.is_live_only();
+        if self.lifecycle == Lifecycle::Closed || (live_only && self.stream.is_none()) {
             return;
         }
         self.seq = self.seq.wrapping_add(1);
-        if let Some(subscribers) = &self.subscribers {
-            let _ = subscribers.send(TunnelEvent {
-                seq: self.seq,
-                age_ms: 0,
-                repeats: 1,
-                kind: kind.clone(),
-            });
+        let event = TunnelEvent {
+            seq: self.seq,
+            age_ms: 0,
+            repeats: 1,
+            kind,
+        };
+        if live_only {
+            self.send(event);
+            return;
+        }
+        if self.stream.is_some() {
+            self.send(event.clone());
         }
         let event = Event {
-            seq: self.seq,
+            seq: event.seq,
             at: Instant::now(),
             repeats: 1,
-            kind: kind.clone(),
+            kind: event.kind,
         };
         if let Some(last) = self
             .events
             .back_mut()
-            .filter(|last| kind.folds_into(&last.kind))
+            .filter(|last| event.kind.folds_into(&last.kind))
         {
             *last = Event {
                 repeats: last.repeats.saturating_add(1),
@@ -327,6 +390,35 @@ impl State {
         }
         self.events.push_back(event);
     }
+
+    fn send(&mut self, event: TunnelEvent) {
+        // Sending fails only once every subscription is gone.
+        if let Some(stream) = &self.stream
+            && stream.send(event).is_err()
+        {
+            self.stream = None;
+        }
+    }
+
+    /// A worker's report, which a stopped tunnel no longer takes.
+    fn running(&self) -> bool {
+        self.lifecycle == Lifecycle::Running
+    }
+
+    fn enter(&mut self, phase: RecoveryPhase) {
+        if self.phase != phase {
+            self.phase = phase;
+            self.record(TunnelEventKind::PhaseChanged { phase });
+        }
+    }
+
+    fn close_if_drained(&mut self) {
+        if self.lifecycle == Lifecycle::Stopping && self.cleanups == 0 {
+            self.record(TunnelEventKind::Stopped);
+            self.lifecycle = Lifecycle::Closed;
+            self.stream = None;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -335,12 +427,11 @@ pub(crate) struct Diagnostics(Arc<Mutex<State>>);
 impl Default for Diagnostics {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(State {
-            mapping: None,
-            subscribers: None,
-            closed: false,
-            stopping: false,
-            mapping_running: false,
+            lifecycle: Lifecycle::Running,
+            cleanups: 0,
+            stream: None,
             direct: None,
+            port_mapping: None,
             phase: RecoveryPhase::Starting,
             attempts: 0,
             failures: 0,
@@ -359,85 +450,87 @@ impl Default for Diagnostics {
 }
 
 impl Diagnostics {
-    #[cfg(feature = "port-mapping")]
-    pub(crate) fn mapping_started(&self) {
-        self.state().mapping_running = true;
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
-
-    #[cfg(feature = "port-mapping")]
-    pub(crate) fn mapping_finished(&self) {
+    /// The history kept so far, then every event from now on, with nothing
+    /// lost or repeated between the two.
+    pub(crate) fn subscribe(&self) -> TunnelEvents {
         let mut state = self.state();
-        state.mapping_running = false;
-        if state.stopping {
-            state.close();
-        }
-    }
-    pub(crate) fn subscribe(&self) -> DiagnosticsSubscription {
-        let mut state = self.state();
-        let receiver = if state.closed {
-            let (_, receiver) = broadcast::channel(1);
-            receiver
-        } else {
-            state
-                .subscribers
-                .get_or_insert_with(|| broadcast::channel(128).0)
-                .subscribe()
+        let receiver = match state.lifecycle {
+            // Its sender is gone at once: the history, then the end.
+            Lifecycle::Closed => broadcast::channel(1).1,
+            Lifecycle::Running | Lifecycle::Stopping => state
+                .stream
+                .get_or_insert_with(|| broadcast::channel(STREAM_CAPACITY).0)
+                .subscribe(),
         };
-        let replay = state
-            .events
-            .iter()
-            .map(|e| TunnelEvent {
-                seq: e.seq,
-                age_ms: ms(e.at.elapsed()),
-                repeats: e.repeats,
-                kind: e.kind.clone(),
-            })
-            .collect();
-        DiagnosticsSubscription { replay, receiver }
-    }
-
-    pub(crate) fn mapping_requested(&self, enabled: bool, direct: bool, generation: u64) {
-        if enabled {
-            self.mapping_update(PortMappingEvent::new(
-                if direct {
-                    PortMappingStage::WaitingForDirect
-                } else {
-                    PortMappingStage::RelayOnly
-                },
-                generation,
-            ));
+        let now = Instant::now();
+        TunnelEvents {
+            replay: state.events.iter().map(|event| event.public(now)).collect(),
+            receiver,
         }
     }
-
-    pub(crate) fn mapping_update(&self, mut event: PortMappingEvent) {
-        if let Some(error) = &mut event.error {
-            *error = error.chars().take(256).collect();
-        }
+    /// The tunnel stopped. Later reports from its workers are ignored, and the
+    /// stream ends once every cleanup still running has reported.
+    pub(crate) fn stop(&self) {
         let mut state = self.state();
-        if state.closed {
-            return;
+        if state.running() {
+            state.lifecycle = Lifecycle::Stopping;
+            state.phase = RecoveryPhase::Stopped;
         }
-        let mapping = state.mapping.get_or_insert_with(|| {
-            Box::new(PortMappingDiagnostics {
-                current: event.clone(),
+        state.close_if_drained();
+    }
+    /// Hold the stream open past [`Self::stop`] until the guard drops, so a
+    /// cleanup can say how it went.
+    #[cfg(feature = "port-mapping")]
+    pub(crate) fn defer_close(&self) -> DeferClose {
+        self.state().cleanups += 1;
+        DeferClose(self.clone())
+    }
+    /// This tunnel will map its direct endpoint's port, once that opens.
+    pub(crate) fn port_mapping_requested(&self, network_generation: u64) {
+        self.state()
+            .port_mapping
+            .get_or_insert_with(|| PortMappingDiagnostics {
+                current: PortMappingStatus::new(
+                    PortMappingStage::WaitingForDirect,
+                    network_generation,
+                ),
                 attempts: 0,
                 renewals: 0,
                 failures: 0,
-            })
-        });
-        match event.stage {
+            });
+    }
+    #[cfg(feature = "port-mapping")]
+    pub(crate) fn port_mapping_changed(&self, mut status: PortMappingStatus) {
+        if let Some(error) = &mut status.error
+            && let Some((cut, _)) = error.char_indices().nth(256)
+        {
+            error.truncate(cut);
+        }
+        let mut state = self.state();
+        if state.lifecycle == Lifecycle::Closed {
+            return;
+        }
+        let mapping = state
+            .port_mapping
+            .get_or_insert_with(|| PortMappingDiagnostics {
+                current: status.clone(),
+                attempts: 0,
+                renewals: 0,
+                failures: 0,
+            });
+        match status.stage {
             PortMappingStage::Requesting => mapping.attempts += 1,
             PortMappingStage::Renewing => mapping.renewals += 1,
             PortMappingStage::Failed | PortMappingStage::ReleaseFailed => mapping.failures += 1,
             _ => {}
         }
-        mapping.current = event.clone();
-        state.record(TunnelEventKind::PortMapping {
-            mapping: Box::new(event),
+        mapping.current = status.clone();
+        state.record(TunnelEventKind::PortMappingChanged {
+            mapping: Box::new(status),
         });
-    }
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
     pub(crate) fn has_active_direct(&self) -> bool {
         self.state()
@@ -446,32 +539,28 @@ impl Diagnostics {
             .is_some_and(|p| p.active_direct != 0)
     }
     #[cfg(feature = "p2p")]
-    pub(crate) fn path_started(&self, path: pb_mapper_protocol::direct::SessionPath) {
+    pub(crate) fn session_opened(&self, path: SessionPath) {
         let mut state = self.state();
         let p = state.direct.get_or_insert_default();
         match path {
-            pb_mapper_protocol::direct::SessionPath::Direct => {
+            SessionPath::Direct => {
                 p.direct_sessions += 1;
                 p.active_direct += 1;
             }
-            pb_mapper_protocol::direct::SessionPath::Relay => {
+            SessionPath::Relay => {
                 p.relay_sessions += 1;
                 p.active_relay += 1;
             }
         }
-        state.record(TunnelEventKind::SessionStarted { path });
+        state.record(TunnelEventKind::SessionOpened { path });
     }
     #[cfg(feature = "p2p")]
-    pub(crate) fn path_closed(&self, path: pb_mapper_protocol::direct::SessionPath) {
+    pub(crate) fn session_closed(&self, path: SessionPath) {
         let mut state = self.state();
         let p = state.direct.get_or_insert_default();
         match path {
-            pb_mapper_protocol::direct::SessionPath::Direct => {
-                p.active_direct = p.active_direct.saturating_sub(1)
-            }
-            pb_mapper_protocol::direct::SessionPath::Relay => {
-                p.active_relay = p.active_relay.saturating_sub(1)
-            }
+            SessionPath::Direct => p.active_direct = p.active_direct.saturating_sub(1),
+            SessionPath::Relay => p.active_relay = p.active_relay.saturating_sub(1),
         }
         state.record(TunnelEventKind::SessionClosed { path });
     }
@@ -504,40 +593,25 @@ impl Diagnostics {
     }
     pub(crate) fn phase(&self, phase: RecoveryPhase) {
         let mut state = self.state();
-        if phase == RecoveryPhase::Stopped {
-            state.stopping = true;
-            state.phase = phase;
-            if !state.mapping_running {
-                state.close();
-            }
-            return;
-        }
-        if state.stopping {
-            return;
-        }
-        if state.phase != phase {
-            state.phase = phase;
-            state.record(TunnelEventKind::PhaseChanged { phase });
+        if state.running() {
+            state.enter(phase);
         }
     }
     pub(crate) fn attempt(&self) {
         let mut state = self.state();
-        if state.stopping {
+        if !state.running() {
             return;
         }
         state.attempts = state.attempts.saturating_add(1);
         state.retry = None;
-        state.phase = RecoveryPhase::Capacity;
-        state.record(TunnelEventKind::PhaseChanged {
-            phase: RecoveryPhase::Capacity,
-        });
+        state.enter(RecoveryPhase::Capacity);
     }
     pub(crate) fn succeeded(&self, elapsed: Duration) {
         let mut state = self.state();
-        if state.stopping {
+        if !state.running() {
             return;
         }
-        state.phase = RecoveryPhase::Ready;
+        state.enter(RecoveryPhase::Ready);
         state.failures = 0;
         state.success = Some(Instant::now());
         state.latency = Some(elapsed);
@@ -551,12 +625,12 @@ impl Diagnostics {
     }
     pub(crate) fn failed(&self, failure: RecoveryFailure, retry: Duration) -> bool {
         let mut state = self.state();
-        if state.stopping {
+        if !state.running() {
             return false;
         }
         state.failures = state.failures.saturating_add(1);
         let emit = state.failure != Some(failure) || state.failures.is_power_of_two();
-        state.phase = RecoveryPhase::Backoff;
+        state.enter(RecoveryPhase::Backoff);
         state.failure = Some(failure);
         state.retry = Some(Instant::now() + retry);
         state.ready = false;
@@ -592,12 +666,12 @@ impl Diagnostics {
             in_flight: state.in_flight,
         });
         TunnelDiagnostics {
-            port_mapping: state.mapping.as_deref().cloned(),
             relay_transport: endpoint.transport(),
             direct: state
                 .direct
                 .clone()
                 .map(|direct| PathDiagnostics { attempt, ..direct }),
+            port_mapping: state.port_mapping.clone(),
             sdk_version: env!("CARGO_PKG_VERSION"),
             last_attempt_phase: state.phase,
             attempts: state.attempts,
@@ -614,22 +688,27 @@ impl Diagnostics {
             network_generation: endpoint.network_generation(),
             active_control_setups,
             active_data_setups,
-            events: state
-                .events
-                .iter()
-                .map(|event| TunnelEvent {
-                    seq: event.seq,
-                    age_ms: ms(now.saturating_duration_since(event.at)),
-                    repeats: event.repeats,
-                    kind: event.kind.clone(),
-                })
-                .collect(),
+            events: state.events.iter().map(|event| event.public(now)).collect(),
         }
     }
 }
 
-fn ms(time: Duration) -> u64 {
+pub(crate) fn ms(time: Duration) -> u64 {
     time.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// Holds a tunnel's event stream open past its stop; see
+/// [`Diagnostics::defer_close`].
+#[cfg(feature = "port-mapping")]
+pub(crate) struct DeferClose(Diagnostics);
+
+#[cfg(feature = "port-mapping")]
+impl Drop for DeferClose {
+    fn drop(&mut self) {
+        let mut state = self.0.state();
+        state.cleanups = state.cleanups.saturating_sub(1);
+        state.close_if_drained();
+    }
 }
 
 /// One direct attempt in flight. Dropping it without an outcome (an error
@@ -677,12 +756,13 @@ impl Drop for DirectAttemptGuard {
     }
 }
 
+/// A session open on a path, closed when this drops.
 #[cfg(feature = "p2p")]
-pub(crate) struct PathUsage(pub Diagnostics, pub pb_mapper_protocol::direct::SessionPath);
+pub(crate) struct PathUsage(pub Diagnostics, pub SessionPath);
 #[cfg(feature = "p2p")]
 impl Drop for PathUsage {
     fn drop(&mut self) {
-        self.0.path_closed(self.1);
+        self.0.session_closed(self.1);
     }
 }
 
@@ -768,27 +848,10 @@ mod tests {
             direct.last_fallback.as_deref(),
             Some("direct_timeout_or_unreachable")
         );
+        // Its stages are steps, delivered live; the history keeps outcomes.
         assert!(matches!(
             kinds(&diagnostics)[..],
             [
-                (
-                    TunnelEventKind::DirectStageChanged {
-                        stage: DirectStage::Negotiating
-                    },
-                    1
-                ),
-                (
-                    TunnelEventKind::DirectStageChanged {
-                        stage: DirectStage::Punching
-                    },
-                    1
-                ),
-                (
-                    TunnelEventKind::DirectStageChanged {
-                        stage: DirectStage::Negotiating
-                    },
-                    1
-                ),
                 (
                     TunnelEventKind::DirectFallback {
                         stage: DirectStage::Punching
@@ -801,44 +864,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribers_replay_then_receive_unfolded_events_and_explicit_lag() {
+    async fn subscribers_replay_history_then_follow_every_event_and_learn_of_lag() {
         let diagnostics = Diagnostics::default();
         diagnostics.network_changed(1);
         let mut fast = diagnostics.subscribe();
         let mut slow = diagnostics.subscribe();
-        assert_eq!(fast.recv().await.unwrap().seq, 1);
-        assert_eq!(slow.recv().await.unwrap().seq, 1);
+        assert_eq!(fast.recv().await.unwrap().unwrap().seq, 1);
+        assert_eq!(slow.recv().await.unwrap().unwrap().seq, 1);
         for generation in 2..=140 {
             diagnostics.network_changed(generation);
-            let event = fast.recv().await.unwrap();
+            let event = fast.recv().await.unwrap().unwrap();
             assert_eq!((event.seq, event.repeats), (generation, 1));
         }
-        assert!(matches!(
-            slow.recv().await,
-            Err(broadcast::error::RecvError::Lagged(11))
-        ));
-        diagnostics.phase(RecoveryPhase::Stopped);
-        assert_eq!(fast.recv().await.unwrap().kind, TunnelEventKind::Stopped);
-        assert_eq!(fast.recv().await, Err(broadcast::error::RecvError::Closed));
+        // Steps reach a subscriber without displacing the history.
+        diagnostics.phase(RecoveryPhase::Connecting);
+        assert_eq!(
+            fast.recv().await.unwrap().unwrap().kind,
+            TunnelEventKind::PhaseChanged {
+                phase: RecoveryPhase::Connecting
+            }
+        );
+        assert_eq!(
+            slow.recv().await.unwrap(),
+            Err(EventsLagged { skipped: 12 })
+        );
+        diagnostics.stop();
+        assert_eq!(
+            fast.recv().await.unwrap().unwrap().kind,
+            TunnelEventKind::Stopped
+        );
+        assert!(fast.recv().await.is_none());
+        let history = kinds(&diagnostics);
+        assert!(history.iter().all(|(kind, _)| !kind.is_live_only()));
+        assert_eq!(history.last().unwrap().0, TunnelEventKind::Stopped);
     }
 
     #[cfg(feature = "port-mapping")]
     #[tokio::test]
-    async fn shutdown_waits_for_mapping_cleanup_before_closing_diagnostics() {
+    async fn a_stopped_tunnel_reports_its_mapping_release_before_the_stream_ends() {
         let diagnostics = Diagnostics::default();
-        diagnostics.mapping_started();
+        let cleanup = diagnostics.defer_close();
         let mut events = diagnostics.subscribe();
-        diagnostics.phase(RecoveryPhase::Stopped);
-        diagnostics.mapping_update(PortMappingEvent::new(PortMappingStage::Released, 1));
-        diagnostics.mapping_finished();
+        diagnostics.stop();
+        diagnostics.port_mapping_changed(PortMappingStatus::new(PortMappingStage::Released, 1));
+        drop(cleanup);
         assert!(matches!(
-            events.recv().await.unwrap().kind,
-            TunnelEventKind::PortMapping { .. }
+            events.recv().await.unwrap().unwrap().kind,
+            TunnelEventKind::PortMappingChanged { .. }
         ));
-        assert_eq!(events.recv().await.unwrap().kind, TunnelEventKind::Stopped);
         assert_eq!(
-            events.recv().await,
-            Err(broadcast::error::RecvError::Closed)
+            events.recv().await.unwrap().unwrap().kind,
+            TunnelEventKind::Stopped
         );
+        assert!(events.recv().await.is_none());
     }
 }

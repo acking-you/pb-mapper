@@ -258,34 +258,50 @@ void main() {
                 fakeService(serviceKey: 'nas-files', portMapping: true),
               ],
             )
-            ..diagnosticUpdates = Stream.value(
-              DiagnosticUpdate(
-                snapshot: {
-                  'events': [
-                    for (final (seq, stage) in [
-                      (1, 'discovering'),
-                      (2, 'gateway_found'),
-                      (3, 'discovered'),
-                      (4, 'requesting'),
-                      (5, 'active'),
-                    ])
-                      {
-                        'seq': seq,
-                        'kind': {
-                          'kind': 'port_mapping',
-                          'mapping': {
-                            'stage': stage,
-                            'active': stage == 'active',
-                            'protocol': 'pcp',
-                            'local_port': 52183,
-                            'external_addr': '203.0.113.7:52183',
-                          },
-                        },
-                      },
-                  ],
-                },
-              ),
-            );
+            ..tunnelEventFeed = Stream.fromIterable([
+              for (final (seq, kind) in [
+                (1, {'kind': 'relay_ready', 'latency_ms': 38}),
+                (2, {'kind': 'direct_stage_changed', 'stage': 'punching'}),
+                (3, {'kind': 'direct_fallback', 'stage': 'punching'}),
+                (4, {
+                  'kind': 'port_mapping_changed',
+                  'mapping': {'stage': 'discovering'},
+                }),
+                (5, {
+                  'kind': 'port_mapping_changed',
+                  'mapping': {'stage': 'requesting', 'protocol': 'pcp'},
+                }),
+                (6, {
+                  'kind': 'port_mapping_changed',
+                  'mapping': _activeMapping,
+                }),
+                (7, {'kind': 'direct_established', 'setup_ms': 184}),
+              ])
+                TunnelEventsUpdate.fromMap({
+                  'type': 'event',
+                  'event': {
+                    'seq': seq,
+                    'age_ms': (8 - seq) * 41000,
+                    'repeats': 1,
+                    'kind': kind,
+                  },
+                  'diagnostics': {
+                    'relay_transport': 'quic',
+                    'last_setup_latency_ms': 38,
+                    'direct': {
+                      'direct_sessions': 3,
+                      'relay_sessions': 0,
+                      'fallbacks': 1,
+                    },
+                    'port_mapping': {
+                      'current': _activeMapping,
+                      'attempts': 1,
+                      'renewals': 2,
+                      'failures': 0,
+                    },
+                  },
+                }),
+            ]);
       await pumpApp(
         tester,
         api,
@@ -554,3 +570,13 @@ void main() {
     await finish(tester);
   });
 }
+
+const _activeMapping = {
+  'stage': 'active',
+  'protocol': 'pcp',
+  'local_port': 52183,
+  'gateway': '192.168.1.1',
+  'external_addr': '203.0.113.7:52183',
+  'active': true,
+  'lease_lifetime_ms': 7200000,
+};

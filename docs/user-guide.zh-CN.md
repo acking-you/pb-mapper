@@ -60,9 +60,14 @@ sequenceDiagram
 
 双层 NAT 不一定阻止直连，关键是各层的映射和过滤规则。客户端会保留 IPv4/IPv6 候选，并验证认证探测的实际来源地址，因此可以利用部分与 STUN 结果不同的对端映射。公网 IPv6 可达时也能绕开 IPv4 NAT；这仍要求防火墙允许 UDP。双方都无法接收第一包或 UDP 被封锁时继续使用中继，不保证任意 NAT 都能打洞。
 
-自动端口映射是可选能力，默认关闭、不请求网关修改。CLI 需要构建 `cargo build -p pb-mapper-cli --features port-mapping`，在 `register` 或 `connect` 后加 `--port-mapping`。客户端使用 PCP、NAT-PMP 或 UPnP 映射直连 UDP socket，由库续租，本机网络变化时重新发现网关，隧道停止时尝试释放。发现不会延长直连预算，首条连接可能先回退，后续连接才使用已获得的映射。`--relay-only` 不创建映射。只控制家用路由器无法保证穿过运营商 NAT；上游需要可穿透、显式映射或 PCP 代理等配合。Rust SDK 启用同名 Cargo feature 后使用 `client.with_port_mapping(true)?`，原有请求结构无需修改。Node 和 Flutter 构建已包含此能力：Node 设置 `ClientConfig.portMapping: true`；UI 在隧道「更多选项」中开启「自动端口映射」。分享和连接均保存此选择，仅中继模式会暂停映射并保留选择。
+网关端口映射是可选能力，默认关闭。开启后，隧道会用 PCP、NAT-PMP 或 UPnP 请求路由器映射直连所用的 UDP 端口；库负责续租，本机网络变化时重新寻找路由器，隧道停止时释放租约。映射从不阻塞会话：首条连接可能先走中继，之后的连接才用上映射。仅中继的隧道不会请求映射。只映射家用路由器无法穿过上游运营商 NAT，那需要上游允许打洞、自行映射端口，或提供 PCP 代理等机制。
 
-Rust 句柄通过 `subscribe_diagnostics()`、Node 句柄通过 `subscribeDiagnostics()`、Dart 通过 `diagnostics(key: ..., share: ...)` 订阅诊断；UI 从隧道菜单或概览面板打开「诊断」。事件涵盖发现、网关与协议选择、申请、续租、过期、失败、网络变化和停止清理，同时包含连接阶段。每个订阅有独立的有界队列，消费落后会显式报告丢失数量。PCP/NAT-PMP 删除只报告「已发送释放请求」；UPnP 收到网关成功响应后才报告确认释放。
+- CLI：用 `cargo build -p pb-mapper-cli --features port-mapping` 构建，在 `register` 或 `connect` 后加 `--port-mapping`。
+- Rust SDK：启用同名 Cargo feature，在 `RegisterOptions` 或 `ConnectOptions` 中设置 `port_mapping: true`。
+- Node：在 `register` 或 `connect` 的请求中设置 `portMapping: true`。
+- 应用：隧道「更多选项」里「允许直连」（或「优先直连」）下方的「端口映射」。选择随隧道保存，关闭直连时也会保留。
+
+观察隧道：Rust 句柄有 `subscribe_events()`，Node 句柄有 `subscribeEvents()`，先给出隧道保留的结果事件，再实时给出每个事件，包括中继阶段、直连阶段和端口映射的每次变化。每个读者有独立的有界队列，读得太慢时会被告知漏掉了多少条。应用里，运行中的隧道可从菜单或总览面板打开「诊断」，实时查看同样的内容，并可复制为 JSON 报告。PCP 和 NAT-PMP 的释放只报告「已发送」，因为这些路由器不会确认；UPnP 在路由器响应后才报告已释放。
 
 直连不需要任何配置：relay 在与 TCP 相同的端口号上监听 UDP，所有角色默认都允许直连。在 `server`、`register` 或 `connect` 上加 `--relay-only` 即可关闭对应一侧的直连。已建立的直连会话归两端所有：relay 重启或凭据吊销只阻止新的建连，不会切断它；停止本地隧道才会关闭它。
 

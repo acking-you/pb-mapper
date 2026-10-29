@@ -69,6 +69,7 @@ typedef _PbMapperRegisterServiceNative =
       Int32 enableKeepAlive,
       // Nonzero lets connections reach it directly.
       Int32 allowDirect,
+      // Nonzero asks the gateway to map the direct UDP port.
       Int32 portMapping,
     );
 typedef _PbMapperRegisterServiceDart =
@@ -104,6 +105,7 @@ typedef _PbMapperConnectServiceNative =
       Int64 namespace,
       // Nonzero tries a direct path before the relay.
       Int32 allowDirect,
+      // Nonzero asks the gateway to map the direct UDP port.
       Int32 portMapping,
     );
 typedef _PbMapperConnectServiceDart =
@@ -282,7 +284,7 @@ class PbMapperFFI {
       .lookupFunction<
         _PbMapperRegisterServiceNative,
         _PbMapperRegisterServiceDart
-      >('pb_mapper_register_service_with_options');
+      >('pb_mapper_register_service');
 
   late final pbMapperUnregisterService = lib
       .lookupFunction<
@@ -300,7 +302,7 @@ class PbMapperFFI {
       .lookupFunction<
         _PbMapperConnectServiceNative,
         _PbMapperConnectServiceDart
-      >('pb_mapper_connect_service_with_options');
+      >('pb_mapper_connect_service');
 
   late final pbMapperDisconnectService = lib
       .lookupFunction<
@@ -348,17 +350,18 @@ class PbMapperFFI {
       >('pb_mapper_get_service_conns_json');
 
   /// Every relay status and administrator operation, as `{"op": …}` JSON.
-  late final pbMapperDiagnosticsCall = lib
-      .lookupFunction<
-        _PbMapperGetServiceStatusNative,
-        _PbMapperGetServiceStatusDart
-      >('pb_mapper_diagnostics_call_json');
-
   late final pbMapperRelayCall = lib
       .lookupFunction<
         _PbMapperGetServiceStatusNative,
         _PbMapperGetServiceStatusDart
       >('pb_mapper_relay_call_json');
+
+  /// A running tunnel's event readers, as `{"op": …}` JSON.
+  late final pbMapperTunnelEventsCall = lib
+      .lookupFunction<
+        _PbMapperGetServiceStatusNative,
+        _PbMapperGetServiceStatusDart
+      >('pb_mapper_tunnel_events_call_json');
 
   late final pbMapperGetClientConfigs = lib
       .lookupFunction<

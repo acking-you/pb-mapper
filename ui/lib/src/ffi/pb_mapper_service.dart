@@ -8,7 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:pb_mapper_ui/src/common/state_change.dart';
 
 import 'pb_mapper_ffi.dart';
-import 'diagnostics_stream.dart';
+import 'tunnel_event_stream.dart';
 
 /// Log entry from native library.
 class LogMessage {
@@ -24,18 +24,6 @@ class LogMessage {
 }
 
 class PbMapperService {
-  /// Long-poll one bounded native subscription. No native callback queue can
-  /// grow while Dart is paused; a slow consumer receives an explicit lag.
-  Stream<Map<String, dynamic>> diagnostics({
-    required String key,
-    required bool share,
-  }) => diagnosticStream(
-    (request) =>
-        _runJsonOnWorker('diagnostics', {'request': jsonEncode(request)}),
-    key: key,
-    share: share,
-  );
-
   static final PbMapperService _instance = PbMapperService._internal();
   factory PbMapperService() => _instance;
   PbMapperService._internal();
@@ -166,8 +154,8 @@ class PbMapperService {
     _destroyIfIdle();
   }
 
-  // Worker isolates borrow this address. A pending diagnostic read must finish
-  // before its runtime can be freed; disposal prevents further borrows.
+  // Worker isolates borrow the handle: one still in a call, a tunnel event
+  // read waiting on a quiet tunnel among them, must return before it is freed.
   void _destroyIfIdle() {
     if (!_disposeRequested || _activeCalls != 0) return;
     if (_handle != null && _handle != nullptr) {
@@ -229,7 +217,7 @@ class PbMapperService {
     required bool enableEncryption,
     required bool enableKeepAlive,
     required bool allowDirect,
-    bool portMapping = false,
+    required bool portMapping,
   }) {
     return _runJsonOnWorker('registerService', {
       'serviceKey': serviceKey,
@@ -257,7 +245,7 @@ class PbMapperService {
     required bool enableKeepAlive,
     int? namespace,
     required bool allowDirect,
-    bool portMapping = false,
+    required bool portMapping,
   }) {
     return _runJsonOnWorker('connectService', {
       'serviceKey': serviceKey,
@@ -337,6 +325,18 @@ class PbMapperService {
   Future<Map<String, dynamic>> relayCall(Map<String, Object?> request) {
     return _runJsonOnWorker('relayCall', {'request': jsonEncode(request)});
   }
+
+  /// A running tunnel's events (see `tunnel_events.rs`), read one at a time
+  /// while listened to.
+  Stream<Map<String, dynamic>> tunnelEvents({
+    required String serviceKey,
+    required bool share,
+  }) => tunnelEventStream(
+    (request) =>
+        _runJsonOnWorker('tunnelEvents', {'request': jsonEncode(request)}),
+    serviceKey: serviceKey,
+    share: share,
+  );
 }
 
 Map<String, dynamic> _decodeJsonStatic(PbMapperFFI ffi, Pointer<Utf8> ptr) {
@@ -394,9 +394,9 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
       case 'stopServer':
         result = ffi.pbMapperStopServer(handle);
         break;
-      case 'diagnostics':
+      case 'tunnelEvents':
         arg1 = (params['request'] as String).toNativeUtf8();
-        result = ffi.pbMapperDiagnosticsCall(handle, arg1);
+        result = ffi.pbMapperTunnelEventsCall(handle, arg1);
         break;
       case 'registerService':
         arg1 = (params['serviceKey'] as String).toNativeUtf8();
@@ -410,7 +410,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           (params['enableEncryption'] as bool) ? 1 : 0,
           (params['enableKeepAlive'] as bool) ? 1 : 0,
           (params['allowDirect'] as bool) ? 1 : 0,
-          (params['portMapping'] as bool? ?? false) ? 1 : 0,
+          (params['portMapping'] as bool) ? 1 : 0,
         );
         break;
       case 'unregisterService':
@@ -433,7 +433,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           (params['enableKeepAlive'] as bool) ? 1 : 0,
           params['namespace'] as int? ?? -1,
           (params['allowDirect'] as bool) ? 1 : 0,
-          (params['portMapping'] as bool? ?? false) ? 1 : 0,
+          (params['portMapping'] as bool) ? 1 : 0,
         );
         break;
       case 'disconnectService':

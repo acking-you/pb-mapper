@@ -322,8 +322,8 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break 'outer,
-                generation = wake.changed() => {
-                    if let Some(generation) = generation {
+                woke = wake.changed() => {
+                    if let crate::endpoint::Wake::Network(generation) = woke {
                         diagnostics.network_changed(generation);
                         #[cfg(feature = "p2p")]
                         if let Some(direct) = &direct { direct.invalidate(); }

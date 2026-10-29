@@ -114,6 +114,16 @@ the last attempt ended.
 - **A switch** under the editor's More options: *Try direct first* for a
   connection, *Allow direct connections* for a share. Off is
   `--relay-only`; it is saved with the tunnel and kept through an edit.
+  *Port mapping* sits set in beneath it, since it only acts while direct
+  is on: it asks the router to map the direct UDP port, and is kept, held
+  as it is, while direct is off.
+- **Diagnostics**, for a running tunnel, from its menu or its details
+  panel (`pages/tunnel_diagnostics.dart`): its carrier, relay and sessions as
+  pills, its port mapping as it stands, and its events, newest first, as they
+  happen. Each update carries the tunnel's diagnostics, so nothing on screen
+  is kept up by the app itself. A session's opening and closing are counted,
+  not listed. A mapping the router will not make is amber, never red: like a
+  relayed path, it is no fault of the tunnel's.
 
 Blue keeps its one meaning: this computer and what it reaches by itself. A
 relayed path is not a fault, so it is never amber or red; why it is the

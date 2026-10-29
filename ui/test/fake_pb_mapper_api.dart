@@ -9,12 +9,6 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 /// what later reads return, so a view can be driven through a whole flow:
 /// register, see it listed, stop it, see it stopped.
 class FakePbMapperApi implements PbMapperApiClient {
-  Stream<DiagnosticUpdate> diagnosticUpdates = const Stream.empty();
-  @override
-  Stream<DiagnosticUpdate> diagnostics({
-    required String key,
-    required bool share,
-  }) => diagnosticUpdates;
   FakePbMapperApi({
     this.services = const [],
     this.clients = const [],
@@ -332,6 +326,15 @@ class FakePbMapperApi implements PbMapperApiClient {
     clients = clients.where((c) => c.serviceKey != serviceKey).toList();
     return _ok;
   }
+
+  /// What every running tunnel's event feed delivers; none by default.
+  Stream<TunnelEventsUpdate> tunnelEventFeed = const Stream.empty();
+
+  @override
+  Stream<TunnelEventsUpdate> tunnelEvents({
+    required String serviceKey,
+    required bool share,
+  }) => tunnelEventFeed;
 
   // --- The relay as a whole.
 

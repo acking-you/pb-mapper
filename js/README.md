@@ -61,40 +61,15 @@ To stay on the relay, register with `allowDirect: false` or connect with
 `path: "relay-only"`. Established direct connections survive coordinator loss
 and credential revocation; local `stop()` closes them.
 
+To get through more networks, a tunnel can ask the router to map its direct
+UDP port (PCP, NAT-PMP or UPnP): pass `portMapping: true` to `register` or
+`connect`. It is off by default and ignored on the relay; it starts with the
+first direct session, is renewed while the tunnel runs and released when it
+stops. `diagnostics().portMapping` says where it stands.
+
 ## Listening for changes
 
-Automatic gateway mapping is off by default. Set `portMapping: true` in
-`new Client({ server, credential, portMapping: true })` to request a UDP mapping
-when a direct endpoint is created. Both register and connect use this setting;
-relay-only tunnels leave the router alone. No extra build flag is needed for
-the Node package. `diagnostics().portMapping` shows current state and counters.
-
-```ts
-const events = conn.subscribeDiagnostics();
-try {
-  for (;;) {
-    const event = await events.next(); // null after tunnel cleanup
-    if (event === null) break;
-    console.log(event);
-  }
-} finally {
-  events.close(); // also cancels pending next() calls
-}
-```
-
-Each subscription replays recent history and then receives each transition,
-without polling or folding live events. Its queue holds 128 events. A slow
-reader gets a rejection naming the skipped count; refresh `diagnostics()` and
-continue reading. `next(timeoutMs)` rejects on timeout without consuming an
-event. Status and diagnostics are independent subscriptions.
-
-Mapping events include discovery, gateway/protocol selection, requests,
-activation, renewal (even if the address is unchanged), expiry, retries,
-network changes, cancellation and cleanup. `event.mapping` contains the
-generation, local port, gateway, protocol, external address, lifetime,
-active flag and bounded error. A failed renewal can leave `active: true`
-until expiry. `release_sent` is an unacknowledged PCP/NAT-PMP deletion;
-`released` is a confirmed UPnP deletion; `release_failed` is not success.
+Two feeds, both free of credentials and payload. The status:
 
 ```ts
 // Resolves on every status change; once the tunnel settles as "stopped" or
@@ -106,14 +81,39 @@ while (status !== "stopped" && !status.startsWith("failed")) {
 }
 ```
 
+And every event, as it happens: `subscribeEvents()` yields the outcomes the
+tunnel kept, then each event until the tunnel stops and its cleanup, the port
+mapping's release included, has reported.
+
+```ts
+const events = conn.subscribeEvents();
+try {
+  for (let event; (event = await events.next()) !== null;) {
+    console.log(event.kind, event);
+  }
+} finally {
+  events.close(); // also resolves a pending next() with null
+}
+```
+
+Each reader has its own queue of 128 events and nothing queues on the JS
+side while no one reads. One that falls further behind gets a rejection that
+says how many it missed: read `diagnostics()` and keep reading.
+`next(timeoutMs)` rejects when the time passes first, without losing an
+event. A stream carries the steps as well as the outcomes: `phase_changed`,
+`direct_stage_changed`, `session_opened`, `session_closed` and
+`port_mapping_changed`, whose `mapping` is the mapping as it now stands.
+`release_sent` there is a PCP or NAT-PMP deletion the router does not
+acknowledge; `released` is one UPnP confirmed.
+
 `diagnostics()` is a credential-free snapshot for dashboards and logs:
 
-- `events`: the last 16 transitions, including `phase_changed`,
-  `direct_stage_changed`, `session_started`, `session_closed`, `port_mapping`,
-  `relay_ready`, `relay_failed`, `network_changed`, `direct_established`,
-  `direct_fallback` and `stopped`, each with a `seq` so a poller
-  can print only new ones, plus `latencyMs`, `failure`, `retryInMs`,
-  `setupMs` or `stage` as they apply;
+- `events`: the last 16 outcomes, `relay_ready`, `relay_failed`,
+  `network_changed`, `direct_established`, `direct_fallback` and `stopped`,
+  each with a `seq` so a poller can print only new ones, plus `latencyMs`,
+  `failure`, `retryInMs`, `setupMs` or `stage` as they apply;
+- `portMapping`, when the tunnel maps its port: the mapping as it stands,
+  and its requests, renewals and failures;
 - `direct`: sessions per path, active sessions, fallbacks, and the attempt in
   flight with its stage (`negotiating`, `discovering`, `punching`,
   `committing`);

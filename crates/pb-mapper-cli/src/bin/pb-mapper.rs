@@ -148,6 +148,10 @@ struct RegisterArgs {
     /// Accepted for 0.7 scripts: direct sessions are allowed by default.
     #[arg(long, hide = true)]
     allow_direct: bool,
+    /// Ask the gateway (PCP, NAT-PMP or UPnP) to map the direct UDP port.
+    /// Needs a build with the `port-mapping` feature.
+    #[arg(long, conflicts_with = "relay_only")]
+    port_mapping: bool,
     /// Transport used by the local service.
     #[arg(value_enum)]
     transport: Transport,
@@ -178,6 +182,10 @@ struct ConnectArgs {
     /// Shorthand for `--path relay-only`.
     #[arg(long, conflicts_with = "path")]
     relay_only: bool,
+    /// Ask the gateway (PCP, NAT-PMP or UPnP) to map the direct UDP port.
+    /// Needs a build with the `port-mapping` feature.
+    #[arg(long, conflicts_with = "relay_only")]
+    port_mapping: bool,
     /// Transport exposed by the local listener.
     #[arg(value_enum)]
     transport: Transport,
@@ -209,9 +217,6 @@ struct StatusArgs {
 
 #[derive(Debug, Args)]
 struct RelayArgs {
-    /// Request a gateway mapping for direct UDP (requires a port-mapping build).
-    #[arg(long, conflicts_with = "relay_only")]
-    port_mapping: bool,
     /// Carrier between this endpoint and the relay; independent of TCP/UDP service type.
     #[arg(long, value_enum, default_value_t = RelayTransportArg::Tcp)]
     relay_transport: RelayTransportArg,
@@ -442,8 +447,7 @@ fn tunnel_client(relay: &RelayArgs, namespace: Option<u64>) -> Result<Client, Bo
     .with_relay_transport(match relay.relay_transport {
         RelayTransportArg::Tcp => pb_mapper_client::sdk::RelayTransport::Tcp,
         RelayTransportArg::Quic => pb_mapper_client::sdk::RelayTransport::Quic,
-    })?
-    .with_port_mapping(relay.port_mapping)?)
+    })?)
 }
 
 fn sdk_transport(transport: Transport) -> pb_mapper_client::sdk::Transport {
@@ -466,6 +470,7 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
             },
             RegisterOptions {
                 allow_direct: !args.relay_only && RegisterOptions::default().allow_direct,
+                port_mapping: args.port_mapping,
                 ..Default::default()
             },
         )
@@ -493,6 +498,7 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
                     // Auto in a build with `p2p`, relay-only in one without.
                     (false, PathArg::Auto) => PathPolicy::default(),
                 },
+                port_mapping: args.port_mapping,
             },
         )
         .await?;

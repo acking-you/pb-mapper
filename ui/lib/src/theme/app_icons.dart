@@ -30,6 +30,10 @@ abstract final class AppIcons {
   static const IconData computer = LucideIcons.laptop300;
   static const IconData service = LucideIcons.server300;
 
+  /// A tunnel's diagnostics, and the router a port mapping asks.
+  static const IconData diagnostics = LucideIcons.stethoscope300;
+  static const IconData router = LucideIcons.router300;
+
   // Actions.
   static const IconData add = LucideIcons.plus300;
   static const IconData close = LucideIcons.x300;

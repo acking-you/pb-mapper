@@ -10,19 +10,18 @@
 //! * `subscribe()` is a `tokio::sync::watch` receiver of [`TunnelStatus`]:
 //!   `Starting`, `Connected`, `Retrying`, `Stopped`, `Failed(reason)`. It is
 //!   what to drive a connection indicator from.
-//! * `subscribe_diagnostics()` replays recent history, then delivers every
-//!   transition through a bounded queue. Lag is explicit; `diagnostics()`
-//!   reconciles current state. Events and snapshots serialize directly to JSON.
-//!
-//! Add `--port-mapping` (and build with the `port-mapping` feature) to observe
-//! gateway discovery, lease requests, renewal, expiry and cleanup as well.
+//! * `subscribe_events()` yields the tunnel's recent outcomes, then every
+//!   event as it happens: relay phases, direct stages, sessions, and with
+//!   `--port-mapping` (in a build with the `port-mapping` feature) the
+//!   gateway lease as it is found, granted, renewed and released. A reader
+//!   that falls behind is told how many it missed; `diagnostics()` is the
+//!   state to reconcile with. Events and snapshots serialize to JSON.
 //!
 //! When the host reports a network change or a resume from sleep, call
 //! `client.notify_network_change()`: waiting retries start at once and the
 //! next connection tries direct again.
 
-use pb_mapper::{Client, ClientConfig, ConnectRequest, Transport};
-use tokio::sync::broadcast::error::RecvError;
+use pb_mapper::{Client, ClientConfig, ConnectOptions, ConnectRequest, Transport};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,18 +36,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         credential: std::env::var("MSG_HEADER_KEY")?,
         keep_alive: true,
         namespace: None,
-    })?
-    .with_port_mapping(std::env::args().any(|arg| arg == "--port-mapping"))?;
+    })?;
     let connection = client
-        .connect(ConnectRequest {
-            key,
-            local_addr,
-            transport: Transport::Tcp,
-        })
+        .connect_with_options(
+            ConnectRequest {
+                key,
+                local_addr,
+                transport: Transport::Tcp,
+            },
+            ConnectOptions {
+                port_mapping: std::env::args().any(|arg| arg == "--port-mapping"),
+                ..Default::default()
+            },
+        )
         .await?;
 
     let mut status = connection.subscribe();
-    let mut events = connection.subscribe_diagnostics();
+    let mut events = connection.subscribe_events();
     let mut status_open = true;
     let mut stopping = false;
     loop {
@@ -62,16 +66,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 status_open = changed.is_ok();
                 println!("status: {:?}", *status.borrow_and_update());
             }
-            event = events.recv() => {
-                match event {
-                    Ok(event) => println!("{}", serde_json::to_string(&event)?),
-                    Err(RecvError::Lagged(count)) => {
-                        eprintln!("diagnostics skipped {count} events; reconciling snapshot");
-                        println!("{}", serde_json::to_string(&connection.diagnostics())?);
-                    }
-                    Err(RecvError::Closed) => break,
+            event = events.recv() => match event {
+                Some(Ok(event)) => println!("{}", serde_json::to_string(&event)?),
+                Some(Err(lagged)) => {
+                    eprintln!("{lagged}; reconciling with a snapshot");
+                    println!("{}", serde_json::to_string(&connection.diagnostics())?);
                 }
-            }
+                // The tunnel stopped and everything it was cleaning up reported.
+                None => break,
+            },
         }
     }
 
@@ -80,6 +83,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         serde_json::to_string_pretty(&connection.diagnostics())?
     );
-    connection.stop().await?;
     Ok(())
 }

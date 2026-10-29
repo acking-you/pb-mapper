@@ -234,7 +234,11 @@ The design and its rules are in `docs/ui-design.md`.
     attempt in flight, how the last one ended) are read from its handle,
     not probed; `watch_tunnel` emits the change events. Dropping a handle
     stops its tunnel. `pb_mapper_register_service` and
-    `pb_mapper_connect_service` take `allow_direct`, saved with the tunnel
+    `pb_mapper_connect_service` take `allow_direct` and `port_mapping`,
+    saved with the tunnel
+  - `tunnel_events.rs`: `pb_mapper_tunnel_events_call_json`, the window's
+    readers of a running tunnel's events (`subscribe`/`next`/`close`), each
+    answer carrying the tunnel's diagnostics as they are by then
   - The relay carrier (TCP or QUIC, `relay-quic`) is app config, set by
     `pb_mapper_update_config` with the address and credential; a tunnel
     keeps the one it started with and reports it as `relayTransport`.

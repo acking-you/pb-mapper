@@ -148,6 +148,13 @@ impl Default for PathPolicy {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectOptions {
     pub path: PathPolicy,
+    /// Ask this network's gateway (PCP, NAT-PMP or UPnP) to map the direct
+    /// endpoint's UDP port, so that more peers get through. Off by default,
+    /// ignored on the relay-only path, and only in a build with the
+    /// `port-mapping` feature; see [`TunnelDiagnostics::port_mapping`].
+    ///
+    /// [`TunnelDiagnostics::port_mapping`]: crate::sdk::TunnelDiagnostics::port_mapping
+    pub port_mapping: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,6 +165,8 @@ pub struct RegisterOptions {
     /// the UDP socket is opened on the first offer.
     pub allow_direct: bool,
     pub idle_timeout: Option<std::time::Duration>,
+    /// As [`ConnectOptions::port_mapping`]: ignored unless `allow_direct`.
+    pub port_mapping: bool,
 }
 
 #[cfg(feature = "p2p")]
@@ -166,6 +175,7 @@ impl Default for RegisterOptions {
         Self {
             allow_direct: true,
             idle_timeout: None,
+            port_mapping: false,
         }
     }
 }

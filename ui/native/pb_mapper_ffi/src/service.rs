@@ -12,33 +12,10 @@ use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_str
 use crate::state::{ServiceConfigInfo, ServiceStatusResponse};
 
 /// Register a service. A nonzero `allow_direct` lets connections reach it
-/// directly rather than through the relay.
+/// directly rather than through the relay; a nonzero `port_mapping` then asks
+/// the gateway to map the direct UDP port.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_register_service(
-    handle: *mut PbMapperHandle,
-    service_key: *const c_char,
-    local_address: *const c_char,
-    protocol: *const c_char,
-    enable_encryption: c_int,
-    enable_keep_alive: c_int,
-    allow_direct: c_int,
-) -> *mut c_char {
-    unsafe {
-        pb_mapper_register_service_with_options(
-            handle,
-            service_key,
-            local_address,
-            protocol,
-            enable_encryption,
-            enable_keep_alive,
-            allow_direct,
-            0,
-        )
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pb_mapper_register_service_with_options(
     handle: *mut PbMapperHandle,
     service_key: *const c_char,
     local_address: *const c_char,

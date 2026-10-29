@@ -1,5 +1,9 @@
-//! Optional gateway leases belong to the UDP endpoint, never its coordinator.
-use crate::diagnostics::{Diagnostics, PortMappingEvent, PortMappingProtocol, PortMappingStage};
+//! A gateway lease for the direct UDP endpoint, asked for with PCP, NAT-PMP
+//! or UPnP. It belongs to the endpoint, never its coordinator, and no
+//! connection setup waits for it.
+use crate::diagnostics::{
+    Diagnostics, PortMappingProtocol, PortMappingStage, PortMappingStatus, ms,
+};
 use crate::network::NetworkHints;
 use std::{
     net::SocketAddr,
@@ -19,8 +23,8 @@ pub(super) struct Mapping {
 
 impl Mapping {
     pub fn new(port: NonZeroU16, network: Arc<NetworkHints>, diagnostics: Diagnostics) -> Self {
-        diagnostics.mapping_started();
-        let diagnostic_guard = MappingDiagnosticGuard(diagnostics.clone());
+        // The release is reported even when the tunnel stops first.
+        let cleanup = diagnostics.defer_close();
         let (address_tx, address) = watch::channel((network.generation(), None));
         let stop = CancellationToken::new();
         let done = CancellationToken::new();
@@ -31,7 +35,7 @@ impl Mapping {
         // bounded opportunity to release its lease even on an aborted setup.
         tokio::spawn(async move {
             let _done = done_guard;
-            let _diagnostics = diagnostic_guard;
+            let _cleanup = cleanup;
             run(port, changes, address_tx, shutdown, diagnostics).await;
         });
         Self {
@@ -42,6 +46,7 @@ impl Mapping {
         }
     }
 
+    /// The public address of the current lease, if it is for this network.
     pub fn address(&self) -> Option<SocketAddr> {
         let (generation, address) = *self.address.borrow();
         (generation == self.network.generation())
@@ -49,6 +54,7 @@ impl Mapping {
             .flatten()
     }
 
+    /// Release the lease, waiting (at most 2 s) for the gateway.
     pub async fn shutdown(&self) {
         self.stop.cancel();
         self.done.cancelled().await;
@@ -141,21 +147,15 @@ async fn run(
     }
 }
 
-struct MappingDiagnosticGuard(Diagnostics);
-impl Drop for MappingDiagnosticGuard {
-    fn drop(&mut self) {
-        self.0.mapping_finished();
-    }
-}
-
+/// Turns what the mapper observes into the tunnel's [`PortMappingStatus`].
 struct Reporter {
-    current: Mutex<PortMappingEvent>,
+    current: Mutex<PortMappingStatus>,
     diagnostics: Diagnostics,
 }
 
 impl Reporter {
     fn new(port: NonZeroU16, generation: u64, diagnostics: Diagnostics) -> Self {
-        let mut current = PortMappingEvent::new(PortMappingStage::WaitingForDirect, generation);
+        let mut current = PortMappingStatus::new(PortMappingStage::WaitingForDirect, generation);
         current.local_port = Some(port.get());
         Self {
             current: Mutex::new(current),
@@ -163,12 +163,11 @@ impl Reporter {
         }
     }
 
-    fn update(&self, change: impl FnOnce(&mut PortMappingEvent)) {
+    fn update(&self, change: impl FnOnce(&mut PortMappingStatus)) {
         let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
         current.error = None;
-        current.retry_in_ms = None;
         change(&mut current);
-        self.diagnostics.mapping_update(current.clone());
+        self.diagnostics.port_mapping_changed(current.clone());
     }
 
     fn stage(&self, stage: PortMappingStage, error: Option<String>) {
@@ -226,8 +225,7 @@ impl Reporter {
                 } => {
                     current.protocol = Some(protocol.into());
                     current.external_addr = Some(external.into());
-                    current.lease_lifetime_ms =
-                        Some(lifetime.as_millis().min(u64::MAX as u128) as u64);
+                    current.lease_lifetime_ms = Some(ms(lifetime));
                     current.active = true;
                     PortMappingStage::Active
                 }
@@ -297,8 +295,8 @@ mod tests {
         });
         let mut mapping = Vec::new();
         for _ in 0..4 {
-            if let crate::diagnostics::TunnelEventKind::PortMapping { mapping: event } =
-                events.recv().await.unwrap().kind
+            if let crate::diagnostics::TunnelEventKind::PortMappingChanged { mapping: event } =
+                events.recv().await.unwrap().unwrap().kind
             {
                 mapping.push(event);
             }

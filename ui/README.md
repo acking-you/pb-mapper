@@ -12,26 +12,24 @@ behavior and migration from older CI-signed APKs.
 
 ## Using Rust Inside Flutter
 
-Both share and connect editors include **Automatic port mapping** under
-**More options**, off by default. The choice persists across editing and restart.
-Turning off direct connections disables the control while preserving its value.
-The native library includes PCP/NAT-PMP/UPnP support; no gateway work runs until
-an opted-in tunnel creates a direct endpoint.
+A tunnel's **More options** hold **Port mapping**, set under the direct
+switch it depends on: off by default, saved with the tunnel, and kept while
+direct is off. The native library speaks PCP, NAT-PMP and UPnP, and asks no
+router anything until such a tunnel opens its first direct session.
 
-Open **Diagnostics** from a tunnel's menu or overview panel for live connection
-and mapping stages. Current state stays visible; expand an event for its raw
-fields, or copy the snapshot and retained events as JSON. The panel retains up
-to 128 events and reports subscriber lag explicitly.
+A running tunnel's **Diagnostics**, from its menu or its panel in the
+overview, show its carrier, relay and sessions, its port mapping, and its
+events as they happen; tap an event for its fields, or copy the whole as a
+JSON report.
 
-Dart callers use `registerService(..., portMapping: true)` or
-`connectService(..., portMapping: true)` and subscribe through
-`api.diagnostics(key: key, share: true)`. Canceling the stream closes its native
-subscription, including a pending read. The C ABI retains the old register and
-connect functions (mapping off) and adds `_with_options` variants. Its
-`pb_mapper_diagnostics_call_json` accepts `subscribe {key, share}`,
-`next {id, timeout_ms}` and `close {id}`; `next` returns `event`, `lagged`,
-`timeout` or `closed` inside the normal response envelope. Free every response
-with `pb_mapper_free_string`; the runtime handle must outlive concurrent calls.
+On the Dart side, `registerService` and `connectService` take `portMapping`,
+and `PbMapperApiClient.tunnelEvents(serviceKey:, share:)` is the live feed:
+each update carries the tunnel's diagnostics as they are by then, and
+cancelling it ends the reader in Rust, a read waiting on a quiet tunnel
+included. Underneath, `pb_mapper_register_service` and
+`pb_mapper_connect_service` take `port_mapping`, and
+`pb_mapper_tunnel_events_call_json` serves `subscribe {kind, key}`,
+`next {id, timeout_ms}` and `close {id}` (see `native/pb_mapper_ffi/src/tunnel_events.rs`).
 
 This project uses raw `dart:ffi` to call into a Rust FFI library (`pb-mapper-ffi`)
 located under `ui/native`.

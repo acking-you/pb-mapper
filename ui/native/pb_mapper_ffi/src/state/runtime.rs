@@ -484,12 +484,19 @@ impl PbMapperState {
     }
 }
 
-/// Refresh on SDK transitions. A lag invalidates the snapshot too.
-/// Receivers do not keep the tunnel alive; no polling timer is needed.
+/// Tell the window when `handle`'s state or path changes, until the tunnel
+/// ends. Both are read when its status or one of its events says something
+/// may have changed, and announced only when they did: which paths its
+/// sessions use, not how many, and not the message, which for a failing
+/// tunnel says when it tries again. Holds the handle weakly, so it never
+/// keeps a tunnel alive.
 fn watch_tunnel(handle: &Arc<TunnelHandle>, kind: events::ChangeKind, key: &str) {
+    let tunnel = Arc::downgrade(handle);
     let mut status = handle.subscribe();
-    let mut diagnostics = handle.subscribe_diagnostics();
+    let mut events = handle.subscribe_events();
     let key = key.to_string();
+    let shape = |view: TunnelView| (view.status, view.path.map(|path| path.shape()));
+    let mut seen = shape(handle.view());
     tokio::spawn(async move {
         let mut status_open = true;
         loop {
@@ -498,9 +505,17 @@ fn watch_tunnel(handle: &Arc<TunnelHandle>, kind: events::ChangeKind, key: &str)
                     status_open = changed.is_ok();
                     true
                 },
-                event = diagnostics.recv() => !matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)),
+                // A missed event may have been a change too: read it all again.
+                event = events.recv() => event.is_some(),
             };
-            events::emit(kind, Some(&key), Origin::Internal);
+            let Some(handle) = tunnel.upgrade() else {
+                return;
+            };
+            let now = shape(handle.view());
+            drop(handle);
+            if std::mem::replace(&mut seen, now) != now {
+                events::emit(kind, Some(&key), Origin::Internal);
+            }
             if !live {
                 return;
             }

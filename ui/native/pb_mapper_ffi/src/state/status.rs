@@ -13,27 +13,21 @@
 use super::*;
 
 impl PbMapperState {
-    pub(crate) fn tunnel_diagnostics(
+    /// The share (`share`) or connection running under `key`.
+    pub(crate) fn running_tunnel(
         &self,
-        key: &str,
         share: bool,
-    ) -> Result<
-        (
-            TunnelDiagnostics,
-            pb_mapper_client::sdk::DiagnosticsSubscription,
-        ),
-        CtlError,
-    > {
+        key: &str,
+    ) -> Result<&Arc<TunnelHandle>, CtlError> {
         let runtimes = if share {
             &self.service_runtime
         } else {
             &self.client_runtime
         };
-        let runtime = runtimes
+        runtimes
             .get(key)
-            .ok_or_else(|| CtlError::not_found("tunnel is not running"))?;
-        let receiver = runtime.handle.subscribe_diagnostics();
-        Ok((runtime.handle.diagnostics(), receiver))
+            .map(|runtime| &runtime.handle)
+            .ok_or_else(|| CtlError::not_found(format!("'{key}' is not running")))
     }
     pub async fn get_config_status(&self) -> AppConfig {
         self.config.clone()
