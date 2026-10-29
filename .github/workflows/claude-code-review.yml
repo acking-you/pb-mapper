@@ -24,11 +24,13 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Check Claude gateway configuration
+      - name: Check Claude configuration
         shell: bash
         env:
           CLAUDE_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           CLAUDE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Repository Settings > Secrets and variables > Actions > Variables.
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
         run: |
           missing=0
           if [[ -z "$CLAUDE_BASE_URL" ]]; then
@@ -37,6 +39,10 @@ jobs:
           fi
           if [[ -z "$CLAUDE_API_KEY" ]]; then
             echo "::error::Repository secret ANTHROPIC_API_KEY is not configured."
+            missing=1
+          fi
+          if [[ -z "$CLAUDE_MODEL" ]]; then
+            echo "::error::Repository variable CLAUDE_MODEL is not configured."
             missing=1
           fi
           exit "$missing"
@@ -360,7 +366,7 @@ jobs:
             ${{ steps.review-context.outputs.context }}
             END BOUNDED REVIEW CONTEXT
           claude_args: |
-            --model "${{ vars.CLAUDE_MODEL || 'claude-opus-5-5' }}"
+            --model "${{ vars.CLAUDE_MODEL }}"
             --max-turns 100
             --json-schema '{"type":"object","additionalProperties":false,"properties":{"summary":{"type":"string","maxLength":2000},"findings":{"type":"array","maxItems":10,"items":{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"},"line":{"type":"integer","minimum":1},"severity":{"type":"string","enum":["critical","high","medium","low"]},"title":{"type":"string","maxLength":160},"body":{"type":"string","maxLength":2000}},"required":["path","line","severity","title","body"]}}},"required":["summary","findings"]}'
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
