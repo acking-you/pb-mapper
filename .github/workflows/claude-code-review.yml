@@ -360,7 +360,7 @@ jobs:
             ${{ steps.review-context.outputs.context }}
             END BOUNDED REVIEW CONTEXT
           claude_args: |
-            --model "${{ vars.CLAUDE_MODEL || 'claude-sonnet-5' }}"
+            --model "${{ vars.CLAUDE_MODEL || 'claude-opus-5-5' }}"
             --max-turns 100
             --json-schema '{"type":"object","additionalProperties":false,"properties":{"summary":{"type":"string","maxLength":2000},"findings":{"type":"array","maxItems":10,"items":{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"},"line":{"type":"integer","minimum":1},"severity":{"type":"string","enum":["critical","high","medium","low"]},"title":{"type":"string","maxLength":160},"body":{"type":"string","maxLength":2000}},"required":["path","line","severity","title","body"]}}},"required":["summary","findings"]}'
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
