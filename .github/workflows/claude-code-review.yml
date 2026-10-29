@@ -5,9 +5,15 @@ on:
     # One automatic review per PR, including drafts. Later pushes, reopens,
     # and ready_for_review transitions do not start another review.
     types: [opened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: string
 
 concurrency:
-  group: claude-code-review-${{ github.event.pull_request.number }}
+  group: claude-code-review-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: false
 
 permissions:
@@ -19,8 +25,9 @@ jobs:
   review:
     name: Review pull request
     if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]'
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.login != 'dependabot[bot]')
     runs-on: ubuntu-latest
     # Advisory only: review failures must not fail the workflow.
     continue-on-error: true
@@ -45,24 +52,61 @@ jobs:
           fi
           echo "configured=$configured" >> "$GITHUB_OUTPUT"
 
-      - name: Check out pull request
+      - name: Resolve pull request
+        id: pr
         if: steps.config.outputs.configured == 'true'
+        uses: actions/github-script@v7
+        env:
+          REQUESTED_PR: ${{ inputs.pr_number }}
+        with:
+          script: |
+            let pr = context.payload.pull_request;
+            if (context.eventName === 'workflow_dispatch') {
+              const input = process.env.REQUESTED_PR || '';
+              const number = Number(input);
+              if (!/^[1-9][0-9]*$/.test(input) || !Number.isSafeInteger(number)) {
+                core.warning('Invalid PR number; skipping advisory review.');
+                return;
+              }
+              ({ data: pr } = await github.rest.pulls.get({
+                ...context.repo,
+                pull_number: number,
+              }));
+            }
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            if (!pr || pr.state !== 'open' ||
+                pr.head.repo?.full_name !== repository ||
+                pr.user.login === 'dependabot[bot]') {
+              core.warning('Review requires an open, same-repository, non-Dependabot PR.');
+              return;
+            }
+            core.setOutput('number', pr.number);
+            core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('eligible', 'true');
+
+      - name: Check out pull request
+        if: steps.pr.outputs.eligible == 'true'
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
       - name: Run Claude review
         id: claude-review
-        if: steps.config.outputs.configured == 'true'
+        if: steps.pr.outputs.eligible == 'true'
         continue-on-error: true
         # v1.0.191; pin the action because this job receives an API credential.
         uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           ANTHROPIC_CUSTOM_HEADERS: ${{ secrets.ANTHROPIC_CUSTOM_HEADERS }}
+          GH_TOKEN: ${{ github.token }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Manual runs use the job's read-code/write-PR token. Automatic PR
+          # runs retain the existing GitHub App/OIDC authentication.
+          github_token: ${{ github.event_name == 'workflow_dispatch' && github.token || '' }}
           show_full_output: true
           display_report: true
           # Post each confirmed line finding as Claude discovers it instead of
@@ -70,9 +114,10 @@ jobs:
           classify_inline_comments: false
           prompt: |
             REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-            BASE SHA: ${{ github.event.pull_request.base.sha }}
-            HEAD SHA: ${{ github.event.pull_request.head.sha }}
+            PR NUMBER: ${{ steps.pr.outputs.number }}
+            BASE SHA: ${{ steps.pr.outputs.base_sha }}
+            HEAD SHA: ${{ steps.pr.outputs.head_sha }}
+            EVENT: ${{ github.event_name }}
 
             Review this pull request using the complete diff and repository.
             Start with git diff BASE_SHA...HEAD_SHA using the SHAs above, then
@@ -97,6 +142,12 @@ jobs:
             concrete failure scenario. Immediately publish confirmed findings
             on commentable changed lines with
             mcp__github_inline_comment__create_inline_comment and confirmed=true.
+            For workflow_dispatch runs, that MCP server is unavailable: post
+            the same inline findings with gh api to
+            repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments,
+            using commit_id=HEAD_SHA, path, line, side=RIGHT, and body. The gh
+            CLI is already authenticated; never print its token. Include
+            severity, title, and the failure scenario in each comment body.
             Include all confirmed findings in the structured review object,
             with a concise summary and the narrowest relevant line. Return an
             empty findings array when there are no actionable defects.

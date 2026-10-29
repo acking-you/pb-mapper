@@ -3,8 +3,18 @@
 `.github/workflows/claude-code-review.yml` runs one automatic review when a
 same-repository pull request is opened, including a draft PR. Pushes, reopening
 the PR, and switching between draft and ready do not trigger another review.
-Fork PRs and Dependabot PRs remain excluded. An explicit **Re-run jobs** action
-can repeat an existing run; this is a manual retry, not another automatic run.
+Fork PRs and Dependabot PRs remain excluded. To review an existing PR with the
+current workflow, use **Run workflow** and enter its `pr_number`, or run:
+
+```sh
+gh workflow run claude-code-review.yml --ref master -f pr_number=45
+```
+
+Choose the branch containing the workflow configuration you want to run. The
+manual entry resolves the PR's current head, validates the same repository and
+author restrictions, and checks out that exact commit. An explicit **Re-run
+jobs** instead repeats the original event's commit and workflow configuration.
+Neither manual operation adds another automatic trigger.
 
 The review can read the complete diff, related source and tests, and run checks.
 There is no configured turn, tool-call, file-count, diff-size, output-length,
@@ -35,6 +45,10 @@ required checks: it deliberately does not produce a new check on every push,
 and GitHub may still display infrastructure failures, cancellation, or timeout
 status even when a job allows failure.
 
-Workflow changes take effect after merging into the default branch. The pinned
-Claude action's existing GitHub App/OIDC workflow validation remains enabled;
-this change does not rerun reviews on already-open PRs.
+Automatic reviews retain the pinned Claude action's GitHub App/OIDC workflow
+validation, so workflow changes need to reach the default branch before they
+can run automatically. Manual runs use the action's supported `github_token`
+input with the job's read-code/write-PR token. They publish inline findings via
+the authenticated `gh` CLI because the action only enables its inline-comment
+MCP server for PR events. Existing PRs are reviewed again only when explicitly
+requested.
