@@ -433,7 +433,7 @@ class _PortMapping extends StatelessWidget {
       color: scheme.onSurfaceVariant,
     );
     final mapping = this.mapping;
-    final off = !tunnel.portMapping
+    final off = tunnel.portMapping == PortMappingMode.off
         ? l10n.portMappingOff
         : !tunnel.allowDirect
         ? l10n.portMappingNeedsDirect

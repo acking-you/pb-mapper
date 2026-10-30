@@ -14,9 +14,9 @@ use crate::state::{ClientConfigInfo, ClientStatusResponse};
 /// Connect client to service. `namespace` is the temporary credential whose
 /// service it is, for the administrator key; negative for this credential's
 /// own namespace. A nonzero `allow_direct` has each session try a direct
-/// path before the relay; zero keeps them all on the relay. A nonzero
-/// `port_mapping` asks the gateway to map the direct UDP port, while direct
-/// is allowed.
+/// path before the relay; zero keeps them all on the relay. `port_mapping`
+/// says when to ask the router to map the direct UDP port, while direct is
+/// allowed: 0 never, 1 once punching through fails, 2 from the start.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_connect_service(
     handle: *mut PbMapperHandle,
@@ -44,6 +44,10 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
         Ok(v) => v,
         Err(e) => return err_ctl(&e),
     };
+    let port_mapping = match crate::state::port_mapping_from_c(port_mapping) {
+        Ok(v) => v,
+        Err(e) => return err_ctl(&e),
+    };
 
     let handle = unsafe { &*handle };
     let state = handle.state.clone();
@@ -62,7 +66,7 @@ pub unsafe extern "C" fn pb_mapper_connect_service(
             u64::try_from(namespace).ok(),
             crate::state::DirectOptions {
                 allow_direct: allow_direct != 0,
-                port_mapping: port_mapping != 0,
+                port_mapping,
             },
         )
         .await

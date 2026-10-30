@@ -80,7 +80,7 @@ void main() {
       final feed = StreamController<TunnelEventsUpdate>();
       final api = FakePbMapperApi(
         services: [
-          fakeService(serviceKey: 'web', portMapping: true),
+          fakeService(serviceKey: 'web', portMapping: PortMappingMode.always),
           fakeService(serviceKey: 'old', status: 'stopped'),
         ],
       )..tunnelEventFeed = feed.stream;

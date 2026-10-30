@@ -212,10 +212,11 @@ export interface JsConnectRequest {
    */
   path?: string
   /**
-   * Ask the gateway (PCP, NAT-PMP or UPnP) to map the direct UDP port
-   * (default `false`). Ignored on the relay-only path.
+   * When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+   * port: "auto" once punching through fails (default), "always", or "off".
+   * Ignored on the relay-only path.
    */
-  portMapping?: boolean
+  portMapping?: string
   key: string
   localAddr: string
   transport: string
@@ -316,10 +317,11 @@ export interface JsRegisterRequest {
    */
   allowDirect?: boolean
   /**
-   * Ask the gateway (PCP, NAT-PMP or UPnP) to map the direct UDP port
-   * (default `false`). Ignored when direct is not allowed.
+   * When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+   * port: "auto" once punching through fails (default), "always", or "off".
+   * Ignored when direct is not allowed.
    */
-  portMapping?: boolean
+  portMapping?: string
   key: string
   localAddr: string
   transport: string

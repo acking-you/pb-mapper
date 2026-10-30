@@ -12,6 +12,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PortMappingStage {
+    /// Asked for when needed (`PortMapping::Auto`): starts if a direct
+    /// attempt fails to punch through, which none has.
+    Standby,
     /// Requested; starts with the tunnel's first direct session, when its UDP
     /// endpoint opens.
     WaitingForDirect,
@@ -54,6 +57,7 @@ impl PortMappingStage {
     /// Stable diagnostic label, matching the serialized representation.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Standby => "standby",
             Self::WaitingForDirect => "waiting_for_direct",
             Self::Discovering => "discovering",
             Self::GatewayFound => "gateway_found",

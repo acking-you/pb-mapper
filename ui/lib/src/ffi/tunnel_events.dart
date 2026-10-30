@@ -142,6 +142,7 @@ class TunnelEvent {
 
 /// Where a gateway mapping stands; see the SDK's `PortMappingStage`.
 enum PortMappingStage {
+  standby('standby'),
   waitingForDirect('waiting_for_direct'),
   discovering('discovering'),
   gatewayFound('gateway_found'),

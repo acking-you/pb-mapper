@@ -115,8 +115,9 @@ the last attempt ended.
   connection, *Allow direct connections* for a share. Off is
   `--relay-only`; it is saved with the tunnel and kept through an edit.
   *Port mapping* sits set in beneath it, since it only acts while direct
-  is on: it asks the router to map the direct UDP port, and is kept, held
-  as it is, while direct is off.
+  is on: Off, Auto or Always, as a segmented control like the protocol's.
+  Auto, the default, asks the router to map the direct UDP port only once a
+  punch has failed; while direct is off the choice is kept, held and faded.
 - **Diagnostics**, for a running tunnel, from its menu or its details
   panel (`pages/tunnel_diagnostics.dart`): its carrier, relay and sessions as
   pills, its port mapping as it stands, and its events, newest first, as they

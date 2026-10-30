@@ -1,11 +1,12 @@
 // Reach a registered service on a local port and listen to the tunnel.
 //
 //   PB_MAPPER_SERVER=relay.example.com:7666 MSG_HEADER_KEY=<credential> \
-//     node examples/connect.mjs web 127.0.0.1:9090 [tcp|udp] [--relay-only] [--port-mapping]
+//     node examples/connect.mjs web 127.0.0.1:9090 [tcp|udp] [--relay-only] [--port-mapping[=always]]
 //
 // Each connection to the local port tries direct first and falls back to the
-// relay; `--port-mapping` asks the router to map the direct UDP port. This
-// prints every status change and every tunnel event.
+// relay. `--port-mapping` asks the router to map the direct UDP port once
+// punching through fails; `=always`, from the start. This prints every
+// status change and every tunnel event.
 import { Client } from "pb-mapper";
 
 const [key = "web", localAddr = "127.0.0.1:9090", transport = "tcp"] =
@@ -17,7 +18,8 @@ const client = new Client({
   credential: process.env.MSG_HEADER_KEY,
   keepAlive: true,
 });
-const portMapping = process.argv.includes("--port-mapping");
+const flag = process.argv.find((arg) => arg.startsWith("--port-mapping"));
+const portMapping = flag ? (flag.split("=")[1] ?? "auto") : "off";
 const connection = await client.connect({ key, localAddr, transport, path, portMapping });
 process.once("SIGINT", () => connection.stop());
 

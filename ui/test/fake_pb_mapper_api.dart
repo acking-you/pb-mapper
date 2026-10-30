@@ -206,7 +206,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool enableEncryption,
     required bool enableKeepAlive,
     bool allowDirect = true,
-    bool portMapping = false,
+    PortMappingMode portMapping = PortMappingMode.auto,
   }) async {
     calls.add(
       allowDirect
@@ -276,7 +276,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool enableKeepAlive,
     int? namespace,
     bool allowDirect = true,
-    bool portMapping = false,
+    PortMappingMode portMapping = PortMappingMode.auto,
   }) async {
     final target = namespace == null ? serviceKey : '$serviceKey@$namespace';
     calls.add(
@@ -667,7 +667,7 @@ ClientConfigInfo fakeClient({
   int? namespace,
   int? routedNamespace,
   bool allowDirect = true,
-  bool portMapping = false,
+  PortMappingMode portMapping = PortMappingMode.auto,
   TunnelPath? path,
   RelayTransport? relayTransport,
 }) => ClientConfigInfo(
@@ -696,7 +696,7 @@ ServiceConfigInfo fakeService({
   String status = 'running',
   String message = '',
   bool allowDirect = true,
-  bool portMapping = false,
+  PortMappingMode portMapping = PortMappingMode.auto,
   TunnelPath? path,
   RelayTransport? relayTransport,
 }) => ServiceConfigInfo(

@@ -90,7 +90,7 @@ pub(crate) struct Consumer {
     network: OnceCell<Arc<Network>>,
     diagnostics: Diagnostics,
     cooldown: std::sync::Mutex<Cooldown>,
-    port_mapping: bool,
+    port_mapping: crate::sdk::PortMapping,
 }
 impl Consumer {
     pub fn new(
@@ -100,7 +100,7 @@ impl Consumer {
         is_datagram: bool,
         keep_alive: bool,
         diagnostics: Diagnostics,
-        port_mapping: bool,
+        port_mapping: crate::sdk::PortMapping,
     ) -> Arc<Self> {
         let control = Arc::new(Mutex::new(None::<Arc<Control>>));
         let reports = Arc::new(reports::Latest::default());
@@ -203,7 +203,7 @@ impl Consumer {
             let network = self
                 .network
                 .get_or_try_init(|| async {
-                    Network::new(false, self.port_mapping.then(|| self.diagnostics.clone()))
+                    Network::new(false, self.port_mapping, &self.diagnostics)
                 })
                 .await?
                 .clone();
@@ -291,6 +291,7 @@ impl Consumer {
             tracing::debug!(reason = ?candidate.as_ref().map(|r| r.as_ref().map(|_| ())), "direct attempt failed before commit");
             attempt.fell_back("direct_timeout_or_unreachable");
             self.cooldown().back_off(Instant::now());
+            network.punching_failed();
             control.relay(grant.id).await?;
             let ready = crate::client::stream::subscribe_request(
                 PbConnRequest::DirectRelay {

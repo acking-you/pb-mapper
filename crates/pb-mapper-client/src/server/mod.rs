@@ -562,7 +562,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         Diagnostics::default(),
         None,
         false,
-        false,
+        crate::sdk::PortMapping::Off,
     )
     .await;
 }
@@ -579,7 +579,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     diagnostics: Diagnostics,
     idle_timeout: Option<Duration>,
     allow_direct: bool,
-    port_mapping: bool,
+    port_mapping: crate::sdk::PortMapping,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,

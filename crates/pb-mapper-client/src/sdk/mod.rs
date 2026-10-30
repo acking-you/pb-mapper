@@ -18,8 +18,8 @@ pub use client::{Client, ClientConfig, ConnectRequest, RegisterRequest};
 pub use error::{Error, Result};
 pub use handle::{Connection, Registration};
 pub use types::{
-    ConnectOptions, LegacyProtocol, PathPolicy, RegisterOptions, RemoteId, ServiceConnection,
-    Transport, TunnelStatus,
+    ConnectOptions, LegacyProtocol, PathPolicy, PortMapping, RegisterOptions, RemoteId,
+    ServiceConnection, Transport, TunnelStatus,
 };
 
 /// The SDK version compiled into this process.

@@ -503,15 +503,21 @@ impl Diagnostics {
         self.state().cleanups += 1;
         DeferClose(self.clone())
     }
-    /// This tunnel will map its direct endpoint's port, once that opens.
-    pub(crate) fn port_mapping_requested(&self, network_generation: u64) {
+    /// This tunnel may map its direct endpoint's port: once that opens, or
+    /// (`Auto`) once punching through has failed.
+    pub(crate) fn port_mapping_requested(
+        &self,
+        mode: crate::sdk::PortMapping,
+        network_generation: u64,
+    ) {
+        let stage = match mode {
+            crate::sdk::PortMapping::Auto => PortMappingStage::Standby,
+            _ => PortMappingStage::WaitingForDirect,
+        };
         self.state()
             .port_mapping
             .get_or_insert_with(|| PortMappingDiagnostics {
-                current: PortMappingStatus::new(
-                    PortMappingStage::WaitingForDirect,
-                    network_generation,
-                ),
+                current: PortMappingStatus::new(stage, network_generation),
                 attempts: 0,
                 renewals: 0,
                 failures: 0,

@@ -51,7 +51,7 @@ impl Provider {
         shutdown: CancellationToken,
         idle: Option<Duration>,
         diagnostics: Diagnostics,
-        port_mapping: bool,
+        port_mapping: crate::sdk::PortMapping,
     ) -> Arc<Self>
     where
         L::Item: StreamForward,
@@ -113,7 +113,7 @@ async fn run<L: StreamProvider + Send + 'static>(
     idle: Option<Duration>,
     diagnostics: Diagnostics,
     active: Arc<AtomicUsize>,
-    port_mapping: bool,
+    port_mapping: crate::sdk::PortMapping,
 ) where
     L::Item: StreamForward,
 {
@@ -139,7 +139,7 @@ async fn run<L: StreamProvider + Send + 'static>(
                             continue;
                         }
                         let admitted =
-                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply, port_mapping.then_some(&diagnostics));
+                            admit_offer(&grant, &key, is_datagram, sessions.len(), &mut network, &reply, || Network::new(true, port_mapping, &diagnostics));
                         let Some(net) = admitted else { continue };
                         let (tx, rx) = mpsc::channel(8);
                         let id = grant.id;
@@ -200,7 +200,8 @@ async fn run<L: StreamProvider + Send + 'static>(
         network.shutdown().await;
     }
 }
-/// Validate an offer and lazily create the shared endpoint, or reject it.
+/// Validate an offer and lazily create the shared endpoint with `open`, or
+/// reject it.
 fn admit_offer(
     grant: &SessionGrant,
     key: &str,
@@ -208,7 +209,7 @@ fn admit_offer(
     sessions: usize,
     network: &mut Option<Arc<Network>>,
     reply: &Reply,
-    port_mapping: Option<&Diagnostics>,
+    open: impl FnOnce() -> io::Result<Arc<Network>>,
 ) -> Option<Arc<Network>> {
     let reject = |reason: String| {
         send(
@@ -232,7 +233,7 @@ fn admit_offer(
     if let Some(network) = network {
         return Some(network.clone());
     }
-    match Network::new(true, port_mapping.cloned()) {
+    match open() {
         Ok(created) => Some(network.insert(created).clone()),
         Err(error) => reject(error.to_string()),
     }
@@ -331,6 +332,9 @@ where
                     }
                 }
                 Some(SessionEvent::Relay) => {
+                    // The consumer chose the relay before any path committed:
+                    // the punch did not get through.
+                    network.punching_failed();
                     let selected = DirectProviderMessage::RelaySelected { id: grant.id };
                     return send_until(&reply, selected, deadline).await;
                 }
@@ -611,8 +615,18 @@ mod tests {
 
     #[tokio::test]
     async fn committed_direct_cannot_acknowledge_relay_or_dial_backend_twice() {
-        let provider = Network::new(true, None).unwrap();
-        let consumer = Network::new(false, None).unwrap();
+        let provider = Network::new(
+            true,
+            crate::sdk::PortMapping::Off,
+            &crate::diagnostics::Diagnostics::default(),
+        )
+        .unwrap();
+        let consumer = Network::new(
+            false,
+            crate::sdk::PortMapping::Off,
+            &crate::diagnostics::Diagnostics::default(),
+        )
+        .unwrap();
         let stun = "127.0.0.1:9".parse().unwrap();
         let mut grant = SessionGrant {
             id: random_session_id(),

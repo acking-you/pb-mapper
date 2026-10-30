@@ -69,7 +69,7 @@ typedef _PbMapperRegisterServiceNative =
       Int32 enableKeepAlive,
       // Nonzero lets connections reach it directly.
       Int32 allowDirect,
-      // Nonzero asks the gateway to map the direct UDP port.
+      // When to map the direct UDP port: 0 never, 1 after a failed punch, 2 always.
       Int32 portMapping,
     );
 typedef _PbMapperRegisterServiceDart =
@@ -105,7 +105,7 @@ typedef _PbMapperConnectServiceNative =
       Int64 namespace,
       // Nonzero tries a direct path before the relay.
       Int32 allowDirect,
-      // Nonzero asks the gateway to map the direct UDP port.
+      // When to map the direct UDP port: 0 never, 1 after a failed punch, 2 always.
       Int32 portMapping,
     );
 typedef _PbMapperConnectServiceDart =

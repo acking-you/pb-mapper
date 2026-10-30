@@ -26,7 +26,7 @@ use super::admin::Admin;
 use super::error::{AddressSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use super::{ConnectOptions, PathPolicy, RegisterOptions};
+use super::{ConnectOptions, PathPolicy, PortMapping, RegisterOptions};
 use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
@@ -292,7 +292,11 @@ impl Client {
             .prepare_worker(&request.key, &request.local_addr)
             .await?;
         let credential = self.credential();
-        let port_mapping = worker.port_mapping(port_mapping && allow_direct);
+        let port_mapping = worker.port_mapping(if allow_direct {
+            port_mapping
+        } else {
+            PortMapping::Off
+        });
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
@@ -360,8 +364,10 @@ impl Client {
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
-        let port_mapping =
-            worker.port_mapping(options.port_mapping && options.path == PathPolicy::Auto);
+        let port_mapping = worker.port_mapping(match options.path {
+            PathPolicy::Auto => options.port_mapping,
+            PathPolicy::RelayOnly => PortMapping::Off,
+        });
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
@@ -530,9 +536,11 @@ pub(crate) fn is_carrier_failure(error: &Error) -> bool {
     }
 }
 
-/// Refuse a port mapping that this build cannot make, rather than ignore it.
-fn check_port_mapping(requested: bool) -> Result<()> {
-    if requested && !cfg!(feature = "port-mapping") {
+/// Refuse a mapping from the start that this build cannot make, rather than
+/// ignore it. One when needed is best effort, and the default: without the
+/// feature it never starts.
+fn check_port_mapping(requested: PortMapping) -> Result<()> {
+    if requested == PortMapping::Always && !cfg!(feature = "port-mapping") {
         return Err(Error::invalid_config("built without port-mapping support"));
     }
     Ok(())
@@ -602,14 +610,19 @@ struct TunnelWorker {
 }
 
 impl TunnelWorker {
-    /// Whether this tunnel maps its direct endpoint's port, noted in its
-    /// diagnostics from the start when it does.
-    fn port_mapping(&self, enabled: bool) -> bool {
-        if enabled {
+    /// How this tunnel maps its direct endpoint's port, noted in its
+    /// diagnostics from the start when it may.
+    fn port_mapping(&self, mode: PortMapping) -> PortMapping {
+        let mode = if cfg!(feature = "port-mapping") {
+            mode
+        } else {
+            PortMapping::Off
+        };
+        if mode != PortMapping::Off {
             self.diagnostics
-                .port_mapping_requested(crate::network::NetworkHints::shared().generation());
+                .port_mapping_requested(mode, crate::network::NetworkHints::shared().generation());
         }
-        enabled
+        mode
     }
 
     fn spawn<F, Fut>(self, start: F) -> LiveTunnel

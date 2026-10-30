@@ -26,9 +26,9 @@ use tokio_util::sync::CancellationToken;
 
 use pb_mapper_auth::{AuthConfig, AuthRuntime};
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, Connection, DirectStage, PathPolicy, RecoveryFailure,
-    RegisterOptions, RegisterRequest, Registration, RelayTransport, RemoteId, Transport,
-    TunnelDiagnostics, TunnelEventKind, TunnelStatus,
+    Client, ConnectOptions, ConnectRequest, Connection, DirectStage, PathPolicy, PortMapping,
+    RecoveryFailure, RegisterOptions, RegisterRequest, Registration, RelayTransport, RemoteId,
+    Transport, TunnelDiagnostics, TunnelEventKind, TunnelStatus,
 };
 use pb_mapper_core::checksum::{
     Credential, get_process_credential, parse_credential, set_process_msg_header_key,
@@ -164,14 +164,49 @@ pub struct ServiceConfigData {
     /// allows it, as `register` does.
     #[serde(default = "direct_by_default")]
     pub allow_direct: bool,
-    /// Whether to ask the gateway to map the direct UDP port. Off unless
-    /// turned on, and kept while direct is off, to apply when it is on again.
-    #[serde(default)]
-    pub port_mapping: bool,
+    /// When to ask the router to map the direct UDP port. A tunnel saved
+    /// before there was a choice does it when needed: once punching through
+    /// has failed. Kept while direct is off, to apply when it is on again.
+    #[serde(default = "map_when_needed", deserialize_with = "saved_port_mapping")]
+    pub port_mapping: PortMapping,
 }
 
 fn direct_by_default() -> bool {
     true
+}
+
+fn map_when_needed() -> PortMapping {
+    PortMapping::Auto
+}
+
+/// A saved port mapping: its name, or the on/off a build of this change's
+/// first draft saved (on was from the start).
+fn saved_port_mapping<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<PortMapping, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Mode(PortMapping),
+        Switch(bool),
+    }
+    Ok(match Saved::deserialize(deserializer)? {
+        Saved::Mode(mode) => mode,
+        Saved::Switch(true) => PortMapping::Always,
+        Saved::Switch(false) => PortMapping::Off,
+    })
+}
+
+/// The port mapping a C caller names: 0 off, 1 when needed, 2 always.
+pub fn port_mapping_from_c(raw: std::ffi::c_int) -> Result<PortMapping, CtlError> {
+    match raw {
+        0 => Ok(PortMapping::Off),
+        1 => Ok(PortMapping::Auto),
+        2 => Ok(PortMapping::Always),
+        _ => Err(CtlError::invalid_argument(format!(
+            "port_mapping must be 0, 1 or 2, got {raw}"
+        ))),
+    }
 }
 
 /// How a tunnel may go past the relay, as it is saved with the tunnel.
@@ -179,7 +214,7 @@ fn direct_by_default() -> bool {
 pub struct DirectOptions {
     pub allow_direct: bool,
     /// Only acted on while `allow_direct` is.
-    pub port_mapping: bool,
+    pub port_mapping: PortMapping,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -203,8 +238,8 @@ pub struct ClientConfigData {
     #[serde(default = "direct_by_default")]
     pub allow_direct: bool,
     /// As [`ServiceConfigData::port_mapping`].
-    #[serde(default)]
-    pub port_mapping: bool,
+    #[serde(default = "map_when_needed", deserialize_with = "saved_port_mapping")]
+    pub port_mapping: PortMapping,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -243,7 +278,7 @@ pub struct ServiceConfigInfo {
     pub enable_encryption: bool,
     pub enable_keep_alive: bool,
     pub allow_direct: bool,
-    pub port_mapping: bool,
+    pub port_mapping: PortMapping,
     pub status: String,
     pub status_message: String,
     /// How its sessions travel, while it runs.
@@ -271,7 +306,7 @@ pub struct ClientConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routed_namespace: Option<u64>,
     pub allow_direct: bool,
-    pub port_mapping: bool,
+    pub port_mapping: PortMapping,
     pub status: String,
     pub status_message: String,
     /// How its sessions travel, while it runs.
@@ -670,7 +705,7 @@ struct RegisterCommit {
     enable_encryption: bool,
     enable_keep_alive: bool,
     allow_direct: bool,
-    port_mapping: bool,
+    port_mapping: PortMapping,
     handle: Registration,
     pin: PinnedTunnel,
 }
@@ -683,7 +718,7 @@ struct ConnectCommit {
     protocol: String,
     enable_keep_alive: bool,
     allow_direct: bool,
-    port_mapping: bool,
+    port_mapping: PortMapping,
     handle: Connection,
     pin: PinnedTunnel,
 }
@@ -1099,7 +1134,7 @@ mod tests {
                 false,
                 DirectOptions {
                     allow_direct: direct,
-                    port_mapping: false,
+                    port_mapping: PortMapping::Off,
                 },
             )
             .await
@@ -1114,7 +1149,7 @@ mod tests {
                 None,
                 DirectOptions {
                     allow_direct: true,
-                    port_mapping: false,
+                    port_mapping: PortMapping::Off,
                 },
             )
             .await
@@ -1235,7 +1270,7 @@ mod tests {
             false,
             DirectOptions {
                 allow_direct: false,
-                port_mapping: true,
+                port_mapping: PortMapping::Always,
             },
         )
         .await
@@ -1250,7 +1285,7 @@ mod tests {
             None,
             DirectOptions {
                 allow_direct: false,
-                port_mapping: true,
+                port_mapping: PortMapping::Always,
             },
         )
         .await
@@ -1284,18 +1319,29 @@ mod tests {
             let client = &state.get_client_configs().await[0];
             assert_eq!(share.relay_transport, Some(RelayTransport::Quic));
             assert_eq!(client.relay_transport, Some(RelayTransport::Quic));
-            // Saved with each tunnel, but one kept on the relay asks no gateway.
-            assert!(share.port_mapping && client.port_mapping);
+            // Saved with each tunnel, but one kept on the relay asks no router.
+            assert_eq!(share.port_mapping, PortMapping::Always);
+            assert_eq!(client.port_mapping, PortMapping::Always);
             let tunnel = state.running_tunnel(false, "web").unwrap();
             assert!(tunnel.diagnostics().port_mapping.is_none());
-            let mut legacy =
+            // A tunnel saved before the choice maps when needed; one saved
+            // with the first draft's switch keeps what it meant.
+            let saved =
                 serde_json::to_value(&state.load_service_configs().services["web"]).unwrap();
-            legacy.as_object_mut().unwrap().remove("port_mapping");
-            assert!(
-                !serde_json::from_value::<ServiceConfigData>(legacy)
+            let read = |port_mapping: Option<serde_json::Value>| {
+                let mut saved = saved.clone();
+                match port_mapping {
+                    Some(value) => saved["port_mapping"] = value,
+                    None => drop(saved.as_object_mut().unwrap().remove("port_mapping")),
+                }
+                serde_json::from_value::<ServiceConfigData>(saved)
                     .unwrap()
                     .port_mapping
-            );
+            };
+            assert_eq!(read(None), PortMapping::Auto);
+            assert_eq!(read(Some(true.into())), PortMapping::Always);
+            assert_eq!(read(Some(false.into())), PortMapping::Off);
+            assert_eq!(read(Some("off".into())), PortMapping::Off);
             let detail = state.force_refresh_server_status().await.unwrap();
             assert!(detail.server_available, "{:?}", detail.error);
             assert!(detail.quic_port.is_some());
@@ -1318,7 +1364,7 @@ mod tests {
             false,
             DirectOptions {
                 allow_direct: true,
-                port_mapping: false,
+                port_mapping: PortMapping::Off,
             },
         )
         .await
@@ -1395,7 +1441,7 @@ mod tests {
             false,
             DirectOptions {
                 allow_direct: true,
-                port_mapping: false,
+                port_mapping: PortMapping::Off,
             },
         )
         .await
@@ -1444,7 +1490,7 @@ mod tests {
             false,
             DirectOptions {
                 allow_direct: true,
-                port_mapping: false,
+                port_mapping: PortMapping::Off,
             },
         )
         .await
@@ -1466,7 +1512,7 @@ mod tests {
             false,
             DirectOptions {
                 allow_direct: true,
-                port_mapping: false,
+                port_mapping: PortMapping::Off,
             },
         )
         .await

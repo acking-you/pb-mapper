@@ -233,7 +233,7 @@ pub(crate) async fn run_client_side_cli_recovering<LocalListener: ListenerProvid
         diagnostics,
         crate::sdk::PathPolicy::RelayOnly,
         false,
-        false,
+        crate::sdk::PortMapping::Off,
     )
     .await;
 }
@@ -251,7 +251,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
     diagnostics: Diagnostics,
     path: crate::sdk::PathPolicy,
     is_datagram: bool,
-    port_mapping: bool,
+    port_mapping: crate::sdk::PortMapping,
 ) where
     <LocalListener::Listener as StreamAccept>::Item: StreamForward,
 {

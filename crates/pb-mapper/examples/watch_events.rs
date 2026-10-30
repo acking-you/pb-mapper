@@ -11,9 +11,9 @@
 //!   `Starting`, `Connected`, `Retrying`, `Stopped`, `Failed(reason)`. It is
 //!   what to drive a connection indicator from.
 //! * `subscribe_events()` yields the tunnel's recent outcomes, then every
-//!   event as it happens: relay phases, direct stages, sessions, and with
-//!   `--port-mapping` (in a build with the `port-mapping` feature) the
-//!   gateway lease as it is found, granted, renewed and released. A reader
+//!   event as it happens: relay phases, direct stages, sessions, and, once
+//!   a direct attempt fails to punch through, the router mapping the tunnel
+//!   then asks for, as it is found, granted, renewed and released. A reader
 //!   that falls behind is told how many it missed; `diagnostics()` is the
 //!   state to reconcile with. Events and snapshots serialize to JSON.
 //!
@@ -21,7 +21,7 @@
 //! `client.notify_network_change()`: waiting retries start at once and the
 //! next connection tries direct again.
 
-use pb_mapper::{Client, ClientConfig, ConnectOptions, ConnectRequest, Transport};
+use pb_mapper::{Client, ClientConfig, ConnectRequest, Transport};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,17 +38,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         namespace: None,
     })?;
     let connection = client
-        .connect_with_options(
-            ConnectRequest {
-                key,
-                local_addr,
-                transport: Transport::Tcp,
-            },
-            ConnectOptions {
-                port_mapping: std::env::args().any(|arg| arg == "--port-mapping"),
-                ..Default::default()
-            },
-        )
+        .connect(ConnectRequest {
+            key,
+            local_addr,
+            transport: Transport::Tcp,
+        })
         .await?;
 
     let mut status = connection.subscribe();

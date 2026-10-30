@@ -3,7 +3,7 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 
 export 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart'
-    show DirectStage, RelayTransport, TunnelPath;
+    show DirectStage, PortMappingMode, RelayTransport, TunnelPath;
 
 /// Which end of a tunnel this computer is.
 enum TunnelKind {
@@ -50,7 +50,7 @@ class Tunnel {
     this.namespace,
     this.routedNamespace,
     this.allowDirect = true,
-    this.portMapping = false,
+    this.portMapping = PortMappingMode.auto,
     this.path,
     this.relayTransport,
   });
@@ -123,7 +123,8 @@ class Tunnel {
   /// session tries a direct path before the relay; for a share, whether it
   /// lets connections reach it that way.
   final bool allowDirect;
-  final bool portMapping;
+  /// When it asks the router to map its direct port; see [PortMappingMode].
+  final PortMappingMode portMapping;
 
   /// How its sessions travel, while it runs.
   final TunnelPath? path;
@@ -256,7 +257,7 @@ class TunnelDraft {
     this.keepAlive = true,
     this.namespace,
     this.allowDirect = true,
-    this.portMapping = false,
+    this.portMapping = PortMappingMode.auto,
   });
 
   final TunnelKind kind;
@@ -271,7 +272,7 @@ class TunnelDraft {
 
   /// See [Tunnel.allowDirect].
   final bool allowDirect;
-  final bool portMapping;
+  final PortMappingMode portMapping;
 
   /// The address a fresh form starts with: the conventional local service
   /// port for a share, a free-looking one for a connection.

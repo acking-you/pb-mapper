@@ -35,14 +35,35 @@ pub(super) struct Network {
     generation: AtomicU64,
     network: Arc<crate::network::NetworkHints>,
     #[cfg(feature = "port-mapping")]
-    mapping: Option<super::mapping::Mapping>,
+    mapper: Option<Mapper>,
 }
+
+/// The router mapping this endpoint may ask for, and the one it asked for.
+#[cfg(feature = "port-mapping")]
+struct Mapper {
+    port: std::num::NonZeroU16,
+    network: Arc<crate::network::NetworkHints>,
+    diagnostics: crate::diagnostics::Diagnostics,
+    started: std::sync::OnceLock<super::mapping::Mapping>,
+}
+
+#[cfg(feature = "port-mapping")]
+impl Mapper {
+    fn start(&self) -> &super::mapping::Mapping {
+        self.started.get_or_init(|| {
+            super::mapping::Mapping::new(self.port, self.network.clone(), self.diagnostics.clone())
+        })
+    }
+}
+
 impl Network {
-    /// Open the endpoint; with `port_mapping`, also ask the gateway to map its
-    /// IPv4 port, reporting into those diagnostics.
+    /// Open the endpoint. As `port_mapping` says, ask the router to map its
+    /// IPv4 port now, after a failure to punch through, or never, reporting
+    /// into `diagnostics`.
     pub fn new(
         server: bool,
-        port_mapping: Option<crate::diagnostics::Diagnostics>,
+        port_mapping: crate::sdk::PortMapping,
+        diagnostics: &crate::diagnostics::Diagnostics,
     ) -> io::Result<Arc<Self>> {
         let identity = Identity::new()?;
         let (tx, rx) = mpsc::channel(64);
@@ -105,22 +126,31 @@ impl Network {
         }
         let network = crate::network::NetworkHints::shared();
         #[cfg(feature = "port-mapping")]
-        let mapping = port_mapping.and_then(|diagnostics| {
-            let port = transports.iter().find_map(|(socket, _)| {
-                socket
-                    .local_addr()
-                    .ok()
-                    .filter(SocketAddr::is_ipv4)
-                    .and_then(|addr| std::num::NonZeroU16::new(addr.port()))
-            })?;
-            Some(super::mapping::Mapping::new(
+        let mapper = (port_mapping != crate::sdk::PortMapping::Off)
+            .then(|| {
+                transports.iter().find_map(|(socket, _)| {
+                    socket
+                        .local_addr()
+                        .ok()
+                        .filter(SocketAddr::is_ipv4)
+                        .and_then(|addr| std::num::NonZeroU16::new(addr.port()))
+                })
+            })
+            .flatten()
+            .map(|port| Mapper {
                 port,
-                network.clone(),
-                diagnostics,
-            ))
-        });
+                network: network.clone(),
+                diagnostics: diagnostics.clone(),
+                started: std::sync::OnceLock::new(),
+            });
+        #[cfg(feature = "port-mapping")]
+        if let Some(mapper) = &mapper
+            && port_mapping == crate::sdk::PortMapping::Always
+        {
+            mapper.start();
+        }
         #[cfg(not(feature = "port-mapping"))]
-        let _ = port_mapping;
+        let _ = (port_mapping, diagnostics);
         Ok(Arc::new(Self {
             identity,
             transports,
@@ -130,7 +160,7 @@ impl Network {
             generation: AtomicU64::new(0),
             network,
             #[cfg(feature = "port-mapping")]
-            mapping,
+            mapper,
         }))
     }
     pub async fn peer(&self, stun: SocketAddr) -> PeerInfo {
@@ -208,10 +238,25 @@ impl Network {
     }
     fn mapped_addr(&self) -> Option<SocketAddr> {
         #[cfg(feature = "port-mapping")]
-        if let Some(mapping) = &self.mapping {
+        if let Some(mapping) = self.mapper.as_ref().and_then(|m| m.started.get()) {
             return mapping.address();
         }
         None
+    }
+    /// A direct attempt failed to punch through: a sign that a NAT drops what
+    /// it has not seen. A tunnel that maps its port when needed asks the
+    /// router now, so that later sessions can offer the mapped address.
+    pub fn punching_failed(&self) {
+        #[cfg(feature = "port-mapping")]
+        if let Some(mapper) = &self.mapper
+            && mapper.started.get().is_none()
+        {
+            tracing::debug!(
+                event = "port_mapping_started",
+                "direct punching failed; asking the router for a port mapping"
+            );
+            mapper.start();
+        }
     }
     pub fn authorize(
         &self,
@@ -263,7 +308,7 @@ impl Network {
         })
         .await;
         #[cfg(feature = "port-mapping")]
-        if let Some(mapping) = &self.mapping {
+        if let Some(mapping) = self.mapper.as_ref().and_then(|m| m.started.get()) {
             mapping.shutdown().await;
         }
     }
@@ -386,6 +431,7 @@ pub(super) fn framing_key(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use crate::{diagnostics::Diagnostics, sdk::PortMapping};
     use stun_proto::types::{
         attribute::XorMappedAddress,
         message::{Message, MessageWrite, MessageWriteExt, MessageWriteVec},
@@ -411,7 +457,8 @@ mod tests {
     #[tokio::test]
     async fn discovery_invalidation_survives_in_flight_stun_and_coalesces_refresh() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let mut network = Network::new(false, None).unwrap();
+            let mut network =
+                Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
             Arc::get_mut(&mut network).unwrap().network = crate::network::NetworkHints::isolated();
             let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let server = stun.local_addr().unwrap();
@@ -445,5 +492,20 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// Where punching works, a tunnel that maps when needed never asks the
+    /// router: the endpoint opens with its mapping on standby.
+    #[cfg(feature = "port-mapping")]
+    #[tokio::test]
+    async fn an_endpoint_that_maps_when_needed_waits_for_a_punching_failure() {
+        let network = Network::new(false, PortMapping::Auto, &Diagnostics::default()).unwrap();
+        let mapper = network.mapper.as_ref().unwrap();
+        assert!(mapper.started.get().is_none());
+        assert_eq!(network.mapped_addr(), None);
+        let off = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+        assert!(off.mapper.is_none());
+        // Without a failure there is nothing to start; with one, the router is
+        // asked, which this test leaves to the end-to-end NAT checks.
     }
 }

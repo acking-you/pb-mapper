@@ -60,12 +60,12 @@ sequenceDiagram
 
 双层 NAT 不一定阻止直连，关键是各层的映射和过滤规则。客户端会保留 IPv4/IPv6 候选，并验证认证探测的实际来源地址，因此可以利用部分与 STUN 结果不同的对端映射。公网 IPv6 可达时也能绕开 IPv4 NAT；这仍要求防火墙允许 UDP。双方都无法接收第一包或 UDP 被封锁时继续使用中继，不保证任意 NAT 都能打洞。
 
-网关端口映射是可选能力，默认关闭。开启后，隧道会用 PCP、NAT-PMP 或 UPnP 请求路由器映射直连所用的 UDP 端口；库负责续租，本机网络变化时重新寻找路由器，隧道停止时释放租约。映射从不阻塞会话：首条连接可能先走中继，之后的连接才用上映射。仅中继的隧道不会请求映射。只映射家用路由器无法穿过上游运营商 NAT，那需要上游允许打洞、自行映射端口，或提供 PCP 代理等机制。
+打洞失败时，隧道会用 PCP、NAT-PMP 或 UPnP 请求本网络的路由器映射直连所用的 UDP 端口，并在之后的会话里把映射地址放在候选首位，让对端的首包也能穿过拦截陌生来源的 NAT。这是默认行为（`auto`）：打洞能通的网络里，路由器永远不会被请求。`always` 从第一个直连会话起就请求，`off` 从不请求。库负责续租，本机网络变化时重新寻找路由器，隧道停止时释放租约。映射从不阻塞会话：打洞失败的那条连接走中继，之后的连接才用上映射。仅中继的隧道不会请求。只映射家用路由器无法穿过上游运营商 NAT，那需要上游允许打洞、自行映射端口，或提供 PCP 代理等机制。
 
-- CLI：用 `cargo build -p pb-mapper-cli --features port-mapping` 构建，在 `register` 或 `connect` 后加 `--port-mapping`。
-- Rust SDK：启用同名 Cargo feature，在 `RegisterOptions` 或 `ConnectOptions` 中设置 `port_mapping: true`。
-- Node：在 `register` 或 `connect` 的请求中设置 `portMapping: true`。
-- 应用：隧道「更多选项」里「允许直连」（或「优先直连」）下方的「端口映射」。选择随隧道保存，关闭直连时也会保留。
+- CLI：`register` 或 `connect` 加 `--port-mapping off|auto|always`；不带值即 `always`。
+- Rust SDK：在 `RegisterOptions` 或 `ConnectOptions` 中设置 `port_mapping: PortMapping::{Auto, Always, Off}`。`port-mapping` Cargo feature 默认开启；关闭后 `Auto` 不会请求，`Always` 会被拒绝。
+- Node：在 `register` 或 `connect` 请求中设置 `portMapping: "auto" | "always" | "off"`。
+- 应用：隧道「更多选项」里「允许直连」（或「优先直连」）下方的「端口映射」：关闭、自动或始终。选择随隧道保存，关闭直连时也会保留。
 
 观察隧道：Rust 句柄有 `subscribe_events()`，Node 句柄有 `subscribeEvents()`，先给出隧道保留的结果事件，再实时给出每个事件，包括中继阶段、直连阶段和端口映射的每次变化。每个读者有独立的有界队列，读得太慢时会被告知漏掉了多少条。应用里，运行中的隧道可从菜单或总览面板打开「诊断」，实时查看同样的内容，并可复制为 JSON 报告。PCP 和 NAT-PMP 的释放只报告「已发送」，因为这些路由器不会确认；UPnP 在路由器响应后才报告已释放。
 

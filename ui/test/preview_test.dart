@@ -255,7 +255,7 @@ void main() {
       final api =
           FakePbMapperApi(
               services: [
-                fakeService(serviceKey: 'nas-files', portMapping: true),
+                fakeService(serviceKey: 'nas-files', portMapping: PortMappingMode.always),
               ],
             )
             ..tunnelEventFeed = Stream.fromIterable([

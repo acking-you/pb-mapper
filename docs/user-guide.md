@@ -84,23 +84,29 @@ mapping. Reachable global IPv6 can bypass IPv4 NAT, subject to UDP firewall
 rules. If neither peer's first packet can arrive, or UDP is blocked, relay
 fallback remains necessary.
 
-Gateway port mapping is optional and off by default. A tunnel that asks for
-it has the router map its direct UDP port with PCP, NAT-PMP or UPnP; the
-library renews the lease, looks for the router again after a network change,
-and releases the lease when the tunnel stops. It never holds up a session: the
-first connection may use the relay before later ones can use the mapping. A
-relay-only tunnel never asks. Mapping the home router alone does not get
-through an upstream carrier NAT, which must permit punching, map a port
-itself, or offer something like a PCP proxy.
+When hole punching fails, a tunnel asks this network's router to map its
+direct UDP port, with PCP, NAT-PMP or UPnP, and offers the mapped address
+first to later sessions, so that a peer's first packet gets in where the NAT
+drops what it has not seen. This is the default, `auto`: where punching
+works, the router is never asked. `always` asks from the first direct session
+on, and `off` never does. The library renews the lease, looks for the router
+again after a network change, and releases the lease when the tunnel stops.
+It never holds up a session: the connection whose punch failed uses the
+relay, and later ones can use the mapping. A relay-only tunnel never asks.
+Mapping the home router alone does not get through an upstream carrier NAT,
+which must permit punching, map a port itself, or offer something like a PCP
+proxy.
 
-- CLI: build with `cargo build -p pb-mapper-cli --features port-mapping`, then
-  add `--port-mapping` to `register` or `connect`.
-- Rust SDK: the same Cargo feature, and `port_mapping: true` in
-  `RegisterOptions` or `ConnectOptions`.
-- Node: `portMapping: true` in the `register` or `connect` request.
-- App: **Port mapping**, under **Allow direct connections** (or **Try direct
-  first**) in a tunnel's **More options**. The choice is saved with the tunnel
-  and kept while direct is off.
+- CLI: `--port-mapping off|auto|always` on `register` or `connect`; alone,
+  `always`.
+- Rust SDK: `port_mapping: PortMapping::{Auto, Always, Off}` in
+  `RegisterOptions` or `ConnectOptions`. The `port-mapping` Cargo feature is on
+  by default; without it `Auto` never asks and `Always` is refused.
+- Node: `portMapping: "auto" | "always" | "off"` in the `register` or
+  `connect` request.
+- App: **Port mapping** under **Allow direct connections** (or **Try direct
+  first**) in a tunnel's **More options**: Off, Auto or Always. It is saved
+  with the tunnel and kept while direct is off.
 
 To watch a tunnel, Rust handles have `subscribe_events()` and Node handles
 `subscribeEvents()`: the outcomes a tunnel kept, then every event as it

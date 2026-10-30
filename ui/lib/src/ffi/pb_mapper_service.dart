@@ -217,7 +217,7 @@ class PbMapperService {
     required bool enableEncryption,
     required bool enableKeepAlive,
     required bool allowDirect,
-    required bool portMapping,
+    required int portMapping,
   }) {
     return _runJsonOnWorker('registerService', {
       'serviceKey': serviceKey,
@@ -245,7 +245,7 @@ class PbMapperService {
     required bool enableKeepAlive,
     int? namespace,
     required bool allowDirect,
-    required bool portMapping,
+    required int portMapping,
   }) {
     return _runJsonOnWorker('connectService', {
       'serviceKey': serviceKey,
@@ -410,7 +410,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           (params['enableEncryption'] as bool) ? 1 : 0,
           (params['enableKeepAlive'] as bool) ? 1 : 0,
           (params['allowDirect'] as bool) ? 1 : 0,
-          (params['portMapping'] as bool) ? 1 : 0,
+          params['portMapping'] as int,
         );
         break;
       case 'unregisterService':
@@ -433,7 +433,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           (params['enableKeepAlive'] as bool) ? 1 : 0,
           params['namespace'] as int? ?? -1,
           (params['allowDirect'] as bool) ? 1 : 0,
-          (params['portMapping'] as bool) ? 1 : 0,
+          params['portMapping'] as int,
         );
         break;
       case 'disconnectService':

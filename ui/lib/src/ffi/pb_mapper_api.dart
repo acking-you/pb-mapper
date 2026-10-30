@@ -94,7 +94,7 @@ class ServiceConfigInfo {
 
   /// Whether connections may reach it directly rather than through the relay.
   final bool allowDirect;
-  final bool portMapping;
+  final PortMappingMode portMapping;
   final String status;
   final String statusMessage;
 
@@ -113,7 +113,7 @@ class ServiceConfigInfo {
     required this.enableEncryption,
     required this.enableKeepAlive,
     this.allowDirect = true,
-    this.portMapping = false,
+    this.portMapping = PortMappingMode.auto,
     required this.status,
     required this.statusMessage,
     this.path,
@@ -130,7 +130,7 @@ class ServiceConfigInfo {
       enableEncryption: _asBool(map['enableEncryption']),
       enableKeepAlive: _asBool(map['enableKeepAlive']),
       allowDirect: _asBool(map['allowDirect'], fallback: true),
-      portMapping: _asBool(map['portMapping']),
+      portMapping: PortMappingMode.parse(map['portMapping']),
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
       path: TunnelPath.maybeFrom(map['path']),
@@ -157,7 +157,7 @@ class ClientConfigInfo {
 
   /// Whether each session tries a direct path before the relay.
   final bool allowDirect;
-  final bool portMapping;
+  final PortMappingMode portMapping;
   final String status;
   final String statusMessage;
 
@@ -177,7 +177,7 @@ class ClientConfigInfo {
     this.namespace,
     this.routedNamespace,
     this.allowDirect = true,
-    this.portMapping = false,
+    this.portMapping = PortMappingMode.auto,
     required this.status,
     required this.statusMessage,
     this.path,
@@ -197,7 +197,7 @@ class ClientConfigInfo {
           ? null
           : _asInt(map['routedNamespace']),
       allowDirect: _asBool(map['allowDirect'], fallback: true),
-      portMapping: _asBool(map['portMapping']),
+      portMapping: PortMappingMode.parse(map['portMapping']),
       status: _asString(map['status'], fallback: 'stopped'),
       statusMessage: _asString(map['statusMessage']),
       path: TunnelPath.maybeFrom(map['path']),
@@ -210,6 +210,26 @@ class ClientConfigInfo {
 
 /// How far a direct attempt got. Every stage before [committing] can still
 /// give way to the relay.
+/// When a tunnel asks this network's router to map its direct UDP port.
+enum PortMappingMode {
+  /// Never.
+  off(0),
+
+  /// Once a direct attempt fails to punch through; the default.
+  auto(1),
+
+  /// From the tunnel's first direct session.
+  always(2);
+
+  const PortMappingMode(this.code);
+
+  /// What `pb_mapper_register_service` and `pb_mapper_connect_service` take.
+  final int code;
+
+  static PortMappingMode parse(Object? raw) =>
+      values.firstWhereOrNull((mode) => mode.name == raw) ?? auto;
+}
+
 enum DirectStage {
   /// Asking the relay whether the sharing computer offers direct.
   negotiating,
@@ -505,8 +525,8 @@ abstract interface class PbMapperApiClient {
   Future<List<ServiceConnInfo>> getServiceConns(String serviceKey);
 
   /// Share [serviceKey]. With [allowDirect], connections may reach it
-  /// directly rather than through the relay, and with [portMapping] as well
-  /// the gateway is asked to map the direct UDP port.
+  /// directly rather than through the relay, and [portMapping] says when the
+  /// router is asked to map the direct UDP port.
   Future<OperationResult> registerService({
     required String serviceKey,
     required String localAddress,
@@ -514,7 +534,7 @@ abstract interface class PbMapperApiClient {
     required bool enableEncryption,
     required bool enableKeepAlive,
     bool allowDirect = true,
-    bool portMapping = false,
+    PortMappingMode portMapping = PortMappingMode.auto,
   });
   Future<OperationResult> unregisterService(String serviceKey);
   Future<OperationResult> deleteServiceConfig(String serviceKey);
@@ -525,8 +545,8 @@ abstract interface class PbMapperApiClient {
   /// Connect to [serviceKey]. [namespace] is the temporary credential whose
   /// service it is, which only the administrator key may name; null for this
   /// credential's own. With [allowDirect] each session tries a direct path
-  /// before the relay, and with [portMapping] as well the gateway is asked to
-  /// map the direct UDP port.
+  /// before the relay, and [portMapping] says when the router is asked to map
+  /// the direct UDP port.
   Future<OperationResult> connectService({
     required String serviceKey,
     required String localAddress,
@@ -534,7 +554,7 @@ abstract interface class PbMapperApiClient {
     required bool enableKeepAlive,
     int? namespace,
     bool allowDirect = true,
-    bool portMapping = false,
+    PortMappingMode portMapping = PortMappingMode.auto,
   });
   Future<OperationResult> disconnectService(String serviceKey);
   Future<OperationResult> deleteClientConfig(String serviceKey);
@@ -761,7 +781,7 @@ class PbMapperApi implements PbMapperApiClient {
     required bool enableEncryption,
     required bool enableKeepAlive,
     bool allowDirect = true,
-    bool portMapping = false,
+    PortMappingMode portMapping = PortMappingMode.auto,
   }) async {
     final result = await _service.registerService(
       serviceKey: serviceKey,
@@ -770,7 +790,7 @@ class PbMapperApi implements PbMapperApiClient {
       enableEncryption: enableEncryption,
       enableKeepAlive: enableKeepAlive,
       allowDirect: allowDirect,
-      portMapping: portMapping,
+      portMapping: portMapping.code,
     );
     return _resultFrom(result);
   }
@@ -829,7 +849,7 @@ class PbMapperApi implements PbMapperApiClient {
     required bool enableKeepAlive,
     int? namespace,
     bool allowDirect = true,
-    bool portMapping = false,
+    PortMappingMode portMapping = PortMappingMode.auto,
   }) async {
     final result = await _service.connectService(
       serviceKey: serviceKey,
@@ -838,7 +858,7 @@ class PbMapperApi implements PbMapperApiClient {
       enableKeepAlive: enableKeepAlive,
       namespace: namespace,
       allowDirect: allowDirect,
-      portMapping: portMapping,
+      portMapping: portMapping.code,
     );
     return _resultFrom(result);
   }

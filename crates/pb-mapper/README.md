@@ -60,7 +60,7 @@ Requires a Tokio runtime. The `pb-mapper` CLI and relay live in the
 | --- | --- |
 | Publish / reach a TCP or UDP service | `Client::register`, `Client::connect`, `Transport::{Tcp, Udp}` |
 | Choose the path | `RegisterOptions { allow_direct }`, `ConnectOptions { path: PathPolicy::{Auto, RelayOnly} }` |
-| Ask the router to map the direct port | `port_mapping: true` in either options, with the `port-mapping` Cargo feature; off by default |
+| Ask the router to map the direct port | `port_mapping: PortMapping::{Auto, Always, Off}` in either options; `Auto`, once punching fails, by default |
 | Reclaim abandoned TCP data connections | `register_with_idle_timeout`, `RegisterOptions { idle_timeout }` |
 | Listen to a tunnel | `subscribe()` for status, `subscribe_events()` for every event as it happens, `diagnostics()` for a snapshot |
 | Wake recovery after a network change or resume | `Client::notify_network_change` |
@@ -75,17 +75,20 @@ needs no setup.
 
 ## Paths
 
-A tunnel may also ask this network's router to map its direct UDP port,
-with PCP, NAT-PMP or UPnP: build with the `port-mapping` Cargo feature and set
-`port_mapping: true` in `RegisterOptions` or `ConnectOptions`. It is off by
-default and ignored when the tunnel stays on the relay. The mapping starts with
-the tunnel's first direct session, never holds one up, is renewed while the
-tunnel runs and released when it stops. A router that maps nothing leaves
-direct and the relay fallback as they were. `diagnostics().port_mapping` says
-where it stands; `active` stays true while a renewal is pending or has failed,
-until the lease expires. `cargo run -p pb-mapper --features port-mapping
---example port_mapping -- share web 127.0.0.1:8080` prints each step, through
-the release when it stops.
+When hole punching fails, a tunnel asks this network's router to map its
+direct UDP port, with PCP, NAT-PMP or UPnP, and offers the mapped address to
+later sessions: `PortMapping::Auto`, the default in `RegisterOptions` and
+`ConnectOptions`. Where punching works the router is never asked. `Always`
+asks from the first direct session on, and `Off` never does. A mapping never
+holds a session up, is renewed while the tunnel runs and released when it
+stops, and is ignored while the tunnel keeps to the relay; a router that maps
+nothing leaves direct and the relay fallback as they were. It needs the
+`port-mapping` Cargo feature, on by default: without it `Auto` never asks and
+`Always` is refused. `diagnostics().port_mapping` says where it stands
+(`standby` until a punch fails); `active` stays true while a renewal is pending
+or has failed, until the lease expires. `cargo run -p pb-mapper --example
+port_mapping -- connect web 127.0.0.1:9090` prints each step, through the
+release when it stops.
 
 `subscribe_events()` yields the outcomes the tunnel kept
 (`diagnostics().events`), then every event as it happens, until the tunnel

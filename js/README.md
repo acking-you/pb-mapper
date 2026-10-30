@@ -61,11 +61,14 @@ To stay on the relay, register with `allowDirect: false` or connect with
 `path: "relay-only"`. Established direct connections survive coordinator loss
 and credential revocation; local `stop()` closes them.
 
-To get through more networks, a tunnel can ask the router to map its direct
-UDP port (PCP, NAT-PMP or UPnP): pass `portMapping: true` to `register` or
-`connect`. It is off by default and ignored on the relay; it starts with the
-first direct session, is renewed while the tunnel runs and released when it
-stops. `diagnostics().portMapping` says where it stands.
+When hole punching fails, a tunnel asks the router to map its direct UDP port
+(PCP, NAT-PMP or UPnP) and offers that address to later sessions:
+`portMapping: "auto"`, the default for `register` and `connect`. Where
+punching works the router is never asked. `"always"` asks from the first
+direct session, `"off"` never; the relay-only path never asks. A lease is
+renewed while the tunnel runs and released when it stops, and
+`diagnostics().portMapping` says where it stands (`standby` until a punch
+fails).
 
 ## Listening for changes
 

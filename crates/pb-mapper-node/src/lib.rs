@@ -438,6 +438,17 @@ fn parse_transport(raw: &str) -> Result<Transport> {
     }
 }
 
+fn parse_port_mapping(raw: Option<&str>) -> Result<sdk::PortMapping> {
+    match raw.unwrap_or("auto") {
+        "off" => Ok(sdk::PortMapping::Off),
+        "auto" => Ok(sdk::PortMapping::Auto),
+        "always" => Ok(sdk::PortMapping::Always),
+        other => Err(invalid_argument(format!(
+            "portMapping must be \"off\", \"auto\" or \"always\", got {other}"
+        ))),
+    }
+}
+
 /// Render a tunnel status for JS.
 ///
 /// `Failed` keeps its reason after the colon: it is the only description of a
@@ -467,9 +478,10 @@ pub struct JsRegisterRequest {
     /// Accept direct sessions from authorized consumers (default `true`).
     /// `false` keeps every session to this service on the relay.
     pub allow_direct: Option<bool>,
-    /// Ask the gateway (PCP, NAT-PMP or UPnP) to map the direct UDP port
-    /// (default `false`). Ignored when direct is not allowed.
-    pub port_mapping: Option<bool>,
+    /// When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+    /// port: "auto" once punching through fails (default), "always", or "off".
+    /// Ignored when direct is not allowed.
+    pub port_mapping: Option<String>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -496,9 +508,10 @@ pub struct JsConnectRequest {
     /// "auto" (default): direct first, relay fallback before any byte is sent.
     /// "relay-only": always use the relay.
     pub path: Option<String>,
-    /// Ask the gateway (PCP, NAT-PMP or UPnP) to map the direct UDP port
-    /// (default `false`). Ignored on the relay-only path.
-    pub port_mapping: Option<bool>,
+    /// When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+    /// port: "auto" once punching through fails (default), "always", or "off".
+    /// Ignored on the relay-only path.
+    pub port_mapping: Option<String>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -734,7 +747,7 @@ impl Client {
     pub async fn register(&self, request: JsRegisterRequest) -> Result<Registration> {
         let options = sdk::RegisterOptions {
             allow_direct: request.allow_direct.unwrap_or(true),
-            port_mapping: request.port_mapping.unwrap_or(false),
+            port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
             ..Default::default()
         };
         let registration = self
@@ -763,7 +776,7 @@ impl Client {
         let options = sdk::RegisterOptions {
             allow_direct: request.allow_direct.unwrap_or(true),
             idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
-            port_mapping: request.port_mapping.unwrap_or(false),
+            port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
         };
         let registration = self
             .inner
@@ -790,7 +803,7 @@ impl Client {
                 },
                 sdk::ConnectOptions {
                     path,
-                    port_mapping: request.port_mapping.unwrap_or(false),
+                    port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
                 },
             )
             .await

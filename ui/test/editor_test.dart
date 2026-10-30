@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart' show PortMappingMode;
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
+import 'package:pb_mapper_ui/src/theme/glass.dart';
 
 import 'fake_pb_mapper_api.dart';
 import 'support.dart';
@@ -22,30 +24,34 @@ TextEditingController _controller(WidgetTester tester, String key) => tester
 
 void main() {
   testWidgets(
-    'mapping is opt-in and survives editing while relay-only disables its control',
+    'port mapping defaults to when needed, and a choice survives relay-only and editing',
     (tester) async {
       final api = FakePbMapperApi();
       await _openEditor(tester, api);
       await tester.enterText(find.byKey(const Key('tunnel-key')), 'mapped');
       await tester.tap(find.byKey(const Key('tunnel-more')));
       await settle(tester);
-      SwitchListTile mapping() => tester.widget<SwitchListTile>(
-        find.descendant(
-          of: find.byKey(const Key('tunnel-port-mapping')),
-          matching: find.byType(SwitchListTile),
-        ),
+      final control = find.byKey(const Key('tunnel-port-mapping'));
+      PortMappingMode mode() =>
+          tester.widget<GlassSegmented<PortMappingMode>>(control).selected;
+      bool held() => tester
+          .widget<IgnorePointer>(
+            find.ancestor(of: control, matching: find.byType(IgnorePointer)).first,
+          )
+          .ignoring;
+      expect(mode(), PortMappingMode.auto);
+      await tester.ensureVisible(control);
+      await tester.tap(
+        find.descendant(of: control, matching: find.text('Always')),
       );
-      expect(mapping().value, isFalse);
-      await tester.ensureVisible(find.byKey(const Key('tunnel-port-mapping')));
-      await tester.tap(find.byKey(const Key('tunnel-port-mapping')));
       await tester.tap(find.byKey(const Key('tunnel-direct')));
       await settle(tester);
-      expect(mapping().value, isTrue);
-      expect(mapping().onChanged, isNull);
+      // Relay-only holds the choice rather than dropping it.
+      expect((mode(), held()), (PortMappingMode.always, true));
       await tester.ensureVisible(find.byKey(const Key('tunnel-submit')));
       await tester.tap(find.byKey(const Key('tunnel-submit')));
       await settle(tester);
-      expect(api.services.single.portMapping, isTrue);
+      expect(api.services.single.portMapping, PortMappingMode.always);
       expect(api.services.single.allowDirect, isFalse);
       await tester.tap(find.byKey(const Key('menu-share:mapped')));
       await settle(tester);
@@ -53,7 +59,7 @@ void main() {
       await settle(tester);
       await tester.tap(find.byKey(const Key('tunnel-submit')));
       await settle(tester);
-      expect(api.services.single.portMapping, isTrue);
+      expect(api.services.single.portMapping, PortMappingMode.always);
       await finish(tester);
     },
   );

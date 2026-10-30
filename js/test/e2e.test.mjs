@@ -42,7 +42,7 @@ test.skipIf(!hasRelay)("event readers are independent, close on their own and en
     const client = clientFor(relay);
     const echo = await startEchoServer();
     const registration = await client.register({
-      key: "events", localAddr: echo.address, transport: "tcp", allowDirect: false, portMapping: true,
+      key: "events", localAddr: echo.address, transport: "tcp", allowDirect: false, portMapping: "always",
     });
     const first = registration.subscribeEvents();
     const second = registration.subscribeEvents();
