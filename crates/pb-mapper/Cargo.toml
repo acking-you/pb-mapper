@@ -18,10 +18,13 @@ publish = ["crates-io"]
 pb-mapper-client.workspace = true
 
 [features]
+port-mapping = ["p2p", "pb-mapper-client/port-mapping"]
 relay-quic = ["pb-mapper-client/relay-quic"]
 # Direct QUIC with relay fallback is the default path; the relay carrier is TCP.
 # Disabling both `p2p` and `relay-quic` drops quinn, rcgen and stun-proto.
-default = ["p2p", "relay-quic"]
+# `port-mapping` lets a tunnel ask the router for a mapping once punching
+# fails (`PortMapping::Auto`, the default); without it, none is ever asked.
+default = ["p2p", "relay-quic", "port-mapping"]
 p2p = ["pb-mapper-client/p2p"]
 
 [dev-dependencies]
@@ -31,6 +34,11 @@ serde_json.workspace = true
 pb-mapper-auth.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p"] }
 tokio-util.workspace = true
+
+# Needs the router-facing code, which `--no-default-features` leaves out.
+[[example]]
+name = "port_mapping"
+required-features = ["port-mapping"]
 
 [lints]
 workspace = true

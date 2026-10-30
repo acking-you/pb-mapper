@@ -16,6 +16,7 @@ mod response;
 mod server;
 mod service;
 mod state;
+mod tunnel_events;
 mod update;
 
 // Re-export public FFI functions and handle type.
@@ -44,6 +45,7 @@ pub use service::{
     pb_mapper_delete_service_config, pb_mapper_get_service_configs_json,
     pb_mapper_get_service_status_json, pb_mapper_register_service, pb_mapper_unregister_service,
 };
+pub use tunnel_events::pb_mapper_tunnel_events_call_json;
 pub use update::pb_mapper_ed25519_verify_v1;
 
 #[global_allocator]

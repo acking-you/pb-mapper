@@ -60,8 +60,9 @@ Requires a Tokio runtime. The `pb-mapper` CLI and relay live in the
 | --- | --- |
 | Publish / reach a TCP or UDP service | `Client::register`, `Client::connect`, `Transport::{Tcp, Udp}` |
 | Choose the path | `RegisterOptions { allow_direct }`, `ConnectOptions { path: PathPolicy::{Auto, RelayOnly} }` |
+| Ask the router to map the direct port | `port_mapping: PortMapping::{Auto, Always, Off}` in either options; `Auto`, once punching fails, by default |
 | Reclaim abandoned TCP data connections | `register_with_idle_timeout`, `RegisterOptions { idle_timeout }` |
-| Listen to a tunnel | `subscribe()` (a `watch` of `TunnelStatus`), `diagnostics()` with `events`, `direct.attempt` and path counters |
+| Listen to a tunnel | `subscribe()` for status, `subscribe_events()` for every event as it happens, `diagnostics()` for a snapshot |
 | Wake recovery after a network change or resume | `Client::notify_network_change` |
 | Inspect a namespace | `list_keys`, `service_status`, `sessions`, `remote_id` |
 | Manage credentials (administrator key) | `admin()`: `issue_key`, `show_key`, `reveal_key`, `renew_key`, `revoke_key`, `list_keys_all`, `gc_keys`, `auth_status` |
@@ -73,6 +74,42 @@ Each row has a runnable example in
 needs no setup.
 
 ## Paths
+
+When hole punching fails, a tunnel asks this network's router to map its
+direct UDP port, with PCP, NAT-PMP or UPnP, and offers the mapped address to
+later sessions: `PortMapping::Auto`, the default in `RegisterOptions` and
+`ConnectOptions`. Where punching works the router is never asked. `Always`
+asks from the first direct session on, and `Off` never does. A mapping never
+holds a session up, is renewed while the tunnel runs and released when it
+stops, and is ignored while the tunnel keeps to the relay; a router that maps
+nothing leaves direct and the relay fallback as they were. It needs the
+`port-mapping` Cargo feature, on by default: without it `Auto` never asks and
+`Always` is refused. `diagnostics().port_mapping` says where it stands
+(`standby` until a punch fails); `active` stays true while a renewal is pending
+or has failed, until the lease expires. `cargo run -p pb-mapper --example
+port_mapping -- connect web 127.0.0.1:9090` prints each step, through the
+release when it stops.
+
+`subscribe_events()` yields the outcomes the tunnel kept
+(`diagnostics().events`), then every event as it happens, until the tunnel
+stops and its cleanup, the mapping's release included, has reported:
+
+```rust,ignore
+let mut events = connection.subscribe_events();
+while let Some(event) = events.recv().await {
+    match event {
+        Ok(event) => println!("{}", serde_json::to_string(&event)?),
+        // Fell more than 128 events behind; the snapshot is current.
+        Err(lagged) => eprintln!("{lagged}: {:?}", connection.diagnostics()),
+    }
+}
+```
+
+Besides the outcomes, a stream carries the steps that lead to them: relay
+phases, direct stages and attempts given up, sessions opening and closing,
+and each change of the port mapping. `release_sent` is a PCP or NAT-PMP deletion the router does not
+acknowledge; `released` is one UPnP confirmed. Each subscriber reads at its
+own pace, and none keeps the tunnel alive.
 
 The relay carrier defaults to TCP. Select QUIC with
 `client.with_relay_transport(RelayTransport::Quic)?` before registering or

@@ -704,3 +704,4 @@ module.exports.Admin = nativeBinding.Admin
 module.exports.Client = nativeBinding.Client
 module.exports.Connection = nativeBinding.Connection
 module.exports.Registration = nativeBinding.Registration
+module.exports.TunnelEvents = nativeBinding.TunnelEvents

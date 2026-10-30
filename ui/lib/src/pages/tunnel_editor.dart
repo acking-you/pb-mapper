@@ -164,6 +164,8 @@ class _TunnelFormState extends State<TunnelForm> {
       widget.existing?.keepAlive ?? widget.store.config.keepAliveEnabled;
   late int? _namespace = widget.existing?.namespace ?? widget.initialNamespace;
   late bool _direct = widget.existing?.allowDirect ?? true;
+  late PortMappingMode _portMapping =
+      widget.existing?.portMapping ?? PortMappingMode.auto;
   bool _more = false;
   bool _busy = false;
   String? _keyError;
@@ -246,6 +248,7 @@ class _TunnelFormState extends State<TunnelForm> {
       keepAlive: _keepAlive,
       namespace: _kind == TunnelKind.connect ? _namespace : null,
       allowDirect: _direct,
+      portMapping: _portMapping,
     );
     setState(() => _busy = true);
     // Replacing goes the way an edit does: the old connection stops first,
@@ -304,18 +307,6 @@ class _TunnelFormState extends State<TunnelForm> {
           ),
           const SizedBox(height: 10),
         ],
-        AnimatedSwitcher(
-          duration: Motion.of(context, Motion.fast),
-          child: Text(
-            share ? l10n.kindShareHint : l10n.kindConnectHint,
-            key: ValueKey(_kind),
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-              fontSize: 12.5,
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
         _Field(
           key: const Key('tunnel-key'),
           controller: _key,
@@ -478,21 +469,27 @@ class _TunnelFormState extends State<TunnelForm> {
           _SwitchRow(
             key: const Key('tunnel-encryption'),
             title: l10n.encryption,
-            subtitle: l10n.encryptionHelp,
+            hint: l10n.encryptionHelp,
             value: _encrypted,
             onChanged: (v) => setState(() => _encrypted = v),
           ),
         _SwitchRow(
           key: const Key('tunnel-direct'),
           title: share ? l10n.directAllow : l10n.directPrefer,
-          subtitle: share ? l10n.directAllowHelp : l10n.directPreferHelp,
+          hint: share ? l10n.directAllowHelp : l10n.directPreferHelp,
           value: _direct,
           onChanged: (v) => setState(() => _direct = v),
+        ),
+        // A part of going direct: set beneath it, and kept while it is off.
+        _PortMappingRow(
+          mode: _portMapping,
+          enabled: _direct,
+          onChanged: (mode) => setState(() => _portMapping = mode),
         ),
         _SwitchRow(
           key: const Key('tunnel-keepalive'),
           title: l10n.keepAlive,
-          subtitle: l10n.keepAliveHelp,
+          hint: l10n.keepAliveHelp,
           value: _keepAlive,
           onChanged: (v) => setState(() => _keepAlive = v),
         ),
@@ -725,29 +722,95 @@ class _Disclosure extends StatelessWidget {
   }
 }
 
-/// A setting that is on or off, with its explanation beneath.
+/// A setting that is on or off: its name at rest, what it does on hover or
+/// a long press.
 class _SwitchRow extends StatelessWidget {
   const _SwitchRow({
     super.key,
     required this.title,
-    required this.subtitle,
+    required this.hint,
     required this.value,
     required this.onChanged,
   });
 
   final String title;
-  final String subtitle;
+  final String hint;
   final bool value;
   final ValueChanged<bool> onChanged;
 
   @override
-  Widget build(BuildContext context) {
-    return SwitchListTile(
+  Widget build(BuildContext context) => Tooltip(
+    message: hint,
+    child: SwitchListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 4),
       title: Text(title),
-      subtitle: Text(subtitle),
       value: value,
       onChanged: onChanged,
+    ),
+  );
+}
+
+/// When to ask the router for a port mapping, set in under the direct switch
+/// it belongs to. While direct is off it is held as it is, faded.
+class _PortMappingRow extends StatelessWidget {
+  const _PortMappingRow({
+    required this.mode,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final PortMappingMode mode;
+  final bool enabled;
+  final ValueChanged<PortMappingMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    return Tooltip(
+      message: enabled ? l10n.portMappingHelp : l10n.portMappingNeedsDirect,
+      child: Padding(
+        padding: const EdgeInsetsDirectional.fromSTEB(22, 6, 4, 10),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                l10n.portMapping,
+                style: theme.textTheme.bodyLarge?.copyWith(
+                  color: enabled ? null : theme.disabledColor,
+                ),
+              ),
+            ),
+            IgnorePointer(
+              ignoring: !enabled,
+              child: AnimatedOpacity(
+                opacity: enabled ? 1 : 0.45,
+                duration: Motion.of(context, Motion.fast),
+                child: GlassSegmented<PortMappingMode>(
+                  key: const Key('tunnel-port-mapping'),
+                  expand: false,
+                  selected: mode,
+                  onChanged: onChanged,
+                  segments: [
+                    GlassSegment(
+                      value: PortMappingMode.off,
+                      label: l10n.portMappingModeOff,
+                    ),
+                    GlassSegment(
+                      value: PortMappingMode.auto,
+                      label: l10n.portMappingModeAuto,
+                    ),
+                    GlassSegment(
+                      value: PortMappingMode.always,
+                      label: l10n.portMappingModeAlways,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

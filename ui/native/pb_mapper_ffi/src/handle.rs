@@ -15,6 +15,8 @@ use crate::state::PbMapperState;
 
 /// Opaque handle for the pb-mapper runtime and shared state.
 pub struct PbMapperHandle {
+    /// The window's readers of tunnel events.
+    pub(crate) tunnel_events: crate::tunnel_events::TunnelEventReaders,
     pub(crate) runtime: Runtime,
     pub(crate) state: Arc<Mutex<PbMapperState>>,
     /// Stops the control server when the handle goes away.
@@ -40,6 +42,7 @@ pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
 
     let state = PbMapperState::new(None);
     let handle = PbMapperHandle {
+        tunnel_events: Default::default(),
         runtime,
         state: Arc::new(Mutex::new(state)),
         control_shutdown: CancellationToken::new(),
@@ -64,7 +67,7 @@ pub unsafe extern "C" fn pb_mapper_start_control_server(
     if handle.is_null() {
         return err_null_handle();
     }
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let shutdown = handle.control_shutdown.clone();
 
@@ -81,7 +84,8 @@ pub unsafe extern "C" fn pb_mapper_start_control_server(
 /// Destroy handle and free resources.
 ///
 /// # Safety
-/// `handle` must be a valid pointer returned by `pb_mapper_create`.
+/// `handle` must be a valid pointer returned by `pb_mapper_create`. Every call
+/// borrowing it, a pending tunnel event read included, must have returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_destroy(handle: *mut PbMapperHandle) {
     if !handle.is_null() {
@@ -111,7 +115,7 @@ pub unsafe extern "C" fn pb_mapper_set_app_dir(
         }
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;

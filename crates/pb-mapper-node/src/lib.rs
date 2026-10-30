@@ -34,6 +34,110 @@ fn number(value: u64) -> f64 {
     value.min((1_u64 << 53) - 1) as f64
 }
 
+fn path_name(path: sdk::SessionPath) -> &'static str {
+    match path {
+        sdk::SessionPath::Direct => "direct",
+        sdk::SessionPath::Relay => "relay",
+    }
+}
+
+/// A tunnel's gateway port mapping after its latest change.
+#[napi(object)]
+pub struct JsPortMappingStatus {
+    /// `waiting_for_direct`, `discovering`, `gateway_found`, `discovered`,
+    /// `requesting`, `active`, `renewing`, `expired`, `retrying`,
+    /// `network_changed`, `releasing`, `released`, `release_sent`, `failed`,
+    /// `release_failed`, `cancelled` or `stopped`.
+    pub stage: String,
+    pub network_generation: f64,
+    pub local_port: Option<u32>,
+    pub gateway: Option<String>,
+    /// `pcp`, `nat_pmp` or `upnp`.
+    pub protocol: Option<String>,
+    pub available_protocols: Vec<String>,
+    pub external_addr: Option<String>,
+    /// Whether a lease is usable now, renewal pending or failed included.
+    pub active: bool,
+    pub lease_lifetime_ms: Option<f64>,
+    pub error: Option<String>,
+}
+
+impl From<sdk::PortMappingStatus> for JsPortMappingStatus {
+    fn from(value: sdk::PortMappingStatus) -> Self {
+        Self {
+            stage: value.stage.as_str().into(),
+            network_generation: number(value.network_generation),
+            local_port: value.local_port.map(u32::from),
+            gateway: value.gateway.map(|v| v.to_string()),
+            protocol: value.protocol.map(|v| v.as_str().into()),
+            available_protocols: value
+                .available_protocols
+                .into_iter()
+                .map(|v| v.as_str().into())
+                .collect(),
+            external_addr: value.external_addr.map(|v| v.to_string()),
+            active: value.active,
+            lease_lifetime_ms: value.lease_lifetime_ms.map(number),
+            error: value.error,
+        }
+    }
+}
+
+#[napi(object)]
+pub struct JsPortMappingDiagnostics {
+    pub current: JsPortMappingStatus,
+    pub attempts: f64,
+    pub renewals: f64,
+    pub failures: f64,
+}
+
+/// A tunnel's events, read one at a time: the outcomes it kept, then every
+/// event as it happens. Nothing queues on the JS side while no one reads.
+#[napi]
+pub struct TunnelEvents {
+    events: tokio::sync::Mutex<sdk::TunnelEvents>,
+    closed: tokio_util::sync::CancellationToken,
+}
+
+#[napi]
+impl TunnelEvents {
+    /// The next event, or `null` once the tunnel has stopped or `close()` was
+    /// called. Rejects when this reader fell more than 128 events behind
+    /// (read `diagnostics()` and keep reading), and when `timeoutMs` passes
+    /// first, which loses no event. Calls are served one at a time.
+    #[napi]
+    pub async fn next(&self, timeout_ms: Option<u32>) -> Result<Option<JsTunnelEvent>> {
+        let receive = async {
+            match self.events.lock().await.recv().await {
+                Some(Ok(event)) => Ok(Some(event.into())),
+                Some(Err(lagged)) => Err(Error::from_reason(format!(
+                    "{lagged}; read diagnostics() and keep reading"
+                ))),
+                None => Ok(None),
+            }
+        };
+        let receive = async {
+            match timeout_ms {
+                Some(ms) => tokio::time::timeout(Duration::from_millis(ms.into()), receive)
+                    .await
+                    .map_err(|_| Error::from_reason(format!("no tunnel event within {ms} ms")))?,
+                None => receive.await,
+            }
+        };
+        tokio::select! {
+            biased;
+            () = self.closed.cancelled() => Ok(None),
+            result = receive => result,
+        }
+    }
+
+    /// Stop reading: a pending `next()` resolves with `null`, as do later ones.
+    #[napi]
+    pub fn close(&self) {
+        self.closed.cancel();
+    }
+}
+
 #[napi(object)]
 pub struct JsRelayDiagnostics {
     pub transport: String,
@@ -123,18 +227,22 @@ pub struct JsPathDiagnostics {
     pub attempt: Option<JsDirectAttempt>,
 }
 
-/// One entry of a tunnel's recent history. Consecutive repeats fold into one
-/// entry, counted by `repeats`.
+/// One event of a tunnel. In `diagnostics().events` consecutive repeats fold
+/// into one entry, counted by `repeats`.
 #[napi(object)]
 pub struct JsTunnelEvent {
-    /// Increases with every recorded event, a fold included: remember the
-    /// highest one handled to tell which entries are new.
+    /// Increases with every event, a fold included: remember the highest one
+    /// handled to tell which entries are new.
     pub seq: f64,
     /// Time since the latest occurrence.
     pub age_ms: f64,
     pub repeats: u32,
-    /// `relay_ready`, `relay_failed`, `network_changed`, `direct_established`
-    /// or `direct_fallback`.
+    /// Outcomes, also kept in `diagnostics().events`: `relay_ready`,
+    /// `relay_failed`, `network_changed`, `direct_established`,
+    /// `direct_fallback` and `stopped`, the last event of a stream. Steps,
+    /// from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
+    /// `direct_abandoned`, `session_opened`, `session_closed` and
+    /// `port_mapping_changed`.
     pub kind: String,
     /// `relay_ready`: setup latency of the answering relay.
     pub latency_ms: Option<f64>,
@@ -145,8 +253,16 @@ pub struct JsTunnelEvent {
     pub retry_in_ms: Option<f64>,
     /// `direct_established`: time from the first request to the open path.
     pub setup_ms: Option<f64>,
-    /// `direct_fallback`: the stage the attempt left for the relay.
+    /// `direct_fallback`: the stage the attempt left for the relay;
+    /// `direct_stage_changed`: the stage it entered; `direct_abandoned`: the
+    /// stage at which it was given up.
     pub stage: Option<String>,
+    /// `phase_changed`: the relay attempt's new phase.
+    pub phase: Option<String>,
+    /// `session_opened`, `session_closed`: `direct` or `relay`.
+    pub path: Option<String>,
+    /// `port_mapping_changed`: the mapping as it now stands.
+    pub mapping: Option<JsPortMappingStatus>,
 }
 
 impl From<sdk::TunnelEvent> for JsTunnelEvent {
@@ -161,6 +277,9 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
             retry_in_ms: None,
             setup_ms: None,
             stage: None,
+            phase: None,
+            path: None,
+            mapping: None,
         };
         js.kind = match event.kind {
             sdk::TunnelEventKind::RelayReady { latency_ms } => {
@@ -184,6 +303,31 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
                 js.stage = Some(stage.as_str().to_string());
                 "direct_fallback"
             }
+            sdk::TunnelEventKind::Stopped => "stopped",
+            sdk::TunnelEventKind::PhaseChanged { phase } => {
+                js.phase = Some(phase.as_str().into());
+                "phase_changed"
+            }
+            sdk::TunnelEventKind::DirectStageChanged { stage } => {
+                js.stage = Some(stage.as_str().into());
+                "direct_stage_changed"
+            }
+            sdk::TunnelEventKind::DirectAbandoned { stage } => {
+                js.stage = Some(stage.as_str().into());
+                "direct_abandoned"
+            }
+            sdk::TunnelEventKind::SessionOpened { path } => {
+                js.path = Some(path_name(path).into());
+                "session_opened"
+            }
+            sdk::TunnelEventKind::SessionClosed { path } => {
+                js.path = Some(path_name(path).into());
+                "session_closed"
+            }
+            sdk::TunnelEventKind::PortMappingChanged { mapping } => {
+                js.mapping = Some((*mapping).into());
+                "port_mapping_changed"
+            }
         }
         .to_string();
         js
@@ -194,6 +338,8 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
 pub struct JsTunnelDiagnostics {
     pub relay_transport: String,
     pub direct: Option<JsPathDiagnostics>,
+    /// Present when the tunnel maps its direct endpoint's port.
+    pub port_mapping: Option<JsPortMappingDiagnostics>,
     pub sdk_version: String,
     pub last_attempt_phase: String,
     pub attempts: f64,
@@ -213,6 +359,12 @@ pub struct JsTunnelDiagnostics {
 impl From<sdk::TunnelDiagnostics> for JsTunnelDiagnostics {
     fn from(value: sdk::TunnelDiagnostics) -> Self {
         Self {
+            port_mapping: value.port_mapping.map(|mapping| JsPortMappingDiagnostics {
+                current: mapping.current.into(),
+                attempts: number(mapping.attempts),
+                renewals: number(mapping.renewals),
+                failures: number(mapping.failures),
+            }),
             direct: value.direct.map(|d| JsPathDiagnostics {
                 direct_sessions: number(d.direct_sessions),
                 relay_sessions: number(d.relay_sessions),
@@ -286,6 +438,17 @@ fn parse_transport(raw: &str) -> Result<Transport> {
     }
 }
 
+fn parse_port_mapping(raw: Option<&str>) -> Result<sdk::PortMapping> {
+    match raw.unwrap_or("auto") {
+        "off" => Ok(sdk::PortMapping::Off),
+        "auto" => Ok(sdk::PortMapping::Auto),
+        "always" => Ok(sdk::PortMapping::Always),
+        other => Err(invalid_argument(format!(
+            "portMapping must be \"off\", \"auto\" or \"always\", got {other}"
+        ))),
+    }
+}
+
 /// Render a tunnel status for JS.
 ///
 /// `Failed` keeps its reason after the colon: it is the only description of a
@@ -315,6 +478,10 @@ pub struct JsRegisterRequest {
     /// Accept direct sessions from authorized consumers (default `true`).
     /// `false` keeps every session to this service on the relay.
     pub allow_direct: Option<bool>,
+    /// When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+    /// port: "auto" once punching through fails (default), "always", or "off".
+    /// Ignored when direct is not allowed.
+    pub port_mapping: Option<String>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -341,6 +508,10 @@ pub struct JsConnectRequest {
     /// "auto" (default): direct first, relay fallback before any byte is sent.
     /// "relay-only": always use the relay.
     pub path: Option<String>,
+    /// When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+    /// port: "auto" once punching through fails (default), "always", or "off".
+    /// Ignored on the relay-only path.
+    pub port_mapping: Option<String>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -576,6 +747,7 @@ impl Client {
     pub async fn register(&self, request: JsRegisterRequest) -> Result<Registration> {
         let options = sdk::RegisterOptions {
             allow_direct: request.allow_direct.unwrap_or(true),
+            port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
             ..Default::default()
         };
         let registration = self
@@ -604,6 +776,7 @@ impl Client {
         let options = sdk::RegisterOptions {
             allow_direct: request.allow_direct.unwrap_or(true),
             idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
+            port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
         };
         let registration = self
             .inner
@@ -628,7 +801,10 @@ impl Client {
                     local_addr: request.local_addr,
                     transport: parse_transport(&request.transport)?,
                 },
-                sdk::ConnectOptions { path },
+                sdk::ConnectOptions {
+                    path,
+                    port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
+                },
             )
             .await
             .map_err(to_napi)?;
@@ -738,6 +914,17 @@ macro_rules! tunnel_class {
             #[napi]
             pub fn diagnostics(&self) -> JsTunnelDiagnostics {
                 self.inner.diagnostics().into()
+            }
+
+            /// The outcomes kept in `diagnostics().events`, then every event
+            /// as it happens, until the tunnel stops. Each call is a reader of
+            /// its own.
+            #[napi]
+            pub fn subscribe_events(&self) -> TunnelEvents {
+                TunnelEvents {
+                    events: tokio::sync::Mutex::new(self.inner.subscribe_events()),
+                    closed: tokio_util::sync::CancellationToken::new(),
+                }
             }
 
             /// Resolves with the next status this tunnel reports, rendered as

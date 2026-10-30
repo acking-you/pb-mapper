@@ -145,7 +145,7 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
         }
         tokio::select! {
             () = tokio::time::sleep_until((Instant::now() + crate::recovery::jitter(retry.next_delay())).min(deadline)) => {},
-            () = wake.changed() => retry.reset(),
+            _ = wake.changed() => retry.reset(),
         }
     };
     drop(global_permit);
@@ -157,7 +157,7 @@ pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
     #[cfg(feature = "p2p")]
     let _path = setup.direct.as_ref().map(|_| {
         let path = pb_mapper_protocol::direct::SessionPath::Relay;
-        setup.diagnostics.path_started(path);
+        setup.diagnostics.session_opened(path);
         crate::diagnostics::PathUsage(setup.diagnostics.clone(), path)
     });
     let span = info_span!("forward", "client:{client_id} <-> server_id:{server_id}");

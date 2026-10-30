@@ -12,6 +12,27 @@ behavior and migration from older CI-signed APKs.
 
 ## Using Rust Inside Flutter
 
+A tunnel's **More options** hold **Port mapping**, set under the direct
+switch it depends on: Off, Auto or Always, saved with the tunnel and kept
+while direct is off. Auto, the default, asks the router (PCP, NAT-PMP or
+UPnP) for a mapping only once a direct attempt fails to punch through, so a
+network where punching works never hears from it.
+
+A running tunnel's **Diagnostics**, from its menu or its panel in the
+overview, show its carrier, relay and sessions, its port mapping, and its
+events as they happen; tap an event for its fields, or copy the whole as a
+JSON report.
+
+On the Dart side, `registerService` and `connectService` take a
+`PortMappingMode`,
+and `PbMapperApiClient.tunnelEvents(serviceKey:, share:)` is the live feed:
+each update carries the tunnel's diagnostics as they are by then, and
+cancelling it ends the reader in Rust, a read waiting on a quiet tunnel
+included. Underneath, `pb_mapper_register_service` and
+`pb_mapper_connect_service` take `port_mapping` (0 off, 1 auto, 2 always), and
+`pb_mapper_tunnel_events_call_json` serves `subscribe {kind, key}`,
+`next {id, timeout_ms}` and `close {id}` (see `native/pb_mapper_ffi/src/tunnel_events.rs`).
+
 This project uses raw `dart:ffi` to call into a Rust FFI library (`pb-mapper-ffi`)
 located under `ui/native`.
 

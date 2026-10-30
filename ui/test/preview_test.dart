@@ -247,6 +247,89 @@ void main() {
     await loadRealFonts();
   });
 
+  for (final (name, size) in [
+    ('desktop', const Size(1280, 820)),
+    ('phone', const Size(390, 844)),
+  ]) {
+    testWidgets('port mapping $name', (tester) async {
+      final api =
+          FakePbMapperApi(
+              services: [
+                fakeService(serviceKey: 'nas-files', portMapping: PortMappingMode.always),
+              ],
+            )
+            ..tunnelEventFeed = Stream.fromIterable([
+              for (final (seq, kind) in [
+                (1, {'kind': 'relay_ready', 'latency_ms': 38}),
+                (2, {'kind': 'direct_stage_changed', 'stage': 'punching'}),
+                (3, {'kind': 'direct_fallback', 'stage': 'punching'}),
+                (4, {
+                  'kind': 'port_mapping_changed',
+                  'mapping': {'stage': 'discovering'},
+                }),
+                (5, {
+                  'kind': 'port_mapping_changed',
+                  'mapping': {'stage': 'requesting', 'protocol': 'pcp'},
+                }),
+                (6, {
+                  'kind': 'port_mapping_changed',
+                  'mapping': _activeMapping,
+                }),
+                (7, {'kind': 'direct_established', 'setup_ms': 184}),
+              ])
+                TunnelEventsUpdate.fromMap({
+                  'type': 'event',
+                  'event': {
+                    'seq': seq,
+                    'age_ms': (8 - seq) * 41000,
+                    'repeats': 1,
+                    'kind': kind,
+                  },
+                  'diagnostics': {
+                    'relay_transport': 'quic',
+                    'last_setup_latency_ms': 38,
+                    'direct': {
+                      'direct_sessions': 3,
+                      'relay_sessions': 0,
+                      'fallbacks': 1,
+                    },
+                    'port_mapping': {
+                      'current': _activeMapping,
+                      'attempts': 1,
+                      'renewals': 2,
+                      'failures': 0,
+                    },
+                  },
+                }),
+            ]);
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.tunnels,
+        size: size,
+        locale: const Locale('zh'),
+      );
+      await tester.tap(find.byKey(const Key('menu-share:nas-files')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('menu-diagnostics')));
+      await settle(tester);
+      await _capture(tester, 'port_mapping_diagnostics_$name');
+      await tester.tap(find.byTooltip('关闭').last);
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('menu-share:nas-files')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('menu-edit')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('tunnel-more')));
+      await settle(tester);
+      await tester.ensureVisible(find.byKey(const Key('tunnel-port-mapping')));
+      await settle(tester);
+      await _capture(tester, 'port_mapping_editor_$name');
+      expect(tester.takeException(), isNull);
+      await finish(tester);
+    });
+  }
+
   for (final (name, theme) in [
     ('light', ThemeMode.light),
     ('dark', ThemeMode.dark),
@@ -487,3 +570,13 @@ void main() {
     await finish(tester);
   });
 }
+
+const _activeMapping = {
+  'stage': 'active',
+  'protocol': 'pcp',
+  'local_port': 52183,
+  'gateway': '192.168.1.1',
+  'external_addr': '203.0.113.7:52183',
+  'active': true,
+  'lease_lifetime_ms': 7200000,
+};

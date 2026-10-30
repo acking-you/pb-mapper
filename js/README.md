@@ -61,7 +61,18 @@ To stay on the relay, register with `allowDirect: false` or connect with
 `path: "relay-only"`. Established direct connections survive coordinator loss
 and credential revocation; local `stop()` closes them.
 
+When hole punching fails, a tunnel asks the router to map its direct UDP port
+(PCP, NAT-PMP or UPnP) and offers that address to later sessions:
+`portMapping: "auto"`, the default for `register` and `connect`. Where
+punching works the router is never asked. `"always"` asks from the first
+direct session, `"off"` never; the relay-only path never asks. A lease is
+renewed while the tunnel runs and released when it stops, and
+`diagnostics().portMapping` says where it stands (`standby` until a punch
+fails).
+
 ## Listening for changes
+
+Two feeds, both free of credentials and payload. The status:
 
 ```ts
 // Resolves on every status change; once the tunnel settles as "stopped" or
@@ -73,12 +84,39 @@ while (status !== "stopped" && !status.startsWith("failed")) {
 }
 ```
 
+And every event, as it happens: `subscribeEvents()` yields the outcomes the
+tunnel kept, then each event until the tunnel stops and its cleanup, the port
+mapping's release included, has reported.
+
+```ts
+const events = conn.subscribeEvents();
+try {
+  for (let event; (event = await events.next()) !== null;) {
+    console.log(event.kind, event);
+  }
+} finally {
+  events.close(); // also resolves a pending next() with null
+}
+```
+
+Each reader has its own queue of 128 events and nothing queues on the JS
+side while no one reads. One that falls further behind gets a rejection that
+says how many it missed: read `diagnostics()` and keep reading.
+`next(timeoutMs)` rejects when the time passes first, without losing an
+event. A stream carries the steps as well as the outcomes: `phase_changed`,
+`direct_stage_changed`, `direct_abandoned`, `session_opened`,
+`session_closed` and `port_mapping_changed`, whose `mapping` is the mapping as it now stands.
+`release_sent` there is a PCP or NAT-PMP deletion the router does not
+acknowledge; `released` is one UPnP confirmed.
+
 `diagnostics()` is a credential-free snapshot for dashboards and logs:
 
-- `events`: the last 16 of `relay_ready`, `relay_failed`, `network_changed`,
-  `direct_established` and `direct_fallback`, each with a `seq` so a poller
-  can print only new ones, plus `latencyMs`, `failure`, `retryInMs`,
-  `setupMs` or `stage` as they apply;
+- `events`: the last 16 outcomes, `relay_ready`, `relay_failed`,
+  `network_changed`, `direct_established`, `direct_fallback` and `stopped`,
+  each with a `seq` so a poller can print only new ones, plus `latencyMs`,
+  `failure`, `retryInMs`, `setupMs` or `stage` as they apply;
+- `portMapping`, when the tunnel maps its port: the mapping as it stands,
+  and its requests, renewals and failures;
 - `direct`: sessions per path, active sessions, fallbacks, and the attempt in
   flight with its stage (`negotiating`, `discovering`, `punching`,
   `committing`);

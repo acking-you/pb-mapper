@@ -10,19 +10,18 @@
 //! * `subscribe()` is a `tokio::sync::watch` receiver of [`TunnelStatus`]:
 //!   `Starting`, `Connected`, `Retrying`, `Stopped`, `Failed(reason)`. It is
 //!   what to drive a connection indicator from.
-//! * `diagnostics()` is a snapshot whose `events` list says what recovery did:
-//!   relay up or down and why, network changes, direct sessions established,
-//!   fallbacks and the stage they left at. Each event carries a `seq`, so a
-//!   poller prints only what it has not seen. The snapshot serializes to JSON
-//!   as-is, ready to forward to a UI or a log pipeline.
+//! * `subscribe_events()` yields the tunnel's recent outcomes, then every
+//!   event as it happens: relay phases, direct stages, sessions, and, once
+//!   a direct attempt fails to punch through, the router mapping the tunnel
+//!   then asks for, as it is found, granted, renewed and released. A reader
+//!   that falls behind is told how many it missed; `diagnostics()` is the
+//!   state to reconcile with. Events and snapshots serialize to JSON.
 //!
 //! When the host reports a network change or a resume from sleep, call
 //! `client.notify_network_change()`: waiting retries start at once and the
 //! next connection tries direct again.
 
-use std::time::Duration;
-
-use pb_mapper::{Client, ClientConfig, ConnectRequest, Transport, TunnelEventKind, TunnelStatus};
+use pb_mapper::{Client, ClientConfig, ConnectRequest, Transport};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,50 +46,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut status = connection.subscribe();
-    let mut seen = 0_u64;
-    let mut poll = tokio::time::interval(Duration::from_millis(500));
+    let mut events = connection.subscribe_events();
+    let mut status_open = true;
+    let mut stopping = false;
     loop {
         tokio::select! {
-            result = tokio::signal::ctrl_c() => { result?; break; }
-            changed = status.changed() => {
-                if changed.is_err() {
-                    break; // the worker is gone; its last status is final
-                }
-                let current = status.borrow_and_update().clone();
-                println!("status: {current:?}");
-                if matches!(current, TunnelStatus::Stopped | TunnelStatus::Failed(_)) {
-                    break;
-                }
+            result = tokio::signal::ctrl_c(), if !stopping => {
+                result?;
+                stopping = true;
+                connection.stop().await?;
             }
-            _ = poll.tick() => {
-                let snapshot = connection.diagnostics();
-                let unseen = seen;
-                for event in snapshot.events.iter().filter(|event| event.seq > unseen) {
-                    seen = event.seq;
-                    match event.kind {
-                        TunnelEventKind::DirectEstablished { setup_ms } => {
-                            println!("direct path up in {setup_ms} ms");
-                        }
-                        TunnelEventKind::DirectFallback { stage } => {
-                            println!("direct gave way to the relay at `{}`", stage.as_str());
-                        }
-                        TunnelEventKind::RelayReady { latency_ms } => {
-                            println!("relay answered in {latency_ms} ms");
-                        }
-                        TunnelEventKind::RelayFailed { failure, retry_in_ms } => {
-                            println!("relay {}; retrying in {retry_in_ms} ms", failure.as_str());
-                        }
-                        TunnelEventKind::NetworkChanged => println!("network changed"),
-                    }
-                }
-                if let Some(attempt) = snapshot.direct.as_ref().and_then(|path| path.attempt) {
-                    println!(
-                        "direct attempt: {} for {} ms",
-                        attempt.stage.as_str(),
-                        attempt.elapsed_ms
-                    );
-                }
+            changed = status.changed(), if status_open => {
+                status_open = changed.is_ok();
+                println!("status: {:?}", *status.borrow_and_update());
             }
+            event = events.recv() => match event {
+                Some(Ok(event)) => println!("{}", serde_json::to_string(&event)?),
+                Some(Err(lagged)) => {
+                    eprintln!("{lagged}; reconciling with a snapshot");
+                    println!("{}", serde_json::to_string(&connection.diagnostics())?);
+                }
+                // The tunnel stopped and everything it was cleaning up reported.
+                None => break,
+            },
         }
     }
 
@@ -99,6 +77,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         serde_json::to_string_pretty(&connection.diagnostics())?
     );
-    connection.stop().await?;
     Ok(())
 }

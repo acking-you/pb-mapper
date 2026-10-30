@@ -12,7 +12,9 @@ use crate::response::{err_ctl, err_null_handle, ok_data, ok_message, parse_c_str
 use crate::state::{ServiceConfigInfo, ServiceStatusResponse};
 
 /// Register a service. A nonzero `allow_direct` lets connections reach it
-/// directly rather than through the relay.
+/// directly rather than through the relay; `port_mapping` then says when to
+/// ask the router to map the direct UDP port: 0 never, 1 once punching
+/// through fails, 2 from the start.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_register_service(
     handle: *mut PbMapperHandle,
@@ -22,6 +24,7 @@ pub unsafe extern "C" fn pb_mapper_register_service(
     enable_encryption: c_int,
     enable_keep_alive: c_int,
     allow_direct: c_int,
+    port_mapping: c_int,
 ) -> *mut c_char {
     if handle.is_null() {
         return err_null_handle();
@@ -39,8 +42,12 @@ pub unsafe extern "C" fn pb_mapper_register_service(
         Ok(v) => v,
         Err(e) => return err_ctl(&e),
     };
+    let port_mapping = match crate::state::port_mapping_from_c(port_mapping) {
+        Ok(v) => v,
+        Err(e) => return err_ctl(&e),
+    };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     // Not `state.lock().await` around the call: registration releases the lock
     // for its slow middle phase, which it can only do if the caller does not
@@ -53,7 +60,10 @@ pub unsafe extern "C" fn pb_mapper_register_service(
             protocol,
             enable_encryption != 0,
             enable_keep_alive != 0,
-            allow_direct != 0,
+            crate::state::DirectOptions {
+                allow_direct: allow_direct != 0,
+                port_mapping,
+            },
         )
         .await
     });
@@ -82,7 +92,7 @@ pub unsafe extern "C" fn pb_mapper_unregister_service(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
@@ -113,7 +123,7 @@ pub unsafe extern "C" fn pb_mapper_delete_service_config(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
@@ -138,7 +148,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_configs_json(
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let services: Vec<ServiceConfigInfo> = handle.runtime.block_on(async move {
         let state = state.lock().await;
@@ -163,7 +173,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_status_json(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let status: ServiceStatusResponse = handle.runtime.block_on(async move {
         let state = state.lock().await;

@@ -69,6 +69,8 @@ typedef _PbMapperRegisterServiceNative =
       Int32 enableKeepAlive,
       // Nonzero lets connections reach it directly.
       Int32 allowDirect,
+      // When to map the direct UDP port: 0 never, 1 after a failed punch, 2 always.
+      Int32 portMapping,
     );
 typedef _PbMapperRegisterServiceDart =
     Pointer<Utf8> Function(
@@ -79,6 +81,7 @@ typedef _PbMapperRegisterServiceDart =
       int enableEncryption,
       int enableKeepAlive,
       int allowDirect,
+      int portMapping,
     );
 
 typedef _PbMapperUnregisterServiceNative =
@@ -102,6 +105,8 @@ typedef _PbMapperConnectServiceNative =
       Int64 namespace,
       // Nonzero tries a direct path before the relay.
       Int32 allowDirect,
+      // When to map the direct UDP port: 0 never, 1 after a failed punch, 2 always.
+      Int32 portMapping,
     );
 typedef _PbMapperConnectServiceDart =
     Pointer<Utf8> Function(
@@ -112,6 +117,7 @@ typedef _PbMapperConnectServiceDart =
       int enableKeepAlive,
       int namespace,
       int allowDirect,
+      int portMapping,
     );
 
 typedef _PbMapperDisconnectServiceNative =
@@ -349,6 +355,13 @@ class PbMapperFFI {
         _PbMapperGetServiceStatusNative,
         _PbMapperGetServiceStatusDart
       >('pb_mapper_relay_call_json');
+
+  /// A running tunnel's event readers, as `{"op": …}` JSON.
+  late final pbMapperTunnelEventsCall = lib
+      .lookupFunction<
+        _PbMapperGetServiceStatusNative,
+        _PbMapperGetServiceStatusDart
+      >('pb_mapper_tunnel_events_call_json');
 
   late final pbMapperGetClientConfigs = lib
       .lookupFunction<

@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:pb_mapper_ui/src/common/state_change.dart';
 
 import 'pb_mapper_ffi.dart';
+import 'tunnel_event_stream.dart';
 
 /// Log entry from native library.
 class LogMessage {
@@ -29,6 +30,8 @@ class PbMapperService {
 
   final PbMapperFFI _ffi = PbMapperFFI();
   Pointer<Void>? _handle;
+  int _activeCalls = 0;
+  bool _disposeRequested = false;
   bool _loggingInitialized = false;
 
   static final StreamController<LogMessage> _logController =
@@ -78,6 +81,7 @@ class PbMapperService {
   }
 
   void ensureInitialized() {
+    if (_disposeRequested) throw StateError('pb-mapper service is disposed');
     if (_handle == null || _handle == nullptr) {
       _handle = _ffi.pbMapperCreate();
     }
@@ -146,6 +150,14 @@ class PbMapperService {
   }
 
   void dispose() {
+    _disposeRequested = true;
+    _destroyIfIdle();
+  }
+
+  // Worker isolates borrow the handle: one still in a call, a tunnel event
+  // read waiting on a quiet tunnel among them, must return before it is freed.
+  void _destroyIfIdle() {
+    if (!_disposeRequested || _activeCalls != 0) return;
     if (_handle != null && _handle != nullptr) {
       _ffi.pbMapperDestroy(_handle!);
     }
@@ -165,11 +177,17 @@ class PbMapperService {
     Map<String, dynamic> args,
   ) async {
     final handle = _requireHandle();
-    return compute(_callJsonIsolate, {
-      'op': op,
-      'handleAddress': handle.address,
-      ...args,
-    });
+    _activeCalls++;
+    try {
+      return await compute(_callJsonIsolate, {
+        'op': op,
+        'handleAddress': handle.address,
+        ...args,
+      });
+    } finally {
+      _activeCalls--;
+      _destroyIfIdle();
+    }
   }
 
   Future<Map<String, dynamic>> setAppDirectoryPath(String path) {
@@ -199,6 +217,7 @@ class PbMapperService {
     required bool enableEncryption,
     required bool enableKeepAlive,
     required bool allowDirect,
+    required int portMapping,
   }) {
     return _runJsonOnWorker('registerService', {
       'serviceKey': serviceKey,
@@ -207,6 +226,7 @@ class PbMapperService {
       'enableEncryption': enableEncryption,
       'enableKeepAlive': enableKeepAlive,
       'allowDirect': allowDirect,
+      'portMapping': portMapping,
     });
   }
 
@@ -225,6 +245,7 @@ class PbMapperService {
     required bool enableKeepAlive,
     int? namespace,
     required bool allowDirect,
+    required int portMapping,
   }) {
     return _runJsonOnWorker('connectService', {
       'serviceKey': serviceKey,
@@ -233,6 +254,7 @@ class PbMapperService {
       'enableKeepAlive': enableKeepAlive,
       'namespace': namespace,
       'allowDirect': allowDirect,
+      'portMapping': portMapping,
     });
   }
 
@@ -303,6 +325,18 @@ class PbMapperService {
   Future<Map<String, dynamic>> relayCall(Map<String, Object?> request) {
     return _runJsonOnWorker('relayCall', {'request': jsonEncode(request)});
   }
+
+  /// A running tunnel's events (see `tunnel_events.rs`), read one at a time
+  /// while listened to.
+  Stream<Map<String, dynamic>> tunnelEvents({
+    required String serviceKey,
+    required bool share,
+  }) => tunnelEventStream(
+    (request) =>
+        _runJsonOnWorker('tunnelEvents', {'request': jsonEncode(request)}),
+    serviceKey: serviceKey,
+    share: share,
+  );
 }
 
 Map<String, dynamic> _decodeJsonStatic(PbMapperFFI ffi, Pointer<Utf8> ptr) {
@@ -360,6 +394,10 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
       case 'stopServer':
         result = ffi.pbMapperStopServer(handle);
         break;
+      case 'tunnelEvents':
+        arg1 = (params['request'] as String).toNativeUtf8();
+        result = ffi.pbMapperTunnelEventsCall(handle, arg1);
+        break;
       case 'registerService':
         arg1 = (params['serviceKey'] as String).toNativeUtf8();
         arg2 = (params['localAddress'] as String).toNativeUtf8();
@@ -372,6 +410,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           (params['enableEncryption'] as bool) ? 1 : 0,
           (params['enableKeepAlive'] as bool) ? 1 : 0,
           (params['allowDirect'] as bool) ? 1 : 0,
+          params['portMapping'] as int,
         );
         break;
       case 'unregisterService':
@@ -394,6 +433,7 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
           (params['enableKeepAlive'] as bool) ? 1 : 0,
           params['namespace'] as int? ?? -1,
           (params['allowDirect'] as bool) ? 1 : 0,
+          params['portMapping'] as int,
         );
         break;
       case 'disconnectService':

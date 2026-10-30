@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
 
+use pb_mapper_client::sdk::PortMapping;
+
 use crate::error::CtlError;
 use crate::events::ChangeKind;
 use crate::state::{self, PbMapperState};
@@ -52,6 +54,17 @@ pub struct RegisterArgs {
     #[arg(long, default_value_t = false)]
     #[serde(default)]
     pub relay_only: bool,
+    /// When to ask the router to map the direct UDP port: `off`, `auto` once
+    /// punching through fails (the default), or `always`. Alone, `always`.
+    #[arg(
+        long,
+        value_parser = parse_port_mapping,
+        default_value = "auto",
+        num_args = 0..=1,
+        default_missing_value = "always"
+    )]
+    #[serde(default = "map_when_needed")]
+    pub port_mapping: PortMapping,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, clap::Args)]
@@ -77,6 +90,17 @@ pub struct ConnectArgs {
     #[arg(long, default_value_t = false)]
     #[serde(default)]
     pub relay_only: bool,
+    /// When to ask the router to map the direct UDP port: `off`, `auto` once
+    /// punching through fails (the default), or `always`. Alone, `always`.
+    #[arg(
+        long,
+        value_parser = parse_port_mapping,
+        default_value = "auto",
+        num_args = 0..=1,
+        default_missing_value = "always"
+    )]
+    #[serde(default = "map_when_needed")]
+    pub port_mapping: PortMapping,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, clap::Subcommand)]
@@ -139,6 +163,19 @@ impl Command {
             | Command::Connections { .. }
             | Command::ConfigGet => None,
         }
+    }
+}
+
+fn map_when_needed() -> PortMapping {
+    PortMapping::Auto
+}
+
+fn parse_port_mapping(raw: &str) -> Result<PortMapping, String> {
+    match raw {
+        "off" => Ok(PortMapping::Off),
+        "auto" => Ok(PortMapping::Auto),
+        "always" => Ok(PortMapping::Always),
+        _ => Err(format!("expected off, auto or always, got {raw}")),
     }
 }
 
@@ -242,7 +279,10 @@ async fn run(
                 protocol(args.udp),
                 !args.no_encrypt,
                 args.keep_alive,
-                !args.relay_only,
+                state::DirectOptions {
+                    allow_direct: !args.relay_only,
+                    port_mapping: args.port_mapping,
+                },
             )
             .await?;
             Ok(proto::Response::ok(
@@ -264,7 +304,10 @@ async fn run(
                 protocol(args.udp),
                 args.keep_alive,
                 args.namespace,
-                !args.relay_only,
+                state::DirectOptions {
+                    allow_direct: !args.relay_only,
+                    port_mapping: args.port_mapping,
+                },
             )
             .await?;
             Ok(proto::Response::ok(

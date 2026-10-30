@@ -145,9 +145,47 @@ impl Default for PathPolicy {
     }
 }
 
+/// Whether a tunnel asks this network's router (PCP, NAT-PMP or UPnP) to map
+/// its direct endpoint's UDP port, so that a peer's first packet gets in
+/// where the NAT drops what it has not seen. A mapping never holds up a
+/// session, is renewed while the tunnel runs and released when it stops,
+/// and is ignored while the tunnel keeps to the relay;
+/// [`TunnelDiagnostics::port_mapping`] says where it stands.
+///
+/// [`TunnelDiagnostics::port_mapping`]: crate::sdk::TunnelDiagnostics::port_mapping
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortMapping {
+    /// Never ask the router.
+    Off,
+    /// The default: ask only once a direct attempt of this tunnel has failed
+    /// to punch through, a sign that a NAT drops unsolicited packets; later
+    /// sessions then offer the mapped address. Where punching works, the
+    /// router is never asked. In a build without the `port-mapping` feature
+    /// there is nothing to ask with, and this is `Off`.
+    #[default]
+    Auto,
+    /// Ask as soon as the tunnel's direct endpoint opens. Needs the
+    /// `port-mapping` feature: a build without it refuses the tunnel.
+    Always,
+}
+
+impl PortMapping {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Always => "always",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectOptions {
     pub path: PathPolicy,
+    /// `Auto` by default, and ignored on the relay-only path.
+    pub port_mapping: PortMapping,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,6 +196,8 @@ pub struct RegisterOptions {
     /// the UDP socket is opened on the first offer.
     pub allow_direct: bool,
     pub idle_timeout: Option<std::time::Duration>,
+    /// `Auto` by default, and ignored unless `allow_direct`.
+    pub port_mapping: PortMapping,
 }
 
 #[cfg(feature = "p2p")]
@@ -166,6 +206,7 @@ impl Default for RegisterOptions {
         Self {
             allow_direct: true,
             idle_timeout: None,
+            port_mapping: PortMapping::Auto,
         }
     }
 }

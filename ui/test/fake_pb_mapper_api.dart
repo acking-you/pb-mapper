@@ -206,6 +206,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool enableEncryption,
     required bool enableKeepAlive,
     bool allowDirect = true,
+    PortMappingMode portMapping = PortMappingMode.auto,
   }) async {
     calls.add(
       allowDirect
@@ -223,6 +224,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         encrypted: enableEncryption,
         status: startStatus,
         allowDirect: allowDirect,
+        portMapping: portMapping,
         relayTransport: config.relayTransport,
       ),
     ];
@@ -240,6 +242,8 @@ class FakePbMapperApi implements PbMapperApiClient {
                 serviceKey: s.serviceKey,
                 localAddress: s.localAddress,
                 status: 'stopped',
+                allowDirect: s.allowDirect,
+                portMapping: s.portMapping,
               )
             : s,
     ];
@@ -272,6 +276,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     required bool enableKeepAlive,
     int? namespace,
     bool allowDirect = true,
+    PortMappingMode portMapping = PortMappingMode.auto,
   }) async {
     final target = namespace == null ? serviceKey : '$serviceKey@$namespace';
     calls.add(
@@ -289,6 +294,7 @@ class FakePbMapperApi implements PbMapperApiClient {
         status: startStatus,
         namespace: namespace,
         allowDirect: allowDirect,
+        portMapping: portMapping,
         relayTransport: config.relayTransport,
       ),
     ];
@@ -307,6 +313,7 @@ class FakePbMapperApi implements PbMapperApiClient {
                 status: 'stopped',
                 namespace: c.namespace,
                 allowDirect: c.allowDirect,
+                portMapping: c.portMapping,
               )
             : c,
     ];
@@ -319,6 +326,15 @@ class FakePbMapperApi implements PbMapperApiClient {
     clients = clients.where((c) => c.serviceKey != serviceKey).toList();
     return _ok;
   }
+
+  /// What every running tunnel's event feed delivers; none by default.
+  Stream<TunnelEventsUpdate> tunnelEventFeed = const Stream.empty();
+
+  @override
+  Stream<TunnelEventsUpdate> tunnelEvents({
+    required String serviceKey,
+    required bool share,
+  }) => tunnelEventFeed;
 
   // --- The relay as a whole.
 
@@ -651,6 +667,7 @@ ClientConfigInfo fakeClient({
   int? namespace,
   int? routedNamespace,
   bool allowDirect = true,
+  PortMappingMode portMapping = PortMappingMode.auto,
   TunnelPath? path,
   RelayTransport? relayTransport,
 }) => ClientConfigInfo(
@@ -661,6 +678,7 @@ ClientConfigInfo fakeClient({
   namespace: namespace,
   routedNamespace: routedNamespace,
   allowDirect: allowDirect,
+  portMapping: portMapping,
   path: path,
   relayTransport: status == 'stopped' ? null : relayTransport,
   status: status,
@@ -678,6 +696,7 @@ ServiceConfigInfo fakeService({
   String status = 'running',
   String message = '',
   bool allowDirect = true,
+  PortMappingMode portMapping = PortMappingMode.auto,
   TunnelPath? path,
   RelayTransport? relayTransport,
 }) => ServiceConfigInfo(
@@ -687,6 +706,7 @@ ServiceConfigInfo fakeService({
   enableEncryption: encrypted,
   enableKeepAlive: true,
   allowDirect: allowDirect,
+  portMapping: portMapping,
   status: status,
   statusMessage: message,
   path: path,

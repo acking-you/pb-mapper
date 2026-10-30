@@ -2,7 +2,7 @@
 # Every library and the CLI live under `crates/`. The FFI cdylib stays next to
 # the Flutter code that loads it.
 members = ["crates/*", "ui/native/pb_mapper_ffi", "ui/native/pb_mapper_galaxy"]
-exclude = ["deps/uni-stream", "deps/kanal", "deps/quinn", "deps/rcgen", "deps/stun-proto"]
+exclude = ["deps/uni-stream", "deps/kanal", "deps/quinn", "deps/rcgen", "deps/stun-proto", "deps/portmapper"]
 # Spelled out: a virtual manifest does not infer the resolver from the edition,
 # and without this it silently falls back to resolver 1.
 resolver = "3"
@@ -44,6 +44,7 @@ hickory-resolver = { version = "0.26.1" }
 # the local crate name so server code does not need to know the package name.
 kanal = { package = "kanal-plus", version = "0.2.0" }
 parking_lot = "0.12"
+portmapper = { package = "portmapper-plus", path = "deps/portmapper/portmapper", version = "0.20.0", default-features = false }
 rand = "0.10"
 ring = "0.17.14"
 # Pinned forks, published by `release-sdk.yml` as quinn-plus (with

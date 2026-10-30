@@ -9,6 +9,7 @@ import 'package:pb_mapper_ui/src/galaxy/galaxy_model.dart';
 import 'package:pb_mapper_ui/src/galaxy/planet_glyph.dart';
 import 'package:pb_mapper_ui/src/pages/relay/relay_format.dart' show ownerName;
 import 'package:pb_mapper_ui/src/pages/tunnel_actions.dart';
+import 'package:pb_mapper_ui/src/pages/tunnel_diagnostics.dart';
 import 'package:pb_mapper_ui/src/pages/tunnel_editor.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
@@ -329,6 +330,14 @@ class _PlanetDetail extends StatelessWidget {
                     icon: const Icon(AppIcons.edit, size: 16),
                     label: Text(l10n.edit),
                   ),
+                  if (tunnel.isLive)
+                    IconButton(
+                      key: const Key('galaxy-diagnostics'),
+                      tooltip: l10n.tunnelDiagnostics,
+                      onPressed: () =>
+                          openTunnelDiagnostics(context, store, tunnel),
+                      icon: const Icon(AppIcons.diagnostics, size: 17),
+                    ),
                   IconButton(
                     tooltip: l10n.copyKey,
                     onPressed: () => copyText(context, tunnel.key),

@@ -37,6 +37,46 @@ function clientFor(relay, credential = relay.adminKey) {
   });
 }
 
+test.skipIf(!hasRelay)("event readers are independent, close on their own and end with the tunnel", async () => {
+  await withRelay(async (relay) => {
+    const client = clientFor(relay);
+    const echo = await startEchoServer();
+    const registration = await client.register({
+      key: "events", localAddr: echo.address, transport: "tcp", allowDirect: false, portMapping: "always",
+    });
+    // One reader from the start, one once the relay has answered: the first
+    // sees the answer as it happens, the second from the kept history.
+    const first = registration.subscribeEvents();
+    let second;
+    const relayReady = async (events, seen = []) => {
+      for (let event; (event = await events.next(READY_MS));) {
+        seen.push(event);
+        if (event.kind === "relay_ready") return event;
+      }
+      return null;
+    };
+    try {
+      await registration.waitReady(READY_MS);
+      // Mapping needs direct: a relay-only share never asks the gateway.
+      expect(registration.diagnostics().portMapping).toBeUndefined();
+      second = registration.subscribeEvents();
+      const seen = [];
+      const live = await relayReady(first);
+      const replayed = await relayReady(second, seen);
+      expect(replayed.seq).toBe(live.seq);
+      first.close();
+      expect(await first.next(READY_MS)).toBeNull();
+      await registration.stop();
+      for (let event; (event = await second.next(READY_MS));) seen.push(event);
+      expect(seen.at(-1).kind).toBe("stopped");
+      expect(JSON.stringify(seen)).not.toContain(relay.adminKey);
+    } finally {
+      first.close(); second?.close();
+      await registration.stop(); await echo.close();
+    }
+  });
+}, 30_000);
+
 test.skipIf(!hasRelay)(
   "napi QUIC relay multiplexes streams and exposes live diagnostics",
   async () => {

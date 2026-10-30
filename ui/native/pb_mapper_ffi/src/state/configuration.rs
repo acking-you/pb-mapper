@@ -204,8 +204,12 @@ impl PbMapperState {
         protocol: &str,
         enable_encryption: bool,
         enable_keep_alive: bool,
-        allow_direct: bool,
+        direct: DirectOptions,
     ) -> Result<(), CtlError> {
+        let DirectOptions {
+            allow_direct,
+            port_mapping,
+        } = direct;
         let mut store = self.load_service_configs();
         let now = SystemTime::now();
 
@@ -221,6 +225,7 @@ impl PbMapperState {
                 now
             },
             allow_direct,
+            port_mapping,
         };
 
         store.services.insert(service_key.to_string(), config);
@@ -267,8 +272,12 @@ impl PbMapperState {
         protocol: &str,
         enable_keep_alive: bool,
         namespace: Option<u64>,
-        allow_direct: bool,
+        direct: DirectOptions,
     ) -> Result<(), CtlError> {
+        let DirectOptions {
+            allow_direct,
+            port_mapping,
+        } = direct;
         let mut store = self.load_client_configs();
         let now = SystemTime::now();
 
@@ -284,6 +293,7 @@ impl PbMapperState {
             },
             namespace,
             allow_direct,
+            port_mapping,
         };
 
         store.clients.insert(service_key.to_string(), config);

@@ -1,7 +1,10 @@
 //! Client-owned direct sessions. Control sockets never own an established data task.
+mod candidates;
 mod control;
 mod endpoint;
 mod identity;
+#[cfg(feature = "port-mapping")]
+mod mapping;
 mod provider;
 mod reports;
 mod socket;
@@ -87,6 +90,7 @@ pub(crate) struct Consumer {
     network: OnceCell<Arc<Network>>,
     diagnostics: Diagnostics,
     cooldown: std::sync::Mutex<Cooldown>,
+    port_mapping: crate::sdk::PortMapping,
 }
 impl Consumer {
     pub fn new(
@@ -96,6 +100,7 @@ impl Consumer {
         is_datagram: bool,
         keep_alive: bool,
         diagnostics: Diagnostics,
+        port_mapping: crate::sdk::PortMapping,
     ) -> Arc<Self> {
         let control = Arc::new(Mutex::new(None::<Arc<Control>>));
         let reports = Arc::new(reports::Latest::default());
@@ -121,6 +126,7 @@ impl Consumer {
             network: OnceCell::new(),
             diagnostics,
             cooldown: std::sync::Mutex::default(),
+            port_mapping,
         })
     }
     fn cooldown(&self) -> std::sync::MutexGuard<'_, Cooldown> {
@@ -196,7 +202,9 @@ impl Consumer {
             };
             let network = self
                 .network
-                .get_or_try_init(|| async { Network::new(false) })
+                .get_or_try_init(|| async {
+                    Network::new(false, self.port_mapping, &self.diagnostics)
+                })
                 .await?
                 .clone();
             attempt.stage(DirectStage::Discovering);
@@ -283,6 +291,7 @@ impl Consumer {
             tracing::debug!(reason = ?candidate.as_ref().map(|r| r.as_ref().map(|_| ())), "direct attempt failed before commit");
             attempt.fell_back("direct_timeout_or_unreachable");
             self.cooldown().back_off(Instant::now());
+            network.punching_failed();
             control.relay(grant.id).await?;
             let ready = crate::client::stream::subscribe_request(
                 PbConnRequest::DirectRelay {
@@ -371,7 +380,7 @@ impl Prepared {
             seq: 0,
             diagnostics: self.diagnostics,
         };
-        report.diagnostics.path_started(path);
+        report.diagnostics.session_opened(path);
         report.active();
         let forwarding = async {
             match self.path {
@@ -462,7 +471,7 @@ impl ConsumerReport {
 }
 impl Drop for ConsumerReport {
     fn drop(&mut self) {
-        self.diagnostics.path_closed(self.path);
+        self.diagnostics.session_closed(self.path);
         self.update(SessionState::Closed);
     }
 }

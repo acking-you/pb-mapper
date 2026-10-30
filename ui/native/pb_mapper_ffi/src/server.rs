@@ -23,7 +23,7 @@ pub unsafe extern "C" fn pb_mapper_start_server(
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
@@ -52,7 +52,7 @@ pub unsafe extern "C" fn pb_mapper_stop_server(handle: *mut PbMapperHandle) -> *
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;
@@ -77,7 +77,7 @@ pub unsafe extern "C" fn pb_mapper_get_local_server_status_json(
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let status = handle.runtime.block_on(async move {
         let state = state.lock().await;
@@ -106,7 +106,7 @@ pub unsafe extern "C" fn pb_mapper_get_service_conns_json(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let state = state.lock().await;
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn pb_mapper_get_server_status_detail_json(
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let state = state.lock().await;
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn pb_mapper_force_refresh_server_status_json(
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let state = state.lock().await;

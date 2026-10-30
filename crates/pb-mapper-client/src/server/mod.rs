@@ -562,6 +562,7 @@ async fn run_server_side_cli_pool<LocalStream>(
         Diagnostics::default(),
         None,
         false,
+        crate::sdk::PortMapping::Off,
     )
     .await;
 }
@@ -578,6 +579,7 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
     diagnostics: Diagnostics,
     idle_timeout: Option<Duration>,
     allow_direct: bool,
+    port_mapping: crate::sdk::PortMapping,
 ) where
     LocalStream: StreamProvider + Send + 'static,
     LocalStream::Item: StreamForward,
@@ -603,10 +605,11 @@ pub(crate) async fn run_server_side_cli_recovering<LocalStream>(
             shutdown.clone(),
             idle_timeout,
             diagnostics.clone(),
+            port_mapping,
         )
     });
     #[cfg(not(feature = "p2p"))]
-    let _ = allow_direct;
+    let _ = (allow_direct, port_mapping);
     let mut workers = JoinSet::new();
     // Every worker reports here, and the pool's aggregate is what the caller is
     // told: one healthy control connection is a reachable service, whichever
@@ -814,8 +817,10 @@ async fn run_server_side_cli_worker<LocalStream>(
         tokio::select! {
             () = shutdown.cancelled() => break 'outer,
             () = tokio::time::sleep(retry_interval) => {},
-            () = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => {
-                diagnostics.network_changed(remote_addr.network_generation());
+            woke = wake.changed(), if !matches!(failure, RecoveryFailure::Rejected) => {
+                if let crate::endpoint::Wake::Network(generation) = woke {
+                    diagnostics.network_changed(generation);
+                }
                 backoff.transport.reset();
             }
         }

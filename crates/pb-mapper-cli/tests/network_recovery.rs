@@ -494,6 +494,7 @@ async fn connection_burst_has_bounded_setup_and_probe_concurrency() {
             },
             ConnectOptions {
                 path: PathPolicy::RelayOnly,
+                ..Default::default()
             },
         )
         .await

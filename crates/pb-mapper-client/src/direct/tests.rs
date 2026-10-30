@@ -104,8 +104,14 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
         false,
         true,
         diagnostics,
+        crate::sdk::PortMapping::Off,
     );
-    let network = Network::new(false).unwrap();
+    let network = Network::new(
+        false,
+        crate::sdk::PortMapping::Off,
+        &crate::diagnostics::Diagnostics::default(),
+    )
+    .unwrap();
     network.block_quic();
     consumer
         .network
@@ -184,8 +190,18 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
 
 #[tokio::test]
 async fn peer_certificate_and_session_binding_are_both_required() {
-    let provider = Network::new(true).unwrap();
-    let consumer = Network::new(false).unwrap();
+    let provider = Network::new(
+        true,
+        crate::sdk::PortMapping::Off,
+        &crate::diagnostics::Diagnostics::default(),
+    )
+    .unwrap();
+    let consumer = Network::new(
+        false,
+        crate::sdk::PortMapping::Off,
+        &crate::diagnostics::Diagnostics::default(),
+    )
+    .unwrap();
     // Use one discovered loopback path for the TLS boundary test. With multiple
     // candidates, the client's winning connection and the first server accept
     // can be different TLS sessions, which correctly have different bindings.
@@ -230,7 +246,12 @@ async fn peer_certificate_and_session_binding_are_both_required() {
     let mut wrong = grant.clone();
     wrong.service = "another-service".into();
     assert!(endpoint::verify_binding(&incoming, &wrong, &tag).is_err());
-    let stranger = Network::new(false).unwrap();
+    let stranger = Network::new(
+        false,
+        crate::sdk::PortMapping::Off,
+        &crate::diagnostics::Diagnostics::default(),
+    )
+    .unwrap();
     stranger
         .authorize(&grant, false, Instant::now() + Duration::from_secs(3))
         .unwrap();
@@ -257,7 +278,12 @@ async fn peer_certificate_and_session_binding_are_both_required() {
             "only the granted identity may reach application accept"
         );
     }
-    let other_provider = Network::new(true).unwrap();
+    let other_provider = Network::new(
+        true,
+        crate::sdk::PortMapping::Off,
+        &crate::diagnostics::Diagnostics::default(),
+    )
+    .unwrap();
     wrong.provider.certificate = other_provider.identity.certificate.clone();
     assert!(
         consumer

@@ -65,9 +65,9 @@ Control connections use leases and a receive watchdog. After the tolerance windo
 Each new connection first tries a peer-to-peer path. The consumer asks the relay
 for a session grant, both ends learn their public UDP address from the relay's
 STUN service, punch through their NATs, and open a mutually authenticated QUIC
-connection. Only then does the publisher dial its local service. If any step
-fails, the connection uses the relay path above, before any application byte is
-sent, so nothing is replayed and the backend is dialed once. After a fallback the
+connection. The publisher dials its local service only after StartDirect.
+Failures before that commit point use the relay; failures after it never replay
+the request or dial the backend again. After a fallback the
 tunnel sends its next connections straight to the relay for a while (10 s,
 doubling to 5 min, cleared by a direct success or a network change).
 
@@ -76,6 +76,47 @@ number over UDP, and every role allows it by default. `--relay-only` on
 `server`, `register` or `connect` turns it off for that side. Established direct
 sessions belong to the two endpoints: a relay restart or a revoked credential
 stops new setups but does not cut them, while stopping the local tunnel does.
+
+Nested NAT can work when the mapping and filtering rules permit it. Candidate
+selection preserves both IPv4 and IPv6, and authenticated probes trigger a
+return-path check of their actual source address, even if STUN saw a different
+mapping. Reachable global IPv6 can bypass IPv4 NAT, subject to UDP firewall
+rules. If neither peer's first packet can arrive, or UDP is blocked, relay
+fallback remains necessary.
+
+When hole punching fails, a tunnel asks this network's router to map its
+direct UDP port, with PCP, NAT-PMP or UPnP, and offers the mapped address
+first to later sessions, so that a peer's first packet gets in where the NAT
+drops what it has not seen. This is the default, `auto`: where punching
+works, the router is never asked. `always` asks from the first direct session
+on, and `off` never does. The library renews the lease, looks for the router
+again after a network change, and releases the lease when the tunnel stops.
+It never holds up a session: the connection whose punch failed uses the
+relay, and later ones can use the mapping. A relay-only tunnel never asks.
+Mapping the home router alone does not get through an upstream carrier NAT,
+which must permit punching, map a port itself, or offer something like a PCP
+proxy.
+
+- CLI: `--port-mapping off|auto|always` on `register` or `connect`; alone,
+  `always`.
+- Rust SDK: `port_mapping: PortMapping::{Auto, Always, Off}` in
+  `RegisterOptions` or `ConnectOptions`. The `port-mapping` Cargo feature is on
+  by default; without it `Auto` never asks and `Always` is refused.
+- Node: `portMapping: "auto" | "always" | "off"` in the `register` or
+  `connect` request.
+- App: **Port mapping** under **Allow direct connections** (or **Try direct
+  first**) in a tunnel's **More options**: Off, Auto or Always. It is saved
+  with the tunnel and kept while direct is off.
+
+To watch a tunnel, Rust handles have `subscribe_events()` and Node handles
+`subscribeEvents()`: the outcomes a tunnel kept, then every event as it
+happens, including relay phases, direct stages and each change of the port
+mapping. Each reader has its own bounded queue and is told how many events it
+missed if it falls behind. In the app, a running tunnel's **Diagnostics**,
+from its menu or its panel in the overview, shows the same live, and copies
+it as a JSON report. A PCP or NAT-PMP release is reported as **sent**, since
+those routers do not acknowledge it; a UPnP one as released once the router
+answers.
 
 ## Prerequisites
 

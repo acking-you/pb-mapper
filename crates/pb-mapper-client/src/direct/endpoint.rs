@@ -1,24 +1,70 @@
 use super::{
+    candidates::Candidates,
     identity::Identity,
     socket::{self, Socket},
 };
-use pb_mapper_protocol::direct::{MAX_CANDIDATES, PeerInfo, SessionGrant, valid_candidate};
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use pb_mapper_protocol::direct::{PeerInfo, SessionGrant, valid_candidate};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     sync::{Mutex, mpsc},
     task::JoinSet,
     time::Instant,
 };
 
+struct Discovery {
+    at: Instant,
+    server: SocketAddr,
+    generation: (u64, u64),
+    candidates: Candidates,
+}
+
 pub(super) struct Network {
     pub identity: Identity,
     transports: Vec<(Socket, quinn::Endpoint)>,
     incoming: Mutex<mpsc::Receiver<quinn::Connection>>,
     acceptors: Vec<tokio_util::task::AbortOnDropHandle<()>>,
-    cached: Mutex<Option<(Instant, SocketAddr, Vec<SocketAddr>)>>,
+    cached: Mutex<Option<Discovery>>,
+    generation: AtomicU64,
+    network: Arc<crate::network::NetworkHints>,
+    #[cfg(feature = "port-mapping")]
+    mapper: Option<Mapper>,
 }
+
+/// The router mapping this endpoint may ask for, and the one it asked for.
+#[cfg(feature = "port-mapping")]
+struct Mapper {
+    port: std::num::NonZeroU16,
+    network: Arc<crate::network::NetworkHints>,
+    diagnostics: crate::diagnostics::Diagnostics,
+    started: std::sync::OnceLock<super::mapping::Mapping>,
+}
+
+#[cfg(feature = "port-mapping")]
+impl Mapper {
+    fn start(&self) -> &super::mapping::Mapping {
+        self.started.get_or_init(|| {
+            super::mapping::Mapping::new(self.port, self.network.clone(), self.diagnostics.clone())
+        })
+    }
+}
+
 impl Network {
-    pub fn new(server: bool) -> io::Result<Arc<Self>> {
+    /// Open the endpoint. As `port_mapping` says, ask the router to map its
+    /// IPv4 port now, after a failure to punch through, or never, reporting
+    /// into `diagnostics`.
+    pub fn new(
+        server: bool,
+        port_mapping: crate::sdk::PortMapping,
+        diagnostics: &crate::diagnostics::Diagnostics,
+    ) -> io::Result<Arc<Self>> {
         let identity = Identity::new()?;
         let (tx, rx) = mpsc::channel(64);
         let mut transports = Vec::new();
@@ -78,33 +124,70 @@ impl Network {
             }
             transports.push((socket, endpoint));
         }
+        let network = crate::network::NetworkHints::shared();
+        #[cfg(feature = "port-mapping")]
+        let mapper = (port_mapping != crate::sdk::PortMapping::Off)
+            .then(|| {
+                transports.iter().find_map(|(socket, _)| {
+                    socket
+                        .local_addr()
+                        .ok()
+                        .filter(SocketAddr::is_ipv4)
+                        .and_then(|addr| std::num::NonZeroU16::new(addr.port()))
+                })
+            })
+            .flatten()
+            .map(|port| Mapper {
+                port,
+                network: network.clone(),
+                diagnostics: diagnostics.clone(),
+                started: std::sync::OnceLock::new(),
+            });
+        #[cfg(feature = "port-mapping")]
+        if let Some(mapper) = &mapper
+            && port_mapping == crate::sdk::PortMapping::Always
+        {
+            mapper.start();
+        }
+        #[cfg(not(feature = "port-mapping"))]
+        let _ = (port_mapping, diagnostics);
         Ok(Arc::new(Self {
             identity,
             transports,
             incoming: Mutex::new(rx),
             acceptors,
             cached: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            network,
+            #[cfg(feature = "port-mapping")]
+            mapper,
         }))
     }
     pub async fn peer(&self, stun: SocketAddr) -> PeerInfo {
         let mut cached = self.cached.lock().await;
-        if let Some((at, server, candidates)) = &*cached
-            && *server == stun
-            && at.elapsed() < Duration::from_secs(10)
+        let generation = (
+            self.generation.load(Ordering::Acquire),
+            self.network.generation(),
+        );
+        if let Some(discovery) = &*cached
+            && discovery.server == stun
+            && discovery.generation == generation
+            && discovery.at.elapsed() < Duration::from_secs(10)
         {
             return PeerInfo {
                 certificate: self.identity.certificate.clone(),
-                candidates: candidates.clone(),
+                candidates: discovery.candidates.select(self.mapped_addr()),
             };
         }
-        let mut candidates = Vec::new();
+        let mut reflexive = None;
+        let mut hosts = Vec::new();
         for (socket, _) in &self.transports {
             if socket
                 .local_addr()
                 .is_ok_and(|a| a.is_ipv4() == stun.is_ipv4())
             {
                 match socket.mapped_addr(stun).await {
-                    Ok(addr) => candidates.push(addr),
+                    Ok(addr) => reflexive = Some(addr),
                     Err(error) => tracing::debug!(%error, "STUN discovery unavailable"),
                 }
             }
@@ -121,19 +204,25 @@ impl Network {
                             continue;
                         }
                         let addr = SocketAddr::new(ip, local.port());
-                        if valid_candidate(&addr) && !candidates.contains(&addr) {
-                            candidates.push(addr);
+                        if valid_candidate(&addr) {
+                            hosts.push(addr);
                         }
                     }
                 }
             }
         }
-        candidates.truncate(MAX_CANDIDATES);
-        tracing::debug!(%stun, ?candidates, "direct candidates discovered");
-        *cached = Some((Instant::now(), stun, candidates.clone()));
+        let candidates = Candidates::new(reflexive, hosts);
+        let selected = candidates.select(self.mapped_addr());
+        tracing::debug!(%stun, candidates = ?selected, "direct candidates discovered");
+        *cached = Some(Discovery {
+            at: Instant::now(),
+            server: stun,
+            generation,
+            candidates,
+        });
         PeerInfo {
             certificate: self.identity.certificate.clone(),
-            candidates,
+            candidates: selected,
         }
     }
     #[cfg(test)]
@@ -143,8 +232,30 @@ impl Network {
         }
     }
     pub fn invalidate(&self) {
-        if let Ok(mut cached) = self.cached.try_lock() {
-            *cached = None;
+        // Discovery holds the cache lock across STUN. A generation also
+        // invalidates an in-flight result instead of losing the notification.
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+    fn mapped_addr(&self) -> Option<SocketAddr> {
+        #[cfg(feature = "port-mapping")]
+        if let Some(mapping) = self.mapper.as_ref().and_then(|m| m.started.get()) {
+            return mapping.address();
+        }
+        None
+    }
+    /// A direct attempt failed to punch through: a sign that a NAT drops what
+    /// it has not seen. A tunnel that maps its port when needed asks the
+    /// router now, so that later sessions can offer the mapped address.
+    pub fn punching_failed(&self) {
+        #[cfg(feature = "port-mapping")]
+        if let Some(mapper) = &self.mapper
+            && mapper.started.get().is_none()
+        {
+            tracing::debug!(
+                event = "port_mapping_started",
+                "direct punching failed; asking the router for a port mapping"
+            );
+            mapper.start();
         }
     }
     pub fn authorize(
@@ -196,6 +307,10 @@ impl Network {
             }
         })
         .await;
+        #[cfg(feature = "port-mapping")]
+        if let Some(mapping) = self.mapper.as_ref().and_then(|m| m.started.get()) {
+            mapping.shutdown().await;
+        }
     }
     pub async fn connect(
         &self,
@@ -310,4 +425,87 @@ pub(super) fn framing_key(
         .export_keying_material(&mut key, b"pb-mapper/framing/1", &grant.id)
         .map_err(|_| io::Error::other("TLS framing exporter unavailable"))?;
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::{diagnostics::Diagnostics, sdk::PortMapping};
+    use stun_proto::types::{
+        attribute::XorMappedAddress,
+        message::{Message, MessageWrite, MessageWriteExt, MessageWriteVec},
+    };
+    use tokio::net::UdpSocket;
+
+    async fn respond(stun: &UdpSocket, mapped: SocketAddr, invalidate: Option<&Network>) {
+        let mut buffer = [0; 2048];
+        let (len, from) = stun.recv_from(&mut buffer).await.unwrap();
+        // Receipt of the actual request proves discovery owns the cache lock.
+        if let Some(network) = invalidate {
+            network.invalidate();
+        }
+        let request = Message::from_bytes(&buffer[..len]).unwrap();
+        let mut response = Message::builder_success(&request, MessageWriteVec::new());
+        response
+            .add_attribute(&XorMappedAddress::new(mapped, request.transaction_id()))
+            .unwrap();
+        response.add_fingerprint().unwrap();
+        stun.send_to(&response.finish(), from).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_invalidation_survives_in_flight_stun_and_coalesces_refresh() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut network =
+                Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+            Arc::get_mut(&mut network).unwrap().network = crate::network::NetworkHints::isolated();
+            let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let server = stun.local_addr().unwrap();
+            let old = "192.0.2.10:40001".parse().unwrap();
+            let new = "192.0.2.10:40002".parse().unwrap();
+            let (first, ()) =
+                tokio::join!(network.peer(server), respond(&stun, old, Some(&network)));
+            assert_eq!(first.candidates[0], old);
+
+            // Both waiters must share one fresh lookup; neither may reuse old.
+            let (first, second, ()) = tokio::join!(
+                network.peer(server),
+                network.peer(server),
+                respond(&stun, new, None)
+            );
+            assert_eq!(first.candidates[0], new);
+            assert_eq!(second.candidates, first.candidates);
+            assert_eq!(network.peer(server).await.candidates, first.candidates);
+            assert_eq!(
+                stun.try_recv_from(&mut [0; 2048]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+
+            // An idle cache must also observe the shared network generation,
+            // including on providers that do not call Consumer::invalidate.
+            network.network.notify();
+            let refreshed = "192.0.2.10:40003".parse().unwrap();
+            let (peer, ()) = tokio::join!(network.peer(server), respond(&stun, refreshed, None));
+            assert_eq!(peer.candidates[0], refreshed);
+            network.shutdown().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Where punching works, a tunnel that maps when needed never asks the
+    /// router: the endpoint opens with its mapping on standby.
+    #[cfg(feature = "port-mapping")]
+    #[tokio::test]
+    async fn an_endpoint_that_maps_when_needed_waits_for_a_punching_failure() {
+        let network = Network::new(false, PortMapping::Auto, &Diagnostics::default()).unwrap();
+        let mapper = network.mapper.as_ref().unwrap();
+        assert!(mapper.started.get().is_none());
+        assert_eq!(network.mapped_addr(), None);
+        let off = Network::new(false, PortMapping::Off, &Diagnostics::default()).unwrap();
+        assert!(off.mapper.is_none());
+        // Without a failure there is nothing to start; with one, the router is
+        // asked, which this test leaves to the end-to-end NAT checks.
+    }
 }

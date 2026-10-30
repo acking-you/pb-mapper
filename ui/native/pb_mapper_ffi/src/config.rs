@@ -21,7 +21,7 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let (config, isolated_admin_key_set) = handle.runtime.block_on(async move {
         let state = state.lock().await;
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn pb_mapper_reveal_isolated_admin_key(
         return err_null_handle();
     }
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let key = handle.runtime.block_on(async move {
         let state = state.lock().await;
@@ -94,7 +94,7 @@ pub unsafe extern "C" fn pb_mapper_update_config(
         Err(e) => return err_ctl(&e),
     };
 
-    let handle = unsafe { &mut *handle };
+    let handle = unsafe { &*handle };
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         // Where that relay is, to know its tunnels by address as well as by

@@ -69,6 +69,7 @@ async fn measure(carrier: RelayTransport, codec: bool) {
             },
             ConnectOptions {
                 path: PathPolicy::RelayOnly,
+                ..Default::default()
             },
         )
         .await

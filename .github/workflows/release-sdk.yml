@@ -176,7 +176,8 @@ jobs:
             deps/quinn/quinn-udp \
             deps/quinn/quinn-proto \
             deps/quinn/quinn \
-            deps/rcgen/rcgen
+            deps/rcgen/rcgen \
+            deps/portmapper/portmapper
 
   publish-rust:
     name: Publish Rust SDK to crates.io

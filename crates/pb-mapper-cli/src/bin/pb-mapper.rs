@@ -25,8 +25,8 @@ use pb_mapper_auth::{
 };
 use pb_mapper_client::client::handle_status_cli_scoped;
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, ConnectRequest, PathPolicy, RegisterOptions, RegisterRequest,
-    TunnelDiagnostics, TunnelStatus,
+    Client, ConnectOptions, ConnectRequest, PathPolicy, PortMapping, RegisterOptions,
+    RegisterRequest, TunnelDiagnostics, TunnelStatus,
 };
 use pb_mapper_core::checksum::set_process_msg_header_key;
 use pb_mapper_core::checksum::{MACHINE_MSG_HEADER_KEY_PATH, setup_machine_msg_header_key};
@@ -148,6 +148,18 @@ struct RegisterArgs {
     /// Accepted for 0.7 scripts: direct sessions are allowed by default.
     #[arg(long, hide = true)]
     allow_direct: bool,
+    /// When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+    /// port: `auto` once punching through fails (the default), `always` from
+    /// the start, or `off`. Alone, `always`.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = PortMappingArg::Auto,
+        num_args = 0..=1,
+        default_missing_value = "always",
+        conflicts_with = "relay_only"
+    )]
+    port_mapping: PortMappingArg,
     /// Transport used by the local service.
     #[arg(value_enum)]
     transport: Transport,
@@ -178,6 +190,18 @@ struct ConnectArgs {
     /// Shorthand for `--path relay-only`.
     #[arg(long, conflicts_with = "path")]
     relay_only: bool,
+    /// When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+    /// port: `auto` once punching through fails (the default), `always` from
+    /// the start, or `off`. Alone, `always`.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = PortMappingArg::Auto,
+        num_args = 0..=1,
+        default_missing_value = "always",
+        conflicts_with = "relay_only"
+    )]
+    port_mapping: PortMappingArg,
     /// Transport exposed by the local listener.
     #[arg(value_enum)]
     transport: Transport,
@@ -224,6 +248,23 @@ struct RelayArgs {
 enum RelayTransportArg {
     Tcp,
     Quic,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PortMappingArg {
+    Off,
+    Auto,
+    Always,
+}
+
+impl From<PortMappingArg> for PortMapping {
+    fn from(value: PortMappingArg) -> Self {
+        match value {
+            PortMappingArg::Off => Self::Off,
+            PortMappingArg::Auto => Self::Auto,
+            PortMappingArg::Always => Self::Always,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -462,6 +503,7 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
             },
             RegisterOptions {
                 allow_direct: !args.relay_only && RegisterOptions::default().allow_direct,
+                port_mapping: args.port_mapping.into(),
                 ..Default::default()
             },
         )
@@ -489,6 +531,7 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
                     // Auto in a build with `p2p`, relay-only in one without.
                     (false, PathArg::Auto) => PathPolicy::default(),
                 },
+                port_mapping: args.port_mapping.into(),
             },
         )
         .await?;
@@ -752,6 +795,17 @@ mod tests {
         assert!(
             Cli::try_parse_from(connect.iter().chain(&["--relay-only", "--path", "auto"])).is_err()
         );
+        let mapping = |extra: &[&str]| match Cli::try_parse_from(connect.iter().chain(extra))
+            .unwrap()
+            .command
+        {
+            Command::Connect(args) => args.port_mapping,
+            _ => panic!("expected connect command"),
+        };
+        assert_eq!(defaults.port_mapping, PortMappingArg::Auto);
+        assert_eq!(mapping(&["--port-mapping", "off"]), PortMappingArg::Off);
+        assert_eq!(mapping(&["--port-mapping"]), PortMappingArg::Always);
+        assert_eq!(mapping(&["--port-mapping", "auto"]), PortMappingArg::Auto);
     }
 
     #[test]

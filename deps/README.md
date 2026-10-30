@@ -1,8 +1,8 @@
 # 第三方源码维护
 
-`deps/` 下的五个仓库统一使用 `dev` 作为维护分支和 GitHub 默认分支，`.gitmodules` 也指向 `dev`。Quinn、rcgen、stun-proto 和 Kanal 是 fork，另保留 `upstream` 分支跟踪纯上游源码；uni-stream 是自研仓库，没有外部上游或 `upstream` 分支。
+`deps/` 下的六个仓库统一使用 `dev` 作为维护分支和 GitHub 默认分支，`.gitmodules` 也指向 `dev`。Quinn、rcgen、stun-proto、portmapper 和 Kanal 是 fork，另保留 `upstream` 分支跟踪纯上游源码；uni-stream 是自研仓库，没有外部上游或 `upstream` 分支。
 
-Quinn、rcgen、stun-proto 通过 `path + version` 接入 Cargo，构建使用子模块源码；Quinn 与 rcgen 以 `quinn-plus`、`rcgen-plus` 等包名发布到 crates.io（见下文“发布 SDK”）。Kanal 和 uni-stream 的子模块用于源码维护，产品仍使用 registry 中的 `kanal-plus 0.2.0` 和 `uni-stream 0.3.5`；切换维护分支不会改变已发布包，也不会自动升级产品的依赖。
+Quinn、rcgen、stun-proto、portmapper 通过 `path + version` 接入 Cargo，构建使用子模块源码；Quinn、rcgen 与 portmapper 以 `quinn-plus`、`rcgen-plus`、`portmapper-plus` 等包名发布到 crates.io（见下文“发布 SDK”）。Kanal 和 uni-stream 的子模块用于源码维护，产品仍使用 registry 中的 `kanal-plus 0.2.0` 和 `uni-stream 0.3.5`；切换维护分支不会改变已发布包，也不会自动升级产品的依赖。
 
 ## 固定版本
 
@@ -11,6 +11,7 @@ Quinn、rcgen、stun-proto 通过 `path + version` 接入 Cargo，构建使用�
 | `deps/quinn` | [acking-you/quinn](https://github.com/acking-you/quinn/tree/dev) | [quinn-rs/quinn](https://github.com/quinn-rs/quinn), `main@12fe8094`（开发版），发布为 `quinn-plus`、`quinn-proto-plus`、`quinn-udp-plus` | `885075f0fa0f34fbf1ba72342f378ab34d99f2ad` | MIT OR Apache-2.0 |
 | `deps/rcgen` | [acking-you/rcgen](https://github.com/acking-you/rcgen/tree/dev) | [rustls/rcgen](https://github.com/rustls/rcgen), `main@b820c438`（开发版），发布为 `rcgen-plus` | `f9dae611a6d9bb83320ec60ce6d0585473bbda44` | MIT OR Apache-2.0 |
 | `deps/stun-proto` | [acking-you/stun-proto](https://github.com/acking-you/stun-proto/tree/dev) | [ystreet/stun-proto](https://github.com/ystreet/stun-proto), `v2.0.4 / main@9e47ca00` | `66dc8e0ae7179393d6b80373582893fa8bb0283e` | MIT OR Apache-2.0 |
+| `deps/portmapper` | [acking-you/net-tools](https://github.com/acking-you/net-tools/tree/dev) | [n0-computer/net-tools](https://github.com/n0-computer/net-tools), `portmapper 0.20.0 @80b449c7`，发布为 `portmapper-plus` | `b65d19db1c8ae33d9b5c004a72faca45740100a8` | MIT OR Apache-2.0 |
 | `deps/kanal` | [acking-you/kanal](https://github.com/acking-you/kanal/tree/dev) | [fereidani/kanal](https://github.com/fereidani/kanal)，本地扩展发布为 `kanal-plus 0.2.0` | `e79d95d5163446c23d53befbc778aaf6d7d34e42` | MIT |
 | `deps/uni-stream` | [acking-you/uni-stream](https://github.com/acking-you/uni-stream/tree/dev) | 自研，`0.3.5` 发布后的已合并维护修复 | `796efc8c938e0eedb5006c2512fc5cf810fbbca4` | MIT |
 
@@ -34,10 +35,12 @@ rustls 作为 Quinn 的传递依赖由 Cargo 管理，通过 `quinn::rustls` 使
 
 ## 初始化与直接修改
 
+portmapper 的补丁提供真实发现、申请、同地址续租、过期、失败和释放事件，以及有完成确认的停用接口。PCP/NAT-PMP 的删除仅确认发送，UPnP 则确认网关响应。未配置观察者时不创建事件队列或任务；协议选择沿用上游策略，传递依赖 netwatch 仍由 registry 管理。运行时默认关闭，Node/Flutter 编译此能力以供用户选择，CLI/Rust SDK 通过 `port-mapping` feature 编译。维护与 loopback PCP 验证见 [MAINTENANCE.md](portmapper/portmapper/MAINTENANCE.md)。
+
 从主项目根目录运行以下命令，构建始终使用主仓库记录的 gitlink：
 
 ```sh
-git submodule update --init deps/uni-stream deps/kanal deps/quinn deps/rcgen deps/stun-proto
+git submodule update --init deps/uni-stream deps/kanal deps/quinn deps/rcgen deps/stun-proto deps/portmapper
 ```
 
 普通 submodule 初始化会进入 detached HEAD，即使 `.gitmodules` 配了 `branch`。需要修改源码时显式切换维护分支，以 Quinn 为例：
@@ -53,7 +56,7 @@ git remote -v
 # git remote add upstream https://github.com/quinn-rs/quinn.git
 ```
 
-四个 fork 使用 `upstream` remote 指向表中的外部上游；uni-stream 只需要 `origin`。remote 配置不会随 gitlink 传播，新机器按表中地址添加。维护时先检查工作区与分支提交，再修改。完成格式检查及相关测试后，先提交、推送依赖仓库，再更新主仓库 gitlink：
+五个 fork 使用 `upstream` remote 指向表中的外部上游；uni-stream 只需要 `origin`。remote 配置不会随 gitlink 传播，新机器按表中地址添加。维护时先检查工作区与分支提交，再修改。完成格式检查及相关测试后，先提交、推送依赖仓库，再更新主仓库 gitlink：
 
 ```sh
 # 在 deps/quinn 中，完成检查并提交修改后：
@@ -79,12 +82,13 @@ stun-proto 社区规模较小，保留 fork 的直接修复能力，并跟踪上
 
 ## Cargo 接入
 
-**根 Cargo.toml** 已将五个仓库加入 `[workspace].exclude`，防止依赖仓库的成员被主项目误纳入；`[workspace.dependencies]` 中使用：
+**根 Cargo.toml** 已将六个仓库加入 `[workspace].exclude`，防止依赖仓库的成员被主项目误纳入；`[workspace.dependencies]` 中使用：
 
 ```toml
 quinn = { package = "quinn-plus", path = "deps/quinn/quinn", version = "0.12.0", default-features = false, features = ["runtime-tokio", "rustls-ring", "fast-apple-datapath"] }
 rcgen = { package = "rcgen-plus", path = "deps/rcgen/rcgen", version = "0.15.0", default-features = false, features = ["ring"] }
 stun-proto = { path = "deps/stun-proto/stun-proto", version = "2.0.4" }
+portmapper = { package = "portmapper-plus", path = "deps/portmapper/portmapper", version = "0.20.0", default-features = false }
 kanal = { package = "kanal-plus", version = "0.2.0" }
 uni-stream = "0.3.5"
 ```
@@ -94,6 +98,8 @@ uni-stream = "0.3.5"
 通过 `cargo metadata`/`cargo tree` 检查三个直接依赖 source 为本地路径、rustls 由 registry 解析且只有预期的一份、没有意外启用 aws-lc 或系统证书验证。依赖锁定后运行受影响测试，CI 已把 `deps/*` 和 `.gitmodules` 纳入 Rust/Node 变更触发范围；仅调整 gitlink 也必须验收。
 
 ### 发布 SDK
+
+端口映射 fork 以 `portmapper-plus 0.20.0` 首次发布，库名仍为 `portmapper`；`publish-forks` 在产品 SDK 发布前发布它。新增补丁尚未执行 registry 发布，发布由后续版本 tag 驱动。
 
 `path + version` 在发布时会解析 registry 版本，根 `[patch.crates-io]` 也不会传播给库的使用者，所以 SDK 用到的 fork 必须先以自己的包名发布。Quinn 的三个 crate 发布为 `quinn-plus`、`quinn-proto-plus`、`quinn-udp-plus`，rcgen 发布为 `rcgen-plus`，做法同 `kanal-plus`。库名不变（`quinn`、`quinn_proto`、`quinn_udp`、`rcgen`），pb-mapper 只在 `[workspace.dependencies]` 里写 `package = "quinn-plus"`，代码照旧 `use quinn::…`。
 

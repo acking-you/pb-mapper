@@ -111,6 +111,7 @@ async fn direct_survives_coordinator_loss(carrier: pb_mapper_client::sdk::RelayT
             },
             ConnectOptions {
                 path: PathPolicy::Auto,
+                ..Default::default()
             },
         )
         .await
@@ -245,6 +246,7 @@ async fn udp_direct_preserves_datagrams_and_revocation_leaves_active_session_own
             },
             ConnectOptions {
                 path: PathPolicy::Auto,
+                ..Default::default()
             },
         )
         .await
@@ -295,6 +297,7 @@ async fn udp_direct_preserves_datagrams_and_revocation_leaves_active_session_own
             },
             ConnectOptions {
                 path: PathPolicy::Auto,
+                ..Default::default()
             },
         )
         .await
@@ -364,6 +367,7 @@ async fn either_side_can_keep_connections_on_the_existing_relay_path() {
                 },
                 ConnectOptions {
                     path: PathPolicy::Auto,
+                    ..Default::default()
                 },
             )
             .await

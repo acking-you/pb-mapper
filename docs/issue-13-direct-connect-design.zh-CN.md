@@ -51,7 +51,7 @@ Tailscale 的价值在于把“发现地址”“证明地址可达”“确认�
 
 | 已核对的源码行为 | pb-mapper 的适配 |
 |---|---|
-| [`determineEndpoints`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/wgengine/magicsock/magicsock.go#L1278) 汇总本地地址、STUN 和端口映射结果；[`netcheck`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/net/netcheck/netcheck.go#L219) 支持复用发送入口 | 在承载 QUIC 的同一个 UDP socket 上发 STUN 和探测，首版使用本地 IPv4/IPv6 + STUN 映射，不加入 UPnP/NAT-PMP |
+| [`determineEndpoints`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/wgengine/magicsock/magicsock.go#L1278) 汇总本地地址、STUN 和端口映射结果；[`netcheck`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/net/netcheck/netcheck.go#L219) 支持复用发送入口 | 在承载 QUIC 的同一个 UDP socket 上发 STUN 和探测，使用本地 IPv4/IPv6 + STUN 映射，可选 `port-mapping` feature 补充 PCP/NAT-PMP/UPnP 网关映射 |
 | [`CallMeMaybe`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/disco/disco.go#L191) 通过 DERP 告知对方新候选；[`enqueueCallMeMaybe`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/wgengine/magicsock/magicsock.go#L2672) 会刷新过期候选 | 复用现有认证控制通道转发候选和“开始探测”，双方同时向对方发送有限探测 |
 | [`handleDiscoMessage`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/wgengine/magicsock/magicsock.go#L2192) 先确认已知 peer，再验证加密消息 | 探测必须绑定授权会话和短期密钥；最终 QUIC TLS 再验证对端证书 |
 | [`startDiscoPingLocked`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/wgengine/magicsock/endpoint.go#L1361) 记录 transaction ID/超时；[`handlePongConnLocked`](https://github.com/tailscale/tailscale/blob/f8ad538a3ba0b905c87688c3bc881d20e232a644/wgengine/magicsock/endpoint.go#L1934) 匹配未完成请求、测 RTT、更新可信期限 | 只接受当前 attempt 的未完成 nonce；晚到结果不能改变已经选定的路径 |
@@ -183,7 +183,11 @@ TLS 1.3 使用 `quinn::rustls`，双方验证许可中的证书、证书有效�
 | server 授权 / 观测 | 各最多 4096 条；授权到期即释放；观测每 namespace 最多 1024 条，120 秒无更新清理，满额时优先淘汰已关闭历史 |
 | namespace 配额 | 直连 setup 计入活跃流上限并消耗新流速率令牌；提交后的直连不经过 relay，也无法被 relay 权威跟踪，因此不占活跃中继流额度，其并发由速率令牌与每注册句柄 64 个会话约束 |
 
-相同 LAN 和本地 IPv6 候选均保留；未指定、多播、广播、link-local 候选拒绝。没有 UPnP、端口预测、公共发现服务或 iroh 运行时依赖。目的地址相关映射、UDP 封锁等网络可能无法穿透，提交前按预算回退；不承诺运行中把 TCP 字节流无损迁到中继。
+相同 LAN 和本地 IPv6 候选均保留；未指定、多播、广播、link-local 候选拒绝。候选预算先保留网关映射与 STUN 地址，再交替选择 IPv6/IPv4 网卡地址，IPv6 优先使用非 ULA、非 loopback 地址，避免虚拟网卡挤掉 IPv6。认证 Ping 的实际来源进入有界待验证表，由已有探测 tick 发起自身 nonce 挑战；只有收到匹配 Pong 的地址才能进入 QUIC 握手。认证、nonce、许可过期和候选上限仍适用。
+
+可选 `port-mapping` feature 使用独立的 `portmapper` 库（PCP/NAT-PMP/UPnP），不依赖 iroh 运行时；默认构建不包含该依赖，运行时还需 SDK `with_port_mapping(true)` 或 CLI `--port-mapping` 显式开启。租约跟随直连 UDP endpoint，发现不阻塞会话协商，续租与失败重试由独立任务负责。真实网络变更使旧映射立即失效并重新发现网关；协调连接重连不释放租约。停止时有界等待释放；进程被强杀等情况下只能依靠网关租约过期。缓存的 STUN/网卡地址与即时租约分开，租约更新不会受十秒候选缓存阻挡；网络代数也防止发现过程覆盖并发的失效通知。
+
+没有端口预测或公共发现服务依赖。目的地址相关映射、UDP 封锁等网络仍可能无法穿透，提交前按预算回退；不承诺运行中把 TCP 字节流无损迁到中继。
 
 ## 6. 生命周期与只读观测
 

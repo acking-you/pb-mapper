@@ -69,6 +69,7 @@ async fn a_retired_connection_delivers_its_last_streams_tail() {
             },
             ConnectOptions {
                 path: PathPolicy::RelayOnly,
+                ..Default::default()
             },
         )
         .await

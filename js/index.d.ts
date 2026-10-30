@@ -73,6 +73,12 @@ export declare class Connection {
    */
   diagnostics(): JsTunnelDiagnostics
   /**
+   * The outcomes kept in `diagnostics().events`, then every event
+   * as it happens, until the tunnel stops. Each call is a reader of
+   * its own.
+   */
+  subscribeEvents(): TunnelEvents
+  /**
    * Resolves with the next status this tunnel reports, rendered as
    * `status()` renders it: an event listener for status changes.
    *
@@ -112,6 +118,12 @@ export declare class Registration {
    */
   diagnostics(): JsTunnelDiagnostics
   /**
+   * The outcomes kept in `diagnostics().events`, then every event
+   * as it happens, until the tunnel stops. Each call is a reader of
+   * its own.
+   */
+  subscribeEvents(): TunnelEvents
+  /**
    * Resolves with the next status this tunnel reports, rendered as
    * `status()` renders it: an event listener for status changes.
    *
@@ -134,6 +146,22 @@ export declare class Registration {
   waitReady(timeoutMs?: number | undefined | null): Promise<void>
   /** Cancels the tunnel's worker and waits for it to unwind. */
   stop(): Promise<void>
+}
+
+/**
+ * A tunnel's events, read one at a time: the outcomes it kept, then every
+ * event as it happens. Nothing queues on the JS side while no one reads.
+ */
+export declare class TunnelEvents {
+  /**
+   * The next event, or `null` once the tunnel has stopped or `close()` was
+   * called. Rejects when this reader fell more than 128 events behind
+   * (read `diagnostics()` and keep reading), and when `timeoutMs` passes
+   * first, which loses no event. Calls are served one at a time.
+   */
+  next(timeoutMs?: number | undefined | null): Promise<JsTunnelEvent | null>
+  /** Stop reading: a pending `next()` resolves with `null`, as do later ones. */
+  close(): void
 }
 
 export interface JsAuthStatus {
@@ -183,6 +211,12 @@ export interface JsConnectRequest {
    * "relay-only": always use the relay.
    */
   path?: string
+  /**
+   * When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+   * port: "auto" once punching through fails (default), "always", or "off".
+   * Ignored on the relay-only path.
+   */
+  portMapping?: string
   key: string
   localAddr: string
   transport: string
@@ -229,6 +263,35 @@ export interface JsPathDiagnostics {
   attempt?: JsDirectAttempt
 }
 
+export interface JsPortMappingDiagnostics {
+  current: JsPortMappingStatus
+  attempts: number
+  renewals: number
+  failures: number
+}
+
+/** A tunnel's gateway port mapping after its latest change. */
+export interface JsPortMappingStatus {
+  /**
+   * `waiting_for_direct`, `discovering`, `gateway_found`, `discovered`,
+   * `requesting`, `active`, `renewing`, `expired`, `retrying`,
+   * `network_changed`, `releasing`, `released`, `release_sent`, `failed`,
+   * `release_failed`, `cancelled` or `stopped`.
+   */
+  stage: string
+  networkGeneration: number
+  localPort?: number
+  gateway?: string
+  /** `pcp`, `nat_pmp` or `upnp`. */
+  protocol?: string
+  availableProtocols: Array<string>
+  externalAddr?: string
+  /** Whether a lease is usable now, renewal pending or failed included. */
+  active: boolean
+  leaseLifetimeMs?: number
+  error?: string
+}
+
 export interface JsQuicConnectionDiagnostics {
   connectionId: number
   peerAddr: string
@@ -253,6 +316,12 @@ export interface JsRegisterRequest {
    * `false` keeps every session to this service on the relay.
    */
   allowDirect?: boolean
+  /**
+   * When to ask the router (PCP, NAT-PMP or UPnP) to map the direct UDP
+   * port: "auto" once punching through fails (default), "always", or "off".
+   * Ignored when direct is not allowed.
+   */
+  portMapping?: string
   key: string
   localAddr: string
   transport: string
@@ -295,6 +364,8 @@ export interface JsServiceInfo {
 export interface JsTunnelDiagnostics {
   relayTransport: string
   direct?: JsPathDiagnostics
+  /** Present when the tunnel maps its direct endpoint's port. */
+  portMapping?: JsPortMappingDiagnostics
   sdkVersion: string
   lastAttemptPhase: string
   attempts: number
@@ -312,21 +383,25 @@ export interface JsTunnelDiagnostics {
 }
 
 /**
- * One entry of a tunnel's recent history. Consecutive repeats fold into one
- * entry, counted by `repeats`.
+ * One event of a tunnel. In `diagnostics().events` consecutive repeats fold
+ * into one entry, counted by `repeats`.
  */
 export interface JsTunnelEvent {
   /**
-   * Increases with every recorded event, a fold included: remember the
-   * highest one handled to tell which entries are new.
+   * Increases with every event, a fold included: remember the highest one
+   * handled to tell which entries are new.
    */
   seq: number
   /** Time since the latest occurrence. */
   ageMs: number
   repeats: number
   /**
-   * `relay_ready`, `relay_failed`, `network_changed`, `direct_established`
-   * or `direct_fallback`.
+   * Outcomes, also kept in `diagnostics().events`: `relay_ready`,
+   * `relay_failed`, `network_changed`, `direct_established`,
+   * `direct_fallback` and `stopped`, the last event of a stream. Steps,
+   * from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
+   * `direct_abandoned`, `session_opened`, `session_closed` and
+   * `port_mapping_changed`.
    */
   kind: string
   /** `relay_ready`: setup latency of the answering relay. */
@@ -340,6 +415,16 @@ export interface JsTunnelEvent {
   retryInMs?: number
   /** `direct_established`: time from the first request to the open path. */
   setupMs?: number
-  /** `direct_fallback`: the stage the attempt left for the relay. */
+  /**
+   * `direct_fallback`: the stage the attempt left for the relay;
+   * `direct_stage_changed`: the stage it entered; `direct_abandoned`: the
+   * stage at which it was given up.
+   */
   stage?: string
+  /** `phase_changed`: the relay attempt's new phase. */
+  phase?: string
+  /** `session_opened`, `session_closed`: `direct` or `relay`. */
+  path?: string
+  /** `port_mapping_changed`: the mapping as it now stands. */
+  mapping?: JsPortMappingStatus
 }

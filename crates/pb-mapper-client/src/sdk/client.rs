@@ -5,7 +5,7 @@
 //! transport's worker — so that lifecycle lives in one place (`TunnelWorker`)
 //! and each call site is left with only the worker it invokes.
 
-use crate::diagnostics::{Diagnostics, RecoveryPhase};
+use crate::diagnostics::Diagnostics;
 use crate::endpoint::RelayEndpoint;
 use crate::relay::CarrierId;
 use std::sync::{Arc, RwLock};
@@ -26,7 +26,7 @@ use super::admin::Admin;
 use super::error::{AddressSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use super::{ConnectOptions, PathPolicy, RegisterOptions};
+use super::{ConnectOptions, PathPolicy, PortMapping, RegisterOptions};
 use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
@@ -238,8 +238,10 @@ impl Client {
         }
         self.register_inner(
             request,
-            Some(idle_timeout),
-            RegisterOptions::default().allow_direct,
+            RegisterOptions {
+                idle_timeout: Some(idle_timeout),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -254,6 +256,7 @@ impl Client {
         if options.allow_direct && !cfg!(feature = "p2p") {
             return Err(Error::invalid_config("built without p2p support"));
         }
+        check_port_mapping(options.port_mapping)?;
         if let Some(timeout) = options.idle_timeout
             && (request.transport.is_datagram()
                 || tokio::time::Instant::now().checked_add(timeout).is_none())
@@ -262,20 +265,23 @@ impl Client {
                 "idle deadline requires TCP and a representable duration",
             ));
         }
-        self.register_inner(request, options.idle_timeout, options.allow_direct)
-            .await
+        self.register_inner(request, options).await
     }
 
     async fn register_inner(
         &self,
         request: RegisterRequest,
-        idle_timeout: Option<std::time::Duration>,
-        allow_direct: bool,
+        options: RegisterOptions,
     ) -> Result<Registration> {
+        let RegisterOptions {
+            allow_direct,
+            idle_timeout,
+            port_mapping,
+        } = options;
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
         }
-        let options = ServerTunnelOptions {
+        let tunnel = ServerTunnelOptions {
             need_codec: request.codec,
             is_datagram: request.transport.is_datagram(),
             keep_alive: self.inner.keep_alive,
@@ -286,19 +292,25 @@ impl Client {
             .prepare_worker(&request.key, &request.local_addr)
             .await?;
         let credential = self.credential();
+        let port_mapping = worker.port_mapping(if allow_direct {
+            port_mapping
+        } else {
+            PortMapping::Off
+        });
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
                     context.local_addr,
                     context.remote_addr,
                     context.key,
-                    options,
+                    tunnel,
                     Some(context.status_callback),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
                     idle_timeout,
                     allow_direct,
+                    port_mapping,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -306,13 +318,14 @@ impl Client {
                     context.local_addr,
                     context.remote_addr,
                     context.key,
-                    options,
+                    tunnel,
                     Some(context.status_callback),
                     Some(credential),
                     context.shutdown,
                     context.diagnostics,
                     idle_timeout,
                     allow_direct,
+                    port_mapping,
                 )
             }),
         };
@@ -340,6 +353,7 @@ impl Client {
         if options.path == PathPolicy::Auto && !cfg!(feature = "p2p") {
             return Err(Error::invalid_config("built without p2p support"));
         }
+        check_port_mapping(options.port_mapping)?;
         let is_datagram = request.transport.is_datagram();
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
@@ -350,6 +364,10 @@ impl Client {
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
+        let port_mapping = worker.port_mapping(match options.path {
+            PathPolicy::Auto => options.port_mapping,
+            PathPolicy::RelayOnly => PortMapping::Off,
+        });
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
@@ -364,6 +382,7 @@ impl Client {
                     context.diagnostics,
                     options.path,
                     is_datagram,
+                    port_mapping,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -379,6 +398,7 @@ impl Client {
                     context.diagnostics,
                     options.path,
                     is_datagram,
+                    port_mapping,
                 )
             }),
         };
@@ -516,6 +536,16 @@ pub(crate) fn is_carrier_failure(error: &Error) -> bool {
     }
 }
 
+/// Refuse a mapping from the start that this build cannot make, rather than
+/// ignore it. One when needed is best effort, and the default: without the
+/// feature it never starts.
+fn check_port_mapping(requested: PortMapping) -> Result<()> {
+    if requested == PortMapping::Always && !cfg!(feature = "port-mapping") {
+        return Err(Error::invalid_config("built without port-mapping support"));
+    }
+    Ok(())
+}
+
 /// Resolve one endpoint to every address it names.
 ///
 /// The list, not just its first entry: a worker handed the whole list dials each
@@ -580,6 +610,21 @@ struct TunnelWorker {
 }
 
 impl TunnelWorker {
+    /// How this tunnel maps its direct endpoint's port, noted in its
+    /// diagnostics from the start when it may.
+    fn port_mapping(&self, mode: PortMapping) -> PortMapping {
+        let mode = if cfg!(feature = "port-mapping") {
+            mode
+        } else {
+            PortMapping::Off
+        };
+        if mode != PortMapping::Off {
+            self.diagnostics
+                .port_mapping_requested(mode, crate::network::NetworkHints::shared().generation());
+        }
+        mode
+    }
+
     fn spawn<F, Fut>(self, start: F) -> LiveTunnel
     where
         F: FnOnce(WorkerContext) -> Fut + Send + 'static,
@@ -607,7 +652,7 @@ impl TunnelWorker {
                 diagnostics: worker_diagnostics.clone(),
             })
             .await;
-            worker_diagnostics.phase(RecoveryPhase::Stopped);
+            worker_diagnostics.stop();
             settle_stopped(&status_tx);
         });
         LiveTunnel::new(shutdown, join, status_rx, endpoint, diagnostics)
