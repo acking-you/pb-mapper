@@ -87,7 +87,7 @@
   "@portMappingRouter": {"placeholders": {"address": {"type": "String"}}},
   "portMappingFigures": "请求 {attempts} 次 · 续租 {renewals} 次 · 失败 {failures} 次",
   "@portMappingFigures": {"placeholders": {"attempts": {"type": "int"}, "renewals": {"type": "int"}, "failures": {"type": "int"}}},
-  "tunnelEventTitle": "{kind, select, relay_ready{中继已响应} relay_failed{中继未响应} network_changed{网络已变化} direct_established{已直连} direct_fallback{改走中继} stopped{已停止} other{{kind}}}",
+  "tunnelEventTitle": "{kind, select, relay_ready{中继已响应} relay_failed{中继未响应} network_changed{网络已变化} direct_established{已直连} direct_fallback{改走中继} direct_abandoned{放弃直连} stopped{已停止} other{{kind}}}",
   "@tunnelEventTitle": {"placeholders": {"kind": {"type": "String"}}},
   "tunnelEventDirectStage": "建立直连：{stage}",
   "@tunnelEventDirectStage": {"placeholders": {"stage": {"type": "String"}}},

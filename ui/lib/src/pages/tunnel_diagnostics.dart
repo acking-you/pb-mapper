@@ -591,6 +591,13 @@ _Reading _read(BuildContext context, TunnelEvent event) {
         icon: AppIcons.relay,
         tone: _Tone.quiet,
       );
+    case 'direct_abandoned':
+      return (
+        title: l10n.tunnelEventTitle(event.kind),
+        detail: l10n.tunnelEventAtStage(stage()),
+        icon: AppIcons.direct,
+        tone: _Tone.quiet,
+      );
     case 'direct_stage_changed':
       return (
         title: l10n.tunnelEventDirectStage(stage()),

@@ -146,6 +146,10 @@ pub enum TunnelEventKind {
     PhaseChanged { phase: RecoveryPhase },
     /// A direct attempt entered `stage`.
     DirectStageChanged { stage: DirectStage },
+    /// A direct attempt ended at `stage` with neither a direct session nor a
+    /// fallback: its setup was cancelled, or it failed after committing, when
+    /// the relay can no longer take its place.
+    DirectAbandoned { stage: DirectStage },
     /// A session opened on `path`.
     SessionOpened { path: SessionPath },
     /// A session on `path` closed.
@@ -173,6 +177,7 @@ impl TunnelEventKind {
             self,
             Self::PhaseChanged { .. }
                 | Self::DirectStageChanged { .. }
+                | Self::DirectAbandoned { .. }
                 | Self::SessionOpened { .. }
                 | Self::SessionClosed { .. }
                 | Self::PortMappingChanged { .. }
@@ -211,8 +216,8 @@ const STREAM_CAPACITY: usize = 128;
 /// there. A subscription does not keep its tunnel alive: once the tunnel
 /// stops and its cleanup has reported, the stream ends.
 pub struct TunnelEvents {
-    replay: VecDeque<TunnelEvent>,
-    receiver: broadcast::Receiver<TunnelEvent>,
+    replay: VecDeque<Event>,
+    receiver: broadcast::Receiver<Event>,
 }
 
 impl TunnelEvents {
@@ -220,11 +225,12 @@ impl TunnelEvents {
     /// events were missed; the tunnel's `diagnostics()` is the state to
     /// reconcile with, and the stream goes on. Cancel-safe.
     pub async fn recv(&mut self) -> Option<Result<TunnelEvent, EventsLagged>> {
+        // Aged as it is read, however long it waited in the queue.
         if let Some(event) = self.replay.pop_front() {
-            return Some(Ok(event));
+            return Some(Ok(event.public(Instant::now())));
         }
         match self.receiver.recv().await {
-            Ok(event) => Some(Ok(event)),
+            Ok(event) => Some(Ok(event.public(Instant::now()))),
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 Some(Err(EventsLagged { skipped }))
             }
@@ -294,6 +300,7 @@ pub struct PathDiagnostics {
     pub attempt: Option<DirectAttempt>,
 }
 
+#[derive(Clone)]
 struct Event {
     seq: u64,
     at: Instant,
@@ -328,7 +335,7 @@ struct State {
     cleanups: usize,
     /// Present while someone subscribes: a tunnel nobody listens to sends
     /// nothing, and records no live-only event.
-    stream: Option<broadcast::Sender<TunnelEvent>>,
+    stream: Option<broadcast::Sender<Event>>,
     direct: Option<PathDiagnostics>,
     port_mapping: Option<PortMappingDiagnostics>,
     phase: RecoveryPhase,
@@ -360,9 +367,9 @@ impl State {
             return;
         }
         self.seq = self.seq.wrapping_add(1);
-        let event = TunnelEvent {
+        let event = Event {
             seq: self.seq,
-            age_ms: 0,
+            at: Instant::now(),
             repeats: 1,
             kind,
         };
@@ -373,12 +380,6 @@ impl State {
         if self.stream.is_some() {
             self.send(event.clone());
         }
-        let event = Event {
-            seq: event.seq,
-            at: Instant::now(),
-            repeats: 1,
-            kind: event.kind,
-        };
         if let Some(last) = self
             .events
             .back_mut()
@@ -396,7 +397,7 @@ impl State {
         self.events.push_back(event);
     }
 
-    fn send(&mut self, event: TunnelEvent) {
+    fn send(&mut self, event: Event) {
         // Sending fails only once every subscription is gone.
         if let Some(stream) = &self.stream
             && stream.send(event).is_err()
@@ -480,9 +481,8 @@ impl Diagnostics {
                 .get_or_insert_with(|| broadcast::channel(STREAM_CAPACITY).0)
                 .subscribe(),
         };
-        let now = Instant::now();
         TunnelEvents {
-            replay: state.events.iter().map(|event| event.public(now)).collect(),
+            replay: state.events.iter().cloned().collect(),
             receiver,
         }
     }
@@ -595,6 +595,7 @@ impl Diagnostics {
             diagnostics: self.clone(),
             stage: DirectStage::Negotiating,
             started,
+            settled: false,
         }
     }
 
@@ -726,13 +727,15 @@ impl Drop for DeferClose {
     }
 }
 
-/// One direct attempt in flight. Dropping it without an outcome (an error
-/// after commit, a cancelled setup) records nothing.
+/// One direct attempt in flight. Dropped without an outcome (an error after
+/// commit, a cancelled setup), it tells subscribers the attempt was abandoned,
+/// so that one following its stages does not wait on it forever.
 #[cfg(feature = "p2p")]
 pub(crate) struct DirectAttemptGuard {
     diagnostics: Diagnostics,
     stage: DirectStage,
     started: Instant,
+    settled: bool,
 }
 
 #[cfg(feature = "p2p")]
@@ -743,7 +746,8 @@ impl DirectAttemptGuard {
         state.attempt = Some((stage, self.started));
         state.record(TunnelEventKind::DirectStageChanged { stage });
     }
-    pub(crate) fn established(self) {
+    pub(crate) fn established(mut self) {
+        self.settled = true;
         let setup_ms = ms(self.started.elapsed());
         self.diagnostics
             .state()
@@ -751,7 +755,8 @@ impl DirectAttemptGuard {
     }
     /// Fall back to the relay for `reason`, the legacy label kept in
     /// [`PathDiagnostics::last_fallback`].
-    pub(crate) fn fell_back(self, reason: &str) {
+    pub(crate) fn fell_back(mut self, reason: &str) {
+        self.settled = true;
         let mut state = self.diagnostics.state();
         let p = state.direct.get_or_insert_default();
         p.fallbacks += 1;
@@ -767,6 +772,9 @@ impl Drop for DirectAttemptGuard {
         state.in_flight = state.in_flight.saturating_sub(1);
         if state.in_flight == 0 {
             state.attempt = None;
+        }
+        if !self.settled {
+            state.record(TunnelEventKind::DirectAbandoned { stage: self.stage });
         }
     }
 }
@@ -844,6 +852,7 @@ mod tests {
         let diagnostics = Diagnostics::default();
         let endpoint = RelayEndpoint::shared("127.0.0.1:1");
         let attempt_of = |d: &Diagnostics| d.snapshot(&endpoint).direct.and_then(|p| p.attempt);
+        let mut events = diagnostics.subscribe();
         let mut first = diagnostics.direct_attempt();
         first.stage(DirectStage::Punching);
         assert_eq!(
@@ -876,6 +885,33 @@ mod tests {
                 (TunnelEventKind::DirectEstablished { .. }, 1),
             ]
         ));
+        // One that ends with neither outcome says so, live, and only it does.
+        let mut third = diagnostics.direct_attempt();
+        third.stage(DirectStage::Committing);
+        drop(third);
+        assert_eq!(attempt_of(&diagnostics), None);
+        let abandoned: Vec<_> = std::iter::from_fn(|| events.receiver.try_recv().ok())
+            .map(|event| event.kind)
+            .filter(|kind| matches!(kind, TunnelEventKind::DirectAbandoned { .. }))
+            .collect();
+        assert_eq!(
+            abandoned,
+            [TunnelEventKind::DirectAbandoned {
+                stage: DirectStage::Committing
+            }]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_event_is_aged_when_it_is_read() {
+        let diagnostics = Diagnostics::default();
+        let mut live = diagnostics.subscribe();
+        diagnostics.network_changed(1);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(live.recv().await.unwrap().unwrap().age_ms, 5_000);
+        let mut replayed = diagnostics.subscribe();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(replayed.recv().await.unwrap().unwrap().age_ms, 6_000);
     }
 
     #[tokio::test]

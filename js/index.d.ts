@@ -398,7 +398,8 @@ export interface JsTunnelEvent {
    * `relay_failed`, `network_changed`, `direct_established`,
    * `direct_fallback` and `stopped`, the last event of a stream. Steps,
    * from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
-   * `session_opened`, `session_closed` and `port_mapping_changed`.
+   * `direct_abandoned`, `session_opened`, `session_closed` and
+   * `port_mapping_changed`.
    */
   kind: string
   /** `relay_ready`: setup latency of the answering relay. */
@@ -414,7 +415,8 @@ export interface JsTunnelEvent {
   setupMs?: number
   /**
    * `direct_fallback`: the stage the attempt left for the relay;
-   * `direct_stage_changed`: the stage it entered.
+   * `direct_stage_changed`: the stage it entered; `direct_abandoned`: the
+   * stage at which it was given up.
    */
   stage?: string
   /** `phase_changed`: the relay attempt's new phase. */

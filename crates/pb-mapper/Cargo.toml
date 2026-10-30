@@ -33,5 +33,10 @@ pb-mapper-auth.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p"] }
 tokio-util.workspace = true
 
+# Needs the router-facing code, which a default build leaves out.
+[[example]]
+name = "port_mapping"
+required-features = ["port-mapping"]
+
 [lints]
 workspace = true

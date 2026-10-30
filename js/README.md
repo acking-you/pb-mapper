@@ -101,8 +101,8 @@ side while no one reads. One that falls further behind gets a rejection that
 says how many it missed: read `diagnostics()` and keep reading.
 `next(timeoutMs)` rejects when the time passes first, without losing an
 event. A stream carries the steps as well as the outcomes: `phase_changed`,
-`direct_stage_changed`, `session_opened`, `session_closed` and
-`port_mapping_changed`, whose `mapping` is the mapping as it now stands.
+`direct_stage_changed`, `direct_abandoned`, `session_opened`,
+`session_closed` and `port_mapping_changed`, whose `mapping` is the mapping as it now stands.
 `release_sent` there is a PCP or NAT-PMP deletion the router does not
 acknowledge; `released` is one UPnP confirmed.
 

@@ -88,7 +88,7 @@
   "@portMappingRouter": {"placeholders": {"address": {"type": "String"}}},
   "portMappingFigures": "{attempts, plural, =1{1 request} other{{attempts} requests}} · {renewals, plural, =1{1 renewal} other{{renewals} renewals}} · {failures, plural, =0{no failures} =1{1 failure} other{{failures} failures}}",
   "@portMappingFigures": {"placeholders": {"attempts": {"type": "int"}, "renewals": {"type": "int"}, "failures": {"type": "int"}}},
-  "tunnelEventTitle": "{kind, select, relay_ready{Relay answered} relay_failed{Relay did not answer} network_changed{Network changed} direct_established{Went direct} direct_fallback{Used the relay} stopped{Stopped} other{{kind}}}",
+  "tunnelEventTitle": "{kind, select, relay_ready{Relay answered} relay_failed{Relay did not answer} network_changed{Network changed} direct_established{Went direct} direct_fallback{Used the relay} direct_abandoned{Gave up going direct} stopped{Stopped} other{{kind}}}",
   "@tunnelEventTitle": {"placeholders": {"kind": {"type": "String"}}},
   "tunnelEventDirectStage": "Going direct: {stage}",
   "@tunnelEventDirectStage": {"placeholders": {"stage": {"type": "String"}}},

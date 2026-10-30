@@ -83,7 +83,9 @@ the tunnel's first direct session, never holds one up, is renewed while the
 tunnel runs and released when it stops. A router that maps nothing leaves
 direct and the relay fallback as they were. `diagnostics().port_mapping` says
 where it stands; `active` stays true while a renewal is pending or has failed,
-until the lease expires.
+until the lease expires. `cargo run -p pb-mapper --features port-mapping
+--example port_mapping -- share web 127.0.0.1:8080` prints each step, through
+the release when it stops.
 
 `subscribe_events()` yields the outcomes the tunnel kept
 (`diagnostics().events`), then every event as it happens, until the tunnel
@@ -101,8 +103,8 @@ while let Some(event) = events.recv().await {
 ```
 
 Besides the outcomes, a stream carries the steps that lead to them: relay
-phases, direct stages, sessions opening and closing, and each change of the
-port mapping. `release_sent` is a PCP or NAT-PMP deletion the router does not
+phases, direct stages and attempts given up, sessions opening and closing,
+and each change of the port mapping. `release_sent` is a PCP or NAT-PMP deletion the router does not
 acknowledge; `released` is one UPnP confirmed. Each subscriber reads at its
 own pace, and none keeps the tunnel alive.
 

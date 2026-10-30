@@ -241,7 +241,8 @@ pub struct JsTunnelEvent {
     /// `relay_failed`, `network_changed`, `direct_established`,
     /// `direct_fallback` and `stopped`, the last event of a stream. Steps,
     /// from `subscribeEvents()` only: `phase_changed`, `direct_stage_changed`,
-    /// `session_opened`, `session_closed` and `port_mapping_changed`.
+    /// `direct_abandoned`, `session_opened`, `session_closed` and
+    /// `port_mapping_changed`.
     pub kind: String,
     /// `relay_ready`: setup latency of the answering relay.
     pub latency_ms: Option<f64>,
@@ -253,7 +254,8 @@ pub struct JsTunnelEvent {
     /// `direct_established`: time from the first request to the open path.
     pub setup_ms: Option<f64>,
     /// `direct_fallback`: the stage the attempt left for the relay;
-    /// `direct_stage_changed`: the stage it entered.
+    /// `direct_stage_changed`: the stage it entered; `direct_abandoned`: the
+    /// stage at which it was given up.
     pub stage: Option<String>,
     /// `phase_changed`: the relay attempt's new phase.
     pub phase: Option<String>,
@@ -309,6 +311,10 @@ impl From<sdk::TunnelEvent> for JsTunnelEvent {
             sdk::TunnelEventKind::DirectStageChanged { stage } => {
                 js.stage = Some(stage.as_str().into());
                 "direct_stage_changed"
+            }
+            sdk::TunnelEventKind::DirectAbandoned { stage } => {
+                js.stage = Some(stage.as_str().into());
+                "direct_abandoned"
             }
             sdk::TunnelEventKind::SessionOpened { path } => {
                 js.path = Some(path_name(path).into());
