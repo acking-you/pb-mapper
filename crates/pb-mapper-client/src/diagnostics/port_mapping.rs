@@ -29,7 +29,8 @@ pub enum PortMappingStage {
     Renewing,
     /// The lease ran out before it was renewed.
     Expired,
-    /// No lease yet; asking again (every 30 s).
+    /// No lease yet; asking again, 30 s after the first time and then less
+    /// often, up to every 10 min.
     Retrying,
     /// The local network changed; the gateway is looked for again.
     NetworkChanged,

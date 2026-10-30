@@ -14,6 +14,13 @@ use std::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+/// How long a router that mapped nothing is left before it is asked again:
+/// 30 s, doubling to 10 min, and from the start once it grants a lease. One
+/// that does not map ports rarely starts to, and asking is not free (UPnP
+/// multicasts to the whole LAN).
+const RETRY_FIRST: Duration = Duration::from_secs(30);
+const RETRY_MAX: Duration = Duration::from_secs(600);
+
 pub(super) struct Mapping {
     address: watch::Receiver<(u64, Option<SocketAddr>)>,
     network: Arc<NetworkHints>,
@@ -103,11 +110,9 @@ async fn run(
             }
         }
         client.update_local_port(port);
-        let mut retry = tokio::time::interval_at(
-            tokio::time::Instant::now() + Duration::from_secs(30),
-            Duration::from_secs(30),
-        );
-        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut wait = RETRY_FIRST;
+        let retry = tokio::time::sleep(wait);
+        tokio::pin!(retry);
         loop {
             tokio::select! {
                 biased;
@@ -116,15 +121,19 @@ async fn run(
                 result = external.changed() => {
                     if result.is_err() { break; }
                     let mapped = external.borrow_and_update().map(SocketAddr::V4);
-                    tracing::debug!(?mapped, "direct gateway mapping changed");
+                    if mapped.is_some() {
+                        wait = RETRY_FIRST;
+                    }
                     address.send_replace((generation, mapped));
                 }
-                _ = retry.tick() => {
+                () = &mut retry => {
                     if external.borrow().is_none() {
                         reporter.stage(PortMappingStage::Retrying, None);
                         client.procure_mapping();
+                        wait = (wait * 2).min(RETRY_MAX);
                     }
-                },
+                    retry.as_mut().reset(tokio::time::Instant::now() + wait);
+                }
             }
         }
         address.send_replace((generation, None));
@@ -167,6 +176,14 @@ impl Reporter {
         let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
         current.error = None;
         change(&mut current);
+        tracing::debug!(
+            event = "port_mapping_changed",
+            stage = current.stage.as_str(),
+            protocol = current.protocol.map(PortMappingProtocol::as_str),
+            external = ?current.external_addr,
+            active = current.active,
+            error = current.error.as_deref(),
+        );
         self.diagnostics.port_mapping_changed(current.clone());
     }
 

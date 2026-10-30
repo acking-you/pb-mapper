@@ -140,7 +140,9 @@ pub enum TunnelEventKind {
     /// The tunnel stopped, and whatever it was cleaning up has reported. The
     /// last event of every stream.
     Stopped,
-    /// A relay attempt entered `phase`.
+    /// A relay attempt entered `phase`. Once the tunnel is ready, its routine
+    /// re-checks are not announced: the next change is `backoff`, when one
+    /// fails.
     PhaseChanged { phase: RecoveryPhase },
     /// A direct attempt entered `stage`.
     DirectStageChanged { stage: DirectStage },
@@ -330,6 +332,9 @@ struct State {
     direct: Option<PathDiagnostics>,
     port_mapping: Option<PortMappingDiagnostics>,
     phase: RecoveryPhase,
+    /// The phase last announced to subscribers. A ready tunnel's routine
+    /// re-checks pass through the attempt phases without being announced.
+    announced: RecoveryPhase,
     attempts: u64,
     failures: u64,
     failure: Option<RecoveryFailure>,
@@ -406,8 +411,17 @@ impl State {
     }
 
     fn enter(&mut self, phase: RecoveryPhase) {
-        if self.phase != phase {
-            self.phase = phase;
+        self.phase = phase;
+        let recheck = self.ready
+            && matches!(
+                phase,
+                RecoveryPhase::Capacity
+                    | RecoveryPhase::Resolving
+                    | RecoveryPhase::Connecting
+                    | RecoveryPhase::Handshake
+            );
+        if !recheck && self.announced != phase {
+            self.announced = phase;
             self.record(TunnelEventKind::PhaseChanged { phase });
         }
     }
@@ -433,6 +447,7 @@ impl Default for Diagnostics {
             direct: None,
             port_mapping: None,
             phase: RecoveryPhase::Starting,
+            announced: RecoveryPhase::Starting,
             attempts: 0,
             failures: 0,
             failure: None,
@@ -897,6 +912,31 @@ mod tests {
         let history = kinds(&diagnostics);
         assert!(history.iter().all(|(kind, _)| !kind.is_live_only()));
         assert_eq!(history.last().unwrap().0, TunnelEventKind::Stopped);
+    }
+
+    #[tokio::test]
+    async fn a_ready_tunnel_announces_a_failure_but_not_its_routine_rechecks() {
+        let diagnostics = Diagnostics::default();
+        diagnostics.attempt();
+        diagnostics.succeeded(Duration::from_millis(30));
+        let mut events = diagnostics.subscribe();
+        let _ = events.recv().await; // The relay answered.
+        for _ in 0..3 {
+            diagnostics.attempt();
+            diagnostics.phase(RecoveryPhase::Handshake);
+            diagnostics.succeeded(Duration::from_millis(30));
+        }
+        diagnostics.attempt();
+        diagnostics.failed(RecoveryFailure::Timeout, Duration::from_secs(1));
+        diagnostics.attempt();
+        let phases: Vec<_> = std::iter::from_fn(|| events.replay.pop_front())
+            .chain(std::iter::from_fn(|| events.receiver.try_recv().ok()))
+            .filter_map(|event| match event.kind {
+                TunnelEventKind::PhaseChanged { phase } => Some(phase),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(phases, [RecoveryPhase::Backoff, RecoveryPhase::Capacity]);
     }
 
     #[cfg(feature = "port-mapping")]

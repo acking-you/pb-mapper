@@ -49,7 +49,9 @@ struct ProbeState {
     nonce: [u8; 16],
     expires: tokio::time::Instant,
     learned: Vec<SocketAddr>,
-    /// Authenticated sources still awaiting our own nonce challenge.
+    /// Authenticated sources not yet proven, each owed one challenge with our
+    /// nonce on the next probe tick. One per ping: a replayed ping from a
+    /// spoofed source earns that address one packet, never a stream of them.
     triggered: Vec<SocketAddr>,
 }
 struct StunPending {
@@ -316,20 +318,20 @@ impl Socket {
     /// and return the paths that have answered so far.
     pub fn probe(&self, id: SessionId, candidates: &[SocketAddr]) -> Vec<SocketAddr> {
         let (bytes, triggered, learned) = {
-            let probes = self
+            let mut probes = self
                 .control
                 .probes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let Some(probe) = probes
-                .get(&id)
+                .get_mut(&id)
                 .filter(|p| p.expires > tokio::time::Instant::now())
             else {
                 return vec![];
             };
             (
                 packet(id, probe.nonce, false, probe.key),
-                probe.triggered.clone(),
+                std::mem::take(&mut probe.triggered),
                 probe.learned.clone(),
             )
         };
@@ -519,6 +521,13 @@ mod tests {
         assert_eq!(
             socket.control.probes.lock().unwrap()[&id].triggered.len(),
             MAX_CANDIDATES
+        );
+        // Each is challenged once; only another ping from it earns another.
+        socket.probe(id, &[]);
+        assert!(
+            socket.control.probes.lock().unwrap()[&id]
+                .triggered
+                .is_empty()
         );
         // A valid MAC alone is not proof that our challenge reached this source.
         socket.handle_probe(&packet(id, [8; 16], true, secret), source);

@@ -196,18 +196,27 @@ mod tests {
 
     #[test]
     fn closing_a_reader_wakes_its_pending_read_and_leaves_the_tunnel_running() {
+        // A new state writes the process credential, so it is made under the
+        // lock, in a directory of its own rather than the app's.
+        let _credential_guard =
+            pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
+        let root = std::env::temp_dir().join(format!(
+            "pb-mapper-tunnel-events-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
         let handle = PbMapperHandle {
             tunnel_events: Default::default(),
             runtime: tokio::runtime::Runtime::new().unwrap(),
             state: Arc::new(tokio::sync::Mutex::new(crate::state::PbMapperState::new(
-                None,
+                Some(root.display().to_string()),
             ))),
             control_shutdown: CancellationToken::new(),
         };
         handle.runtime.block_on(async {
-            let _credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
-                .lock()
-                .await;
             let relay = pb_mapper_testkit::Relay::start("ffi-tunnel-events").await;
             let client = Client::new(ClientConfig {
                 server: relay.addr().to_string(),
@@ -271,5 +280,7 @@ mod tests {
                 .unwrap();
             registration.stop().await.unwrap();
         });
+        drop(handle);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
