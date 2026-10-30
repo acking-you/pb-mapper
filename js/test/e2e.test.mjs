@@ -44,25 +44,34 @@ test.skipIf(!hasRelay)("event readers are independent, close on their own and en
     const registration = await client.register({
       key: "events", localAddr: echo.address, transport: "tcp", allowDirect: false, portMapping: "always",
     });
+    // One reader from the start, one once the relay has answered: the first
+    // sees the answer as it happens, the second from the kept history.
     const first = registration.subscribeEvents();
-    const second = registration.subscribeEvents();
+    let second;
+    const relayReady = async (events, seen = []) => {
+      for (let event; (event = await events.next(READY_MS));) {
+        seen.push(event);
+        if (event.kind === "relay_ready") return event;
+      }
+      return null;
+    };
     try {
       await registration.waitReady(READY_MS);
       // Mapping needs direct: a relay-only share never asks the gateway.
       expect(registration.diagnostics().portMapping).toBeUndefined();
-      const a = await first.next(READY_MS);
-      const b = await second.next(READY_MS);
-      expect(a.seq).toBe(b.seq);
+      second = registration.subscribeEvents();
+      const seen = [];
+      const live = await relayReady(first);
+      const replayed = await relayReady(second, seen);
+      expect(replayed.seq).toBe(live.seq);
       first.close();
       expect(await first.next(READY_MS)).toBeNull();
       await registration.stop();
-      const seen = [b];
       for (let event; (event = await second.next(READY_MS));) seen.push(event);
       expect(seen.at(-1).kind).toBe("stopped");
-      expect(seen.some((e) => e.kind === "relay_ready")).toBe(true);
       expect(JSON.stringify(seen)).not.toContain(relay.adminKey);
     } finally {
-      first.close(); second.close();
+      first.close(); second?.close();
       await registration.stop(); await echo.close();
     }
   });
