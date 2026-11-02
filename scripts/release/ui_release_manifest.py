@@ -26,11 +26,14 @@ import re
 import subprocess
 import tempfile
 
-from android_package import CERTIFICATE, inspect_apk, verify_release
+from android_package import ABIS, CERTIFICATE, inspect_apk, verify_release
 
 MANIFEST = 'release-manifest.json'
+PUBLIC_KEY = Path(__file__).with_name('update_signing_key.pub.pem')
+ANDROID_PACKAGES = {f'pb-mapper-{abi}.apk' for abi in ABIS}
 
-# CI publishes desktops only. Locally signed APKs are verified and added later.
+# The desktop manifest is assembled first; verified Android packages are added
+# before the complete manifest is signed and published.
 EXPECTED = {
     'pb-mapper-windows-x86_64-setup.exe',
     'pb-mapper-windows-x86_64.zip',
@@ -79,15 +82,61 @@ def build(directory: Path, tag: str, commit: str) -> Path:
     return output
 
 
+def previous_android_release(releases: list[dict], version: str) -> str:
+    """Find the newest earlier release with Android packages; fail if incomplete."""
+    def semver(value: str) -> tuple[int, int, int] | None:
+        match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', value)
+        return tuple(map(int, match.groups())) if match else None
+
+    current = semver(version)
+    if current is None:
+        raise ValueError('Expected a numeric X.Y.Z release version')
+    candidates = []
+    for release in releases:
+        tag = release.get('tag_name', '')
+        match = re.fullmatch(r'v(\d+\.\d+\.\d+)-ui', tag)
+        if not match or release.get('draft') or release.get('prerelease'):
+            continue
+        candidate = semver(match[1])
+        names = {asset['name'] for asset in release.get('assets', [])}
+        if candidate is not None and candidate < current and names & ANDROID_PACKAGES:
+            candidates.append((candidate, tag, names))
+    if not candidates:
+        raise ValueError('No earlier Android release found in the retrieved releases')
+    _, tag, names = max(candidates, key=lambda candidate: candidate[0])
+    missing = (ANDROID_PACKAGES | {MANIFEST, MANIFEST + '.sig'}) - names
+    if missing:
+        raise ValueError(f'Previous Android release {tag} is incomplete: {sorted(missing)}')
+    return tag
+
+
 def add_android(manifest: Path, packages: list[Path], build_tools: Path,
-                previous_directory: Path | None, establish_baseline: bool) -> None:
-    if (previous_directory is not None) == establish_baseline:
-        raise ValueError('Provide previous packages, or explicitly establish the first signing baseline')
+                previous_directory: Path | None, establish_baseline: bool,
+                previous_manifest: Path | None = None) -> None:
+    if sum((previous_directory is not None, previous_manifest is not None, establish_baseline)) != 1:
+        raise ValueError('Provide previous packages or a signed previous manifest, or establish the first signing baseline')
     release = json.loads(manifest.read_text(encoding='utf-8'))
     assets = {asset['name']: asset for asset in release['assets']}
+    previous_assets = None
+    if previous_manifest is not None:
+        verify(previous_manifest, PUBLIC_KEY)
+        previous_release = json.loads(previous_manifest.read_text(encoding='utf-8'))
+        if previous_release.get('tag') != f"v{previous_release.get('version')}-ui":
+            raise ValueError('Previous manifest has an inconsistent tag and version')
+        entries = previous_release['assets']
+        previous_assets = {asset['name']: asset for asset in entries}
+        if len(previous_assets) != len(entries):
+            raise ValueError('Previous manifest contains duplicate asset names')
     for package in packages:
         info = inspect_apk(package, build_tools)
-        previous = inspect_apk(previous_directory / package.name, build_tools) if previous_directory else None
+        if previous_directory is not None:
+            previous = inspect_apk(previous_directory / package.name, build_tools)
+        elif previous_assets is not None:
+            previous = previous_assets.get(package.name)
+            if previous is None or previous.get('platform') != 'android':
+                raise ValueError(f'Previous manifest is missing Android package {package.name}')
+        else:
+            previous = None
         verify_release(info, release['version'], CERTIFICATE.read_text().strip(), previous)
         expected_name = f"pb-mapper-{info['abis'][0]}.apk"
         if package.name != expected_name:
@@ -149,7 +198,11 @@ if __name__ == '__main__':
     android_args.add_argument('--build-tools', required=True, type=Path)
     baseline = android_args.add_mutually_exclusive_group(required=True)
     baseline.add_argument('--previous-directory', type=Path)
+    baseline.add_argument('--previous-manifest', type=Path)
     baseline.add_argument('--establish-signing-baseline', action='store_true')
+    previous_args = commands.add_parser('previous-android-release')
+    previous_args.add_argument('version')
+    previous_args.add_argument('releases', type=Path)
     args = parser.parse_args()
     if args.command == 'build':
         print(build(args.directory, args.tag, args.commit))
@@ -158,6 +211,8 @@ if __name__ == '__main__':
     elif args.command == 'verify':
         verify(args.manifest, args.public_key)
         print('Signature verified')
+    elif args.command == 'previous-android-release':
+        print(previous_android_release(json.loads(args.releases.read_text(encoding='utf-8')), args.version))
     else:
         add_android(args.manifest, args.packages, args.build_tools,
-                    args.previous_directory, args.establish_signing_baseline)
+                    args.previous_directory, args.establish_signing_baseline, args.previous_manifest)

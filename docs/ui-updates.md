@@ -34,95 +34,82 @@ requires Android API 24+, and passes 16 KiB ZIP and native-library alignment.
 This proves an upgrade-signing defect; it does not establish the cause of a
 particular phone's browser failing to open its downloaded APK.
 
-Like proxy-everything, distributed mobile packages are now built **locally**.
-CI publishes desktop packages and their signed manifest. It never distributes
-runner-signed APKs or unsigned IPAs. Android release Gradle tasks refuse CI,
-missing keystores and certificates other than
+The maintainer's existing key is `%USERPROFILE%\\.android\\debug.keystore` (or
+`~/.android/debug.keystore`). The repository's `ANDROID_KEYSTORE_BASE64` Actions
+secret contains this same key, not a runner-generated key. Keep a secure backup
+of the original. Never regenerate it or change the application ID
+`com.pb_mapper.ui` to work around installation. Only the public certificate
+fingerprint is checked into the repository.
+
+Release Gradle tasks require a keystore matching
 [`android_signing_certificate.sha256`](../scripts/release/android_signing_certificate.sha256).
-The existing maintainer key is `%USERPROFILE%\.android\debug.keystore` (or
-`~/.android/debug.keystore`). Back it up securely. Never regenerate it or
-change the application ID `com.pb_mapper.ui` to work around installation.
-Only the public certificate fingerprint is checked in.
+A CI release must also explicitly set `PB_MAPPER_ANDROID_KEYSTORE`; a missing,
+wrong or runner-generated key fails the build. The existing key uses the Android
+debug keystore's standard alias and passwords. The workflow decodes the secret
+into a private temporary file, passes its path to Gradle and deletes it after the
+build. Never store the private key in the repository, a workflow artifact or an
+Actions variable.
 
 There is no in-place signing migration from the disposable keys used by old
 CI releases without their private keys. Export the user's pb-mapper settings
 before any manual uninstall/reinstall migration to the new signing baseline.
 Do not claim the new key can cover-install those old packages. Once on this
-baseline, later locally signed releases can update in place.
+baseline, later releases signed with this key can update in place.
 
-## Prepare a local Android release
+## Automated Android release
 
-Use Flutter 3.44.9, matching the desktop release and Flutter checks. Bump the
-workspace/UI release version and pubspec build number for a real release;
-never reuse a published build. Flutter split APKs add ABI-specific offsets to
-the build number, so compare **effective** versionCodes in the APKs.
+A `vX.Y.Z` tag builds ARMv7, ARM64 and x86_64 APKs using Flutter 3.44.9 and
+fresh Rust FFI libraries. The workflow verifies the pinned certificate, package
+identity, ABI, signature, 16 KiB alignment and actual FFI contents. It finds the
+newest earlier release containing Android packages among the 100 most recent
+releases, verifies that release's signed manifest, and requires each effective
+APK versionCode to increase. A missing or incomplete previous Android release
+fails closed. The APKs are uploaded without replacing an existing asset, then
+the desktop and Android entries are published together in the Ed25519-signed
+update manifest. A retry accepts an existing APK only if its size and SHA-256
+match the verified build.
+
+Bump the workspace/UI release version and pubspec build number for a real
+release; never reuse a published build. Flutter split APKs add ABI-specific
+offsets to the build number, so compare **effective** versionCodes in the APKs.
 Build 906 was consumed by the local repair; release 0.9.6 uses build 907, 0.9.7
 consumed 908 without shipping APKs, 0.9.8 uses 909 and 0.10.0 uses 910. The next
 distribution must use at least 911. The build counter is independent of the
-public version, as in proxy-everything.
+public version.
 
-1. Rebuild the Android Rust library with `make build-pb-mapper-ffi-android`
-   (Android NDK r28+ recommended). On Windows, `cargo ndk -o ui/native/android
-   -t arm64-v8a build -p pb-mapper-ffi --release` works with the Android target
-   installed and `ANDROID_NDK_HOME` pointing to the installed NDK. Build only
-   the ABIs that will be packaged. Never package stale libraries after Rust
-   changes.
-2. From `ui`, run `flutter pub get`, `flutter analyze --no-fatal-infos`, and
-   `flutter test`. Then `flutter build apk --release --split-per-abi
-   --target-platform android-arm64` (add other target platforms when needed).
-3. Run the verifier on every resulting APK. It checks the real package ID,
-   version, ABI, certificate, signature, FFI presence, and 16 KiB ZIP/ELF
-   alignment. Pass the last locally signed release for upgrade comparison:
+To verify the complete Android build without publishing a release, run
+`release-ui.yml` with `android_verify_only=true` against the desired branch.
+The verified packages are available as the `android-release` workflow artifact.
+This check signs an unpublished test manifest using the previous release's
+desktop packages; it never changes that release. The previous signing baseline
+must be present. The existing `UPDATE_SIGNING_KEY` secret signs both test and
+release manifests.
 
-   ```sh
-   python scripts/release/android_package.py ui/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk --build-tools /path/to/Android/Sdk/build-tools/36.0.0 --version 0.10.0 --previous /path/to/previous/pb-mapper-arm64-v8a.apk
-   ```
+## Local Android build and recovery
 
-4. Copy the verified APK into an ignored staging directory as
-   `pb-mapper-arm64-v8a.apk` (or `pb-mapper-armeabi-v7a.apk` /
-   `pb-mapper-x86_64.apk`). Record the verifier's size, SHA-256, effective
-   versionCode and certificate output with the local release.
-5. After the desktop release workflow completes, upload the APKs without
-   `--clobber`, then run **Publish verified Android updates**:
+Use Flutter 3.44.9 and rebuild the Android Rust library with
+`make build-pb-mapper-ffi-android` (Android NDK r28+ recommended). On Windows,
+`cargo ndk -o ui/native/android -t arm64-v8a build -p pb-mapper-ffi --release`
+works with the Android target installed and `ANDROID_NDK_HOME` pointing to the
+installed NDK. Build only the ABIs that will be packaged. Never package stale
+libraries after Rust changes.
 
-   ```sh
-   gh release upload v0.10.0-ui release/pb-mapper-*.apk
-   gh workflow run publish-android.yml -f tag=v0.10.0 -f previous_release=v0.9.8-ui
-   ```
+From `ui`, run `flutter pub get`, `flutter analyze --no-fatal-infos`, and
+`flutter test`, then `flutter build apk --release --split-per-abi
+--target-platform android-arm64` (add other target platforms when needed). Run
+`scripts/release/android_package.py` on each package with `--version`,
+`--build-tools`, and `--previous` pointing to the corresponding previous APK.
+The verifier checks its identity, signature, certificate, ABI, native libraries,
+alignment and upgrade versionCode.
 
-   `previous_release` names the last fixed-key release; only v0.9.6, the first,
-   ran with `-F establish_signing_baseline=true` instead. CI verifies the
-   existing manifest's signature and source commit, then the attached APKs'
-   pinned certificate, identity, alignment and
-   increasing versionCode. It signs the extended manifest using the existing
-   `UPDATE_SIGNING_KEY` secret. The Android private key stays local. Re-running
-   permits byte-identical APKs, never replacement of a published package.
-
-For maintainers signing the manifest offline, the equivalent steps are:
-
-1. Download the **same release's** desktop manifest and signature and verify
-   them using `ui_release_manifest.py verify`. Add the local APKs:
-
-   ```sh
-   python scripts/release/ui_release_manifest.py add-android release/release-manifest.json release/pb-mapper-arm64-v8a.apk --build-tools /path/to/build-tools/36.0.0 --previous-directory /path/to/previous
-   ```
-
-   Only for the first fixed-key release, use `--establish-signing-baseline`
-   instead of `--previous-directory`. This does not waive the pinned-key,
-   package-identity or alignment checks. It acknowledges the migration above.
-   Adding packages invalidates and removes the old local manifest signature.
-2. Re-sign with the **existing** Ed25519 update key and verify again:
-
-   ```sh
-   python scripts/release/ui_release_manifest.py sign release/release-manifest.json --key /secure/path/private.pem
-   python scripts/release/ui_release_manifest.py verify release/release-manifest.json --public-key scripts/release/update_signing_key.pub.pem
-   ```
-
-3. After release authorization, attach the APKs, then replace that release's
-   manifest/signature pair. Until both are available, an update fails closed
-   and can be retried. Never replace an existing APK or reuse its version.
-   A release without APKs remains usable for desktop updates; Android shows
-   that its package is not available yet.
+For repair of an already-published desktop-only release, the existing
+`publish-android.yml` workflow can verify separately uploaded APKs against a
+specified previous release and re-sign the manifest. Do not replace existing APKs
+or reuse a published build. `ui_release_manifest.py add-android` also accepts a
+previous signed manifest using `--previous-manifest`; it authenticates that
+manifest before comparing package identity and version codes. If re-signing a
+manifest offline, use the existing Ed25519 update key and verify the signature
+before attaching the manifest and its signature together.
 
 ## Acceptance checks
 
