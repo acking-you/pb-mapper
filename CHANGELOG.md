@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.1] - 2026-11-03
+- Make the galaxy use less work while idle and keep running tunnels untouched: stop its ticker after interaction and transitions settle, pause hidden canvases, and reuse bounded backdrop, star, glow and label resources. A visible unfocused window keeps its background and continues to display state changes.
+- Keep the overview responsive in dense scenes with batched, viewport-clipped orbits, near-plane-clipped geometry and offscreen culling. Cached sphere layers preserve their vector appearance and transparency; Dart remains available when the native geometry library is unavailable.
+- Preserve drag momentum without adding automatic camera rotation after a drag. Android packages use the existing release signing certificate and a higher build number for upgrades. The CLI, SDK behavior and wire protocol are unchanged.
+
 ## [0.10.0] - 2026-11-02
 - Go direct through more NATs. A destination-dependent NAT can give a peer a different port from the one STUN reported, which used to send the connection to the relay. The QUIC handshake now follows an authenticated ping from where that peer's packets actually came from, and candidates keep STUN and mapped addresses over IPv4 and IPv6. A topology that chose the relay on 0.9.8 now goes direct; see `docs/nat-traversal-validation.zh-CN.md`. A real network change invalidates cached candidates, relay recovery keeps the direct cooldown, and a discovery running at the same time can no longer overwrite that invalidation.
 - Ask the router for a port when a punch fails. By default (`auto`), a tunnel whose hole punch failed requests a mapping of its direct UDP port over PCP, NAT-PMP or UPnP and offers the mapped address first to later sessions; where punching works, the router is never asked. `always` asks from the first direct session and `off` never does: `--port-mapping off|auto|always` on `register` and `connect`, `port_mapping` in the Rust SDK's `RegisterOptions` and `ConnectOptions`, `portMapping` in the Node SDK, and **Port mapping** under a tunnel's **More options** in the app. A relay-only tunnel never asks, and a mapping is never waited for: the connection whose punch failed uses the relay.
