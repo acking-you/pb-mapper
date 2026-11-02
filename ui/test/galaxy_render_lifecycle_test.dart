@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_canvas.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_frame.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_model.dart';
+import 'package:pb_mapper_ui/src/galaxy/galaxy_painter.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_view.dart';
 import 'package:pb_mapper_ui/src/galaxy/planet_atlas.dart';
 import 'package:pb_mapper_ui/src/state/remote_service.dart';
@@ -105,7 +106,13 @@ void main() {
       await frames(tester, 10);
       expect(view.time, greaterThan(time));
       expect(repaints, greaterThan(0));
-      await frames(tester, 600);
+      // Once drag momentum is gone, the decorative interaction interval must
+      // not introduce a new camera rotation of its own.
+      view.camera.spin = 0;
+      final yaw = view.camera.yaw;
+      await frames(tester, 120);
+      expect(view.camera.yaw, closeTo(yaw, 1e-12));
+      await frames(tester, 480);
       final restingTime = view.time;
       await frames(tester, 90);
       expect(view.time, restingTime);
@@ -127,6 +134,50 @@ void main() {
   );
 
   testWidgets(
+    'a visible inactive window keeps its backdrop and renders updates',
+    (tester) async {
+      final view = GalaxyView();
+      addTearDown(view.dispose);
+      final data = scene();
+      await tester.pumpWidget(app(view, data));
+      await frames(tester, 20);
+      final finder = find.byKey(const Key('galaxy-canvas'));
+      final painter =
+          tester.widget<CustomPaint>(finder).painter! as GalaxyPainter;
+      final size = tester.getSize(finder);
+      final backdrop = painter.backdrop.of(
+        size,
+        painter.palette.dark,
+        painter.palette.ratio,
+        painter.onBackdrop,
+      );
+      final atlas = painter.planets.debugImage;
+      expect(backdrop, isNotNull);
+      expect(atlas, isNotNull);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      expect(painter.planets.debugImage, same(atlas));
+      expect(
+        painter.backdrop.of(
+          size,
+          painter.palette.dark,
+          painter.palette.ratio,
+          painter.onBackdrop,
+        ),
+        same(backdrop),
+      );
+      final time = view.time;
+      await tester.pumpWidget(app(view, scene(count: 9)));
+      await frames(tester, 10);
+      expect(view.time, greaterThan(time));
+      expect(view.scene.planetOf('share:share-8'), isNotNull);
+      expect(PlanetAtlas.liveBytes, greaterThan(0));
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: platforms,
+  );
+
+  testWidgets(
     'background and TickerMode release images and resume without a time jump',
     (tester) async {
       final view = GalaxyView();
@@ -136,7 +187,6 @@ void main() {
       await frames(tester, 10);
       expect(PlanetAtlas.liveBytes, greaterThan(0));
       for (final state in [
-        AppLifecycleState.inactive,
         AppLifecycleState.hidden,
         AppLifecycleState.paused,
         AppLifecycleState.detached,

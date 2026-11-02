@@ -203,7 +203,7 @@ on Windows and Linux and to PingFang SC on Apple platforms
 
 ## The galaxy
 
-`galaxy/` draws pb-mapper's topology as a slowly turning disk in true
+`galaxy/` draws pb-mapper's topology as a disk in true
 perspective, after POCOX's galaxy:
 
 - **Stars**: this computer (the signal blue) and the relay (white; a dim ember
@@ -275,8 +275,9 @@ canvases release their images, label layouts and native buffers; pending
 backdrop images are discarded if the canvas has gone away.
 
 Motion and camera easing resume for interaction or scene changes, then stop
-once the finite transitions and camera have settled. Background applications
-and disabled `TickerMode` pause the galaxy; reduced-motion users still get the
+once the finite transitions and camera have settled. Hidden applications
+and disabled `TickerMode` pause the galaxy; visible unfocused windows retain
+their images and can render changes. Reduced-motion users still get the
 delayed return to the overview. The isolated profile-mode renderer at
 `ui/tool/galaxy_resource_probe.dart` reports idle and selection frame timing,
 CPU and memory without starting tunnels or reading settings.

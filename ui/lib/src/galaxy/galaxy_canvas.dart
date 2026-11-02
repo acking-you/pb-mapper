@@ -1,4 +1,4 @@
-/// The galaxy as a widget: the sky turning slowly, drag to orbit, pinch or
+/// The galaxy as a widget: drag to orbit, pinch or
 /// scroll to zoom, tap a body to pick it, arrows and Enter to walk the bodies
 /// by keyboard. After a few seconds without input the camera glides back to
 /// the whole galaxy.
@@ -54,7 +54,7 @@ class GalaxyCanvasState extends State<GalaxyCanvas>
   Duration _last = Duration.zero;
   double _touched = -6;
   Timer? _glide;
-  bool _foreground = true;
+  bool _visible = true;
   bool _enabled = false;
   bool _settled = true;
   double _pinch = 1;
@@ -70,7 +70,7 @@ class GalaxyCanvasState extends State<GalaxyCanvas>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     final lifecycle = WidgetsBinding.instance.lifecycleState;
-    _foreground = lifecycle == null || lifecycle == AppLifecycleState.resumed;
+    _visible = _isVisible(lifecycle);
     // Frames are computed in Rust once the export is found.
     GalaxyNative.load();
     _take(widget.scene);
@@ -90,12 +90,19 @@ class GalaxyCanvasState extends State<GalaxyCanvas>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _foreground = state == AppLifecycleState.resumed;
+    _visible = _isVisible(state);
     _syncActivity();
   }
 
+  // An inactive view may still be visible while another window has focus or
+  // before a mobile app is hidden.
+  static bool _isVisible(AppLifecycleState? state) =>
+      state == null ||
+      state == AppLifecycleState.resumed ||
+      state == AppLifecycleState.inactive;
+
   void _syncActivity() {
-    final enabled = _foreground && TickerMode.valuesOf(context).enabled;
+    final enabled = _visible && TickerMode.valuesOf(context).enabled;
     if (enabled == _enabled) return;
     _enabled = enabled;
     _planets.enabled = enabled;
@@ -167,7 +174,7 @@ class GalaxyCanvasState extends State<GalaxyCanvas>
       final at = _view.positionOf(id);
       if (at != null) camera.goalTarget = at;
     }
-    camera.step(dt, drifting: _ambient && _view.selected == null);
+    camera.step(dt);
     // A slow raster frame must not stretch transition lifetimes.
     _view.time += seconds;
     _view.expireTransitions();
