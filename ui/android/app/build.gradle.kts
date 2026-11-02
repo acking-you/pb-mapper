@@ -8,6 +8,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseKeystore = System.getenv("PB_MAPPER_ANDROID_KEYSTORE")?.takeIf { it.isNotBlank() }
+
 android {
     namespace = "com.pb_mapper.ui"
     compileSdk = flutter.compileSdkVersion
@@ -46,10 +48,15 @@ android {
         // }
     }
 
+    // The maintainer's persistent key uses the Android debug keystore format
+    // and credentials. CI supplies that same key as a temporary file.
+    if (releaseKeystore != null) {
+        signingConfigs.getByName("debug").storeFile = file(releaseKeystore)
+    }
+
     buildTypes {
         release {
-            // Like proxy-everything, distributed APKs are signed locally with
-            // the existing key. Never regenerate it or ship a CI runner's key.
+            // Local and CI releases must both use the pinned persistent key.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -57,8 +64,8 @@ android {
 
 gradle.taskGraph.whenReady {
     if (allTasks.any { it.name.contains("Release", ignoreCase = true) }) {
-        check(System.getenv("CI") != "true" && System.getenv("GITHUB_ACTIONS") != "true") {
-            "Release APKs must be built and signed locally; see docs/ui-updates.md"
+        check((System.getenv("CI") != "true" && System.getenv("GITHUB_ACTIONS") != "true") || releaseKeystore != null) {
+            "CI release APKs require the persistent signing key; see docs/ui-updates.md"
         }
         check(android.signingConfigs.getByName("debug").storeFile?.isFile == true) {
             "The persistent Android signing key is missing. Restore its backup; do not generate a replacement."

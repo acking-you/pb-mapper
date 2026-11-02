@@ -6,7 +6,7 @@ follows POCOX's language; [`docs/ui-design.md`](../docs/ui-design.md) explains
 it.
 
 Updates download and verify packages inside the app before opening the system
-installer. Android releases use the maintainer's persistent local signing key;
+installer. Android releases use the maintainer's persistent signing key in CI;
 see [updates and release verification](../docs/ui-updates.md) for platform
 behavior and migration from older CI-signed APKs.
 

@@ -10,12 +10,20 @@ on:
         description: 'Build, sign and notarize both macOS architectures without publishing a release'
         type: boolean
         default: false
+      android_verify_only:
+        description: 'Build and verify signed Android APKs without publishing a release'
+        type: boolean
+        default: false
 
 env:
   UI_VERSION: ${{ github.ref_name }}
 
 permissions:
   contents: write
+
+concurrency:
+  group: android-manifest-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   get-release:
@@ -48,7 +56,7 @@ jobs:
             echo "- **Windows**: Download the .exe installer or .zip portable version"
             echo "- **Linux**: x86_64 AppImage or portable ZIP"
             echo "- **macOS**: DMG installer"
-            echo "- **Android**: Locally signed APKs are attached separately after upgrade verification."
+            echo "- **Android**: Signed APKs for ARM64, ARMv7 and x86_64."
             echo "- **iOS**: Install through a signed development or store distribution; no unsigned IPA is published."
             echo
             echo "## Latest Changelog"
@@ -65,7 +73,7 @@ jobs:
           path: ui_release_notes.md
 
   build-windows:
-    if: ${{ !inputs.macos_verify_only }}
+    if: ${{ !inputs.macos_verify_only && !inputs.android_verify_only }}
     runs-on: windows-latest
     needs: [get-release]
     steps:
@@ -127,7 +135,7 @@ jobs:
           files: ui/dist/*/*
 
   build-linux:
-    if: ${{ !inputs.macos_verify_only }}
+    if: ${{ !inputs.macos_verify_only && !inputs.android_verify_only }}
     runs-on: ubuntu-22.04
     needs: [get-release]
     steps:
@@ -232,9 +240,8 @@ jobs:
           body_path: ui_release_notes.md
           files: ui/dist/${{ env.UI_VERSION }}/*
 
-  # Mobile packages are built locally with a persistent signing identity.
-  # See docs/ui-updates.md; never publish a runner-generated debug key.
   build-macos:
+    if: ${{ !inputs.android_verify_only }}
     # One native runner per architecture: each .app carries a single-arch FFI
     # dylib, so the artifacts are roughly half the size of a universal build.
     runs-on: ${{ matrix.runner }}
@@ -361,23 +368,150 @@ jobs:
           files: |
             ui/dist/pb-mapper-macos-${{ matrix.arch }}.dmg
 
-  # The app updates itself only from a release whose manifest this key signs,
-  # and installs only files whose size and SHA-256 the manifest lists. A
-  # manual run has no version tag to check the manifest against, so only a
-  # tag push publishes one.
-  publish-manifest:
-    if: github.event_name == 'push'
+  build-android:
+    if: ${{ !inputs.macos_verify_only }}
     runs-on: ubuntu-latest
-    needs: [build-windows, build-linux, build-macos]
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE: ${{ github.ref_name }}-ui
+    needs: [get-release]
     steps:
       - uses: actions/checkout@v4
+      - name: Check out pinned Rust dependencies
+        run: git submodule update --init --jobs 4 deps/portmapper deps/quinn deps/rcgen deps/stun-proto
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;36.0.0'
+      - name: Install Android NDK
+        run: sdkmanager --install 'ndk;28.2.13676358'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.9
+          channel: stable
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          targets: armv7-linux-androideabi,aarch64-linux-android,x86_64-linux-android
+      - name: Build fresh Android FFI libraries
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          cargo install cargo-ndk --version 4.1.2 --locked
+          cargo ndk -o ui/native/android -t armeabi-v7a -t arm64-v8a -t x86_64 \
+            build -p pb-mapper-ffi --release --locked
+      - name: Build APKs with the persistent signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64" || { echo '::error::ANDROID_KEYSTORE_BASE64 is not set'; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/pb-mapper-android.keystore"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$key"
+          unset ANDROID_KEYSTORE_BASE64
+          export PB_MAPPER_ANDROID_KEYSTORE="$key"
+          cd ui
+          flutter pub get --enforce-lockfile
+          flutter build apk --release --split-per-abi \
+            --target-platform android-arm,android-arm64,android-x64 --no-pub
+      - name: Verify APKs and upgrade compatibility
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(awk '/^version:/ { split($2, v, "+"); print v[1] }' ui/pubspec.yaml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [ "$GITHUB_EVENT_NAME" = push ]; then test "v$version" = "$GITHUB_REF_NAME"; fi
+          mkdir -p artifacts/android artifacts/previous
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          previous="$(python3 scripts/release/ui_release_manifest.py previous-android-release "$version" "$RUNNER_TEMP/releases.json")"
+          gh release download "$previous" --repo "$GITHUB_REPOSITORY" --dir artifacts/previous \
+            --pattern 'release-manifest.json' --pattern 'release-manifest.json.sig'
+          python3 scripts/release/ui_release_manifest.py verify artifacts/previous/release-manifest.json \
+            --public-key scripts/release/update_signing_key.pub.pem
+          python3 - "$previous" <<'PY'
+          import json, sys
+          from pathlib import Path
+          previous = json.loads(Path('artifacts/previous/release-manifest.json').read_text())
+          if previous['tag'] != sys.argv[1]:
+              raise SystemExit('Previous signed manifest does not match its release')
+          PY
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            apk="artifacts/android/pb-mapper-$abi.apk"
+            cp "ui/build/app/outputs/flutter-apk/app-$abi-release.apk" "$apk"
+            unzip -tq "$apk"
+            "$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
+              --strip-unneeded -o "$RUNNER_TEMP/ffi-stripped.so" "ui/native/android/$abi/libpb_mapper_ffi.so"
+            unzip -p "$apk" "lib/$abi/libpb_mapper_ffi.so" > "$RUNNER_TEMP/ffi-packaged.so"
+            cmp "$RUNNER_TEMP/ffi-stripped.so" "$RUNNER_TEMP/ffi-packaged.so"
+          done
+          python3 - "$version" <<'PY'
+          import json, sys
+          from pathlib import Path
+          Path('artifacts/check-manifest.json').write_text(json.dumps({'version': sys.argv[1], 'assets': []}))
+          PY
+          python3 scripts/release/ui_release_manifest.py add-android artifacts/check-manifest.json artifacts/android/*.apk \
+            --build-tools "$ANDROID_HOME/build-tools/36.0.0" --previous-manifest artifacts/previous/release-manifest.json
+      - name: Save verified Android packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: artifacts/
+          if-no-files-found: error
+
+  # Verify the same complete manifest in an Android-only manual run, but only
+  # a tag push may attach packages or a manifest to a release.
+  publish-manifest:
+    if: >-
+      ${{ always() && needs.build-android.result == 'success' &&
+          (inputs.android_verify_only ||
+           (github.event_name == 'push' && needs.build-windows.result == 'success' &&
+            needs.build-linux.result == 'success' && needs.build-macos.result == 'success')) }}
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-linux, build-macos, build-android]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;36.0.0'
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-release
+          path: release
+      - name: Select the source and UI release
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            source_tag="$GITHUB_REF_NAME"
+            release="$source_tag-ui"
+          else
+            version="$(awk '/^version:/ { split($2, v, "+"); print v[1] }' ui/pubspec.yaml)"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            source_tag="v$version"
+            # A pre-release branch may not have a UI release yet. Use the
+            # previous release's desktop files only for this unpublished check.
+            release="$(python3 -c 'import json; print(json.load(open("release/previous/release-manifest.json"))["tag"])')"
+            [[ "$release" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-ui$ ]]
+          fi
+          echo "SOURCE_TAG=$source_tag" >> "$GITHUB_ENV"
+          echo "RELEASE=$release" >> "$GITHUB_ENV"
       - name: Collect the release's packages
-        run: gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --dir release --pattern 'pb-mapper-*'
-      - name: Write the release manifest
-        run: python3 scripts/release/ui_release_manifest.py build release "$GITHUB_REF_NAME" "$GITHUB_SHA"
+        run: |
+          gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --dir release/desktop \
+            --pattern 'pb-mapper-linux*' --pattern 'pb-mapper-windows*' --pattern 'pb-mapper-macos*'
+      - name: Write the complete release manifest
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(release/android/*.apk)
+          test "${#apks[@]}" -eq 3
+          python3 scripts/release/ui_release_manifest.py build release/desktop "$SOURCE_TAG" "$GITHUB_SHA"
+          python3 scripts/release/ui_release_manifest.py add-android release/desktop/release-manifest.json "${apks[@]}" \
+            --build-tools "$ANDROID_HOME/build-tools/36.0.0" --previous-manifest release/previous/release-manifest.json
       - name: Sign the release manifest
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
@@ -386,7 +520,20 @@ jobs:
           KEY=$(mktemp)
           trap 'rm -f "$KEY"' EXIT
           printf '%s\n' "$UPDATE_SIGNING_KEY" > "$KEY"
-          python3 scripts/release/ui_release_manifest.py sign release/release-manifest.json --key "$KEY"
-          python3 scripts/release/ui_release_manifest.py verify release/release-manifest.json --public-key scripts/release/update_signing_key.pub.pem
+          python3 scripts/release/ui_release_manifest.py sign release/desktop/release-manifest.json --key "$KEY"
+          python3 scripts/release/ui_release_manifest.py verify release/desktop/release-manifest.json --public-key scripts/release/update_signing_key.pub.pem
+      - name: Attach Android packages without replacing existing assets
+        if: github.event_name == 'push'
+        run: python3 scripts/release/release_assets.py upload --repo "$GITHUB_REPOSITORY" --tag "$RELEASE" release/android/*.apk
       - name: Attach the manifest
-        run: gh release upload "$RELEASE" release/release-manifest.json release/release-manifest.json.sig --repo "$GITHUB_REPOSITORY" --clobber
+        if: github.event_name == 'push'
+        run: |
+          gh release upload "$RELEASE" release/desktop/release-manifest.json release/desktop/release-manifest.json.sig --repo "$GITHUB_REPOSITORY" --clobber
+          python3 scripts/release/release_assets.py verify --repo "$GITHUB_REPOSITORY" --tag "$RELEASE" release/desktop/release-manifest.json release/desktop/release-manifest.json.sig
+      - name: Save verified manifest
+        if: ${{ inputs.android_verify_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-manifest-verification
+          path: release/desktop/release-manifest.json*
+          if-no-files-found: error
