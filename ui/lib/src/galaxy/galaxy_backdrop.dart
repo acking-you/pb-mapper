@@ -56,6 +56,37 @@ void paintGround(Canvas canvas, Size size, bool dark) {
   );
 }
 
+/// One canvas owns its backdrop, including an in-flight rasterization.
+class BackdropCache {
+  Backdrop? _current;
+  bool _enabled = false;
+
+  set enabled(bool enabled) {
+    _enabled = enabled;
+    if (!enabled) dispose();
+  }
+
+  Backdrop? of(Size size, bool dark, double ratio, VoidCallback ready) {
+    if (!_enabled) return null;
+    final current = _current;
+    if (current != null &&
+        current.size == size &&
+        current.dark == dark &&
+        current.ratio == ratio) {
+      return current.._ready = ready;
+    }
+    dispose();
+    final next = _current = Backdrop._(size, dark, ratio).._ready = ready;
+    next._rendered = next._render();
+    return next;
+  }
+
+  void dispose() {
+    _current?._dispose();
+    _current = null;
+  }
+}
+
 /// The backdrop image for one size and theme, rendered once and drawn as an
 /// image every frame after: the nebula's six octaves of noise per pixel are
 /// far too dear to run sixty times a second.
@@ -68,28 +99,12 @@ class Backdrop {
 
   ui.Image? _image;
   bool _disposed = false;
-
-  /// Told when the image arrives: the page that asked for it last, since one
-  /// render may outlive the page that started it.
   VoidCallback? _ready;
+  late final Future<void> _rendered;
 
-  static Backdrop? _current;
-
-  /// The backdrop for this size and theme, starting its render if new;
-  /// [ready] runs when the image arrives.
-  static Backdrop of(Size size, bool dark, double ratio, VoidCallback ready) {
-    final current = _current;
-    if (current != null &&
-        current.size == size &&
-        current.dark == dark &&
-        current.ratio == ratio) {
-      return current.._ready = ready;
-    }
-    current?._dispose();
-    final next = _current = Backdrop._(size, dark, ratio).._ready = ready;
-    next._render();
-    return next;
-  }
+  /// Allows tests to wait for a pending render after its canvas is hidden.
+  @visibleForTesting
+  Future<void> get debugRendered => _rendered;
 
   Future<void> _render() async {
     final program = await _program;
@@ -100,10 +115,11 @@ class Backdrop {
     final height = math.max(1, (size.height * scale).round());
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
+    ui.FragmentShader? shader;
     canvas.scale(scale);
     paintGround(canvas, size, dark);
     if (program != null) {
-      final shader = program.fragmentShader()
+      shader = program.fragmentShader()
         ..setFloat(0, size.width)
         ..setFloat(1, size.height)
         ..setFloat(2, 17.0)
@@ -138,6 +154,7 @@ class Backdrop {
       // No rasteriser (tests): the ground is painted live instead.
     } finally {
       picture.dispose();
+      shader?.dispose();
     }
   }
 

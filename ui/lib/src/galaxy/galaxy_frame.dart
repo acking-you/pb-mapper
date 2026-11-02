@@ -5,7 +5,7 @@
 /// (`flutter test`), [computeFrameInDart], a step-for-step port of the Rust
 /// code, fills the same buffer.
 ///
-/// The geometry and both layouts follow POCOX's galaxy engine unchanged; see
+/// The geometry and layouts build on POCOX's galaxy engine; see
 /// `docs/ui-design.md`.
 library;
 
@@ -79,6 +79,12 @@ abstract final class GalaxyNative {
   static void reset() {
     _frame = null;
     _tried = false;
+  }
+
+  /// Keep the Dart fallback selected while a widget test mounts the canvas.
+  static void useDartForTesting() {
+    _frame = null;
+    _tried = true;
   }
 }
 
@@ -419,6 +425,21 @@ class _Camera {
       depth: depth,
     );
   }
+
+  /// Project the intersection of a segment with the near plane.
+  _Projected nearIntersection(Vec3 a, Vec3 b) {
+    a = a - eye;
+    b = b - eye;
+    final da = a.dot(forward), db = b.dot(forward);
+    final v = a.lerp(b, (0.2 - da) / (db - da));
+    final scale = focal / 0.2;
+    return (
+      x: cx + v.dot(right) * scale,
+      y: cy - v.dot(up) * scale,
+      scale: scale,
+      depth: 0.2,
+    );
+  }
 }
 
 class _Out {
@@ -548,8 +569,19 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
   List<List<(double, double)>> runs(int steps, Vec3 Function(int) point) {
     final runs = <List<(double, double)>>[];
     var open = false;
+    Vec3? previous;
+    var previousVisible = false;
     for (var i = 0; i <= steps; i++) {
-      final p = camera.at(point(i));
+      final world = point(i);
+      final p = camera.at(world);
+      if (previous != null && previousVisible != (p != null)) {
+        final edge = camera.nearIntersection(previous, world);
+        if (!open) {
+          runs.add([]);
+          open = true;
+        }
+        runs.last.add((edge.x, edge.y));
+      }
       if (p == null) {
         open = false;
       } else if (open) {
@@ -558,6 +590,8 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
         runs.add([(p.x, p.y)]);
         open = true;
       }
+      previous = world;
+      previousVisible = p != null;
     }
     return runs;
   }
@@ -683,6 +717,20 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
     for (final ring in rings) {
       List<(double, double)>? run;
       bool? behindRun;
+      Vec3? previous;
+      var previousVisible = false;
+      void append(_Projected p) {
+        final behind = p.depth > core.depth;
+        if (run == null || behind != behindRun) {
+          final prior = run?.last;
+          run = [?prior, (p.x, p.y)];
+          (behind ? back : front).add(run!);
+          behindRun = behind;
+        } else {
+          run!.add((p.x, p.y));
+        }
+      }
+
       for (var i = 0; i <= 96; i++) {
         final a = i / 96 * math.pi * 2;
         final local = tiltAround(
@@ -690,20 +738,18 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
           ring.tiltAxis,
           ring.tilt,
         );
-        final p = camera.at(system.position + local);
+        final world = system.position + local;
+        final p = camera.at(world);
+        if (previous != null && previousVisible != (p != null)) {
+          append(camera.nearIntersection(previous, world));
+        }
+        previous = world;
+        previousVisible = p != null;
         if (p == null) {
           run = null;
           continue;
         }
-        final behind = p.depth > core.depth;
-        if (run == null || behind != behindRun) {
-          final previous = run?.last;
-          run = [?previous, (p.x, p.y)];
-          (behind ? back : front).add(run);
-          behindRun = behind;
-        } else {
-          run.add((p.x, p.y));
-        }
+        append(p);
       }
     }
     for (final side in [back, front]) {
@@ -780,21 +826,24 @@ int computeFrameInDart(Float64List scene, Float64List frame, Float32List out) {
     final control = from.lerp(to, 0.5) + Vec3(0, rise, 0);
     Vec3 curve(double t) =>
         from * ((1 - t) * (1 - t)) + control * (2 * (1 - t) * t) + to * (t * t);
-    final points = <(double, double)>[
-      for (var i = 0; i <= 32; i++)
-        if (camera.at(curve(i / 32)) case final q?) (q.x, q.y),
-    ];
-    if (points.length < 2) continue;
-    o.push(index.toDouble());
-    o.points(points);
+    final visible = runs(
+      32,
+      (i) => curve(i / 32),
+    ).where((run) => run.length >= 2).toList();
+    if (visible.isEmpty) continue;
     final speed = direct ? 0.34 : 0.22;
-    o.points([
+    final particles = [
       for (var k = 0; k < 3; k++)
         if (camera.at(curve(still ? (k + 1) / 4 : (time * speed + k / 3) % 1.0))
             case final q?)
           (q.x, q.y),
-    ]);
-    drawnLinks++;
+    ];
+    for (final (i, run) in visible.indexed) {
+      o.push(index.toDouble());
+      o.points(run);
+      o.points(i + 1 == visible.length ? particles : const []);
+      drawnLinks++;
+    }
   }
   o.fill(linkCount, drawnLinks.toDouble());
 

@@ -19,8 +19,8 @@
 //! picture, and a parity test compares the two on the built library: change
 //! them together.
 //!
-//! The geometry follows POCOX's galaxy engine; the layouts and the arithmetic
-//! are kept identical to it, so the Dart mirror ported from there stays exact.
+//! The geometry builds on POCOX's galaxy engine. Near-plane clipping is
+//! mirrored in Dart, and the versioned buffer layout remains compatible.
 //!
 //! # Scene
 //!
@@ -66,8 +66,9 @@
 //!   and its planets: count, then per planet its index in the planet list, x,
 //!   y, radius, depth, opacity, ripple progress (-1 none) and behind its star
 //!   (0/1);
-//! - links: count, then per link its index in the scene's links, its curve's
-//!   points and its particles' points;
+//! - links: count, then per visible curve run its index in the scene's links,
+//!   its points and its particles' points. An index can repeat when a curve
+//!   crosses the near plane; particles are included on its final run;
 //! - labels: count, then per label the body (numbered as in the frame), strong
 //!   (0/1), x, y.
 mod scratch;
@@ -200,6 +201,21 @@ impl Camera {
             depth,
         })
     }
+
+    /// Project where a segment crossing the camera's near plane enters it.
+    fn near_intersection(&self, a: V3, b: V3) -> Projected {
+        let a = a.sub(self.eye);
+        let b = b.sub(self.eye);
+        let (da, db) = (a.dot(self.forward), b.dot(self.forward));
+        let v = a.lerp(b, (0.2 - da) / (db - da));
+        let scale = self.focal / 0.2;
+        Projected {
+            x: self.cx + v.dot(self.right) * scale,
+            y: self.cy - v.dot(self.up) * scale,
+            scale,
+            depth: 0.2,
+        }
+    }
 }
 
 /// One system's star: this computer, or the relay server.
@@ -255,11 +271,40 @@ struct StarLayer {
 /// The decoded scene (its layout is in the crate docs). The star coordinates
 /// stay in the caller's buffer.
 struct Scene<'a> {
+    systems: &'a [System],
+    planets: &'a [Planet],
+    links: &'a [Link],
+    layers: &'a [StarLayer],
+    stars: &'a [f64],
+}
+
+/// Decoding storage reused on each rendering thread. Nested star buckets are
+/// kept across frames too; the caller's star coordinates are never retained.
+#[derive(Default)]
+struct DecodedScene {
     systems: Vec<System>,
     planets: Vec<Planet>,
     links: Vec<Link>,
     layers: Vec<StarLayer>,
-    stars: &'a [f64],
+}
+
+impl DecodedScene {
+    fn trim(&mut self) {
+        let bytes = self.systems.capacity() * std::mem::size_of::<System>()
+            + self.planets.capacity() * std::mem::size_of::<Planet>()
+            + self.links.capacity() * std::mem::size_of::<Link>()
+            + self.layers.capacity() * std::mem::size_of::<StarLayer>()
+            + self
+                .layers
+                .iter()
+                .map(|layer| {
+                    layer.buckets.capacity() * std::mem::size_of::<(f64, std::ops::Range<usize>)>()
+                })
+                .sum::<usize>();
+        if bytes > 1 << 20 {
+            *self = Self::default();
+        }
+    }
 }
 
 /// A live tunnel: from a planet to a body.
@@ -296,7 +341,16 @@ impl<'a> Fields<'a> {
 
 impl<'a> Scene<'a> {
     /// Decodes `raw`, or nothing when it is malformed.
-    fn decode(raw: &'a [f64]) -> Option<Self> {
+    fn decode(raw: &'a [f64], storage: &'a mut DecodedScene) -> Option<Self> {
+        let DecodedScene {
+            systems,
+            planets,
+            links,
+            layers,
+        } = storage;
+        systems.clear();
+        planets.clear();
+        links.clear();
         if raw.len() < 5 || raw[0] != VERSION {
             return None;
         }
@@ -304,7 +358,6 @@ impl<'a> Scene<'a> {
         let (n_systems, n_planets) = (count(raw[1], limit)?, count(raw[2], limit)?);
         let (n_links, n_layers) = (count(raw[3], limit)?, count(raw[4], limit)?);
         let mut fields = Fields { raw, at: 5 };
-        let mut systems = Vec::with_capacity(n_systems);
         for _ in 0..n_systems {
             let f = fields.take(SYSTEM_FIELDS)?;
             systems.push(System {
@@ -316,7 +369,6 @@ impl<'a> Scene<'a> {
                 label: (f[7], f[8]),
             });
         }
-        let mut planets = Vec::with_capacity(n_planets);
         for _ in 0..n_planets {
             let f = fields.take(PLANET_FIELDS)?;
             planets.push(Planet {
@@ -337,7 +389,6 @@ impl<'a> Scene<'a> {
         if systems.iter().any(|s| s.first + s.count > n_planets) {
             return None;
         }
-        let mut links = Vec::with_capacity(n_links);
         for _ in 0..n_links {
             let f = fields.take(3)?;
             links.push(Link {
@@ -346,25 +397,31 @@ impl<'a> Scene<'a> {
                 direct: f[2] != 0.0,
             });
         }
-        let mut layers = Vec::with_capacity(n_layers);
-        for _ in 0..n_layers {
+        for index in 0..n_layers {
             let head = fields.take(2)?;
             let (parallax, n_buckets) = (head[0], count(head[1], limit)?);
-            let mut buckets = Vec::with_capacity(n_buckets);
+            if index == layers.len() {
+                layers.push(StarLayer {
+                    parallax,
+                    buckets: Vec::new(),
+                });
+            }
+            let layer = &mut layers[index];
+            layer.parallax = parallax;
+            layer.buckets.clear();
             for _ in 0..n_buckets {
                 let bucket = fields.take(2)?;
                 let points = count(bucket[1], limit)?;
                 let start = fields.at;
                 fields.take(points.checked_mul(2)?)?;
-                buckets.push((bucket[0], start..fields.at));
+                layer.buckets.push((bucket[0], start..fields.at));
             }
-            layers.push(StarLayer { parallax, buckets });
         }
         Some(Self {
             systems,
             planets,
             links,
-            layers,
+            layers: &layers[..n_layers],
             stars: raw,
         })
     }
@@ -482,16 +539,23 @@ impl<'a> Out<'a> {
 /// its temporaries live in a thread-local scratch that is reused across frames.
 pub fn compute(scene: &[f64], frame: &[f64], out: &mut [f32]) -> i64 {
     catch_unwind(AssertUnwindSafe(|| {
-        let (Some(scene), Some(frame)) = (Scene::decode(scene), Frame::decode(frame)) else {
+        let Some(frame) = Frame::decode(frame) else {
             return -1;
         };
-        let mut writer = Out::new(out);
-        self::frame(&scene, &frame, &mut writer);
-        if writer.fits() {
-            writer.len() as i64
-        } else {
-            -(writer.len() as i64)
+        thread_local! {
+            static DECODED: std::cell::RefCell<DecodedScene> = std::cell::RefCell::new(DecodedScene::default());
         }
+        DECODED.with_borrow_mut(|storage| {
+            let result = if let Some(scene) = Scene::decode(scene, storage) {
+                let mut writer = Out::new(out);
+                self::frame(&scene, &frame, &mut writer);
+                if writer.fits() { writer.len() as i64 } else { -(writer.len() as i64) }
+            } else {
+                -1
+            };
+            storage.trim();
+            result
+        })
     }))
     .unwrap_or(-1)
 }
@@ -538,8 +602,24 @@ fn extent(scene: &Scene, system: &System) -> f64 {
 fn runs(camera: &Camera, steps: usize, point: impl Fn(usize) -> V3, out: &mut Out) {
     let total = out.hole();
     let (mut runs, mut count, mut points) = (0, None, 0);
+    let mut previous: Option<(V3, bool)> = None;
     for i in 0..=steps {
-        match camera.at(point(i)) {
+        let world = point(i);
+        let projected = camera.at(world);
+        if let Some((prior, visible)) = previous
+            && visible != projected.is_some()
+        {
+            let p = camera.near_intersection(prior, world);
+            if count.is_none() {
+                count = Some(out.hole());
+                points = 0;
+                runs += 1;
+            }
+            out.push(p.x);
+            out.push(p.y);
+            points += 1;
+        }
+        match projected {
             None => {
                 if let Some(at) = count.take() {
                     out.fill(at, points as f64);
@@ -556,11 +636,36 @@ fn runs(camera: &Camera, steps: usize, point: impl Fn(usize) -> V3, out: &mut Ou
                 points += 1;
             }
         }
+        previous = Some((world, projected.is_some()));
     }
     if let Some(at) = count {
         out.fill(at, points as f64);
     }
     out.fill(total, runs as f64);
+}
+
+fn orbit_point(
+    p: Projected,
+    core_depth: f64,
+    back: &mut scratch::Runs,
+    front: &mut scratch::Runs,
+    run: &mut Option<(bool, usize)>,
+) {
+    let behind = p.depth > core_depth;
+    match *run {
+        Some((side, at)) if side == behind => {
+            let list = if side { &mut *back } else { &mut *front };
+            list.push(at, (p.x, p.y));
+        }
+        _ => {
+            let previous = run.and_then(|(side, at)| {
+                let list = if side { &*back } else { &*front };
+                list.last(at)
+            });
+            let list = if behind { &mut *back } else { &mut *front };
+            *run = Some((behind, list.begin(previous, (p.x, p.y))));
+        }
+    }
 }
 
 fn plane(scene: &Scene, camera: &Camera, out: &mut Out, circle: &[(f64, f64); 97]) {
@@ -572,7 +677,7 @@ fn plane(scene: &Scene, camera: &Camera, out: &mut Out, circle: &[(f64, f64); 97
         return;
     }
     let mut reach: f64 = 3.0;
-    for system in &scene.systems {
+    for system in scene.systems {
         reach = reach.max(system.position.length() + extent(scene, system));
     }
     // A soft glow over the plane.
@@ -710,32 +815,32 @@ fn systems(scene: &Scene, frame: &Frame, camera: &Camera, out: &mut Out, scratch
                 continue;
             }
             let mut run: Option<(bool, usize)> = None;
+            let mut previous: Option<(V3, bool)> = None;
             for &(x, z) in circle.iter() {
                 let local = tilt_around(
                     V3::new(x * ring.radius, 0.0, z * ring.radius),
                     ring.tilt_axis,
                     ring.tilt,
                 );
-                let Some(p) = camera.at(system.position.add(local)) else {
+                let world = system.position.add(local);
+                let projected = camera.at(world);
+                if let Some((prior, visible)) = previous
+                    && visible != projected.is_some()
+                {
+                    orbit_point(
+                        camera.near_intersection(prior, world),
+                        core.depth,
+                        back,
+                        front,
+                        &mut run,
+                    );
+                }
+                previous = Some((world, projected.is_some()));
+                let Some(p) = projected else {
                     run = None;
                     continue;
                 };
-                let behind = p.depth > core.depth;
-                match run {
-                    Some((side, at)) if side == behind => {
-                        let list = if side { &mut *back } else { &mut *front };
-                        list.push(at, (p.x, p.y));
-                    }
-                    _ => {
-                        let previous = run.and_then(|(side, at)| {
-                            let list = if side { &*back } else { &*front };
-                            list.last(at)
-                        });
-                        let list = if behind { &mut *back } else { &mut *front };
-                        let at = list.begin(previous, (p.x, p.y));
-                        run = Some((behind, at));
-                    }
-                }
+                orbit_point(p, core.depth, back, front, &mut run);
             }
         }
         back.write(out);
@@ -849,19 +954,41 @@ fn links(scene: &Scene, frame: &Frame, camera: &Camera, out: &mut Out) {
                 .add(control.mul(2.0 * (1.0 - t) * t))
                 .add(to.mul(t * t))
         };
-        let mut points = [(0.0, 0.0); 33];
-        let mut len = 0;
+        // A near-plane crossing ends one visible run instead of joining it to
+        // a later one across the camera. All storage is bounded on the stack.
+        let mut points = [(0.0, 0.0); 65];
+        let mut ranges = [(0, 0); 33];
+        let (mut len, mut start, mut runs) = (0, 0, 0);
+        let mut previous: Option<(V3, bool)> = None;
         for i in 0..=32 {
-            if let Some(p) = camera.at(at(i as f64 / 32.0)) {
+            let world = at(i as f64 / 32.0);
+            let projected = camera.at(world);
+            if let Some((prior, visible)) = previous
+                && visible != projected.is_some()
+            {
+                let p = camera.near_intersection(prior, world);
                 points[len] = (p.x, p.y);
                 len += 1;
             }
+            if let Some(p) = projected {
+                points[len] = (p.x, p.y);
+                len += 1;
+            } else if len > start {
+                if len - start >= 2 {
+                    ranges[runs] = (start, len);
+                    runs += 1;
+                }
+                start = len;
+            }
+            previous = Some((world, projected.is_some()));
         }
-        if len < 2 {
+        if len - start >= 2 {
+            ranges[runs] = (start, len);
+            runs += 1;
+        }
+        if runs == 0 {
             continue;
         }
-        out.push(index as f64);
-        out.points(&points[..len]);
         let speed = if link.direct { 0.34 } else { 0.22 };
         let mut particles = [(0.0, 0.0); 3];
         let mut len = 0;
@@ -876,15 +1003,23 @@ fn links(scene: &Scene, frame: &Frame, camera: &Camera, out: &mut Out) {
                 len += 1;
             }
         }
-        out.points(&particles[..len]);
-        n += 1;
+        for (i, &(start, end)) in ranges[..runs].iter().enumerate() {
+            out.push(index as f64);
+            out.points(&points[start..end]);
+            out.points(if i + 1 == runs {
+                &particles[..len]
+            } else {
+                &[]
+            });
+            n += 1;
+        }
     }
     out.fill(count, n as f64);
 }
 
 fn stars(scene: &Scene, frame: &Frame, out: &mut Out) {
     let (w, h) = (frame.width, frame.height);
-    for layer in &scene.layers {
+    for layer in scene.layers {
         let shift_x = (frame.yaw / (PI * 2.0)) * w * layer.parallax * 2.2;
         let shift_y = (frame.tilt - 0.52) * h * layer.parallax * 0.6;
         for (b, (phase, range)) in layer.buckets.iter().enumerate() {

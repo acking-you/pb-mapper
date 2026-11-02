@@ -59,6 +59,7 @@ Float64List _frame({
   double time = 3,
   bool still = false,
   int selected = -1,
+  Vec3 target = Vec3.zero,
 }) {
   final frame = Float64List(galaxyFrameFields);
   encodeFrame(
@@ -67,7 +68,7 @@ Float64List _frame({
     yaw: yaw,
     tilt: tilt,
     distance: distance,
-    target: Vec3.zero,
+    target: target,
     time: time,
     still: still,
     selected: selected,
@@ -220,7 +221,7 @@ void main() {
       GalaxyNative.use(DynamicLibrary.open(library!));
       addTearDown(GalaxyNative.reset);
       final random = math.Random(7);
-      for (var i = 0; i < 16; i++) {
+      for (var i = 0; i < 32; i++) {
         final scene = _encode(
           _scene(shares: random.nextInt(14), remote: random.nextInt(20)),
           appeared: {'share:share-0': 2.5},
@@ -228,7 +229,14 @@ void main() {
         final frame = _frame(
           yaw: random.nextDouble() * math.pi * 2,
           tilt: 0.2 + random.nextDouble(),
-          distance: 3 + random.nextDouble() * 8,
+          distance: i < 16 ? 3 + random.nextDouble() * 8 : 2.2,
+          target: i < 16
+              ? Vec3.zero
+              : Vec3(
+                  random.nextDouble() * 8 - 4,
+                  0,
+                  random.nextDouble() * 8 - 4,
+                ),
           time: random.nextDouble() * 60,
           still: i % 5 == 0,
           selected: i % 3 == 0 ? random.nextInt(4) : -1,

@@ -234,8 +234,8 @@ Per-frame geometry — projection, every orbit split into the runs behind and in
 front of its star, planet positions with their entrances and ripples, the arcs
 and their particles, the background stars, depth order and label placement —
 is computed in Rust by `pb-mapper-galaxy` (`ui/native/pb_mapper_galaxy`), a
-dependency-free crate whose arithmetic and buffer layouts are POCOX's galaxy
-engine unchanged.
+dependency-free crate based on POCOX's galaxy engine. Rust and Dart implement
+the same near-plane clipping and keep their versioned buffer layouts in step.
 
 `pb-mapper-ffi` exports it as one additive symbol:
 
@@ -257,19 +257,29 @@ SDK crates changed.
 
 Where the library is not loaded (`flutter test`), `computeFrameInDart`
 (`galaxy/galaxy_frame.dart`), a step-for-step port, fills the same buffer.
-`test/galaxy_test.dart` compares the two on the built library over sixteen
-random camera, clock and selection combinations, within 1e-3 relative; keep
+`test/galaxy_test.dart` compares the two on the built library over normal and
+close-up camera, clock and selection combinations, within 1e-3 relative; keep
 the crate and the port in step and keep that test passing.
 
 `cargo run -p pb-mapper-galaxy --example galaxy_bench --release` times the
-call: about 11 µs per frame (p50) for a typical scene and 20 µs for a busy one
-on a desktop CPU.
+geometry call for typical and busy scenes.
 
-The painter only issues draw calls. The nebula behind the disk
-(`shaders/nebula.frag`) is rendered once per size and theme into an image.
-POCOX additionally draws glows and spheres from a cached sprite atlas; at
-pb-mapper's scene sizes the vector spheres are cheap enough, and the atlas is
-the next step if raster time ever shows up in a profile.
+Geometry clips guide, orbit and tunnel segments against the camera's near plane;
+the painter clips their projections to the viewport
+and submits guide and orbit lines in batches. Each canvas owns a backdrop
+image, cached per size and theme, and a bounded sprite atlas for the spheres,
+glows and shadows. The atlas uses the original vector layers on its first
+frame and where an image cannot be made; cached layers keep the same ordering
+and per-layer opacity. Oversized plane glows fall back to vectors. Hidden
+canvases release their images, label layouts and native buffers; pending
+backdrop images are discarded if the canvas has gone away.
+
+Motion and camera easing resume for interaction or scene changes, then stop
+once the finite transitions and camera have settled. Background applications
+and disabled `TickerMode` pause the galaxy; reduced-motion users still get the
+delayed return to the overview. The isolated profile-mode renderer at
+`ui/tool/galaxy_resource_probe.dart` reports idle and selection frame timing,
+CPU and memory without starting tunnels or reading settings.
 
 ## Tests and previews
 
@@ -283,6 +293,9 @@ the next step if raster time ever shows up in a profile.
 - `test/store_test.dart`: the store's reads, edits and rollback.
 - `test/galaxy_test.dart`: the scene, the Dart frame, Rust parity, and keyboard
   selection.
+- `test/planet_atlas_test.dart`, `test/galaxy_lines_test.dart` and
+  `test/galaxy_render_lifecycle_test.dart`: cached/vector image parity, line
+  clipping, resource bounds, backgrounding, interaction and reduced motion.
 
 To look at the design without a device, render the pages with their real
 typefaces to PNGs:
