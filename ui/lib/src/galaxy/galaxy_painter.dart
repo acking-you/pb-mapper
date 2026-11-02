@@ -11,8 +11,10 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_backdrop.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_frame.dart';
+import 'package:pb_mapper_ui/src/galaxy/galaxy_lines.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_model.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_view.dart';
+import 'package:pb_mapper_ui/src/galaxy/planet_atlas.dart';
 import 'package:pb_mapper_ui/src/galaxy/planet_glyph.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
@@ -57,24 +59,32 @@ class GalaxyPalette {
 
   /// Equal palettes paint alike.
   bool same(GalaxyPalette o) =>
-      dark == o.dark && ratio == o.ratio && scheme == o.scheme;
+      dark == o.dark &&
+      ratio == o.ratio &&
+      scheme == o.scheme &&
+      text == o.text;
 }
 
 /// Laid-out labels, reused across frames.
 class LabelCache {
-  final Map<String, TextPainter> _painters = {};
+  final Map<(String, TextStyle), TextPainter> _painters = {};
+  final Set<(String, TextStyle)> _used = {};
+
+  void beginFrame() => _used.clear();
+
+  void endFrame() {
+    _painters.removeWhere((key, painter) {
+      if (_used.contains(key)) return false;
+      painter.dispose();
+      return true;
+    });
+  }
 
   TextPainter of(String text, TextStyle style) {
-    final key =
-        '${style.fontSize}|${style.fontWeight?.value}|${style.color?.toARGB32()}|$text';
+    final key = (text, style);
+    _used.add(key);
     final cached = _painters[key];
     if (cached != null) return cached;
-    if (_painters.length > 300) {
-      for (final painter in _painters.values) {
-        painter.dispose();
-      }
-      _painters.clear();
-    }
     return _painters[key] = TextPainter(
       text: TextSpan(text: text, style: style),
       textDirection: TextDirection.ltr,
@@ -88,6 +98,7 @@ class LabelCache {
       painter.dispose();
     }
     _painters.clear();
+    _used.clear();
   }
 }
 
@@ -187,6 +198,8 @@ class GalaxyPainter extends CustomPainter {
     required this.labels,
     required this.geometry,
     required this.starfield,
+    required this.backdrop,
+    required this.planets,
     required this.onBackdrop,
   }) : super(repaint: view);
 
@@ -195,6 +208,9 @@ class GalaxyPainter extends CustomPainter {
   final LabelCache labels;
   final GalaxyGeometry geometry;
   final Starfield starfield;
+  final BackdropCache backdrop;
+  final PlanetAtlas planets;
+  final GalaxyLines lines = GalaxyLines();
 
   /// Called when the backdrop image arrives.
   final VoidCallback onBackdrop;
@@ -202,6 +218,9 @@ class GalaxyPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (size.isEmpty) return;
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+    labels.beginFrame();
     if (view.still) view.stopMotion();
     final camera = view.camera;
     final styles = GalaxyLabelStyles(palette);
@@ -225,18 +244,34 @@ class GalaxyPainter extends CustomPainter {
       hovered: bodies.indexOf(view.hovered),
       focused: bodies.indexOf(view.focused),
     );
-    Backdrop.of(size, palette.dark, palette.ratio, onBackdrop).paint(canvas);
+    final sky = backdrop.of(size, palette.dark, palette.ratio, onBackdrop);
+    if (sky == null) {
+      paintGround(canvas, size, palette.dark);
+    } else {
+      sky.paint(canvas);
+    }
     final values = geometry.frames.compute(scene);
-    if (values == null) return;
+    if (values == null) {
+      labels.endFrame();
+      canvas.restore();
+      return;
+    }
     final reader = FrameReader(values);
     starfield.paint(canvas, reader, dark: palette.dark);
     final frame = _Frame(this, canvas, reader, bodies, styles, size);
-    frame.plane();
-    frame.systems();
-    frame.links();
-    frame.ghosts();
-    frame.labels();
-    view.hits = frame.hits;
+    planets.begin(canvas, ratio: palette.ratio);
+    try {
+      frame.plane();
+      frame.systems();
+      frame.links();
+      frame.ghosts();
+      frame.labels();
+      view.hits = frame.hits;
+    } finally {
+      planets.end();
+      labels.endFrame();
+      canvas.restore();
+    }
   }
 
   @override
@@ -248,7 +283,7 @@ class GalaxyPainter extends CustomPainter {
 class _Frame {
   _Frame(
     this.painter,
-    this.canvas,
+    this._canvas,
     this.reader,
     this.bodies,
     this.styles,
@@ -256,7 +291,7 @@ class _Frame {
   );
 
   final GalaxyPainter painter;
-  final Canvas canvas;
+  final Canvas _canvas;
   final FrameReader reader;
   final GalaxyBodies bodies;
   final GalaxyLabelStyles styles;
@@ -266,17 +301,44 @@ class _Frame {
   GalaxyView get view => painter.view;
   GalaxyPalette get palette => painter.palette;
   bool get dark => palette.dark;
+  PlanetAtlas get planets => painter.planets;
+  GalaxyLines get lines => painter.lines;
+  Rect get lineViewport => (Offset.zero & size).inflate(3);
+
+  /// Preserve drawing order when switching from queued sprites to vectors.
+  Canvas get canvas {
+    planets.flush();
+    return _canvas;
+  }
+
+  bool _visible(Offset point, double margin) =>
+      (Offset.zero & size).inflate(margin).contains(point);
+
+  void _glow(Offset center, double radius, double sigma, Color color) {
+    if (_visible(center, radius + sigma * 3)) {
+      planets.softDisc(center, radius, sigma, color);
+    }
+  }
 
   /// Runs of points (count, then each run's points) as views of the frame.
   List<Float32List> _runs() => [
     for (var n = reader.count(); n > 0; n--) reader.points(reader.count()),
   ];
 
-  static Path _path(Float32List run, [Path? into]) {
-    final path = into ?? Path();
-    path.moveTo(run[0], run[1]);
-    for (var i = 2; i < run.length; i += 2) {
-      path.lineTo(run[i], run[i + 1]);
+  /// Preserve contiguous curves while dropping their offscreen segments.
+  Path _clippedPath(Float32List run) {
+    lines.clear();
+    lines.addRun(run, lineViewport.inflate(8));
+    final points = lines.points;
+    final path = Path();
+    double? lastX, lastY;
+    for (var i = 0; i < points.length; i += 4) {
+      if (points[i] != lastX || points[i + 1] != lastY) {
+        path.moveTo(points[i], points[i + 1]);
+      }
+      lastX = points[i + 2];
+      lastY = points[i + 3];
+      path.lineTo(lastX, lastY);
     }
     return path;
   }
@@ -292,22 +354,21 @@ class _Frame {
     final blur = reader.next();
     // A soft glow over the plane, with no edge to it.
     if (glow) {
-      canvas.drawOval(
+      planets.softOval(
         oval,
-        Paint()
-          ..color = palette.ink.withValues(alpha: dark ? 0.035 : 0.03)
-          ..maskFilter = MaskFilter.blur(BlurStyle.normal, math.max(1, blur)),
+        math.max(1, blur),
+        palette.ink.withValues(alpha: dark ? 0.035 : 0.03),
       );
     }
     // Faint guide circles give the plane its perspective, fading outwards.
     for (var guides = reader.count(); guides > 0; guides--) {
       final fade = reader.next();
-      final path = Path();
+      lines.clear();
       for (final run in _runs()) {
-        if (run.isNotEmpty) _path(run, path);
+        lines.addRun(run, lineViewport);
       }
-      canvas.drawPath(
-        path,
+      lines.draw(
+        canvas,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 0.8
@@ -356,10 +417,11 @@ class _Frame {
       ..style = PaintingStyle.stroke
       ..strokeWidth = dark ? 0.9 : 0.8
       ..color = palette.ink.withValues(alpha: (dark ? 0.16 : 0.22) * opacity);
+    lines.clear();
     for (final run in runs) {
-      if (run.length < 4) continue;
-      canvas.drawPath(_path(run), paint);
+      lines.addRun(run, lineViewport);
     }
+    lines.draw(canvas, paint);
   }
 
   void _core(
@@ -369,6 +431,7 @@ class _Frame {
     double depth,
     double opacity,
   ) {
+    if (!_visible(c, radius * 18 + 8)) return;
     final online = system.online;
     final color = system.home
         ? palette.signal
@@ -377,8 +440,8 @@ class _Frame {
         : palette.scheme.outline;
     if (dark && !online) {
       // An unreachable relay is a dim ember: no light of its own.
-      paintSphere(
-        canvas,
+      paintSphereLayers(
+        planets,
         c,
         radius,
         color,
@@ -388,8 +451,7 @@ class _Frame {
       );
     } else if (dark) {
       for (final (scale, alpha) in [(7.0, 0.06), (3.4, 0.16), (1.8, 0.32)]) {
-        softDisc(
-          canvas,
+        _glow(
           c,
           radius * scale,
           radius * scale * 0.5,
@@ -412,14 +474,20 @@ class _Frame {
           ).createShader(Rect.fromCircle(center: c, radius: radius)),
       );
     } else {
-      softDisc(
-        canvas,
+      _glow(
         c,
         radius * 2.6,
         radius * 1.4,
         color.withValues(alpha: 0.14 * opacity),
       );
-      paintSphere(canvas, c, radius, color, dark: false, opacity: opacity);
+      paintSphereLayers(
+        planets,
+        c,
+        radius,
+        color,
+        dark: false,
+        opacity: opacity,
+      );
     }
     _focusRings(system.id, c, radius);
     hits.add(Hit(system.id, c, radius * 1.6, depth));
@@ -459,6 +527,7 @@ class _Frame {
   ) {
     final planet = body.planet;
     final (c, radius, opacity) = (body.center, body.radius, body.opacity);
+    if (!_visible(c, radius * 5 + 10)) return;
     final color = palette.planet(planet);
     // A ripple crosses the ring when the state changes.
     final t = body.ripple;
@@ -472,8 +541,8 @@ class _Frame {
           ..color = color.withValues(alpha: (1 - t) * 0.7 * opacity),
       );
     }
-    paintSphere(
-      canvas,
+    paintSphereLayers(
+      planets,
       c,
       radius,
       color,
@@ -535,7 +604,7 @@ class _Frame {
         Offset(curve[0], curve[1]),
         Offset(curve[last], curve[last + 1]),
       ).inflate(1);
-      final path = _path(curve);
+      final path = _clippedPath(curve);
       if (direct) {
         // A path of its own: lit end to end, with a glow under it.
         canvas
@@ -545,8 +614,7 @@ class _Frame {
               ..style = PaintingStyle.stroke
               ..strokeWidth = 5
               ..strokeCap = StrokeCap.round
-              ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3)
-              ..color = light.withValues(alpha: dark ? 0.32 : 0.22),
+              ..color = light.withValues(alpha: dark ? 0.12 : 0.08),
           )
           ..drawPath(
             path,
@@ -574,8 +642,7 @@ class _Frame {
       }
       // Particles run along the tunnel: through the relay, or past it.
       for (var i = 0; i < particles.length; i += 2) {
-        softDisc(
-          canvas,
+        _glow(
           Offset(particles[i], particles[i + 1]),
           (dark ? 2.2 : 1.8) * (direct ? 1.2 : 1),
           dark ? 2.2 : 1,
@@ -586,15 +653,15 @@ class _Frame {
   }
 
   void ghosts() {
-    view.ghosts.removeWhere((g) => view.time - g.since > 1.0);
     if (view.ghosts.isEmpty) return;
     final projection = view.camera.project(size);
     for (final ghost in view.ghosts) {
       final p = projection.at(ghost.position);
       if (p == null) continue;
       final t = (view.time - ghost.since).clamp(0.0, 1.0);
-      paintSphere(
-        canvas,
+      if (!_visible(p.point, math.max(2.0, ghost.size * p.scale) * 7)) continue;
+      paintSphereLayers(
+        planets,
         p.point,
         math.max(2.0, ghost.size * p.scale) * (1 + t * 0.4),
         palette.scheme.outline,

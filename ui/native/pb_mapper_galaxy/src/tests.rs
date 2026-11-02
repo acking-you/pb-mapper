@@ -1,4 +1,7 @@
-use super::{VERSION, compute};
+use super::{
+    Camera, DecodedScene, Frame, Link, Out, Planet, Scene, System, V3, VERSION, compute, links,
+    runs,
+};
 
 /// This computer with two tunnels on one ring, the relay with one registered
 /// service, a second relay that is offline with nothing registered, a live
@@ -171,4 +174,130 @@ fn a_malformed_scene_or_frame_is_refused() {
         assert_eq!(run(bad, &frame(1.0), 1 << 16).0, -1);
     }
     assert_eq!(run(&good, &frame(1.0)[..12], 1 << 16).0, -1);
+}
+
+#[test]
+fn decoding_reuses_buffers_and_recovers_after_a_malformed_scene() {
+    let raw = scene();
+    let mut storage = DecodedScene::default();
+    assert!(Scene::decode(&raw, &mut storage).is_some());
+    let systems = storage.systems.as_ptr();
+    let planets = storage.planets.as_ptr();
+    let buckets = storage.layers[0].buckets.as_ptr();
+    assert!(Scene::decode(&raw, &mut storage).is_some());
+    assert_eq!(storage.systems.as_ptr(), systems);
+    assert_eq!(storage.planets.as_ptr(), planets);
+    assert_eq!(storage.layers[0].buckets.as_ptr(), buckets);
+    assert!(Scene::decode(&raw[..raw.len() - 1], &mut storage).is_none());
+    let decoded = Scene::decode(&raw, &mut storage).unwrap();
+    assert_eq!(
+        (
+            decoded.systems.len(),
+            decoded.planets.len(),
+            decoded.layers.len()
+        ),
+        (3, 3, 1)
+    );
+
+    // An exceptional scene must not retain more than the normal scratch cap.
+    storage
+        .systems
+        .reserve((1 << 20) / std::mem::size_of::<System>() + 1);
+    storage.trim();
+    assert_eq!(storage.systems.capacity(), 0);
+}
+
+#[test]
+fn lines_crossing_the_near_plane_are_clipped_into_separate_runs() {
+    let frame = Frame::decode(&frame(1.0)).unwrap();
+    let camera = Camera::new(&frame);
+    let depths = [0.1, 1.0, 0.1, 1.0];
+    let mut buffer = [0.0; 64];
+    let mut out = Out::new(&mut buffer);
+    runs(
+        &camera,
+        3,
+        |i| {
+            camera
+                .eye
+                .add(camera.forward.mul(depths[i]))
+                .add(camera.right.mul(i as f64 * 0.2))
+        },
+        &mut out,
+    );
+    let mut cursor = Cursor(&buffer, 0);
+    let segments = cursor.runs();
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].len(), 3);
+    assert_eq!(segments[1].len(), 2);
+    assert!(
+        segments
+            .iter()
+            .flatten()
+            .all(|(x, y)| x.is_finite() && y.is_finite())
+    );
+}
+
+#[test]
+fn tunnel_curve_does_not_join_visible_sections_across_the_camera() {
+    let systems = [
+        System {
+            position: V3::new(-5.0, 0.0, 0.0),
+            home: true,
+            online: true,
+            first: 0,
+            count: 1,
+            label: (0.0, 0.0),
+        },
+        System {
+            position: V3::new(5.0, 0.0, 0.0),
+            home: false,
+            online: true,
+            first: 1,
+            count: 0,
+            label: (0.0, 0.0),
+        },
+    ];
+    let planets = [Planet {
+        system: 0,
+        ring: 0,
+        radius: 0.0,
+        phase: 0.0,
+        period: 90.0,
+        size: 0.1,
+        tilt_axis: 0.0,
+        tilt: 0.0,
+        appeared: f64::NAN,
+        rippled: f64::NAN,
+        label: (0.0, 0.0),
+        strong: (0.0, 0.0),
+    }];
+    let connections = [Link {
+        from: 0,
+        to: 1,
+        direct: true,
+    }];
+    let scene = Scene {
+        systems: &systems,
+        planets: &planets,
+        links: &connections,
+        layers: &[],
+        stars: &[],
+    };
+    let frame = Frame::decode(&[
+        800.0, 600.0, 0.0, 1.3, 2.2, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, -1.0, -1.0,
+    ])
+    .unwrap();
+    let camera = Camera::new(&frame);
+    let mut buffer = [0.0; 1024];
+    let mut out = Out::new(&mut buffer);
+    links(&scene, &frame, &camera, &mut out);
+    let mut cursor = Cursor(&buffer, 0);
+    assert_eq!(cursor.next(), 2.0);
+    assert_eq!(cursor.next(), 0.0);
+    assert!(cursor.points().len() >= 2);
+    assert!(cursor.points().is_empty());
+    assert_eq!(cursor.next(), 0.0);
+    assert!(cursor.points().len() >= 2);
+    assert!(cursor.points().len() <= 3);
 }

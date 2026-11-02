@@ -74,6 +74,23 @@ class GalaxyView extends ChangeNotifier {
   /// having every body spiral out at once.
   bool get hasScene => scene.systems.isNotEmpty;
 
+  /// Transitions have finite lifetimes even when their bodies are offscreen.
+  bool get busy =>
+      !still &&
+      (appeared.isNotEmpty || rippled.isNotEmpty || ghosts.isNotEmpty);
+
+  void expireTransitions() {
+    if (still) {
+      stopMotion();
+      return;
+    }
+    final before = appeared.length + rippled.length + ghosts.length;
+    appeared.removeWhere((_, at) => time - at >= 1.6);
+    rippled.removeWhere((_, at) => time - at >= 1.4);
+    ghosts.removeWhere((ghost) => time - ghost.since >= 1);
+    if (before != appeared.length + rippled.length + ghosts.length) revision++;
+  }
+
   /// A still scene has no entrances, ripples or fading ghosts.
   void stopMotion() {
     if (appeared.isEmpty && rippled.isEmpty && ghosts.isEmpty) return;
@@ -87,6 +104,7 @@ class GalaxyView extends ChangeNotifier {
 
   /// Take [next] as the scene, noting what appeared, changed or left.
   void update(GalaxyScene next, {required bool first}) {
+    expireTransitions();
     final animate = !first && !still;
     final before = <String, ({String state, Vec3 at, double size})>{};
     for (final system in scene.systems) {
@@ -115,9 +133,6 @@ class GalaxyView extends ChangeNotifier {
         ghosts.add(Ghost(entry.value.at, entry.value.size, time));
       }
     }
-    // Entrances and ripples that finished long ago need not stay encoded.
-    appeared.removeWhere((_, at) => time - at > 3);
-    rippled.removeWhere((_, at) => time - at > 3);
     scene = next;
     if (selected != null &&
         next.systemOf(selected!) == null &&

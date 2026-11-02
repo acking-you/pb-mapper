@@ -77,9 +77,6 @@ class GalaxyCamera {
 
   static const double _defaultTilt = 0.52;
 
-  /// One turn every six minutes.
-  static const double driftSpeed = math.pi * 2 / 360;
-
   /// Fit [radius] world units of disk on a canvas of [size]: its width across,
   /// its foreshortened depth up and down, with room for the near side, which
   /// perspective enlarges.
@@ -119,8 +116,8 @@ class GalaxyCamera {
     goalDistance = (goalDistance / factor).clamp(2.2, fitDistance * 1.8);
   }
 
-  /// Advance by [dt] seconds; [drifting] turns the disk slowly.
-  void step(double dt, {required bool drifting}) {
+  /// Ease the camera and decay momentum from a drag.
+  void step(double dt) {
     final ease = 1 - math.exp(-dt * 3.2);
     tilt += (goalTilt - tilt) * ease;
     distance += (goalDistance - distance) * ease;
@@ -128,7 +125,6 @@ class GalaxyCamera {
     yaw += spin * dt;
     spin *= math.exp(-dt * 2.4);
     if (spin.abs() < 0.002) spin = 0;
-    if (drifting) yaw += driftSpeed * dt;
   }
 
   /// Whether it has arrived, to far below a pixel, and nothing turns it
