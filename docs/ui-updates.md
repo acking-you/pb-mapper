@@ -57,9 +57,9 @@ workspace/UI release version and pubspec build number for a real release;
 never reuse a published build. Flutter split APKs add ABI-specific offsets to
 the build number, so compare **effective** versionCodes in the APKs.
 Build 906 was consumed by the local repair; release 0.9.6 uses build 907, 0.9.7
-consumed 908 without shipping APKs, and 0.9.8 uses 909. The next distribution
-must use at least 910. The build counter is independent of the public
-version, as in proxy-everything.
+consumed 908 without shipping APKs, 0.9.8 uses 909 and 0.10.0 uses 910. The next
+distribution must use at least 911. The build counter is independent of the
+public version, as in proxy-everything.
 
 1. Rebuild the Android Rust library with `make build-pb-mapper-ffi-android`
    (Android NDK r28+ recommended). On Windows, `cargo ndk -o ui/native/android
@@ -75,7 +75,7 @@ version, as in proxy-everything.
    alignment. Pass the last locally signed release for upgrade comparison:
 
    ```sh
-   python scripts/release/android_package.py ui/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk --build-tools /path/to/Android/Sdk/build-tools/36.0.0 --version 0.9.8 --previous /path/to/previous/pb-mapper-arm64-v8a.apk
+   python scripts/release/android_package.py ui/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk --build-tools /path/to/Android/Sdk/build-tools/36.0.0 --version 0.10.0 --previous /path/to/previous/pb-mapper-arm64-v8a.apk
    ```
 
 4. Copy the verified APK into an ignored staging directory as
@@ -86,8 +86,8 @@ version, as in proxy-everything.
    `--clobber`, then run **Publish verified Android updates**:
 
    ```sh
-   gh release upload v0.9.8-ui release/pb-mapper-*.apk
-   gh workflow run publish-android.yml -f tag=v0.9.8 -f previous_release=v0.9.6-ui
+   gh release upload v0.10.0-ui release/pb-mapper-*.apk
+   gh workflow run publish-android.yml -f tag=v0.10.0 -f previous_release=v0.9.8-ui
    ```
 
    `previous_release` names the last fixed-key release; only v0.9.6, the first,
