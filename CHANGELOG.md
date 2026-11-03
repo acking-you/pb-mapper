@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.2] - 2026-11-03
+- Import a setup string directly from the clipboard during first-run setup. The relay address, credential, transport and keep-alive preference are staged until continuing, and invalid or unavailable clipboard contents leave existing edits intact.
+- Android packages keep the existing release signing certificate and advance the build number for upgrades. The CLI, SDK behavior and wire protocol are unchanged.
+
 ## [0.10.1] - 2026-11-03
 - Make the galaxy use less work while idle and keep running tunnels untouched: stop its ticker after interaction and transitions settle, pause hidden canvases, and reuse bounded backdrop, star, glow and label resources. A visible unfocused window keeps its background and continues to display state changes.
 - Keep the overview responsive in dense scenes with batched, viewport-clipped orbits, near-plane-clipped geometry and offscreen culling. Cached sphere layers preserve their vector appearance and transparency; Dart remains available when the native geometry library is unavailable.

@@ -1,7 +1,10 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/common/setup_string.dart';
 import 'package:pb_mapper_ui/src/pages/tunnel_editor.dart';
 import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
@@ -38,6 +41,10 @@ class _SetupFlowState extends State<SetupFlow> {
   final TextEditingController _address = TextEditingController();
   final TextEditingController _credential = TextEditingController();
   bool _busy = false;
+  bool _importing = false;
+  bool _imported = false;
+  bool _keepAlive = true;
+  RelayTransport _transport = RelayTransport.tcp;
   String? _addressError;
   String? _credentialError;
 
@@ -51,6 +58,7 @@ class _SetupFlowState extends State<SetupFlow> {
       _address.text = config.serverAddress;
     }
     _credential.text = config.msgHeaderKey;
+    _transport = config.relayTransport;
   }
 
   @override
@@ -61,6 +69,7 @@ class _SetupFlowState extends State<SetupFlow> {
   }
 
   Future<void> _saveRelay() async {
+    if (_busy || _importing) return;
     final l10n = context.l10n;
     final address = _address.text.trim();
     final credential = _credential.text.trim();
@@ -75,7 +84,8 @@ class _SetupFlowState extends State<SetupFlow> {
     final result = await widget.store.saveRelay(
       address: address,
       credential: credential,
-      keepAlive: true,
+      keepAlive: _keepAlive,
+      relayTransport: _transport,
     );
     if (!mounted) return;
     setState(() => _busy = false);
@@ -84,6 +94,67 @@ class _SetupFlowState extends State<SetupFlow> {
       return;
     }
     setState(() => _step = _Step.choose);
+  }
+
+  Future<void> _importSetup() async {
+    if (_busy || _importing) return;
+    final l10n = context.l10n;
+    setState(() => _importing = true);
+    try {
+      ClipboardData? clipboard;
+      try {
+        clipboard = await Clipboard.getData(Clipboard.kTextPlain);
+      } catch (_) {
+        if (mounted) {
+          showToast(
+            context,
+            l10n.setupClipboardUnavailable,
+            kind: ToastKind.error,
+          );
+        }
+        return;
+      }
+      if (!mounted) return;
+      final raw = clipboard?.text;
+      if (raw == null || raw.trim().isEmpty) {
+        showToast(context, l10n.setupClipboardEmpty, kind: ToastKind.error);
+        return;
+      }
+      SetupPayload setup;
+      try {
+        setup = decodeSetupString(raw);
+      } catch (_) {
+        showToast(context, l10n.setupStringMalformed, kind: ToastKind.error);
+        return;
+      }
+      if (!looksLikeHostPort(setup.address)) {
+        showToast(
+          context,
+          l10n.setupStringInvalid(l10n.errorAddress),
+          kind: ToastKind.error,
+        );
+        return;
+      }
+      if (!looksLikeCredential(setup.credential)) {
+        showToast(
+          context,
+          l10n.setupStringInvalid(l10n.errorCredential),
+          kind: ToastKind.error,
+        );
+        return;
+      }
+      setState(() {
+        _address.text = setup.address;
+        _credential.text = setup.credential;
+        _keepAlive = setup.keepAlive;
+        _transport = setup.relayTransport;
+        _addressError = null;
+        _credentialError = null;
+        _imported = true;
+      });
+    } finally {
+      if (mounted) setState(() => _importing = false);
+    }
   }
 
   void _choose(TunnelKind kind) => setState(() {
@@ -216,9 +287,31 @@ class _SetupFlowState extends State<SetupFlow> {
           ),
         ),
         const SizedBox(height: 22),
+        OutlinedButton.icon(
+          key: const Key('setup-import'),
+          onPressed: _busy || _importing ? null : _importSetup,
+          icon: const Icon(AppIcons.import, size: 18),
+          label: Text(l10n.setupImportClipboard),
+        ),
+        if (_imported) ...[
+          const SizedBox(height: 8),
+          Text(
+            l10n.setupImportedOptions(
+              _transport.label,
+              _keepAlive ? l10n.setupKeepAliveOn : l10n.setupKeepAliveOff,
+            ),
+            key: const Key('setup-imported-options'),
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+        const SizedBox(height: 14),
         TextField(
           key: const Key('setup-address'),
           controller: _address,
+          enabled: !_importing,
           autofocus: true,
           autocorrect: false,
           style: mono(fontSize: 13.5),
@@ -234,6 +327,7 @@ class _SetupFlowState extends State<SetupFlow> {
         TextField(
           key: const Key('setup-credential'),
           controller: _credential,
+          enabled: !_importing,
           autocorrect: false,
           enableSuggestions: false,
           obscureText: true,
@@ -249,7 +343,7 @@ class _SetupFlowState extends State<SetupFlow> {
         const SizedBox(height: 22),
         FilledButton(
           key: const Key('setup-continue'),
-          onPressed: _busy ? null : _saveRelay,
+          onPressed: _busy || _importing ? null : _saveRelay,
           style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(46)),
           child: _busy
               ? const SizedBox.square(

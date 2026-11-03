@@ -33,7 +33,9 @@ protocol, and the rest folded away. A service picked on the relay — in the
 galaxy or the list — opens the editor with its key filled in.
 
 First run (`pages/setup_flow.dart`) asks where the relay is, then what to do
-first, then shows that one form. Every step can be skipped; the app opens on
+first, then shows that one form. Its clipboard import reads the same setup
+string as Settings, fills the relay fields and stages the carrier and
+keep-alive preference until the user continues. Every step can be skipped; the app opens on
 the galaxy, where a new tunnel spirals out of its star.
 
 All pages read one `AppStore` (`state/app_store.dart`), kept fresh by the Rust
