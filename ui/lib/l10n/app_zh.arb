@@ -247,6 +247,13 @@
 
   "setupWelcome": "欢迎使用 pb-mapper",
   "setupWelcomeBody": "通过中继访问你任意一台电脑上的服务。先告诉我中继在哪里。",
+  "setupImportClipboard": "从剪贴板导入配置",
+  "setupClipboardUnavailable": "无法读取剪贴板。请复制配置串后重试。",
+  "setupClipboardEmpty": "剪贴板为空。请复制配置串后重试。",
+  "setupStringMalformed": "这不是有效的配置串。",
+  "setupImportedOptions": "已导入：{carrier} · 保活{state}。可在设置中修改。",
+  "setupKeepAliveOn": "开启",
+  "setupKeepAliveOff": "关闭",
   "setupContinue": "继续",
   "setupSkip": "暂时跳过",
   "setupChooseTitle": "想先做什么？",
