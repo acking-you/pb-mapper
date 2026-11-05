@@ -29,10 +29,12 @@ use tokio::time::{Instant, timeout};
 
 /// The lease the relay hands out in this binary, and how often it sweeps.
 ///
-/// Both far under the defaults, so a case finishes in a fraction of a second.
-/// The interval stays a small fraction of the lease because retiring one
-/// registration takes two sweeps.
-const LEASE_TIMEOUT: Duration = Duration::from_millis(150);
+/// Both far under the defaults, so a case finishes in a few seconds. The relay
+/// and the test share a thread, so a stall longer than the lease retires a
+/// registration whose pings are still waiting to be read, which is why this cannot
+/// be much shorter: 150 ms failed on a loaded runner. The interval stays a small
+/// fraction of the lease because retiring one registration takes two sweeps.
+const LEASE_TIMEOUT: Duration = Duration::from_secs(1);
 const SWEEP_INTERVAL: Duration = Duration::from_millis(25);
 
 /// How long a case waits for the relay to act, generously over two sweeps.
@@ -227,13 +229,11 @@ async fn admin_retire_unwinds_a_registration_that_never_reads() {
         .await;
         conn_id
     };
-    relay
-        .wait_for_registration(key, admin_credential(), None)
-        .await;
-
-    // Pings from their own task, so the lease keeps being renewed while the
-    // administrator's request is in flight: without them the sweep would reclaim the
-    // registration on its own and the case would pass without testing retirement.
+    // Pings from their own task, so the lease keeps being renewed while this case
+    // waits for the status answer, which on a slow runner can come after a lease this
+    // short has lapsed, and while the administrator's request is in flight: without
+    // them the sweep would reclaim the registration on its own and the case would pass
+    // without testing retirement.
     // The task returns when a write fails, which is this side observing that the
     // relay dropped the socket.
     let pinger = tokio::spawn(async move {
@@ -246,6 +246,10 @@ async fn admin_retire_unwinds_a_registration_that_never_reads() {
             tokio::time::sleep(CONTROL_FRAME_INTERVAL).await;
         }
     });
+
+    relay
+        .wait_for_registration(key, admin_credential(), None)
+        .await;
 
     let client = Client::from_credential(relay.addr().to_string(), admin_credential(), false, None);
     let admin = client.admin().unwrap();
