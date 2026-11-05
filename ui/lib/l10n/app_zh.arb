@@ -6,6 +6,7 @@
   "desktopSecureSetupTitle": "准备完整桌面控制",
   "desktopSecureSetupRequired": "UAC 和锁屏控制需要授权的 Windows 辅助服务。请在本机安装后打开受保护的应用。",
   "desktopSecureSetupReady": "已就绪，将通过授权辅助服务访问 UAC 和锁屏桌面。",
+  "desktopSecureSetupRepair": "服务正在运行，但无法验证其身份。请从最新 Windows 安装包安装／更新辅助服务，然后打开受保护的应用。",
   "desktopSecureSetupStopped": "辅助服务已停止，请先启用再分享完整桌面。",
   "desktopSecureSetupOpen": "请打开受保护的应用，以使用已安装的辅助服务。",
   "desktopOrdinaryOnly": "仅普通桌面",

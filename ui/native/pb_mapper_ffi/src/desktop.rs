@@ -332,6 +332,7 @@ async fn query_background_for_helper(
             "open the installed application to check background sharing, or disable its service before starting local sharing",
         ));
     }
+    helper.ensure_ready().map_err(err)?;
     query.await
 }
 
@@ -1174,11 +1175,28 @@ mod tests {
         active["enabled"] = json!(true);
         active["service_disabled"] = json!(false);
         state.cache_background(active);
+        // An installed/running service is not usable if its image cannot be
+        // verified. Fail before management IPC and preserve the unknown grant.
+        let unverified = query_background_for_helper(
+            desktop::helper::Status {
+                installed: true,
+                running: true,
+                authorized_application: true,
+                ..Default::default()
+            },
+            async { panic!("unverified service must not receive management requests") },
+        )
+        .await;
+        assert!(unverified.is_err());
+        let observed = discover_background(&state, async { unverified }).await;
+        assert!(background_configured(&observed));
+        assert!(background_enabled(&observed));
         let disconnected = query_background_for_helper(
             desktop::helper::Status {
                 installed: true,
                 running: true,
                 authorized_application: true,
+                identity_verified: true,
                 ..Default::default()
             },
             async { Err(err("management connection lost")) },

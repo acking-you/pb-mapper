@@ -96,6 +96,7 @@ void main() {
           const DesktopHelper(
             installed: true,
             running: true,
+            identityVerified: true,
             canOpenApplication: true,
           ),
         );
@@ -129,6 +130,23 @@ void main() {
           installed: true,
           running: true,
           authorized: true,
+          canOpenApplication: true,
+        ),
+      );
+      await store.load();
+      await tester.pumpAndSettle();
+      // Running and approved is insufficient when Windows denies querying the
+      // service identity. Repair remains available, but sharing stays blocked.
+      expect(tester.widget<FilledButton>(share).onPressed, isNull);
+      await tester.tap(setup);
+      await tester.pumpAndSettle();
+      expect(api.helperActions, ['open', 'enable', 'install']);
+      api.helper(
+        const DesktopHelper(
+          installed: true,
+          running: true,
+          authorized: true,
+          identityVerified: true,
           canOpenApplication: true,
         ),
       );

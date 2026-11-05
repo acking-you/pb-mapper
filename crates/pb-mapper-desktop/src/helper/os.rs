@@ -517,25 +517,41 @@ pub fn verify_server(
     let expected_id = if let Some(id) = parent {
         id
     } else {
-        let status = service_status()?;
-        if status.dwCurrentState != SERVICE_RUNNING {
-            return Err(error("helper service is not running"));
-        }
-        status.dwProcessId
+        running_service_pid()?
     };
     if id == 0 || id != expected_id {
         return Err(error(
             "named pipe is not owned by the installed helper service",
         ));
     }
+    verify_process_image(id, expected)
+}
+
+fn running_service_pid() -> Result<u32> {
+    let status = service_status()?;
+    if status.dwCurrentState != SERVICE_RUNNING || status.dwProcessId == 0 {
+        return Err(error("helper service is not running"));
+    }
+    Ok(status.dwProcessId)
+}
+
+pub fn verify_running_service(expected: &Path) -> Result<()> {
+    verify_process_image(running_service_pid()?, expected)
+}
+
+fn verify_process_image(id: u32, expected: &Path) -> Result<()> {
     // A normal UI does not need SYNCHRONIZE access to a LocalSystem process.
     // Keep this handle alive while checking the image, preventing PID reuse.
     let process =
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) }.map_err(error)?;
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) }.map_err(|e| {
+            error(format!(
+                "Cannot query helper process identity; update the Windows desktop service: {e}"
+            ))
+        })?;
     let process = unsafe { Handle::own(process) };
     if !same_path(&image(process.raw())?, expected) {
         return Err(error(
-            "named pipe is not owned by the installed helper service",
+            "helper process image does not match the protected installation",
         ));
     }
     Ok(())

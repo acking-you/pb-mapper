@@ -6,6 +6,7 @@
   "desktopSecureSetupTitle": "Prepare full desktop control",
   "desktopSecureSetupRequired": "UAC and lock-screen control need the authorized Windows helper. Install it locally, then open the protected application.",
   "desktopSecureSetupReady": "Ready for UAC and lock-screen access through the authorized helper.",
+  "desktopSecureSetupRepair": "The service is running, but its identity cannot be verified. Install / update the helper from the latest Windows bundle, then open its protected application.",
   "desktopSecureSetupStopped": "The helper is stopped. Enable it before sharing the full desktop.",
   "desktopSecureSetupOpen": "Open the protected application to use the installed helper.",
   "desktopOrdinaryOnly": "Ordinary desktop only",

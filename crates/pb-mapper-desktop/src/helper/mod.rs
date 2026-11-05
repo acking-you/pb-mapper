@@ -10,6 +10,8 @@ mod install;
 mod ipc;
 mod os;
 #[cfg(feature = "windows-helper")]
+mod process_acl;
+#[cfg(feature = "windows-helper")]
 mod service;
 pub(crate) mod worker;
 
@@ -59,6 +61,8 @@ pub struct Status {
     /// unavailable or restarting service must not permit a second host.
     pub startup_disabled: bool,
     pub authorized_application: bool,
+    /// The live SCM process can be queried and matches the protected helper.
+    pub identity_verified: bool,
     pub installed_application: Option<PathBuf>,
     pub message: String,
 }
@@ -81,6 +85,12 @@ impl Status {
                 "Open the protected installed application on the host to use full desktop access",
             ));
         }
+        if !self.identity_verified {
+            return Err(error(format!(
+                "Windows desktop service identity could not be verified; install/update the helper: {}",
+                self.message
+            )));
+        }
         Ok(())
     }
 }
@@ -94,16 +104,30 @@ pub fn status() -> Status {
         Err(_) => (true, false, false),
     };
     match configuration() {
-        Ok(config) => Status {
-            installed: true,
-            running,
-            startup_disabled,
-            authorized_application: os::current_sid().is_ok_and(|sid| sid == config.owner_sid)
-                && std::env::current_exe()
-                    .is_ok_and(|path| os::same_path(&path, &config.ui_executable)),
-            installed_application: Some(config.ui_executable),
-            message: "Helper requires the installed application; the UI stays unprivileged".into(),
-        },
+        Ok(config) => {
+            let identity = if running {
+                os::verify_running_service(&config.helper_executable)
+            } else {
+                Err(error("Windows desktop service is not running"))
+            };
+            Status {
+                installed: true,
+                running,
+                startup_disabled,
+                authorized_application: os::current_sid().is_ok_and(|sid| sid == config.owner_sid)
+                    && std::env::current_exe()
+                        .is_ok_and(|path| os::same_path(&path, &config.ui_executable)),
+                identity_verified: identity.is_ok(),
+                installed_application: Some(config.ui_executable),
+                message: identity.err().map_or_else(
+                    || {
+                        "Helper requires the installed application; the UI stays unprivileged"
+                            .into()
+                    },
+                    |e| e.to_string(),
+                ),
+            }
+        }
         Err(e) => Status {
             installed: exists,
             running,
@@ -189,6 +213,8 @@ mod readiness_tests {
         status.running = true;
         assert!(status.ensure_ready().is_err());
         status.authorized_application = true;
+        assert!(status.ensure_ready().is_err());
+        status.identity_verified = true;
         assert!(status.ensure_ready().is_ok());
         // An installation retained after Disable does not retain capture
         // readiness, even though its approved caller remains the same.

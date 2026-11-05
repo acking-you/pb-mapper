@@ -58,10 +58,14 @@ class _DesktopPageState extends State<DesktopPage> {
       final helperReady =
           hostHelper?.installed == true &&
           hostHelper?.running == true &&
-          hostHelper?.authorized == true;
+          hostHelper?.authorized == true &&
+          hostHelper?.identityVerified == true;
+      final needsHelperRepair =
+          hostHelper?.running == true && hostHelper?.identityVerified != true;
       final setupAction = hostHelper == null || helperReady
           ? null
-          : !hostHelper.installed ||
+          : needsHelperRepair ||
+                !hostHelper.installed ||
                 !hostHelper.canOpenApplication && !hostHelper.authorized
           ? 'install'
           : !hostHelper.running
@@ -205,7 +209,10 @@ class _DesktopPageState extends State<DesktopPage> {
                             ),
                             const SizedBox(height: 8),
                             Text(switch (setupAction) {
-                              'install' => l.desktopSecureSetupRequired,
+                              'install' =>
+                                needsHelperRepair
+                                    ? l.desktopSecureSetupRepair
+                                    : l.desktopSecureSetupRequired,
                               'enable' => l.desktopSecureSetupStopped,
                               'open' => l.desktopSecureSetupOpen,
                               _ => l.desktopSecureSetupReady,

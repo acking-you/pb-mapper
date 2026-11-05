@@ -35,16 +35,18 @@ class DesktopHelper {
     this.installed = false,
     this.running = false,
     this.authorized = false,
+    this.identityVerified = false,
     this.canOpenApplication = false,
     this.message = '',
   });
-  final bool installed, running, authorized;
+  final bool installed, running, authorized, identityVerified;
   final bool canOpenApplication;
   final String message;
   factory DesktopHelper.fromJson(Map<String, dynamic> data) => DesktopHelper(
     installed: data['installed'] == true,
     running: data['running'] == true,
     authorized: data['authorized_application'] == true,
+    identityVerified: data['identity_verified'] == true,
     canOpenApplication:
         data['installed_application'] is String &&
         (data['installed_application'] as String).isNotEmpty,

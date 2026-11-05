@@ -103,6 +103,7 @@ fn entry(_: Vec<OsString>) {
         {
             return Err(error("helper service identity is invalid"));
         }
+        super::process_acl::allow_identity_query(&config.owner_sid)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;

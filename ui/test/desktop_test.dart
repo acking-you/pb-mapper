@@ -23,7 +23,12 @@ void main() {
       api.desktop.available = const DesktopCapabilities(
         host: true,
         displays: [DesktopDisplay(1, 'Display 1', 1920, 1080)],
-        helper: DesktopHelper(installed: true, running: true, authorized: true),
+        helper: DesktopHelper(
+          installed: true,
+          running: true,
+          authorized: true,
+          identityVerified: true,
+        ),
       );
       api.desktop.trust = const DesktopTrust(supported: true);
       await pumpApp(tester, api, page: AppPage.tunnels);

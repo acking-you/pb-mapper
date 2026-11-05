@@ -115,7 +115,9 @@ input. The separate helper is the implementation path for elevated-window/UAC
 access, **pending actual OS acceptance**.
 
 Windows sharing defaults to full desktop access. Its preparation card checks
-that the helper is installed, running, and that this application is authorized.
+that the helper is installed, running, that this application is authorized,
+and that its live process image matches the protected installation. An identity
+query failure requires repairing/updating the helper and is never shown as ready.
 Follow **Install / update helper**, deliberately complete Windows' local
 administrator consent, then open the protected installed app. Sharing selects
 the helper automatically when ready; restarting a stopped service and opening
@@ -138,7 +140,10 @@ Windows service, independently of Flutter or an agent harness:
   named-pipe IPC only. Its ACL grants the approved user read/write access without
   permission to create another pipe-server instance. Kernel-reported process
   identity, protected executable path, user SID and active console session are
-  checked; the client verifies the installed service as well.
+  checked; the client verifies the installed service as well. Before reporting
+  Running, the service merges only `PROCESS_QUERY_LIMITED_INFORMATION` for the
+  approved owner into its existing process DACL. This lets the unelevated UI
+  query the service executable; it adds no process-control or memory access.
 - For an authorized connection, the service launches one restricted SYSTEM
   worker in the active interactive session. Temporary launch privileges are
   restored, a kill-on-close job bounds the child lifetime, and the worker uses a
