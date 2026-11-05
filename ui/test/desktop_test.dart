@@ -51,6 +51,33 @@ void main() {
       expect(api.desktop.background.enabled, isTrue);
 
       await pumpApp(tester, api, page: AppPage.tunnels);
+      // An enabled grant may remain cached when management IPC is lost. SCM
+      // disable/uninstall must still be reachable without first stopping it.
+      api.desktop.background = const DesktopBackground(
+        configured: true,
+        enabled: true,
+        autoStart: true,
+        message: 'Management connection lost',
+      );
+      await tester.tap(find.byKey(const Key('open-desktop')));
+      await settle(tester);
+      final disable = find.byKey(const Key('desktop-helper-disable'));
+      expect(tester.widget<TextButton>(disable).onPressed, isNotNull);
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byKey(const Key('desktop-helper-uninstall')),
+            )
+            .onPressed,
+        isNotNull,
+      );
+      await Scrollable.ensureVisible(tester.element(disable), alignment: 0.5);
+      await settle(tester);
+      await tester.tap(disable);
+      await settle(tester);
+      expect(api.desktop.helperActions, ['disable']);
+      await tester.pageBack();
+      await settle(tester);
       await tester.tap(find.text('Stop sharing'));
       await settle(tester);
       expect(api.desktop.host, isNull);

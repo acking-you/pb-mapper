@@ -484,7 +484,9 @@ class DesktopStore extends ChangeNotifier {
     await run(() async {
       await api.helperAction(action);
       capabilities = await api.capabilities();
+      await _loadBackground();
     });
+    await poll();
   }
 
   Future<void> allowControl(bool allow) async {

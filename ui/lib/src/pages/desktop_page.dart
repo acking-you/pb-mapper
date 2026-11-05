@@ -190,13 +190,17 @@ class _DesktopPageState extends State<DesktopPage> {
                               child: Text(l.desktopHelperEnable),
                             ),
                           TextButton(
-                            onPressed: store.busy || store.sharing
+                            key: const Key('desktop-helper-disable'),
+                            // Keep the OS service stop available when its
+                            // management pipe cannot stop a background host.
+                            onPressed: store.busy
                                 ? null
                                 : () => store.helperAction('disable'),
                             child: Text(l.desktopHelperDisable),
                           ),
                           TextButton(
-                            onPressed: store.busy || store.sharing
+                            key: const Key('desktop-helper-uninstall'),
+                            onPressed: store.busy
                                 ? null
                                 : () => store.helperAction('uninstall'),
                             child: Text(l.desktopHelperUninstall),
