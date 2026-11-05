@@ -294,7 +294,23 @@ impl Supervisor {
         if !self.enabled || self.saved.is_none() {
             return;
         }
-        let session = os::background_session(owner_sid).ok();
+        self.reconcile_session(os::background_session(owner_sid))
+            .await;
+    }
+    async fn reconcile_session(&mut self, observed: Result<Option<u32>>) {
+        let session = match observed {
+            Ok(session) => session,
+            Err(failure) => {
+                // Remain fail-closed, but report the failed prerequisite rather
+                // than silently calling a signed-in owner "not logged in".
+                self.deactivate().await;
+                self.retry_at = Instant::now();
+                self.message = format!(
+                    "Windows session verification failed; background hosting will retry: {failure}"
+                );
+                return;
+            }
+        };
         if session != self.session && (self.host.is_some() || self.pending.is_some()) {
             self.deactivate().await;
             self.retry_at = Instant::now();
@@ -735,6 +751,27 @@ mod tests {
         assert!(load(&directory, "owner-one").is_err());
         std::fs::remove_file(directory.join(REVOKED_MARKER)).unwrap();
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_query_failure_cancels_start_without_claiming_owner_is_logged_out() {
+        let mut supervisor = state(Saved::prepare(options(), "owner-one", None).unwrap());
+        let pending = tokio::spawn(std::future::pending::<Result<Host>>());
+        let cancelled = pending.abort_handle();
+        supervisor.pending = Some(pending);
+        supervisor.session = Some(7);
+        supervisor
+            .reconcile_session(Err(error("session query failed (998)")))
+            .await;
+        assert!(cancelled.is_finished());
+        assert!(supervisor.pending.is_none());
+        assert!(supervisor.host.is_none());
+        assert!(supervisor.session.is_none());
+        assert!(supervisor.enabled);
+        assert!(!supervisor.message.is_empty());
+        assert_ne!(supervisor.message, "waiting_for_owner_session");
+        supervisor.reconcile_session(Ok(None)).await;
+        assert_eq!(supervisor.message, "waiting_for_owner_session");
     }
 
     #[tokio::test]

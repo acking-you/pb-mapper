@@ -101,7 +101,10 @@ that same login while locked, and retries failed relay/capture startup with
 bounded backoff. Logoff or switching away from that owner closes active capture
 and input. A subsequent viewer still needs fresh explicit control admission;
 old input is never replayed. A fresh boot with no owner login remains
-`waiting_for_owner_session`. Waking from sleep is different from remote input:
+`waiting_for_owner_session`. A Windows session/privilege query failure is reported
+separately with its failing API/error and retried; it must not masquerade as an
+owner who has not signed in. Such failures cancel active/pending hosting while
+retaining the saved authorization. Waking from sleep is different from remote input:
 S3/S4 cannot serve video while suspended, and no Wake-on-LAN facility or power
 policy change is included. Real service-restart, sleep/resume and locked-session
 password entry remain acceptance requirements, not consequences of unit tests.

@@ -79,9 +79,10 @@ issue #50 Windows/Android test distribution (version 0.10.2); build 914 is its
 mobile interaction and recovery repair. Build 915 is the Windows service
 identity-query permission repair. Build 916 includes that repair and stable
 tray menus during background status updates. Build 917 also fixes native popup
-reopening and preserves late menu clicks. The next distribution must use at
-least 918. The build counter is independent of the
-public version.
+reopening and preserves late menu clicks. Build 918 repairs Windows session
+privilege adjustment and distinguishes session-query failures from an absent
+owner login. The next distribution must use at least 919. The build counter is
+independent of the public version.
 
 To verify the complete Android build without publishing a release, run
 `release-ui.yml` with `android_verify_only=true` against the desired branch.

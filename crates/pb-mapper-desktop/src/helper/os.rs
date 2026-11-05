@@ -275,10 +275,6 @@ pub(super) struct ScopedPrivileges {
 #[cfg(feature = "windows-helper")]
 impl ScopedPrivileges {
     pub fn new(names: &[PCWSTR]) -> Result<Self> {
-        // Process privileges are shared by service tasks. No scope survives an
-        // await, and serialized restoration cannot disable another operation's
-        // temporary privileges or leave them enabled after both operations.
-        let guard = PRIVILEGES.lock();
         let mut token = HANDLE::default();
         unsafe {
             OpenProcessToken(
@@ -288,8 +284,16 @@ impl ScopedPrivileges {
             )
         }
         .map_err(error)?;
+        Self::on_token(unsafe { Handle::own(token) }, names)
+    }
+
+    fn on_token(token: Handle, names: &[PCWSTR]) -> Result<Self> {
+        // Process privileges are shared by service tasks. No scope survives an
+        // await, and serialized restoration cannot disable another operation's
+        // temporary privileges or leave them enabled after both operations.
+        let guard = PRIVILEGES.lock();
         let mut scope = Self {
-            token: unsafe { Handle::own(token) },
+            token,
             previous: Vec::with_capacity(names.len()),
             _scope: guard,
         };
@@ -304,6 +308,9 @@ impl ScopedPrivileges {
                 }],
             };
             let mut previous = TOKEN_PRIVILEGES::default();
+            // Windows requires ReturnLength whenever PreviousState is supplied.
+            // A null pointer fails with ERROR_NOACCESS before any session query.
+            let mut previous_length = 0;
             unsafe {
                 AdjustTokenPrivileges(
                     scope.token.raw(),
@@ -311,12 +318,13 @@ impl ScopedPrivileges {
                     Some(&privileges),
                     size_of::<TOKEN_PRIVILEGES>() as u32,
                     Some(&mut previous),
-                    None,
+                    Some(&mut previous_length),
                 )
             }
-            .map_err(error)?;
+            .map_err(|e| error(format!("AdjustTokenPrivileges failed: {e}")))?;
+            let adjusted = unsafe { GetLastError() };
             scope.previous.push(previous);
-            if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
+            if adjusted == ERROR_NOT_ALL_ASSIGNED {
                 return Err(error("service lacks a required session privilege"));
             }
         }
@@ -355,26 +363,41 @@ pub(super) enum ConsoleState {
 }
 
 #[cfg(feature = "windows-helper")]
-pub(super) fn background_session(owner_sid: &str) -> Result<u32> {
-    Ok(owner_session(owner_sid)?.session)
+pub(super) fn background_session(owner_sid: &str) -> Result<Option<u32>> {
+    Ok(available_owner_session(owner_sid)?.map(|identity| identity.session))
 }
 
 #[cfg(feature = "windows-helper")]
 pub(super) fn owner_session(owner_sid: &str) -> Result<SessionIdentity> {
+    available_owner_session(owner_sid)?
+        .ok_or_else(|| error("Waiting for the approved user to sign in to the active console"))
+}
+
+/// An absent/different login is ordinary waiting. OS query/privilege failures
+/// are errors, never evidence that the installation owner has logged out.
+#[cfg(feature = "windows-helper")]
+fn available_owner_session(owner_sid: &str) -> Result<Option<SessionIdentity>> {
     let session = active_session();
-    let (identity, _) = console_session(session)?;
+    if session == 0 || session == u32::MAX {
+        return Ok(None);
+    }
+    let Some((identity, _)) = session_state(session, &console_info(session)?) else {
+        return Ok(None);
+    };
     // WTSQueryUserToken requires LocalSystem/SeTcbPrivilege. Limit that
     // privilege to this synchronous query, restoring it before any await.
-    let privileges = ScopedPrivileges::new(&[SE_TCB_NAME])?;
+    let privileges = ScopedPrivileges::new(&[SE_TCB_NAME])
+        .map_err(|e| error(format!("Cannot query the approved Windows login: {e}")))?;
     let mut token = HANDLE::default();
-    unsafe { WTSQueryUserToken(session, &mut token) }.map_err(error)?;
+    unsafe { WTSQueryUserToken(session, &mut token) }
+        .map_err(|e| error(format!("WTSQueryUserToken failed: {e}")))?;
     let token = unsafe { Handle::own(token) };
     if sid(token.raw())? != owner_sid {
-        return Err(error("The active console belongs to another user"));
+        return Ok(None);
     }
     drop(privileges);
     identity.check()?;
-    Ok(identity)
+    Ok(Some(identity))
 }
 
 #[cfg(feature = "windows-helper")]
@@ -592,6 +615,89 @@ pub(super) fn record_service_failure(failure: &std::io::Error) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn privilege_scope_adjusts_and_restores_only_its_owned_token() {
+        let mut original = HANDLE::default();
+        unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_QUERY | TOKEN_DUPLICATE,
+                &mut original,
+            )
+        }
+        .unwrap();
+        let original = unsafe { Handle::own(original) };
+        let mut duplicate = HANDLE::default();
+        unsafe {
+            DuplicateTokenEx(
+                original.raw(),
+                TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
+                None,
+                SecurityImpersonation,
+                TokenImpersonation,
+                &mut duplicate,
+            )
+        }
+        .unwrap();
+        let duplicate = unsafe { Handle::own(duplicate) };
+        let probe = Handle(duplicate.0.try_clone().unwrap());
+        let mut luid = LUID::default();
+        unsafe { LookupPrivilegeValueW(None, SE_CHANGE_NOTIFY_NAME, &mut luid) }.unwrap();
+        // Modify only an independent token, never the parallel runner's token.
+        let disabled = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: TOKEN_PRIVILEGES_ATTRIBUTES(0),
+            }],
+        };
+        unsafe { AdjustTokenPrivileges(duplicate.raw(), false, Some(&disabled), 0, None, None) }
+            .unwrap();
+        let enabled = || {
+            let mut needed = 0;
+            unsafe {
+                let _ = GetTokenInformation(probe.raw(), TokenPrivileges, None, 0, &mut needed);
+            }
+            let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+            unsafe {
+                GetTokenInformation(
+                    probe.raw(),
+                    TokenPrivileges,
+                    Some(buffer.as_mut_ptr().cast()),
+                    needed,
+                    &mut needed,
+                )
+            }
+            .unwrap();
+            let token = unsafe { &*buffer.as_ptr().cast::<TOKEN_PRIVILEGES>() };
+            unsafe {
+                std::slice::from_raw_parts(token.Privileges.as_ptr(), token.PrivilegeCount as usize)
+            }
+            .iter()
+            .find(|entry| entry.Luid == luid)
+            .unwrap()
+            .Attributes
+            .contains(SE_PRIVILEGE_ENABLED)
+        };
+        assert!(!enabled());
+        let scope = ScopedPrivileges::on_token(duplicate, &[SE_CHANGE_NOTIFY_NAME]).unwrap();
+        assert!(enabled());
+        drop(scope);
+        assert!(!enabled());
+        // A failure after the first adjustment must also restore that change.
+        assert!(
+            ScopedPrivileges::on_token(
+                Handle(probe.0.try_clone().unwrap()),
+                &[
+                    SE_CHANGE_NOTIFY_NAME,
+                    windows::core::w!("pb-mapper-invalid-privilege")
+                ]
+            )
+            .is_err()
+        );
+        assert!(!enabled());
+    }
+
     fn validate(sddl: &str) -> Result<()> {
         let descriptor = Descriptor::new(sddl)?;
         let mut owner = PSID::default();
@@ -712,12 +818,6 @@ pub fn request_installation(action: &str) -> Result<()> {
         })));
     }
     Ok(())
-}
-
-#[cfg(feature = "windows-helper")]
-fn console_session(session: u32) -> Result<(SessionIdentity, ConsoleState)> {
-    session_state(session, &console_info(session)?)
-        .ok_or_else(|| error("Waiting for the approved user to sign in to the active console"))
 }
 
 fn console_info(session: u32) -> Result<WTSINFOEX_LEVEL1_W> {
