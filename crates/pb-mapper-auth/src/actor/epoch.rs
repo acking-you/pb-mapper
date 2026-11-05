@@ -109,7 +109,7 @@ pub(super) fn actor_rotate_root(
     remember_previous_root(inner);
     leases.wipe(unix_seconds());
     let old_admin_lease = admin_lease.clone();
-    let new_admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, u64::MAX));
+    let new_admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
     *inner.admin.write() = AdminState {
         key: new_key,
         lease: Arc::downgrade(&new_admin_lease),

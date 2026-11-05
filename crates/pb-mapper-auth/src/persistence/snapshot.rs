@@ -66,6 +66,7 @@ pub(crate) fn build_snapshot(
                 expires_at: slot.expires_at,
                 label: cold.label.clone(),
                 tombstoned_at: (cold.tombstoned_at != 0).then_some(cold.tombstoned_at),
+                namespace: cold.namespace,
             })
         })
         .collect::<Vec<_>>();

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+- Give one tenant several separately revocable keys. The administrator can now allocate a namespace (`admin namespace allocate`, `Admin::allocate_namespace`) and issue keys into it (`admin key issue --namespace`, `Admin::issue_key_in_namespace`). Those keys see the same services over TCP, QUIC and direct setup, revoking one leaves the others working, and the namespace outlives them. Namespace numbers cannot collide with a key's own namespace and are never handed out twice, including across root rotation and auth-state reset. A relay reports this as the `key_namespaces` capability, which `Admin::supports_key_namespaces` reads. Keys issued the old way, and state written by an older relay, stay in the namespace their key ID names. See `docs/authentication-v2.md`.
+- Fix `key renew` with a shorter TTL: the new expiry was stored and refused new connections, but the key stayed active and its open connections stayed up until the old deadline, unless a restart happened first. The key now ends at the new deadline.
+- Breaking for Rust SDK users: `IssuedKey`, `KeyMetadata` and `AuthStatusInfo` gain a field, so a struct literal must add it. Wire format changes are additive. An older relay refuses the two new requests without side effects, and an older client reads the new responses as before, but a client older than this release refuses a direct setup for a key issued into a namespace.
+
 ## [0.10.2] - 2026-11-03
 - Import a setup string directly from the clipboard during first-run setup. The relay address, credential, transport and keep-alive preference are staged until continuing, and invalid or unavailable clipboard contents leave existing edits intact.
 - Android packages keep the existing release signing certificate and advance the build number for upgrades. The CLI, SDK behavior and wire protocol are unchanged.

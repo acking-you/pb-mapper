@@ -14,6 +14,8 @@ use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
 
 use super::*;
 
+mod namespaces;
+
 fn temp_state_dir(name: &str) -> PathBuf {
     let mut suffix = [0_u8; 8];
     let mut rng = rand::rng();
@@ -1652,6 +1654,7 @@ fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
         expires_at: 20_000,
         label: None,
         tombstoned_at: None,
+        namespace: None,
     };
     let revoked_without_audit = PersistedEntry {
         key_id: KeyId::new(Generation::from_u32(1), SlotIndex::from_index(1)),
@@ -1660,6 +1663,7 @@ fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
         expires_at: 20_000,
         label: None,
         tombstoned_at: None,
+        namespace: None,
     };
     let audit_at = now - 30;
     let mut snapshot = PersistedSnapshot {

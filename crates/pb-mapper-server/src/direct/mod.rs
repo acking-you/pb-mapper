@@ -820,6 +820,201 @@ mod tests {
     use super::*;
     use pb_mapper_auth::{ADMIN_KEY_ID, AuthConfig, AuthRuntime};
 
+    /// Revocation has to stop one key's setups without touching its namespace's
+    /// others, including a setup that was already in flight when the key died.
+    #[tokio::test]
+    async fn revoking_one_key_of_a_namespace_stops_only_its_direct_setups() {
+        let key = [18; 32];
+        let dir = std::env::temp_dir().join(format!(
+            "pb-direct-namespace-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let auth = AuthRuntime::start(
+            key,
+            AuthConfig {
+                state_dir: dir.clone(),
+                ..AuthConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let admin = auth.authenticate_presented(ADMIN_KEY_ID, &key).unwrap();
+        let namespace = auth.allocate_namespace(&admin).await.unwrap();
+        let ttl = Duration::from_secs(600);
+        let issue = || async {
+            let issued = auth
+                .issue_in_namespace(&admin, namespace, ttl, None)
+                .await
+                .unwrap();
+            let id = issued.metadata.key_id;
+            auth.authenticate_presented(id, &auth.derive_key(id).unwrap())
+                .unwrap()
+        };
+        let consumer = issue().await;
+        let provider = issue().await;
+        let peer = issue().await;
+        assert_eq!(consumer.namespace, namespace);
+        assert_ne!(consumer.key_id.as_u64(), namespace);
+
+        let mut state = DirectState::new(Some(DirectCapability {
+            version: DIRECT_VERSION,
+            stun_addr: "127.0.0.1:10811".parse().unwrap(),
+        }));
+        let (consumer_sender, mut consumer_events) = mpsc::channel(8);
+        state.connect(1.into(), namespace, consumer.clone(), consumer_sender);
+        assert!(matches!(
+            consumer_events.recv().await,
+            Some(DirectEvent::Ready(_))
+        ));
+        let (peer_sender, mut peer_events) = mpsc::channel(8);
+        state.connect(2.into(), namespace, peer.clone(), peer_sender);
+        assert!(matches!(
+            peer_events.recv().await,
+            Some(DirectEvent::Ready(_))
+        ));
+        let mut registrations = ServerConnMap::default();
+        let scoped = super::super::compose_service_key(namespace, "echo");
+        registrations.insert(
+            scoped.clone(),
+            vec![super::super::ServerConnInfo {
+                direct: Some(provider.clone()),
+                conn_id: 3.into(),
+                generation: 3,
+                health: ServerConnHealth::Healthy,
+                need_codec: false,
+                is_datagram: false,
+                protocol_version: 2,
+                last_rx_at: Instant::now(),
+                stream_ack_budget: Duration::from_secs(1),
+                suspect_check: None,
+                retire_token: tokio_util::sync::CancellationToken::new(),
+            }],
+        );
+        let (provider_sender, offers) = kanal::bounded_async(8);
+        let route = |id: RemoteConnId| (id == 3.into()).then(|| provider_sender.clone());
+        let peer_info = PeerInfo {
+            certificate: vec![1],
+            candidates: vec![],
+        };
+
+        // Both consumers reach the one provider; the grant names the namespace and
+        // each key separately, since none of the three is the others any more.
+        for (connection, request) in [(1, 1), (2, 2)] {
+            state.open(
+                connection.into(),
+                request,
+                "echo".into(),
+                false,
+                peer_info.clone(),
+                &registrations,
+                route,
+                |_, _| true,
+            );
+        }
+        let mut grant_for = HashMap::new();
+        for _ in 0..2 {
+            let Ok(Some(ConnTask::Direct(offer))) = offers.try_recv() else {
+                panic!("the provider must receive an offer per consumer");
+            };
+            let DirectEvent::Offer { grant, .. } = *offer else {
+                panic!("expected an offer");
+            };
+            assert_eq!(grant.namespace, namespace);
+            assert_eq!(grant.provider_key, provider.key_id.as_u64());
+            grant_for.insert(grant.consumer_key, grant);
+        }
+        let consumer_grant = grant_for.remove(&consumer.key_id.as_u64()).unwrap();
+        let peer_grant = grant_for.remove(&peer.key_id.as_u64()).unwrap();
+        for grant in [&consumer_grant, &peer_grant] {
+            state.entries.get_mut(&grant.id).unwrap().phase = Phase::RelaySelected;
+        }
+
+        auth.revoke(&admin, consumer.key_id).await.unwrap();
+
+        // The in-flight setup dies with its consumer's key, and a new one is refused.
+        assert!(
+            state
+                .relay(
+                    &consumer,
+                    namespace,
+                    consumer_grant.id,
+                    consumer_grant.secret
+                )
+                .is_none(),
+            "a revoked consumer must not attach to a relay selection"
+        );
+        state.open(
+            1.into(),
+            3,
+            "echo".into(),
+            false,
+            peer_info.clone(),
+            &registrations,
+            route,
+            |_, _| panic!("a revoked consumer must not reach admission"),
+        );
+        assert!(matches!(
+            consumer_events.recv().await,
+            Some(DirectEvent::Rejected { request: 3, .. })
+        ));
+
+        // A peer in the same namespace is untouched.
+        assert!(
+            state
+                .relay(&peer, namespace, peer_grant.id, peer_grant.secret)
+                .is_some(),
+            "another key's setup must survive"
+        );
+
+        // Revoking the provider stops what is left: an in-flight setup, and offers.
+        let (second, second_grant) = {
+            state.open(
+                2.into(),
+                4,
+                "echo".into(),
+                false,
+                peer_info.clone(),
+                &registrations,
+                route,
+                |_, _| true,
+            );
+            let Ok(Some(ConnTask::Direct(offer))) = offers.try_recv() else {
+                panic!("the live provider must still receive an offer");
+            };
+            let DirectEvent::Offer { grant, .. } = *offer else {
+                panic!("expected an offer");
+            };
+            (grant.id, grant)
+        };
+        state.entries.get_mut(&second).unwrap().phase = Phase::RelaySelected;
+        auth.revoke(&admin, provider.key_id).await.unwrap();
+        assert!(
+            state
+                .relay(&peer, namespace, second, second_grant.secret)
+                .is_none(),
+            "a revoked provider must not serve a relay selection"
+        );
+        state.open(
+            2.into(),
+            5,
+            "echo".into(),
+            false,
+            peer_info,
+            &registrations,
+            route,
+            |_, _| panic!("a revoked provider must not be offered a setup"),
+        );
+        assert!(matches!(
+            peer_events.recv().await,
+            Some(DirectEvent::LegacyRelay { request: 5 })
+        ));
+
+        drop(state);
+        auth.shutdown_actor().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn relay_grants_are_scoped_single_use_and_observations_cannot_authorize_them() {
         let key = [17; 32];

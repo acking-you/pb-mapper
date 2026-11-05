@@ -50,6 +50,7 @@ struct KeyState {
     expires_at: u64,
     issued_at: u64,
     label: Option<String>,
+    namespace: Option<u64>,
 }
 
 /// Reads a key's lifecycle from the slot table, falling back to the entries
@@ -70,6 +71,7 @@ fn key_state(inner: &AuthStateInner, key_id: KeyId) -> Result<KeyState, AuthFail
             expires_at: slot.expires_at,
             issued_at: metadata.issued_at,
             label: metadata.label.clone(),
+            namespace: metadata.namespace,
         });
     }
     drop(slots);
@@ -80,19 +82,67 @@ fn key_state(inner: &AuthStateInner, key_id: KeyId) -> Result<KeyState, AuthFail
         expires_at: entry.expires_at,
         issued_at: entry.issued_at,
         label: entry.label.clone(),
+        namespace: entry.namespace,
     })
+}
+
+/// Hand out the next namespace.
+///
+/// The new high-water mark reaches the disk before the number leaves the actor, so
+/// a crash can only skip a number, never repeat one.
+pub(super) fn actor_allocate_namespace(
+    inner: &Arc<AuthStateInner>,
+    config: &AuthConfig,
+) -> Result<u64, AuthFailure> {
+    ensure_store_available(inner)?;
+    let namespace = read_namespace_high_water(&config.state_dir)?.saturating_add(1);
+    if namespace > MAX_ALLOCATED_NAMESPACE {
+        return Err(AuthFailure::new(
+            "namespace_space_exhausted",
+            "every allocatable namespace has been handed out",
+            false,
+        ));
+    }
+    write_namespace_high_water(&config.state_dir, namespace)?;
+    append_audit(
+        config,
+        inner,
+        audit(
+            "namespace_allocate",
+            None,
+            Some(format!("namespace={namespace}")),
+        ),
+    )?;
+    Ok(namespace)
+}
+
+/// Refuse a namespace the allocator never handed out. That covers namespace 0 and
+/// every key's own namespace, whose ids all lie above the allocatable range.
+fn ensure_namespace_allocated(config: &AuthConfig, namespace: u64) -> Result<(), AuthFailure> {
+    if namespace == 0 || namespace > read_namespace_high_water(&config.state_dir)? {
+        return Err(AuthFailure::new(
+            "namespace_not_allocated",
+            format!("namespace {namespace} was not allocated by this relay"),
+            false,
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn actor_issue(
     inner: &Arc<AuthStateInner>,
     config: &AuthConfig,
     leases: &mut Leases,
+    namespace: Option<u64>,
     ttl: Duration,
     label: Option<String>,
 ) -> Result<IssuedTemporaryKey, AuthFailure> {
     ensure_store_available(inner)?;
     let expires_at = validate_ttl(config, ttl)?;
     let label = validate_label(label)?;
+    if let Some(namespace) = namespace {
+        ensure_namespace_allocated(config, namespace)?;
+    }
     let issued_at = unix_seconds();
     let (index, generation, key_id, entry) = {
         let slots = inner.slots();
@@ -122,6 +172,7 @@ pub(super) fn actor_issue(
                 expires_at,
                 label: label.clone(),
                 tombstoned_at: None,
+                namespace,
             },
         )
     };
@@ -137,13 +188,13 @@ pub(super) fn actor_issue(
     let slot = slots
         .get_mut(index)
         .ok_or_else(|| AuthFailure::internal("issued slot disappeared"))?;
-    let lease = Arc::new(AuthLease::new(key_id, expires_at));
+    let lease = Arc::new(AuthLease::new(key_id, namespace, expires_at));
     slot.generation = generation;
     slot.state = SlotState::Active;
     slot.expires_at = expires_at;
     slot.lease = Arc::downgrade(&lease);
     drop(slots);
-    leases.issue(&lease, issued_at, label);
+    leases.issue(&lease, issued_at, label, namespace);
     metadata_with_credential(inner, key_id, true)
 }
 
@@ -169,6 +220,7 @@ pub(super) fn actor_list(
                 issued_at: cold.issued_at,
                 expires_at: slot.expires_at,
                 label: cold.label.clone(),
+                namespace: cold.namespace,
             })
         })
         .collect::<Vec<_>>();
@@ -225,7 +277,9 @@ pub(super) fn actor_renew(
     if current.state != SlotState::Active || current.expires_at <= unix_seconds() {
         return Err(key_not_renewable());
     }
-    let label = current.label;
+    let KeyState {
+        label, namespace, ..
+    } = current;
     append_mutation(
         config,
         inner,
@@ -252,7 +306,7 @@ pub(super) fn actor_renew(
             // A cancelled lease cannot be revived, so the renewal installs a
             // replacement; that drops the handle on the lease it succeeds.
             _ => {
-                let lease = Arc::new(AuthLease::new(key_id, expires_at));
+                let lease = Arc::new(AuthLease::new(key_id, namespace, expires_at));
                 slot.lease = Arc::downgrade(&lease);
                 drop(slots);
                 leases.adopt(&lease);
@@ -294,6 +348,7 @@ pub(super) fn actor_revoke(
         label,
         issued_at,
         expires_at,
+        namespace,
         ..
     } = current;
     append_mutation(
@@ -327,6 +382,7 @@ pub(super) fn actor_revoke(
             issued_at: metadata.issued_at,
             expires_at,
             label: metadata.label.clone(),
+            namespace: metadata.namespace,
         });
     }
     drop(slots);
@@ -346,6 +402,7 @@ pub(super) fn actor_revoke(
         issued_at,
         expires_at,
         label,
+        namespace,
     })
 }
 
@@ -392,6 +449,7 @@ fn high_slot_metadata(entry: &PersistedEntry) -> TemporaryKeyMetadata {
         issued_at: entry.issued_at,
         expires_at: entry.expires_at,
         label: entry.label.clone(),
+        namespace: entry.namespace,
     }
 }
 
@@ -418,6 +476,7 @@ fn metadata_with_credential(
                 issued_at: cold.issued_at,
                 expires_at: slot.expires_at,
                 label: cold.label.clone(),
+                namespace: cold.namespace,
             },
             credential,
         });

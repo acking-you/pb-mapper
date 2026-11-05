@@ -142,6 +142,15 @@ pub enum AdminRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
+    /// Reserve a namespace that no key owns.
+    NamespaceAllocate,
+    /// [`Self::KeyIssue`] into a namespace from [`Self::NamespaceAllocate`].
+    KeyIssueScoped {
+        namespace: u64,
+        ttl_seconds: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
     KeyList {
         #[serde(default)]
         page: u32,
@@ -212,6 +221,8 @@ impl AdminRequest {
         matches!(
             self,
             Self::KeyIssue { .. }
+                | Self::NamespaceAllocate
+                | Self::KeyIssueScoped { .. }
                 | Self::KeyRenew { .. }
                 | Self::KeyRevoke { .. }
                 | Self::KeyGc
@@ -276,6 +287,9 @@ pub struct AdminConnectionPage {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum AdminResponse {
     KeyIssued(IssuedTemporaryKey),
+    NamespaceAllocated {
+        namespace: u64,
+    },
     KeyList(KeyPage),
     KeyShown(IssuedTemporaryKey),
     KeyRenewed(IssuedTemporaryKey),

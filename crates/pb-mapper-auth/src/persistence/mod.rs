@@ -15,6 +15,7 @@ use super::*;
 mod admin_key;
 mod blob;
 mod fs;
+mod namespaces;
 mod snapshot;
 mod wal;
 
@@ -35,6 +36,7 @@ pub use fs::acquire_state_dir_lock;
 pub(crate) use fs::prepare_state_dir;
 pub(crate) use fs::sync_parent_directory;
 pub(crate) use fs::{atomic_write, create_new_write, prepare_state_dir_and_lock};
+pub(crate) use namespaces::{read_namespace_high_water, write_namespace_high_water};
 #[cfg(test)]
 pub(crate) use snapshot::try_load_persisted_state;
 pub(crate) use snapshot::{

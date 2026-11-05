@@ -35,6 +35,24 @@
 //! why dead rows linger. `Leases` (`leases.rs`) owns the three structures a
 //! key's lifetime spans; `timing_wheel.rs` schedules the expiries.
 //!
+//! # Namespaces
+//!
+//! A namespace decides which services a credential can see. By default a key owns
+//! one named by its own id, so revoking it takes the namespace with it. The
+//! administrator can instead allocate a namespace that no key owns and issue
+//! several keys into it, which lets one tenant hold a separately revocable key
+//! per device without moving the others:
+//!
+//! ```text
+//! allocate_namespace() --> 7
+//! issue_in_namespace(7) --> key A ─┐  same services; revoking A leaves B working,
+//! issue_in_namespace(7) --> key B ─┘  and namespace 7 is never handed out again
+//! ```
+//!
+//! A key's namespace is fixed at issue and read off its lease, so authentication
+//! does no extra work for it. `ids.rs` shows why the two kinds cannot collide, and
+//! `persistence/namespaces.rs` why the allocator lives outside the encrypted state.
+//!
 //! # Where mutations happen
 //!
 //! ```text
@@ -73,9 +91,12 @@ use pb_mapper_core::checksum::{
     process_credential_configured, set_process_msg_header_key,
 };
 
-/// The namespace administrator connections operate in. Tenant namespaces are the
-/// key id that owns them, so this mirrors [`ADMIN_KEY_ID`].
+/// The namespace administrator connections operate in. A key that was not issued
+/// into a namespace owns the one its id names, so this mirrors [`ADMIN_KEY_ID`].
 pub const ADMIN_NAMESPACE: u64 = ADMIN_KEY_ID.as_u64();
+/// Reported in [`AuthStatus::capabilities`] by a relay that can allocate
+/// namespaces, issue keys into them, and persist each key's namespace.
+pub const CAPABILITY_KEY_NAMESPACES: &str = "key_namespaces";
 pub const DEFAULT_AUTH_STATE_DIR: &str = "/var/lib/pb-mapper/auth";
 pub const DEFAULT_TEMP_KEY_CAPACITY: usize = 65_536;
 pub const MAX_TEMP_KEY_CAPACITY: usize = 1_048_576;
@@ -154,15 +175,17 @@ const LEASE_CANCEL_ROTATED: u8 = 3;
 #[derive(Debug)]
 pub struct AuthLease {
     key_id: KeyId,
+    namespace: u64,
     expires_at: AtomicU64,
     cancellation: CancellationToken,
     cancel_reason: AtomicU8,
 }
 
 impl AuthLease {
-    fn new(key_id: KeyId, expires_at: u64) -> Self {
+    fn new(key_id: KeyId, issued_into: Option<u64>, expires_at: u64) -> Self {
         Self {
             key_id,
+            namespace: key_id.namespace(issued_into),
             expires_at: AtomicU64::new(expires_at),
             cancellation: CancellationToken::new(),
             cancel_reason: AtomicU8::new(LEASE_CANCEL_NONE),
@@ -221,11 +244,7 @@ impl AuthContext {
     fn from_lease(key_id: KeyId, is_admin: bool, lease: &Arc<AuthLease>) -> Self {
         Self {
             key_id,
-            namespace: if is_admin {
-                ADMIN_NAMESPACE
-            } else {
-                key_id.as_u64()
-            },
+            namespace: lease.namespace,
             is_admin,
             lease: Arc::downgrade(lease),
         }
@@ -546,6 +565,18 @@ pub struct TemporaryKeyMetadata {
     pub issued_at: u64,
     pub expires_at: u64,
     pub label: Option<String>,
+    /// The namespace this key was issued into. Absent for a key that owns the one
+    /// its id names, which is also how a relay without namespaces reports every
+    /// key; [`Self::effective_namespace`] covers both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<u64>,
+}
+
+impl TemporaryKeyMetadata {
+    /// The namespace this key's credential operates in.
+    pub fn effective_namespace(&self) -> u64 {
+        self.key_id.namespace(self.namespace)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -576,12 +607,18 @@ pub struct AuthStatus {
     pub auth_successes: u64,
     pub auth_failures: u64,
     pub server_instance_id: String,
+    /// What this relay supports beyond the base protocol, such as
+    /// [`CAPABILITY_KEY_NAMESPACES`]. A relay older than the field reports none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
 struct ColdMetadata {
     issued_at: u64,
     label: Option<String>,
+    /// The namespace this key was issued into, if any. See [`KeyId::namespace`].
+    namespace: Option<u64>,
     tombstoned_at: u64,
 }
 
@@ -592,8 +629,13 @@ enum AuthCommand {
         client_timestamp: u64,
         response: oneshot::Sender<Result<(), AuthFailure>>,
     },
+    AllocateNamespace {
+        authority: Weak<AuthLease>,
+        response: oneshot::Sender<Result<u64, AuthFailure>>,
+    },
     Issue {
         authority: Weak<AuthLease>,
+        namespace: Option<u64>,
         ttl: Duration,
         label: Option<String>,
         response: oneshot::Sender<Result<IssuedTemporaryKey, AuthFailure>>,
@@ -695,6 +737,10 @@ struct PersistedEntry {
     label: Option<String>,
     #[serde(default)]
     tombstoned_at: Option<u64>,
+    /// The namespace this key was issued into. Absent for a key that owns the one
+    /// its id names, which is every entry written before namespaces existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    namespace: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -768,14 +814,15 @@ pub(crate) use persistence::{
     cancel_all_temporary_leases, compaction_is_allowed, empty_snapshot,
     fail_closed_on_uncertain_wal, hex, key_matches_existing_state, load_or_create_instance_id,
     load_persisted_state, normalize_tombstone_times, open_blob, prepare_state_dir_and_lock,
-    push_audit_record, push_persisted_audit, random_instance_id, recover_instance_id_after_reset,
-    reset_already_installed, rotation_already_installed, split_high_slot_state, truncate_auth_wal,
-    unix_seconds, write_admin_key, write_snapshot_and_truncate_wal,
+    push_audit_record, push_persisted_audit, random_instance_id, read_namespace_high_water,
+    recover_instance_id_after_reset, reset_already_installed, rotation_already_installed,
+    split_high_slot_state, truncate_auth_wal, unix_seconds, write_admin_key,
+    write_namespace_high_water, write_snapshot_and_truncate_wal,
 };
 #[cfg(test)]
 pub(crate) use persistence::{prepare_state_dir, read_instance_id_file, try_load_persisted_state};
 mod ids;
-pub use ids::{ADMIN_KEY_ID, Generation, KeyId, SlotIndex};
+pub use ids::{ADMIN_KEY_ID, Generation, KeyId, MAX_ALLOCATED_NAMESPACE, SlotIndex};
 mod leases;
 use leases::Leases;
 mod timing_wheel;

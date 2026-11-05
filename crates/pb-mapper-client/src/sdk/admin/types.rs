@@ -20,6 +20,9 @@ use super::super::types::LegacyProtocol;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IssuedKey {
     pub key_id: u64,
+    /// The namespace this credential operates in: one it was issued into, or else
+    /// the one its `key_id` names.
+    pub namespace: u64,
     pub state: String,
     pub issued_at: u64,
     pub expires_at: u64,
@@ -31,6 +34,9 @@ pub struct IssuedKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyMetadata {
     pub key_id: u64,
+    /// The namespace this credential operates in: one it was issued into, or else
+    /// the one its `key_id` names.
+    pub namespace: u64,
     pub state: String,
     pub issued_at: u64,
     pub expires_at: u64,
@@ -78,6 +84,8 @@ pub struct AuthStatusInfo {
     pub auth_successes: u64,
     pub auth_failures: u64,
     pub server_instance_id: String,
+    /// What this relay supports beyond the base protocol. Empty on an older relay.
+    pub capabilities: Vec<String>,
 }
 
 /// One page of a paginated administrator listing, as
@@ -150,6 +158,7 @@ impl From<IssuedTemporaryKey> for IssuedKey {
     fn from(value: IssuedTemporaryKey) -> Self {
         Self {
             key_id: value.metadata.key_id.as_u64(),
+            namespace: value.metadata.effective_namespace(),
             state: value.metadata.state,
             issued_at: value.metadata.issued_at,
             expires_at: value.metadata.expires_at,
@@ -163,6 +172,7 @@ impl From<TemporaryKeyMetadata> for KeyMetadata {
     fn from(value: TemporaryKeyMetadata) -> Self {
         Self {
             key_id: value.key_id.as_u64(),
+            namespace: value.effective_namespace(),
             state: value.state,
             issued_at: value.issued_at,
             expires_at: value.expires_at,
@@ -216,6 +226,7 @@ impl From<AuthStatus> for AuthStatusInfo {
             auth_successes: value.auth_successes,
             auth_failures: value.auth_failures,
             server_instance_id: value.server_instance_id,
+            capabilities: value.capabilities,
         }
     }
 }

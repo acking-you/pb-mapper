@@ -21,7 +21,7 @@ TLS 仍然有独立价值，V2 不替代公钥 PKI。
 | 管理员密钥 | 唯一的 32 字节根凭据，可管理密钥并查看全部命名空间。 |
 | 临时凭据 | `pbmt1_...` 字符串，携带 key ID 与派生后的 32 字节 secret。 |
 | Key ID | 64 位 `generation:u32 | slot:u32`，用于直接定位固定槽位。 |
-| 命名空间 | 管理员默认为 `0`；临时凭据的命名空间就是自己的 key ID。 |
+| 命名空间 | 管理员默认为 `0`；临时凭据属于签发时指定的命名空间，未指定时就是自己的 key ID。 |
 | 凭据租约 | 同一凭据认证出的连接共同观察的取消对象。 |
 
 临时 secret 由管理员密钥、持久化 server instance ID 与 key ID 通过
@@ -107,8 +107,11 @@ HKDF-SHA256 使用 connection salt 作为 salt，凭据的 32 字节 secret 作�
 ### 签发与续期
 
 签发会寻找空槽位、递增 generation、派生 secret、写入加密 WAL 并 `fsync`，随后才
-把凭据返回给管理员。续期不换 key ID 与凭据文本，只更新绝对过期时间并把新版本任务
-放入时间轮，旧任务到期时因版本不匹配而被忽略。
+把凭据返回给管理员。续期不换 key ID 与凭据文本，只把绝对过期时间设为从现在起的
+给定 TTL（可以比原来早，也可以比原来晚）并把新版本任务放入时间轮，旧任务到期时因
+版本不匹配而被忽略。缩短后的 key 会在新的截止时间像普通过期一样结束，该截止时间
+在重启后依然有效。调用方丢失凭据文本时也可以靠续期找回；`key reveal` 返回相同文本
+且不改变过期时间。
 
 ```bash
 export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
@@ -119,6 +122,39 @@ pb-mapper admin --server relay.example.com:7666 \
 ```
 
 默认最短 TTL 为 10 秒，最长为 30 天，服务端可调整最大值。
+
+### 多个 key 共用的命名空间
+
+默认情况下，一个 key 拥有以自身 key ID 命名的命名空间，持有该 key 的所有设备共用它。
+如果希望一个租户每台设备一个 key，移除设备时只吊销一个 key、其他设备不受影响，就先
+分配命名空间，再向其中签发：
+
+```bash
+pb-mapper admin --server relay.example.com:7666 namespace allocate
+pb-mapper admin --server relay.example.com:7666 \
+  key issue --ttl 24h --label laptop --namespace 1
+```
+
+同一命名空间内的 key 能看到相同的服务，并各自独立地吊销、续期和过期。命名空间比其中
+的 key 活得更久，之后签发的 key 仍会看到相同的服务。只有管理员可以分配和签发；向分配器
+没有发放过的命名空间签发会返回 `namespace_not_allocated`，命名空间 `0` 和任何 key 自身
+的命名空间都属于这种情况。
+
+可分配的命名空间是 `1` 到 `2^32 - 1`，即 key ID 布局中的 generation `0`。任何 key 的
+generation 都不会是 `0`，因此两类命名空间不会冲突。每个编号只发放一次：高水位先写入并
+落盘，然后才返回编号，崩溃或响应丢失最多浪费一个编号，绝不会重复。高水位放在单独的
+文件中，所以根密钥轮换、认证状态重置、从损坏的 snapshot 执行重置都不会影响它，调用方可以
+在这些操作之后继续使用已保存的命名空间。只有丢失整个状态目录才会丢失高水位，此后向已保存
+的编号签发会返回 `namespace_not_allocated`，直到分配器再次越过该编号；调用方应将其视为
+中继丢失了状态，并在自己一侧保证编号唯一。
+
+具备上述能力的中继会在 `admin status` 的 `capabilities` 中列出 `key_namespaces`，SDK 的
+`Admin::supports_key_namespaces` 读取的就是它。旧版中继不报告任何能力，并以
+`request_decode_failed` 拒绝这两个请求，不产生副作用。
+
+未指定命名空间签发的 key 的存储格式与之前完全相同。把中继回退到不支持命名空间的版本时，
+状态仍然可读，但该版本会忽略 key 的命名空间，这类 key 会落到自身 key ID 对应的命名空间：
+仍然隔离，但不再与同伴共享服务。
 
 ### 到期、吊销与 GC
 
@@ -145,10 +181,11 @@ CLI 在发请求前保存候选 key，完成后再用
 
 ## 命名空间与权限边界
 
-临时凭据只能在自己的命名空间执行 `register`、`connect` 与 `status`。它不能签发或
+临时凭据只能在自己的命名空间（签发时指定的命名空间，或其 key ID 对应的命名空间）
+执行 `register`、`connect` 与 `status`。它不能签发或
 查看其他 key、进入其他命名空间、修改 legacy 策略、重置状态或轮换管理员密钥。
 
-管理员默认使用命名空间 0；通过 `--namespace <key-id>` 可以查看或连接临时命名空间。
+管理员默认使用命名空间 0；通过 `--namespace <namespace>` 可以查看或连接临时命名空间。
 管理员要在临时命名空间内注册服务时还必须显式使用 `--force`，避免误把业务服务挂到
 错误租户。
 
@@ -160,9 +197,16 @@ CLI 在发请求前保存候选 key，完成后再用
 | --- | --- | --- | --- | --- |
 | 无状态签名 token | 服务端状态少 | 仍需 deny list | 依赖 token claim | 一个请求 |
 | 通用 HashMap | 动态分配与哈希 | 直接删除 | 直接 | 一个请求 |
-| 固定槽位 + 派生 secret | 固定热内存、O(1) 查找 | 直接取消槽位租约 | key ID 即 namespace | 一个请求 |
+| 固定槽位 + 派生 secret | 固定热内存、O(1) 查找 | 直接取消槽位租约 | key ID 或已分配的 namespace | 一个请求 |
 
 当前方案明确接受有上限的服务端状态，以换取确定的提前吊销与活动连接硬关闭。
+
+吊销在 key 要开始新操作的地方生效：首帧认证（覆盖 TCP 与 QUIC 上的 `register`、订阅和
+stream 连接）以及直连协调。中继转发的 stream 在任一端的 key 失效时关闭。直连建立有所
+不同，因为提交发生在两个端点之间。key 被吊销后，中继不再为它发起或接续建立过程，并取消
+其作为消费方进行中的建立过程。端点已持有的 grant 只对那一个会话有效，到其建立截止时间
+为止（最多 8 秒），此后不再授权任何东西。已建立的直连会话属于端点，不受吊销影响；要关闭它
+需要停止持有它的端点。
 
 ## 持久化与安全模式
 
@@ -176,6 +220,7 @@ Linux、macOS 与 Windows 桌面二进制默认写到用户可写的应用目录
 | `admin.key.next` | 轮换进行中的暂存根密钥 |
 | `server-instance-id` | 16 字节持久派生身份 |
 | `server-instance-id.next` | reset 进行中的暂存实例 ID |
+| `namespace-allocator` | 已发放的最后一个命名空间（十进制文本）。不是机密，reset 与根密钥轮换都不会替换它 |
 | `auth.snapshot` | AES-256-GCM 加密的紧凑槽位快照 |
 | `auth.wal` | 带长度前缀、逐条加密的 mutation 与 audit |
 
@@ -183,6 +228,9 @@ Linux、macOS 与 Windows 桌面二进制默认写到用户可写的应用目录
 WAL；snapshot 同时保存有上限的审计历史和仍有效的管理员重放声明，compact 不会丢弃
 这些安全记录。无效文件头、完整性验证失败、WAL 截断、schema 不匹配或 compact 失败
 都会进入 safe mode：临时凭据全部 fail closed，管理员仍可查看状态并执行显式 reset。
+`namespace-allocator` 损坏的影响范围更小：分配命名空间和向命名空间签发会以
+`namespace_allocator_unavailable` 失败（猜测可能导致编号重复），已有 key 和普通签发不受影响。
+恢复该文件即可解除。
 
 Flutter 启动服务端时使用应用配置目录下的 `auth/` 子目录，并且只有 TCP listener 与
 认证状态都初始化成功后才会报告 running；桌面和移动端无需写 `/var/lib`，初始化失败
