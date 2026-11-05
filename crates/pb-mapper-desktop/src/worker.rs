@@ -83,7 +83,7 @@ impl Worker {
         let renderer = feedback.clone();
         let bitrate = Arc::new(AtomicU32::new(preferences.bitrate));
         let rate = bitrate.clone();
-        let wake = crate::scheduler::Wake::default();
+        let wake = crate::scheduler::Wake::new();
         let signal = wake.clone();
         let join = tokio::task::spawn_blocking(move || {
             let (waiter, backend) =

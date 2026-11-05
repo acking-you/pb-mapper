@@ -19,9 +19,13 @@ mod native {
         System::Threading::*,
     };
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     pub(crate) struct Wake(Arc<OnceLock<Arc<OwnedHandle>>>);
     impl Wake {
+        pub fn new() -> Self {
+            Self(Arc::default())
+        }
+
         pub fn notify(&self) {
             if let Some(event) = self.0.get() {
                 // The waiter and sender both retain the handle until use ends.
@@ -108,10 +112,14 @@ mod native {
 }
 
 #[cfg(not(windows))]
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct Wake;
 #[cfg(not(windows))]
 impl Wake {
+    pub fn new() -> Self {
+        Self
+    }
+
     pub fn notify(&self) {}
 }
 #[cfg(not(windows))]
@@ -142,7 +150,7 @@ mod tests {
     use std::{sync::mpsc, time::Duration};
     #[test]
     fn wake_preserves_queued_input_and_interrupts_idle_stop() -> crate::Result<()> {
-        let wake = Wake::default();
+        let wake = Wake::new();
         let waiter = Waiter::new(&wake)?;
         let (sender, receiver) = mpsc::sync_channel(1);
         sender.send(7u32).map_err(crate::error)?;
