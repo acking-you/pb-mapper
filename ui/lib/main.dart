@@ -34,10 +34,13 @@ bool get _isDesktop =>
     !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
 
 Future<void> main(List<String> args) async {
+  // A UI route, consumed before Rust's independent CLI parser. The restart
+  // worker waits for the old process to exit before launching this one.
+  final openDesktop = args.length == 1 && args.single == '--desktop';
   // `pb_mapper_ui status` and friends are handled by Rust and never reach the
   // window. Rust also decides what counts as a command, so there is no verb
   // list here to fall out of step with the one in `Command`.
-  final exitCode = CliEntry.run(args);
+  final exitCode = CliEntry.run(openDesktop ? const [] : args);
   if (exitCode != null) exit(exitCode);
 
   WidgetsFlutterBinding.ensureInitialized();
@@ -75,7 +78,12 @@ Future<void> main(List<String> args) async {
   // would be a poor trade.
   PbMapperService().startControlServer();
   runApp(
-    PbMapperApp(api: PbMapperApi(), desktop: _isDesktop, checkForUpdates: true),
+    PbMapperApp(
+      api: PbMapperApi(),
+      desktop: _isDesktop,
+      checkForUpdates: true,
+      openDesktopOnStartup: openDesktop,
+    ),
   );
 }
 

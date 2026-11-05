@@ -17,11 +17,13 @@ enum DesktopConnectionPhase {
 /// Owns the session independently of navigation. Only the newest frame is kept,
 /// and each input carries the geometry of the frame actually rendered by UI.
 class DesktopStore extends ChangeNotifier {
-  DesktopStore(this.api, {DateTime Function()? now})
+  DesktopStore(this.api, {DateTime Function()? now, this.onRestartReady})
     : _now = now ?? DateTime.now,
       _presentSample = (now ?? DateTime.now)();
   final DateTime Function() _now;
   final DesktopApiClient api;
+  final Future<void> Function()? onRestartReady;
+  bool restarting = false;
   DesktopCapabilities capabilities = const DesktopCapabilities();
   DesktopTrust trust = const DesktopTrust();
   bool _trustRestored = false;
@@ -638,11 +640,21 @@ class DesktopStore extends ChangeNotifier {
 
   Future<void> helperAction(String action) async {
     await run(() async {
-      await api.helperAction(action);
+      if (await api.helperAction(action)) {
+        final restart = onRestartReady;
+        if (restart == null) {
+          throw StateError('Application restart is unavailable');
+        }
+        restarting = true;
+        _timer?.cancel();
+        _notify();
+        await restart();
+        return;
+      }
       capabilities = await api.capabilities();
       await _loadBackground();
     });
-    await poll();
+    if (!restarting) await poll();
   }
 
   Future<void> allowControl(bool allow) async {

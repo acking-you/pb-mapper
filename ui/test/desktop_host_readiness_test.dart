@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
@@ -8,6 +9,12 @@ import 'fake_desktop_api.dart';
 
 class _HostProbe extends FakeDesktopApi {
   final privileges = <bool>[];
+  Completer<bool>? helperResult;
+  @override
+  Future<bool> helperAction(String action) async {
+    helperActions.add(action);
+    return helperResult == null ? false : await helperResult!.future;
+  }
 
   @override
   Future<String> startHost({
@@ -97,7 +104,6 @@ void main() {
             installed: true,
             running: true,
             identityVerified: true,
-            canOpenApplication: true,
           ),
         );
       final store = await _open(tester, api);
@@ -111,27 +117,16 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(setup);
       await tester.pumpAndSettle();
-      expect(api.helperActions, ['open']);
-      api.helper(
-        const DesktopHelper(
-          installed: true,
-          authorized: true,
-          canOpenApplication: true,
-        ),
-      );
+      expect(api.helperActions, ['install']);
+      api.helper(const DesktopHelper(installed: true, authorized: true));
       await store.load();
       await tester.pumpAndSettle();
       await tester.tap(setup);
       await tester.pumpAndSettle();
-      expect(api.helperActions, ['open', 'enable']);
+      expect(api.helperActions, ['install', 'enable']);
       api.background = const DesktopBackground();
       api.helper(
-        const DesktopHelper(
-          installed: true,
-          running: true,
-          authorized: true,
-          canOpenApplication: true,
-        ),
+        const DesktopHelper(installed: true, running: true, authorized: true),
       );
       await store.load();
       await tester.pumpAndSettle();
@@ -140,14 +135,13 @@ void main() {
       expect(tester.widget<FilledButton>(share).onPressed, isNull);
       await tester.tap(setup);
       await tester.pumpAndSettle();
-      expect(api.helperActions, ['open', 'enable', 'install']);
+      expect(api.helperActions, ['install', 'enable', 'install']);
       api.helper(
         const DesktopHelper(
           installed: true,
           running: true,
           authorized: true,
           identityVerified: true,
-          canOpenApplication: true,
         ),
       );
       await store.load();
@@ -160,6 +154,40 @@ void main() {
       await tester.pumpAndSettle();
       expect(api.privileges, [true]);
       await _close(tester, store);
+    },
+  );
+
+  test(
+    'restart waits for successful handoff and cancellation keeps the UI alive',
+    () async {
+      final api = _HostProbe()..helperResult = Completer<bool>();
+      var exits = 0;
+      final store = DesktopStore(
+        api,
+        onRestartReady: () async {
+          exits++;
+        },
+      );
+      var installing = store.helperAction('install');
+      await store.helperAction(
+        'install',
+      ); // Repeated clicks cannot start another installer.
+      expect(api.helperActions, ['install']);
+      expect(exits, 0);
+      api.helperResult!.completeError(StateError('consent cancelled'));
+      await installing;
+      expect(exits, 0);
+      expect(store.restarting, isFalse);
+      expect(store.error, isNotNull);
+      api.helperResult = Completer<bool>();
+      installing = store.helperAction('install');
+      expect(exits, 0);
+      api.helperResult!.complete(true);
+      await installing;
+      expect(exits, 1);
+      expect(store.restarting, isTrue);
+      expect(store.error, isNull);
+      store.dispose();
     },
   );
 }

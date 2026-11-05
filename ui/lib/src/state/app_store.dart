@@ -38,15 +38,18 @@ class AppStore extends ChangeNotifier {
   DesktopStore? _desktop;
   DesktopStore? get activeDesktop => _desktop;
   DesktopStore get desktop =>
-      _desktop ??= DesktopStore(api.desktop)..addListener(_notify);
+      _desktop ??= DesktopStore(api.desktop, onRestartReady: onRestartReady)
+        ..addListener(_notify);
   AppStore({
     required this.api,
     Stream<StateChange>? changes,
     this.relayInterval = const Duration(seconds: 12),
     this.tunnelInterval = const Duration(seconds: 6),
+    this.onRestartReady,
   }) : _changes = changes ?? PbMapperService.changeStream;
 
   final PbMapperApiClient api;
+  final Future<void> Function()? onRestartReady;
   final Stream<StateChange> _changes;
 
   /// How often the relay is asked what it holds while nothing else asks.

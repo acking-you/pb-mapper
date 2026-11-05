@@ -457,32 +457,30 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         {
             // Enabling/reinstalling may resume a saved service grant. Keep it
             // serialized with local starts until the helper process exits.
-            let local = if action != "open" {
-                Some(handle.desktop.host.lock().await)
+            // Old callers used `open` to spawn a second UI. Always install the
+            // current bundle instead, then replace this UI after a ready ack.
+            let action = if action == "open" {
+                "install".into()
             } else {
-                None
+                action
             };
-            if matches!(action.as_str(), "enable" | "install")
-                && local.as_ref().is_some_and(|slot| slot.is_some())
-            {
+            let local = handle.desktop.host.lock().await;
+            if matches!(action.as_str(), "enable" | "install") && local.is_some() {
                 return Err(err(
                     "stop local sharing before enabling the background service",
                 ));
             }
-            return tokio::task::spawn_blocking(move || {
-                if action == "open" {
-                    let status = desktop::helper::status();
-                    let path = status
-                        .installed_application
-                        .ok_or_else(|| err("helper is not installed"))?;
-                    std::process::Command::new(path).spawn().map_err(err)?;
-                } else {
-                    desktop::helper::request_installation(&action).map_err(err)?;
-                }
-                Ok(json!({}))
-            })
-            .await
-            .map_err(err)?;
+            let restart = action == "install";
+            tokio::task::spawn_blocking(move || desktop::helper::request_installation(&action))
+                .await
+                .map_err(err)?
+                .map_err(err)?;
+            if restart {
+                desktop::helper::prepare_application_restart()
+                    .await
+                    .map_err(err)?;
+            }
+            return Ok(json!({"restart": restart}));
         }
         #[cfg(not(windows))]
         {

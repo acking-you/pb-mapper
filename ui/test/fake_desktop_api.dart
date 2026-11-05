@@ -52,7 +52,11 @@ class FakeDesktopApi implements DesktopApiClient {
   @override
   Future<void> keyframe() async {}
   @override
-  Future<void> helperAction(String action) async => helperActions.add(action);
+  Future<bool> helperAction(String action) async {
+    helperActions.add(action);
+    return false;
+  }
+
   final helperActions = <String>[];
   @override
   Future<void> presented(int generation, int frameId) async {}

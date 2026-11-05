@@ -121,11 +121,17 @@ Windows sharing defaults to full desktop access. Its preparation card checks
 that the helper is installed, running, that this application is authorized,
 and that its live process image matches the protected installation. An identity
 query failure requires repairing/updating the helper and is never shown as ready.
-Follow **Install / update helper**, deliberately complete Windows' local
-administrator consent, then open the protected installed app. Sharing selects
-the helper automatically when ready; restarting a stopped service and opening
-the approved application remain available even if background management lost
-its connection. **Ordinary desktop only** is an explicit limited mode and
+Follow **Install / update and restart app** and deliberately complete Windows'
+local administrator consent. Installation automatically replaces the current
+application and returns to the remote desktop page, preserving saved settings
+and background sharing authorization. There is no separate "open installed app"
+step. An unelevated worker verifies the protected installation and owner, opens
+a handle to the old process, and acknowledges readiness before the UI exits.
+It launches the replacement only after that process exits, with a bounded wait.
+Cancellation or preparation failure leaves the original window open. Sharing
+selects the helper automatically when ready; maintenance remains available for
+service-owned sharing even when background management loses its connection.
+**Ordinary desktop only** is an explicit limited mode and
 does not support UAC or the lock screen. The first
 elevation of a portable app may need a person locally. A phone cannot approve a
 desktop the unprivileged app cannot access. No UAC policy is changed, no prompt

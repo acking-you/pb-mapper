@@ -4,6 +4,7 @@ import 'package:pb_mapper_ui/src/common/locale_controller.dart';
 import 'package:pb_mapper_ui/src/common/setup_state.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/pages/overview_page.dart';
+import 'package:pb_mapper_ui/src/pages/desktop_page.dart';
 import 'package:pb_mapper_ui/src/pages/relay_page.dart';
 import 'package:pb_mapper_ui/src/pages/settings_page.dart';
 import 'package:pb_mapper_ui/src/pages/tunnels_page.dart';
@@ -21,6 +22,19 @@ FakePbMapperApi _fresh() => FakePbMapperApi(
 );
 
 void main() {
+  testWidgets(
+    'helper restart returns to the desktop page with saved configuration',
+    (tester) async {
+      final api = FakePbMapperApi();
+      await pumpApp(tester, api, openDesktopOnStartup: true);
+      expect(find.byType(DesktopPage), findsOneWidget);
+      await tester.pageBack();
+      await settle(tester);
+      expect(find.byType(OverviewPage), findsOneWidget);
+      expect(find.byType(DesktopPage), findsNothing);
+      await finish(tester);
+    },
+  );
   group('shell', () {
     testWidgets('a wide window has a rail with the five pages', (tester) async {
       await pumpApp(tester, FakePbMapperApi());

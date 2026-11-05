@@ -31,6 +31,7 @@ Future<void> pumpApp(
   Locale? locale = const Locale('en'),
   bool reducedMotion = true,
   UpdateController? updates,
+  bool openDesktopOnStartup = false,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -53,6 +54,7 @@ Future<void> pumpApp(
         needsSetup: needsSetup,
         initialPage: page,
         updates: updates,
+        openDesktopOnStartup: openDesktopOnStartup,
       ),
     ),
   );

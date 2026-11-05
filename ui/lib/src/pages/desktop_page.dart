@@ -64,13 +64,9 @@ class _DesktopPageState extends State<DesktopPage> {
           hostHelper?.running == true && hostHelper?.identityVerified != true;
       final setupAction = hostHelper == null || helperReady
           ? null
-          : needsHelperRepair ||
-                !hostHelper.installed ||
-                !hostHelper.canOpenApplication && !hostHelper.authorized
+          : needsHelperRepair || !hostHelper.installed || !hostHelper.authorized
           ? 'install'
-          : !hostHelper.running
-          ? 'enable'
-          : 'open';
+          : 'enable';
       final needsSecureSetup =
           hostHelper != null && !_ordinaryOnly && !helperReady;
       return Scaffold(
@@ -214,21 +210,17 @@ class _DesktopPageState extends State<DesktopPage> {
                                     ? l.desktopSecureSetupRepair
                                     : l.desktopSecureSetupRequired,
                               'enable' => l.desktopSecureSetupStopped,
-                              'open' => l.desktopSecureSetupOpen,
                               _ => l.desktopSecureSetupReady,
                             }),
                             if (!helperReady) ...[
                               const SizedBox(height: 12),
                               FilledButton.icon(
                                 key: const Key('desktop-secure-setup-action'),
-                                // A cached background grant must not disable
-                                // opening its approved app or restarting an
-                                // unavailable service. FFI still serializes
-                                // install/enable against a local host.
+                                // Service-owned hosting survives application
+                                // replacement; only a local host blocks it.
                                 onPressed:
                                     store.busy ||
-                                        (setupAction != 'open' &&
-                                            store.sharing &&
+                                        (store.sharing &&
                                             store
                                                     .snapshot
                                                     .background
@@ -239,8 +231,7 @@ class _DesktopPageState extends State<DesktopPage> {
                                 icon: const Icon(Icons.shield_outlined),
                                 label: Text(switch (setupAction) {
                                   'install' => l.desktopHelperInstall,
-                                  'enable' => l.desktopHelperEnable,
-                                  _ => l.desktopHelperOpen,
+                                  _ => l.desktopHelperEnable,
                                 }),
                               ),
                             ],
@@ -267,7 +258,14 @@ class _DesktopPageState extends State<DesktopPage> {
                                   spacing: 8,
                                   children: [
                                     TextButton(
-                                      onPressed: store.busy || store.sharing
+                                      onPressed:
+                                          store.busy ||
+                                              (store.sharing &&
+                                                  store
+                                                          .snapshot
+                                                          .background
+                                                          ?.enabled !=
+                                                      true)
                                           ? null
                                           : () => store.helperAction('install'),
                                       child: Text(l.desktopHelperInstall),

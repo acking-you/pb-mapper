@@ -36,20 +36,15 @@ class DesktopHelper {
     this.running = false,
     this.authorized = false,
     this.identityVerified = false,
-    this.canOpenApplication = false,
     this.message = '',
   });
   final bool installed, running, authorized, identityVerified;
-  final bool canOpenApplication;
   final String message;
   factory DesktopHelper.fromJson(Map<String, dynamic> data) => DesktopHelper(
     installed: data['installed'] == true,
     running: data['running'] == true,
     authorized: data['authorized_application'] == true,
     identityVerified: data['identity_verified'] == true,
-    canOpenApplication:
-        data['installed_application'] is String &&
-        (data['installed_application'] as String).isNotEmpty,
     message: data['message'] as String? ?? '',
   );
 }
@@ -224,7 +219,9 @@ abstract interface class DesktopApiClient {
   Future<void> revokeTrust();
   Stream<DesktopFrame> frames();
   Future<void> keyframe();
-  Future<void> helperAction(String action);
+
+  /// True only after installation and an unelevated restart handoff are ready.
+  Future<bool> helperAction(String action);
   Future<void> presented(int generation, int frameId);
   Future<DesktopCapabilities> capabilities();
   Future<DesktopSnapshot> status();
@@ -295,9 +292,8 @@ class DesktopApi implements DesktopApiClient {
   }
 
   @override
-  Future<void> helperAction(String action) async {
-    await _call('helper_action', {'action': action});
-  }
+  Future<bool> helperAction(String action) async =>
+      (await _call('helper_action', {'action': action}))['restart'] == true;
 
   @override
   Future<void> presented(int generation, int frameId) async {

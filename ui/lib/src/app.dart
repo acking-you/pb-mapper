@@ -47,6 +47,7 @@ class PbMapperApp extends StatefulWidget {
     this.desktop = false,
     this.updates,
     this.checkForUpdates = false,
+    this.openDesktopOnStartup = false,
   });
 
   final PbMapperApiClient api;
@@ -70,6 +71,7 @@ class PbMapperApp extends StatefulWidget {
   /// Look for a newer release in the background, while the user lets it.
   /// Off in tests, which must not reach GitHub.
   final bool checkForUpdates;
+  final bool openDesktopOnStartup;
 
   @override
   State<PbMapperApp> createState() => _PbMapperAppState();
@@ -79,6 +81,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   late final AppStore _store = AppStore(
     api: widget.api,
     changes: widget.changes,
+    onRestartReady: () async => _quit(),
   );
   late final RelayStore _relay = RelayStore(app: _store);
   late final AppPrefs _prefs = widget.prefs ?? AppPrefs();
@@ -92,6 +95,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   /// Null while deciding, so a returning user never sees setup flash by.
   bool? _setup;
   bool _allowExit = false;
+  final _navigator = GlobalKey<NavigatorState>();
 
   @override
   void initState() {
@@ -117,6 +121,18 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       }
     });
     await started;
+    if (widget.openDesktopOnStartup && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _navigator.currentState?.push(
+            MaterialPageRoute<void>(
+              builder: (_) => DesktopPage(store: _store.desktop),
+            ),
+          );
+        }
+      });
+      WidgetsBinding.instance.ensureVisualUpdate();
+    }
     if (widget.checkForUpdates && updatesSupported && mounted) {
       unawaited(_reportUpdate());
       _updateSchedule = UpdateSchedule(
@@ -282,6 +298,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: _navigator,
       onGenerateTitle: (context) => AppLocalizations.of(context)!.appTitle,
       debugShowCheckedModeBanner: false,
       locale: _prefs.locale,

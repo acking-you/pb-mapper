@@ -11,6 +11,7 @@ mod ipc;
 mod os;
 #[cfg(feature = "windows-helper")]
 mod process_acl;
+mod restart;
 #[cfg(feature = "windows-helper")]
 mod service;
 pub(crate) mod worker;
@@ -23,6 +24,7 @@ pub use client::backend;
 #[cfg(feature = "windows-helper")]
 pub(crate) use os::SessionIdentity;
 pub use os::request_installation;
+pub use restart::prepare as prepare_application_restart;
 
 const SERVICE: &str = "PbMapperDesktop";
 const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v1";
@@ -190,6 +192,7 @@ pub fn run() -> Result<()> {
         [mode, pipe, parent] if mode == "worker" => {
             worker::run(pipe, parent.parse().map_err(error)?)
         }
+        [mode, parent] if mode == "restart-ui" => restart::run(parent.parse().map_err(error)?),
         [mode, source, sid] if mode == "install" => install::install(&PathBuf::from(source), sid),
         [mode] if mode == "enable" => install::enable(),
         [mode] if mode == "disable" => install::disable(),
