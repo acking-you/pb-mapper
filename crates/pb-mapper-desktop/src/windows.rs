@@ -410,8 +410,11 @@ fn relative_cursor(display: &Display, point: POINT, showing: bool) -> CursorPosi
 }
 
 #[cfg(feature = "windows-helper")]
-pub(crate) fn create_privileged(id: u32) -> Result<Box<dyn Backend>> {
-    let mut binding = crate::helper::worker::DesktopBinding::new()?;
+pub(crate) fn create_privileged(
+    id: u32,
+    session: crate::helper::SessionIdentity,
+) -> Result<Box<dyn Backend>> {
+    let mut binding = crate::helper::worker::DesktopBinding::new(session)?;
     binding.enter(|| {})?;
     Ok(Box::new(Desktop {
         id,

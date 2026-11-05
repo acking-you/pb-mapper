@@ -99,6 +99,7 @@ void main() {
     'the final presented frame is acknowledged without another frame and teardown cancels it',
     () async {
       final api = _StreamingApi();
+      api.background = const DesktopBackground(configured: true, enabled: true);
       var now = DateTime.utc(2026);
       final store = DesktopStore(api, now: () => now);
       final messenger =
@@ -117,6 +118,7 @@ void main() {
       }
 
       await present(1);
+      expect(store.snapshot.background?.enabled, isTrue);
       expect(api.presentations, [(7, 1)]);
       now = now.add(const Duration(milliseconds: 10));
       await present(2);
@@ -129,6 +131,7 @@ void main() {
       expect(api.presentations, [(7, 1), (7, 2)]);
       await present(3);
       await store.disconnect();
+      expect(store.snapshot.background?.enabled, isTrue);
       now = now.add(const Duration(milliseconds: 100));
       await Future<void>.delayed(const Duration(milliseconds: 120));
       expect(api.presentations, [(7, 1), (7, 2)]);

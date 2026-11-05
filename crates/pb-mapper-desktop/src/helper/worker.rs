@@ -84,16 +84,18 @@ struct BindingState {
     epoch: u64,
     generation: u64,
     name: String,
+    console: Option<os::ConsoleState>,
 }
 impl BindingState {
     fn enter(
         &mut self,
         name: String,
         epoch: u64,
+        console: os::ConsoleState,
         before_switch: impl FnOnce(),
         bind: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
-        if self.name == name && self.epoch == epoch {
+        if self.name == name && self.epoch == epoch && self.console == Some(console) {
             return Ok(());
         }
         let generation = self
@@ -106,6 +108,7 @@ impl BindingState {
         bind()?;
         self.name = name;
         self.epoch = epoch;
+        self.console = Some(console);
         self.generation = generation;
         Ok(())
     }
@@ -116,20 +119,24 @@ impl BindingState {
 pub(crate) struct DesktopBinding {
     original: isize,
     bound: isize,
-    session: u32,
+    session: os::SessionIdentity,
     state: BindingState,
     _events: Events,
 }
 impl DesktopBinding {
     #[cfg(feature = "windows-helper")]
-    pub fn new() -> Result<Self> {
+    pub fn new(session: os::SessionIdentity) -> Result<Self> {
         if os::current_sid()? != "S-1-5-18" {
             return Err(error(
                 "secure desktop backend requires the installed worker",
             ));
         }
-        let session = os::session(std::process::id())?;
-        os::console_unlocked(session)?;
+        if os::session(std::process::id())? != session.session {
+            return Err(error(
+                "worker does not belong to its approved console session",
+            ));
+        }
+        session.check()?;
         let original = unsafe { GetThreadDesktop(GetCurrentThreadId()) }.map_err(error)?;
         Ok(Self {
             original: original.0 as isize,
@@ -141,6 +148,10 @@ impl DesktopBinding {
     }
     pub fn changed(&self) -> bool {
         self.state.epoch != EPOCH.load(Ordering::Acquire)
+            || !self
+                .session
+                .check()
+                .is_ok_and(|console| self.state.console == Some(console))
     }
     pub fn generation(&self) -> u64 {
         self.state.generation
@@ -153,7 +164,14 @@ impl DesktopBinding {
         }
     }
     pub fn enter(&mut self, before_switch: impl FnOnce()) -> Result<()> {
-        os::console_unlocked(self.session)?;
+        let console = match self.session.check() {
+            Ok(console) => console,
+            Err(failure) => {
+                // A reused session ID must never keep old input or video state.
+                before_switch();
+                return Err(failure);
+            }
+        };
         // Sample before opening: a later notification must not be acknowledged
         // as if it described the handle we already opened.
         let epoch = EPOCH.load(Ordering::Acquire);
@@ -187,9 +205,8 @@ impl DesktopBinding {
             if name != "default" && name != "winlogon" {
                 return Err(error("unsupported input desktop"));
             }
-            self.state.enter(name, epoch, before_switch, || {
-                os::console_unlocked(self.session)?;
-                if EPOCH.load(Ordering::Acquire) != epoch {
+            self.state.enter(name, epoch, console, before_switch, || {
+                if self.session.check()? != console || EPOCH.load(Ordering::Acquire) != epoch {
                     return Err(error("input desktop changed before binding"));
                 }
                 // The caller has released input and desktop-affine capture/COM
@@ -244,10 +261,12 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
     runtime.block_on(async {
         let mut pipe = ipc::connect(name)?;
         os::verify_server(&pipe, &config.helper_executable, Some(parent))?;
-        let Request::Start { display_id } =
-            tokio::time::timeout(TIMEOUT, crate::wire::read_json(&mut pipe))
-                .await
-                .map_err(error)??
+        let Request::Attach {
+            display_id,
+            session,
+        } = tokio::time::timeout(TIMEOUT, crate::wire::read_json(&mut pipe))
+            .await
+            .map_err(error)??
         else {
             return Err(error("missing worker start"));
         };
@@ -256,7 +275,8 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         let cancel = tokio_util::sync::CancellationToken::new();
         let stopped = cancel.clone();
         let join = std::thread::spawn(move || {
-            let mut backend = match crate::platform::windows::create_privileged(display_id) {
+            let mut backend = match crate::platform::windows::create_privileged(display_id, session)
+            {
                 Ok(backend) => backend,
                 Err(e) => {
                     if let Ok((_, reply)) = incoming.recv_timeout(TIMEOUT) {
@@ -298,6 +318,7 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                     let mut video = None;
                     let image = match request {
                         Request::Start { .. } | Request::Context => vec![],
+                        Request::Attach { .. } => return Err(error("worker is already attached")),
                         Request::ConfigureVideo { preferences } => {
                             preferences.validate()?;
                             backend.configure_video(preferences)?;
@@ -429,6 +450,7 @@ mod tests {
             .enter(
                 "default".into(),
                 1,
+                os::ConsoleState::Unlocked,
                 || live_resources.set(false),
                 || {
                     assert!(!live_resources.get());
@@ -442,6 +464,7 @@ mod tests {
             .enter(
                 "default".into(),
                 1,
+                os::ConsoleState::Unlocked,
                 || panic!("unchanged desktop must keep its encoder"),
                 || panic!("unchanged desktop must keep its binding"),
             )
@@ -452,6 +475,7 @@ mod tests {
                 .enter(
                     "winlogon".into(),
                     1, // The event was missed; the name still forces a switch.
+                    os::ConsoleState::Unlocked,
                     || live_resources.set(false),
                     || {
                         assert!(!live_resources.get());
@@ -462,12 +486,44 @@ mod tests {
         );
         assert_eq!(state.name, "default");
         assert_eq!(state.generation, 1);
-        state.enter("winlogon".into(), 1, || {}, || Ok(())).unwrap();
+        state
+            .enter(
+                "winlogon".into(),
+                1,
+                os::ConsoleState::Unlocked,
+                || {},
+                || Ok(()),
+            )
+            .unwrap();
         assert_eq!(state.name, "winlogon");
         assert_eq!(state.generation, 2);
         // An away-and-back event invalidates resources even with the same name.
-        state.enter("winlogon".into(), 2, || {}, || Ok(())).unwrap();
+        state
+            .enter(
+                "winlogon".into(),
+                2,
+                os::ConsoleState::Unlocked,
+                || {},
+                || Ok(()),
+            )
+            .unwrap();
         assert_eq!(state.generation, 3);
+        // UAC and the lock UI can share the Winlogon desktop name. A lock
+        // transition must still invalidate pending input if no hook arrived.
+        live_resources.set(true);
+        state
+            .enter(
+                "winlogon".into(),
+                2,
+                os::ConsoleState::Locked,
+                || live_resources.set(false),
+                || {
+                    assert!(!live_resources.get());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(state.generation, 4);
     }
 
     #[test]

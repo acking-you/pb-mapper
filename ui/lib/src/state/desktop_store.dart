@@ -57,7 +57,8 @@ class DesktopStore extends ChangeNotifier {
   Future<void> _inputTail = Future.value();
   bool _endingControl = false;
   bool _releasing = false;
-  bool get sharing => snapshot.host != null;
+  bool get sharing =>
+      snapshot.host != null || snapshot.background?.enabled == true;
   bool get connected => snapshot.viewer != null;
   bool get fresh =>
       frame != null &&
@@ -80,6 +81,7 @@ class DesktopStore extends ChangeNotifier {
     await run(() async {
       capabilities = await api.capabilities();
       trust = await api.trustStatus();
+      await _loadBackground();
     });
     if (_disposed) return;
     _timer ??= Timer.periodic(const Duration(milliseconds: 250), (_) => poll());
@@ -90,8 +92,11 @@ class DesktopStore extends ChangeNotifier {
     if (_trustRestored || _disposed) return;
     _trustRestored = true;
     try {
+      await _loadBackground();
       trust = await api.trustStatus();
-      if (trust.saved?.autoStart == true && trust.matchesRelay) {
+      if (snapshot.background?.configured != true &&
+          trust.saved?.autoStart == true &&
+          trust.matchesRelay) {
         await restoreHost();
         if (!_disposed) {
           _timer ??= Timer.periodic(
@@ -100,10 +105,33 @@ class DesktopStore extends ChangeNotifier {
           );
         }
       }
+      if (snapshot.background?.configured == true && !_disposed) {
+        _timer ??= Timer.periodic(
+          const Duration(milliseconds: 250),
+          (_) => poll(),
+        );
+        await poll();
+      }
     } catch (e) {
       error = e.toString();
       _notify();
     }
+  }
+
+  Future<void> _loadBackground() async {
+    final background = await api.backgroundAction('status');
+    if (_disposed) return;
+    snapshot = snapshot.withBackground(background);
+    if (background.configured) invitation = background.invitation;
+  }
+
+  Future<void> backgroundAction(String action) async {
+    await run(() async {
+      final background = await api.backgroundAction(action);
+      snapshot = snapshot.withBackground(background);
+      invitation = background.invitation;
+    });
+    await poll();
   }
 
   Future<void> restoreHost() async {
@@ -119,7 +147,7 @@ class DesktopStore extends ChangeNotifier {
       await api.revokeTrust();
       invitation = null;
       trust = await api.trustStatus();
-      snapshot = DesktopSnapshot(viewer: snapshot.viewer);
+      snapshot = snapshot.withHost(null);
     } catch (e) {
       error = e.toString();
     }
@@ -135,6 +163,9 @@ class DesktopStore extends ChangeNotifier {
       final status = await api.status();
       if (!_current(epoch)) return;
       snapshot = status;
+      if (status.background?.configured == true) {
+        invitation = status.background?.invitation;
+      }
       if (snapshot.viewer == null || snapshot.viewer?.state == 'stopped') {
         _mediaFailed = snapshot.viewer != null;
         if (_frames != null || videoTexture != null || frame != null) {
@@ -170,7 +201,7 @@ class DesktopStore extends ChangeNotifier {
     if (!_current(epoch)) return;
     frame = next;
     _frameAt = _now();
-    snapshot = DesktopSnapshot(host: snapshot.host, viewer: next.status);
+    snapshot = snapshot.withViewer(next.status);
     final state = next.status;
     if (state.codec != 'h264' || !state.streaming || next.bytes.isEmpty) {
       videoPresented = null;
@@ -417,6 +448,7 @@ class DesktopStore extends ChangeNotifier {
     bool privileged = false,
     bool remember = false,
     bool autoStart = false,
+    bool background = false,
   }) async {
     await run(() async {
       invitation = await api.startHost(
@@ -427,6 +459,7 @@ class DesktopStore extends ChangeNotifier {
         privileged: privileged,
         remember: remember,
         autoStart: autoStart,
+        background: background,
       );
       trust = await api.trustStatus();
     });
@@ -439,7 +472,7 @@ class DesktopStore extends ChangeNotifier {
       await api.stopHost();
       trust = await api.trustStatus();
       invitation = null;
-      snapshot = DesktopSnapshot(viewer: snapshot.viewer);
+      snapshot = snapshot.withHost(null);
     } catch (e) {
       error = e.toString();
     }
@@ -488,10 +521,7 @@ class DesktopStore extends ChangeNotifier {
       _endingControl = false;
       _releasing = false;
       _mediaFailed = false;
-      snapshot = DesktopSnapshot(
-        host: snapshot.host,
-        viewer: const DesktopStatus(state: 'connecting'),
-      );
+      snapshot = snapshot.withViewer(const DesktopStatus(state: 'connecting'));
       final frames = StreamIterator(api.frames());
       _frames = frames;
       unawaited(_consumeFrames(frames, epoch));
@@ -515,7 +545,7 @@ class DesktopStore extends ChangeNotifier {
     _endingControl = true;
     _inputEpoch++;
     final cleanup = _clearVideo();
-    snapshot = DesktopSnapshot(host: snapshot.host);
+    snapshot = snapshot.withViewer(null);
     final epoch = _mediaEpoch;
     _notify();
     try {

@@ -23,11 +23,12 @@ parking_lot.workspace = true
 subtle.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+pb-mapper-core.workspace = true
 xcap.workspace = true
 windows-capture.workspace = true
 enigo.workspace = true
 image.workspace = true
-windows = { workspace = true, features = ["Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Environment", "Win32_System_Registry", "Win32_System_Services", "Win32_System_Com", "Win32_Media_MediaFoundation", "Win32_Media_DirectShow", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Variant", "Win32_System_Ole", "Win32_Graphics_Dwm"] }
+windows = { workspace = true, features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Environment", "Win32_System_Registry", "Win32_System_Services", "Win32_System_Com", "Win32_Media_MediaFoundation", "Win32_Media_DirectShow", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Variant", "Win32_System_Ole", "Win32_Graphics_Dwm"] }
 windows-service = { workspace = true, optional = true }
 
 [features]

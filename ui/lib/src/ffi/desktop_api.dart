@@ -133,8 +133,40 @@ class DesktopCursor {
 }
 
 class DesktopSnapshot {
-  const DesktopSnapshot({this.host, this.viewer});
+  const DesktopSnapshot({this.host, this.viewer, this.background});
   final DesktopStatus? host, viewer;
+  final DesktopBackground? background;
+  DesktopSnapshot withViewer(DesktopStatus? value) =>
+      DesktopSnapshot(host: host, viewer: value, background: background);
+  DesktopSnapshot withHost(DesktopStatus? value) =>
+      DesktopSnapshot(host: value, viewer: viewer, background: background);
+  DesktopSnapshot withBackground(DesktopBackground value) =>
+      DesktopSnapshot(host: host, viewer: viewer, background: value);
+}
+
+class DesktopBackground {
+  const DesktopBackground({
+    this.configured = false,
+    this.enabled = false,
+    this.service,
+    this.server,
+    this.invitation,
+    this.autoStart = false,
+    this.message = '',
+  });
+  factory DesktopBackground.fromJson(Map<String, dynamic> data) =>
+      DesktopBackground(
+        configured: data['configured'] == true,
+        enabled: data['enabled'] == true,
+        service: (data['settings'] as Map?)?['service'] as String?,
+        server: data['server'] as String?,
+        invitation: data['invitation'] as String?,
+        autoStart: (data['settings'] as Map?)?['auto_start'] == true,
+        message: data['message'] as String? ?? '',
+      );
+  final bool configured, enabled, autoStart;
+  final String? service, server, invitation;
+  final String message;
 }
 
 class DesktopTrustedHost {
@@ -179,6 +211,7 @@ class DesktopFrame {
 }
 
 abstract interface class DesktopApiClient {
+  Future<DesktopBackground> backgroundAction(String action);
   Future<DesktopTrust> trustStatus();
   Future<String> restoreHost();
   Future<void> revokeTrust();
@@ -196,6 +229,7 @@ abstract interface class DesktopApiClient {
     bool privileged = false,
     bool remember = false,
     bool autoStart = false,
+    bool background = false,
   });
   Future<void> stopHost({bool onExit = false});
   Future<void> allowControl(bool allow);
@@ -213,6 +247,12 @@ abstract interface class DesktopApiClient {
 }
 
 class DesktopApi implements DesktopApiClient {
+  @override
+  Future<DesktopBackground> backgroundAction(String action) async =>
+      DesktopBackground.fromJson(
+        await _call('background_action', {'action': action}),
+      );
+
   @override
   Future<DesktopTrust> trustStatus() async {
     final data = await _call('trust_status');
@@ -294,7 +334,15 @@ class DesktopApi implements DesktopApiClient {
     DesktopStatus? parse(String name) => data[name] == null
         ? null
         : DesktopStatus.fromJson(Map<String, dynamic>.from(data[name] as Map));
-    return DesktopSnapshot(host: parse('host'), viewer: parse('viewer'));
+    return DesktopSnapshot(
+      host: parse('host'),
+      viewer: parse('viewer'),
+      background: data['background'] is Map
+          ? DesktopBackground.fromJson(
+              Map<String, dynamic>.from(data['background'] as Map),
+            )
+          : null,
+    );
   }
 
   @override
@@ -306,6 +354,7 @@ class DesktopApi implements DesktopApiClient {
     bool privileged = false,
     bool remember = false,
     bool autoStart = false,
+    bool background = false,
   }) async =>
       (await _call('host_start', {
             'service': service,
@@ -315,6 +364,7 @@ class DesktopApi implements DesktopApiClient {
             'privileged': privileged,
             'remember': remember,
             'auto_start': autoStart,
+            'background': background,
           }))['invitation']
           as String;
   @override

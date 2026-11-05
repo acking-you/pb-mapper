@@ -3126,6 +3126,7 @@ dependencies = [
  "image",
  "parking_lot",
  "pb-mapper-client",
+ "pb-mapper-core",
  "pb-mapper-server",
  "pb-mapper-testkit",
  "quinn-plus",

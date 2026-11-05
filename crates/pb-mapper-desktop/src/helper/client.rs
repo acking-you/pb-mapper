@@ -20,6 +20,25 @@ pub fn backend(display_id: u32) -> Result<Box<dyn Backend>> {
             "Open the installed pb-mapper application to use the authorized helper",
         ));
     }
+    connect_backend(display_id, &config)
+}
+
+/// The background supervisor uses the same bounded IPC as the UI. The server
+/// independently accepts only its own kernel-reported PID, never arbitrary
+/// SYSTEM callers, and binds the worker to the approved owner's current login.
+#[cfg(feature = "windows-helper")]
+pub(super) fn service_backend(display_id: u32) -> Result<Box<dyn Backend>> {
+    let config = configuration()?;
+    if os::current_sid()? != "S-1-5-18"
+        || os::session(std::process::id())? != 0
+        || !os::same_path(&std::env::current_exe()?, &config.helper_executable)
+    {
+        return Err(error("background capture requires the installed service"));
+    }
+    connect_backend(display_id, &config)
+}
+
+fn connect_backend(display_id: u32, config: &Configuration) -> Result<Box<dyn Backend>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

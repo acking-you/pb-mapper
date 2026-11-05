@@ -262,27 +262,169 @@ pub fn session(id: u32) -> Result<u32> {
 pub fn active_session() -> u32 {
     unsafe { WTSGetActiveConsoleSessionId() }
 }
+
+#[cfg(feature = "windows-helper")]
+static PRIVILEGES: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[cfg(feature = "windows-helper")]
+pub(super) struct ScopedPrivileges {
+    pub token: Handle,
+    previous: Vec<TOKEN_PRIVILEGES>,
+    _scope: parking_lot::MutexGuard<'static, ()>,
+}
+#[cfg(feature = "windows-helper")]
+impl ScopedPrivileges {
+    pub fn new(names: &[PCWSTR]) -> Result<Self> {
+        // Process privileges are shared by service tasks. No scope survives an
+        // await, and serialized restoration cannot disable another operation's
+        // temporary privileges or leave them enabled after both operations.
+        let guard = PRIVILEGES.lock();
+        let mut token = HANDLE::default();
+        unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES | TOKEN_DUPLICATE,
+                &mut token,
+            )
+        }
+        .map_err(error)?;
+        let mut scope = Self {
+            token: unsafe { Handle::own(token) },
+            previous: Vec::with_capacity(names.len()),
+            _scope: guard,
+        };
+        for name in names {
+            let mut luid = LUID::default();
+            unsafe { LookupPrivilegeValueW(None, *name, &mut luid) }.map_err(error)?;
+            let privileges = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [LUID_AND_ATTRIBUTES {
+                    Luid: luid,
+                    Attributes: SE_PRIVILEGE_ENABLED,
+                }],
+            };
+            let mut previous = TOKEN_PRIVILEGES::default();
+            unsafe {
+                AdjustTokenPrivileges(
+                    scope.token.raw(),
+                    false,
+                    Some(&privileges),
+                    size_of::<TOKEN_PRIVILEGES>() as u32,
+                    Some(&mut previous),
+                    None,
+                )
+            }
+            .map_err(error)?;
+            scope.previous.push(previous);
+            if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
+                return Err(error("service lacks a required session privilege"));
+            }
+        }
+        Ok(scope)
+    }
+}
+#[cfg(feature = "windows-helper")]
+impl Drop for ScopedPrivileges {
+    fn drop(&mut self) {
+        for previous in self.previous.iter().rev() {
+            if unsafe {
+                AdjustTokenPrivileges(self.token.raw(), false, Some(previous), 0, None, None)
+            }
+            .is_err()
+            {
+                std::process::abort();
+            }
+        }
+    }
+}
+/// The service attests this login instance before starting a privileged worker.
+/// Session IDs alone are reusable after logoff; lock/unlock keeps this identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionIdentity {
+    pub session: u32,
+    logon_time: i64,
+    user: String,
+    domain: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConsoleState {
+    Locked,
+    Unlocked,
+}
+
+#[cfg(feature = "windows-helper")]
+pub(super) fn background_session(owner_sid: &str) -> Result<u32> {
+    Ok(owner_session(owner_sid)?.session)
+}
+
+#[cfg(feature = "windows-helper")]
+pub(super) fn owner_session(owner_sid: &str) -> Result<SessionIdentity> {
+    let session = active_session();
+    let (identity, _) = console_session(session)?;
+    // WTSQueryUserToken requires LocalSystem/SeTcbPrivilege. Limit that
+    // privilege to this synchronous query, restoring it before any await.
+    let privileges = ScopedPrivileges::new(&[SE_TCB_NAME])?;
+    let mut token = HANDLE::default();
+    unsafe { WTSQueryUserToken(session, &mut token) }.map_err(error)?;
+    let token = unsafe { Handle::own(token) };
+    if sid(token.raw())? != owner_sid {
+        return Err(error("The active console belongs to another user"));
+    }
+    drop(privileges);
+    identity.check()?;
+    Ok(identity)
+}
+
 #[cfg(feature = "windows-helper")]
 pub fn verify_client(
     pipe: &tokio::net::windows::named_pipe::NamedPipeServer,
     config: &Configuration,
-) -> Result<(Handle, u32)> {
+) -> Result<(Handle, SessionIdentity)> {
+    let owner = verify_pipe_identity(pipe, config, true)?;
+    Ok((owner, owner_session(&config.owner_sid)?))
+}
+
+/// Management remains available to the installed owner UI even while that
+/// user's console is disconnected. It grants no capture or input by itself.
+#[cfg(feature = "windows-helper")]
+pub(super) fn verify_management_client(
+    pipe: &tokio::net::windows::named_pipe::NamedPipeServer,
+    config: &Configuration,
+) -> Result<Handle> {
+    verify_pipe_identity(pipe, config, false)
+}
+
+#[cfg(feature = "windows-helper")]
+fn verify_pipe_identity(
+    pipe: &tokio::net::windows::named_pipe::NamedPipeServer,
+    config: &Configuration,
+    capture: bool,
+) -> Result<Handle> {
     let mut id = 0;
     unsafe { GetNamedPipeClientProcessId(super::ipc::raw(pipe), &mut id) }.map_err(error)?;
     let process = process(id)?;
-    let session = session(id)?;
-    if session == 0
-        || session != active_session()
-        || !same_path(&image(process.raw())?, &config.ui_executable)
+    let caller_session = session(id)?;
+    let caller_sid = sid(token_for_process(process.raw())?.raw())?;
+    // Only this exact service process may use the background-host factory.
+    // Another SYSTEM process does not inherit the application's authorization.
+    let internal = capture
+        && id == std::process::id()
+        && caller_session == 0
+        && caller_sid == "S-1-5-18"
+        && same_path(&image(process.raw())?, &config.helper_executable);
+    if !internal
+        && (caller_session == 0
+            || (capture && caller_session != active_session())
+            || caller_sid != config.owner_sid
+            || !same_path(&image(process.raw())?, &config.ui_executable))
     {
         return Err(error(
             "helper caller is not the approved console application",
         ));
     }
     protected_file(&config.ui_executable)?;
-    if sid(token_for_process(process.raw())?.raw())? != config.owner_sid {
-        return Err(error("helper caller belongs to another identity"));
-    }
     // Bind to the pipe's actual security context too, rather than trusting a
     // PID sent in a message. Revert synchronously before any await point.
     unsafe { ImpersonateNamedPipeClient(super::ipc::raw(pipe)) }.map_err(error)?;
@@ -291,7 +433,7 @@ pub fn verify_client(
         unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
             .map_err(error)?;
         let token = unsafe { Handle::own(token) };
-        if sid(token.raw())? != config.owner_sid {
+        if sid(token.raw())? != caller_sid {
             return Err(error("pipe identity differs from process identity"));
         }
         Ok(())
@@ -300,7 +442,7 @@ pub fn verify_client(
         std::process::abort();
     }
     verified?;
-    Ok((process, session))
+    Ok(process)
 }
 
 struct ServiceHandle(SC_HANDLE);
@@ -311,19 +453,16 @@ impl Drop for ServiceHandle {
         }
     }
 }
+fn open_service(access: u32) -> windows::core::Result<ServiceHandle> {
+    let manager = ServiceHandle(unsafe { OpenSCManagerW(None, None, SC_MANAGER_CONNECT) }?);
+    Ok(ServiceHandle(unsafe {
+        OpenServiceW(manager.0, PCWSTR(wide(SERVICE).as_ptr()), access)
+    }?))
+}
 fn service_status() -> Result<SERVICE_STATUS_PROCESS> {
-    let manager =
-        ServiceHandle(unsafe { OpenSCManagerW(None, None, SC_MANAGER_CONNECT) }.map_err(error)?);
-    let service = ServiceHandle(
-        unsafe {
-            OpenServiceW(
-                manager.0,
-                PCWSTR(wide(SERVICE).as_ptr()),
-                SERVICE_QUERY_STATUS,
-            )
-        }
-        .map_err(error)?,
-    );
+    query_service_status(&open_service(SERVICE_QUERY_STATUS).map_err(error)?)
+}
+fn query_service_status(service: &ServiceHandle) -> Result<SERVICE_STATUS_PROCESS> {
     let mut status = SERVICE_STATUS_PROCESS::default();
     let mut needed = 0;
     unsafe {
@@ -340,8 +479,33 @@ fn service_status() -> Result<SERVICE_STATUS_PROCESS> {
     .map_err(error)?;
     Ok(status)
 }
-pub fn service_running() -> Result<bool> {
-    Ok(service_status()?.dwCurrentState == SERVICE_RUNNING)
+pub fn service_state() -> Result<Option<(bool, bool)>> {
+    let service = match open_service(SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG) {
+        Ok(service) => service,
+        Err(e)
+            if e.code() == windows::core::HRESULT::from_win32(ERROR_SERVICE_DOES_NOT_EXIST.0) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(error(e)),
+    };
+    let disabled = service_startup_disabled(&service)?;
+    let state = query_service_status(&service)?.dwCurrentState;
+    // A disabled startup policy alone says nothing about an existing process.
+    // Pending transitions and failed queries must never allow a second host.
+    Ok(Some((
+        state == SERVICE_RUNNING,
+        state == SERVICE_STOPPED && disabled,
+    )))
+}
+fn service_startup_disabled(service: &ServiceHandle) -> Result<bool> {
+    // QueryServiceConfig has a documented 8 KiB maximum. Word storage keeps
+    // QUERY_SERVICE_CONFIGW aligned and avoids a second, racy size query.
+    let mut buffer = [0usize; 8192 / size_of::<usize>()];
+    let config = buffer.as_mut_ptr().cast::<QUERY_SERVICE_CONFIGW>();
+    let mut needed = 0;
+    unsafe { QueryServiceConfigW(service.0, Some(config), 8192, &mut needed) }.map_err(error)?;
+    Ok(unsafe { (*config).dwStartType } == SERVICE_DISABLED)
 }
 pub fn verify_server(
     pipe: &tokio::net::windows::named_pipe::NamedPipeClient,
@@ -441,29 +605,46 @@ mod tests {
         assert!(!contained_path(root, &root.join(r"..\outside.exe")));
     }
     #[test]
-    fn only_the_logged_in_active_unlocked_session_is_authorized() {
+    fn console_identity_survives_lock_but_not_logoff_or_session_reuse() {
         let mut info = WTSINFOEX_LEVEL1_W {
             SessionId: 7,
             SessionState: WTSActive,
             SessionFlags: WTS_SESSIONSTATE_UNLOCK as i32,
+            LogonTime: 100,
             ..Default::default()
         };
-        assert!(!session_is_unlocked(7, &info));
+        assert!(session_state(7, &info).is_none());
         info.UserName[0] = u16::from(b'u');
-        assert!(session_is_unlocked(7, &info));
-        assert!(!session_is_unlocked(8, &info));
+        let (identity, state) = session_state(7, &info).unwrap();
+        assert_eq!(state, ConsoleState::Unlocked);
+        assert!(identity.matches(&info));
+        assert!(session_state(8, &info).is_none());
         info.SessionState = WTSDisconnected;
-        assert!(!session_is_unlocked(7, &info));
+        assert!(session_state(7, &info).is_none());
         info.SessionState = WTSActive;
         info.SessionFlags = WTS_SESSIONSTATE_LOCK as i32;
-        assert!(!session_is_unlocked(7, &info));
+        assert_eq!(
+            session_state(7, &info),
+            Some((identity.clone(), ConsoleState::Locked))
+        );
+        // Even the same user logging in again at a reused session ID is a new
+        // authorization boundary; the old worker must never follow it.
+        info.LogonTime += 1;
+        assert_ne!(session_state(7, &info).unwrap().0, identity);
+        assert!(!identity.matches(&info));
+        info.LogonTime -= 1;
+        info.UserName[0] = u16::from(b'v');
+        assert_ne!(session_state(7, &info).unwrap().0, identity);
+        assert!(!identity.matches(&info));
+        info.UserName[0] = 0;
+        assert!(session_state(7, &info).is_none());
     }
 }
 
 /// Launch a separate installer with the OS consent UI. No password or UAC
 /// policy is handled here. The caller's process never gains administrator rights.
 pub fn request_installation(action: &str) -> Result<()> {
-    if !["install", "disable", "uninstall"].contains(&action) {
+    if !["install", "enable", "disable", "uninstall"].contains(&action) {
         return Err(error("unknown helper action"));
     }
     let executable = std::env::current_exe()?;
@@ -517,36 +698,99 @@ pub fn request_installation(action: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn console_unlocked(session: u32) -> Result<()> {
-    if session == 0 || session != active_session() {
+#[cfg(feature = "windows-helper")]
+fn console_session(session: u32) -> Result<(SessionIdentity, ConsoleState)> {
+    session_state(session, &console_info(session)?)
+        .ok_or_else(|| error("Waiting for the approved user to sign in to the active console"))
+}
+
+fn console_info(session: u32) -> Result<WTSINFOEX_LEVEL1_W> {
+    if session == 0 || session == u32::MAX || session != active_session() {
         return Err(error("Only the active console session is supported"));
     }
     let mut buffer = PWSTR::null();
     let mut len = 0;
     unsafe { WTSQuerySessionInformationW(None, session, WTSSessionInfoEx, &mut buffer, &mut len) }
         .map_err(error)?;
-    let valid = if len as usize >= size_of::<WTSINFOEXW>() {
+    let info = if len as usize >= size_of::<WTSINFOEXW>() {
         let info = unsafe { &*buffer.0.cast::<WTSINFOEXW>() };
-        info.Level == 1 && session_is_unlocked(session, unsafe { &info.Data.WTSInfoExLevel1 })
+        if info.Level == 1 {
+            Some(unsafe { info.Data.WTSInfoExLevel1 })
+        } else {
+            None
+        }
     } else {
-        false
+        None
     };
     unsafe {
         WTSFreeMemory(buffer.0.cast::<c_void>());
     }
-    if !valid {
-        return Err(error(
-            "Locked/login desktops are not supported; unlock locally",
-        ));
-    }
-    Ok(())
+    info.ok_or_else(|| error("Console session information is unavailable"))
 }
 
-fn session_is_unlocked(session: u32, info: &WTSINFOEX_LEVEL1_W) -> bool {
-    // The Winlogon input desktop can mean either UAC or the login/lock screen.
-    // Authorize the logged-in session state, never the desktop name alone.
-    info.SessionId == session
-        && info.SessionState == WTSActive
-        && info.SessionFlags == WTS_SESSIONSTATE_UNLOCK as i32
-        && info.UserName[0] != 0
+fn console_state(session: u32, info: &WTSINFOEX_LEVEL1_W) -> Option<ConsoleState> {
+    if session == 0
+        || session == u32::MAX
+        || info.SessionId != session
+        || info.SessionState != WTSActive
+        || info.UserName[0] == 0
+        || info.LogonTime <= 0
+    {
+        return None;
+    }
+    match info.SessionFlags as u32 {
+        WTS_SESSIONSTATE_LOCK => Some(ConsoleState::Locked),
+        WTS_SESSIONSTATE_UNLOCK => Some(ConsoleState::Unlocked),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "windows-helper")]
+fn session_state(
+    session: u32,
+    info: &WTSINFOEX_LEVEL1_W,
+) -> Option<(SessionIdentity, ConsoleState)> {
+    let state = console_state(session, info)?;
+    let text = |value: &[u16]| {
+        String::from_utf16_lossy(
+            &value[..value.iter().position(|c| *c == 0).unwrap_or(value.len())],
+        )
+    };
+    Some((
+        SessionIdentity {
+            session,
+            logon_time: info.LogonTime,
+            user: text(&info.UserName),
+            domain: text(&info.DomainName),
+        },
+        state,
+    ))
+}
+
+impl SessionIdentity {
+    pub(super) fn check(&self) -> Result<ConsoleState> {
+        let info = console_info(self.session)?;
+        let state = console_state(self.session, &info)
+            .ok_or_else(|| error("The approved console login session is unavailable"))?;
+        if !self.matches(&info) {
+            return Err(error("The approved console login session has ended"));
+        }
+        Ok(state)
+    }
+
+    fn matches(&self, info: &WTSINFOEX_LEVEL1_W) -> bool {
+        // Called on the capture/input path: compare existing UTF-16 slices,
+        // allocating user/domain strings only when a login is first attested.
+        self.session == info.SessionId
+            && self.logon_time == info.LogonTime
+            && self
+                .user
+                .encode_utf16()
+                .eq(info.UserName.iter().copied().take_while(|c| *c != 0))
+            && self.domain.encode_utf16().eq(info
+                .DomainName
+                .iter()
+                .copied()
+                .take_while(|c| *c != 0))
+    }
 }

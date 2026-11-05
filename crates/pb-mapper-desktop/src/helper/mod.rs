@@ -1,7 +1,9 @@
-//! Opt-in Windows helper. The unprivileged SDK owns transport and controller
-//! authorization. The installed service accepts only the locally approved,
-//! protected application in its own active console session. It exposes no
-//! command execution, network listener, file, clipboard or credential API.
+//! Opt-in Windows service. The unprivileged UI manages explicitly authorized
+//! capture and optional persistent hosting through protected local IPC. Each
+//! capture worker is bound to the approved owner's current console login,
+//! including its locked desktop; another login never inherits that grant.
+//! There is no arbitrary command execution, file or clipboard API.
+pub mod background;
 mod client;
 #[cfg(feature = "windows-helper")]
 mod install;
@@ -16,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub use client::backend;
+#[cfg(feature = "windows-helper")]
+pub(crate) use os::SessionIdentity;
 pub use os::request_installation;
 
 const SERVICE: &str = "PbMapperDesktop";
@@ -51,15 +55,26 @@ fn configuration() -> Result<Configuration> {
 pub struct Status {
     pub installed: bool,
     pub running: bool,
+    /// Only true after SCM positively reports both Disabled and Stopped; an
+    /// unavailable or restarting service must not permit a second host.
+    pub startup_disabled: bool,
     pub authorized_application: bool,
     pub installed_application: Option<PathBuf>,
     pub message: String,
 }
 pub fn status() -> Status {
+    // A loaded service may outlive a damaged/unreadable installation.json.
+    // Only an affirmative SCM "does not exist" permits treating it as absent.
+    let (exists, running, startup_disabled) = match os::service_state() {
+        Ok(Some((running, startup_disabled))) => (true, running, startup_disabled),
+        Ok(None) => (false, false, false),
+        Err(_) => (true, false, false),
+    };
     match configuration() {
         Ok(config) => Status {
             installed: true,
-            running: os::service_running().unwrap_or(false),
+            running,
+            startup_disabled,
             authorized_application: os::current_sid().is_ok_and(|sid| sid == config.owner_sid)
                 && std::env::current_exe()
                     .is_ok_and(|path| os::same_path(&path, &config.ui_executable)),
@@ -67,6 +82,9 @@ pub fn status() -> Status {
             message: "Helper requires the installed application; the UI stays unprivileged".into(),
         },
         Err(e) => Status {
+            installed: exists,
+            running,
+            startup_disabled,
             message: e.to_string(),
             ..Default::default()
         },
@@ -78,6 +96,10 @@ pub fn status() -> Status {
 enum Request {
     Start {
         display_id: u32,
+    },
+    Attach {
+        display_id: u32,
+        session: os::SessionIdentity,
     },
     Context,
     Capture,
@@ -122,10 +144,11 @@ pub fn run() -> Result<()> {
             worker::run(pipe, parent.parse().map_err(error)?)
         }
         [mode, source, sid] if mode == "install" => install::install(&PathBuf::from(source), sid),
+        [mode] if mode == "enable" => install::enable(),
         [mode] if mode == "disable" => install::disable(),
         [mode] if mode == "uninstall" => install::uninstall(),
         _ => Err(error(
-            "expected install <UI bundle> <authorized SID>, service, disable or uninstall",
+            "expected install <UI bundle> <authorized SID>, service, enable, disable or uninstall",
         )),
     }
 }

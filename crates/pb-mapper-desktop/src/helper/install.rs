@@ -13,8 +13,9 @@ use windows::{
 };
 use windows_service::{
     service::{
-        Service, ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceState,
-        ServiceType,
+        Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl,
+        ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType,
+        ServiceState, ServiceType,
     },
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
@@ -46,7 +47,12 @@ fn stop(service: &Service) -> Result<()> {
     }
 }
 fn start(service: &Service) -> Result<()> {
-    service.start::<OsString>(&[]).map_err(error)?;
+    match service.start::<OsString>(&[]) {
+        Ok(()) => {}
+        // A queued SCM recovery may win the race with an explicit Enable.
+        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1056) => {}
+        Err(e) => return Err(error(e)),
+    }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let status = service.query_status().map_err(error)?;
@@ -79,6 +85,57 @@ fn info(config: &Configuration, start_type: ServiceStartType) -> ServiceInfo {
         account_name: None,
         account_password: None,
     }
+}
+
+struct RecoveryPolicy {
+    actions: ServiceFailureActions,
+    non_crash: bool,
+}
+impl RecoveryPolicy {
+    fn read(service: &Service) -> Result<Self> {
+        let mut actions = service.get_failure_actions().map_err(error)?;
+        // In the setter None means "leave unchanged", whereas the queried
+        // None means "absent". Restore absence explicitly.
+        actions.actions = Some(actions.actions.take().unwrap_or_default());
+        actions.command = Some(actions.command.take().unwrap_or_default());
+        actions.reboot_msg = Some(actions.reboot_msg.take().unwrap_or_default());
+        Ok(Self {
+            actions,
+            non_crash: service
+                .get_failure_actions_on_non_crash_failures()
+                .map_err(error)?,
+        })
+    }
+    fn apply(self, service: &Service) -> Result<()> {
+        service
+            .update_failure_actions(self.actions)
+            .map_err(error)?;
+        service
+            .set_failure_actions_on_non_crash_failures(self.non_crash)
+            .map_err(error)
+    }
+}
+fn configure_recovery(service: &Service) -> Result<()> {
+    // SCM repeats the last delay for subsequent failures. Normal
+    // SERVICE_STOPPED with exit code zero does not run these actions.
+    RecoveryPolicy {
+        actions: ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
+            reboot_msg: Some(OsString::new()),
+            command: Some(OsString::new()),
+            actions: Some(
+                [5, 15, 60]
+                    .into_iter()
+                    .map(|seconds| ServiceAction {
+                        action_type: ServiceActionType::Restart,
+                        delay: Duration::from_secs(seconds),
+                    })
+                    .collect(),
+            ),
+        },
+        non_crash: true,
+    }
+    .apply(service)
 }
 
 // Apply owner and DACL at creation: changing them afterwards leaves an owner
@@ -466,6 +523,11 @@ fn install_bundle(
     } else {
         None
     };
+    if previous.as_ref().is_some_and(|old| old.owner_sid != sid) {
+        return Err(error(
+            "Uninstall the previous owner's helper authorization before installing for another user",
+        ));
+    }
     let release = installation
         .root
         .join(format!("release-{}", crate::security::secret()?));
@@ -493,7 +555,7 @@ fn install_bundle(
             | ServiceAccess::START
             | ServiceAccess::CHANGE_CONFIG
             | ServiceAccess::DELETE;
-        let (service, old_state) = match manager.open_service(SERVICE, access) {
+        let (service, old_state, old_recovery) = match manager.open_service(SERVICE, access) {
             Ok(service) => {
                 let old = previous
                     .as_ref()
@@ -501,27 +563,42 @@ fn install_bundle(
                 let start_type = validate_service(&service, old)?;
                 let running =
                     service.query_status().map_err(error)?.current_state != ServiceState::Stopped;
+                let recovery = RecoveryPolicy::read(&service)?;
                 stop(&service)?;
-                (service, Some((start_type, running)))
+                (service, Some((start_type, running)), Some(recovery))
             }
             Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => (
                 manager
                     .create_service(&info(&config, ServiceStartType::AutoStart), access)
                     .map_err(error)?,
                 None,
+                None,
             ),
             Err(e) => return Err(error(e)),
         };
         let update = (|| {
+            let start_type =
+                old_state.map_or(ServiceStartType::AutoStart, |(start_type, _)| start_type);
             service
-                .change_config(&info(&config, ServiceStartType::AutoStart))
+                .change_config(&info(&config, start_type))
                 .map_err(error)?;
             installation.configuration(&config)?;
-            service.set_description("Explicitly installed, local authenticated capture/input bridge. No remote listener or unattended consent.").map_err(error)?;
-            start(&service)
+            service.set_description("Authorized desktop capture/input and explicitly configured background hosting. Managed only by the approved installed application.").map_err(error)?;
+            configure_recovery(&service)?;
+            if old_state.is_none_or(|(start_type, running)| {
+                start_type != ServiceStartType::Disabled && running
+            }) {
+                start(&service)?;
+            }
+            Ok::<_, std::io::Error>(())
         })();
         if let Err(failure) = update {
             let rollback = (|| {
+                // A failed new process may already have a queued restart;
+                // disable its configuration while restoring the old release.
+                service
+                    .change_config(&info(&config, ServiceStartType::Disabled))
+                    .map_err(error)?;
                 stop(&service)?;
                 if let Some(old) = &previous {
                     installation.configuration(old)?;
@@ -536,7 +613,10 @@ fn install_bundle(
                     service
                         .change_config(&info(old, start_type))
                         .map_err(error)?;
-                    if running {
+                    if let Some(recovery) = old_recovery {
+                        recovery.apply(&service)?;
+                    }
+                    if start_type != ServiceStartType::Disabled && running {
                         start(&service)?;
                     }
                 } else {
@@ -570,6 +650,58 @@ fn install_bundle(
     }
     result
 }
+pub fn enable() -> Result<()> {
+    let manager = manager()?;
+    let installation = Installation::open()?;
+    let result = (|| {
+        let config = configuration()?;
+        let service = manager
+            .open_service(
+                SERVICE,
+                ServiceAccess::STOP
+                    | ServiceAccess::START
+                    | ServiceAccess::QUERY_STATUS
+                    | ServiceAccess::QUERY_CONFIG
+                    | ServiceAccess::CHANGE_CONFIG,
+            )
+            .map_err(error)?;
+        let start_type = validate_service(&service, &config)?;
+        let running = service.query_status().map_err(error)?.current_state == ServiceState::Running;
+        let recovery = RecoveryPolicy::read(&service)?;
+        let update = (|| {
+            configure_recovery(&service)?;
+            service
+                .change_config(&info(&config, ServiceStartType::AutoStart))
+                .map_err(error)?;
+            start(&service)
+        })();
+        if let Err(failure) = update {
+            let rollback = (|| {
+                if !running {
+                    service
+                        .change_config(&info(&config, ServiceStartType::Disabled))
+                        .map_err(error)?;
+                    stop(&service)?;
+                }
+                recovery.apply(&service)?;
+                service
+                    .change_config(&info(&config, start_type))
+                    .map_err(error)
+            })();
+            if let Err(rollback) = rollback {
+                return Err(error(format!(
+                    "{failure}; restoring the previous service settings failed: {rollback}"
+                )));
+            }
+            return Err(error(format!(
+                "{failure}; the previous service settings were restored"
+            )));
+        }
+        Ok(())
+    })();
+    installation.log(&result);
+    result
+}
 pub fn disable() -> Result<()> {
     let manager = manager()?;
     let installation = Installation::open()?;
@@ -585,10 +717,10 @@ pub fn disable() -> Result<()> {
             )
             .map_err(error)?;
         validate_service(&service, &config)?;
-        stop(&service)?;
         service
             .change_config(&info(&config, ServiceStartType::Disabled))
-            .map_err(error)
+            .map_err(error)?;
+        stop(&service)
     })();
     installation.log(&result);
     result
@@ -602,10 +734,17 @@ pub fn uninstall() -> Result<()> {
             ServiceAccess::STOP
                 | ServiceAccess::QUERY_STATUS
                 | ServiceAccess::QUERY_CONFIG
+                | ServiceAccess::CHANGE_CONFIG
                 | ServiceAccess::DELETE,
         ) {
             Ok(service) => {
-                validate_service(&service, &configuration()?)?;
+                let config = configuration()?;
+                validate_service(&service, &config)?;
+                // Changing failure actions cannot cancel an already queued
+                // restart. Disabled must precede Stop/Delete to close that race.
+                service
+                    .change_config(&info(&config, ServiceStartType::Disabled))
+                    .map_err(error)?;
                 stop(&service)?;
                 service.delete().map_err(error)?;
             }
@@ -613,6 +752,9 @@ pub fn uninstall() -> Result<()> {
             Err(e) => return Err(error(e)),
         }
         let config = installation.root.join("installation.json");
+        // Credentials and machine grants must not survive a successful uninstall,
+        // even when an old loaded release has to be removed after reboot.
+        super::background::revoke_installation(&installation.root)?;
         if config.exists() {
             os::protected_file(&config)?;
             std::fs::remove_file(config)?;

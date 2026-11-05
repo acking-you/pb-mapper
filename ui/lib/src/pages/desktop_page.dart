@@ -27,6 +27,7 @@ class _DesktopPageState extends State<DesktopPage> {
   bool _control = false, _relayOnly = false, _showInvitation = false;
   bool _privileged = false;
   bool _remember = false, _autoStart = false;
+  bool _background = false;
   @override
   void initState() {
     super.initState();
@@ -82,7 +83,44 @@ class _DesktopPageState extends State<DesktopPage> {
                       ),
                     ),
                   const SizedBox(height: 20),
-                  if (store.trust.saved case final saved?) ...[
+                  if (store.snapshot.background case final background?
+                      when background.configured) ...[
+                    Text(
+                      l.desktopBackgroundTitle,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Text(
+                      '${background.service ?? ''} · ${background.server ?? ''}',
+                    ),
+                    Text(
+                      background.enabled
+                          ? l.desktopBackgroundActive
+                          : l.desktopBackgroundStopped,
+                    ),
+                    if (background.message.isNotEmpty) Text(background.message),
+                    if (background.autoStart) Text(l.desktopBackgroundStartup),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        if (!background.enabled && !store.sharing)
+                          TextButton(
+                            onPressed: store.busy
+                                ? null
+                                : () => store.backgroundAction('start'),
+                            child: Text(l.desktopTrustRestore),
+                          ),
+                        TextButton(
+                          onPressed: store.busy
+                              ? null
+                              : () => store.backgroundAction('revoke'),
+                          child: Text(l.desktopTrustRevoke),
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                  ],
+                  if (store.trust.saved case final saved?
+                      when store.snapshot.background?.configured != true) ...[
                     Text(
                       l.desktopTrustTitle,
                       style: Theme.of(context).textTheme.titleMedium,
@@ -144,6 +182,13 @@ class _DesktopPageState extends State<DesktopPage> {
                           child: Text(l.desktopHelperInstall),
                         ),
                         if (helper.installed) ...[
+                          if (!helper.running)
+                            TextButton(
+                              onPressed: store.busy || store.sharing
+                                  ? null
+                                  : () => store.helperAction('enable'),
+                              child: Text(l.desktopHelperEnable),
+                            ),
                           TextButton(
                             onPressed: store.busy || store.sharing
                                 ? null
@@ -173,7 +218,10 @@ class _DesktopPageState extends State<DesktopPage> {
                       onChanged:
                           store.sharing || !helper.running || !helper.authorized
                           ? null
-                          : (value) => setState(() => _privileged = value),
+                          : (value) => setState(() {
+                              _privileged = value;
+                              if (!value) _background = false;
+                            }),
                     ),
                     const Divider(),
                   ],
@@ -259,7 +307,24 @@ class _DesktopPageState extends State<DesktopPage> {
                       value: _control,
                       onChanged: (value) => setState(() => _control = value),
                     ),
-                    if (store.trust.supported) ...[
+                    if (store.capabilities.helper case final helper?
+                        when helper.running && helper.authorized)
+                      SwitchListTile(
+                        key: const Key('desktop-background'),
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(l.desktopBackgroundTitle),
+                        subtitle: Text(l.desktopBackgroundHelp),
+                        value: _background,
+                        onChanged: (value) => setState(() {
+                          _background = value;
+                          if (value) {
+                            _privileged = true;
+                            _remember = true;
+                            _autoStart = true;
+                          }
+                        }),
+                      ),
+                    if (store.trust.supported && !_background) ...[
                       SwitchListTile(
                         contentPadding: EdgeInsets.zero,
                         title: Text(l.desktopTrustRemember),
@@ -295,6 +360,7 @@ class _DesktopPageState extends State<DesktopPage> {
                                 privileged: _privileged,
                                 remember: _remember,
                                 autoStart: _autoStart,
+                                background: _background,
                               );
                               if (mounted) {
                                 setState(() => _showInvitation = true);

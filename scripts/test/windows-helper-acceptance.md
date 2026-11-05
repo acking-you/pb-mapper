@@ -65,9 +65,14 @@ be cancelled without revealing or recording a password.
 | No-helper secure desktop | Repeat the prompting operation with helper opt-in disabled. | Viewer clearly reports an inaccessible/stale desktop and admits no input; cached ordinary-desktop frames do not appear live. |
 | Secure-desktop input | With a human operating the controller, exercise harmless navigation or Cancel on a real prompt; do not approve elevation or type credentials. | Observe actual secure-desktop input behavior and recovery. Merely displaying the prompt is not input acceptance. |
 | Held-input release | In a disposable text/drawing window hold a modifier or drag using the controller, then separately end control, revoke input, disconnect, and stop sharing. | The target no longer has held keys/buttons, no delayed input is replayed, and viewing/control state matches the selected action. Record each boundary separately. |
-| Lock revocation | Hold input in the disposable target, then lock the VM using its local console. Locally unlock afterward. | No lock/login-screen control or capture is offered. Existing input is released and authority revoked; unlocking cannot silently restore the old control grant. Fresh explicit admission is required. |
+| Same-owner lock and password entry | Enable the authorized helper, hold input in a disposable target, then lock the VM using its local console. The human controller requests fresh control on the current lock-screen frame and enters the test account's password without recording it. | Old input is released at the transition. The real lock screen is visible and the human can unlock the same login. Record lock/Winlogon transitions and recovery; do not infer this from UAC viewing. Automation never enters the password. |
+| Logoff / user switch | With the helper active, locally log off or switch to a different existing account. | Capture and input stop for the old login. Neither a recycled session ID nor a different user inherits its grant. Background hosting waits for the authorized owner's login and requires a fresh viewer/control session. |
+| Background UI exit | Explicitly enable Windows background hosting, then close the entire UI process. Reopen the installed UI. | The service keeps the same invitation and active host; the reopened UI shows its actual state and can stop/revoke it. This must work beyond merely hiding a tray window. |
+| Background restart / sleep | With background auto-start enabled, restart the service/VM using the authorized local management path; separately test sleep followed by local wake. | Hosting waits for the approved user's login, then recovers without a UI process. It works again after wake; no claim that S3/S4 hosts serve frames while asleep. No old input is replayed. |
+| Background stop / revoke | Stop sharing, restart the service, then repeat with invitation revocation. | Stop prevents automatic restart. Revoke destroys the stored grant, and the old invitation cannot reconnect. A persistence failure is visible and does not silently re-enable input. |
 | Helper disable | Use the UI's Disable helper action with deliberate OS consent, then collect `Disabled`. | Service is Stopped and startup Disabled; helper-backed sharing fails clearly and no worker remains. |
-| Update / reinstall | Install the same complete build again through the UI; collect `Installed`. | Service returns Running and new protected app can share. No stale process is silently authorized. |
+| Helper re-enable / crash recovery | Explicitly re-enable a disabled helper in the UI. In the disposable VM, separately simulate a service failure using its already-authorized management path. | Re-enable restores automatic startup; abnormal failures use 5/15/60-second SCM restart delays. Normal Stop/Disable does not resurrect the host. Record whether a normal OS restart was needed for the non-crash flag. |
+| Update / reinstall | Install the same complete build again through the UI; collect `Installed`. Repeat after explicitly disabling the service. | A previously running service returns Running and the new protected app can share; a disabled/stopped service stays disabled/stopped until explicitly enabled. No stale process is silently authorized. |
 | Uninstall | Use the UI's Uninstall action with deliberate OS consent; collect `Uninstalled`. | Service and authorization configuration are absent. In-use files may await a normal reboot as documented. No reboot is forced. |
 
 Collect the named stage after each lifecycle action, for example:
@@ -80,6 +85,9 @@ For standard-account installation the intended owner's SID must be that account,
 even if another administrator supplies the local consent. Run the collector as
 the sharing account. Do not treat RDP/enhanced-session disconnection as a console
 lock test; the helper deliberately requires the active console session.
+
+Machines requiring Ctrl+Alt+Del/SAS and fresh pre-login boot screens are not
+supported by this implementation. Do not weaken those policies to pass.
 
 Record screenshots before password entry and after cancellation, controller
 errors, and bounded helper logs when needed. Redact account names and private

@@ -17,6 +17,51 @@ import 'support.dart';
 
 void main() {
   testWidgets(
+    'background sharing survives closing the app and remains explicitly stoppable',
+    (tester) async {
+      final api = FakePbMapperApi();
+      api.desktop.available = const DesktopCapabilities(
+        host: true,
+        displays: [DesktopDisplay(1, 'Display 1', 1920, 1080)],
+        helper: DesktopHelper(installed: true, running: true, authorized: true),
+      );
+      api.desktop.trust = const DesktopTrust(supported: true);
+      await pumpApp(tester, api, page: AppPage.tunnels);
+      await tester.tap(find.byKey(const Key('open-desktop')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('desktop-background')));
+      await settle(tester);
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('desktop-share')),
+        250,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await Scrollable.ensureVisible(
+        tester.element(find.byKey(const Key('desktop-share'))),
+        alignment: 0.5,
+      );
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('desktop-share')));
+      await settle(tester);
+      expect(api.desktop.background.enabled, isTrue);
+      expect(api.desktop.background.autoStart, isTrue);
+      expect(api.desktop.host?.controlAllowed, isFalse);
+      await finish(tester);
+      expect(api.desktop.host, isNotNull);
+      expect(api.desktop.background.enabled, isTrue);
+
+      await pumpApp(tester, api, page: AppPage.tunnels);
+      await tester.tap(find.text('Stop sharing'));
+      await settle(tester);
+      expect(api.desktop.host, isNull);
+      expect(api.desktop.background.configured, isTrue);
+      expect(api.desktop.background.enabled, isFalse);
+      expect(api.desktop.background.autoStart, isFalse);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
     'viewer maps touch and mouse hover and blocks ungranted or stale input',
     (tester) async {
       if (const bool.fromEnvironment('DESKTOP_QA')) await loadRealFonts();

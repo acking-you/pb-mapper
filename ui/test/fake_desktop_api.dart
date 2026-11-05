@@ -2,6 +2,28 @@ import 'dart:async';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 
 class FakeDesktopApi implements DesktopApiClient {
+  DesktopBackground background = const DesktopBackground();
+  @override
+  Future<DesktopBackground> backgroundAction(String action) async {
+    if (action == 'start') {
+      background = DesktopBackground(
+        configured: true,
+        enabled: true,
+        service: background.service,
+        server: background.server,
+        invitation: background.invitation,
+        autoStart: background.autoStart,
+      );
+      host = const DesktopStatus(state: 'waiting');
+    } else if (action == 'stop') {
+      await stopHost();
+    } else if (action == 'revoke') {
+      host = null;
+      background = const DesktopBackground();
+    }
+    return background;
+  }
+
   DesktopTrust trust = const DesktopTrust();
   @override
   Future<DesktopTrust> trustStatus() async => trust;
@@ -47,7 +69,7 @@ class FakeDesktopApi implements DesktopApiClient {
   Future<DesktopCapabilities> capabilities() async => available;
   @override
   Future<DesktopSnapshot> status() async =>
-      DesktopSnapshot(host: host, viewer: viewer);
+      DesktopSnapshot(host: host, viewer: viewer, background: background);
   @override
   Future<String> startHost({
     required String service,
@@ -57,9 +79,20 @@ class FakeDesktopApi implements DesktopApiClient {
     bool privileged = false,
     bool remember = false,
     bool autoStart = false,
+    bool background = false,
   }) async {
     host = DesktopStatus(state: 'waiting', controlAllowed: allowControl);
-    if (remember) {
+    if (background) {
+      this.background = DesktopBackground(
+        configured: true,
+        enabled: true,
+        service: service,
+        server: 'test',
+        invitation: 'private background invitation',
+        autoStart: autoStart,
+      );
+      return this.background.invitation!;
+    } else if (remember) {
       trust = DesktopTrust(
         supported: true,
         matchesRelay: true,
@@ -79,7 +112,16 @@ class FakeDesktopApi implements DesktopApiClient {
 
   @override
   Future<void> stopHost({bool onExit = false}) async {
+    if (background.enabled && onExit) return;
     host = null;
+    if (background.configured) {
+      background = DesktopBackground(
+        configured: true,
+        service: background.service,
+        server: background.server,
+        invitation: background.invitation,
+      );
+    }
     if (trust.saved case final saved? when !onExit) {
       trust = DesktopTrust(
         supported: trust.supported,

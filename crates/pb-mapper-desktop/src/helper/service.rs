@@ -60,7 +60,7 @@ impl SessionEvents {
         use SessionChangeReason::*;
         if !matches!(
             event.reason,
-            ConsoleDisconnect | RemoteDisconnect | SessionLogoff | SessionLock | SessionTerminate
+            ConsoleDisconnect | RemoteDisconnect | SessionLogoff | SessionTerminate
         ) {
             return;
         }
@@ -68,8 +68,8 @@ impl SessionEvents {
         if let Some((session, cancel)) = active.as_ref()
             && *session == event.notification.session_id
         {
-            // Revocation is sticky: a later unlock must not resurrect this
-            // connection, even when events arrive faster than our WTS poll.
+            // Ending/switching a login is sticky. Lock/unlock stays in the same
+            // approved login, and the worker invalidates its desktop generation.
             cancel.cancel();
         }
     }
@@ -109,15 +109,31 @@ fn entry(_: Vec<OsString>) {
         runtime.block_on(async {
             let mut listener = ipc::bind(PIPE, Some(&config.owner_sid), true)?;
             status.set_service_status(state(ServiceState::Running, 0)).map_err(error)?;
-            loop {
-                tokio::select! { () = stop.cancelled() => break, result = listener.connect() => result? }
-                // Keep one live server instance while replacing the listener,
-                // so another process can never claim the pipe name in between.
-                let next = ipc::bind(PIPE, Some(&config.owner_sid), false)?;
-                let connection = std::mem::replace(&mut listener, next);
-                let _ = session(connection, &config, stop.clone(), &sessions).await;
+            let mut background = tokio::spawn(super::background::run(stop.clone()));
+            let capture = async {
+                loop {
+                    tokio::select! { () = stop.cancelled() => break, result = listener.connect() => result? }
+                    // Keep one live server instance while replacing the listener,
+                    // so another process can never claim the pipe name in between.
+                    let next = ipc::bind(PIPE, Some(&config.owner_sid), false)?;
+                    let connection = std::mem::replace(&mut listener, next);
+                    let _ = session(connection, &config, stop.clone(), &sessions).await;
+                }
+                Ok::<_, std::io::Error>(())
+            };
+            tokio::select! {
+                result = capture => {
+                    stop.cancel();
+                    background.await.map_err(error)??;
+                    result
+                },
+                result = &mut background => {
+                    // A failed management/supervisor task must not leave SCM
+                    // advertising a healthy but unreachable background host.
+                    stop.cancel();
+                    result.map_err(error)?
+                },
             }
-            Ok::<_, std::io::Error>(())
         })
     })();
     if let Err(failure) = &result {
@@ -134,15 +150,15 @@ async fn session(
     let request: Request = tokio::time::timeout(TIMEOUT, crate::wire::read_json(&mut caller))
         .await
         .map_err(error)??;
-    if !matches!(request, Request::Start { .. }) {
+    let Request::Start { display_id } = request else {
         return Err(error("helper requires a start request"));
-    }
+    };
     let (owner, session) = os::verify_client(&caller, config)?;
-    let revoked = sessions.begin(session);
-    os::console_unlocked(session)?;
+    let revoked = sessions.begin(session.session);
+    session.check()?;
     let name = format!("{PIPE}.worker.{}", crate::security::secret()?);
     let mut private = ipc::bind(&name, None, true)?;
-    let child = spawn_worker(config, session, &name)?;
+    let child = spawn_worker(config, session.session, &name)?;
     tokio::time::timeout(TIMEOUT, private.connect())
         .await
         .map_err(error)??;
@@ -160,15 +176,21 @@ async fn session(
     if revoked.is_cancelled() || stop.is_cancelled() {
         return Err(error("desktop session ended during worker startup"));
     }
-    os::console_unlocked(session)?;
-    tokio::time::timeout(TIMEOUT, crate::wire::write_json(&mut private, &request))
+    if os::owner_session(&config.owner_sid)? != session {
+        return Err(error("approved login ended during worker startup"));
+    }
+    let attached = Request::Attach {
+        display_id,
+        session: session.clone(),
+    };
+    tokio::time::timeout(TIMEOUT, crate::wire::write_json(&mut private, &attached))
         .await
         .map_err(error)??;
     let watch = async {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
-            if os::console_unlocked(session).is_err()
+            if !os::owner_session(&config.owner_sid).is_ok_and(|current| current == session)
                 || unsafe { WaitForSingleObject(owner.raw(), 0) } != WAIT_TIMEOUT
             {
                 break;
@@ -196,68 +218,12 @@ struct Child {
     process: os::Handle,
     pid: u32,
 }
-struct LaunchPrivileges {
-    token: os::Handle,
-    previous: Vec<TOKEN_PRIVILEGES>,
-}
-impl Drop for LaunchPrivileges {
-    fn drop(&mut self) {
-        for previous in self.previous.iter().rev() {
-            if unsafe {
-                AdjustTokenPrivileges(self.token.raw(), false, Some(previous), 0, None, None)
-            }
-            .is_err()
-            {
-                // Never carry a failed temporary privilege restoration into the
-                // long-lived, externally reachable IPC loop.
-                std::process::abort();
-            }
-        }
-    }
-}
-fn launch_privileges() -> Result<LaunchPrivileges> {
-    let mut original = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut original) }
-        .map_err(error)?;
-    let mut scope = LaunchPrivileges {
-        token: unsafe { os::Handle::own(original) },
-        previous: vec![],
-    };
-    for privilege in [
+fn spawn_worker(config: &Configuration, session: u32, pipe: &str) -> Result<Child> {
+    let privileges = os::ScopedPrivileges::new(&[
         SE_TCB_NAME,
         SE_ASSIGNPRIMARYTOKEN_NAME,
         SE_INCREASE_QUOTA_NAME,
-    ] {
-        let mut luid = LUID::default();
-        unsafe { LookupPrivilegeValueW(None, privilege, &mut luid) }.map_err(error)?;
-        let privileges = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES {
-                Luid: luid,
-                Attributes: SE_PRIVILEGE_ENABLED,
-            }],
-        };
-        let mut previous = TOKEN_PRIVILEGES::default();
-        unsafe {
-            AdjustTokenPrivileges(
-                scope.token.raw(),
-                false,
-                Some(&privileges),
-                size_of::<TOKEN_PRIVILEGES>() as u32,
-                Some(&mut previous),
-                None,
-            )
-        }
-        .map_err(error)?;
-        scope.previous.push(previous);
-        if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
-            return Err(error("service lacks a required session-launch privilege"));
-        }
-    }
-    Ok(scope)
-}
-fn spawn_worker(config: &Configuration, session: u32, pipe: &str) -> Result<Child> {
-    let privileges = launch_privileges()?;
+    ])?;
     let mut duplicate = HANDLE::default();
     unsafe {
         DuplicateTokenEx(
@@ -368,7 +334,7 @@ mod tests {
     use windows_service::service::SessionNotification;
 
     #[test]
-    fn lock_revokes_only_its_session_and_unlock_cannot_restore_it() {
+    fn lock_keeps_approved_login_but_logoff_and_switch_revoke_it() {
         let sessions = SessionEvents::default();
         let active = sessions.begin(7);
         let event = |session_id, reason| SessionChangeParam {
@@ -382,6 +348,12 @@ mod tests {
         sessions.changed(event(7, SessionChangeReason::SessionUnlock));
         assert!(!active.is_cancelled());
         sessions.changed(event(7, SessionChangeReason::SessionLock));
+        sessions.changed(event(7, SessionChangeReason::SessionUnlock));
+        assert!(!active.is_cancelled());
+        sessions.changed(event(8, SessionChangeReason::SessionLogoff));
+        assert!(!active.is_cancelled());
+        sessions.changed(event(7, SessionChangeReason::ConsoleDisconnect));
+        assert!(active.is_cancelled());
         sessions.changed(event(7, SessionChangeReason::SessionUnlock));
         assert!(active.is_cancelled());
         let replacement = sessions.begin(7);

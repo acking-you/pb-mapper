@@ -71,15 +71,35 @@ new connection still starts without active control and must request it.
 | Start remembered desktop | Reuses the saved invitation and selected permissions |
 | Share automatically when this app opens | Explicit opt-in; restores once after app configuration loads |
 | Stop sharing | Closes sessions and disables automatic sharing on the next launch; remembered invitation can still be resumed manually |
-| Close the app | Closes owned sessions while preserving the selected startup policy |
+| Close the app during temporary/app-owned sharing | Closes owned sessions while preserving the selected startup policy |
+| Keep sharing in the Windows background service | Explicitly stores a separate service-owned invitation and permissions; closing the UI does not stop it |
 | Revoke invitation and stop sharing | Deletes remembered trust, closes the current host, and requires a new invitation for future sharing |
 
-Automatic sharing requires Windows to be signed in and the pb-mapper UI to run.
-Installing the helper does not install a network-listening desktop host or start
-the UI at Windows boot. The saved file is `desktop-trust.dpapi` beneath the
+App-owned automatic sharing requires Windows to be signed in and the UI to run.
+Its saved file is `desktop-trust.dpapi` beneath the
 existing application configuration directory. SDK embedders own their storage:
 `HostIdentity::encode_secret` contains private material and must go in an OS vault
 or encrypted storage, never a log, public configuration, or source control.
+
+The separate **Windows background service** option transfers host ownership to
+the installed service. It saves the selected relay configuration, invitation
+identity, display and permissions using machine DPAPI in a SYSTEM/admin-only
+file. The approved installed UI manages it through a separate authenticated,
+bounded local pipe; ordinary desktop sessions still use endpoint-pinned TLS and
+the existing pb-mapper direct/relay transport. The service retains no Windows
+login password. Stopping disables future automatic sharing; revoking destroys
+the saved grant. Closing the UI merely stops its viewer and any temporary host.
+Enabling background hosting disables the old app-owned automatic-start policy.
+
+The service waits for the installation owner's active console login, including
+that same login while locked, and retries failed relay/capture startup with
+bounded backoff. Logoff or switching away from that owner closes active capture
+and input. A subsequent viewer still needs fresh explicit control admission;
+old input is never replayed. A fresh boot with no owner login remains
+`waiting_for_owner_session`. Waking from sleep is different from remote input:
+S3/S4 cannot serve video while suspended, and no Wake-on-LAN facility or power
+policy change is included. Real service-restart, sleep/resume and locked-session
+password entry remain acceptance requirements, not consequences of unit tests.
 
 ## Windows helper and UAC boundary
 
@@ -96,7 +116,9 @@ elevation of a portable app may need a person locally. A phone cannot approve a
 desktop the unprivileged app cannot access. No UAC policy is changed, no prompt
 is auto-consented, and no administrator password is retained.
 
-The helper design keeps networking and the Flutter process unprivileged:
+The Flutter process remains unprivileged. Temporary sharing owns networking in
+that process; explicit background hosting owns a narrow desktop endpoint in the
+Windows service, independently of Flutter or an agent harness:
 
 - The installer copies the complete UI/helper bundle to a unique protected
   release directory under `%ProgramFiles%\pb-mapper-desktop`. Owner and DACL are
@@ -110,10 +132,14 @@ The helper design keeps networking and the Flutter process unprivileged:
 - For an authorized connection, the service launches one restricted SYSTEM
   worker in the active interactive session. Temporary launch privileges are
   restored, a kill-on-close job bounds the child lifetime, and the worker uses a
-  separate SYSTEM/admin-only pipe. There is no remote listener, arbitrary
-  command, file, clipboard or credential API in the helper.
+  separate SYSTEM/admin-only pipe. The capture worker has no remote listener,
+  arbitrary command, file, clipboard or credential API. Persistent-host
+  management accepts only the protected installed UI and approved owner SID.
 - The worker can bind its capture/input thread to Default or the secure desktop
-  only while the approved console session is unlocked. Desktop-switch events
+  within the approved console login, including its locked state. The worker
+  checks session ID, login time and user identity before context/input; a reused
+  session ID or another user's login cannot inherit the old admission.
+  Desktop-switch and lock-state changes
   advance a generation independently of resolution. Capture and final input
   injection check that generation; an old click cannot be replayed after a
   detected desktop transition. Failed input releases are retained for retry.
@@ -127,6 +153,13 @@ and startup state if an update fails. A rollback failure is reported and files
 are retained for repair. This is not a claim of crash-atomic replacement of the
 SCM database and filesystem together.
 
+Abnormal service exits use SCM recovery delays of 5, 15 and then 60 seconds,
+reset after 24 hours. Normal Stop exits do not request recovery. Windows may
+apply the non-crash failure flag after the next OS restart. Disable and uninstall
+disable startup before stopping, so an already queued SCM restart cannot undo
+that action. **Enable helper** explicitly restores automatic service startup.
+Updating a disabled or stopped installation preserves that state.
+
 Disable stops the service and disables its startup. Uninstall stops/deletes the
 service and removes its authorization configuration. Upgrade preserves files
 used by an older open UI until the next normal reboot; uninstall deletes what
@@ -136,8 +169,11 @@ Bounded protected `installation.log`/`service.log` diagnostics may remain.
 
 Required UAC acceptance still includes both administrator consent and a
 standard-user credential prompt, with OS version, account type, helper state,
-default secure-desktop policy and observed failures recorded. Lock/login screens,
-secure-attention sequences and fast user switching are outside this implementation.
+default secure-desktop policy and observed failures recorded. Lock-screen password
+entry for the same logged-in owner is implemented but unverified on a Windows VM.
+Pre-login boot, secure-attention sequences and control across user switching are
+unsupported. In particular, SendInput cannot generate Ctrl+Alt+Del, and no
+SoftwareSASGeneration or other security policy is changed.
 
 ## SDK ownership and transport
 
@@ -379,10 +415,22 @@ results are in `target/desktop-slow-tls-acceptance.log`.
 | Android viewer | Native MediaCodec/Flutter texture path exercised in an Android VM; physical phone validation outstanding |
 | iOS viewer | Shared Flutter/JPEG path exists; packaged build and device validation outstanding |
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
-| Remembered unattended host policy | Windows DPAPI persistence, restart identity and revocation tests pass; requires signed-in user and running app |
-| Lock/login, SAS, fast user switching | Unsupported |
+| Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
+| Windows service-owned background host | Implemented with explicit opt-in, machine DPAPI and protected management IPC; actual service/restart/long-running acceptance pending |
+| Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
+| Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |
 | Rotated GPU capture, macOS/Linux hosts | Unsupported |
 | Audio, clipboard, file transfer, recording, multiple viewers | Not implemented |
+
+Background operation follows each platform's own constraints. Linux/macOS need
+their respective host capture/input backends and user-session service/launch
+integration; those are not implemented by the Windows service. Android remains
+a controller here. Mobile hosting is not implemented: Android screen projection
+requires session consent and a media-projection foreground service, and iOS
+does not provide unlimited general background execution for a remote-control
+host. See [Android media projection](https://developer.android.com/media/grow/media-projection)
+and [Apple background execution](https://developer.apple.com/documentation/BackgroundTasks/choosing-background-strategies-for-your-app).
+No all-platform background-host acceptance is claimed.
 
 Focused verification includes desktop/FFI tests for identity pinning, durable
 identity/revocation, DPAPI corruption, helper ACLs, input generations, bounded
