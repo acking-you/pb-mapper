@@ -11,7 +11,8 @@ class _RecoveryApi extends FakeDesktopApi {
   final controls = <bool>[];
   final sources = <StreamController<DesktopFrame>>[];
   final connectionEvents = StreamController<void>.broadcast(sync: true);
-  Completer<void>? connectGate;
+  final disconnectEvents = StreamController<void>.broadcast(sync: true);
+  Completer<void>? connectGate, disconnectGate;
   bool failNext = false;
   int keyframes = 0, serial = 0;
 
@@ -39,6 +40,10 @@ class _RecoveryApi extends FakeDesktopApi {
   Future<void> disconnect() async {
     serial++;
     viewer = null;
+    final gate = disconnectGate;
+    disconnectGate = null;
+    disconnectEvents.add(null);
+    await gate?.future;
   }
 
   @override
@@ -67,6 +72,7 @@ class _RecoveryApi extends FakeDesktopApi {
       await source.close();
     }
     await connectionEvents.close();
+    await disconnectEvents.close();
   }
 }
 
@@ -200,6 +206,31 @@ void main() {
       );
       expect(api.connections.length, 2);
       expect(api.controls, [false]);
+
+      // Foreground can change while a retry is disposing the previous session,
+      // before it actually starts the replacement network connection.
+      final cleanupEntered = api.disconnectEvents.stream.first;
+      final cleanupGate = Completer<void>();
+      api.disconnectGate = cleanupGate;
+      api.sources.last.addError(StateError('second connection reset'));
+      await cleanupEntered.timeout(const Duration(seconds: 5));
+      store.setViewerForeground(false);
+      final staysInBackground = _noConnectionFor(
+        api,
+        const Duration(milliseconds: 1100),
+      );
+      cleanupGate.complete();
+      await staysInBackground;
+      expect(api.connections.length, 2);
+      store.setViewerForeground(true);
+      await _until(
+        store,
+        () =>
+            api.connections.length == 3 &&
+            store.connectionPhase == DesktopConnectionPhase.recoveringVideo,
+      );
+      expect(api.connections.length, 3);
+      expect(api.controls.every((enabled) => !enabled), isTrue);
     },
   );
 

@@ -699,13 +699,15 @@ class DesktopStore extends ChangeNotifier {
       final epoch = _mediaEpoch;
       if (needsDisconnect) await api.disconnect();
       await cleanup;
-      if (!_current(epoch) || serial != _sessionSerial) return;
+      if (!_current(epoch) || serial != _sessionSerial || !_viewerForeground) {
+        return;
+      }
       await api.connect(target.$1, relayOnly: target.$2);
       if (!_current(epoch) || serial != _sessionSerial) return;
       _sequence = 0;
       _inputEpoch++;
       frame = null;
-      _endingControl = false;
+      _endingControl = !_viewerForeground;
       _releasing = false;
       _mediaFailed = false;
       _recoveryStarted = _now();

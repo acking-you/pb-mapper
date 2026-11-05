@@ -16,7 +16,7 @@ acceptance, not physical-phone FPS or actual Windows secure-desktop acceptance.
   ACKs cannot credit the new generation, and new ACK/input resumes.
 - `cargo test -p pb-mapper-ffi --all-features --lib`: 36 passed.
 - `flutter analyze --no-pub`: no issues.
-- `flutter test --no-pub test/desktop_recovery_test.dart test/desktop_lifecycle_test.dart test/desktop_test.dart test/desktop_gesture_test.dart test/desktop_host_readiness_test.dart`: 17 passed.
+- `flutter test --no-pub test/desktop_recovery_test.dart test/desktop_lifecycle_test.dart test/desktop_test.dart test/desktop_gesture_test.dart test/desktop_host_readiness_test.dart`: 17 passed. The final foreground/route correction reran the four recovery tests and added one navigation test (`desktop_viewer_navigation_test.dart`), all five passed, for 18 relevant tests overall. This includes backgrounding during retry cleanup and opening the viewer before a slow connection finishes.
 - Android `:app:testReleaseUnitTest -x :app:compileFlutterBuildRelease`:
   three production presentation-queue tests passed; release Kotlin compiled.
   The command temporarily clears an unavailable local Gradle proxy, without

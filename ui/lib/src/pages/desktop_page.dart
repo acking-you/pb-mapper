@@ -31,6 +31,8 @@ class _DesktopPageState extends State<DesktopPage> {
   bool _ordinaryOnly = false;
   bool _remember = false, _autoStart = false;
   bool _background = false;
+  bool _viewerOpen = false;
+  int _viewerOpenSerial = 0;
   @override
   void initState() {
     super.initState();
@@ -486,12 +488,15 @@ class _DesktopPageState extends State<DesktopPage> {
                       onPressed: store.busy
                           ? null
                           : () async {
+                              final viewerSerial = _viewerOpenSerial;
                               await store.connect(
                                 _invitation.text.trim(),
                                 _relayOnly,
                               );
                               _invitation.clear();
-                              if (context.mounted && store.connected) {
+                              if (context.mounted &&
+                                  store.connected &&
+                                  viewerSerial == _viewerOpenSerial) {
                                 _viewer(context);
                               }
                             },
@@ -515,9 +520,21 @@ class _DesktopPageState extends State<DesktopPage> {
       );
     },
   );
-  void _viewer(BuildContext context) => Navigator.of(context).push(
-    MaterialPageRoute<void>(builder: (_) => DesktopViewer(store: widget.store)),
-  );
+  Future<void> _viewer(BuildContext context) async {
+    if (_viewerOpen) return;
+    _viewerOpen = true;
+    _viewerOpenSerial++;
+    final route = MaterialPageRoute<void>(
+      builder: (_) => DesktopViewer(store: widget.store),
+    );
+    try {
+      await Navigator.of(context).push(route);
+      // Keep one foreground owner until the popped viewer is fully disposed.
+      await route.completed;
+    } finally {
+      _viewerOpen = false;
+    }
+  }
 }
 
 /// Persistent local stop, including while another page is open.
