@@ -165,7 +165,13 @@ impl Worker {
                             }
                             Command::Ping => Ok(()),
                             Command::Keyframe => {
-                                engine.keyframe = true;
+                                if renderer
+                                    .as_ref()
+                                    .is_none_or(|feedback| feedback.request_keyframe())
+                                {
+                                    outgoing.resynchronize();
+                                    engine.keyframe = true;
+                                }
                                 Ok(())
                             }
                             Command::Presented {
@@ -689,5 +695,117 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), worker.stop())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn decoder_reset_replaces_an_unacknowledged_idr_and_resumes_capture() {
+        struct Video(Arc<AtomicU32>);
+        impl Backend for Video {
+            fn display(&mut self) -> Result<Display> {
+                Ok(Display {
+                    id: 1,
+                    name: "decoder recovery".into(),
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                })
+            }
+            fn capture(&mut self) -> Result<Vec<u8>> {
+                Err(error("test requires H264"))
+            }
+            fn capture_video(
+                &mut self,
+                _: &crate::DesktopContext,
+                _: crate::VideoCodec,
+                keyframe: bool,
+                _: u32,
+            ) -> Result<Option<crate::EncodedFrame>> {
+                if self
+                    .0
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_err()
+                {
+                    return Ok(None);
+                }
+                Ok(Some(crate::EncodedFrame {
+                    format: crate::VideoFormat {
+                        codec: crate::VideoCodec::H264,
+                        keyframe,
+                        width: 1920,
+                        height: 1080,
+                        ..Default::default()
+                    },
+                    bytes: vec![1; if keyframe { 128 * 1024 } else { 1024 }],
+                }))
+            }
+            fn input(&mut self, _: &Input) -> Result<()> {
+                Ok(())
+            }
+            fn release(&mut self) {}
+        }
+        async fn next(worker: &mut Worker) -> Frame {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(frame) = worker.media.pop() {
+                        return frame;
+                    }
+                    worker.frames.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap()
+        }
+
+        let remaining = Arc::new(AtomicU32::new(1));
+        let produced = remaining.clone();
+        let mut worker = Worker::start_video(
+            Arc::new(move || Ok(Box::new(Video(produced.clone())))),
+            Arc::new(Policy::new(false)),
+            Arc::new(parking_lot::Mutex::new(SessionStatus::default())),
+            crate::VideoCodec::H264,
+            crate::VideoPreferences::default(),
+            true,
+            None,
+        );
+        let feedback = worker.feedback.clone().unwrap();
+        let initial = next(&mut worker).await;
+        assert!(initial.status.video.keyframe);
+        assert_eq!(
+            feedback.admit(&initial, initial.bytes.len()),
+            crate::congestion::Admission::Send
+        );
+        assert!(feedback.budget().2);
+
+        // The renderer discarded the initial IDR and cannot acknowledge it.
+        worker.command(Command::Keyframe).await.unwrap();
+        remaining.store(1, Ordering::SeqCst);
+        let replacement = next(&mut worker).await;
+        assert!(replacement.status.video.keyframe);
+        assert!(replacement.status.frame_id > initial.status.frame_id);
+        assert_eq!(
+            feedback.admit(&replacement, replacement.bytes.len()),
+            crate::congestion::Admission::Send
+        );
+        assert!(feedback.budget().2);
+        worker
+            .command(Command::Presented {
+                generation: replacement.status.generation,
+                frame_id: replacement.status.frame_id,
+            })
+            .await
+            .unwrap();
+        assert!(!feedback.budget().2);
+        remaining.store(1, Ordering::SeqCst);
+        let resumed = next(&mut worker).await;
+        assert!(!resumed.status.video.keyframe);
+        assert_eq!(
+            feedback.admit(&resumed, resumed.bytes.len()),
+            crate::congestion::Admission::Send
+        );
+        assert!(feedback.request_keyframe());
+        worker.stop().await;
     }
 }

@@ -333,6 +333,9 @@ class _DesktopViewerState extends State<DesktopViewer>
                                 panEnabled: !_interactive,
                                 scaleEnabled: !_interactive,
                                 child: Listener(
+                                  onPointerHover: (event) {
+                                    unawaited(_move(event.localPosition, size));
+                                  },
                                   onPointerDown: (event) {
                                     if (!_interactive) return;
                                     _focus.requestFocus();

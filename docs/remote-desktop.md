@@ -261,7 +261,7 @@ delay. Zero means no current-generation presentation sample is available.
 
 Development environment: Windows 11 Enterprise 10.0.26300, Ryzen 9 9950X,
 NVIDIA RTX 5070 Ti, 2560×1440 display at 165 Hz; Rust 1.99.1 and Flutter 3.44.9.
-The final 0.10.2-based Windows UI run lasted 30.05 seconds with a five-second
+The first 0.10.2-based Windows UI run lasted 30.05 seconds with a five-second
 warmup and measured **89.58 native texture-consumed FPS at 1920×1080 over the
 actual pb-mapper direct path**. Sampled UI presentation averaged 89.54 FPS;
 unique capture and receive both averaged 90.00 FPS. Every steady-state sample
@@ -274,8 +274,19 @@ The raw counters, monotonic timings, environment and native binary hashes are in
 The [reproduction procedure](../scripts/test/desktop-ui-acceptance.md) uses the
 product viewer and decoder, not a simulated renderer.
 
+After fixing explicit decoder-reset credit recovery, connection cancellation
+and mouse hover, an always-visible moving pattern produced **85.19 native
+presented FPS**, 89.19 unique capture/receive FPS, and zero SDK/native queue
+drops or steady-state errors in another 30-second direct run. Its counters and
+binary hashes are in
+[`validation/windows-direct-1080p90-reviewed.json`](validation/windows-direct-1080p90-reviewed.json).
+The pattern now stays topmost: an intervening run with the pattern occluded by
+the viewer measured 78.36 presented / 80.74 captured FPS. These different source
+conditions are not a controlled before/after comparison. The observed rates
+depend on content and compositor scheduling; 89.58 FPS is not a guaranteed floor.
+
 The following earlier development experiments are separate evidence, not
-full-product acceptance or substitutes for the final native presentation run:
+full-product acceptance or substitutes for the native presentation runs:
 
 | Experiment | Recorded result | What it establishes |
 | --- | --- | --- |

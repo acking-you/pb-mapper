@@ -45,7 +45,8 @@ node scripts/test/desktop-bootstrap.cjs target/desktop-acceptance
 
 Run `target/release/examples/video_bench.exe 60 90 --pattern-only` to supply
 moving content, then launch the newly built UI from its build directory. The
-pattern program draws only its own window and does not inject input. Avoid
+pattern program keeps its own animation window topmost so the viewer cannot
+occlude the source; it does not inject input. Avoid
 other builds and system changes during the measurement. The viewer records
 30 one-second samples and disconnects. The report contains counters and status,
 not images, invitations or relay credentials.

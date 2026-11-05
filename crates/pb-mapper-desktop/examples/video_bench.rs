@@ -280,7 +280,7 @@ mod pattern {
             let (ready, started) = std::sync::mpsc::sync_channel(1);
             let thread = std::thread::spawn(move || unsafe {
                 let window = match CreateWindowExW(
-                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                     w!("STATIC"),
                     w!("pb-mapper capture benchmark"),
                     WS_POPUP | WS_VISIBLE | WS_DISABLED,

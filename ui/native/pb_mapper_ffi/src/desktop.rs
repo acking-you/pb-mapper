@@ -33,9 +33,8 @@ impl DesktopState {
         &self,
         connect: impl std::future::Future<Output = Result<Viewer, CtlError>>,
     ) -> Result<(), CtlError> {
-        if self.viewer.lock().await.is_some() {
-            return Err(err("disconnect the current desktop first"));
-        }
+        // Register before any await, including the viewer/configuration locks:
+        // a disconnect must invalidate setup even before network work starts.
         let cancel = CancellationToken::new();
         let epoch = {
             let mut pending = self.connecting.lock();
@@ -46,7 +45,16 @@ impl DesktopState {
             *pending = Some((epoch, cancel.clone()));
             epoch
         };
-        let result = tokio::select! { biased; () = cancel.cancelled() => Err(err("desktop connection cancelled")), result = connect => result };
+        let result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(err("desktop connection cancelled")),
+            result = async {
+                if self.viewer.lock().await.is_some() {
+                    return Err(err("disconnect the current desktop first"));
+                }
+                connect.await
+            } => result,
+        };
         {
             let mut pending = self.connecting.lock();
             if pending.as_ref().is_some_and(|(id, _)| *id == epoch) {
@@ -221,23 +229,6 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             return Err(err("the helper requires Windows"));
         }
     }
-    // Only starts need a credential. Local stop/revoke keeps working even when
-    // Settings or the relay's authentication state has changed.
-    let client = if matches!(request, Request::Connect { .. }) {
-        let config = handle.state.lock().await.get_config_status().await;
-        Some(
-            Client::from_credential(
-                &config.server_address,
-                get_process_credential().map_err(err)?,
-                config.keep_alive_enabled,
-                None,
-            )
-            .with_relay_transport(config.relay_transport)
-            .map_err(err)?,
-        )
-    } else {
-        None
-    };
     let state = &handle.desktop;
     match request {
         Request::TrustStatus => {
@@ -350,7 +341,17 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         } => {
             state
                 .connect_viewer(async {
-                    let client = client.as_ref().ok_or_else(|| err("missing client"))?;
+                    // Configuration can wait behind other app operations. Keep
+                    // that wait inside the registered, cancellable attempt.
+                    let config = handle.state.lock().await.get_config_status().await;
+                    let client = Client::from_credential(
+                        &config.server_address,
+                        get_process_credential().map_err(err)?,
+                        config.keep_alive_enabled,
+                        None,
+                    )
+                    .with_relay_transport(config.relay_transport)
+                    .map_err(err)?;
                     let invitation = Invitation::decode(&invitation).map_err(err)?;
                     let options = ConnectOptions {
                         path: if relay_only {
@@ -363,7 +364,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     let preferences = video.unwrap_or_default();
                     if native_video {
                         Viewer::connect_with_presentation_feedback(
-                            client,
+                            &client,
                             invitation,
                             options,
                             vec![desktop::VideoCodec::H264, desktop::VideoCodec::Jpeg],
@@ -372,7 +373,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                         .await
                     } else {
                         Viewer::connect_with_video_preferences(
-                            client,
+                            &client,
                             invitation,
                             options,
                             vec![desktop::VideoCodec::Jpeg],
@@ -664,8 +665,98 @@ mod tests {
     use super::*;
     use std::{
         ffi::{CStr, CString},
+        future::Future,
         sync::Arc,
+        task::{Context, Waker},
     };
+
+    #[test]
+    fn disconnect_cancels_configuration_wait_without_cancelling_reconnect() {
+        let root =
+            std::env::temp_dir().join(format!("pb-desktop-config-cancel-{}", std::process::id()));
+        let handle = PbMapperHandle {
+            desktop: Default::default(),
+            tunnel_events: Default::default(),
+            state: Arc::new(tokio::sync::Mutex::new(crate::state::PbMapperState::new(
+                Some(root.display().to_string()),
+            ))),
+            control_shutdown: Default::default(),
+            runtime: tokio::runtime::Runtime::new().unwrap(),
+        };
+        handle.runtime.block_on(async {
+            // Contend on the real app-state lock used by the FFI call. Setup
+            // must be cancelled while the lock is still held, before loading
+            // credentials or contacting a relay.
+            let config = handle.state.lock().await;
+            let connect = || {
+                call(
+                    &handle,
+                    Request::Connect {
+                        invitation: String::new(),
+                        relay_only: false,
+                        native_video: false,
+                        video: None,
+                    },
+                )
+            };
+            let mut first = std::pin::pin!(connect());
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(first.as_mut().poll(&mut context).is_pending());
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                call(&handle, Request::Disconnect),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            // A new attempt can start before the cancelled call resumes.
+            // Finishing the old call must not unregister the new token.
+            let mut second = std::pin::pin!(connect());
+            assert!(second.as_mut().poll(&mut context).is_pending());
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), first)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(handle.desktop.connecting.lock().is_some());
+            call(&handle, Request::Disconnect).await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), second)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            drop(config);
+            assert!(handle.desktop.viewer.lock().await.is_none());
+            assert!(handle.desktop.connecting.lock().is_none());
+        });
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_setup_waiting_for_viewer_lock() {
+        let state = DesktopState::default();
+        let viewer = state.viewer.lock().await;
+        let mut attempt = std::pin::pin!(
+            state.connect_viewer(std::future::pending::<Result<Viewer, CtlError>>())
+        );
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(attempt.as_mut().poll(&mut context).is_pending());
+        let mut disconnect = std::pin::pin!(state.disconnect_viewer());
+        assert!(disconnect.as_mut().poll(&mut context).is_pending());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), attempt)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        drop(viewer);
+        disconnect.await.unwrap();
+        assert!(state.viewer.lock().await.is_none());
+        assert!(state.connecting.lock().is_none());
+    }
+
     #[tokio::test]
     async fn disconnect_cancels_pending_setup_without_waiting_for_network() {
         let state = Arc::new(DesktopState::default());

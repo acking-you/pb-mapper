@@ -1,6 +1,6 @@
 //! Opt-in renderer feedback. Socket writes only move bytes into local buffers;
 //! admission is bounded by frames the remote renderer has actually presented.
-use crate::{Frame, VideoPreferences};
+use crate::{Frame, VideoCodec, VideoPreferences};
 use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
@@ -26,7 +26,6 @@ struct Sent {
     generation: u64,
     id: u64,
     ready: Instant,
-    sent: Instant,
     bytes: usize,
 }
 struct State {
@@ -37,6 +36,8 @@ struct State {
     bitrate: u32,
     ceiling: VideoPreferences,
     last_ack: Option<Instant>,
+    unacknowledged_since: Option<Instant>,
+    recovering: bool,
     baseline: Option<Duration>,
     adjusted: Instant,
     congested_since: Option<Instant>,
@@ -63,6 +64,8 @@ impl Feedback {
                 bitrate: ceiling.bitrate,
                 ceiling,
                 last_ack: None,
+                unacknowledged_since: None,
+                recovering: false,
                 baseline: None,
                 adjusted: Instant::now(),
                 congested_since: None,
@@ -107,6 +110,15 @@ impl Feedback {
         if now.saturating_duration_since(ready) > MAX_READY_AGE {
             return Admission::Discard;
         }
+        // An asynchronous encoder can still return an old predictive output
+        // after an IDR request. It must not spend the recovery's first credit.
+        if state.recovering
+            && state.sent.is_empty()
+            && frame.status.video.codec == VideoCodec::H264
+            && !frame.status.video.keyframe
+        {
+            return Admission::Discard;
+        }
         if bytes > MAX_INDEPENDENT_FRAME {
             let reduced = state.bitrate / 2;
             state.reduce(now, reduced);
@@ -120,16 +132,35 @@ impl Feedback {
             state.waiting = true;
             return Admission::Wait;
         }
+        state.unacknowledged_since.get_or_insert(now);
         state.bytes += bytes;
         state.sent.push_back(Sent {
             generation: frame.status.generation,
             id: frame.status.frame_id,
             ready,
-            sent: now,
             bytes,
         });
         state.waiting = state.bytes >= state.window || state.sent.len() >= MAX_FRAMES;
         Admission::Send
+    }
+    /// A decoder reset retires frames it can no longer acknowledge. Permit one
+    /// replacement GOP until a real acknowledgment advances the live ledger;
+    /// repeated requests neither create credit nor postpone the ACK deadline.
+    pub fn request_keyframe(&self) -> bool {
+        let mut state = self.state.lock();
+        if state.recovering {
+            return false;
+        }
+        state.recovering = true;
+        state.ready.clear();
+        state.sent.clear();
+        state.bytes = 0;
+        state.waiting = false;
+        // Preserve unacknowledged_since even while the retired ledger is empty,
+        // together with the earned window, bitrate and congestion history.
+        drop(state);
+        self.changed.notify_one();
+        true
     }
     /// A transport acknowledgment is independently checked against the sent
     /// ledger. It never grants control or renews input. An old-generation/late
@@ -157,6 +188,8 @@ impl Feedback {
         state.bytes = state.bytes.saturating_sub(acknowledged);
         let first_ack = state.last_ack.is_none();
         state.last_ack = Some(now);
+        state.unacknowledged_since = (!state.sent.is_empty()).then_some(now);
+        state.recovering = false;
         state.baseline = Some(state.baseline.map_or(latency, |old| old.min(latency)));
         state.waiting = false;
         if !first_ack && latency >= state.congested_after() {
@@ -195,9 +228,10 @@ impl Feedback {
         let now = Instant::now();
         let stall =
             Duration::from_secs(1).max(state.congested_after() + Duration::from_millis(250));
-        if state.sent.front().is_some_and(|first| {
-            now.saturating_duration_since(state.last_ack.unwrap_or(first.sent)) >= stall
-        }) && now.saturating_duration_since(state.adjusted) >= Duration::from_secs(1)
+        if state
+            .unacknowledged_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= stall)
+            && now.saturating_duration_since(state.adjusted) >= Duration::from_secs(1)
         {
             let reduced = state.bitrate.saturating_mul(2) / 3;
             state.reduce(now, reduced);
@@ -220,11 +254,13 @@ impl Feedback {
         (prefs, state.bitrate, state.waiting)
     }
     pub fn stalled(&self) -> bool {
+        self.stalled_at(Instant::now())
+    }
+    fn stalled_at(&self, now: Instant) -> bool {
         let state = self.state.lock();
-        state.sent.front().is_some_and(|first| {
-            Instant::now().saturating_duration_since(state.last_ack.unwrap_or(first.sent))
-                >= Duration::from_secs(4)
-        })
+        state
+            .unacknowledged_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= Duration::from_secs(4))
     }
 }
 impl State {
@@ -294,6 +330,55 @@ mod tests {
             Admission::Discard
         );
         assert_eq!(feedback.admit_at(&frame(3, 0), 1024, at), Admission::Send);
+    }
+    #[test]
+    fn keyframe_recovery_retires_old_frames_without_resetting_unacknowledged_limit() {
+        let feedback = Feedback::new(VideoPreferences::default());
+        let at = Instant::now();
+        let initial = frame(1, INITIAL_WINDOW + 1);
+        ready(&feedback, &initial, at);
+        assert_eq!(
+            feedback.admit_at(&initial, initial.bytes.len(), at),
+            Admission::Send
+        );
+        let pending = frame(2, 1024);
+        ready(&feedback, &pending, at);
+        assert_eq!(feedback.admit_at(&pending, 1024, at), Admission::Wait);
+
+        assert!(feedback.request_keyframe());
+        assert!(!feedback.request_keyframe());
+        // This frame may already be outside the media queue in Host::send.
+        assert_eq!(feedback.admit_at(&pending, 1024, at), Admission::Discard);
+        assert!(feedback.stalled_at(at + Duration::from_secs(4)));
+        let replacement_at = at + Duration::from_secs(1);
+        let delayed_output = frame(3, 1024);
+        ready(&feedback, &delayed_output, replacement_at);
+        assert_eq!(
+            feedback.admit_at(&delayed_output, 1024, replacement_at),
+            Admission::Discard
+        );
+        let mut replacement = frame(4, INITIAL_WINDOW + 1);
+        replacement.status.video.keyframe = true;
+        ready(&feedback, &replacement, replacement_at);
+        assert_eq!(
+            feedback.admit_at(&replacement, replacement.bytes.len(), replacement_at),
+            Admission::Send
+        );
+        assert!(!feedback.request_keyframe());
+        feedback.presented_at(1, 1, at + Duration::from_millis(3500));
+        {
+            let state = feedback.state.lock();
+            assert_eq!(state.bytes, replacement.bytes.len());
+            assert!(state.waiting);
+            assert_eq!(state.window, INITIAL_WINDOW);
+            assert_eq!(state.bitrate, VideoPreferences::default().bitrate);
+            assert_eq!(state.last_ack, None);
+        }
+        // Replacing debt and receiving a retired ACK cannot buy another four
+        // seconds, nor can repeated requests retire the replacement again.
+        assert!(!feedback.request_keyframe());
+        assert!(!feedback.stalled_at(at + Duration::from_millis(3999)));
+        assert!(feedback.stalled_at(at + Duration::from_secs(4)));
     }
     #[test]
     fn renderer_baseline_and_congestion_recovery_use_real_ack_progress() {

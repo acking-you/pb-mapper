@@ -17,7 +17,7 @@ import 'support.dart';
 
 void main() {
   testWidgets(
-    'phone viewer maps a tap to display pixels and blocks stale input',
+    'viewer maps touch and mouse hover and blocks ungranted or stale input',
     (tester) async {
       if (const bool.fromEnvironment('DESKTOP_QA')) await loadRealFonts();
       tester.view.physicalSize = const Size(390, 844);
@@ -89,6 +89,11 @@ void main() {
       }
       await tester.pump();
       expect(find.byType(RawImage), findsOneWidget);
+      final mouse = await tester.createGesture(
+        kind: ui.PointerDeviceKind.mouse,
+      );
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(find.byType(RawImage)));
       await tester.tap(find.byType(RawImage));
       await tester.pump();
       expect(api.inputs, isEmpty);
@@ -101,6 +106,13 @@ void main() {
       expect(api.inputs.first['x'], 960);
       expect(api.inputs.first['y'], 540);
       expect(api.inputs.last['down'], false);
+      final viewer = tester.getRect(find.byType(RawImage));
+      await mouse.moveTo(viewer.topLeft + viewer.size.center(Offset.zero) / 2);
+      await tester.pump();
+      expect(api.inputs.length, 4);
+      expect(api.inputs.last, containsPair('kind', 'move'));
+      expect(api.inputs.last['x'], 480);
+      expect(api.inputs.last['y'], 270);
       if (const bool.fromEnvironment('DESKTOP_QA')) {
         await tester.runAsync(() async {
           final image =
@@ -120,9 +132,11 @@ void main() {
       );
       await store.poll();
       await tester.pump();
+      await mouse.moveTo(viewer.center);
       await tester.tap(find.byType(RawImage), warnIfMissed: false);
       await tester.pump();
-      expect(api.inputs.length, 3);
+      expect(api.inputs.length, 4);
+      await mouse.removePointer();
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
