@@ -219,7 +219,7 @@ impl Admin {
     );
 
     admin_rpc!(
-        /// One page of registered services, optionally scoped to one credential.
+        /// One page of registered services, optionally scoped to one namespace.
         list_services(key_id: Option<u64>, page: u32, page_size: u16) -> ServicePage,
         request: AdminRequest::ServiceList {
             key_id,
@@ -230,7 +230,7 @@ impl Admin {
     );
 
     admin_rpc!(
-        /// One page of live connections, optionally scoped to one credential.
+        /// One page of live connections, optionally scoped to one namespace.
         list_connections(key_id: Option<u64>, page: u32, page_size: u16) -> ConnectionPage,
         request: AdminRequest::ConnectionList {
             key_id,
@@ -269,12 +269,12 @@ impl Admin {
         collect_pages(|page| self.list_keys(page, COLLECT_PAGE_SIZE)).await
     }
 
-    /// Every registered service, optionally scoped to one credential.
+    /// Every registered service, optionally scoped to one namespace.
     pub async fn list_services_all(&self, key_id: Option<u64>) -> Result<Vec<ServiceInfo>> {
         collect_pages(|page| self.list_services(key_id, page, COLLECT_PAGE_SIZE)).await
     }
 
-    /// Every live connection, optionally scoped to one credential.
+    /// Every live connection, optionally scoped to one namespace.
     pub async fn list_connections_all(&self, key_id: Option<u64>) -> Result<Vec<ConnectionInfo>> {
         collect_pages(|page| self.list_connections(key_id, page, COLLECT_PAGE_SIZE)).await
     }

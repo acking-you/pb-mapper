@@ -46,6 +46,8 @@ pub struct KeyMetadata {
 /// A registered service as the relay sees it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceInfo {
+    /// The same value as `namespace`, under its older name. It only names a key
+    /// when that key owns the namespace.
     pub key_id: u64,
     pub namespace: u64,
     pub service_name: String,
@@ -57,6 +59,8 @@ pub struct ServiceInfo {
 /// One control connection the relay holds for a registered service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
+    /// The same value as `namespace`, under its older name. It only names a key
+    /// when that key owns the namespace.
     pub key_id: u64,
     pub namespace: u64,
     pub service_name: String,
