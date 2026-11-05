@@ -78,8 +78,9 @@ consumed 908 without shipping APKs, 0.9.8 uses 909, 0.10.0 uses 910 and
 issue #50 Windows/Android test distribution (version 0.10.2); build 914 is its
 mobile interaction and recovery repair. Build 915 is the Windows service
 identity-query permission repair. Build 916 includes that repair and stable
-tray menus during background status updates. The next distribution must use at
-least 917. The build counter is independent of the
+tray menus during background status updates. Build 917 also fixes native popup
+reopening and preserves late menu clicks. The next distribution must use at
+least 918. The build counter is independent of the
 public version.
 
 To verify the complete Android build without publishing a release, run

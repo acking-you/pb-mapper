@@ -86,16 +86,6 @@ void main() {
     await tester.pump(const Duration(seconds: 18));
     expect(calls.map((call) => call.method), ['popUpContextMenu']);
 
-    // This is the actual plugin event path, using the ID from the still-open
-    // native menu. Replacing the Dart menu too early would lose this click.
-    await binding.defaultBinaryMessenger.handlePlatformMessage(
-      'tray_manager',
-      const StandardMethodCodec().encodeMethodCall(
-        MethodCall('onTrayMenuItemClick', {'id': originalOpen['id']}),
-      ),
-      (_) {},
-    );
-    expect(opened, 1);
     popup!.complete();
     await tester.pump();
     expect(calls.map((call) => call.method), [
@@ -106,6 +96,17 @@ void main() {
     ]);
     expect((menu!['items'] as List).first['label'], 'zh connections 3');
     expect((menu!['items'] as List)[2]['label'], 'zh open');
+
+    // WM_COMMAND may arrive after TrackPopupMenu returns and status/locale
+    // changes have rendered. The old native ID must still resolve correctly.
+    await binding.defaultBinaryMessenger.handlePlatformMessage(
+      'tray_manager',
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('onTrayMenuItemClick', {'id': originalOpen['id']}),
+      ),
+      (_) {},
+    );
+    expect(opened, 1);
 
     calls.clear();
     service.onTrayIconRightMouseDown();

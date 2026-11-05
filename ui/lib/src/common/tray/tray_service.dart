@@ -83,6 +83,22 @@ class TrayService with TrayListener {
   bool _toolTipSupported = true;
   bool _contextMenuSupported = true;
   TrayStrings? _strings;
+  final _statusItem = MenuItem(key: 'status', disabled: true);
+  final _openItem = MenuItem(key: 'open');
+  final _refreshItem = MenuItem(key: 'refresh');
+  final _quitItem = MenuItem(key: 'quit');
+  // Windows can deliver WM_COMMAND after the popup has returned. Retain IDs
+  // across renders so that a closing click still resolves to the same action.
+  late final _menu = Menu(
+    items: [
+      _statusItem,
+      MenuItem.separator(),
+      _openItem,
+      _refreshItem,
+      MenuItem.separator(),
+      _quitItem,
+    ],
+  );
   String? _renderedIcon, _renderedToolTip;
   (String, String, String, String)? _renderedMenu;
   Future<void>? _rendering;
@@ -246,19 +262,12 @@ class TrayService with TrayListener {
       _renderedToolTip = statusText;
     }
     if (_contextMenuSupported && _renderedMenu != menuLabels) {
+      _statusItem.label = statusText;
+      _openItem.label = strings.open;
+      _refreshItem.label = strings.refresh;
+      _quitItem.label = strings.quit;
       await _invokeTrayMethod(
-        action: () => _trayManager.setContextMenu(
-          Menu(
-            items: [
-              MenuItem(key: 'status', label: statusText, disabled: true),
-              MenuItem.separator(),
-              MenuItem(key: 'open', label: strings.open),
-              MenuItem(key: 'refresh', label: strings.refresh),
-              MenuItem.separator(),
-              MenuItem(key: 'quit', label: strings.quit),
-            ],
-          ),
-        ),
+        action: () => _trayManager.setContextMenu(_menu),
         onUnsupported: () => _contextMenuSupported = false,
         methodName: 'setContextMenu',
       );
