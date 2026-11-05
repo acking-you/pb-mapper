@@ -3,6 +3,7 @@ import 'dart:io' show exit;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
+import 'pages/desktop_page.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
@@ -300,8 +301,22 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       themeAnimationCurve: Curves.easeInOutCubic,
       // Inside MaterialApp, so a toast raised without a context still wears
       // the theme and speaks the language.
-      builder: (context, child) =>
-          ToastificationWrapper(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => ToastificationWrapper(
+        child: Column(
+          children: [
+            ListenableBuilder(
+              listenable: _store,
+              builder: (context, _) {
+                final desktop = _store.activeDesktop;
+                return desktop == null
+                    ? const SizedBox.shrink()
+                    : DesktopSharingBanner(store: desktop);
+              },
+            ),
+            Expanded(child: child ?? const SizedBox.shrink()),
+          ],
+        ),
+      ),
       home: Builder(builder: _home),
     );
   }

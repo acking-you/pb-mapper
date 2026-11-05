@@ -1,5 +1,25 @@
 # pb-mapper
 
+The optional `desktop` feature exposes `pb_mapper::desktop::{Host, HostOptions,
+HostIdentity, Viewer, Invitation}` for endpoint-owned screen sharing over an
+existing Client. Windows hosting includes GPU H.264 video and an opt-in privileged
+helper; the existing Flutter UI supplies Windows/Android native textures and
+separate view/control permissions. The helper's real UAC acceptance and the
+60+ FPS end-to-end UI target are still unverified. See the
+[setup, measurements and support matrix](../../docs/remote-desktop.md).
+
+Desktop backends are constructed and retained on their capture/input worker;
+`Backend` need not be `Send`. Embedders coordinate other input writers with a
+`ControlAdmission` lease, acquired only for an explicit control request. Use
+`Viewer::next_frame` to consume H.264 units in order and acknowledge actual
+rendering with `presented`; latest-frame polling can lose predictive references.
+`VideoPreferences` bounds encoded size, frame rate and bitrate independently of
+the physical display geometry used for input.
+`HostIdentity` permits an explicitly authorized restart, but its serialized form
+contains private keys and a bearer grant: storage and revocation belong to the
+embedding application. The UI uses Windows DPAPI. Ordinary SDK consumers incur
+none of these desktop dependencies unless the feature is enabled.
+
 Client SDK for [pb-mapper](https://github.com/acking-you/pb-mapper): publish a
 private TCP/UDP service with `register` and reach it on a local port with
 `connect`. Every connection goes peer to peer over QUIC when the networks allow

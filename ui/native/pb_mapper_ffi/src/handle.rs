@@ -15,6 +15,7 @@ use crate::state::PbMapperState;
 
 /// Opaque handle for the pb-mapper runtime and shared state.
 pub struct PbMapperHandle {
+    pub(crate) desktop: crate::desktop::DesktopState,
     /// The window's readers of tunnel events.
     pub(crate) tunnel_events: crate::tunnel_events::TunnelEventReaders,
     pub(crate) runtime: Runtime,
@@ -42,6 +43,7 @@ pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
 
     let state = PbMapperState::new(None);
     let handle = PbMapperHandle {
+        desktop: Default::default(),
         tunnel_events: Default::default(),
         runtime,
         state: Arc::new(Mutex::new(state)),

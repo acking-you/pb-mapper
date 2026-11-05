@@ -22,6 +22,7 @@ tokio-util.workspace = true
 dirs.workspace = true
 
 pb-mapper-auth.workspace = true
+pb-mapper = { workspace = true, features = ["desktop"] }
 # Direct sessions, as the CLI has them: a connection tries a direct path
 # first and falls back to the relay, and the embedded relay offers one. The
 # relay itself is reached over TCP or, when Settings says so, QUIC.
@@ -34,6 +35,9 @@ uni-stream.workspace = true
 parking_lot.workspace = true
 # The update manifest's Ed25519 signature; see src/update.rs.
 ring.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # A live relay for the Relay page's calls; see src/relay.rs.

@@ -210,6 +210,7 @@ mod tests {
         ));
         let handle = PbMapperHandle {
             tunnel_events: Default::default(),
+            desktop: Default::default(),
             runtime: tokio::runtime::Runtime::new().unwrap(),
             state: Arc::new(tokio::sync::Mutex::new(crate::state::PbMapperState::new(
                 Some(root.display().to_string()),

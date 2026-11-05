@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'desktop_page.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/galaxy/planet_glyph.dart';
 import 'package:pb_mapper_ui/src/pages/relay/relay_format.dart' show ownerName;
@@ -29,6 +30,12 @@ class TunnelsPage extends StatelessWidget {
     return PageFrame(
       title: l10n.navTunnels,
       actions: [
+        IconButton(
+          key: const Key('open-desktop'),
+          tooltip: l10n.desktopTitle,
+          onPressed: () => openDesktop(context),
+          icon: const Icon(Icons.desktop_windows_outlined),
+        ),
         IconButton(
           key: const Key('tunnels-refresh'),
           tooltip: l10n.refresh,

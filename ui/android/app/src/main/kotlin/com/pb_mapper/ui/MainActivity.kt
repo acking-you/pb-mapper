@@ -6,15 +6,19 @@ import io.flutter.embedding.engine.FlutterEngine
 
 class MainActivity : FlutterActivity() {
     private var updates: UpdateInstaller? = null
+    private var desktopVideo: DesktopVideo? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         updates = UpdateInstaller(this, flutterEngine.dartExecutor.binaryMessenger)
+        desktopVideo = DesktopVideo(flutterEngine.dartExecutor.binaryMessenger, flutterEngine.renderer)
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         updates?.dispose()
         updates = null
+        desktopVideo?.dispose()
+        desktopVideo = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 

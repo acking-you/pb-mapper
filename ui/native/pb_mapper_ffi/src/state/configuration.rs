@@ -12,6 +12,9 @@
 use super::*;
 
 impl PbMapperState {
+    pub(crate) fn desktop_config_dir(&self) -> PathBuf {
+        self.config_dir.clone()
+    }
     pub(super) async fn reset_status_caches(&self) {
         {
             let mut cache = self.local_server_status_cache.write().await;

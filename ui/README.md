@@ -1,5 +1,15 @@
 # pb-mapper UI
 
+**Remote desktop:** open the monitor button on **Tunnels** to share a Windows
+desktop or view/control an authorized screen inside the app. It uses the existing
+relay configuration, separate desktop permission, endpoint encryption and native
+H.264 textures on Windows/Android. Windows can remember an invitation and its
+permissions with DPAPI and optionally resume sharing when the app opens.
+The separately installed UAC helper is implemented; actual secure-desktop prompt
+acceptance, physical-phone/cross-network validation and sustained 60+ FPS UI
+acceptance remain incomplete. Android development verification currently uses a
+VM. See [setup, measurements and support matrix](../docs/remote-desktop.md).
+
 The desktop and mobile app for pb-mapper: four pages — an Overview drawn as a
 galaxy, Tunnels, Logs and Settings — plus a three-step first run. The design
 follows POCOX's language; [`docs/ui-design.md`](../docs/ui-design.md) explains
@@ -60,7 +70,7 @@ located under `ui/native`.
 
 ### Why the FFI API returns JSON
 
-The Rust FFI layer returns a JSON string for every call (for example:
+The Rust FFI control layer returns a JSON string (for example:
 `{"success": true, "message": "...", "data": {...}}`). We intentionally keep
 this JSON envelope because:
 
@@ -73,9 +83,11 @@ this JSON envelope because:
 - **Good enough performance**: UI interactions are dominated by network calls,
   so the JSON parse cost is negligible compared to keeping the API stable.
 
-If a future workflow needs high-throughput data, we can introduce a typed C
-struct or a binary format for that specific API, but the default remains JSON
-for clarity and stability during development.
+Desktop video uses separately owned binary buffers with an explicit free
+function. H.264 units flow in order to native decoder workers and Flutter
+textures; JPEG remains a compatibility path. Encoded bytes never enter the JSON
+control envelope. See the desktop document above for queue bounds, presentation
+acknowledgements and buffer ownership.
 
 To run and build this app, you need to have
 [Flutter SDK](https://docs.flutter.dev/get-started/install)

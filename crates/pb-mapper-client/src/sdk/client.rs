@@ -344,6 +344,108 @@ impl Client {
             .await
     }
 
+    /// Open one owned TCP session without reserving or exposing a forwarding port.
+    /// Keep the returned connection alive for the lifetime of the stream. Setup
+    /// uses the same direct commit/fallback rules as `connect`; after setup no
+    /// application bytes are replayed and a closed stream is never reconnected.
+    pub async fn connect_tcp(
+        &self,
+        key: impl Into<String>,
+        options: ConnectOptions,
+    ) -> Result<(tokio::net::TcpStream, Connection)> {
+        use crate::client::stream::{StreamSetup, handle_local_stream};
+        use tokio::{
+            net::{TcpListener, TcpStream},
+            sync::{Mutex, Semaphore, mpsc},
+        };
+        use uni_stream::stream::TcpStreamImpl;
+
+        let key = key.into();
+        if key.trim().is_empty() || (options.path == PathPolicy::Auto && !cfg!(feature = "p2p")) {
+            return Err(Error::invalid_config(
+                "invalid service key or unavailable direct support",
+            ));
+        }
+        check_port_mapping(options.port_mapping)?;
+        let io_error = |error: std::io::Error| Error::protocol(error.to_string());
+        // Retain the bound socket until our own connection has been accepted;
+        // there is no reserve/drop/rebind race or reusable external listener.
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_error)?;
+        let stream = TcpStream::connect(listener.local_addr().map_err(io_error)?)
+            .await
+            .map_err(io_error)?;
+        let peer = stream.local_addr().map_err(io_error)?;
+        let accepted = loop {
+            let (candidate, address) = listener.accept().await.map_err(io_error)?;
+            if address == peer {
+                break candidate;
+            }
+        };
+        drop(listener);
+        stream.set_nodelay(true).map_err(io_error)?;
+        accepted.set_nodelay(true).map_err(io_error)?;
+        let worker = self.prepare_worker(&key, "127.0.0.1:0").await?;
+        let credential = self.credential();
+        let keep_alive = self.inner.keep_alive;
+        let namespace = self.inner.namespace;
+        let port_mapping = worker.port_mapping(match options.path {
+            PathPolicy::Auto => options.port_mapping,
+            PathPolicy::RelayOnly => PortMapping::Off,
+        });
+        let handle = worker.spawn(move |context| async move {
+            context.remote_addr.start();
+            #[cfg(feature = "p2p")]
+            let direct = (options.path == PathPolicy::Auto).then(|| {
+                crate::direct::Consumer::new(
+                    context.remote_addr.clone(),
+                    credential,
+                    namespace,
+                    false,
+                    keep_alive,
+                    context.diagnostics.clone(),
+                    port_mapping,
+                )
+            });
+            #[cfg(not(feature = "p2p"))]
+            let _ = port_mapping;
+            let (events, mut ready) = mpsc::channel(1);
+            let Ok(permit) = Arc::new(Semaphore::new(1)).acquire_owned().await else {
+                return;
+            };
+            let setup = StreamSetup {
+                permit,
+                events,
+                timing: Arc::new(Mutex::new(Default::default())),
+                diagnostics: context.diagnostics,
+                #[cfg(feature = "p2p")]
+                direct,
+            };
+            let forward = handle_local_stream(
+                TcpStreamImpl::new(accepted),
+                context.key,
+                context.remote_addr,
+                keep_alive,
+                namespace,
+                credential,
+                setup,
+            );
+            tokio::pin!(forward);
+            loop {
+                tokio::select! {
+                    () = context.shutdown.cancelled() => break,
+                    Some(_) = ready.recv() => (context.status_callback)("connected"),
+                    result = &mut forward => {
+                        if let Err(error) = result {
+                            (context.status_callback)(&format!("failed: {error}"));
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        Ok((stream, Connection::new(handle, key)))
+    }
+
     /// Select direct-first or the relay-only protocol for this tunnel only.
     pub async fn connect_with_options(
         &self,

@@ -24,7 +24,7 @@ use pb_mapper_protocol::forward::StreamForward;
 use pb_mapper_protocol::secure::ClientHeaderSession;
 use uni_stream::stream::NetworkStream;
 
-pub(super) struct StreamSetup {
+pub(crate) struct StreamSetup {
     pub permit: OwnedSemaphorePermit,
     pub timing: Arc<Mutex<RecoveryTiming>>,
     pub events: mpsc::Sender<bool>,
@@ -34,7 +34,7 @@ pub(super) struct StreamSetup {
 }
 
 #[instrument(skip(local_stream, credential, setup))]
-pub(super) async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
+pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForward>(
     mut local_stream: LocalStream,
     key: Arc<str>,
     remote_addr: RelayEndpoint,

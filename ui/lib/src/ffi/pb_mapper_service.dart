@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -23,7 +24,297 @@ class LogMessage {
   });
 }
 
+Map<String, dynamic>? _desktopFrameIsolate(
+  (int, int, int) args, {
+  bool wait = false,
+}) {
+  final ffi = PbMapperFFI();
+  final read = wait ? ffi.pbMapperDesktopWaitFrame : ffi.pbMapperDesktopFrame;
+  final buffer = read(Pointer<Void>.fromAddress(args.$1), args.$2, args.$3);
+  if (buffer == nullptr) return null;
+  try {
+    final bytes = buffer.ref.data.asTypedList(buffer.ref.len);
+    if (bytes.length < 4) throw StateError('Invalid desktop frame');
+    final length = ByteData.sublistView(
+      bytes,
+      0,
+      4,
+    ).getUint32(0, Endian.little);
+    if (length > bytes.length - 4) throw StateError('Invalid desktop metadata');
+    return {
+      'status': jsonDecode(
+        utf8.decode(Uint8List.sublistView(bytes, 4, 4 + length)),
+      ),
+      'bytes': Uint8List.fromList(Uint8List.sublistView(bytes, 4 + length)),
+    };
+  } finally {
+    ffi.pbMapperDesktopFreeFrame(buffer);
+  }
+}
+
+// One worker per viewer, one outstanding owned frame. Credits prevent the
+// isolate mailbox from becoming another unbounded video queue.
+Future<void> _desktopFramesWorker((int, SendPort) args) async {
+  final requests = ReceivePort();
+  var stopped = false, credit = false;
+  Completer<void>? ready;
+  requests.listen((message) {
+    if (message == false) {
+      stopped = true;
+    } else if (message == true) {
+      credit = true;
+    } else if (!stopped && message is (int, Map<String, Object?>)) {
+      final (id, request) = message;
+      try {
+        args.$2.send((
+          id,
+          _callJsonIsolate({
+            'op': 'desktop',
+            'handleAddress': args.$1,
+            'request': jsonEncode(request),
+          }),
+        ));
+      } catch (error) {
+        args.$2.send((id, {'success': false, 'message': error.toString()}));
+      }
+    }
+    if (ready?.isCompleted == false) ready!.complete();
+  });
+  args.$2.send(requests.sendPort);
+  var after = 0, generation = 0;
+  try {
+    while (!stopped) {
+      if (!credit) {
+        ready = Completer<void>();
+        await ready.future;
+      }
+      if (stopped) break;
+      if (!credit) continue;
+      final frame = _desktopFrameIsolate((
+        args.$1,
+        after,
+        generation,
+      ), wait: true);
+      if (frame == null) {
+        await Future<void>.delayed(const Duration(milliseconds: 2));
+        continue;
+      }
+      final status = frame['status'] as Map;
+      after = status['frame_id'] as int;
+      generation = status['generation'] as int;
+      credit = false;
+      args.$2.send(frame);
+    }
+  } catch (e) {
+    args.$2.send(e.toString());
+  } finally {
+    requests.close();
+    args.$2.send(null);
+  }
+}
+
+/// Owns one worker until its exit acknowledgement. Cancellation never depends
+/// on an async generator reaching another yield, including while it is paused.
+@visibleForTesting
+class DesktopFrameStream {
+  DesktopFrameStream({required this.spawn, required this.onClosed}) {
+    _controller = StreamController<Map<String, dynamic>>(
+      onListen: _start,
+      onPause: () => _paused = true,
+      onResume: () {
+        _paused = false;
+        // Deliver a buffered event before deciding whether another credit is due.
+        scheduleMicrotask(_credit);
+      },
+      onCancel: () {
+        stop();
+        return _closed.future;
+      },
+    );
+  }
+  final Future<Isolate> Function(SendPort, SendPort, SendPort) spawn;
+  final void Function() onClosed;
+  late final StreamController<Map<String, dynamic>> _controller;
+  late final ReceivePort _messages, _exited, _errors;
+  final _closed = Completer<void>();
+  final _calls =
+      <int, (Map<String, Object?>, Completer<Map<String, dynamic>>)>{};
+  int _nextCall = 0;
+  SendPort? _requests;
+  bool _stopped = false,
+      _paused = false,
+      _outstanding = false,
+      _finished = false;
+  Stream<Map<String, dynamic>> get stream => _controller.stream;
+  bool get acceptsCalls => !_stopped && !_finished;
+
+  /// Short, session-bound operations share the already-running FFI worker.
+  /// Connection setup and cancellation never use this serialized mailbox.
+  Future<Map<String, dynamic>> call(Map<String, Object?> request) {
+    if (!acceptsCalls) {
+      return Future.error(StateError('Desktop worker stopped'));
+    }
+    if (_calls.length >= 16) {
+      return Future.error(StateError('Desktop worker request limit reached'));
+    }
+    final id = ++_nextCall;
+    final result = Completer<Map<String, dynamic>>();
+    _calls[id] = (request, result);
+    _requests?.send((id, request));
+    return result.future;
+  }
+
+  void stop() {
+    _stopped = true;
+    _cancelCalls();
+    _requests?.send(false);
+  }
+
+  void _cancelCalls() {
+    for (final pending in _calls.values) {
+      pending.$2.completeError(StateError('Desktop worker stopped'));
+    }
+    _calls.clear();
+  }
+
+  void _credit() {
+    if (_stopped || _paused || _outstanding || _requests == null) return;
+    _outstanding = true;
+    _requests!.send(true);
+  }
+
+  void _start() {
+    _messages = ReceivePort();
+    _exited = ReceivePort();
+    _errors = ReceivePort();
+    _messages.listen((message) {
+      if (message is SendPort) {
+        _requests = message;
+        if (_stopped) {
+          message.send(false);
+        } else {
+          for (final pending in _calls.entries) {
+            message.send((pending.key, pending.value.$1));
+          }
+          _credit();
+        }
+      } else if (message is (int, Map)) {
+        final pending = _calls.remove(message.$1);
+        pending?.$2.complete(Map<String, dynamic>.from(message.$2));
+      } else if (message is Map) {
+        _outstanding = false;
+        if (!_stopped) {
+          _controller.add(Map<String, dynamic>.from(message));
+          scheduleMicrotask(_credit);
+        }
+      } else if (message is String && !_stopped) {
+        _controller.addError(StateError(message));
+        stop();
+      }
+    });
+    _errors.listen((message) {
+      if (!_stopped) {
+        _controller.addError(
+          StateError('Desktop frame worker failed: $message'),
+        );
+      }
+      stop();
+    });
+    _exited.listen((_) => _finish());
+    unawaited(() async {
+      try {
+        await spawn(_messages.sendPort, _exited.sendPort, _errors.sendPort);
+      } catch (error, stack) {
+        if (!_stopped) _controller.addError(error, stack);
+        _finish();
+      }
+    }());
+  }
+
+  void _finish() {
+    if (_finished) return;
+    _finished = true;
+    _stopped = true;
+    _cancelCalls();
+    _messages.close();
+    _exited.close();
+    _errors.close();
+    onClosed();
+    _closed.complete();
+    unawaited(_controller.close());
+  }
+}
+
 class PbMapperService {
+  final _desktopFrameWorkers = <DesktopFrameStream>{};
+  int _desktopFramesEpoch = 0;
+  void stopDesktopFrames() {
+    _desktopFramesEpoch++;
+    for (final worker in _desktopFrameWorkers) {
+      worker.stop();
+    }
+  }
+
+  Stream<Map<String, dynamic>> desktopFrames() {
+    final epoch = _desktopFramesEpoch;
+    var pinned = false;
+    late DesktopFrameStream reader;
+    reader = DesktopFrameStream(
+      spawn: (messages, exited, errors) {
+        final handle = _requireHandle();
+        _activeCalls++;
+        pinned = true;
+        _desktopFrameWorkers.add(reader);
+        if (epoch != _desktopFramesEpoch) reader.stop();
+        return Isolate.spawn(
+          _desktopFramesWorker,
+          (handle.address, messages),
+          onExit: exited,
+          onError: errors,
+          errorsAreFatal: true,
+        );
+      },
+      onClosed: () {
+        _desktopFrameWorkers.remove(reader);
+        if (pinned) {
+          _activeCalls--;
+          _destroyIfIdle();
+        }
+      },
+    );
+    return reader.stream;
+  }
+
+  Future<Map<String, dynamic>> desktopCall(Map<String, Object?> request) {
+    if (const {
+      'presented',
+      'keyframe',
+      'input',
+      'control',
+      'release',
+    }.contains(request['op'])) {
+      for (final worker in _desktopFrameWorkers) {
+        if (worker.acceptsCalls) return worker.call(request);
+      }
+    }
+    return _runJsonOnWorker('desktop', {'request': jsonEncode(request)});
+  }
+
+  Future<Map<String, dynamic>?> desktopFrame(int after, int generation) async {
+    final handle = _requireHandle();
+    _activeCalls++;
+    try {
+      return await compute(_desktopFrameIsolate, (
+        handle.address,
+        after,
+        generation,
+      ));
+    } finally {
+      _activeCalls--;
+      _destroyIfIdle();
+    }
+  }
+
   static final PbMapperService _instance = PbMapperService._internal();
   factory PbMapperService() => _instance;
   PbMapperService._internal();
@@ -151,6 +442,7 @@ class PbMapperService {
 
   void dispose() {
     _disposeRequested = true;
+    stopDesktopFrames();
     _destroyIfIdle();
   }
 
@@ -397,6 +689,10 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
       case 'tunnelEvents':
         arg1 = (params['request'] as String).toNativeUtf8();
         result = ffi.pbMapperTunnelEventsCall(handle, arg1);
+        break;
+      case 'desktop':
+        arg1 = (params['request'] as String).toNativeUtf8();
+        result = ffi.pbMapperDesktopCall(handle, arg1);
         break;
       case 'registerService':
         arg1 = (params['serviceKey'] as String).toNativeUtf8();

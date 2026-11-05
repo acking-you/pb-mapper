@@ -202,6 +202,7 @@ jobs:
             crates/pb-mapper-protocol \
             crates/pb-mapper-server \
             crates/pb-mapper-client \
+            crates/pb-mapper-desktop \
             crates/pb-mapper \
             crates/pb-mapper-cli
 

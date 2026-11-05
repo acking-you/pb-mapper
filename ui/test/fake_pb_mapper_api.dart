@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'fake_desktop_api.dart';
 
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 
@@ -9,6 +10,8 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 /// what later reads return, so a view can be driven through a whole flow:
 /// register, see it listed, stop it, see it stopped.
 class FakePbMapperApi implements PbMapperApiClient {
+  @override
+  final FakeDesktopApi desktop = FakeDesktopApi();
   FakePbMapperApi({
     this.services = const [],
     this.clients = const [],

@@ -1,0 +1,131 @@
+//! Opt-in Windows helper. The unprivileged SDK owns transport and controller
+//! authorization. The installed service accepts only the locally approved,
+//! protected application in its own active console session. It exposes no
+//! command execution, network listener, file, clipboard or credential API.
+mod client;
+#[cfg(feature = "windows-helper")]
+mod install;
+mod ipc;
+mod os;
+#[cfg(feature = "windows-helper")]
+mod service;
+pub(crate) mod worker;
+
+use crate::{Backend, DesktopContext, Input, Result, error};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+pub use client::backend;
+pub use os::request_installation;
+
+const SERVICE: &str = "PbMapperDesktop";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v1";
+const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Configuration {
+    schema: u32,
+    owner_sid: String,
+    ui_executable: PathBuf,
+    helper_executable: PathBuf,
+}
+fn configuration() -> Result<Configuration> {
+    let path = os::install_root()?.join("installation.json");
+    os::protected_file(&path)?;
+    let data = std::fs::read(path)?;
+    if data.len() > 8192 {
+        return Err(error("invalid helper installation"));
+    }
+    let config: Configuration = serde_json::from_slice(&data).map_err(error)?;
+    if config.schema != 1 {
+        return Err(error("unsupported helper installation"));
+    }
+    os::protected_file(&config.helper_executable)?;
+    os::protected_file(&config.ui_executable)?;
+    Ok(config)
+}
+
+#[derive(Default, Serialize)]
+pub struct Status {
+    pub installed: bool,
+    pub running: bool,
+    pub authorized_application: bool,
+    pub installed_application: Option<PathBuf>,
+    pub message: String,
+}
+pub fn status() -> Status {
+    match configuration() {
+        Ok(config) => Status {
+            installed: true,
+            running: os::service_running().unwrap_or(false),
+            authorized_application: os::current_sid().is_ok_and(|sid| sid == config.owner_sid)
+                && std::env::current_exe()
+                    .is_ok_and(|path| os::same_path(&path, &config.ui_executable)),
+            installed_application: Some(config.ui_executable),
+            message: "Helper requires the installed application; the UI stays unprivileged".into(),
+        },
+        Err(e) => Status {
+            message: e.to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "op", deny_unknown_fields, rename_all = "snake_case")]
+enum Request {
+    Start {
+        display_id: u32,
+    },
+    Context,
+    Capture,
+    ConfigureVideo {
+        preferences: crate::VideoPreferences,
+    },
+    CaptureVideo {
+        expected: DesktopContext,
+        codec: crate::VideoCodec,
+        keyframe: bool,
+        bitrate: u32,
+    },
+    Presented {
+        generation: u64,
+    },
+    Input {
+        generation: u64,
+        sequence: u64,
+        input: Input,
+    },
+    Release,
+    Close,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Response {
+    context: Option<DesktopContext>,
+    error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video: Option<crate::VideoFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cursor: Option<crate::CursorPosition>,
+}
+
+/// Entry point of the dedicated helper executable, never the Flutter process.
+#[cfg(feature = "windows-helper")]
+pub fn run() -> Result<()> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [mode] if mode == "service" => service::run(),
+        [mode, pipe, parent] if mode == "worker" => {
+            worker::run(pipe, parent.parse().map_err(error)?)
+        }
+        [mode, source, sid] if mode == "install" => install::install(&PathBuf::from(source), sid),
+        [mode] if mode == "disable" => install::disable(),
+        [mode] if mode == "uninstall" => install::uninstall(),
+        _ => Err(error(
+            "expected install <UI bundle> <authorized SID>, service, disable or uninstall",
+        )),
+    }
+}

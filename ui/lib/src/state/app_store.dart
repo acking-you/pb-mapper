@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'desktop_store.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:pb_mapper_ui/src/common/polling.dart';
@@ -34,6 +35,10 @@ enum RelayState {
 /// this computer's tunnels, without which the stream would go quiet (see
 /// [tunnelInterval]).
 class AppStore extends ChangeNotifier {
+  DesktopStore? _desktop;
+  DesktopStore? get activeDesktop => _desktop;
+  DesktopStore get desktop =>
+      _desktop ??= DesktopStore(api.desktop)..addListener(_notify);
   AppStore({
     required this.api,
     Stream<StateChange>? changes,
@@ -181,6 +186,7 @@ class AppStore extends ChangeNotifier {
     _relayTimer = Timer.periodic(relayInterval, (_) => checkRelay());
     _tunnelTimer = Timer.periodic(tunnelInterval, (_) => _loadTunnels());
     await refresh(force: true);
+    if (!_disposed) unawaited(desktop.restoreOnStartup());
   }
 
   /// Re-read whatever a burst of changes touched.
@@ -498,6 +504,7 @@ class AppStore extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _desktop?.dispose();
     _subscription?.cancel();
     _relayTimer?.cancel();
     _tunnelTimer?.cancel();

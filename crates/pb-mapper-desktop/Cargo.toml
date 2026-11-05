@@ -1,0 +1,50 @@
+[package]
+name = "pb-mapper-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional encrypted remote desktop endpoints for pb-mapper"
+
+[dependencies]
+pb-mapper-client = { workspace = true, features = ["p2p"] }
+quinn.workspace = true
+rcgen.workspace = true
+tokio-rustls.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ring.workspace = true
+base64.workspace = true
+parking_lot.workspace = true
+subtle.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+xcap.workspace = true
+windows-capture.workspace = true
+enigo.workspace = true
+image.workspace = true
+windows = { workspace = true, features = ["Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Environment", "Win32_System_Registry", "Win32_System_Services", "Win32_System_Com", "Win32_Media_MediaFoundation", "Win32_Media_DirectShow", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Variant", "Win32_System_Ole", "Win32_Graphics_Dwm"] }
+windows-service = { workspace = true, optional = true }
+
+[features]
+windows-helper = ["dep:windows-service"]
+
+[[bin]]
+name = "pb-mapper-desktop-helper"
+path = "src/bin/helper.rs"
+required-features = ["windows-helper"]
+
+[dev-dependencies]
+pb-mapper-client = { workspace = true, features = ["relay-quic"] }
+pb-mapper-testkit.workspace = true
+pb-mapper-server = { workspace = true, features = ["p2p"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
+[lints]
+workspace = true

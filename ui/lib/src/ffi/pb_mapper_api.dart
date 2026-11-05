@@ -2,6 +2,8 @@
 // This replaces the old generated bindings layer and keeps UI code simple.
 
 import 'dart:async';
+import 'desktop_api.dart';
+export 'desktop_api.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:pb_mapper_ui/src/common/polling.dart' show FirstWhereOrNull;
@@ -493,6 +495,7 @@ class ServiceConnInfo {
 /// forgets a method fails to compile here; a fake that inherited from the real
 /// class would quietly fall through to the FFI instead.
 abstract interface class PbMapperApiClient {
+  DesktopApiClient get desktop;
   Future<OperationResult> setAppDirectoryPath(String path);
 
   Future<ConfigStatus> fetchConfig();
@@ -614,6 +617,8 @@ abstract interface class PbMapperApiClient {
 }
 
 class PbMapperApi implements PbMapperApiClient {
+  @override
+  final DesktopApiClient desktop = DesktopApi();
   static final PbMapperApi _instance = PbMapperApi._internal();
   factory PbMapperApi() => _instance;
   PbMapperApi._internal();
