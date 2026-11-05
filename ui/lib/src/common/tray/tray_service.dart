@@ -1,4 +1,4 @@
-import 'dart:async' show Timer, unawaited;
+import 'dart:async' show Completer, Timer, unawaited;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -83,13 +83,18 @@ class TrayService with TrayListener {
   bool _toolTipSupported = true;
   bool _contextMenuSupported = true;
   TrayStrings? _strings;
+  String? _renderedIcon, _renderedToolTip;
+  (String, String, String, String)? _renderedMenu;
+  Future<void>? _rendering;
+  bool _dirty = false, _menuOpen = false;
+  int _statusRequest = 0, _lifecycle = 0;
 
   /// Replaces the strings and redraws, so a language switch reaches the tray
   /// without waiting for the next status poll.
   Future<void> updateStrings(TrayStrings strings) async {
     _strings = strings;
     if (_initialized) {
-      await _applyStatus(_status);
+      await _scheduleRender();
     }
   }
 
@@ -107,6 +112,7 @@ class TrayService with TrayListener {
       _statusProvider = statusProvider;
       _showApp = showApp;
       _quitApp = quitApp;
+      await refreshStatus();
       return;
     }
 
@@ -115,9 +121,16 @@ class TrayService with TrayListener {
     _quitApp = quitApp;
 
     _trayManager.addListener(this);
-    await _applyStatus(_status);
-    _startPolling();
     _initialized = true;
+    final lifecycle = _lifecycle;
+    try {
+      await _applyStatus(_status);
+      if (!_initialized || lifecycle != _lifecycle) return;
+      _startPolling();
+    } catch (_) {
+      dispose();
+      rethrow;
+    }
   }
 
   void dispose() {
@@ -125,6 +138,11 @@ class TrayService with TrayListener {
     _statusTimer = null;
     _trayManager.removeListener(this);
     _initialized = false;
+    _statusRequest++;
+    _lifecycle++;
+    _dirty = false;
+    _renderedIcon = _renderedToolTip = null;
+    _renderedMenu = null;
   }
 
   void _startPolling() {
@@ -136,33 +154,75 @@ class TrayService with TrayListener {
   }
 
   Future<void> refreshStatus() async {
-    if (_statusProvider == null) {
+    if (!_initialized || _statusProvider == null) {
       return;
     }
+    final request = ++_statusRequest;
+    TrayStatus next;
     try {
-      final next = await _statusProvider!();
-      await _applyStatus(next);
+      next = await _statusProvider!();
     } catch (_) {
-      await _applyStatus(
-        const TrayStatus(
-          serverAvailable: false,
-          activeConnections: 0,
-          registeredServices: 0,
-          connectedClients: 0,
-        ),
+      next = const TrayStatus(
+        serverAvailable: false,
+        activeConnections: 0,
+        registeredServices: 0,
+        connectedClients: 0,
       );
+    }
+    // A slower older read must never overwrite the most recent observation.
+    if (!_initialized || request != _statusRequest) return;
+    try {
+      await _applyStatus(next);
+    } catch (error) {
+      debugPrint('Tray refresh failed: $error');
     }
   }
 
-  Future<void> _applyStatus(TrayStatus next) async {
+  Future<void> _applyStatus(TrayStatus next) {
     _status = next;
+    return _scheduleRender();
+  }
+
+  Future<void> _scheduleRender() {
+    _dirty = true;
+    if (_rendering != null) return _rendering!;
+    if (!_initialized || _menuOpen) return Future<void>.value();
+    final completion = Completer<void>();
+    _rendering = completion.future;
+    unawaited(_drainRender(completion));
+    return completion.future;
+  }
+
+  Future<void> _drainRender(Completer<void> completion) async {
+    try {
+      while (_initialized && _dirty && !_menuOpen) {
+        _dirty = false;
+        await _renderStatus();
+      }
+      completion.complete();
+    } catch (error, stack) {
+      _dirty = true;
+      completion.completeError(error, stack);
+    } finally {
+      _rendering = null;
+    }
+  }
+
+  Future<void> _renderStatus() async {
     final strings = _strings;
-    if (strings == null) {
+    if (!_initialized || strings == null) {
       return;
     }
-    final statusText = next.displayText(strings);
-    final iconPath = _iconFor(next);
-    if (_iconSupported) {
+    final lifecycle = _lifecycle;
+    final statusText = _status.displayText(strings);
+    final iconPath = _iconFor(_status);
+    final menuLabels = (
+      statusText,
+      strings.open,
+      strings.refresh,
+      strings.quit,
+    );
+    if (_iconSupported && _renderedIcon != iconPath) {
       await _invokeTrayMethod(
         // A template image is black plus alpha, and macOS tints it to match
         // the menu bar: light in dark mode, dark in light mode, inverted while
@@ -173,15 +233,19 @@ class TrayService with TrayListener {
         onUnsupported: () => _iconSupported = false,
         methodName: 'setIcon',
       );
+      if (!_initialized || lifecycle != _lifecycle) return;
+      _renderedIcon = iconPath;
     }
-    if (_toolTipSupported) {
+    if (_toolTipSupported && _renderedToolTip != statusText) {
       await _invokeTrayMethod(
         action: () => _trayManager.setToolTip(statusText),
         onUnsupported: () => _toolTipSupported = false,
         methodName: 'setToolTip',
       );
+      if (!_initialized || lifecycle != _lifecycle) return;
+      _renderedToolTip = statusText;
     }
-    if (_contextMenuSupported) {
+    if (_contextMenuSupported && _renderedMenu != menuLabels) {
       await _invokeTrayMethod(
         action: () => _trayManager.setContextMenu(
           Menu(
@@ -198,6 +262,8 @@ class TrayService with TrayListener {
         onUnsupported: () => _contextMenuSupported = false,
         methodName: 'setContextMenu',
       );
+      if (!_initialized || lifecycle != _lifecycle) return;
+      _renderedMenu = menuLabels;
     }
   }
 
@@ -273,11 +339,29 @@ class TrayService with TrayListener {
   }
 
   void _popUpContextMenu() {
-    if (!_contextMenuSupported) {
+    if (!_initialized || !_contextMenuSupported || _menuOpen) {
       return;
     }
+    // Reserve synchronously: repeated clicks must not nest native menu loops.
+    _menuOpen = true;
     unawaited(
-      _invokeTrayMethod(
+      _showMenu().catchError((Object error) {
+        debugPrint('Tray menu failed: $error');
+      }),
+    );
+  }
+
+  Future<void> _showMenu() async {
+    final lifecycle = _lifecycle;
+    try {
+      // Finish any in-flight native update before opening the menu. While
+      // TrackPopupMenu is running, collect desired state without replacing its
+      // HMENU entries or the Dart menu IDs used to dispatch the user's click.
+      await _rendering;
+      if (!_initialized || lifecycle != _lifecycle) return;
+      await _renderStatus();
+      if (!_initialized || lifecycle != _lifecycle) return;
+      await _invokeTrayMethod(
         // Win32 requires the menu's owner to be the foreground window before
         // TrackPopupMenu, or the menu stays on screen when the user clicks
         // away. bringAppToFront is the plugin's only route to
@@ -286,8 +370,11 @@ class TrayService with TrayListener {
         action: () => _trayManager.popUpContextMenu(bringAppToFront: true),
         onUnsupported: () => _contextMenuSupported = false,
         methodName: 'popUpContextMenu',
-      ),
-    );
+      );
+    } finally {
+      _menuOpen = false;
+      if (_initialized && _dirty) await _scheduleRender();
+    }
   }
 
   @override
