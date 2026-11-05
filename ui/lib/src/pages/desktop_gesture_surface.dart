@@ -45,6 +45,8 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   Size _viewport = Size.zero, _scene = Size.zero;
   Offset _offset = Offset.zero, _scaleAnchor = Offset.zero;
   Offset? _remoteCursor;
+  final _cursorPaint = ValueNotifier<Offset?>(null);
+  DateTime? _lastLocalMove;
   double _scale = 1, _startScale = 1, _gestureScale = 1;
   int? _scalePointers;
   int _maxTouches = 0;
@@ -54,6 +56,12 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   Timer? _hold;
 
   @override
+  void initState() {
+    super.initState();
+    _cursorPaint.value = widget.cursor;
+  }
+
+  @override
   void didUpdateWidget(covariant DesktopGestureSurface oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.enabled != widget.enabled ||
@@ -61,6 +69,17 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
         oldWidget.inputEpoch != widget.inputEpoch) {
       cancelInput();
       _remoteCursor = null;
+    }
+    updateRemoteCursor(widget.cursor);
+  }
+
+  void updateRemoteCursor(Offset? cursor) {
+    if (_touches.isEmpty &&
+        (_lastLocalMove == null ||
+            DateTime.now().difference(_lastLocalMove!) >
+                const Duration(milliseconds: 500))) {
+      _cursorPaint.value = cursor;
+      _remoteCursor = cursor;
     }
   }
 
@@ -81,6 +100,7 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   @override
   void dispose() {
     cancelInput();
+    _cursorPaint.dispose();
     super.dispose();
   }
 
@@ -103,6 +123,8 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
   void _move(Offset point) {
     if (!widget.enabled) return;
     _remoteCursor = _clampCursor(point);
+    _lastLocalMove = DateTime.now();
+    _cursorPaint.value = _remoteCursor;
     unawaited(widget.onMove(_remoteCursor!));
   }
 
@@ -165,13 +187,17 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
         _tapPoint =
             _touches.values.map((p) => p.$1).reduce((a, b) => a + b) / 2;
       }
-    } else if (_touchEligible && widget.trackpad) {
+    } else if (_touchEligible) {
       _hold = Timer(kLongPressTimeout, () {
         if (!mounted || !widget.enabled || _touches.length != 1 || _moved) {
           return;
         }
         _dragging = true;
-        _move(_remoteCursor ?? const Offset(0.5, 0.5));
+        _move(
+          widget.trackpad
+              ? _remoteCursor ?? const Offset(0.5, 0.5)
+              : _point(_tapPoint, clamp: true)!,
+        );
         unawaited(widget.onButton('left', true));
       });
     }
@@ -206,11 +232,8 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
             ),
       );
     } else {
-      if (!_dragging) {
-        _dragging = true;
-        _move(_point(previous.$1, clamp: true)!);
-        unawaited(widget.onButton('left', true));
-      }
+      // A stroke moves the pointer; holding first is the explicit drag gesture.
+      // This also leaves a second finger time to join without clicking remotely.
       _move(_point(event.localPosition, clamp: true)!);
     }
   }
@@ -359,6 +382,21 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
                     child: RepaintBoundary(child: widget.child),
                   ),
                 ),
+                ValueListenableBuilder<Offset?>(
+                  valueListenable: _cursorPaint,
+                  builder: (_, cursor, _) => cursor == null
+                      ? const SizedBox.shrink()
+                      : Positioned(
+                          left: _offset.dx + cursor.dx * _scene.width * _scale,
+                          top: _offset.dy + cursor.dy * _scene.height * _scale,
+                          child: const IgnorePointer(
+                            child: CustomPaint(
+                              size: Size(18, 27),
+                              painter: DesktopCursorPainter(),
+                            ),
+                          ),
+                        ),
+                ),
               ],
             ),
           ),
@@ -366,4 +404,32 @@ class DesktopGestureSurfaceState extends State<DesktopGestureSurface> {
       );
     },
   );
+}
+
+/// A visible pointer remains the same screen size at every zoom level.
+class DesktopCursorPainter extends CustomPainter {
+  const DesktopCursorPainter();
+  @override
+  void paint(Canvas canvas, Size size) {
+    final pointer = Path()
+      ..moveTo(1, 1)
+      ..lineTo(1, 20)
+      ..lineTo(6, 16)
+      ..lineTo(10, 25)
+      ..lineTo(14, 23)
+      ..lineTo(10, 15)
+      ..lineTo(17, 15)
+      ..close();
+    canvas.drawPath(pointer, Paint()..color = Colors.black);
+    canvas.drawPath(
+      pointer,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant DesktopCursorPainter oldDelegate) => false;
 }

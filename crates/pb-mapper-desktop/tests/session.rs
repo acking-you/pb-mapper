@@ -129,7 +129,7 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
         .await
         .unwrap();
         let mut frames = viewer.frames();
-        let viewed = frame(&mut frames, |f| f.status.state == "streaming").await;
+        let viewed = frame(&mut frames, |f| !f.bytes.is_empty()).await;
         assert_eq!(&*viewed.bytes, &[10, 20, 30, 40]);
         assert_eq!(
             viewed.status.path,
@@ -195,7 +195,153 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
             frame(&mut frames, |f| f.status.frame_id > id).await;
         }
         viewer.stop().await.unwrap();
+        let stopped = host.status();
+        assert_eq!(stopped.state, "waiting");
+        assert!(stopped.message.is_empty(), "{}", stopped.message);
         host.stop().await.unwrap();
         assert_eq!(observed.dropped.load(Ordering::Relaxed), 1);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_crosses_a_full_video_window_without_refreshing_the_picture() {
+    struct Snapshot {
+        cursor: Arc<AtomicU32>,
+        captured: bool,
+    }
+    impl Backend for Snapshot {
+        fn display(&mut self) -> Result<Display> {
+            Ok(Display {
+                id: 1,
+                name: "static desktop".into(),
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            })
+        }
+        fn capture(&mut self) -> Result<Vec<u8>> {
+            unreachable!("test uses H264")
+        }
+        fn capture_video(
+            &mut self,
+            _: &pb_mapper_desktop::DesktopContext,
+            _: pb_mapper_desktop::VideoCodec,
+            _: bool,
+            _: u32,
+        ) -> Result<Option<pb_mapper_desktop::EncodedFrame>> {
+            if std::mem::replace(&mut self.captured, true) {
+                return Ok(None);
+            }
+            Ok(Some(pb_mapper_desktop::EncodedFrame {
+                format: pb_mapper_desktop::VideoFormat {
+                    codec: pb_mapper_desktop::VideoCodec::H264,
+                    width: 1920,
+                    height: 1080,
+                    keyframe: true,
+                    ..Default::default()
+                },
+                // The single IDR exceeds initial credit, pausing video until
+                // a real presentation. This test deliberately never ACKs it.
+                bytes: vec![1; 128 * 1024],
+            }))
+        }
+        fn cursor(
+            &mut self,
+            _: &pb_mapper_desktop::DesktopContext,
+        ) -> Result<Option<pb_mapper_desktop::CursorPosition>> {
+            Ok(Some(pb_mapper_desktop::CursorPosition {
+                x: self.cursor.load(Ordering::Relaxed) as i32,
+                y: 0,
+                visible: true,
+            }))
+        }
+        fn input(&mut self, _: &Input) -> Result<()> {
+            Ok(())
+        }
+        fn release(&mut self) {}
+    }
+    async fn next(viewer: &Viewer, changed: &mut watch::Receiver<Option<Frame>>) -> Frame {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(frame) = viewer.next_frame() {
+                    return frame;
+                }
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap()
+    }
+    let relay = Relay::start("desktop-cursor").await;
+    let client = Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+    let cursor = Arc::new(AtomicU32::new(0));
+    let backend = cursor.clone();
+    let host = Host::start_with_backend(
+        &client,
+        HostOptions {
+            service: "desktop:cursor".into(),
+            display_id: 1,
+            allow_control: false,
+            allow_direct: false,
+        },
+        Arc::new(move || {
+            Ok(Box::new(Snapshot {
+                cursor: backend.clone(),
+                captured: false,
+            }))
+        }),
+    )
+    .await
+    .unwrap();
+    let viewer = Viewer::connect_with_presentation_feedback(
+        &client,
+        host.invitation().clone(),
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+        vec![pb_mapper_desktop::VideoCodec::H264],
+        pb_mapper_desktop::VideoPreferences::default(),
+    )
+    .await
+    .unwrap();
+    let mut changed = viewer.frames();
+    let initial = loop {
+        let frame = next(&viewer, &mut changed).await;
+        if !frame.bytes.is_empty() {
+            break frame;
+        }
+    };
+    cursor.store(17, Ordering::Relaxed);
+    let moved = loop {
+        let frame = next(&viewer, &mut changed).await;
+        if frame.status.cursor.is_some_and(|cursor| cursor.x == 17) {
+            break frame;
+        }
+    };
+    assert!(moved.bytes.is_empty());
+    assert_eq!(moved.status.frame_id, initial.status.frame_id);
+    assert_eq!(moved.status.generation, initial.status.generation);
+    assert_eq!(moved.status.frames, initial.status.frames);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while viewer.status().state != "stale" {
+            let update = next(&viewer, &mut changed).await;
+            assert!(update.bytes.is_empty());
+        }
+    })
+    .await
+    .unwrap();
+    cursor.store(29, Ordering::Relaxed);
+    loop {
+        let update = next(&viewer, &mut changed).await;
+        assert!(update.bytes.is_empty());
+        if update.status.cursor.is_some_and(|cursor| cursor.x == 29) {
+            break;
+        }
+    }
+    assert_eq!(viewer.status().state, "stale");
+    assert_eq!(viewer.status().frame_id, initial.status.frame_id);
+    viewer.stop().await.unwrap();
+    host.stop().await.unwrap();
 }

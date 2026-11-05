@@ -3,11 +3,12 @@ use crate::{
     wire::{self, Command},
 };
 use parking_lot::Mutex;
-use pb_mapper_client::sdk::{Client, ConnectOptions, Connection};
+use pb_mapper_client::sdk::{Client, ConnectOptions, Connection, TunnelEventKind};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -166,6 +167,25 @@ impl Viewer {
         )
         .await
         .map_err(error)??;
+        // Selection is fixed for this session. Sample once, rather than cloning
+        // the tunnel's event history on every video frame. These observations
+        // come from our connection, never from the remote desktop's status.
+        let transport = connection.diagnostics();
+        let direct = transport.direct.as_ref();
+        let path = if direct.is_some_and(|state| state.active_direct > 0) {
+            "direct"
+        } else {
+            "relay"
+        };
+        let direct_failure = direct.and_then(|state| state.last_fallback.clone());
+        let direct_stage = transport
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event.kind {
+                TunnelEventKind::DirectFallback { stage } => Some(stage.as_str().to_owned()),
+                _ => None,
+            });
         let connection = Arc::new(connection);
         let status = Arc::new(Mutex::new((
             SessionStatus {
@@ -186,7 +206,6 @@ impl Viewer {
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let observation = status.clone();
-        let tunnel = connection.clone();
         let join = tokio::spawn(async move {
             let (mut read, mut write) = tokio::io::split(stream);
             let receive = async {
@@ -202,16 +221,9 @@ impl Viewer {
                         })
                         .await
                         .map_err(error)??;
-                    state.path = tunnel.diagnostics().direct.map_or_else(
-                        || "relay".into(),
-                        |d| {
-                            if d.active_direct > 0 {
-                                "direct".into()
-                            } else {
-                                "relay".into()
-                            }
-                        },
-                    );
+                    state.path = path.into();
+                    state.direct_stage.clone_from(&direct_stage);
+                    state.direct_failure.clone_from(&direct_failure);
                     if state.display.as_ref().is_some_and(|d| {
                         d.width == 0 || d.height == 0 || d.width > 32768 || d.height > 32768
                     }) {
@@ -243,10 +255,15 @@ impl Viewer {
                         }));
                     }
                     if jpeg.is_empty() && state.state == "streaming" {
-                        // An admission-window heartbeat is not a fresh picture.
-                        // Preserve image age and decoder references while still
-                        // servicing transport liveness and status observation.
-                        observation.lock().0 = state;
+                        // Status and cursor changes wake the UI independently of
+                        // video, without refreshing picture age or decoder refs.
+                        if incoming.push_status(state.clone()) {
+                            observation.lock().0 = state.clone();
+                            frames_tx.send_replace(Some(Frame {
+                                status: state,
+                                bytes: jpeg.into(),
+                            }));
+                        }
                         continue;
                     }
                     *observation.lock() = (state.clone(), Instant::now());
@@ -266,6 +283,12 @@ impl Viewer {
                 loop {
                     let command = tokio::select! {
                         biased;
+                        () = stop.cancelled() => {
+                            // Complete the current control message before TLS
+                            // shutdown; cancelling a partial JSON write would
+                            // make a deliberate disconnect look truncated.
+                            return tokio::time::timeout(wire::IO_TIMEOUT, write.shutdown()).await.map_err(error)?;
+                        },
                         command = controls.next() => { while inputs.try_recv().is_ok() {} command },
                         Ok(()) = keyframes.changed() => { keyframes.borrow_and_update(); Command::Keyframe },
                         Ok(()) = presentation.changed() => { let (generation, frame_id) = *presentation.borrow_and_update(); Command::Presented { generation, frame_id } },
@@ -278,7 +301,18 @@ impl Viewer {
                         .map_err(error)??;
                 }
             };
-            let result = tokio::select! { () = stop.cancelled() => Ok(()), result = receive => result, result = send => result };
+            let result =
+                tokio::select! { biased; result = send => result, result = receive => result };
+            if stop.is_cancelled() && result.is_ok() {
+                // Keep the owned tunnel alive until the peer consumes our
+                // close_notify and closes its side, or the bounded grace expires.
+                // Discard remaining video without retaining a backlog.
+                let _ = tokio::time::timeout(
+                    wire::IO_TIMEOUT,
+                    tokio::io::copy(&mut read, &mut tokio::io::sink()),
+                )
+                .await;
+            }
             stop.cancel();
             let mut current = observation.lock();
             current.0.state = "stopped".into();
@@ -314,6 +348,8 @@ impl Viewer {
     pub fn presented(&self, generation: u64, frame_id: u64) {
         self.presented.send_replace((generation, frame_id));
     }
+    /// Video or status changed. Same-generation streaming events with empty
+    /// bytes update metadata only; keep the picture and do not acknowledge them.
     pub fn frames(&self) -> watch::Receiver<Option<Frame>> {
         self.frames.clone()
     }

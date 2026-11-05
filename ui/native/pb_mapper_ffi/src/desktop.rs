@@ -60,8 +60,17 @@ pub(crate) struct DesktopState {
     viewer: tokio::sync::Mutex<Option<Viewer>>,
     connecting: parking_lot::Mutex<Option<(u64, CancellationToken)>>,
     viewer_epoch: AtomicU64,
-    remembered: tokio::sync::Mutex<Option<trust::Scope>>,
+    // Guarded by the host lifecycle lock. Retain even an ephemeral local key
+    // while its host lives so ownership can move to the service unchanged.
+    host_identity: tokio::sync::Mutex<Option<LocalIdentity>>,
     background: Arc<parking_lot::Mutex<BackgroundCache>>,
+}
+#[derive(Clone)]
+struct LocalIdentity {
+    scope: trust::Scope,
+    #[cfg(windows)]
+    identity: desktop::HostIdentity,
+    remembered: bool,
 }
 impl DesktopState {
     fn cache_background(&self, snapshot: Value) -> Value {
@@ -189,6 +198,10 @@ enum Request {
     TrustStatus,
     TrustRevoke,
     HostRestore,
+    HostEnable {
+        service: String,
+        display_id: u32,
+    },
     HelperAction {
         action: String,
     },
@@ -391,8 +404,23 @@ async fn background_action(handle: &PbMapperHandle, action: &str) -> Result<Valu
                 disable_legacy_startup(handle).await?;
                 desktop::helper::background::start().await
             }
-            "stop" => desktop::helper::background::stop().await,
-            "revoke" => desktop::helper::background::revoke().await,
+            "stop" => {
+                let disabled = disable_legacy_startup(handle).await;
+                let stopped = desktop::helper::background::stop().await;
+                disabled?;
+                stopped
+            }
+            "revoke" => {
+                // Retire any pending handoff before the service grant so a
+                // later app startup cannot recreate explicitly revoked access.
+                let directory = handle.state.lock().await.desktop_config_dir();
+                let retired = tokio::task::spawn_blocking(move || trust::revoke(&directory))
+                    .await
+                    .map_err(err)?;
+                let revoked = desktop::helper::background::revoke().await;
+                retired?;
+                revoked
+            }
             _ => unreachable!(),
         }
         .map_err(err)?;
@@ -413,6 +441,69 @@ async fn stop_background(state: &DesktopState) -> Result<(), CtlError> {
         return Ok(());
     }
     state.cache_background(snapshot);
+    Ok(())
+}
+
+async fn revoke_background(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+    #[cfg(windows)]
+    {
+        let server = handle
+            .state
+            .lock()
+            .await
+            .get_config_status()
+            .await
+            .server_address;
+        let namespace = get_process_credential()
+            .ok()
+            .map(|credential| credential.key_id());
+        let snapshot = desktop::helper::background::revoke_scope(server, namespace)
+            .await
+            .map_err(err)?;
+        serde_json::to_value(snapshot).map_err(err)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = handle;
+        Ok(unavailable_background(
+            "background hosting requires Windows",
+        ))
+    }
+}
+
+async fn revoke_trust_with_background(
+    handle: &PbMapperHandle,
+    background: impl std::future::Future<Output = Result<Value, CtlError>>,
+) -> Result<(), CtlError> {
+    // The handoff and its revocation share one lifecycle lock. In particular,
+    // observe/revoke the service only after an in-flight Configure has finished;
+    // the UI's cached owner is not authoritative here.
+    let state = &handle.desktop;
+    let mut slot = state.host.lock().await;
+    if let Some(host) = slot.as_ref() {
+        host.set_control_allowed(false);
+    }
+    let directory = handle.state.lock().await.desktop_config_dir();
+    let retired = tokio::task::spawn_blocking(move || trust::revoke(&directory))
+        .await
+        .map_err(err)
+        .and_then(|result| result);
+    // Retire pending automatic setup before deleting the service grant, so a
+    // later startup cannot recreate access from a leftover local identity.
+    let revoked = match retired {
+        Ok(()) => background
+            .await
+            .map(|snapshot| state.cache_background(snapshot)),
+        Err(failure) => Err(failure),
+    };
+    let stopped = if let Some(host) = slot.take() {
+        host.stop().await.map_err(err)
+    } else {
+        Ok(())
+    };
+    *state.host_identity.lock().await = None;
+    stopped?;
+    revoked?;
     Ok(())
 }
 
@@ -518,23 +609,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             );
         }
         Request::TrustRevoke => {
-            let mut slot = state.host.lock().await;
-            if let Some(host) = slot.as_ref() {
-                host.set_control_allowed(false);
-            }
-            let directory = handle.state.lock().await.desktop_config_dir();
-            let revoked = tokio::task::spawn_blocking(move || trust::revoke(&directory))
-                .await
-                .map_err(err)
-                .and_then(|result| result);
-            let stopped = if let Some(host) = slot.take() {
-                host.stop().await.map_err(err)
-            } else {
-                Ok(())
-            };
-            *state.remembered.lock().await = None;
-            stopped?;
-            revoked?;
+            revoke_trust_with_background(handle, revoke_background(handle)).await?;
         }
         Request::Status => {
             let background = state.background_status();
@@ -552,7 +627,29 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         Request::BackgroundAction { action } => {
             return background_action(handle, &action).await;
         }
-        start @ (Request::HostStart { .. } | Request::HostRestore) => {
+        Request::HostEnable {
+            service,
+            display_id,
+        } => {
+            return enable_host(handle, service, display_id, true).await;
+        }
+        Request::HostRestore => {
+            let directory = handle.state.lock().await.desktop_config_dir();
+            let saved = tokio::task::spawn_blocking(move || trust::load(&directory))
+                .await
+                .map_err(err)??;
+            if let Some(saved) = saved.filter(|saved| saved.settings.background) {
+                return enable_host(
+                    handle,
+                    saved.settings.service,
+                    saved.settings.display_id,
+                    false,
+                )
+                .await;
+            }
+            return start_host(handle, Request::HostRestore).await;
+        }
+        start @ Request::HostStart { .. } => {
             return start_host(handle, start).await;
         }
         Request::HostStop { on_exit } => {
@@ -562,7 +659,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             } else {
                 Ok(())
             };
-            *state.remembered.lock().await = None;
+            *state.host_identity.lock().await = None;
             if on_exit {
                 // The system service owns its host. Closing this UI only
                 // releases the temporary host owned by this FFI handle.
@@ -595,7 +692,14 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             if !allow_control {
                 host.set_control_allowed(false);
             }
-            if let Some(scope) = state.remembered.lock().await.clone() {
+            if let Some(local) = state
+                .host_identity
+                .lock()
+                .await
+                .clone()
+                .filter(|local| local.remembered)
+            {
+                let scope = local.scope;
                 let service = host.invitation().service.clone();
                 tokio::task::spawn_blocking(move || {
                     let mut saved = trust::load(&scope.directory)?
@@ -746,10 +850,10 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
             background: true,
             ..
         }
-    ) && background_enabled(&background)
+    ) && background_configured(&background)
     {
         return Err(err(
-            "stop background sharing before starting a local desktop host",
+            "this desktop belongs to the background service; enable it to reuse its invitation",
         ));
     }
     let (directory, config) = {
@@ -768,6 +872,7 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
         ..
     } = &request
     {
+        let namespace = credential.key_id();
         let credential = match credential {
             pb_mapper_core::checksum::Credential::Admin(key) => String::from_utf8(key.to_vec())
                 .map_err(|_| err("invalid administrator credential encoding"))?,
@@ -778,25 +883,44 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
         // Keep the old identity for an explicit restore, but never allow a
         // later app launch to resurrect its independent automatic grant.
         disable_legacy_startup(handle).await?;
-        let snapshot =
-            desktop::helper::background::configure(desktop::helper::background::Options {
-                server: config.server_address,
-                credential,
-                relay_transport: config.relay_transport,
-                settings: desktop::helper::background::Settings {
-                    service: service.clone(),
-                    display_id: *display_id,
-                    allow_control: *allow_control,
-                    allow_direct: !relay_only,
-                    auto_start: *auto_start,
-                },
-            })
-            .await
-            .map_err(err)?;
+        let legacy = tokio::task::spawn_blocking({
+            let directory = directory.clone();
+            move || trust::load(&directory)
+        })
+        .await
+        .map_err(err)??;
+        let options = desktop::helper::background::Options {
+            server: config.server_address,
+            credential,
+            relay_transport: config.relay_transport,
+            settings: desktop::helper::background::Settings {
+                service: service.clone(),
+                display_id: *display_id,
+                allow_control: *allow_control,
+                allow_direct: !relay_only,
+                auto_start: *auto_start,
+            },
+        };
+        let scope = trust::Scope {
+            directory: directory.clone(),
+            relay: options.server.clone(),
+            namespace,
+        };
+        let snapshot = if let Some(saved) =
+            legacy.filter(|saved| saved.matches(&scope) && saved.settings.service == *service)
+        {
+            desktop::helper::background::configure_with_identity(options, saved.identity()?).await
+        } else {
+            desktop::helper::background::configure(options).await
+        }
+        .map_err(err)?;
         let snapshot = handle
             .desktop
             .cache_background(serde_json::to_value(snapshot).map_err(err)?);
-        *handle.desktop.remembered.lock().await = None;
+        *handle.desktop.host_identity.lock().await = None;
+        tokio::task::spawn_blocking(move || trust::revoke(&directory))
+            .await
+            .map_err(err)??;
         return Ok(json!({"invitation": snapshot["invitation"], "background": snapshot}));
     }
     let scope = trust::Scope {
@@ -847,6 +971,7 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
                     relay_only,
                     privileged,
                     auto_start,
+                    background: false,
                 },
                 remember,
             )
@@ -886,6 +1011,12 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
     let persisted = remember
         .then(|| trust::Saved::new(&scope, settings.clone(), &identity))
         .transpose()?;
+    let local_identity = LocalIdentity {
+        scope,
+        #[cfg(windows)]
+        identity: identity.clone(),
+        remembered: remember,
+    };
     let host = if settings.privileged {
         #[cfg(windows)]
         {
@@ -910,7 +1041,7 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
             .map_err(err)?
     };
     if let Some(saved) = persisted {
-        let directory = scope.directory.clone();
+        let directory = local_identity.scope.directory.clone();
         let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
             .await
             .map_err(err)?;
@@ -921,8 +1052,159 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
     }
     let invitation = host.invitation().encode().map_err(err)?;
     *slot = Some(host);
-    *handle.desktop.remembered.lock().await = remember.then_some(scope);
+    *handle.desktop.host_identity.lock().await = Some(local_identity);
     Ok(json!({"invitation": invitation}))
+}
+
+/// The product has one durable host owner. Setup intent and any existing local
+/// identity survive the installed application's restart; only the service owns
+/// registration after the handoff. Internal SDK/local-host APIs remain separate.
+#[cfg(windows)]
+async fn enable_host(
+    handle: &PbMapperHandle,
+    service: String,
+    display_id: u32,
+    allow_install: bool,
+) -> Result<Value, CtlError> {
+    let mut slot = handle.desktop.host.lock().await;
+    let (directory, config) = {
+        let state = handle.state.lock().await;
+        (state.desktop_config_dir(), state.get_config_status().await)
+    };
+    let credential = get_process_credential().map_err(err)?;
+    let scope = trust::Scope {
+        directory: directory.clone(),
+        relay: config.server_address.clone(),
+        namespace: credential.key_id(),
+    };
+    let previous = tokio::task::spawn_blocking({
+        let directory = directory.clone();
+        move || trust::load(&directory)
+    })
+    .await
+    .map_err(err)??;
+    if !allow_install
+        && !previous.as_ref().is_some_and(|saved| {
+            saved.matches(&scope) && saved.settings.background && saved.settings.auto_start
+        })
+    {
+        // Recheck under the lifecycle lock: Stop may have cancelled the pending
+        // action after HostRestore first observed it, while waiting for setup.
+        return Err(err(
+            "background setup was stopped or belongs to another relay",
+        ));
+    }
+    let local = handle.desktop.host_identity.lock().await.clone();
+    let local = local.filter(|local| {
+        local.scope.relay == scope.relay
+            && local.scope.namespace == scope.namespace
+            && slot
+                .as_ref()
+                .is_some_and(|host| host.invitation().service == service)
+    });
+    let pending = trust::Saved::for_background(
+        &scope,
+        service.clone(),
+        display_id,
+        previous.as_ref(),
+        local.as_ref().map(|local| &local.identity),
+    )?;
+    let identity = pending.identity()?;
+    tokio::task::spawn_blocking({
+        let directory = directory.clone();
+        move || trust::save(&directory, &pending)
+    })
+    .await
+    .map_err(err)??;
+    // Stop the old registration before enabling a service that could already
+    // hold an automatic grant. No two owners may publish the same desktop.
+    if let Some(host) = slot.take() {
+        host.stop().await.map_err(err)?;
+    }
+    *handle.desktop.host_identity.lock().await = None;
+    let helper = tokio::task::spawn_blocking(desktop::helper::status)
+        .await
+        .map_err(err)?;
+    if helper.ensure_ready().is_err() {
+        if !allow_install {
+            return Err(err(
+                "desktop setup is waiting for the installed background service",
+            ));
+        }
+        let action = if !helper.installed
+            || !helper.authorized_application
+            || (helper.running && !helper.identity_verified)
+        {
+            "install"
+        } else {
+            "enable"
+        };
+        let installed =
+            tokio::task::spawn_blocking(move || desktop::helper::request_installation(action))
+                .await
+                .map_err(err)?
+                .map_err(err);
+        if let Err(failure) = installed {
+            // A cancelled/failed first installation must not silently resume
+            // the pending action on a later application launch.
+            tokio::task::spawn_blocking(move || match previous {
+                Some(mut saved) => {
+                    if saved.settings.background {
+                        saved.settings.auto_start = false;
+                    }
+                    trust::save(&directory, &saved)
+                }
+                None => trust::revoke(&directory),
+            })
+            .await
+            .map_err(err)??;
+            return Err(failure);
+        }
+        if action == "install" {
+            desktop::helper::prepare_application_restart()
+                .await
+                .map_err(err)?;
+            return Ok(json!({"restart": true}));
+        }
+    }
+    let credential = match credential {
+        pb_mapper_core::checksum::Credential::Admin(key) => String::from_utf8(key.to_vec())
+            .map_err(|_| err("invalid administrator credential encoding"))?,
+        pb_mapper_core::checksum::Credential::Temporary { key_id, key } => {
+            pb_mapper_core::checksum::encode_temporary_credential(key_id, &key)
+        }
+    };
+    let snapshot = desktop::helper::background::configure_with_identity(
+        desktop::helper::background::Options {
+            server: config.server_address,
+            credential,
+            relay_transport: config.relay_transport,
+            settings: desktop::helper::background::Settings {
+                service,
+                display_id,
+                allow_control: true,
+                allow_direct: true,
+                auto_start: true,
+            },
+        },
+        identity,
+    )
+    .await
+    .map_err(err)?;
+    let snapshot = handle
+        .desktop
+        .cache_background(serde_json::to_value(snapshot).map_err(err)?);
+    // The service now durably owns the key. Retiring the legacy copy also
+    // prevents an explicit legacy restore after service revocation.
+    tokio::task::spawn_blocking(move || trust::revoke(&directory))
+        .await
+        .map_err(err)??;
+    Ok(json!({"restart": false, "invitation": snapshot["invitation"], "background": snapshot}))
+}
+
+#[cfg(not(windows))]
+async fn enable_host(_: &PbMapperHandle, _: String, _: u32, _: bool) -> Result<Value, CtlError> {
+    Err(err("persistent desktop hosting currently requires Windows"))
 }
 
 /// One allocation containing u32 little-endian metadata length, UTF-8 status,
@@ -937,8 +1219,8 @@ pub struct DesktopBuffer {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_desktop_frame(
     handle: *mut PbMapperHandle,
-    after: u64,
-    generation: u64,
+    _after: u64,
+    _generation: u64,
 ) -> *mut DesktopBuffer {
     if handle.is_null() {
         return std::ptr::null_mut();
@@ -953,7 +1235,7 @@ pub unsafe extern "C" fn pb_mapper_desktop_frame(
             .as_ref()
             .and_then(Viewer::next_frame)
     });
-    export_frame(frame, after, generation)
+    export_frame(frame)
 }
 
 /// Bounded wait variant for a dedicated media worker. The buffer ownership is
@@ -961,24 +1243,22 @@ pub unsafe extern "C" fn pb_mapper_desktop_frame(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_mapper_desktop_wait_frame(
     handle: *mut PbMapperHandle,
-    after: u64,
-    generation: u64,
+    _after: u64,
+    _generation: u64,
 ) -> *mut DesktopBuffer {
     if handle.is_null() {
         return std::ptr::null_mut();
     }
     let handle = unsafe { &*handle };
-    export_frame(
-        handle.runtime.block_on(handle.desktop.wait_frame()),
-        after,
-        generation,
-    )
+    export_frame(handle.runtime.block_on(handle.desktop.wait_frame()))
 }
 
-fn export_frame(frame: Option<desktop::Frame>, after: u64, generation: u64) -> *mut DesktopBuffer {
-    let Some(frame) =
-        frame.filter(|f| f.status.frame_id != after || f.status.generation != generation)
-    else {
+fn export_frame(frame: Option<desktop::Frame>) -> *mut DesktopBuffer {
+    // next_frame consumes an event exactly once. Cursor/status events can share
+    // the next picture's frame id; filtering by the caller's last id would lose
+    // observations or a predictive access unit and corrupt its reference chain.
+    // Retain the legacy arguments in the C ABI, but let the queue own delivery.
+    let Some(frame) = frame else {
         return std::ptr::null_mut();
     };
     let Ok(metadata) = serde_json::to_vec(&frame.status) else {
@@ -1032,6 +1312,35 @@ mod tests {
             control_shutdown: Default::default(),
             runtime: tokio::runtime::Runtime::new().unwrap(),
         }
+    }
+
+    #[test]
+    fn status_and_video_with_the_same_id_both_cross_the_binary_boundary() {
+        let status = desktop::SessionStatus {
+            state: "streaming".into(),
+            generation: 3,
+            frame_id: 9,
+            cursor: Some(desktop::CursorPosition {
+                x: 4,
+                y: 5,
+                visible: true,
+            }),
+            ..Default::default()
+        };
+        for payload in [vec![], vec![1, 2, 3]] {
+            let buffer = export_frame(Some(desktop::Frame {
+                status: status.clone(),
+                bytes: payload.clone().into(),
+            }));
+            assert!(!buffer.is_null());
+            let bytes = unsafe { std::slice::from_raw_parts((*buffer).data, (*buffer).len) };
+            let length = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+            let metadata: Value = serde_json::from_slice(&bytes[4..4 + length]).unwrap();
+            assert_eq!(metadata["cursor"]["x"], 4);
+            assert_eq!(&bytes[4 + length..], payload);
+            unsafe { pb_mapper_desktop_free_frame(buffer) };
+        }
+        assert!(export_frame(None).is_null());
     }
 
     #[test]
@@ -1112,6 +1421,62 @@ mod tests {
         reply.send(unavailable_background("")).unwrap();
         assert_eq!(discovery.await, configured);
         assert_eq!(state.background.lock().snapshot.as_ref(), Some(&configured));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn revocation_waits_for_handoff_and_uses_the_actual_owner() {
+        let handle = test_handle("revoke-handoff");
+        handle.runtime.block_on(async {
+            let directory = handle.state.lock().await.desktop_config_dir();
+            let scope = trust::Scope {
+                directory: directory.clone(),
+                relay: "test-relay:7666".into(),
+                namespace: 1,
+            };
+            let pending =
+                trust::Saved::for_background(&scope, "desktop:handoff".into(), 1, None, None)
+                    .unwrap();
+            trust::save(&directory, &pending).unwrap();
+            let lifecycle = handle.desktop.host.lock().await;
+            let actual_owner = parking_lot::Mutex::new(false);
+            let mut revoke = std::pin::pin!(revoke_trust_with_background(&handle, async {
+                assert!(*actual_owner.lock(), "the pending handoff completed first");
+                assert!(trust::load(&directory).unwrap().is_none());
+                *actual_owner.lock() = false;
+                Ok(unavailable_background(""))
+            }));
+            assert!(
+                revoke
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            // Configure completes while the UI still has no background snapshot.
+            *actual_owner.lock() = true;
+            assert!(handle.desktop.background.lock().snapshot.is_none());
+            drop(lifecycle);
+            revoke.await.unwrap();
+            assert!(!*actual_owner.lock());
+
+            // Failed service revocation stays visible, retaining the observed
+            // grant; the removed local pending record cannot resurrect it.
+            let configured = json!({"configured": true, "enabled": true});
+            handle.desktop.cache_background(configured.clone());
+            assert!(
+                revoke_trust_with_background(&handle, async {
+                    Err(err("service management unavailable"))
+                })
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                handle.desktop.background.lock().snapshot.as_ref(),
+                Some(&configured)
+            );
+            assert!(trust::load(&directory).unwrap().is_none());
+            std::fs::remove_dir(&directory).unwrap();
+        });
     }
 
     #[cfg(windows)]

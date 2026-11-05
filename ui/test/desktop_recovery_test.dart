@@ -110,9 +110,12 @@ void main() {
         await api.close();
       });
       await store.connect('private invitation', true);
+      await store.poll();
+      expect(api.controls, isEmpty);
       api.emit();
       await _until(store, () => store.fresh);
-      await store.control(true);
+      await store.poll();
+      expect(api.controls, [true]);
       api.emit(controlling: true);
       await _until(store, () => store.controlling);
       expect(store.controlling, isTrue);
@@ -162,6 +165,31 @@ void main() {
       expect(store.connectionPhase, DesktopConnectionPhase.idle);
     },
   );
+
+  test('identity failure keeps the pin and stops automatic retries', () async {
+    final api = _RecoveryApi();
+    final store = DesktopStore(api);
+    addTearDown(() async {
+      await store.disconnect();
+      store.dispose();
+      await api.close();
+    });
+    await store.connect('pinned invitation', false);
+    api.sources.last.addError(StateError('desktop identity changed'));
+    await _until(
+      store,
+      () => store.connectionPhase == DesktopConnectionPhase.identityMismatch,
+    );
+    await _noConnectionFor(api, const Duration(milliseconds: 1100));
+    expect(api.connections, [('pinned invitation', false)]);
+    expect(store.controlling, isFalse);
+    await store.connect('deliberately replaced invitation', false);
+    expect(api.connections.last.$1, 'deliberately replaced invitation');
+    expect(
+      store.connectionPhase,
+      isNot(DesktopConnectionPhase.identityMismatch),
+    );
+  });
 
   test(
     'stalls request an IDR before reconnect, while desktop transitions and backgrounding do not churn connections',

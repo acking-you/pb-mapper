@@ -10,8 +10,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const STORAGE_LIMIT: u64 = 32 * 1024;
-const FILE_NAME: &str = "background-host.dpapi";
-const REVOKED_MARKER: &str = "background-host.revoked";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,7 +20,12 @@ struct Saved {
     identity: HostIdentity,
 }
 impl Saved {
-    fn prepare(options: Options, owner_sid: &str, previous: Option<&Self>) -> Result<Self> {
+    fn prepare(
+        options: Options,
+        owner_sid: &str,
+        previous: Option<&Self>,
+        imported: Option<HostIdentity>,
+    ) -> Result<Self> {
         let key_id = validate(&options)?;
         let same_identity = previous.is_some_and(|old| {
             old.owner_sid == owner_sid
@@ -35,6 +38,9 @@ impl Saved {
                 .ok_or_else(|| error("Missing previous background identity"))?
                 .identity
                 .clone()
+        } else if let Some(identity) = imported {
+            identity.acceptor()?;
+            identity
         } else {
             HostIdentity::generate()?
         };
@@ -118,10 +124,15 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
             },
             result = async { match state.pending.as_mut() { Some(pending) => pending.await, None => std::future::pending().await } }, if state.pending.is_some() => {
                 state.pending.take();
-                match result {
-                    Ok(Ok(host)) => { state.host = Some(host); state.message.clear(); },
-                    _ => {
-                        state.message = "Unable to connect to the configured relay; background hosting will retry".into();
+                match result.map_err(error).and_then(|result| result) {
+                    Ok(host) => {
+                        state.host = Some(host);
+                        state.message.clear();
+                        os::record_service_event("background_registered", "Desktop registration is ready");
+                    },
+                    Err(failure) => {
+                        state.message = format!("Background hosting will retry in {} s: {failure}", state.retry_delay.as_secs());
+                        os::record_service_event("background_start_failed", &state.message);
                         state.retry_at = Instant::now() + state.retry_delay;
                         state.retry_delay = (state.retry_delay * 2).min(Duration::from_secs(60));
                     },
@@ -192,19 +203,36 @@ impl Supervisor {
         root: &Path,
         owner_sid: &str,
     ) -> Result<Snapshot> {
+        if let Command::RevokeScope {
+            server,
+            namespace: expected,
+        } = &command
+            && let Some(saved) = &self.saved
+            && (saved.options.server != *server || Some(namespace(&saved.options)?) != *expected)
+        {
+            return Err(error(
+                "Background authorization belongs to another relay or namespace",
+            ));
+        }
         match command {
             Command::Status => {}
-            Command::Configure { options } => {
-                let saved = Saved::prepare(options, owner_sid, self.saved.as_ref())?;
+            Command::Configure { options, identity } => {
+                let saved = Saved::prepare(options, owner_sid, self.saved.as_ref(), identity)?;
                 // Persist before replacing either live state or the identity.
                 save(root, &saved)?;
                 clear_marker(root)?;
-                self.deactivate().await;
+                if self.saved.as_ref().is_none_or(|old| {
+                    old.owner_sid != saved.owner_sid || old.options != saved.options
+                }) {
+                    self.deactivate().await;
+                }
                 self.saved = Some(saved);
                 self.enabled = true;
                 self.retry_at = Instant::now();
                 self.retry_delay = Duration::from_secs(1);
-                self.message = "Connecting background host".into();
+                if self.host.is_none() {
+                    self.message = "Connecting background host".into();
+                }
                 self.persistence_failed = false;
             }
             Command::Start => {
@@ -213,9 +241,13 @@ impl Supervisor {
                         "Background authorization could not be persisted; configure it again before starting",
                     ));
                 }
-                if self.saved.is_none() {
-                    return Err(error("No saved background authorization"));
-                }
+                let mut saved = self
+                    .saved
+                    .clone()
+                    .ok_or_else(|| error("No saved background authorization"))?;
+                saved.options.settings.auto_start = true;
+                save(root, &saved)?;
+                self.saved = Some(saved);
                 self.enabled = true;
                 self.retry_at = Instant::now();
             }
@@ -228,7 +260,7 @@ impl Supervisor {
                 self.persist_restriction(root).await?;
                 self.message.clear();
             }
-            Command::Revoke => {
+            Command::Revoke | Command::RevokeScope { .. } => {
                 self.enabled = false;
                 self.deactivate().await;
                 self.saved = None;
@@ -705,7 +737,7 @@ mod tests {
     fn machine_storage_rejects_readable_grants_and_preserves_namespace_identity() {
         assert!(descriptor("O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)").is_ok());
         assert!(descriptor("O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;BU)").is_err());
-        let original = Saved::prepare(options(), "owner-one", None).unwrap();
+        let original = Saved::prepare(options(), "owner-one", None, None).unwrap();
         let original_secret = original.identity.encode_secret().unwrap();
         let plaintext = serde_json::to_vec(&original).unwrap();
         let cipher = protect(&plaintext, true).unwrap();
@@ -721,14 +753,15 @@ mod tests {
         assert!(protect(&tampered, false).is_err());
         let mut rotated = options();
         rotated.credential = "background-test-key-111111111111".into();
-        let retained = Saved::prepare(rotated, "owner-one", Some(&original)).unwrap();
+        let retained = Saved::prepare(rotated, "owner-one", Some(&original), None).unwrap();
         assert_eq!(retained.identity.encode_secret().unwrap(), original_secret);
         let mut another_namespace = options();
         another_namespace.credential =
             pb_mapper_core::checksum::encode_temporary_credential(9, &[7; 32]);
-        let replaced = Saved::prepare(another_namespace, "owner-one", Some(&original)).unwrap();
+        let replaced =
+            Saved::prepare(another_namespace, "owner-one", Some(&original), None).unwrap();
         assert_ne!(replaced.identity.encode_secret().unwrap(), original_secret);
-        let changed_owner = Saved::prepare(options(), "owner-two", Some(&original)).unwrap();
+        let changed_owner = Saved::prepare(options(), "owner-two", Some(&original), None).unwrap();
         assert_ne!(
             changed_owner.identity.encode_secret().unwrap(),
             original_secret
@@ -754,8 +787,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_session_starts_a_registered_background_host() {
+        let relay = pb_mapper_testkit::Relay::start("background-registration").await;
+        let mut configured = options();
+        configured.server = relay.addr().to_string();
+        configured.credential = pb_mapper_testkit::TEST_ADMIN_KEY.into();
+        let mut supervisor = state(Saved::prepare(configured, "owner-one", None, None).unwrap());
+        supervisor.reconcile_session(Ok(Some(7))).await;
+        let pending = supervisor
+            .pending
+            .take()
+            .expect("owner session starts registration");
+        let host = tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.status().state, "waiting");
+        let invitation = host.invitation().encode().unwrap();
+        supervisor.host = Some(host);
+        supervisor.reconcile_session(Ok(None)).await;
+        assert!(supervisor.host.is_none());
+        supervisor.reconcile_session(Ok(Some(8))).await;
+        let host = tokio::time::timeout(Duration::from_secs(5), supervisor.pending.take().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.invitation().encode().unwrap(), invitation);
+        host.stop().await.unwrap();
+    }
+
+    #[test]
+    fn imported_identity_survives_restart_but_never_replaces_an_existing_link() {
+        let identity = HostIdentity::generate().unwrap();
+        let original =
+            Saved::prepare(options(), "owner-one", None, Some(identity.clone())).unwrap();
+        let secret = identity.encode_secret().unwrap();
+        assert_eq!(original.identity.encode_secret().unwrap(), secret);
+        let encrypted = protect(&serde_json::to_vec(&original).unwrap(), true).unwrap();
+        let mut restored: Saved =
+            serde_json::from_slice(&protect(&encrypted, false).unwrap()).unwrap();
+        restored.options.settings.auto_start = false;
+        let restarted = Saved::prepare(
+            options(),
+            "owner-one",
+            Some(&restored),
+            Some(HostIdentity::generate().unwrap()),
+        )
+        .unwrap();
+        assert!(restarted.options.settings.auto_start);
+        assert_eq!(restarted.identity.encode_secret().unwrap(), secret);
+    }
+
+    #[tokio::test]
     async fn session_query_failure_cancels_start_without_claiming_owner_is_logged_out() {
-        let mut supervisor = state(Saved::prepare(options(), "owner-one", None).unwrap());
+        let mut supervisor = state(Saved::prepare(options(), "owner-one", None, None).unwrap());
         let pending = tokio::spawn(std::future::pending::<Result<Host>>());
         let cancelled = pending.abort_handle();
         supervisor.pending = Some(pending);
@@ -775,13 +862,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_revoke_preserves_another_owner_and_reports_failed_persistence() {
+        let saved = Saved::prepare(options(), "owner-one", None, None).unwrap();
+        let expected = namespace(&saved.options).unwrap();
+        let server = saved.options.server.clone();
+        let mut supervisor = state(saved);
+        let pending = tokio::spawn(std::future::pending::<Result<Host>>());
+        let cancelled = pending.abort_handle();
+        supervisor.pending = Some(pending);
+        let outside = std::env::temp_dir();
+        assert!(
+            supervisor
+                .command(
+                    Command::RevokeScope {
+                        server: server.clone(),
+                        namespace: Some(expected.wrapping_add(1)),
+                    },
+                    &outside,
+                    "owner-one"
+                )
+                .await
+                .is_err()
+        );
+        assert!(supervisor.enabled);
+        assert!(supervisor.saved.is_some());
+        assert!(supervisor.pending.is_some());
+        assert!(!cancelled.is_finished());
+        // The same-scope owner is stopped even if its protected persistence
+        // cannot be updated, but that failure must not be acknowledged as OK.
+        assert!(
+            supervisor
+                .command(
+                    Command::RevokeScope {
+                        server,
+                        namespace: Some(expected),
+                    },
+                    &outside,
+                    "owner-one"
+                )
+                .await
+                .is_err()
+        );
+        assert!(!supervisor.enabled);
+        assert!(supervisor.saved.is_none());
+        assert!(supervisor.pending.is_none());
+        assert!(cancelled.is_finished());
+    }
+
+    #[tokio::test]
     async fn failed_configuration_preserves_pending_host_but_failed_revoke_cancels_it() {
         use tokio::io::AsyncReadExt;
         let blackhole = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut configured = options();
         configured.settings.allow_control = true;
         configured.server = blackhole.local_addr().unwrap().to_string();
-        let original = Saved::prepare(configured, "owner-one", None).unwrap();
+        let original = Saved::prepare(configured, "owner-one", None, None).unwrap();
         let original_secret = original.identity.encode_secret().unwrap();
         let mut supervisor = state(original.clone());
         supervisor.pending = Some(tokio::spawn(async move {
@@ -809,7 +944,10 @@ mod tests {
         assert!(
             supervisor
                 .command(
-                    Command::Configure { options: options() },
+                    Command::Configure {
+                        options: options(),
+                        identity: None
+                    },
                     &outside,
                     "owner-one"
                 )

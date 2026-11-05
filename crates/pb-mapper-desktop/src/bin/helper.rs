@@ -1,4 +1,4 @@
-//! Privileged capture/input only. This process never registers a network service.
+//! Privileged capture/input and explicitly authorized background desktop hosting.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 fn main() {
     #[cfg(windows)]

@@ -668,5 +668,12 @@
   "timeAgo": "{span} ago",
   "@timeAgo": {"placeholders": {"span": {"type": "String"}}},
   "timeIn": "in {span}",
-  "@timeIn": {"placeholders": {"span": {"type": "String"}}}
+  "@timeIn": {"placeholders": {"span": {"type": "String"}}},
+  "desktopIdentityMismatch": "The host identity has changed",
+  "desktopIdentityMismatchHelp": "Reconnect using the current link from your computer. Automatic retries have stopped.",
+  "desktopEnable": "Enable remote control",
+  "desktopEnabledHelp": "Remote control is on. The same link works after closing the app or reconnecting.",
+  "desktopEnableHelp": "Enable once to keep this computer available in the background. Windows may ask you to approve setup the first time.",
+  "desktopAdvanced": "Advanced",
+  "desktopStopHelp": "Stopping pauses access and keeps the link for next time. Revoke the link to invalidate it."
 }

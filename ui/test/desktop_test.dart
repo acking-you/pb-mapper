@@ -34,8 +34,6 @@ void main() {
       await pumpApp(tester, api, page: AppPage.tunnels);
       await tester.tap(find.byKey(const Key('open-desktop')));
       await settle(tester);
-      await tester.tap(find.byKey(const Key('desktop-background')));
-      await settle(tester);
       await tester.scrollUntilVisible(
         find.byKey(const Key('desktop-share')),
         250,
@@ -50,7 +48,7 @@ void main() {
       await settle(tester);
       expect(api.desktop.background.enabled, isTrue);
       expect(api.desktop.background.autoStart, isTrue);
-      expect(api.desktop.host?.controlAllowed, isFalse);
+      expect(api.desktop.host?.controlAllowed, isTrue);
       await finish(tester);
       expect(api.desktop.host, isNotNull);
       expect(api.desktop.background.enabled, isTrue);
@@ -280,7 +278,7 @@ void main() {
   );
 
   testWidgets(
-    'phone host flow exposes a persistent stop and defaults to view-only',
+    'compact host flow enables control and exposes a persistent stop',
     (tester) async {
       final api = FakePbMapperApi();
       await pumpApp(
@@ -293,7 +291,7 @@ void main() {
       await settle(tester);
       await tester.tap(find.byKey(const Key('desktop-share')));
       await settle(tester);
-      expect(api.desktop.host?.controlAllowed, isFalse);
+      expect(api.desktop.host?.controlAllowed, isTrue);
       expect(find.byKey(const Key('desktop-stop')), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pageBack();

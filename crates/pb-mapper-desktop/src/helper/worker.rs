@@ -316,6 +316,10 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                     }
                     let context = backend.context()?;
                     let mut video = None;
+                    let observe_cursor = matches!(
+                        &request,
+                        Request::Context | Request::Capture | Request::CaptureVideo { .. }
+                    );
                     let image = match request {
                         Request::Start { .. } | Request::Context => vec![],
                         Request::Attach { .. } => return Err(error("worker is already attached")),
@@ -365,13 +369,13 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                         }
                         Request::Release | Request::Close => unreachable!(),
                     };
-                    // Pointer metadata is sampled only with a real frame, and
-                    // checked against that frame's desktop before leaving the
-                    // privileged worker. No separate IPC call can mix epochs.
-                    let cursor = if image.is_empty() {
-                        None
-                    } else {
+                    // Context polling observes the pointer even when capture is
+                    // idle or paused. The backend checks this desktop identity;
+                    // observing it never renews last_input or acknowledges video.
+                    let cursor = if observe_cursor {
                         backend.cursor(&context)?
+                    } else {
+                        None
                     };
                     Ok::<_, std::io::Error>((Some(context), image, video, cursor))
                 })();

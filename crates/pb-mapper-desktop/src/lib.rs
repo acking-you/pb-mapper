@@ -132,6 +132,11 @@ pub struct SessionStatus {
     pub frame_id: u64,
     pub display: Option<Display>,
     pub path: String,
+    /// Local transport observation, never trusted as host authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_failure: Option<String>,
     pub frames: u64,
     pub bytes: u64,
     #[serde(default)]
@@ -304,9 +309,9 @@ pub trait Backend: 'static {
         })
     }
     fn capture(&mut self) -> Result<Vec<u8>>;
-    /// Report a pointer for the same desktop as the just-captured frame. A
-    /// desktop transition must fail instead of attaching another desktop's
-    /// pointer to that frame. Backends without pointer metadata return `None`.
+    /// Report a pointer for the expected desktop, including when no video frame
+    /// changed. A desktop transition must fail instead of reporting another
+    /// desktop's pointer. Backends without pointer metadata return `None`.
     fn cursor(&mut self, _expected: &DesktopContext) -> Result<Option<CursorPosition>> {
         Ok(None)
     }

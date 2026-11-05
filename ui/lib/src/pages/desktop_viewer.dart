@@ -39,6 +39,7 @@ class _DesktopViewerState extends State<DesktopViewer>
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     store.setViewerForeground(_foreground);
     store.addListener(_update);
+    store.cursorStatus.addListener(_updateCursor);
     _update();
   }
 
@@ -77,6 +78,7 @@ class _DesktopViewerState extends State<DesktopViewer>
       _renderedEpoch = _rendered == null ? null : store.mediaEpoch;
     }
     if (mounted) setState(() {});
+    _updateCursor();
     final frame = store.frame;
     if (_decoding ||
         frame == null ||
@@ -87,6 +89,23 @@ class _DesktopViewerState extends State<DesktopViewer>
     }
     _decoding = true;
     unawaited(_decode(frame, store.mediaEpoch));
+  }
+
+  void _updateCursor() {
+    final status = store.cursorStatus.value;
+    final display = _rendered?.display;
+    final cursor = status?.generation == _rendered?.generation
+        ? status?.cursor
+        : null;
+    _surface.currentState?.updateRemoteCursor(
+      cursor == null ||
+              !cursor.visible ||
+              display == null ||
+              display.width == 0 ||
+              display.height == 0
+          ? null
+          : Offset(cursor.x / display.width, cursor.y / display.height),
+    );
   }
 
   Future<void> _decode(DesktopFrame frame, int epoch) async {
@@ -150,10 +169,12 @@ class _DesktopViewerState extends State<DesktopViewer>
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.store, store)) {
       oldWidget.store.removeListener(_update);
+      oldWidget.store.cursorStatus.removeListener(_updateCursor);
       oldWidget.store.setViewerForeground(false);
       _viewEpoch = -1;
       store.setViewerForeground(_foreground);
       store.addListener(_update);
+      store.cursorStatus.addListener(_updateCursor);
       _update();
     }
   }
@@ -162,6 +183,7 @@ class _DesktopViewerState extends State<DesktopViewer>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     store.removeListener(_update);
+    store.cursorStatus.removeListener(_updateCursor);
     store.setViewerForeground(false);
     _focus.dispose();
     _image?.dispose();
@@ -407,7 +429,9 @@ class _DesktopViewerState extends State<DesktopViewer>
     final image = _image;
     final hasPicture = video != null || image != null;
     final display = _rendered?.display;
-    final cursor = _rendered?.cursor;
+    final cursor = status?.generation == _rendered?.generation
+        ? status?.cursor
+        : _rendered?.cursor;
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -419,6 +443,7 @@ class _DesktopViewerState extends State<DesktopViewer>
           inputEpoch: (store, store.mediaEpoch, store.frame?.status.generation),
           cursor:
               cursor == null ||
+                  !cursor.visible ||
                   display == null ||
                   display.width == 0 ||
                   display.height == 0
@@ -449,21 +474,6 @@ class _DesktopViewerState extends State<DesktopViewer>
                   fit: BoxFit.fill,
                   filterQuality: FilterQuality.low,
                 ),
-              LayoutBuilder(
-                builder: (_, constraints) => Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (video != null)
-                      ValueListenableBuilder<DesktopStatus?>(
-                        valueListenable: store.videoPresentation,
-                        builder: (_, rendered, _) =>
-                            _cursor(rendered, constraints.biggest),
-                      )
-                    else
-                      _cursor(_rendered, constraints.biggest),
-                  ],
-                ),
-              ),
             ],
           ),
         ),
@@ -506,34 +516,6 @@ class _DesktopViewerState extends State<DesktopViewer>
     );
   }
 
-  Widget _cursor(DesktopStatus? rendered, Size size) {
-    final cursor = rendered?.cursor;
-    final display = rendered?.display;
-    if (!store.fresh ||
-        rendered?.generation != store.frame?.status.generation ||
-        cursor == null ||
-        !cursor.visible ||
-        display == null ||
-        display.width <= 0 ||
-        display.height <= 0 ||
-        cursor.x < 0 ||
-        cursor.y < 0 ||
-        cursor.x >= display.width ||
-        cursor.y >= display.height) {
-      return const SizedBox.shrink();
-    }
-    return Positioned(
-      left: cursor.x / display.width * size.width,
-      top: cursor.y / display.height * size.height,
-      child: const IgnorePointer(
-        child: CustomPaint(
-          size: Size(18, 27),
-          painter: _DesktopCursorPainter(),
-        ),
-      ),
-    );
-  }
-
   Future<void> _text(BuildContext context) async {
     final field = TextEditingController();
     final text = await showDialog<String>(
@@ -554,34 +536,6 @@ class _DesktopViewerState extends State<DesktopViewer>
       await _send({'kind': 'text', 'text': text});
     }
   }
-}
-
-/// A generic pointer marker; operating-system cursor bitmaps are not transported.
-class _DesktopCursorPainter extends CustomPainter {
-  const _DesktopCursorPainter();
-  @override
-  void paint(Canvas canvas, Size size) {
-    final pointer = Path()
-      ..moveTo(1, 1)
-      ..lineTo(1, 20)
-      ..lineTo(6, 16)
-      ..lineTo(10, 25)
-      ..lineTo(14, 23)
-      ..lineTo(10, 15)
-      ..lineTo(17, 15)
-      ..close();
-    canvas.drawPath(pointer, Paint()..color = Colors.black);
-    canvas.drawPath(
-      pointer,
-      Paint()
-        ..color = Colors.white
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.5,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _DesktopCursorPainter oldDelegate) => false;
 }
 
 final _keyNames = <LogicalKeyboardKey, String>{

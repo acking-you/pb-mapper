@@ -114,21 +114,18 @@ impl tracing::field::Visit for MessageVisitor {
 /// Can be called multiple times safely.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_init_logging() {
-    use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
     let _ = tracing_subscriber::registry()
-        .with(FfiLogLayer)
         .with({
             let filter = tracing_subscriber::EnvFilter::from_default_env();
-            let filter = match "pb_mapper=info".parse() {
+            match "pb_mapper=info".parse() {
                 Ok(directive) => filter.add_directive(directive),
                 Err(_) => filter,
-            };
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stdout)
-                .with_filter(filter)
+            }
         })
+        .with(FfiLogLayer)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
         .try_init();
 }

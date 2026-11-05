@@ -25,6 +25,7 @@ class DesktopConnectionBanner extends StatelessWidget {
         DesktopConnectionPhase.recoveringVideo => l.desktopStateRecovering,
         DesktopConnectionPhase.retryWaiting => l.desktopStateRetry,
         DesktopConnectionPhase.reconnecting => l.desktopStateReconnecting,
+        DesktopConnectionPhase.identityMismatch => l.desktopIdentityMismatch,
       };
       final age = store.pictureAge;
       final message = status?.message ?? '';
@@ -33,6 +34,8 @@ class DesktopConnectionBanner extends StatelessWidget {
           message.contains('Secure/locked desktop unavailable');
       final detail = needsHelper
           ? l.desktopOrdinaryOnlyHelp
+          : phase == DesktopConnectionPhase.identityMismatch
+          ? l.desktopIdentityMismatchHelp
           : store.recoveryReason ?? store.error ?? message;
       return Container(
         key: const Key('desktop-connection-state'),
@@ -53,7 +56,8 @@ class DesktopConnectionBanner extends StatelessWidget {
                           size: 14,
                           color: Theme.of(context).colorScheme.primary,
                         )
-                      : phase == DesktopConnectionPhase.idle
+                      : phase == DesktopConnectionPhase.idle ||
+                            phase == DesktopConnectionPhase.identityMismatch
                       ? const Icon(Icons.link_off, size: 14)
                       : const CircularProgressIndicator(strokeWidth: 2),
                 ),

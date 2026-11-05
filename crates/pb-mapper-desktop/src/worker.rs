@@ -39,6 +39,7 @@ impl Policy {
 pub(crate) struct Worker {
     requests: mpsc::SyncSender<Request>,
     pub frames: watch::Receiver<Option<Frame>>,
+    pub cursor: watch::Receiver<Option<SessionStatus>>,
     pub media: Arc<crate::media::Queue>,
     pub feedback: Option<Arc<crate::congestion::Feedback>>,
     bitrate: Arc<AtomicU32>,
@@ -74,6 +75,7 @@ impl Worker {
     ) -> Self {
         let (requests, rx) = mpsc::sync_channel::<Request>(16);
         let (frames_tx, frames) = watch::channel(None);
+        let (cursor_tx, cursor) = watch::channel(None);
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let media = Arc::new(crate::media::Queue::default());
@@ -129,8 +131,9 @@ impl Worker {
             engine.admission = admission;
             let mut policy = allowed.get();
             let mut next_frame = Instant::now();
+            let mut next_cursor = next_frame;
+            let mut observed_cursor = None;
             let mut configured = preferences;
-            let mut checked_context = Instant::now();
             let mut feedback_context = (0, false);
             while !stop.is_cancelled() {
                 let current_policy = allowed.get();
@@ -143,6 +146,7 @@ impl Worker {
                 let received = waiter.receive(
                     &rx,
                     next_frame
+                        .min(next_cursor)
                         .saturating_duration_since(Instant::now())
                         .min(Duration::from_millis(10)),
                 );
@@ -197,6 +201,21 @@ impl Worker {
                     }
                     Ok(None) => {}
                 }
+                if Instant::now() >= next_cursor {
+                    engine.sample_cursor();
+                    let current = (engine.state.generation, engine.state.cursor);
+                    if engine.state.state == "streaming" && observed_cursor != Some(current) {
+                        observed_cursor = Some(current);
+                        *status.lock() = engine.state.clone();
+                        cursor_tx.send_replace(Some(engine.state.clone()));
+                    }
+                    next_cursor = Instant::now()
+                        + if engine.state.state == "capture_unavailable" {
+                            Duration::from_millis(200)
+                        } else {
+                            Duration::from_millis(16)
+                        };
+                }
                 if Instant::now() >= next_frame {
                     let mut paused = false;
                     if let Some(feedback) = &renderer {
@@ -225,14 +244,6 @@ impl Worker {
                     // Only actual queue loss, stale output or a context change
                     // requires an IDR; restarting every credit window otherwise
                     // spends the available bandwidth repeatedly on keyframes.
-                    if paused && checked_context.elapsed() >= Duration::from_millis(200) {
-                        let _ = engine.geometry();
-                        checked_context = Instant::now();
-                        if let Some(feedback) = &renderer {
-                            engine.sync_feedback(feedback, &mut feedback_context);
-                            paused = feedback.budget().2;
-                        }
-                    }
                     engine.keyframe |= outgoing.take_keyframe_request();
                     engine.state.dropped_frames = outgoing.dropped();
                     let started = Instant::now();
@@ -267,6 +278,7 @@ impl Worker {
         Self {
             requests,
             frames,
+            cursor,
             media,
             feedback,
             bitrate,
@@ -390,6 +402,15 @@ impl Engine {
         self.lease = None;
     }
     fn control(&mut self, enabled: bool, allowed: bool) -> Result<()> {
+        // Retrying the same request on a delayed link must not reset the
+        // desktop generation, decoder or active lease on every UI poll.
+        if enabled && allowed && self.state.controlling {
+            return Ok(());
+        }
+        if !enabled && !self.state.controlling {
+            self.backend.release();
+            return Ok(());
+        }
         self.release_control();
         if enabled {
             if !allowed {
@@ -459,6 +480,25 @@ impl Engine {
     #[cfg(test)]
     fn capture(&mut self) -> Frame {
         self.capture_video().expect("fake capture returns an image")
+    }
+    fn sample_cursor(&mut self) {
+        let result = self.geometry().and_then(|()| {
+            let context = self
+                .context
+                .as_ref()
+                .ok_or_else(|| error("missing desktop context"))?;
+            self.backend.cursor(context)
+        });
+        match result {
+            Ok(cursor) => self.state.cursor = cursor,
+            Err(e) => {
+                if self.state.state != "capture_unavailable" {
+                    self.invalidate();
+                }
+                self.state.state = "capture_unavailable".into();
+                self.state.message = e.to_string();
+            }
+        }
     }
     fn capture_video(&mut self) -> Option<Frame> {
         let image = self.geometry().and_then(|()| {
@@ -638,6 +678,17 @@ mod tests {
         assert_eq!(engine.state.frame_ack_ms, measured);
         let releases = counts.lock().2;
         engine.recent.front_mut().unwrap().1 = Instant::now() - Duration::from_secs(3);
+        let expired = engine.recent.clone();
+        let presented = engine.presented;
+        engine.sample_cursor();
+        assert_eq!(engine.recent, expired);
+        assert_eq!(engine.presented, presented);
+        assert_eq!(engine.state.frame_id, frame.status.frame_id);
+        assert!(
+            engine
+                .presentation(event.generation, event.frame_id)
+                .is_err()
+        );
         engine.release_if_stale();
         assert!(counts.lock().2 > releases);
         // A different desktop at identical geometry must invalidate input too.
@@ -684,8 +735,21 @@ mod tests {
         assert_eq!(writers.load(Ordering::SeqCst), 0);
         engine.control(true, true).unwrap();
         assert_eq!(writers.load(Ordering::SeqCst), 1);
+        let frame = engine.capture();
+        engine
+            .presentation(frame.status.generation, frame.status.frame_id)
+            .unwrap();
+        let presented = engine.presented;
+        engine.control(true, true).unwrap();
+        assert_eq!(engine.state.generation, frame.status.generation);
+        assert_eq!(engine.presented, presented);
+        assert_eq!(engine.recent.len(), 1);
+        assert_eq!(writers.load(Ordering::SeqCst), 1);
         engine.release_control();
         assert_eq!(writers.load(Ordering::SeqCst), 0);
+        let generation = engine.state.generation;
+        engine.control(false, true).unwrap();
+        assert_eq!(engine.state.generation, generation);
         engine.control(true, true).unwrap();
         drop(engine);
         assert_eq!(writers.load(Ordering::SeqCst), 0);
@@ -726,6 +790,7 @@ mod tests {
             pending: u32,
             ready: bool,
             inputs: u32,
+            cursor: i32,
         }
         struct Video(Arc<parking_lot::Mutex<Capture>>);
         impl Backend for Video {
@@ -782,6 +847,19 @@ mod tests {
                 self.0.lock().inputs += 1;
                 Ok(())
             }
+            fn cursor(
+                &mut self,
+                expected: &crate::DesktopContext,
+            ) -> Result<Option<crate::CursorPosition>> {
+                if self.context()? != *expected {
+                    return Err(error("desktop changed during cursor sampling"));
+                }
+                Ok(Some(crate::CursorPosition {
+                    x: self.0.lock().cursor,
+                    y: 0,
+                    visible: true,
+                }))
+            }
             fn release(&mut self) {}
         }
         async fn next(worker: &mut Worker) -> Frame {
@@ -821,6 +899,29 @@ mod tests {
             crate::congestion::Admission::Send
         );
         assert!(feedback.budget().2);
+
+        // Cursor motion is observable while the initial IDR owns all video
+        // credit. It creates neither a frame nor a presentation acknowledgment.
+        worker.cursor.borrow_and_update();
+        capture.lock().cursor = 17;
+        let moved = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                worker.cursor.changed().await.unwrap();
+                let state = worker.cursor.borrow_and_update().clone().unwrap();
+                if state.cursor.is_some_and(|cursor| cursor.x == 17) {
+                    break state;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(moved.generation, initial.status.generation);
+        assert_eq!(moved.frame_id, initial.status.frame_id);
+        assert_eq!(moved.frames, initial.status.frames);
+        assert_eq!(moved.frame_ack_ms, 0.0);
+        assert!(feedback.budget().2);
+        assert!(worker.media.pop().is_none());
+        assert_eq!(capture.lock().inputs, 0);
 
         capture.lock().unavailable = true;
         let unavailable = next(&mut worker).await;

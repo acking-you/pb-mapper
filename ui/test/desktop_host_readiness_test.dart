@@ -8,159 +8,147 @@ import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'fake_desktop_api.dart';
 
 class _HostProbe extends FakeDesktopApi {
-  final privileges = <bool>[];
-  Completer<bool>? helperResult;
+  final enables = <(String, int)>[];
+  Completer<DesktopHostEnable>? enableResult;
+  bool rejectRevoke = false;
+  int restores = 0;
+
   @override
-  Future<bool> helperAction(String action) async {
-    helperActions.add(action);
-    return helperResult == null ? false : await helperResult!.future;
+  Future<String> restoreHost() {
+    restores++;
+    return super.restoreHost();
   }
 
   @override
-  Future<String> startHost({
-    required String service,
-    required int displayId,
-    required bool allowControl,
-    required bool relayOnly,
-    bool privileged = false,
-    bool remember = false,
-    bool autoStart = false,
-    bool background = false,
-  }) {
-    privileges.add(privileged);
-    return super.startHost(
-      service: service,
-      displayId: displayId,
-      allowControl: allowControl,
-      relayOnly: relayOnly,
-      privileged: privileged,
-      remember: remember,
-      autoStart: autoStart,
-      background: background,
-    );
+  Future<void> revokeTrust() {
+    if (rejectRevoke) {
+      throw StateError('service management unavailable');
+    }
+    return super.revokeTrust();
   }
 
-  void helper(DesktopHelper state) {
-    available = DesktopCapabilities(
-      host: true,
-      displays: const [DesktopDisplay(1, 'Display', 1920, 1080)],
-      helper: state,
-    );
+  @override
+  Future<DesktopHostEnable> enableHost(String service, int displayId) async {
+    enables.add((service, displayId));
+    if (enableResult case final result?) return result.future;
+    return super.enableHost(service, displayId);
   }
 }
 
-Future<DesktopStore> _open(WidgetTester tester, _HostProbe api) async {
-  tester.view.physicalSize = const Size(1000, 1500);
-  tester.view.devicePixelRatio = 1;
-  addTearDown(tester.view.reset);
-  final store = DesktopStore(api);
-  await tester.pumpWidget(
-    MaterialApp(
-      locale: const Locale('en'),
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      home: DesktopPage(store: store),
-    ),
-  );
-  await tester.pumpAndSettle();
-  return store;
-}
+class _PendingHostProbe extends FakeDesktopApi {
+  _PendingHostProbe() {
+    trust = const DesktopTrust(
+      supported: true,
+      matchesRelay: true,
+      saved: DesktopTrustedHost(
+        relay: 'test',
+        service: 'desktop:pending',
+        displayId: 1,
+        background: true,
+        autoStart: true,
+      ),
+    );
+  }
 
-Future<void> _close(WidgetTester tester, DesktopStore store) async {
-  await tester.pumpWidget(const SizedBox.shrink());
-  store.dispose();
-  await tester.pump();
+  int restores = 0;
+  int enables = 0;
+  final restored = Completer<String>();
+  @override
+  Future<DesktopHostEnable> enableHost(String service, int displayId) async {
+    enables++;
+    throw StateError('helper configuration reply was lost');
+  }
+
+  @override
+  Future<String> restoreHost() async {
+    if (++restores == 1) throw StateError('helper is restarting');
+    return restored.future;
+  }
 }
 
 void main() {
   testWidgets(
-    'sharing requires secure setup unless ordinary access is explicitly chosen',
+    'one action upgrades local viewing and revoke reflects service ownership',
     (tester) async {
-      final api = _HostProbe()..helper(const DesktopHelper());
-      final store = await _open(tester, api);
-      final share = find.byKey(const Key('desktop-share'));
-      expect(tester.widget<FilledButton>(share).onPressed, isNull);
-      await tester.tap(find.byKey(const Key('desktop-secure-setup-action')));
+      final api = _HostProbe()
+        ..available = const DesktopCapabilities(
+          host: true,
+          displays: [DesktopDisplay(1, 'Display', 1920, 1080)],
+          helper: DesktopHelper(),
+        )
+        ..host = const DesktopStatus(state: 'waiting');
+      final store = DesktopStore(api);
+      await tester.pumpWidget(
+        MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: DesktopPage(store: store),
+        ),
+      );
       await tester.pumpAndSettle();
-      expect(api.helperActions, ['install']);
-      expect(tester.widget<FilledButton>(share).onPressed, isNull);
-      await tester.tap(find.byKey(const Key('desktop-ordinary-only')));
+      final enable = find.byKey(const Key('desktop-share'));
+      // Missing helper preparation is handled by this operation, never by a
+      // separately required setup button or a second background toggle.
+      expect(tester.widget<FilledButton>(enable).onPressed, isNotNull);
+      await tester.tap(enable);
       await tester.pumpAndSettle();
-      await tester.ensureVisible(share);
+      expect(api.enables, [('desktop:my-computer', 1)]);
+      expect(store.sharing, isTrue);
+      expect(store.snapshot.background?.autoStart, isTrue);
+      expect(store.snapshot.host?.controlAllowed, isTrue);
+      expect(store.invitation, isNotNull);
+      expect(find.byKey(const Key('desktop-stop')), findsOneWidget);
+      expect(enable, findsNothing);
+      final invitation = store.invitation;
+      api.rejectRevoke = true;
+      await store.revokeTrust();
       await tester.pumpAndSettle();
-      await tester.tap(share);
+      expect(store.sharing, isTrue);
+      expect(store.invitation, invitation);
+      expect(store.error, isNotNull);
+      api.rejectRevoke = false;
+      await store.revokeTrust();
       await tester.pumpAndSettle();
-      expect(api.privileges, [false]);
-      await _close(tester, store);
+      expect(store.sharing, isFalse);
+      expect(store.invitation, isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      store.dispose();
+      await tester.pump();
     },
   );
 
   testWidgets(
-    'protected application and running service are required before default full access',
+    'one-click setup resumes after IPC failure but stop rejects a late reply',
     (tester) async {
-      final api = _HostProbe()
-        ..helper(
-          const DesktopHelper(
-            installed: true,
-            running: true,
-            identityVerified: true,
-          ),
-        );
-      final store = await _open(tester, api);
-      final share = find.byKey(const Key('desktop-share'));
-      final setup = find.byKey(const Key('desktop-secure-setup-action'));
-      expect(tester.widget<FilledButton>(share).onPressed, isNull);
-      // A remembered background grant can survive management IPC failure.
-      // Its recovery entry point must stay usable even while `sharing` is true.
-      api.background = const DesktopBackground(configured: true, enabled: true);
-      await store.poll();
-      await tester.pumpAndSettle();
-      await tester.tap(setup);
-      await tester.pumpAndSettle();
-      expect(api.helperActions, ['install']);
-      api.helper(const DesktopHelper(installed: true, authorized: true));
-      await store.load();
-      await tester.pumpAndSettle();
-      await tester.tap(setup);
-      await tester.pumpAndSettle();
-      expect(api.helperActions, ['install', 'enable']);
-      api.background = const DesktopBackground();
-      api.helper(
-        const DesktopHelper(installed: true, running: true, authorized: true),
-      );
-      await store.load();
-      await tester.pumpAndSettle();
-      // Running and approved is insufficient when Windows denies querying the
-      // service identity. Repair remains available, but sharing stays blocked.
-      expect(tester.widget<FilledButton>(share).onPressed, isNull);
-      await tester.tap(setup);
-      await tester.pumpAndSettle();
-      expect(api.helperActions, ['install', 'enable', 'install']);
-      api.helper(
-        const DesktopHelper(
-          installed: true,
-          running: true,
-          authorized: true,
-          identityVerified: true,
-        ),
-      );
-      await store.load();
-      await tester.pumpAndSettle();
-      expect(setup, findsNothing);
-      expect(tester.widget<FilledButton>(share).onPressed, isNotNull);
-      await tester.ensureVisible(share);
-      await tester.pumpAndSettle();
-      await tester.tap(share);
-      await tester.pumpAndSettle();
-      expect(api.privileges, [true]);
-      await _close(tester, store);
+      final api = _PendingHostProbe();
+      final store = DesktopStore(api);
+      await store.enableHost('desktop:pending', 1);
+      expect(api.enables, 1);
+      expect(api.restores, 0);
+      await tester.pump(const Duration(seconds: 1));
+      expect(api.restores, 1);
+      expect(store.error, isNotNull);
+      await tester.pump(const Duration(seconds: 2));
+      expect(api.restores, 2);
+      expect(api.enables, 1);
+      await store.stopHost();
+      api.restored.complete('obsolete invitation');
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 20));
+      expect(store.invitation, isNull);
+      expect(store.sharing, isFalse);
+      expect(api.restores, 2);
+      expect(api.helperActions, isEmpty);
+      store.dispose();
+      await tester.pump();
     },
   );
 
-  test(
-    'restart waits for successful handoff and cancellation keeps the UI alive',
-    () async {
-      final api = _HostProbe()..helperResult = Completer<bool>();
+  testWidgets(
+    'restart waits for a successful handoff and cancellation keeps UI alive',
+    (tester) async {
+      final api = _HostProbe()..enableResult = Completer<DesktopHostEnable>();
       var exits = 0;
       final store = DesktopStore(
         api,
@@ -168,22 +156,24 @@ void main() {
           exits++;
         },
       );
-      var installing = store.helperAction('install');
-      await store.helperAction(
-        'install',
-      ); // Repeated clicks cannot start another installer.
-      expect(api.helperActions, ['install']);
+      var enabling = store.enableHost('desktop:machine', 1);
+      await store.enableHost('desktop:machine', 1);
+      expect(api.enables, [('desktop:machine', 1)]);
       expect(exits, 0);
-      api.helperResult!.completeError(StateError('consent cancelled'));
-      await installing;
+      api.enableResult!.completeError(StateError('consent cancelled'));
+      await enabling;
       expect(exits, 0);
       expect(store.restarting, isFalse);
       expect(store.error, isNotNull);
-      api.helperResult = Completer<bool>();
-      installing = store.helperAction('install');
+      await tester.pump(const Duration(seconds: 20));
+      expect(api.restores, 0);
+      expect(api.enables, [('desktop:machine', 1)]);
+
+      api.enableResult = Completer<DesktopHostEnable>();
+      enabling = store.enableHost('desktop:machine', 1);
       expect(exits, 0);
-      api.helperResult!.complete(true);
-      await installing;
+      api.enableResult!.complete(const DesktopHostEnable(restart: true));
+      await enabling;
       expect(exits, 1);
       expect(store.restarting, isTrue);
       expect(store.error, isNull);

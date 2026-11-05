@@ -25,22 +25,27 @@ to preserve responsiveness; 90 FPS is not a relay acceptance requirement.
 1. Configure both apps for the deployed relay and a namespace they can both
    access. Use a dedicated scoped relay credential for the controller; never
    transfer the relay administrator credential to a phone.
-2. On Windows, open the monitor button on **Tunnels**, choose a display, and
-   use a unique service name such as `desktop:my-computer`. Names start with
+2. On Windows, open the monitor button on **Tunnels** and choose **Enable remote
+   control**. This single action prepares the authorized helper, persistent
+   service, input permission and automatic restoration. Complete any Windows
+   consent yourself; a successful installation restarts the unprivileged UI and
+   resumes the saved operation. Advanced settings select the display and a
+   unique service name such as `desktop:my-computer`. Names start with
    `desktop:` and contain only ASCII letters, digits, `.`, `_`, `:`, or `-`,
    with a maximum of 128 bytes. A slash is invalid for scoped relay services.
-3. Sharing defaults to view-only. Enable the separate mouse/keyboard permission
-   only when intended. Send the invitation privately: anyone possessing it can
-   view this desktop and request control when the host permits it. It contains
-   no relay credential.
+3. Copy the reusable invitation privately: anyone possessing it can view and
+   control this desktop while its host permission is enabled. It contains no
+   relay credential. Advanced settings can revoke input while retaining viewing.
 4. On the controller, open Remote desktop, paste the invitation, and open its
-   screen. Request control explicitly; viewing alone never acquires input
-   admission. Choose **relay only** before connecting to exercise that path.
+   screen. The UI automatically requests the host's permitted control after a
+   fresh frame is actually presented. The SDK's explicit control-grant boundary
+   remains unchanged. Choose **relay only** in Advanced before connecting to
+   exercise that path.
 5. Touch mode uses a single tap for left click and a two-finger tap for right
-   click; drag directly to drag a remote item. Trackpad mode moves the remote
-   cursor with one finger and uses a long press to drag. Two fingers always
-   zoom/pan in either mode, without switching away from mouse control. The
-   toolbar also exposes mouse buttons, scrolling, text and key combinations.
+   click; hold before moving to drag a remote item. Trackpad mode moves the remote
+   cursor with one finger and also uses a long press to drag. Moving a two-finger
+   gesture zooms/pans in either mode, without switching away from mouse control.
+   The toolbar also exposes mouse buttons, scrolling, text and key combinations.
    Unicode insertion is supported;
    it is not a remote IME session. Secure-attention sequences are unsupported.
 6. End control to retain viewing, or disconnect. The host retains a persistent
@@ -56,45 +61,62 @@ generic position indicator, not the original Windows cursor bitmap or shape.
 
 ## Remembered authorization and unattended use
 
-**Remember this invitation and its permissions** is off by default. On Windows,
-opting in stores the host TLS identity, 256-bit invitation token, selected display
-and permissions using current-user Windows DPAPI. This is one remembered host
-grant per application profile, bound to the exact relay address and credential
-namespace ID. Remembering a different service replaces the saved grant after
-the new host starts successfully. Relay passwords/administrator keys are not
-copied into this store. The controller must retain its private invitation;
-automatic mobile invitation storage is not implemented.
+**Enable remote control** is the explicit host authorization for persistent
+viewing and input. The Windows service owns the TLS identity, 256-bit invitation
+token, selected display and permissions. The grant is bound to the exact relay
+address and credential namespace ID. The controller must retain its private
+invitation; automatic mobile invitation storage is not implemented.
 
 The invitation is a bearer capability, not a certificate identifying a particular
 phone. Changing a relay or namespace does not silently reuse it elsewhere. Input
-permission is separately persisted only through an explicit host choice; every
-new connection still starts without active control and must request it.
+permission is separately revocable. Every connection starts without active
+control; the UI requests a new grant only after displaying a current frame.
+Reconnect never replays queued pointer or keyboard actions. A certificate
+mismatch stops automatic retries and never replaces the pinned identity.
 
 | Action | Result |
 | --- | --- |
-| Temporary sharing | A fresh identity/invitation; stopping invalidates it |
-| Start remembered desktop | Reuses the saved invitation and selected permissions |
-| Share automatically when this app opens | Explicit opt-in; restores once after app configuration loads |
-| Stop sharing | Closes sessions and disables automatic sharing on the next launch; remembered invitation can still be resumed manually |
-| Close the app during temporary/app-owned sharing | Closes owned sessions while preserving the selected startup policy |
-| Keep sharing in the Windows background service | Explicitly stores a separate service-owned invitation and permissions; closing the UI does not stop it |
+| Enable remote control | Starts the service-owned host with input and automatic restoration enabled; reuses its invitation |
+| Stop sharing | Closes sessions and disables automatic sharing; the same invitation resumes on the next explicit Enable |
+| Close the app | Stops its viewer; service-owned sharing continues |
+| Upgrade legacy app-owned sharing | Transfers the saved identity if no same-scope service identity exists; an existing service identity remains authoritative |
 | Revoke invitation and stop sharing | Deletes remembered trust, closes the current host, and requires a new invitation for future sharing |
 
-App-owned automatic sharing requires Windows to be signed in and the UI to run.
-Its saved file is `desktop-trust.dpapi` beneath the
-existing application configuration directory. SDK embedders own their storage:
+Legacy app-owned grants and a pending installation handoff use current-user
+DPAPI in `desktop-trust.dpapi` beneath the existing configuration directory.
+Successful service transfer removes the legacy copy. A pending handoff retries
+temporary IPC failures with bounded backoff; it never installs a helper without
+the explicit Enable action. Stop or Revoke cancels the pending restoration.
+SDK embedders own their storage:
 `HostIdentity::encode_secret` contains private material and must go in an OS vault
 or encrypted storage, never a log, public configuration, or source control.
 
-The separate **Windows background service** option transfers host ownership to
-the installed service. It saves the selected relay configuration, invitation
+The installed **Windows background service** saves the relay configuration, invitation
 identity, display and permissions using machine DPAPI in a SYSTEM/admin-only
 file. The approved installed UI manages it through a separate authenticated,
 bounded local pipe; ordinary desktop sessions still use endpoint-pinned TLS and
 the existing pb-mapper direct/relay transport. The service retains no Windows
 login password. Stopping disables future automatic sharing; revoking destroys
 the saved grant. Closing the UI merely stops its viewer and any temporary host.
-Enabling background hosting disables the old app-owned automatic-start policy.
+The UI stops any local publisher before transferring ownership. Repeating the
+same configuration does not restart an active host or rotate its identity.
+
+Process-based proxy and firewall rules must allow `pb-mapper-desktop-helper.exe`
+as well as `pb_mapper_ui.exe`: background sharing opens its relay connections in
+the helper. A rule for the UI alone does not cover the service. With the QUIC
+carrier, the helper needs UDP access to the relay's advertised QUIC port and
+TCP access to its configured discovery port. For example, a TUN proxy with UDP
+forwarding disabled can leave the UI connected while silently dropping the
+helper's QUIC handshake. Add the helper to the same permitted route as the UI,
+or explicitly select a working relay carrier before configuring background
+sharing. pb-mapper does not change another application's routing rules.
+
+Background startup errors retain the registration carrier, phase and failure
+in the UI status and in the bounded protected
+`%ProgramFiles%\pb-mapper-desktop\service.log`. `background_start_failed`
+records failed attempts; `background_registered` confirms relay readiness.
+If a viewer resets while the relay reports that its desktop service is not
+registered, resolve that publisher startup failure before diagnosing capture.
 
 The service waits for the installation owner's active console login, including
 that same login while locked, and retries failed relay/capture startup with
@@ -117,12 +139,12 @@ keep a cached Default desktop apparently live. Elevated windows can reject its
 input. The separate helper is the implementation path for elevated-window/UAC
 access, **pending actual OS acceptance**.
 
-Windows sharing defaults to full desktop access. Its preparation card checks
+Windows remote-control preparation checks
 that the helper is installed, running, that this application is authorized,
 and that its live process image matches the protected installation. An identity
 query failure requires repairing/updating the helper and is never shown as ready.
-Follow **Install / update and restart app** and deliberately complete Windows'
-local administrator consent. Installation automatically replaces the current
+Use **Enable remote control** and deliberately complete Windows' local
+administrator consent when required. Installation automatically replaces the current
 application and returns to the remote desktop page, preserving saved settings
 and background sharing authorization. There is no separate "open installed app"
 step. An unelevated worker verifies the protected installation and owner, opens
@@ -131,8 +153,8 @@ It launches the replacement only after that process exits, with a bounded wait.
 Cancellation or preparation failure leaves the original window open. Sharing
 selects the helper automatically when ready; maintenance remains available for
 service-owned sharing even when background management loses its connection.
-**Ordinary desktop only** is an explicit limited mode and
-does not support UAC or the lock screen. The first
+The SDK ordinary-desktop backend remains available to embedders and does not
+support UAC or the lock screen. The first
 elevation of a portable app may need a person locally. A phone cannot approve a
 desktop the unprivileged app cannot access. No UAC policy is changed, no prompt
 is auto-consented, and no administrator password is retained.
@@ -303,17 +325,20 @@ The capture schedule is independent of encoding duration. Static-screen refreshe
 at about 250 ms are marked duplicates and excluded from unique-frame FPS.
 `Viewer::connect_with_presentation_feedback` opts into renderer-driven admission;
 the UI uses it and the existing receive-only SDK APIs retain their behavior.
-The unacknowledged window starts at 64 KiB, is bounded by 512 KiB / 24 frames,
+The unacknowledged window starts at 64 KiB, is bounded by 512 KiB / eight frames,
 and allows one bounded independent unit (at most 256 KiB) to initialize the decoder.
+The frame limit matches the receiver's queue. A recovery IDR holds the window
+until its presentation is acknowledged, so another burst cannot evict that
+replacement GOP while the receiver is still waiting for an independent image.
 Unsent frames older than 250 ms are discarded and request a fresh IDR. True
-presentation acknowledgements are coalesced over 100 ms, including a trailing
+presentation acknowledgements are coalesced over 33 ms, including a trailing
 acknowledgement when there is no next frame. These observations never bypass
 input authorization or its two-second freshness limit.
 
 Growing acknowledgement delay lowers bitrate and GPU output size, down to a
 256 kbit/s budget and 640×360 / 30 FPS. Progress with healthy latency gradually
-restores quality within the viewer's limits. A stable renderer latency baseline
-avoids treating Android's fixed presentation delay as congestion. Admission grows
+restores quality within the viewer's limits. A renderer latency baseline is
+calibrated from small predictive flights. Admission grows
 on earned acknowledgements toward the measured round-trip budget, within the
 same byte/frame caps. Sustained queueing, rather than one delayed ACK, reduces
 quality; application-limited ACK throughput is not treated as link capacity.
@@ -321,19 +346,28 @@ Brief credit pauses preserve the predictive GOP. After an expired GPU output,
 dependent outputs are discarded until an independent frame arrives. Four seconds
 without presentation progress ends the session with an explicit reconnect
 message; there is no silent indefinite freeze. This does not establish a fixed
-frame-rate guarantee on arbitrary hardware or networks.
+frame-rate guarantee on arbitrary hardware or networks. Persistent delay and
+jitter in the Android VM can still leave quality at its minimum; recovery on
+that real renderer remains a limitation despite the synthetic slow-link test.
 
 Android negotiates no more than its current display refresh rate (up to 90 FPS).
 The media isolate waits on native frame arrival for at most 16 ms, and native
 submit returns producer credit after consuming encoded input. Android uses
 `MediaCodec.Callback` on its codec worker instead of two-ms dequeue polling.
-At most four units are decoding or waiting as decoded outputs; it additionally
-paces those outputs using capture timestamps, with a 25 ms initial
-buffer and an 80 ms scheduling bound. Only one output may await SurfaceTexture
-consumption at a time; its exact timestamp returns the next presentation credit.
+At most four units are decoding or waiting as decoded outputs. The newest
+decoded picture is immediately eligible, without an additional playback pacer.
+Only one output may await SurfaceTexture consumption at a time; its exact
+timestamp returns the next presentation credit.
 Full metadata capacity pauses decoder input, while reset, disconnect and a
 two-second consumption stall retire pending work. These bounds do not guarantee
-a frame rate.
+a frame rate. Android uses Flutter's supported OpenGL renderer for this
+SurfaceTexture path; zoom/pan retains the same texture and decoder.
+
+Cursor position changes use a separate coalesced status channel, including when
+capture is idle or the video window is full. Same-generation streaming events
+with empty bytes update status/cursor only: retain the picture and its age, do
+not reset the decoder or acknowledge a new frame. Cursor observation never
+renews held-input authorization.
 
 Diagnostics distinguish unique capture FPS, unique receive FPS, native texture
 presentation, dropped units and bitrate. `frame_ack_ms` measures host frame-ready
@@ -345,126 +379,112 @@ delay. Zero means no current-generation presentation sample is available.
 
 Development environment: Windows 11 Enterprise 10.0.26300, Ryzen 9 9950X,
 NVIDIA RTX 5070 Ti, 2560×1440 display at 165 Hz; Rust 1.99.1 and Flutter 3.44.9.
-The first 0.10.2-based Windows UI run lasted 30.05 seconds with a five-second
-warmup and measured **89.58 native texture-consumed FPS at 1920×1080 over the
-actual pb-mapper direct path**. Sampled UI presentation averaged 89.54 FPS;
-unique capture and receive both averaged 90.00 FPS. Every steady-state sample
-was streaming/direct with no viewer error, zero SDK queue drops and zero native
-queue drops. This meets the milestone's "at or near 90 FPS" target on this
-machine. The endpoints ran on the same Windows host with a moving test window
-and self-view; it is not cross-NAT, physical-phone, image-quality or UAC proof.
-The raw counters, monotonic timings, environment and native binary hashes are in
-[`validation/windows-direct-1080p90.json`](validation/windows-direct-1080p90.json).
-The [reproduction procedure](../scripts/test/desktop-ui-acceptance.md) uses the
-product viewer and decoder, not a simulated renderer.
+The [UI acceptance procedure](../scripts/test/desktop-ui-acceptance.md) measures
+native texture consumption through the product viewer and decoder.
 
-After fixing explicit decoder-reset credit recovery, connection cancellation
-and mouse hover, an always-visible moving pattern produced **85.19 native
-presented FPS**, 89.19 unique capture/receive FPS, and zero SDK/native queue
-drops or steady-state errors in another 30-second direct run. Its counters and
-binary hashes are in
+The final build 922 native Windows run measured **84.75 presented FPS** at
+1920×1080 over direct, with 89.91 unique capture/receive FPS and mean frame ACK
+17.35 ms over 60 samples. The final Android VM relay smoke measured 14.24 FPS
+and 427.10 ms mean ACK over 60 samples; neither run had errors, reconnects or SDK
+queue loss. Android had no decoder recovery, and normal disconnect left the host
+waiting without a TLS error. See
+[`validation/desktop-922.md`](validation/desktop-922.md) and its counter evidence
+for the environment, longer diagnostic baselines and remaining limits.
+
+The earlier 0.10.2-based Windows revision measured **89.58 native presented FPS
+at 1920×1080 over the actual direct path**, after a five-second warmup in a
+30.05-second run. Unique capture/receive averaged 90.00 FPS; steady-state samples
+had no viewer errors or SDK/native queue drops. A later reviewed revision with
+an always-visible moving pattern measured **85.19 presented FPS**, 89.19 unique
+capture/receive FPS and zero SDK/native drops. Their counters, environment and
+binary hashes are preserved in
+[`validation/windows-direct-1080p90.json`](validation/windows-direct-1080p90.json)
+and
 [`validation/windows-direct-1080p90-reviewed.json`](validation/windows-direct-1080p90-reviewed.json).
-The pattern now stays topmost: an intervening run with the pattern occluded by
-the viewer measured 78.36 presented / 80.74 captured FPS. These different source
-conditions are not a controlled before/after comparison. The observed rates
-depend on content and compositor scheduling; 89.58 FPS is not a guaranteed floor.
+These are independent evidence for those older revisions on one Windows machine,
+not a performance pass for the current package. The installed build 922's recent
+69–77 FPS self-view observation was not a controlled 90 FPS benchmark.
 
-The following earlier development experiments are separate evidence, not
-full-product acceptance or substitutes for the native presentation runs:
+The current Android diagnostic baseline uses Android 36 x86_64 emulator
+`emulator-5580`, `c2.goldfish.h264.decoder`, a 60 Hz virtual display and host OpenGL
+on the RTX 5070 Ti (`-gpu host`). Each path ran for approximately 120 seconds,
+without concurrent builds. These runs used the eight-frame admission window and
+33 ms ACK coalescing. Their congestion reference is retained in the final code;
+the subsequent reference-mean experiment was reverted. These are diagnostic
+baselines, not a physical-phone performance pass.
 
-| Experiment | Recorded result | What it establishes |
-| --- | --- | --- |
-| Optimized SDK capture/encode/receive, 2560×1440, 10 s per path | 94.79 unique received FPS direct; 104.45 forced relay; zero reported queue drops | The GPU/transport path can exceed 60 FPS in this environment; no native rendering measured |
-| Default 1920×1080 / 90 FPS SDK, 10 s per path, after host TCP_NODELAY | 86.48 unique received FPS direct; 85.42 forced relay; zero reported queue drops | Short SDK experiment through the deployed TCP service; not a sustained UI result |
-| Native 1920×1080, 90 FPS encoded fixture on Windows | 89.96 texture-presented FPS | Native decode/texture path in isolation; no network/capture latency measured |
-| Same fixture on the Android VM with a 60 Hz display | 56.38 texture-presented FPS | Android native path exercised; does not pass the requested 60+ FPS target |
-| Full Windows Flutter/FFI/native viewer, 1080p90, direct, 25 s | 88.93 presented FPS over seconds 5–24; 2,194 consumed textures total; zero SDK/native queue drops | Actual integrated viewing, including capture and transport; both endpoints on this Windows host |
-| Same Windows UI with final renderer feedback and trailing ACK, 25 s | 85.88 presented FPS over seconds 5–24; 2,095 consumed textures total; zero SDK/native queue drops | Direct self-view on the same host; 1080p / 12 Mbps ceiling, 16.65 ms final ACK sample; no synthetic animation in this run |
-| Earlier Android VM viewer, 1080p60, direct, 25 s | 55.24 presented FPS over seconds 5–24; 59.98 received FPS | Before single-output surface credit; not a 60+ FPS pass |
-| Android VM with single-output surface credit and feedback, 1080p60, direct, 25 s | 49.62 presented FPS over seconds 5–24; 1,182 of 1,186 decoded outputs consumed; 1 SDK drop / 0 native drops | Android 36 x86_64, `c2.goldfish.h264.decoder`, 60 Hz virtual display; bounded presentation, but below the requested 60+ FPS |
-| Earlier Android UI with feedback and single-output credit, deployed TCP relay, 25 s | 22.54 presented FPS over seconds 5–24; 640×360 / 256 kbit/s at the end; 2 SDK drops / 0 native drops | Before the callback decoder and WAN admission fixes; 484 of 485 decoded outputs consumed; no 60 FPS claim |
+| Android VM path | Native presented FPS | Submit-to-consume mean | Surface release-to-consume mean | Reconnects / SDK drops / native recoveries |
+| --- | --- | --- | --- | --- |
+| Direct | 17.78 | 89.00 ms | 48.42 ms | 0 / 0 / 0 |
+| Forced relay | 15.94 | 87.20 ms | 50.53 ms | 0 / 0 / 0 |
 
-The SDK run used the deployed relay over TCP with a dedicated expiring scoped
-test credential; its log is `target/desktop-scheduler-benchmark.log`. The locally
-configured QUIC carrier timed out. The test used TCP without changing the user's
-saved configuration, so QUIC connectivity is not verified. A deployed-relay path
-and a VM on the same host also do not prove operation across two independent NATs.
-Integrated direct-viewer logs are `target/desktop-live-windows-auto.json` and
-`target/desktop-live-android-auto.json`. Some earlier full UI forced-relay runs
-received only about 100 KiB/s and accumulated stale video. This was application
-throughput, **not a measured limit of the public relay**. The Windows feedback
-run is `target/desktop-live-windows-feedback-auto.json`. The fixture and SDK
-numbers must not substitute for UI results.
-The earlier Android relay log is `target/desktop-live-android-package-relay.json`;
-all 24 samples after initial connection remained streaming, with no viewer error.
-The single-output direct log is `target/desktop-live-android-surface-credit-auto.json`.
+Both runs adapted mostly to 640×360. The native renderer skipped 1,076 / 489
+obsolete decoded pictures respectively; these are distinct from compressed SDK
+queue loss. Final native-presented and transmitted-ACK generation/frame IDs
+matched, with no ACK errors and one application keyframe request per run.
+Local reports are `target/issue50-922/direct-window8-ack33.json` and
+`target/issue50-922/relay-window8-ack33.json`; neither contains controller setup.
+Flutter build time averaged about 2.7 ms and raster time 15.7–16.8 ms. After
+warmup, additional Flutter draws beyond new video presentations were fewer than
+one per second. No fixed application 20 FPS limit or dominant repeated-rebuild
+cost was established. Surface delivery, GPU work and Flutter scheduling remain
+partially combined in the timings; physical-phone 60 FPS is unverified.
 
-The 2026-11-05 transport probe separates carrier capacity from video admission.
-Four MiB in each direction, through the deployed TCP relay and the machine's
-existing `wintun` route, measured 43.62 / 32.26 Mbit/s with split TLS and a
-194 ms median ping round trip. Raw, framed and combined-TLS cases also exceeded
-32 Mbit/s in both directions. Upload timing waits for the receiving endpoint's
-confirmation. Logs: `target/desktop-transport-deployed.log` and
-`target/desktop-transport-environment.log`.
+A 120-second experiment replaced the lifetime-minimum reference with a low-load
+interval mean. It restored substantially higher resolution but reduced the VM's
+native presented rate from 15.94 to 13.66 FPS, raised sampled mean ACK delay from
+384.3 to 439.6 ms, and increased decoder configurations from 5 to 17. That
+experiment is not in the final package. The one-second averaging of congestion
+observations, eight-frame bound and exclusive recovery-IDR credit are retained.
 
-A second consumer route uses an existing SSH connection to a separate cloud
-host, forwarding only the local test connection to the same public relay. The
-publisher still exits through the local `wintun` route. That controlled topology
-measured 42.98 / 38.63 Mbit/s with split TLS and 238.80 ms median round trip;
-`target/desktop-transport-ssh-exit.log` records byte verification. It establishes
-two different relay entry paths, not independent physical phones or two real
-NATs. No remote relay deployment or route settings were changed.
+Installed build 922 passed a persistent-host lifecycle check: one Enable action
+left `PbMapperDesktop` Running with Automatic startup. After fully terminating
+the UI and reopening the exact protected installed executable, sharing appeared
+automatically, the service retained PID 99536, and the copied invitation's SHA-256
+matched the value before UI exit. Stop removed the sharing banner and restored
+Enable; enabling again resumed sharing within seconds without another UAC prompt
+for the already-authorized installation. Replacing the clipboard with a marker
+before copying again confirmed that the unchanged invitation was freshly copied.
+This verifies UI exit/relaunch and Stop/Enable, not OS reboot, service restart,
+sleep/resume or remote control of a UAC prompt.
 
-After preserving predictive frames across credit pauses and repairing window
-growth, two 30-second 1080p60 GPU streams were received with **simulated** 50 ms
-presentation delay and 100 ms ACK coalescing. A moving benchmark window supplied
-content. The ordinary public-relay path received 58.95 unique FPS after a five
-second warmup (54.96 over the whole run); the SSH consumer path received 57.69
-(55.98 overall). Both ended at a 12 Mbit/s codec budget with zero SDK queue drops.
-Their receive-gap p95 values were 38.91 and 42.29 ms, so these averages are not
-proof of uniform frame pacing. Full saved H.264 streams decoded with no FFmpeg
-errors. Logs: `target/desktop-flow-final.log` and
-`target/desktop-flow-final-ssh.log`. These are transport/feedback measurements,
-**not native Android or Windows UI presentation FPS**.
+Android VM touch tap, hold-drag, two-finger right click and pinch, plus trackpad
+hold-drag/right click, passed against a benign owned Windows target with event
+counters. Text insertion and scrolling passed in the preceding input run. These
+are actual controller-to-target checks; they do not establish physical touchscreen
+or secure-desktop behavior.
 
-The callback-based Android revision compiled successfully, but its on-device
-installation/run was blocked by automatic approval review. The previous Android
-UI measurements above remain the last runtime evidence; the callback change
-has no new presented-FPS result. A forced 350 ms GPU-output pause additionally
-verified recovery on an independent frame; all 172 exported 1280×720 frames
-decoded without error (`target/desktop-pause-recovery.log`).
+Supporting experiments remain separate from UI presentation acceptance. Earlier
+split-TLS transport probes measured 43.62 / 32.26 Mbit/s with a 194 ms median ping
+round trip through the deployed TCP relay, and 42.98 / 38.63 Mbit/s with a
+238.80 ms median using a separate SSH consumer exit. Logs are
+`target/desktop-transport-deployed.log` and
+`target/desktop-transport-ssh-exit.log`. They demonstrate carrier capacity and two
+relay entry paths, not two independent NATs. The earlier SDK/fixture and simulated
+presentation-delay results are not current Android UI rates. A forced 350 ms
+GPU-output pause recovered on an independent frame; all 172 exported 1280×720
+frames decoded without error (`target/desktop-pause-recovery.log`).
 
-An explicit 34.22-second synthetic-source / real-TLS feedback acceptance run
-throttles reads to 100 KiB/s, then delays presentation by 600 ms and restores the
-reader. With the revised controller the budget fell below 1 Mbit/s during the
-first eight seconds, bottomed at 256 kbit/s, then recovered to 12 Mbit/s by second
-30. Maximum accepted ACK latency was 713.26 ms; intentionally stopping all ACKs
-ended the session after 4.18 s. This tests congestion recovery and bounded admission, not image quality
-or physical presentation. Reproduce with
-`cargo test -p pb-mapper-desktop --all-features --lib presentation_feedback_recovers_after_slow_tls_and_renderer -- --ignored --nocapture`;
-log: `target/desktop-feedback-acceptance-optimized.log`.
-
-A separate 30-second acceptance test throttles actual TLS reads through a local
-test relay, using synthetic 64 KiB access units and no OS input. At 209.54 KiB/s
-measured throughput it captured 2,430 units and discarded 2,304 under the 8-frame /
-8 MiB queue limits. Remote control-grant and release commands completed in 2.15 ms
-and 0.47 ms; local revocation and stop in 0.15 ms and 0.95 ms. The viewing session
-remained active after revocation. This measures the transport/control boundary,
-not image quality or WAN latency. A 64 KiB/s attempt disconnected after about
-17 seconds and is not a stable-throughput pass. Reproduce the successful explicit
-probe with `cargo test -p pb-mapper-desktop --all-features --lib sustained_slow_tls_reader -- --ignored --nocapture`;
-results are in `target/desktop-slow-tls-acceptance.log`.
+Older synthetic-source / real-TLS tests separately exercised slow-reader and
+presentation-feedback recovery. Their logs are
+`target/desktop-feedback-acceptance-optimized.log` and
+`target/desktop-slow-tls-acceptance.log`; rerun the ignored
+`presentation_feedback_recovers_after_slow_tls_and_renderer` and
+`sustained_slow_tls_reader` tests for the current congestion revision. These do
+not measure image quality or physical presentation. Deployed probes use dedicated
+expiring scopes and an explicit TCP override without changing saved application
+routing; QUIC carrier and independent cross-network UI acceptance remain separate.
 
 | Capability | Current evidence / limit |
 | --- | --- |
 | Windows ordinary desktop | Capture and native video paths exercised on the machine above |
-| Input / Unicode / touch mapping | Backend and UI paths implemented; focused state/security tests cover mapping and ordering |
-| Direct and forced relay | Local integration and deployed TCP SDK experiments exercised; independent cross-network UI acceptance outstanding |
+| Input / Unicode / touch mapping | Android VM gestures and text/scroll reached a benign Windows target; physical-device and secure-desktop acceptance outstanding |
+| Direct and forced relay | Android VM runtime baselines above and deployed TCP experiments recorded; independent cross-network UI acceptance outstanding |
 | Android viewer | Native MediaCodec/Flutter texture path exercised in an Android VM; physical phone validation outstanding |
 | iOS viewer | Shared Flutter/JPEG path exists; packaged build and device validation outstanding |
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
-| Windows service-owned background host | Implemented with explicit opt-in, machine DPAPI and protected management IPC; actual service/restart/long-running acceptance pending |
+| Windows service-owned background host | Installed build 922 passed UI exit/relaunch and Stop/Enable with the same invitation; OS boot, service restart and sleep/resume acceptance pending |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |
 | Rotated GPU capture, macOS/Linux hosts | Unsupported |
@@ -498,19 +518,12 @@ secure desktop. Use the read-only collector and explicit acceptance matrix in
 host evidence is in `target/issue50-vm-acceptance/`. No UAC policy was changed and
 no consent dialog was approved by automation.
 
-`input_acceptance --run-owned-window` additionally exercised real Windows input
-through a dedicated local TCP relay and GPU/H.264 backend. Its own EDIT control
-read back Chinese, Unicode and emoji exactly; two real mouse-down/up pairs were
-observed, with disconnect-triggered release taking 15.245 ms. The program checks
-the foreground HWND, DPI-correct geometry and focus before every injection and
-never targets other windows. This is ordinary-desktop evidence, not UAC or a
-physical touch-device test. Log: `target/desktop-native-input-acceptance.log`.
-The probe also accepts `--relay-config PATH --tcp --consumer-server HOST:PORT`
-for an existing alternate relay entry, with its own expiring test scope. The
-attempt through the SSH entry aborted with `applied=0` when the owned window
-lost foreground. This correctly prevented input to another window, but does
-not pass cross-network input acceptance; see
-`target/desktop-native-input-cross-egress.log`.
+The earlier `input_acceptance --run-owned-window` probe independently read back
+Chinese, Unicode and emoji and observed mouse input through a dedicated TCP
+relay (`target/desktop-native-input-acceptance.log`). Its alternate SSH-entry
+attempt aborted with `applied=0` when the owned target lost foreground; that
+preserves the input boundary but does not pass cross-network input acceptance
+(`target/desktop-native-input-cross-egress.log`).
 
 ## Components, builds and licensing
 

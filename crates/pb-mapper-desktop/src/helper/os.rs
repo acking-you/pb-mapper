@@ -582,6 +582,12 @@ fn verify_process_image(id: u32, expected: &Path) -> Result<()> {
 
 #[cfg(feature = "windows-helper")]
 pub(super) fn record_service_failure(failure: &std::io::Error) {
+    record_service_event("service_failed", &failure.to_string());
+}
+
+/// Bounded control-path diagnostics; never pass grants, keys or input events.
+#[cfg(feature = "windows-helper")]
+pub(super) fn record_service_event(event: &str, detail: &str) {
     let write = || -> Result<()> {
         let root = install_root()?;
         protected_path(&root)?;
@@ -596,16 +602,28 @@ pub(super) fn record_service_failure(failure: &std::io::Error) {
                 GENERIC_WRITE.0,
                 FILE_SHARE_READ,
                 Some(descriptor.attributes()),
-                CREATE_ALWAYS,
+                OPEN_ALWAYS,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                 None,
             )
         }
         .map_err(error)?;
         let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
-        use std::io::Write;
-        let text: String = failure.to_string().chars().take(1000).collect();
-        file.write_all(text.as_bytes())?;
+        use std::io::{Seek, SeekFrom, Write};
+        if file.metadata()?.len() > 64 * 1024 {
+            file.set_len(0)?;
+        }
+        file.seek(SeekFrom::End(0))?;
+        let text: String = detail
+            .chars()
+            .take(2000)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        writeln!(file, "{now} {event}: {text}")?;
         Ok(())
     };
     let _ = write();

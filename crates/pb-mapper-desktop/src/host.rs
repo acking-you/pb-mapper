@@ -6,6 +6,7 @@ use crate::{
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{Client, RegisterOptions, RegisterRequest, Registration, Transport};
 use std::{sync::Arc, time::Duration};
+use tokio::io::AsyncWriteExt;
 use tokio::{net::TcpListener, sync::Mutex as AsyncMutex, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -105,10 +106,25 @@ impl Host {
             )
             .await
             .map_err(error)?;
-        registration
+        if let Err(failure) = registration
             .wait_ready_timeout(Duration::from_secs(15))
             .await
-            .map_err(error)?;
+        {
+            let diagnostic = registration.diagnostics();
+            let relay = client.relay_diagnostics().await;
+            return Err(error(format!(
+                "Desktop registration failed: {failure}; carrier={:?}, phase={}, failure={}, attempts={}{}",
+                diagnostic.relay_transport,
+                diagnostic.last_attempt_phase.as_str(),
+                diagnostic
+                    .last_failure
+                    .map_or("none", |reason| reason.as_str()),
+                diagnostic.attempts,
+                relay
+                    .last_error
+                    .map_or(String::new(), |detail| format!("; {detail}")),
+            )));
+        }
         let allowed = Arc::new(Policy::new(options.allow_control));
         let status = Arc::new(Mutex::new(SessionStatus {
             state: "waiting".into(),
@@ -158,14 +174,14 @@ impl Host {
                             let mut worker = Worker::start_video(factory, allowed, status, codec, preferences, presentation_feedback, admission);
                             let (mut read, mut write) = tokio::io::split(stream);
                             let mut frames = worker.frames.clone();
+                            let mut cursor = worker.cursor.clone();
                             let receive = async {
                                 loop {
-                                    let command = tokio::time::timeout(wire::IO_TIMEOUT, wire::read_json::<_, Command>(&mut read)).await.map_err(error)??;
+                                    let Some(command) = tokio::time::timeout(wire::IO_TIMEOUT, wire::read_json_or_eof::<_, Command>(&mut read)).await.map_err(error)?? else { return Ok::<(), std::io::Error>(()) };
                                     // Permission/stale input errors are reported with the next
                                     // status frame; malformed frames terminate the transport.
                                     let _ = worker.command(command).await;
                                 }
-                                #[allow(unreachable_code)] Ok::<(), std::io::Error>(())
                             };
                             let send = async {
                                 let mut pending = None;
@@ -182,7 +198,29 @@ impl Host {
                                         }).await.map_err(error)??;
                                         return Err(error(&state.message));
                                     }
+                                    // Cursor observations bypass the predictive-media queue
+                                    // and its presentation credits. A watch retains only
+                                    // the newest position while a network write is busy.
+                                    if cursor.has_changed().map_err(error)? {
+                                        let update = cursor.borrow_and_update().clone();
+                                        if let Some(state) = update
+                                            && state.generation == session_status.lock().generation {
+                                            tokio::time::timeout(wire::IO_TIMEOUT, async {
+                                                wire::write_json(&mut write, &state).await?;
+                                                wire::write_bytes(&mut write, &[], wire::MAX_FRAME).await
+                                            }).await.map_err(error)??;
+                                            last_sent = std::time::Instant::now();
+                                        }
+                                    }
                                     if pending.is_none() { pending = worker.media.pop(); }
+                                    if let Some(frame) = pending.as_mut() {
+                                        let current = session_status.lock();
+                                        if frame.status.generation == current.generation {
+                                            // An older queued picture must not undo a newer
+                                            // independently delivered pointer observation.
+                                            frame.status.cursor = current.cursor;
+                                        }
+                                    }
                                     let mut waiting = false;
                                     if let Some(frame) = pending.as_ref()
                                         && let Some(feedback) = &worker.feedback {
@@ -205,8 +243,10 @@ impl Host {
                                                 }).await.map_err(error)??;
                                                 last_sent = std::time::Instant::now();
                                             }
-                                            tokio::select! { result = frames.changed() => { result.map_err(error)?; }, () = feedback.changed.notified() => {}, () = tokio::time::sleep(Duration::from_millis(20)) => {} }
-                                        } else { frames.changed().await.map_err(error)?; }
+                                            tokio::select! { result = cursor.changed() => { result.map_err(error)?; cursor.mark_changed(); }, result = frames.changed() => { result.map_err(error)?; }, () = feedback.changed.notified() => {}, () = tokio::time::sleep(Duration::from_millis(20)) => {} }
+                                        } else {
+                                            tokio::select! { result = cursor.changed() => { result.map_err(error)?; cursor.mark_changed(); }, result = frames.changed() => { result.map_err(error)?; } }
+                                        }
                                         continue;
                                     }
                                     let frame = pending.take().ok_or_else(|| error("missing admitted desktop frame"))?;
@@ -220,9 +260,21 @@ impl Host {
                                 }
                                 #[allow(unreachable_code)] Ok::<(), std::io::Error>(())
                             };
-                            let outcome = tokio::select! { () = stop.cancelled() => Ok(()), result = receive => result, result = send => result };
+                            let outcome = tokio::select! { biased; () = stop.cancelled() => Ok(()), result = receive => result, result = send => result };
                             worker.stop().await;
-                            if let Err(e) = outcome { session_status.lock().message = e.to_string(); }
+                            if let Err(e) = outcome {
+                                session_status.lock().message = e.to_string();
+                            } else {
+                                session_status.lock().message.clear();
+                                // Acknowledge normal TLS closure before the viewer
+                                // tears down its owned forwarding connection. Local
+                                // stop must never wait for a slow peer to drain video.
+                                tokio::select! {
+                                    biased;
+                                    () = stop.cancelled() => {},
+                                    _ = tokio::time::timeout(wire::IO_TIMEOUT, write.shutdown()) => {},
+                                }
+                            }
                         });
                     }
                 }

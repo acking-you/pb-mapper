@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 
 const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v1";
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const FILE_NAME: &str = "background-host.dpapi";
+const REVOKED_MARKER: &str = "background-host.revoked";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub service: String,
@@ -18,7 +20,7 @@ pub struct Settings {
     pub auto_start: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Options {
     pub server: String,
@@ -53,12 +55,22 @@ pub struct Snapshot {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
-    Configure { options: Options },
+    Configure {
+        options: Options,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<crate::HostIdentity>,
+    },
     Status,
     Start,
     Stop,
     Revoke,
-    Permission { allow_control: bool },
+    RevokeScope {
+        server: String,
+        namespace: Option<u64>,
+    },
+    Permission {
+        allow_control: bool,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,12 +101,30 @@ async fn call(command: Command) -> Result<Snapshot> {
 /// readiness is asynchronous and visible through [`status`]. Validation or
 /// storage failure leaves the previous configuration and host untouched.
 pub async fn configure(options: Options) -> Result<Snapshot> {
-    call(Command::Configure { options }).await
+    call(Command::Configure {
+        options,
+        identity: None,
+    })
+    .await
+}
+/// Transfer a local host into service ownership without changing its invitation.
+/// An existing service identity for the same scope always wins: stale application
+/// storage must never replace an established service-owned grant.
+pub async fn configure_with_identity(
+    options: Options,
+    identity: crate::HostIdentity,
+) -> Result<Snapshot> {
+    call(Command::Configure {
+        options,
+        identity: Some(identity),
+    })
+    .await
 }
 pub async fn status() -> Result<Snapshot> {
     call(Command::Status).await
 }
-/// Restore the saved grant; a viewer still has to request input control.
+/// Restore the saved grant and automatic startup. A renderer still requests
+/// control only after presenting the current desktop.
 pub async fn start() -> Result<Snapshot> {
     call(Command::Start).await
 }
@@ -105,6 +135,22 @@ pub async fn stop() -> Result<Snapshot> {
 /// Stop active hosting and destroy the stored invitation and relay credential.
 pub async fn revoke() -> Result<Snapshot> {
     call(Command::Revoke).await
+}
+/// Revoke the current application's relay scope, including a just-completed
+/// handoff that its UI has not observed. The service checks the scope atomically.
+/// Older helpers reject this operation; never fall back to unscoped revocation.
+pub async fn revoke_scope(server: String, namespace: Option<u64>) -> Result<Snapshot> {
+    let helper = super::status();
+    if !helper.installed || helper.startup_disabled {
+        let root = os::install_root()?;
+        // An absent/stopped helper with no durable grant has nothing to revoke.
+        // A leftover authorization or failed-revocation marker requires the
+        // service, even when this application has never observed it running.
+        if !root.join(FILE_NAME).try_exists()? && !root.join(REVOKED_MARKER).try_exists()? {
+            return Ok(Snapshot::default());
+        }
+    }
+    call(Command::RevokeScope { server, namespace }).await
 }
 pub async fn set_control_allowed(allow_control: bool) -> Result<Snapshot> {
     call(Command::Permission { allow_control }).await

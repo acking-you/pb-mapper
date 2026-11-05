@@ -27,8 +27,11 @@ pub(super) struct Settings {
     pub relay_only: bool,
     pub privileged: bool,
     pub auto_start: bool,
+    /// Service ownership, including a pending one-click setup across app restart.
+    #[serde(default)]
+    pub background: bool,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Saved {
     schema: u32,
@@ -38,6 +41,47 @@ pub(super) struct Saved {
     identity: Vec<u8>,
 }
 impl Saved {
+    #[cfg(windows)]
+    pub fn for_background(
+        scope: &Scope,
+        service: String,
+        display_id: u32,
+        previous: Option<&Self>,
+        live_identity: Option<&HostIdentity>,
+    ) -> Result<Self, CtlError> {
+        if !service.starts_with("desktop:")
+            || service.len() <= 8
+            || service.len() > 128
+            || !service
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
+        {
+            return Err(CtlError::invalid_argument("invalid desktop service"));
+        }
+        let identity = if let Some(identity) = live_identity {
+            identity.clone()
+        } else if let Some(saved) =
+            previous.filter(|saved| saved.matches(scope) && saved.settings.service == service)
+        {
+            saved.identity()?
+        } else {
+            HostIdentity::generate().map_err(err)?
+        };
+        Self::new(
+            scope,
+            Settings {
+                service,
+                display_id,
+                allow_control: true,
+                relay_only: false,
+                privileged: true,
+                auto_start: true,
+                background: true,
+            },
+            &identity,
+        )
+    }
+
     pub fn new(
         scope: &Scope,
         settings: Settings,
@@ -60,7 +104,8 @@ impl Saved {
     pub fn metadata(&self) -> Value {
         json!({"relay": self.relay, "service": self.settings.service, "display_id": self.settings.display_id,
             "allow_control": self.settings.allow_control, "relay_only": self.settings.relay_only,
-            "privileged": self.settings.privileged, "auto_start": self.settings.auto_start})
+            "privileged": self.settings.privileged, "auto_start": self.settings.auto_start,
+            "background": self.settings.background})
     }
 }
 fn path(directory: &Path) -> PathBuf {
@@ -219,6 +264,7 @@ mod tests {
                 relay_only: true,
                 privileged: false,
                 auto_start: false,
+                background: false,
             },
             &identity,
         )
@@ -247,5 +293,47 @@ mod tests {
         revoke(&root).unwrap();
         assert!(load(&root).unwrap().is_none());
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn background_handoff_keeps_the_live_link_through_restart() {
+        let scope = Scope {
+            directory: Default::default(),
+            relay: "relay:7666".into(),
+            namespace: 1,
+        };
+        let identity = HostIdentity::generate().unwrap();
+        let pending =
+            Saved::for_background(&scope, "desktop:handoff".into(), 1, None, Some(&identity))
+                .unwrap();
+        // The same DPAPI representation used between portable and installed
+        // processes carries the identity, owner scope and the one pending action.
+        let encrypted = protect(&serde_json::to_vec(&pending).unwrap(), true).unwrap();
+        let restored: Saved = serde_json::from_slice(&protect(&encrypted, false).unwrap()).unwrap();
+        assert!(restored.settings.background && restored.settings.auto_start);
+        assert!(restored.settings.allow_control && restored.settings.privileged);
+        assert!(!restored.settings.relay_only);
+        let resumed =
+            Saved::for_background(&scope, "desktop:handoff".into(), 2, Some(&restored), None)
+                .unwrap();
+        assert_eq!(
+            resumed.identity().unwrap().encode_secret().unwrap(),
+            identity.encode_secret().unwrap()
+        );
+        let different = Saved::for_background(
+            &Scope {
+                namespace: 2,
+                ..scope
+            },
+            "desktop:handoff".into(),
+            1,
+            Some(&restored),
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            different.identity().unwrap().encode_secret().unwrap(),
+            identity.encode_secret().unwrap()
+        );
     }
 }

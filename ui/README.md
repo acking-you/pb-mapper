@@ -3,8 +3,9 @@
 **Remote desktop:** open the monitor button on **Tunnels** to share a Windows
 desktop or view/control an authorized screen inside the app. It uses the existing
 relay configuration, separate desktop permission, endpoint encryption and native
-H.264 textures on Windows/Android. Windows can remember an invitation and its
-permissions with DPAPI and optionally resume sharing when the app opens.
+H.264 textures on Windows/Android. **Enable remote control** prepares the Windows
+helper, persistent service, input permission and reusable invitation in one flow.
+Stop pauses sharing while retaining the invitation; Revoke invalidates it.
 The separately installed UAC helper is implemented; actual secure-desktop prompt
 acceptance, physical-phone/cross-network validation and sustained 60+ FPS UI
 acceptance remain incomplete. Android development verification currently uses a

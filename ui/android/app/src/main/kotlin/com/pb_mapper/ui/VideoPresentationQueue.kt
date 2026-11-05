@@ -9,41 +9,30 @@ internal class VideoPresentationQueue {
         val ptsUs: Long,
         val revision: Long,
         val frameId: Long,
-        val dueNs: Long,
+        val readyNs: Long,
     ) {
         var render = false
             internal set
     }
 
     private val outputs = ArrayDeque<Output>()
-    private var lastSourcePtsUs: Long? = null
-    private var lastScheduledNs = 0L
     val size: Int get() = outputs.size
-    val nextDeadlineNs: Long? get() = outputs.peekFirst()?.dueNs
 
-    fun enqueue(index: Int, ptsUs: Long, revision: Long, frameId: Long, sourcePtsUs: Long, nowNs: Long) {
-        val previous = lastSourcePtsUs
-        val step = if (previous == null) 0 else sourcePtsUs - previous
-        // Preserve capture cadence across short TCP bursts, without adding a
-        // startup buffer. A discontinuity re-anchors instead of growing latency.
-        val candidate = lastScheduledNs + step.coerceIn(0, 80_000) * 1000
-        val due = if (previous == null || step !in 1L..80_000L ||
-            candidate < nowNs - 25_000_000 || candidate > nowNs + 80_000_000) {
-            nowNs
-        } else candidate
-        lastSourcePtsUs = sourcePtsUs
-        lastScheduledNs = due
-        outputs.addLast(Output(index, ptsUs, revision, frameId, due))
+    fun enqueue(index: Int, ptsUs: Long, revision: Long, frameId: Long, nowNs: Long) {
+        // This is an interactive desktop, not a media timeline. A decoded
+        // picture is immediately eligible; source pacing after a network burst
+        // would make us play old input results while newer pictures are ready.
+        outputs.addLast(Output(index, ptsUs, revision, frameId, nowNs))
     }
 
-    /** Return one buffer to release, or keep the newest due picture until the surface has credit. */
-    fun take(nowNs: Long, revision: Long, surfaceBusy: Boolean): Output? {
+    /** Return one buffer to release, or keep the newest picture until the surface has credit. */
+    fun take(revision: Long, surfaceBusy: Boolean): Output? {
         val output = outputs.pollFirst() ?: return null
         val next = outputs.peekFirst()
         val current = output.revision == revision
         val superseded = current && next != null && next.revision == revision &&
-            next.frameId > output.frameId && next.dueNs <= nowNs
-        if (current && !superseded && (surfaceBusy || output.dueNs > nowNs)) {
+            next.frameId > output.frameId
+        if (current && !superseded && surfaceBusy) {
             outputs.addFirst(output)
             return null
         }
@@ -55,7 +44,5 @@ internal class VideoPresentationQueue {
 
     fun clear() {
         outputs.clear()
-        lastSourcePtsUs = null
-        lastScheduledNs = 0
     }
 }

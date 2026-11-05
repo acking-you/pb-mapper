@@ -280,6 +280,19 @@ void main() {
       expect(store.controlling, true);
       expect(api.presentations, [(3, 1)]);
 
+      final picture = store.frame;
+      final presented = store.videoPresented;
+      final initialResets = resets;
+      now = now.add(const Duration(milliseconds: 500));
+      api.source!.add(DesktopFrame(api.viewer!, Uint8List(0)));
+      await Future<void>.delayed(Duration.zero);
+      expect(store.frame, same(picture));
+      expect(store.videoPresented, same(presented));
+      expect(store.pictureAge, const Duration(milliseconds: 500));
+      expect(store.controlling, isTrue);
+      await emit(3, 2);
+      expect(resets, initialResets);
+
       now = now.add(const Duration(milliseconds: 2100));
       await emit(3, 2);
       expect(

@@ -73,6 +73,8 @@ class DesktopStatus {
     this.bitrate = 0,
     this.cursor,
     this.frameAckMs = 0,
+    this.directStage,
+    this.directFailure,
   });
   factory DesktopStatus.fromJson(Map<String, dynamic> json) => DesktopStatus(
     state: json['state'] as String? ?? 'stopped',
@@ -105,8 +107,11 @@ class DesktopStatus {
           )
         : null,
     frameAckMs: (json['frame_ack_ms'] as num?)?.toDouble() ?? 0,
+    directStage: json['direct_stage'] as String?,
+    directFailure: json['direct_failure'] as String?,
   );
   final String state, message, path, desktop;
+  final String? directStage, directFailure;
   final bool controlling, controlAllowed;
   final int generation, frameId, frames, bytes;
   final DesktopDisplay? display;
@@ -180,10 +185,11 @@ class DesktopTrustedHost {
     this.relayOnly = false,
     this.privileged = false,
     this.autoStart = false,
+    this.background = false,
   });
   final String relay, service;
   final int displayId;
-  final bool allowControl, relayOnly, privileged, autoStart;
+  final bool allowControl, relayOnly, privileged, autoStart, background;
   factory DesktopTrustedHost.fromJson(Map<String, dynamic> data) =>
       DesktopTrustedHost(
         relay: data['relay'] as String,
@@ -193,7 +199,19 @@ class DesktopTrustedHost {
         relayOnly: data['relay_only'] == true,
         privileged: data['privileged'] == true,
         autoStart: data['auto_start'] == true,
+        background: data['background'] == true,
       );
+}
+
+class DesktopHostEnable {
+  const DesktopHostEnable({
+    this.restart = false,
+    this.invitation,
+    this.background,
+  });
+  final bool restart;
+  final String? invitation;
+  final DesktopBackground? background;
 }
 
 class DesktopTrust {
@@ -213,6 +231,7 @@ class DesktopFrame {
 }
 
 abstract interface class DesktopApiClient {
+  Future<DesktopHostEnable> enableHost(String service, int displayId);
   Future<DesktopBackground> backgroundAction(String action);
   Future<DesktopTrust> trustStatus();
   Future<String> restoreHost();
@@ -251,6 +270,23 @@ abstract interface class DesktopApiClient {
 }
 
 class DesktopApi implements DesktopApiClient {
+  @override
+  Future<DesktopHostEnable> enableHost(String service, int displayId) async {
+    final data = await _call('host_enable', {
+      'service': service,
+      'display_id': displayId,
+    });
+    return DesktopHostEnable(
+      restart: data['restart'] == true,
+      invitation: data['invitation'] as String?,
+      background: data['background'] is Map
+          ? DesktopBackground.fromJson(
+              Map<String, dynamic>.from(data['background'] as Map),
+            )
+          : null,
+    );
+  }
+
   @override
   Future<DesktopBackground> backgroundAction(String action) async =>
       DesktopBackground.fromJson(

@@ -2,6 +2,21 @@ import 'dart:async';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 
 class FakeDesktopApi implements DesktopApiClient {
+  @override
+  Future<DesktopHostEnable> enableHost(String service, int displayId) async {
+    final invitation = await startHost(
+      service: service,
+      displayId: displayId,
+      allowControl: true,
+      relayOnly: false,
+      privileged: true,
+      remember: true,
+      autoStart: true,
+      background: true,
+    );
+    return DesktopHostEnable(invitation: invitation, background: background);
+  }
+
   DesktopBackground background = const DesktopBackground();
   @override
   Future<DesktopBackground> backgroundAction(String action) async {
@@ -44,6 +59,7 @@ class FakeDesktopApi implements DesktopApiClient {
   @override
   Future<void> revokeTrust() async {
     host = null;
+    background = const DesktopBackground();
     trust = DesktopTrust(supported: trust.supported);
   }
 

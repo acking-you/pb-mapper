@@ -564,5 +564,12 @@
   "desktopSecureActive": "Windows 安全桌面",
   "justNow": "刚刚",
   "timeAgo": "{span}前",
-  "timeIn": "{span}后"
+  "timeIn": "{span}后",
+  "desktopIdentityMismatch": "主机身份已变化",
+  "desktopIdentityMismatchHelp": "请使用电脑当前的链接重新连接。已停止自动重试。",
+  "desktopEnable": "开启远程控制",
+  "desktopEnabledHelp": "远程控制已开启。关闭应用后仍可连接，恢复连接继续使用同一链接。",
+  "desktopEnableHelp": "开启一次，即可在后台持续使用。首次开启时，Windows 可能需要你批准安装。",
+  "desktopAdvanced": "高级设置",
+  "desktopStopHelp": "停止会暂停访问，下次开启仍用原链接；撤销链接会使其失效。"
 }

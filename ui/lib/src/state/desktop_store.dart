@@ -12,6 +12,7 @@ enum DesktopConnectionPhase {
   recoveringVideo,
   retryWaiting,
   reconnecting,
+  identityMismatch,
 }
 
 /// Owns the session independently of navigation. Only the newest frame is kept,
@@ -27,10 +28,13 @@ class DesktopStore extends ChangeNotifier {
   DesktopCapabilities capabilities = const DesktopCapabilities();
   DesktopTrust trust = const DesktopTrust();
   bool _trustRestored = false;
+  Timer? _hostResumeTimer;
+  int _hostResumeSerial = 0, _hostResumeAttempt = 0;
   DesktopSnapshot snapshot = const DesktopSnapshot();
   DesktopFrame? frame;
   DesktopVideoTexture? videoTexture;
   final videoPresentation = ValueNotifier<DesktopStatus?>(null);
+  final cursorStatus = ValueNotifier<DesktopStatus?>(null);
   DesktopStatus? get videoPresented => videoPresentation.value;
   set videoPresented(DesktopStatus? status) => videoPresentation.value = status;
   StreamIterator<DesktopFrame>? _frames;
@@ -82,6 +86,7 @@ class DesktopStore extends ChangeNotifier {
   DateTime? _controlRequestedAt;
   int reconnectAttempt = 0;
   String? recoveryReason;
+  bool _identityMismatch = false;
   Duration? get pictureAge {
     final at = _videoPresentedAt ?? _frameAt;
     return at == null ? null : _now().difference(at);
@@ -93,6 +98,7 @@ class DesktopStore extends ChangeNotifier {
             ? _retryAt!.difference(_now())
             : Duration.zero);
   DesktopConnectionPhase get connectionPhase {
+    if (_identityMismatch) return DesktopConnectionPhase.identityMismatch;
     if (_retryTimer != null) return DesktopConnectionPhase.retryWaiting;
     if (_attemptRunning) {
       return reconnectAttempt == 0
@@ -147,21 +153,41 @@ class DesktopStore extends ChangeNotifier {
   Future<void> restoreOnStartup() async {
     if (_trustRestored || _disposed) return;
     _trustRestored = true;
+    await _restoreStartupHost(_hostResumeSerial);
+  }
+
+  bool _hostResumeCurrent(int serial) =>
+      !_disposed && serial == _hostResumeSerial;
+
+  Future<void> _restoreStartupHost(int serial) async {
+    if (!_hostResumeCurrent(serial)) return;
     try {
-      await _loadBackground();
-      trust = await api.trustStatus();
+      // A restarting helper must not prevent discovering the durable handoff
+      // that asks us to retry it. Read the local intent before service IPC.
+      final restoredTrust = await api.trustStatus();
+      if (!_hostResumeCurrent(serial)) return;
+      trust = restoredTrust;
+      if (trust.saved?.background == true &&
+          trust.saved?.autoStart == true &&
+          trust.matchesRelay) {
+        await _resumePendingHost(serial);
+        return;
+      }
+      await _loadBackground(hostSerial: serial);
+      if (!_hostResumeCurrent(serial)) return;
       if (snapshot.background?.configured != true &&
           trust.saved?.autoStart == true &&
           trust.matchesRelay) {
         await restoreHost();
-        if (!_disposed) {
+        if (_hostResumeCurrent(serial)) {
           _timer ??= Timer.periodic(
             const Duration(milliseconds: 250),
             (_) => poll(),
           );
         }
       }
-      if (snapshot.background?.configured == true && !_disposed) {
+      if (snapshot.background?.configured == true &&
+          _hostResumeCurrent(serial)) {
         _timer ??= Timer.periodic(
           const Duration(milliseconds: 250),
           (_) => poll(),
@@ -169,43 +195,119 @@ class DesktopStore extends ChangeNotifier {
         await poll();
       }
     } catch (e) {
+      if (!_hostResumeCurrent(serial)) return;
       error = e.toString();
+      _scheduleHostResume(serial, _restoreStartupHost);
       _notify();
     }
   }
 
-  Future<void> _loadBackground() async {
+  Future<void> _loadBackground({int? hostSerial}) async {
+    final serial = hostSerial ?? _hostResumeSerial;
     final background = await api.backgroundAction('status');
-    if (_disposed) return;
+    if (!_hostResumeCurrent(serial)) return;
     snapshot = snapshot.withBackground(background);
     if (background.configured) invitation = background.invitation;
   }
 
   Future<void> backgroundAction(String action) async {
     await run(() async {
+      if (action != 'status') _cancelHostResume();
+      final serial = _hostResumeSerial;
       final background = await api.backgroundAction(action);
+      if (!_hostResumeCurrent(serial)) return;
       snapshot = snapshot.withBackground(background);
       invitation = background.invitation;
     });
     await poll();
   }
 
+  Future<void> _resumePendingHost(int serial) async {
+    if (!_hostResumeCurrent(serial)) return;
+    try {
+      final restoredTrust = await api.trustStatus();
+      if (!_hostResumeCurrent(serial)) return;
+      trust = restoredTrust;
+      if (trust.saved?.background != true ||
+          trust.saved?.autoStart != true ||
+          !trust.matchesRelay) {
+        // A previous attempt may have configured the service successfully and
+        // then lost its status reply. Discover that owner without re-enabling.
+        await _restoreStartupHost(serial);
+        return;
+      }
+      final restoredInvitation = await api.restoreHost();
+      if (!_hostResumeCurrent(serial)) return;
+      invitation = restoredInvitation;
+      _hostResumeAttempt = 0;
+      error = null;
+      await _loadBackground(hostSerial: serial);
+      if (!_hostResumeCurrent(serial)) return;
+      final currentTrust = await api.trustStatus();
+      if (!_hostResumeCurrent(serial)) return;
+      trust = currentTrust;
+      _timer ??= Timer.periodic(
+        const Duration(milliseconds: 250),
+        (_) => poll(),
+      );
+      await poll();
+    } catch (e) {
+      if (!_hostResumeCurrent(serial)) return;
+      error = e.toString();
+      _scheduleHostResume(serial, _resumePendingHost);
+    }
+    _notify();
+  }
+
+  void _scheduleHostResume(int serial, Future<void> Function(int) retry) {
+    if (!_hostResumeCurrent(serial)) return;
+    _hostResumeTimer?.cancel();
+    _hostResumeTimer = Timer(
+      Duration(seconds: (1 << _hostResumeAttempt.clamp(0, 4)).clamp(1, 15)),
+      () {
+        _hostResumeTimer = null;
+        _hostResumeAttempt++;
+        unawaited(retry(serial));
+      },
+    );
+  }
+
+  void _cancelHostResume() {
+    _hostResumeSerial++;
+    _hostResumeTimer?.cancel();
+    _hostResumeTimer = null;
+    _hostResumeAttempt = 0;
+  }
+
   Future<void> restoreHost() async {
     await run(() async {
-      invitation = await api.restoreHost();
-      trust = await api.trustStatus();
+      final serial = _hostResumeSerial;
+      final restoredInvitation = await api.restoreHost();
+      if (!_hostResumeCurrent(serial)) return;
+      invitation = restoredInvitation;
+      final restoredTrust = await api.trustStatus();
+      if (!_hostResumeCurrent(serial)) return;
+      trust = restoredTrust;
     });
     await poll();
   }
 
   Future<void> revokeTrust() async {
+    _cancelHostResume();
+    final serial = _hostResumeSerial;
     try {
+      // Native revocation serializes with pending setup and checks the actual
+      // service owner. This snapshot can lag a completed background handoff.
       await api.revokeTrust();
+      if (!_hostResumeCurrent(serial)) return;
       invitation = null;
-      trust = await api.trustStatus();
+      final revokedTrust = await api.trustStatus();
+      if (!_hostResumeCurrent(serial)) return;
+      trust = revokedTrust;
       snapshot = snapshot.withHost(null);
+      error = null;
     } catch (e) {
-      error = e.toString();
+      if (_hostResumeCurrent(serial)) error = e.toString();
     }
     _notify();
     await poll();
@@ -320,7 +422,23 @@ class DesktopStore extends ChangeNotifier {
   }
 
   void _scheduleReconnect(String? reason) {
+    // Certificate pin failure cannot be repaired by retrying a different
+    // publisher. Keep the original invitation and require a deliberate new
+    // connection after the host identity has been checked.
+    if (reason?.contains('desktop identity changed') == true) {
+      _identityMismatch = true;
+      _retryTimer?.cancel();
+      _retryTimer = null;
+      _retryAt = null;
+      _controlWanted = false;
+      _endingControl = true;
+      _inputEpoch++;
+      recoveryReason = reason;
+      _notify();
+      return;
+    }
     if (_disposed ||
+        _identityMismatch ||
         !_viewerForeground ||
         _target == null ||
         _retryTimer != null ||
@@ -348,6 +466,23 @@ class DesktopStore extends ChangeNotifier {
 
   Future<void> _acceptFrame(DesktopFrame next, int epoch) async {
     if (!_current(epoch)) return;
+    cursorStatus.value = next.status;
+    if (next.status.streaming &&
+        next.bytes.isEmpty &&
+        next.status.generation == frame?.status.generation) {
+      // Transport liveness is neither a new image nor a decoder discontinuity.
+      // In particular it must not refresh picture age or revoke the rendered
+      // geometry while waiting for presentation credit.
+      final previous = snapshot.viewer;
+      snapshot = snapshot.withViewer(next.status);
+      if (previous?.controlling != next.status.controlling ||
+          previous?.controlAllowed != next.status.controlAllowed ||
+          _now().difference(_lastMediaNotify).inMilliseconds >= 100) {
+        _lastMediaNotify = _now();
+        _notify();
+      }
+      return;
+    }
     frame = next;
     snapshot = snapshot.withViewer(next.status);
     final state = next.status;
@@ -475,8 +610,10 @@ class DesktopStore extends ChangeNotifier {
             _pendingKeyframe = false;
             await api.keyframe();
           } else if (_pendingPresentation case final status?) {
+            // Keep cumulative feedback within two 60 Hz refreshes. Waiting
+            // 100 ms can fill the bounded receiver window even on a fast link.
             final delay =
-                const Duration(milliseconds: 100) - _now().difference(_lastAck);
+                const Duration(milliseconds: 33) - _now().difference(_lastAck);
             if (delay > Duration.zero) {
               // Always acknowledge the final displayed frame even if media
               // admission pauses the source before another event can arrive.
@@ -546,6 +683,7 @@ class DesktopStore extends ChangeNotifier {
 
   Future<void> _clearVideo() async {
     _mediaEpoch++;
+    cursorStatus.value = null;
     _presentationTimer?.cancel();
     _presentationTimer = null;
     final frames = _frames;
@@ -624,15 +762,68 @@ class DesktopStore extends ChangeNotifier {
     await poll();
   }
 
+  Future<void> enableHost(String service, int display) async {
+    await run(() async {
+      _cancelHostResume();
+      final serial = _hostResumeSerial;
+      final DesktopHostEnable result;
+      try {
+        result = await api.enableHost(service, display);
+      } catch (_) {
+        // A failed IPC reply can leave durable setup waiting for the helper.
+        // Resume that intent through HostRestore, which never installs or asks
+        // for UAC. Cancelled installation has already retired this intent.
+        try {
+          final pending = await api.trustStatus();
+          if (_hostResumeCurrent(serial) &&
+              pending.saved?.background == true &&
+              pending.saved?.autoStart == true &&
+              pending.matchesRelay) {
+            trust = pending;
+            _scheduleHostResume(serial, _resumePendingHost);
+          }
+        } catch (_) {
+          // Preserve the original setup error when local trust cannot be read.
+        }
+        rethrow;
+      }
+      if (!_hostResumeCurrent(serial)) return;
+      if (result.restart) {
+        final restart = onRestartReady;
+        if (restart == null) {
+          throw StateError('Application restart is unavailable');
+        }
+        restarting = true;
+        _timer?.cancel();
+        _notify();
+        await restart();
+        return;
+      }
+      invitation = result.invitation;
+      if (result.background case final background?) {
+        snapshot = snapshot.withBackground(background);
+      }
+      final enabledTrust = await api.trustStatus();
+      if (!_hostResumeCurrent(serial)) return;
+      trust = enabledTrust;
+    });
+    if (!restarting) await poll();
+  }
+
   Future<void> stopHost() async {
+    _cancelHostResume();
+    final serial = _hostResumeSerial;
     // Local stop must work during an unrelated outgoing connection attempt.
     try {
       await api.stopHost();
-      trust = await api.trustStatus();
+      if (!_hostResumeCurrent(serial)) return;
+      final stoppedTrust = await api.trustStatus();
+      if (!_hostResumeCurrent(serial)) return;
+      trust = stoppedTrust;
       invitation = null;
       snapshot = snapshot.withHost(null);
     } catch (e) {
-      error = e.toString();
+      if (_hostResumeCurrent(serial)) error = e.toString();
     }
     _notify();
     await poll();
@@ -684,7 +875,8 @@ class DesktopStore extends ChangeNotifier {
     _retryTimer = null;
     _retryAt = null;
     _target = (invite, relayOnly);
-    _controlWanted = false;
+    _controlWanted = true;
+    _identityMismatch = false;
     reconnectAttempt = 0;
     error = null;
     recoveryReason = null;
@@ -763,6 +955,7 @@ class DesktopStore extends ChangeNotifier {
     _retryTimer = null;
     _retryAt = null;
     _controlWanted = false;
+    _identityMismatch = false;
     _recoveryStarted = null;
     recoveryReason = null;
     _endingControl = true;
@@ -822,7 +1015,8 @@ class DesktopStore extends ChangeNotifier {
       _retryTimer?.cancel();
       _retryTimer = null;
       _retryAt = null;
-      _controlWanted = false;
+      // Suspend actual input while retaining the user's desired mode. A fresh
+      // presented frame is still required before reacquiring the host grant.
       _endingControl = true;
       _inputEpoch++;
       if (connected) {
@@ -911,6 +1105,7 @@ class DesktopStore extends ChangeNotifier {
 
   @override
   void dispose() {
+    _cancelHostResume();
     _disposed = true;
     _target = null;
     _retryTimer?.cancel();
@@ -920,6 +1115,7 @@ class DesktopStore extends ChangeNotifier {
     unawaited(api.disconnect().catchError((Object _) {}));
     unawaited(api.stopHost(onExit: true).catchError((Object _) {}));
     videoPresentation.dispose();
+    cursorStatus.dispose();
     super.dispose();
   }
 }

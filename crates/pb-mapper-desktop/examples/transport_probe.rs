@@ -3,9 +3,11 @@
 //!
 //! cargo run -p pb-mapper-desktop --example transport_probe -- CONFIG --tcp
 //! cargo run -p pb-mapper-desktop --example transport_probe -- --local
+//! --host checks desktop registration only, without issuing a test credential.
 //! Optional: --mib 4 --case tls-split --nagle (host accepted socket only).
 //! --consumer-server HOST:PORT changes only the consumer's relay address, for
 //! example an existing SSH loopback forward. It never starts that forward.
+//! --auto tries direct and reports the actual selected path and fallback stage.
 use pb_mapper_client::sdk::{
     Client, ClientConfig, ConnectOptions, PathPolicy, RegisterOptions, RegisterRequest,
     RelayTransport, Transport,
@@ -73,9 +75,14 @@ const CASES: [Case; 4] = [
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(false)
+        .init();
     let args: Vec<_> = std::env::args().skip(1).collect();
     let local = args.iter().any(|arg| arg == "--local");
     let nagle = args.iter().any(|arg| arg == "--nagle");
+    let direct = args.iter().any(|arg| arg == "--auto");
     let value = |name| {
         args.windows(2)
             .find(|pair| pair[0] == name)
@@ -124,6 +131,26 @@ async fn main() -> Result<()> {
         (config.server_address, client)
     };
     let consumer_server = consumer_override.unwrap_or(&server).to_string();
+    if args.iter().any(|arg| arg == "--host") {
+        let start = Instant::now();
+        let host = pb_mapper_desktop::Host::start(
+            &admin_client,
+            pb_mapper_desktop::HostOptions {
+                service: format!("desktop:registration-probe-{}", std::process::id()),
+                display_id: 0,
+                allow_control: false,
+                allow_direct: false,
+            },
+        )
+        .await?;
+        println!(
+            "host_registered carrier={:?} elapsed_ms={}",
+            admin_client.relay_transport(),
+            start.elapsed().as_millis()
+        );
+        host.stop().await?;
+        return Ok(());
+    }
     println!(
         "environment os={} arch={} sdk={} topology={} publisher_relay={} consumer_relay={} carrier={:?} host_nodelay={} bytes_per_direction={}",
         std::env::consts::OS,
@@ -170,7 +197,7 @@ async fn main() -> Result<()> {
         {
             tokio::time::timeout(
                 Duration::from_secs(180),
-                run_case(&publisher, &consumer, case, mib, !nagle),
+                run_case(&publisher, &consumer, case, mib, !nagle, direct),
             )
             .await??;
         }
@@ -214,6 +241,7 @@ async fn run_case(
     case: Case,
     mib: usize,
     nodelay: bool,
+    direct: bool,
 ) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let service = format!(
@@ -231,7 +259,7 @@ async fn run_case(
                 force_namespace: false,
             },
             RegisterOptions {
-                allow_direct: false,
+                allow_direct: direct,
                 ..Default::default()
             },
         )
@@ -255,7 +283,11 @@ async fn run_case(
         .connect_tcp(
             service,
             ConnectOptions {
-                path: PathPolicy::RelayOnly,
+                path: if direct {
+                    PathPolicy::Auto
+                } else {
+                    PathPolicy::RelayOnly
+                },
                 ..Default::default()
             },
         )
@@ -264,6 +296,13 @@ async fn run_case(
         connection
             .wait_ready_timeout(Duration::from_secs(15))
             .await?;
+        let diagnostic = connection.diagnostics();
+        println!(
+            "case={} direct_diagnostics={} events={}",
+            case.name,
+            serde_json::to_string(&diagnostic.direct)?,
+            serde_json::to_string(&diagnostic.events)?,
+        );
         if case.tls {
             let mut tls = connector
                 .connect(ServerName::try_from(NAME)?, socket)
@@ -288,6 +327,14 @@ async fn run_case(
         host.abort();
     }
     let host_result = host.await;
+    if publisher.relay_transport() == RelayTransport::Quic {
+        println!(
+            "case={} publisher_relay={} consumer_relay={}",
+            case.name,
+            serde_json::to_string(&publisher.relay_diagnostics().await)?,
+            serde_json::to_string(&consumer.relay_diagnostics().await)?,
+        );
+    }
     connection.stop().await?;
     registration.stop().await?;
     result?;

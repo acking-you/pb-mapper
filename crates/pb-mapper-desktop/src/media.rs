@@ -1,6 +1,6 @@
 //! A bounded access-unit queue. Dropping a predictive frame invalidates the
 //! remaining GOP: discard it and request an IDR instead of decoding corrupt refs.
-use crate::{Frame, VideoCodec};
+use crate::{CursorPosition, Frame, SessionStatus, VideoCodec};
 use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
@@ -13,6 +13,8 @@ pub(crate) const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Default)]
 struct Pending {
     frames: VecDeque<Frame>,
+    status: Option<SessionStatus>,
+    cursor: Option<CursorPosition>,
     bytes: usize,
     generation: u64,
     wait_keyframe: bool,
@@ -30,10 +32,15 @@ impl Queue {
         let predictive = frame.status.video.codec == VideoCodec::H264 && !frame.bytes.is_empty();
         if q.generation != frame.status.generation || frame.bytes.is_empty() {
             q.frames.clear();
+            q.status = None;
             q.bytes = 0;
             q.generation = frame.status.generation;
             q.wait_keyframe = predictive;
             q.requested = false;
+        }
+        q.cursor = frame.status.cursor;
+        if let Some(status) = q.status.as_mut() {
+            status.cursor = frame.status.cursor;
         }
         // About 67 ms at 120 fps absorbs normal relay delivery bursts without
         // accumulating an entire GOP. The byte bound also applies to IDRs.
@@ -62,9 +69,27 @@ impl Queue {
     }
     pub fn pop(&self) -> Option<Frame> {
         let mut q = self.pending.lock();
-        let frame = q.frames.pop_front()?;
+        if let Some(status) = q.status.take() {
+            return Some(Frame {
+                status,
+                bytes: std::sync::Arc::from([]),
+            });
+        }
+        let mut frame = q.frames.pop_front()?;
         q.bytes -= frame.bytes.len();
+        frame.status.cursor = q.cursor;
         Some(frame)
+    }
+    /// Independent, coalesced observation; never clears video references or
+    /// acquires presentation credit. A new desktop requires a real frame first.
+    pub fn push_status(&self, status: SessionStatus) -> bool {
+        let mut q = self.pending.lock();
+        if status.state != "streaming" || status.generation != q.generation {
+            return false;
+        }
+        q.cursor = status.cursor;
+        q.status = Some(status);
+        true
     }
     pub fn take_keyframe_request(&self) -> bool {
         self.keyframe.swap(false, Ordering::AcqRel)
@@ -85,6 +110,7 @@ impl Queue {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{SessionStatus, VideoFormat};
@@ -122,5 +148,50 @@ mod tests {
         q.push(switched);
         assert!(q.pop().is_none());
         assert!(q.take_keyframe_request());
+    }
+    #[test]
+    fn status_is_coalesced_without_reordering_or_invalidating_video() {
+        let q = Queue::default();
+        q.push(frame(1, true));
+        q.push(frame(2, false));
+        let mut status = SessionStatus {
+            state: "streaming".into(),
+            generation: 1,
+            frame_id: 2,
+            cursor: Some(CursorPosition {
+                x: 10,
+                y: 20,
+                visible: true,
+            }),
+            ..Default::default()
+        };
+        assert!(q.push_status(status.clone()));
+        status.cursor.as_mut().unwrap().x = 30;
+        assert!(q.push_status(status.clone()));
+        let update = q.pop().unwrap();
+        assert!(update.bytes.is_empty());
+        assert_eq!(update.status.cursor, status.cursor);
+        for id in [1, 2] {
+            let video = q.pop().unwrap();
+            assert_eq!(video.status.frame_id, id);
+            assert!(!video.bytes.is_empty());
+            assert_eq!(video.status.cursor, status.cursor);
+        }
+        assert!(q.pop().is_none());
+        assert!(!q.take_keyframe_request());
+        assert_eq!(q.dropped(), 0);
+
+        status.generation = 2;
+        assert!(!q.push_status(status.clone()));
+        status.generation = 1;
+        assert!(q.push_status(status));
+        let mut switched = frame(3, true);
+        switched.status.generation = 2;
+        q.push(switched);
+        let next = q.pop().unwrap();
+        assert!(!next.bytes.is_empty());
+        assert_eq!(next.status.generation, 2);
+        assert_eq!(next.status.cursor, None);
+        assert!(q.pop().is_none());
     }
 }
