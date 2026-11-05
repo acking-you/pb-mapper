@@ -66,6 +66,7 @@ pub(crate) fn build_snapshot(
                 expires_at: slot.expires_at,
                 label: cold.label.clone(),
                 tombstoned_at: (cold.tombstoned_at != 0).then_some(cold.tombstoned_at),
+                namespace: cold.namespace,
             })
         })
         .collect::<Vec<_>>();
@@ -140,6 +141,7 @@ fn snapshot_with(
         admin_replays: admin_replays.iter().cloned().collect(),
         audit_records: inner.audit_records.read().clone(),
         root_epoch: inner.root_epoch.load(Ordering::Acquire),
+        namespace_high_water: inner.namespace_high_water.load(Ordering::Acquire),
     }
 }
 
@@ -195,6 +197,7 @@ pub(crate) fn try_load_persisted_state(
             admin_replays: Vec::new(),
             audit_records: VecDeque::new(),
             root_epoch: 0,
+            namespace_high_water: 0,
         }
     };
     if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION || snapshot.instance_id != instance_id {
@@ -219,7 +222,12 @@ pub(crate) fn try_load_persisted_state(
                     push_persisted_audit(&mut snapshot.audit_records, audit);
                 }
                 WalRecord::AdminReplay(record) => snapshot.admin_replays.push(record),
-                WalRecord::Audit(audit) => push_persisted_audit(&mut snapshot.audit_records, audit),
+                WalRecord::Audit(audit) => {
+                    snapshot.namespace_high_water = snapshot
+                        .namespace_high_water
+                        .max(audit.namespace.unwrap_or_default());
+                    push_persisted_audit(&mut snapshot.audit_records, audit);
+                }
             }
         }
     }
@@ -243,13 +251,17 @@ pub(crate) fn apply_persisted_mutation(
             snapshot.entries.push(entry);
         }
         StateMutation::Renew { key_id, expires_at } => {
-            let entry = snapshot_entry_mut(snapshot, key_id, "renew")?;
+            let Some(entry) = replayed_entry_mut(snapshot, key_id, "renew")? else {
+                return Ok(());
+            };
             entry.expires_at = expires_at;
             entry.state = SlotState::Active;
             entry.tombstoned_at = None;
         }
         StateMutation::Revoke { key_id, at } => {
-            let entry = snapshot_entry_mut(snapshot, key_id, "revoke")?;
+            let Some(entry) = replayed_entry_mut(snapshot, key_id, "revoke")? else {
+                return Ok(());
+            };
             entry.state = SlotState::Revoked;
             entry.tombstoned_at = Some(at);
         }
@@ -258,22 +270,35 @@ pub(crate) fn apply_persisted_mutation(
     Ok(())
 }
 
-fn snapshot_entry_mut<'a>(
+/// The entry a replayed record applies to, or `None` for a key that is already over.
+///
+/// Compaction replaces the snapshot and then truncates the WAL, so a crash between the
+/// two replays records the snapshot already includes, among them records for keys it
+/// reaped afterwards. A key whose generation the row has reached and which has no entry
+/// is such a key, and a dead key stays dead. A generation the row has not reached means
+/// the record that issued it is gone, which really is a damaged store.
+fn replayed_entry_mut<'a>(
     snapshot: &'a mut PersistedSnapshot,
     key_id: KeyId,
     operation: &str,
-) -> Result<&'a mut PersistedEntry, AuthFailure> {
-    snapshot
+) -> Result<Option<&'a mut PersistedEntry>, AuthFailure> {
+    let issued = snapshot
+        .generations
+        .get(key_id.slot().as_index())
+        .is_some_and(|generation| *generation >= key_id.generation());
+    match snapshot
         .entries
         .iter_mut()
         .find(|entry| entry.key_id == key_id)
-        .ok_or_else(|| {
-            AuthFailure::new(
-                "temporary_key_store_unavailable",
-                format!("WAL {operation} record references an unknown key"),
-                false,
-            )
-        })
+    {
+        Some(entry) => Ok(Some(entry)),
+        None if issued => Ok(None),
+        None => Err(AuthFailure::new(
+            "temporary_key_store_unavailable",
+            format!("WAL {operation} record references an unknown key"),
+            false,
+        )),
+    }
 }
 
 pub(crate) fn push_persisted_audit(records: &mut VecDeque<AuditRecord>, record: AuditRecord) {

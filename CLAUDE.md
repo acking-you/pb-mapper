@@ -115,7 +115,8 @@ Nothing in the SDK crates knows it exists.
   - `lib.rs`: `AuthRuntime`, `AuthContext`, `AuthFailure`, `KeyId`
   - `runtime.rs`: Key derivation and authentication of a presented key
   - `actor/`: The lifecycle actor — `epoch.rs` for root rotation
-  - `persistence/`: `snapshot.rs`, `wal.rs`, `blob.rs`, `admin_key.rs`, `fs.rs`
+  - `persistence/`: `snapshot.rs`, `wal.rs`, `blob.rs`, `admin_key.rs`, `fs.rs`,
+    `namespaces.rs`
   - `timing_wheel.rs`: Hierarchical wheel driving credential expiry
   - `leases.rs`, `keys.rs`, `ids.rs`, `config.rs`: Leases, key material, platform dirs
 
@@ -155,6 +156,8 @@ Nothing in the SDK crates knows it exists.
   - `tests/test_delay.rs`: The transport/codec matrix over the whole tunnel
   - `tests/temporary_credential_e2e.rs`: The credential lifecycle over the whole
     tunnel — namespace isolation, renew, expiry, revoke
+  - `tests/key_namespaces.rs`: Several keys in one allocated namespace, over TCP,
+    QUIC and direct setup
   - `tests/regression.rs`: Protocol-level cases against hand-rolled frames
 
 #### Flutter UI (`ui/`)

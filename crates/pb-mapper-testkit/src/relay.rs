@@ -201,7 +201,30 @@ impl Relay {
             .unwrap()
     }
 
-    /// Extend a credential's lifetime. The credential text does not change.
+    /// Reserve a namespace that keys can then be issued into.
+    pub async fn allocate_namespace(&self) -> u64 {
+        self.auth().allocate_namespace(&self.admin).await.unwrap()
+    }
+
+    /// Issue a temporary credential into `namespace`, ready to authenticate with.
+    pub async fn issue_credential_in(
+        &self,
+        namespace: u64,
+        ttl: Duration,
+        label: &str,
+    ) -> (KeyId, Credential) {
+        let issued = self
+            .auth()
+            .issue_in_namespace(&self.admin, namespace, ttl, Some(label.to_string()))
+            .await
+            .unwrap();
+        (
+            issued.metadata.key_id,
+            parse_credential(&issued.credential).unwrap(),
+        )
+    }
+
+    /// Set a credential's lifetime. The credential text does not change.
     pub async fn renew(&self, key_id: KeyId, ttl: Duration) -> IssuedTemporaryKey {
         self.auth().renew(&self.admin, key_id, ttl).await.unwrap()
     }
