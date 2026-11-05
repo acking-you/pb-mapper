@@ -890,12 +890,7 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
     let host = if settings.privileged {
         #[cfg(windows)]
         {
-            let status = desktop::helper::status();
-            if !status.running || !status.authorized_application {
-                return Err(err(
-                    "Install the helper and open its protected application first",
-                ));
-            }
+            desktop::helper::status().ensure_ready().map_err(err)?;
             Host::start_with_backend_and_identity(
                 &client,
                 options,

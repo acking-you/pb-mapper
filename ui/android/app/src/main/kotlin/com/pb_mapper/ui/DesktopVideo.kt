@@ -43,7 +43,7 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                             require(bytes.isNotEmpty() && bytes.size <= MAX_BYTES && width in 2..7680 && height in 2..4320 && width.toLong() * height <= 16_777_216) { "Invalid video bounds" }
                             viewer.submit(Packet(bytes, call.argument<Number>("generation")!!.toLong(), call.argument<Number>("frameId")!!.toLong(), call.argument<Number>("ptsUs")!!.toLong(), width, height, call.argument<Boolean>("keyframe") == true, viewer.revision.get()), result)
                         }
-                        "reset" -> { viewer.reset(); result.success(null) }
+                        "reset" -> viewer.reset(result)
                         "dispose" -> { viewers.remove(id); viewer.dispose(); result.success(null) }
                         "stats" -> viewer.stats(result, call.argument<Boolean>("timings") != false)
                         else -> result.notImplemented()
@@ -63,7 +63,6 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
 
     private data class Packet(val bytes: ByteArray, val generation: Long, val frameId: Long, val sourcePtsUs: Long, val width: Int, val height: Int, val keyframe: Boolean, val revision: Long)
     private data class PendingFrame(val packet: Packet, val queuedNs: Long, var decodedNs: Long = 0, var releasedNs: Long = 0)
-    private data class DecodedOutput(val index: Int, val ptsUs: Long, val dueNs: Long)
     private inner class Submission(val packet: Packet, private val reply: MethodChannel.Result, val receivedNs: Long) {
         private val completed = AtomicBoolean()
         fun complete() {
@@ -129,11 +128,9 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
         private val queue = ArrayDeque<Submission>()
         private val pending = linkedMapOf<Long, PendingFrame>()
         private val inputs = ArrayDeque<Int>()
-        private val outputs = ArrayDeque<DecodedOutput>()
+        private val outputs = VideoPresentationQueue()
         private var surfacePtsUs: Long? = null
         private var surfaceReleasedAtMs = 0L
-        private var lastSourcePtsUs: Long? = null
-        private var lastScheduledNs = 0L
         private var waitingOutputs = 0
         private var lastProgress = 0L
         private var codec: MediaCodec? = null
@@ -269,15 +266,27 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             queue.clear()
         }
 
-        fun reset() {
-            synchronized(lock) {
-                revision.incrementAndGet()
+        fun reset(reply: MethodChannel.Result) {
+            val resetRevision = synchronized(lock) {
+                val next = revision.incrementAndGet()
                 clearQueue()
                 awaitingKey = true
                 acceptedGeneration = -1
                 lastAccepted = 0
+                next
             }
-            worker.post { releaseCodec() }
+            worker.post {
+                // A pump already posted before reset can consume the next
+                // generation before this cleanup runs. Never close that newer
+                // codec: its first IDR may already have returned input credit,
+                // leaving no queued packet that could restart the decoder.
+                if (active?.revision?.let { it < resetRevision } != false) {
+                    releaseCodec()
+                }
+                pump()
+                // Dart awaits this barrier before submitting the next IDR.
+                main.post { reply.success(null) }
+            }
         }
 
         fun dispose() {
@@ -323,7 +332,6 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             inputs.clear()
             outputs.clear()
             surfacePtsUs = null
-            lastSourcePtsUs = null
             try { old?.stop() } catch (_: Exception) {}
             try { old?.release() } catch (_: Exception) {}
         }
@@ -351,6 +359,10 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             format.setInteger(MediaFormat.KEY_MAX_WIDTH, packet.width)
             format.setInteger(MediaFormat.KEY_MAX_HEIGHT, packet.height)
             if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            // We own dropping before the surface and keep exactly one released
+            // frame in flight. A driver silently dropping that sole frame would
+            // strand the consumption credit and look like a frozen renderer.
+            if (Build.VERSION.SDK_INT >= 29) format.setInteger(MediaFormat.KEY_ALLOW_FRAME_DROP, 0)
             parameterSets(packet.bytes).forEach { (type, bytes) -> format.setByteBuffer(if (type == 7) "csd-0" else "csd-1", ByteBuffer.wrap(bytes)) }
             val next = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             codec = next
@@ -371,13 +383,13 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                         lastProgress = SystemClock.elapsedRealtime()
                         if (frame != null) waitingOutputs = (waitingOutputs - 1).coerceAtLeast(0)
                         if (render) {
-                            val output = DecodedOutput(index, info.presentationTimeUs, presentationTime(frame!!.packet))
+                            val packet = frame!!.packet
                             diagnostics?.let { metrics ->
                                 frame.decodedNs = System.nanoTime()
                                 if (frame.queuedNs != 0L) metrics.decodeCallback.add(frame.decodedNs - frame.queuedNs)
                                 metrics.peakOutputs = maxOf(metrics.peakOutputs, outputs.size + 1)
                             }
-                            outputs.addLast(output)
+                            outputs.enqueue(index, info.presentationTimeUs, packet.revision, packet.frameId, packet.sourcePtsUs, System.nanoTime())
                             decoded.incrementAndGet()
                         } else {
                             c.releaseOutputBuffer(index, false)
@@ -411,37 +423,18 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             }
         }
 
-        private fun presentationTime(packet: Packet): Long {
-            val now = System.nanoTime()
-            val previous = lastSourcePtsUs
-            val step = if (previous == null) 0 else packet.sourcePtsUs - previous
-            // Preserve capture cadence across short TCP bursts. Timestamp jumps
-            // re-anchor instead of allowing unbounded future or stale playback.
-            val candidate = lastScheduledNs + step.coerceIn(0, 80_000) * 1000
-            val due = if (previous == null || step !in 1L..80_000L ||
-                candidate < now - 25_000_000 || candidate > now + 80_000_000) {
-                now + 25_000_000
-            } else candidate
-            lastSourcePtsUs = packet.sourcePtsUs
-            lastScheduledNs = due
-            return due
-        }
-
         private fun renderDue(c: MediaCodec) {
-            while (outputs.isNotEmpty()) {
-                val output = outputs.peekFirst() ?: return
+            while (true) {
+                val output = outputs.take(System.nanoTime(), revision.get(), surfacePtsUs != null) ?: return
                 val frame = pending[output.ptsUs]
-                val current = frame != null && frame.packet.revision == revision.get()
-                if (current && (surfacePtsUs != null || output.dueNs > System.nanoTime())) return
-                outputs.removeFirst()
                 // SurfaceTexture does not guarantee SurfaceView's timestamp
                 // scheduling. Release here at the deadline, keeping the unique
                 // decoder timestamp for the actual Flutter consumption receipt.
-                if (current) {
+                if (output.render && frame != null && frame.packet.revision == revision.get()) {
                     surfacePtsUs = output.ptsUs
                     surfaceReleasedAtMs = SystemClock.elapsedRealtime()
                     diagnostics?.let { metrics ->
-                        frame!!.releasedNs = System.nanoTime()
+                        frame.releasedNs = System.nanoTime()
                         if (frame.decodedNs != 0L) {
                             metrics.pacingWait.add(minOf(frame.releasedNs, output.dueNs) - frame.decodedNs)
                             // Ready time excludes the intentional capture pacer;
@@ -454,6 +447,7 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                 }
                 c.releaseOutputBuffer(output.index, false)
                 pending.remove(output.ptsUs)
+                dropped.incrementAndGet()
             }
         }
 
@@ -532,8 +526,10 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                 var delayMs = Long.MAX_VALUE
                 if (surfacePtsUs != null) delayMs = minOf(delayMs, 2001 - (nowMs - surfaceReleasedAtMs))
                 if (waitingOutputs > 0) delayMs = minOf(delayMs, 2001 - (nowMs - lastProgress))
-                if (surfacePtsUs == null && outputs.isNotEmpty()) {
-                    delayMs = minOf(delayMs, (outputs.peekFirst()!!.dueNs - System.nanoTime() + 999_999) / 1_000_000)
+                if (surfacePtsUs == null) {
+                    outputs.nextDeadlineNs?.let { dueNs ->
+                        delayMs = minOf(delayMs, (dueNs - System.nanoTime() + 999_999) / 1_000_000)
+                    }
                 }
                 if (delayMs != Long.MAX_VALUE) schedulePump(delayMs.coerceAtLeast(1))
             } catch (error: Exception) {

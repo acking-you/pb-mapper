@@ -37,7 +37,8 @@ fn available() -> Result<()> {
     // An ordinary process must never treat its cached Default desktop as live
     // while input belongs to Winlogon/UAC or another inaccessible desktop.
     unsafe {
-        let desk = OpenInputDesktop(Default::default(), false, DESKTOP_READOBJECTS).map_err(|_| error("Secure/locked desktop unavailable. Return to the ordinary desktop locally; privileged helper support is not installed."))?;
+        let desk = OpenInputDesktop(Default::default(), false, DESKTOP_READOBJECTS)
+            .map_err(|_| ordinary_desktop_unavailable())?;
         let mut name = [0u16; 256];
         let result = GetUserObjectInformationW(
             HANDLE(desk.0),
@@ -50,12 +51,15 @@ fn available() -> Result<()> {
         result.map_err(error)?;
         let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
         if !String::from_utf16_lossy(&name[..len]).eq_ignore_ascii_case("default") {
-            return Err(error(
-                "Secure/locked desktop unavailable in ordinary preview mode",
-            ));
+            return Err(ordinary_desktop_unavailable());
         }
     }
     Ok(())
+}
+fn ordinary_desktop_unavailable() -> std::io::Error {
+    error(
+        "secure_desktop_requires_helper: This sharing session uses ordinary desktop access. UAC and the lock screen require the authorized Windows service. Prepare full desktop access on the host and restart sharing; otherwise the picture resumes when the ordinary desktop returns.",
+    )
 }
 fn describe(monitor: &xcap::Monitor) -> Result<Display> {
     Ok(Display {
@@ -135,7 +139,13 @@ struct Desktop {
 impl Desktop {
     fn prepare(&mut self) -> Result<()> {
         let Some(secure) = &mut self.secure else {
-            return available();
+            return available().inspect_err(|_| {
+                release_input(&mut self.input, &mut self.buttons, &mut self.keys);
+                // A secure desktop transition can invalidate DXGI duplication
+                // without changing monitor geometry. Rebuild on return to the
+                // ordinary desktop rather than retaining old encoder resources.
+                self.encoder = None;
+            });
         };
         secure.enter(|| {
             release_input(&mut self.input, &mut self.buttons, &mut self.keys);

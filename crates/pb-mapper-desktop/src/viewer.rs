@@ -8,13 +8,13 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex as AsyncMutex, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 pub struct Viewer {
     presented: watch::Sender<(u64, u64)>,
     input: mpsc::Sender<Command>,
-    priority: mpsc::Sender<Command>,
+    priority: Arc<Controls>,
     frames: watch::Receiver<Option<Frame>>,
     media: Arc<crate::media::Queue>,
     keyframe: watch::Sender<u64>,
@@ -22,6 +22,59 @@ pub struct Viewer {
     cancel: CancellationToken,
     connection: Arc<Connection>,
     join: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+// Releases are state, not a queue of gestures. Repeated focus/pointer-cancel
+// notifications must not disconnect video. A revoke always reaches the peer
+// before a subsequent grant, and every barrier discards obsolete input.
+#[derive(Default)]
+struct Controls {
+    pending: Mutex<PendingControls>,
+    changed: Notify,
+}
+#[derive(Default)]
+struct PendingControls {
+    revoke: bool,
+    release: bool,
+    grant: bool,
+}
+impl Controls {
+    fn push(&self, command: Command) {
+        let mut state = self.pending.lock();
+        match command {
+            Command::Control { enabled: false } => {
+                state.revoke = true;
+                state.grant = false;
+                state.release = false;
+            }
+            Command::Control { enabled: true } => state.grant = true,
+            Command::Release => state.release = true,
+            _ => unreachable!("only control barriers enter this mailbox"),
+        }
+        drop(state);
+        self.changed.notify_one();
+    }
+    fn take(&self) -> Option<Command> {
+        let mut state = self.pending.lock();
+        if std::mem::take(&mut state.revoke) {
+            Some(Command::Control { enabled: false })
+        } else if std::mem::take(&mut state.release) {
+            Some(Command::Release)
+        } else if std::mem::take(&mut state.grant) {
+            Some(Command::Control { enabled: true })
+        } else {
+            None
+        }
+    }
+    async fn next(&self) -> Command {
+        loop {
+            let changed = self.changed.notified();
+            if let Some(command) = self.take() {
+                return command;
+            }
+            changed.await;
+        }
+    }
 }
 impl Viewer {
     pub async fn connect(
@@ -127,7 +180,8 @@ impl Viewer {
         let (keyframe, mut keyframes) = watch::channel(0u64);
         let recover = keyframe.clone();
         let (input, mut inputs) = mpsc::channel(32);
-        let (priority, mut controls) = mpsc::channel(4);
+        let priority = Arc::new(Controls::default());
+        let controls = priority.clone();
         let (presented, mut presentation) = watch::channel((0, 0));
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
@@ -212,7 +266,7 @@ impl Viewer {
                 loop {
                     let command = tokio::select! {
                         biased;
-                        Some(command) = controls.recv() => { while inputs.try_recv().is_ok() {} command },
+                        command = controls.next() => { while inputs.try_recv().is_ok() {} command },
                         Ok(()) = keyframes.changed() => { keyframes.borrow_and_update(); Command::Keyframe },
                         Ok(()) = presentation.changed() => { let (generation, frame_id) = *presentation.borrow_and_update(); Command::Presented { generation, frame_id } },
                         _ = heartbeat.tick() => Command::Ping,
@@ -225,6 +279,7 @@ impl Viewer {
                 }
             };
             let result = tokio::select! { () = stop.cancelled() => Ok(()), result = receive => result, result = send => result };
+            stop.cancel();
             let mut current = observation.lock();
             current.0.state = "stopped".into();
             current.0.controlling = false;
@@ -279,14 +334,15 @@ impl Viewer {
         self.control_command(Command::Release)
     }
     fn control_command(&self, command: Command) -> Result<()> {
-        if self.priority.try_send(command).is_err() {
-            // Ending control and releasing keys must fail closed even when
-            // callers saturate the priority queue while the transport stalls.
-            self.cancel.cancel();
-            return Err(error(
-                "control queue unavailable; session closed to release input",
-            ));
+        if self.cancel.is_cancelled() {
+            // Teardown already releases remote input. Idempotent release/end
+            // calls must not replace the original transport failure message.
+            return match command {
+                Command::Release | Command::Control { enabled: false } => Ok(()),
+                _ => Err(error("desktop session is disconnected")),
+            };
         }
+        self.priority.push(command);
         Ok(())
     }
     pub fn input(&self, event: InputEvent) -> Result<()> {
@@ -298,9 +354,14 @@ impl Viewer {
             return Err(error("a current screen and control grant are required"));
         }
         if self.input.try_send(Command::Input { event }).is_err() {
-            // Never silently drop a key-up or queue an action for later retry.
-            self.cancel.cancel();
-            return Err(error("input queue full; session closed to release input"));
+            // Preserve video while releasing every held input. The priority
+            // barrier drains queued gestures; no key-up is silently lost and
+            // no old click is retried when the transport recovers.
+            self.priority.push(Command::Control { enabled: false });
+            self.status.lock().0.controlling = false;
+            return Err(error(
+                "input congestion; control released while video recovers",
+            ));
         }
         Ok(())
     }
@@ -317,5 +378,32 @@ impl Viewer {
 impl Drop for Viewer {
     fn drop(&mut self) {
         self.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn repeated_releases_are_bounded_and_revocation_precedes_a_new_grant() {
+        let controls = Controls::default();
+        for _ in 0..1000 {
+            controls.push(Command::Release);
+        }
+        assert!(matches!(controls.next().await, Command::Release));
+        assert!(controls.take().is_none());
+        controls.push(Command::Control { enabled: true });
+        controls.push(Command::Control { enabled: false });
+        controls.push(Command::Control { enabled: true });
+        assert!(matches!(
+            controls.next().await,
+            Command::Control { enabled: false }
+        ));
+        assert!(matches!(
+            controls.next().await,
+            Command::Control { enabled: true }
+        ));
+        assert!(controls.take().is_none());
     }
 }

@@ -88,6 +88,21 @@ impl Feedback {
             state.ready.pop_front();
         }
     }
+    /// Only the host's capture context may retire an unavailable desktop's
+    /// presentation obligation. A renderer request cannot extend this deadline.
+    pub fn context_changed(&self, unavailable: bool) {
+        let mut state = self.state.lock();
+        state.ready.clear();
+        state.sent.clear();
+        state.bytes = 0;
+        state.waiting = false;
+        state.recovering = false;
+        if unavailable {
+            state.unacknowledged_since = None;
+        }
+        drop(state);
+        self.changed.notify_one();
+    }
     pub fn admit(&self, frame: &Frame, bytes: usize) -> Admission {
         self.admit_at(frame, bytes, Instant::now())
     }
@@ -379,6 +394,34 @@ mod tests {
         assert!(!feedback.request_keyframe());
         assert!(!feedback.stalled_at(at + Duration::from_millis(3999)));
         assert!(feedback.stalled_at(at + Duration::from_secs(4)));
+    }
+    #[test]
+    fn unavailable_capture_retires_debt_but_new_video_still_requires_acks() {
+        let feedback = Feedback::new(VideoPreferences::default());
+        let at = Instant::now();
+        let initial = frame(1, INITIAL_WINDOW + 1);
+        ready(&feedback, &initial, at);
+        assert_eq!(
+            feedback.admit_at(&initial, initial.bytes.len(), at),
+            Admission::Send
+        );
+        feedback.context_changed(false);
+        assert!(feedback.stalled_at(at + Duration::from_secs(4)));
+        feedback.context_changed(true);
+        assert!(!feedback.stalled_at(at + Duration::from_secs(60)));
+        assert!(!feedback.budget().2);
+        feedback.context_changed(false);
+        let recovered_at = at + Duration::from_secs(60);
+        let mut recovered = frame(2, 1024);
+        recovered.status.generation = 2;
+        recovered.status.video.keyframe = true;
+        ready(&feedback, &recovered, recovered_at);
+        assert_eq!(
+            feedback.admit_at(&recovered, 1024, recovered_at),
+            Admission::Send
+        );
+        assert!(feedback.request_keyframe());
+        assert!(feedback.stalled_at(recovered_at + Duration::from_secs(4)));
     }
     #[test]
     fn renderer_baseline_and_congestion_recovery_use_real_ack_progress() {

@@ -62,6 +62,29 @@ pub struct Status {
     pub installed_application: Option<PathBuf>,
     pub message: String,
 }
+impl Status {
+    /// Validate the existing local authorization; this never installs, starts
+    /// or elevates the helper on the caller's behalf.
+    pub fn ensure_ready(&self) -> Result<()> {
+        if !self.installed {
+            return Err(error(
+                "Install the Windows desktop service on the host before sharing UAC or the lock screen",
+            ));
+        }
+        if !self.running {
+            return Err(error(
+                "Enable the Windows desktop service on the host before sharing UAC or the lock screen",
+            ));
+        }
+        if !self.authorized_application {
+            return Err(error(
+                "Open the protected installed application on the host to use full desktop access",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn status() -> Status {
     // A loaded service may outlive a damaged/unreadable installation.json.
     // Only an affirmative SCM "does not exist" permits treating it as absent.
@@ -150,5 +173,27 @@ pub fn run() -> Result<()> {
         _ => Err(error(
             "expected install <UI bundle> <authorized SID>, service, enable, disable or uninstall",
         )),
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::Status;
+
+    #[test]
+    fn capture_requires_installed_running_service_and_approved_caller() {
+        let mut status = Status::default();
+        assert!(status.ensure_ready().is_err());
+        status.installed = true;
+        assert!(status.ensure_ready().is_err());
+        status.running = true;
+        assert!(status.ensure_ready().is_err());
+        status.authorized_application = true;
+        assert!(status.ensure_ready().is_ok());
+        // An installation retained after Disable does not retain capture
+        // readiness, even though its approved caller remains the same.
+        status.running = false;
+        status.startup_disabled = true;
+        assert!(status.ensure_ready().is_err());
     }
 }

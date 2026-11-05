@@ -131,6 +131,7 @@ impl Worker {
             let mut next_frame = Instant::now();
             let mut configured = preferences;
             let mut checked_context = Instant::now();
+            let mut feedback_context = (0, false);
             while !stop.is_cancelled() {
                 let current_policy = allowed.get();
                 if current_policy != policy {
@@ -199,6 +200,7 @@ impl Worker {
                 if Instant::now() >= next_frame {
                     let mut paused = false;
                     if let Some(feedback) = &renderer {
+                        engine.sync_feedback(feedback, &mut feedback_context);
                         let (preferences, bitrate, waiting) = feedback.budget();
                         engine.bitrate = bitrate;
                         paused = waiting;
@@ -226,12 +228,17 @@ impl Worker {
                     if paused && checked_context.elapsed() >= Duration::from_millis(200) {
                         let _ = engine.geometry();
                         checked_context = Instant::now();
+                        if let Some(feedback) = &renderer {
+                            engine.sync_feedback(feedback, &mut feedback_context);
+                            paused = feedback.budget().2;
+                        }
                     }
                     engine.keyframe |= outgoing.take_keyframe_request();
                     engine.state.dropped_frames = outgoing.dropped();
                     let started = Instant::now();
                     if !paused && let Some(frame) = engine.capture_video() {
                         if let Some(feedback) = &renderer {
+                            engine.sync_feedback(feedback, &mut feedback_context);
                             feedback.captured(&frame);
                         }
                         outgoing.push(frame.clone());
@@ -322,6 +329,16 @@ struct Engine {
     lease: Option<Box<dyn crate::ControlLease>>,
 }
 impl Engine {
+    fn sync_feedback(&self, feedback: &crate::congestion::Feedback, observed: &mut (u64, bool)) {
+        let context = (
+            self.state.generation,
+            self.state.state == "capture_unavailable",
+        );
+        if *observed != context {
+            feedback.context_changed(context.1);
+            *observed = context;
+        }
+    }
     fn new(backend: Box<dyn Backend>) -> Self {
         Self {
             backend,
@@ -426,6 +443,7 @@ impl Engine {
                     self.state.display = Some(context.display.clone());
                     self.state.desktop = context.desktop.clone();
                     self.context = Some(context);
+                    self.state.state = "connecting".into();
                 }
                 Ok(())
             }
@@ -488,7 +506,9 @@ impl Engine {
                 jpeg
             }
             result => {
-                self.invalidate();
+                if self.state.state != "capture_unavailable" {
+                    self.invalidate();
+                }
                 self.state.state = "capture_unavailable".into();
                 self.state.message = result.err().map_or_else(
                     || "frame exceeds the preview limit".into(),
@@ -695,6 +715,190 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), worker.stop())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unavailable_desktop_retires_old_ack_debt_and_resumes_control() {
+        #[derive(Default)]
+        struct Capture {
+            unavailable: bool,
+            desktop: u64,
+            pending: u32,
+            ready: bool,
+            inputs: u32,
+        }
+        struct Video(Arc<parking_lot::Mutex<Capture>>);
+        impl Backend for Video {
+            fn display(&mut self) -> Result<Display> {
+                if self.0.lock().unavailable {
+                    return Err(error("desktop transition"));
+                }
+                Ok(Display {
+                    id: 1,
+                    name: "desktop transition".into(),
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                })
+            }
+            fn context(&mut self) -> Result<crate::DesktopContext> {
+                Ok(crate::DesktopContext {
+                    display: self.display()?,
+                    generation: self.0.lock().desktop,
+                    desktop: "test".into(),
+                })
+            }
+            fn capture(&mut self) -> Result<Vec<u8>> {
+                Err(error("test requires H264"))
+            }
+            fn capture_video(
+                &mut self,
+                _: &crate::DesktopContext,
+                _: crate::VideoCodec,
+                keyframe: bool,
+                _: u32,
+            ) -> Result<Option<crate::EncodedFrame>> {
+                let mut state = self.0.lock();
+                if state.pending > 0 {
+                    state.pending -= 1;
+                    return Ok(None);
+                }
+                if !std::mem::take(&mut state.ready) {
+                    return Ok(None);
+                }
+                Ok(Some(crate::EncodedFrame {
+                    format: crate::VideoFormat {
+                        codec: crate::VideoCodec::H264,
+                        keyframe,
+                        width: 1920,
+                        height: 1080,
+                        ..Default::default()
+                    },
+                    bytes: vec![1; if keyframe { 128 * 1024 } else { 1024 }],
+                }))
+            }
+            fn input(&mut self, _: &Input) -> Result<()> {
+                self.0.lock().inputs += 1;
+                Ok(())
+            }
+            fn release(&mut self) {}
+        }
+        async fn next(worker: &mut Worker) -> Frame {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(frame) = worker.media.pop() {
+                        return frame;
+                    }
+                    worker.frames.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap()
+        }
+
+        let capture = Arc::new(parking_lot::Mutex::new(Capture::default()));
+        let produced = capture.clone();
+        let mut worker = Worker::start_video(
+            Arc::new(move || Ok(Box::new(Video(produced.clone())))),
+            Arc::new(Policy::new(true)),
+            Arc::new(parking_lot::Mutex::new(SessionStatus::default())),
+            crate::VideoCodec::H264,
+            crate::VideoPreferences::default(),
+            true,
+            None,
+        );
+        worker
+            .command(Command::Control { enabled: true })
+            .await
+            .unwrap();
+        capture.lock().ready = true;
+        let feedback = worker.feedback.clone().unwrap();
+        let initial = next(&mut worker).await;
+        assert!(initial.status.video.keyframe);
+        assert_eq!(
+            feedback.admit(&initial, initial.bytes.len()),
+            crate::congestion::Admission::Send
+        );
+        assert!(feedback.budget().2);
+
+        capture.lock().unavailable = true;
+        let unavailable = next(&mut worker).await;
+        assert_eq!(unavailable.status.generation, initial.status.generation + 1);
+        // Real Worker uses std::time for the four-second ACK deadline. Wait on
+        // its repeated status frames, not sleeps or a fake Engine clock.
+        let until = Instant::now() + Duration::from_millis(4100);
+        while Instant::now() < until {
+            let frame = next(&mut worker).await;
+            assert_eq!(frame.status.state, "capture_unavailable");
+            assert_eq!(frame.status.generation, unavailable.status.generation);
+            assert!(frame.bytes.is_empty());
+            assert!(!feedback.stalled());
+        }
+        {
+            let mut state = capture.lock();
+            state.unavailable = false;
+            state.desktop += 1;
+            state.pending = 3;
+            state.ready = true;
+        }
+        let recovered = loop {
+            let frame = next(&mut worker).await;
+            if !frame.bytes.is_empty() {
+                break frame;
+            }
+        };
+        assert_eq!(capture.lock().pending, 0);
+        assert_eq!(
+            recovered.status.generation,
+            unavailable.status.generation + 1
+        );
+        assert!(recovered.status.video.keyframe);
+        assert!(recovered.status.controlling);
+        assert_eq!(
+            feedback.admit(&recovered, recovered.bytes.len()),
+            crate::congestion::Admission::Send
+        );
+        assert!(!feedback.stalled());
+        assert!(feedback.budget().2);
+        assert!(
+            worker
+                .command(Command::Presented {
+                    generation: initial.status.generation,
+                    frame_id: initial.status.frame_id,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            feedback.budget().2,
+            "old ACK must not release the new IDR's credit"
+        );
+        worker
+            .command(Command::Presented {
+                generation: recovered.status.generation,
+                frame_id: recovered.status.frame_id,
+            })
+            .await
+            .unwrap();
+        assert!(!feedback.budget().2);
+        worker
+            .command(Command::Input {
+                event: InputEvent {
+                    generation: recovered.status.generation,
+                    frame_id: recovered.status.frame_id,
+                    sequence: 1,
+                    input: Input::Move { x: 3, y: 3 },
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(capture.lock().inputs, 1);
+        capture.lock().ready = true;
+        let resumed = next(&mut worker).await;
+        assert_eq!(resumed.status.generation, recovered.status.generation);
+        assert!(!resumed.status.video.keyframe);
+        worker.stop().await;
     }
 
     #[tokio::test]

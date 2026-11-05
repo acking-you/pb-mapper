@@ -14,12 +14,8 @@ struct RemoteBackend {
 /// Connect from the dedicated SDK capture worker. No automatic privilege
 /// escalation or fallback: failure is observable at the viewer and local UI.
 pub fn backend(display_id: u32) -> Result<Box<dyn Backend>> {
+    status().ensure_ready()?;
     let config = configuration()?;
-    if !status().authorized_application {
-        return Err(error(
-            "Open the installed pb-mapper application to use the authorized helper",
-        ));
-    }
     connect_backend(display_id, &config)
 }
 

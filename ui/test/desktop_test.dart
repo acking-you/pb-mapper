@@ -61,6 +61,10 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('open-desktop')));
       await settle(tester);
+      final maintenance = find.byKey(const Key('desktop-helper-maintenance'));
+      await Scrollable.ensureVisible(tester.element(maintenance));
+      await tester.tap(maintenance);
+      await settle(tester);
       final disable = find.byKey(const Key('desktop-helper-disable'));
       expect(tester.widget<TextButton>(disable).onPressed, isNotNull);
       expect(

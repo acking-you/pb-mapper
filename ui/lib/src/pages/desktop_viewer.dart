@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../common/l10n_extension.dart';
 import '../ffi/desktop_api.dart';
 import '../state/desktop_store.dart';
+import 'desktop_connection_banner.dart';
+import 'desktop_gesture_surface.dart';
 
 class DesktopViewer extends StatefulWidget {
   const DesktopViewer({super.key, required this.store});
@@ -19,29 +20,36 @@ class _DesktopViewerState extends State<DesktopViewer>
     with WidgetsBindingObserver {
   ui.Image? _image;
   DesktopFrame? _decoded;
-  DesktopStatus? _rendered;
+  DesktopStatus? _rendered, _videoGeometry;
   int _viewEpoch = -1;
   int? _renderedEpoch;
   DateTime? _decodedAt;
-  bool _decoding = false, _navigate = false;
+  bool _decoding = false, _trackpad = false, _foreground = true;
+  double _lastAspectRatio = 16 / 9;
   final _focus = FocusNode();
-  final _buttons = <int, String>{};
-  final _transform = TransformationController();
+  final _keys = <LogicalKeyboardKey>{};
+  final _surface = GlobalKey<DesktopGestureSurfaceState>();
   DesktopStore get store => widget.store;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _foreground =
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    store.setViewerForeground(_foreground);
     store.addListener(_update);
     _update();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed) {
-      _buttons.clear();
-      unawaited(store.control(false));
+    final foreground = state == AppLifecycleState.resumed;
+    if (_foreground && !foreground) {
+      _releaseLocalInput();
     }
+    _foreground = foreground;
+    store.setViewerForeground(foreground);
   }
 
   void _update() {
@@ -51,15 +59,20 @@ class _DesktopViewerState extends State<DesktopViewer>
       _image = null;
       _decoded = null;
       _rendered = null;
+      _videoGeometry = null;
       _renderedEpoch = null;
       _decodedAt = null;
-      _buttons.clear();
-      _transform.value = Matrix4.identity();
+      _keys.clear();
       if (previous != null) {
         WidgetsBinding.instance.addPostFrameCallback((_) => previous.dispose());
       }
     }
     if (store.frame?.status.codec == 'h264') {
+      final video = store.frame!.status;
+      if (video.videoWidth >= 2 && video.videoHeight >= 2) {
+        _videoGeometry = video;
+        _lastAspectRatio = video.videoWidth / video.videoHeight;
+      }
       _rendered = store.videoPresented;
       _renderedEpoch = _rendered == null ? null : store.mediaEpoch;
     }
@@ -103,6 +116,7 @@ class _DesktopViewerState extends State<DesktopViewer>
       final previous = _image;
       setState(() {
         _image = info.image;
+        _lastAspectRatio = info.image.width / info.image.height;
         _decoded = frame;
         _rendered = null;
         _renderedEpoch = null;
@@ -123,7 +137,6 @@ class _DesktopViewerState extends State<DesktopViewer>
     } catch (e) {
       if (mounted && epoch == store.mediaEpoch) {
         store.error = e.toString();
-        unawaited(store.control(false));
       }
     } finally {
       _decoding = false;
@@ -137,8 +150,9 @@ class _DesktopViewerState extends State<DesktopViewer>
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.store, store)) {
       oldWidget.store.removeListener(_update);
-      unawaited(oldWidget.store.control(false));
+      oldWidget.store.setViewerForeground(false);
       _viewEpoch = -1;
+      store.setViewerForeground(_foreground);
       store.addListener(_update);
       _update();
     }
@@ -148,16 +162,14 @@ class _DesktopViewerState extends State<DesktopViewer>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     store.removeListener(_update);
-    scheduleMicrotask(() => unawaited(store.control(false)));
+    store.setViewerForeground(false);
     _focus.dispose();
-    _transform.dispose();
     _image?.dispose();
     super.dispose();
   }
 
   bool get _interactive =>
       store.controlling &&
-      !_navigate &&
       _rendered != null &&
       _renderedEpoch == store.mediaEpoch &&
       (store.frame?.status.codec == 'h264' ||
@@ -172,14 +184,16 @@ class _DesktopViewerState extends State<DesktopViewer>
     }
   }
 
-  Future<void> _move(Offset point, Size size) => _send({
+  Future<void> _move(Offset normalized) => _send({
     'kind': 'move',
-    'x': (point.dx / size.width * (_rendered?.display?.width ?? 0))
-        .floor()
-        .clamp(0, math.max(0, (_rendered?.display?.width ?? 1) - 1)),
-    'y': (point.dy / size.height * (_rendered?.display?.height ?? 0))
-        .floor()
-        .clamp(0, math.max(0, (_rendered?.display?.height ?? 1) - 1)),
+    'x': (normalized.dx * (_rendered?.display?.width ?? 0)).floor().clamp(
+      0,
+      math.max(0, (_rendered?.display?.width ?? 1) - 1),
+    ),
+    'y': (normalized.dy * (_rendered?.display?.height ?? 0)).floor().clamp(
+      0,
+      math.max(0, (_rendered?.display?.height ?? 1) - 1),
+    ),
   });
   Future<void> _click(String button) async {
     await _send({'kind': 'button', 'button': button, 'down': true});
@@ -195,6 +209,11 @@ class _DesktopViewerState extends State<DesktopViewer>
     if (!_interactive) return KeyEventResult.ignored;
     final key = _keyNames[event.logicalKey];
     if (key != null) {
+      if (event is KeyUpEvent) {
+        _keys.remove(event.logicalKey);
+      } else {
+        _keys.add(event.logicalKey);
+      }
       unawaited(
         _send({'kind': 'key', 'key': key, 'down': event is! KeyUpEvent}),
       );
@@ -232,22 +251,14 @@ class _DesktopViewerState extends State<DesktopViewer>
       body: SafeArea(
         child: Column(
           children: [
+            DesktopConnectionBanner(store: store),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               child: Wrap(
-                spacing: 12,
+                spacing: 8,
+                runSpacing: 4,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  Text(
-                    store.controlling ? l.desktopInteract : l.desktopViewOnly,
-                  ),
-                  if (status?.path.isNotEmpty == true)
-                    Text('${status!.path} · TLS 1.3'),
-                  if (status?.desktop == 'secure') Text(l.desktopSecureActive),
-                  if (status?.codec == 'h264')
-                    Text(
-                      '${status!.captureFps.toStringAsFixed(0)} / ${status.receiveFps.toStringAsFixed(0)} / ${store.presentFps.toStringAsFixed(0)} fps · H.264',
-                    ),
                   FilledButton.tonal(
                     onPressed: hasGrant
                         ? () => store.control(false)
@@ -260,194 +271,46 @@ class _DesktopViewerState extends State<DesktopViewer>
                       hasGrant ? l.desktopEndControl : l.desktopRequestControl,
                     ),
                   ),
-                  FilterChip(
-                    label: Text(l.desktopNavigate),
-                    selected: _navigate,
-                    onSelected: (value) {
-                      unawaited(store.release());
-                      _buttons.clear();
-                      setState(() => _navigate = value);
+                  SegmentedButton<bool>(
+                    key: const Key('desktop-touch-mode'),
+                    showSelectedIcon: false,
+                    segments: [
+                      ButtonSegment(
+                        value: false,
+                        label: Text(l.desktopTouchMode),
+                      ),
+                      ButtonSegment(
+                        value: true,
+                        label: Text(l.desktopTrackpadMode),
+                      ),
+                    ],
+                    selected: {_trackpad},
+                    onSelectionChanged: (values) {
+                      _releaseLocalInput();
+                      setState(() => _trackpad = values.single);
                     },
                   ),
                 ],
               ),
             ),
-            if (status?.message.isNotEmpty == true || store.error != null)
-              Padding(
-                padding: const EdgeInsets.all(8),
-                child: Text(
-                  store.error ?? status!.message,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: Text(
+                l.desktopGestureHelp,
+                style: Theme.of(context).textTheme.bodySmall,
               ),
+            ),
             Expanded(
               child: Focus(
                 focusNode: _focus,
                 autofocus: true,
                 onKeyEvent: _keyboard,
                 onFocusChange: (focused) {
-                  if (!focused) unawaited(store.release());
+                  if (!focused) _releaseLocalInput();
                 },
                 child: ColoredBox(
                   color: Colors.black,
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      final image = _image;
-                      final texture = store.videoTexture;
-                      final video = store.frame?.status.codec == 'h264'
-                          ? store.frame!.status
-                          : null;
-                      if (video == null && image == null ||
-                          video != null &&
-                              (texture == null ||
-                                  video.videoWidth < 2 ||
-                                  video.videoHeight < 2)) {
-                        return Center(
-                          child: Text(
-                            status?.state == 'stopped'
-                                ? l.desktopStopped
-                                : l.desktopConnecting,
-                            style: const TextStyle(color: Colors.white),
-                          ),
-                        );
-                      }
-                      final ratio = video != null
-                          ? video.videoWidth / video.videoHeight
-                          : image!.width / image.height;
-                      final width = math.min(
-                        constraints.maxWidth,
-                        constraints.maxHeight * ratio,
-                      );
-                      final size = Size(width, width / ratio);
-                      return Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Center(
-                            child: SizedBox.fromSize(
-                              size: size,
-                              child: InteractiveViewer(
-                                transformationController: _transform,
-                                minScale: 1,
-                                maxScale: 5,
-                                panEnabled: !_interactive,
-                                scaleEnabled: !_interactive,
-                                child: Listener(
-                                  onPointerHover: (event) {
-                                    unawaited(_move(event.localPosition, size));
-                                  },
-                                  onPointerDown: (event) {
-                                    if (!_interactive) return;
-                                    _focus.requestFocus();
-                                    final button =
-                                        event.buttons & kSecondaryMouseButton !=
-                                            0
-                                        ? 'right'
-                                        : event.buttons & kMiddleMouseButton !=
-                                              0
-                                        ? 'middle'
-                                        : 'left';
-                                    _buttons[event.pointer] = button;
-                                    unawaited(_move(event.localPosition, size));
-                                    unawaited(
-                                      _send({
-                                        'kind': 'button',
-                                        'button': button,
-                                        'down': true,
-                                      }),
-                                    );
-                                  },
-                                  onPointerMove: (event) {
-                                    if (_buttons.containsKey(event.pointer)) {
-                                      unawaited(
-                                        _move(event.localPosition, size),
-                                      );
-                                    }
-                                  },
-                                  onPointerUp: (event) {
-                                    final button = _buttons.remove(
-                                      event.pointer,
-                                    );
-                                    if (button != null) {
-                                      unawaited(
-                                        _send({
-                                          'kind': 'button',
-                                          'button': button,
-                                          'down': false,
-                                        }),
-                                      );
-                                    }
-                                  },
-                                  onPointerCancel: (_) {
-                                    _buttons.clear();
-                                    unawaited(store.release());
-                                  },
-                                  onPointerSignal: (event) {
-                                    if (event is PointerScrollEvent &&
-                                        _interactive) {
-                                      unawaited(
-                                        _send({
-                                          'kind': 'wheel',
-                                          'horizontal':
-                                              (event.scrollDelta.dx / 30)
-                                                  .round()
-                                                  .clamp(-100, 100),
-                                          'vertical':
-                                              (event.scrollDelta.dy / 30)
-                                                  .round()
-                                                  .clamp(-100, 100),
-                                        }),
-                                      );
-                                    }
-                                  },
-                                  child: Stack(
-                                    fit: StackFit.expand,
-                                    clipBehavior: Clip.hardEdge,
-                                    children: [
-                                      if (video != null)
-                                        Texture(
-                                          textureId: texture!.textureId,
-                                          filterQuality: FilterQuality.low,
-                                        )
-                                      else
-                                        RawImage(
-                                          image: image,
-                                          fit: BoxFit.fill,
-                                          filterQuality: FilterQuality.low,
-                                        ),
-                                      if (video != null)
-                                        ValueListenableBuilder<DesktopStatus?>(
-                                          valueListenable:
-                                              store.videoPresentation,
-                                          builder: (_, rendered, _) =>
-                                              _cursor(rendered, size),
-                                        )
-                                      else
-                                        _cursor(_rendered, size),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          if (!store.fresh)
-                            ColoredBox(
-                              color: Colors.black,
-                              child: Center(
-                                child: Padding(
-                                  padding: const EdgeInsets.all(24),
-                                  child: Text(
-                                    l.desktopStale,
-                                    style: const TextStyle(color: Colors.white),
-                                    textAlign: TextAlign.center,
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      );
-                    },
-                  ),
+                  child: _screen(context, status),
                 ),
               ),
             ),
@@ -460,6 +323,11 @@ class _DesktopViewerState extends State<DesktopViewer>
                     tooltip: l.desktopKeyboard,
                     onPressed: _interactive ? () => _text(context) : null,
                     icon: const Icon(Icons.keyboard_outlined),
+                  ),
+                  IconButton(
+                    tooltip: l.desktopLeftClick,
+                    onPressed: _interactive ? () => _click('left') : null,
+                    icon: const Icon(Icons.ads_click),
                   ),
                   IconButton(
                     tooltip: l.desktopRightClick,
@@ -522,6 +390,119 @@ class _DesktopViewerState extends State<DesktopViewer>
           ],
         ),
       ),
+    );
+  }
+
+  void _releaseLocalInput() {
+    _surface.currentState?.cancelInput();
+    if (_keys.isNotEmpty) {
+      _keys.clear();
+      unawaited(store.release());
+    }
+  }
+
+  Widget _screen(BuildContext context, DesktopStatus? status) {
+    final texture = store.videoTexture;
+    final video = texture == null ? null : _videoGeometry;
+    final image = _image;
+    final hasPicture = video != null || image != null;
+    final display = _rendered?.display;
+    final cursor = _rendered?.cursor;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        DesktopGestureSurface(
+          key: _surface,
+          aspectRatio: _lastAspectRatio,
+          enabled: _interactive,
+          trackpad: _trackpad,
+          inputEpoch: (store, store.mediaEpoch, store.frame?.status.generation),
+          cursor:
+              cursor == null ||
+                  display == null ||
+                  display.width == 0 ||
+                  display.height == 0
+              ? null
+              : Offset(cursor.x / display.width, cursor.y / display.height),
+          onFocus: _focus.requestFocus,
+          onMove: _move,
+          onButton: (button, down) =>
+              _send({'kind': 'button', 'button': button, 'down': down}),
+          onWheel: (delta) => _send({
+            'kind': 'wheel',
+            'horizontal': (delta.dx / 30).round().clamp(-100, 100),
+            'vertical': (delta.dy / 30).round().clamp(-100, 100),
+          }),
+          onRelease: store.release,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (video != null)
+                Texture(
+                  key: ValueKey(texture!.textureId),
+                  textureId: texture.textureId,
+                  filterQuality: FilterQuality.low,
+                )
+              else if (image != null)
+                RawImage(
+                  image: image,
+                  fit: BoxFit.fill,
+                  filterQuality: FilterQuality.low,
+                ),
+              LayoutBuilder(
+                builder: (_, constraints) => Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (video != null)
+                      ValueListenableBuilder<DesktopStatus?>(
+                        valueListenable: store.videoPresentation,
+                        builder: (_, rendered, _) =>
+                            _cursor(rendered, constraints.biggest),
+                      )
+                    else
+                      _cursor(_rendered, constraints.biggest),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (!hasPicture)
+          IgnorePointer(
+            child: Center(
+              child: Text(
+                status?.state == 'stopped'
+                    ? context.l10n.desktopStopped
+                    : context.l10n.desktopConnecting,
+                style: const TextStyle(color: Colors.white),
+              ),
+            ),
+          )
+        else if (!store.fresh)
+          // Never cover the entire native texture with an opaque layer. Flutter
+          // still needs to consume it to acknowledge the next recovered frame.
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: IgnorePointer(
+              child: Container(
+                margin: const EdgeInsets.all(12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  context.l10n.desktopStale,
+                  style: const TextStyle(color: Colors.white),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 

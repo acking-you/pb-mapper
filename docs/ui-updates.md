@@ -75,8 +75,9 @@ offsets to the build number, so compare **effective** versionCodes in the APKs.
 Build 906 was consumed by the local repair; release 0.9.6 uses build 907, 0.9.7
 consumed 908 without shipping APKs, 0.9.8 uses 909, 0.10.0 uses 910 and
 0.10.1 uses 911 and 0.10.2 uses 912. Build 913 is consumed by the local
-issue #50 Windows/Android test distribution (version 0.10.2). The next
-distribution must use at least 914. The build counter is independent of the
+issue #50 Windows/Android test distribution (version 0.10.2); build 914 is its
+mobile interaction and recovery repair. The next distribution must use at
+least 915. The build counter is independent of the
 public version.
 
 To verify the complete Android build without publishing a release, run

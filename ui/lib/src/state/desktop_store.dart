@@ -3,6 +3,17 @@ import 'package:flutter/foundation.dart';
 import '../ffi/desktop_api.dart';
 import '../ffi/desktop_video.dart';
 
+enum DesktopConnectionPhase {
+  idle,
+  connecting,
+  live,
+  delayed,
+  waitingForDesktop,
+  recoveringVideo,
+  retryWaiting,
+  reconnecting,
+}
+
 /// Owns the session independently of navigation. Only the newest frame is kept,
 /// and each input carries the geometry of the frame actually rendered by UI.
 class DesktopStore extends ChangeNotifier {
@@ -55,11 +66,54 @@ class DesktopStore extends ChangeNotifier {
   int _inFlight = 0;
   int _inputEpoch = 0;
   Future<void> _inputTail = Future.value();
+  _PendingMove? _pendingMove;
   bool _endingControl = false;
   bool _releasing = false;
+  (String, bool)? _target;
+  int _sessionSerial = 0;
+  int? _attemptSerial;
+  bool get _attemptRunning => _attemptSerial == _sessionSerial;
+  bool _controlWanted = false, _viewerForeground = true;
+  bool _restoringControl = false;
+  Timer? _retryTimer;
+  DateTime? _retryAt, _recoveryStarted, _lastKeyframeRequest, _stableSince;
+  DateTime? _controlRequestedAt;
+  int reconnectAttempt = 0;
+  String? recoveryReason;
+  Duration? get pictureAge {
+    final at = _videoPresentedAt ?? _frameAt;
+    return at == null ? null : _now().difference(at);
+  }
+
+  Duration get retryIn => _retryAt == null
+      ? Duration.zero
+      : (_retryAt!.difference(_now()) > Duration.zero
+            ? _retryAt!.difference(_now())
+            : Duration.zero);
+  DesktopConnectionPhase get connectionPhase {
+    if (_retryTimer != null) return DesktopConnectionPhase.retryWaiting;
+    if (_attemptRunning) {
+      return reconnectAttempt == 0
+          ? DesktopConnectionPhase.connecting
+          : DesktopConnectionPhase.reconnecting;
+    }
+    if (snapshot.viewer?.state == 'capture_unavailable') {
+      return DesktopConnectionPhase.waitingForDesktop;
+    }
+    if (!connected) return DesktopConnectionPhase.idle;
+    if (fresh) {
+      return snapshot.viewer!.frameAckMs > 500
+          ? DesktopConnectionPhase.delayed
+          : DesktopConnectionPhase.live;
+    }
+    return _recoveryStarted != null
+        ? DesktopConnectionPhase.recoveringVideo
+        : DesktopConnectionPhase.connecting;
+  }
+
   bool get sharing =>
       snapshot.host != null || snapshot.background?.enabled == true;
-  bool get connected => snapshot.viewer != null;
+  bool get connected => _target != null || snapshot.viewer != null;
   bool get fresh =>
       frame != null &&
       frame!.bytes.isNotEmpty &&
@@ -156,7 +210,11 @@ class DesktopStore extends ChangeNotifier {
   }
 
   Future<void> poll() async {
-    if (_polling || _disposed || busy || _disconnecting != null) return;
+    if (_polling || _disposed || _disconnecting != null) return;
+    if (busy || _attemptRunning || _retryTimer != null) {
+      _notify();
+      return;
+    }
     _polling = true;
     final epoch = _mediaEpoch;
     try {
@@ -168,6 +226,10 @@ class DesktopStore extends ChangeNotifier {
       }
       if (snapshot.viewer == null || snapshot.viewer?.state == 'stopped') {
         _mediaFailed = snapshot.viewer != null;
+        if (_target != null) {
+          _scheduleReconnect(snapshot.viewer?.message ?? error);
+          return;
+        }
         if (_frames != null || videoTexture != null || frame != null) {
           await _clearVideo();
         }
@@ -186,10 +248,11 @@ class DesktopStore extends ChangeNotifier {
         frame = null;
       }
       if (snapshot.viewer?.controlling != true) _endingControl = false;
+      await _maintainViewer();
     } catch (e) {
       if (_current(epoch)) {
         error = e.toString();
-        frame = null;
+        if (_target != null) _scheduleReconnect(error);
       }
     } finally {
       _polling = false;
@@ -197,20 +260,113 @@ class DesktopStore extends ChangeNotifier {
     }
   }
 
+  Future<void> _maintainViewer() async {
+    if (_target == null || !_viewerForeground) return;
+    if (_mediaFailed) {
+      _scheduleReconnect(error);
+      return;
+    }
+    final status = snapshot.viewer;
+    if (status?.state == 'capture_unavailable') {
+      // The transport is alive. Wait for the host desktop instead of making a
+      // network retry loop around a local Windows permission requirement.
+      _recoveryStarted = null;
+      _lastKeyframeRequest = null;
+      _stableSince = null;
+      return;
+    }
+    if (fresh) {
+      _recoveryStarted = null;
+      recoveryReason = null;
+      _stableSince ??= _now();
+      if (_now().difference(_stableSince!) >= const Duration(seconds: 3)) {
+        reconnectAttempt = 0;
+      }
+      if (status?.controlAllowed != true) _controlWanted = false;
+      if (_controlWanted &&
+          status?.controlling != true &&
+          !_restoringControl &&
+          (_controlRequestedAt == null ||
+              _now().difference(_controlRequestedAt!) >=
+                  const Duration(seconds: 1))) {
+        _restoringControl = true;
+        _controlRequestedAt = _now();
+        final serial = _sessionSerial;
+        try {
+          await api.control(true);
+        } catch (e) {
+          if (serial == _sessionSerial) recoveryReason = e.toString();
+        } finally {
+          _restoringControl = false;
+        }
+      }
+      return;
+    }
+    _stableSince = null;
+    _recoveryStarted ??= _now();
+    final age = _now().difference(_recoveryStarted!);
+    if (age >= const Duration(seconds: 3)) {
+      _scheduleReconnect(error ?? status?.message);
+    } else if (age >= const Duration(milliseconds: 700) &&
+        (_lastKeyframeRequest == null ||
+            _now().difference(_lastKeyframeRequest!) >=
+                const Duration(seconds: 1))) {
+      _lastKeyframeRequest = _now();
+      _pendingKeyframe = true;
+      _flushFeedback(_mediaEpoch);
+    }
+  }
+
+  void _scheduleReconnect(String? reason) {
+    if (_disposed ||
+        !_viewerForeground ||
+        _target == null ||
+        _retryTimer != null ||
+        _attemptRunning) {
+      return;
+    }
+    reconnectAttempt++;
+    final delay = Duration(
+      seconds: (1 << (reconnectAttempt - 1).clamp(0, 4)).clamp(1, 15),
+    );
+    recoveryReason = reason?.isNotEmpty == true ? reason : null;
+    _retryAt = _now().add(delay);
+    _endingControl = true;
+    _inputEpoch++;
+    final serial = _sessionSerial;
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
+      _retryAt = null;
+      if (!_disposed && serial == _sessionSerial && _target != null) {
+        unawaited(_openViewer(serial));
+      }
+    });
+    _notify();
+  }
+
   Future<void> _acceptFrame(DesktopFrame next, int epoch) async {
     if (!_current(epoch)) return;
     frame = next;
-    _frameAt = _now();
     snapshot = snapshot.withViewer(next.status);
     final state = next.status;
-    if (state.codec != 'h264' || !state.streaming || next.bytes.isEmpty) {
+    if (!state.streaming || next.bytes.isEmpty) {
       videoPresented = null;
       _videoPresentedAt = null;
       _videoStatuses.clear();
       _videoGeneration = -1;
       _notify();
+      // Status heartbeats carry no image. Keep the texture alive and reset the
+      // decoder once when a real frame of the next generation arrives.
+      return;
+    }
+    _frameAt = _now();
+    if (state.codec != 'h264') {
+      videoPresented = null;
+      _videoPresentedAt = null;
+      _videoStatuses.clear();
       final texture = videoTexture;
-      if (texture != null) await texture.reset();
+      if (_videoGeneration != -1 && texture != null) await texture.reset();
+      _videoGeneration = -1;
       if (!_current(epoch)) return;
     }
     if (state.codec == 'h264' && next.bytes.isNotEmpty && state.streaming) {
@@ -510,25 +666,68 @@ class DesktopStore extends ChangeNotifier {
 
   Future<void> connect(String invite, bool relayOnly) async {
     await _disconnecting;
-    await run(() async {
+    if (_disposed || busy || _attemptRunning) return;
+    _viewerForeground = true;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryAt = null;
+    _target = (invite, relayOnly);
+    _controlWanted = false;
+    reconnectAttempt = 0;
+    error = null;
+    recoveryReason = null;
+    final serial = ++_sessionSerial;
+    _timer ??= Timer.periodic(const Duration(milliseconds: 250), (_) => poll());
+    await _openViewer(serial);
+    await poll();
+  }
+
+  Future<void> _openViewer(int serial) async {
+    final target = _target;
+    if (_disposed ||
+        !_viewerForeground ||
+        target == null ||
+        serial != _sessionSerial ||
+        _attemptRunning) {
+      return;
+    }
+    _attemptSerial = serial;
+    _notify();
+    try {
+      final needsDisconnect = snapshot.viewer != null || reconnectAttempt > 0;
       final cleanup = _clearVideo();
       final epoch = _mediaEpoch;
+      if (needsDisconnect) await api.disconnect();
       await cleanup;
-      if (!_current(epoch)) return;
-      await api.connect(invite, relayOnly: relayOnly);
-      if (!_current(epoch)) return;
+      if (!_current(epoch) || serial != _sessionSerial) return;
+      await api.connect(target.$1, relayOnly: target.$2);
+      if (!_current(epoch) || serial != _sessionSerial) return;
       _sequence = 0;
       _inputEpoch++;
       frame = null;
       _endingControl = false;
       _releasing = false;
       _mediaFailed = false;
+      _recoveryStarted = _now();
+      _lastKeyframeRequest = null;
+      _controlRequestedAt = null;
+      error = null;
       snapshot = snapshot.withViewer(const DesktopStatus(state: 'connecting'));
       final frames = StreamIterator(api.frames());
       _frames = frames;
       unawaited(_consumeFrames(frames, epoch));
-    });
-    await poll();
+    } catch (e) {
+      if (!_disposed && serial == _sessionSerial) {
+        error = e.toString();
+        _mediaFailed = true;
+      }
+    } finally {
+      if (_attemptSerial == serial) _attemptSerial = null;
+      if (!_disposed && serial == _sessionSerial && _mediaFailed) {
+        _scheduleReconnect(error);
+      }
+      _notify();
+    }
   }
 
   Future<void> disconnect() {
@@ -544,6 +743,14 @@ class DesktopStore extends ChangeNotifier {
   }
 
   Future<void> _disconnect() async {
+    _target = null;
+    _sessionSerial++;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryAt = null;
+    _controlWanted = false;
+    _recoveryStarted = null;
+    recoveryReason = null;
     _endingControl = true;
     _inputEpoch++;
     final cleanup = _clearVideo();
@@ -561,6 +768,8 @@ class DesktopStore extends ChangeNotifier {
 
   Future<void> control(bool enabled) async {
     if (_disposed) return;
+    _controlWanted = enabled;
+    _controlRequestedAt = _now();
     _endingControl = !enabled;
     _inputEpoch++;
     _notify();
@@ -578,7 +787,7 @@ class DesktopStore extends ChangeNotifier {
   }
 
   Future<void> release() async {
-    if (!connected) return;
+    if (!connected || _releasing) return;
     _inputEpoch++;
     _releasing = true;
     final epoch = _mediaEpoch;
@@ -592,6 +801,25 @@ class DesktopStore extends ChangeNotifier {
     }
   }
 
+  void setViewerForeground(bool foreground) {
+    if (_disposed || _viewerForeground == foreground) return;
+    _viewerForeground = foreground;
+    if (!foreground) {
+      _retryTimer?.cancel();
+      _retryTimer = null;
+      _retryAt = null;
+      _controlWanted = false;
+      _endingControl = true;
+      _inputEpoch++;
+      if (connected) {
+        unawaited(api.control(false).catchError((Object _) {}));
+      }
+    } else {
+      _recoveryStarted = null;
+      scheduleMicrotask(() => unawaited(poll()));
+    }
+  }
+
   Future<void> send(
     DesktopStatus rendered,
     Map<String, Object?> event, {
@@ -599,47 +827,68 @@ class DesktopStore extends ChangeNotifier {
   }) async {
     if (mediaEpoch != null && mediaEpoch != _mediaEpoch) return;
     if (!controlling || rendered.generation != frame?.status.generation) return;
+    final moving = event['kind'] == 'move';
+    final pending = _pendingMove;
+    if (moving && pending != null && pending.epoch == _inputEpoch) {
+      pending.rendered = rendered;
+      pending.event = event;
+      return pending.done;
+    }
+    // A button/key is an ordering barrier. Only consecutive unsent pointer
+    // motion may be replaced, so a click still follows its intended position.
+    _pendingMove = null;
     // Bound calls from gesture sources as well as the native input queue. If
     // saturated, end control instead of dropping a release or replaying a click.
     if (_inFlight >= 16) {
-      await control(false);
+      await _interruptInput();
       return;
     }
     _inFlight++;
     final epoch = _inputEpoch;
+    final move = moving ? _PendingMove(rendered, event, epoch) : null;
+    _pendingMove = move;
     final operation = _inputTail.then((_) async {
+      if (identical(_pendingMove, move)) _pendingMove = null;
+      final currentRendered = move?.rendered ?? rendered;
+      final currentEvent = move?.event ?? event;
       try {
         if (_disposed ||
             epoch != _inputEpoch ||
             !controlling ||
-            rendered.generation != frame?.status.generation) {
+            currentRendered.generation != frame?.status.generation) {
           return;
         }
         await api.input(
-          generation: rendered.generation,
-          frameId: rendered.frameId,
+          generation: currentRendered.generation,
+          frameId: currentRendered.frameId,
           sequence: ++_sequence,
-          input: event,
+          input: currentEvent,
         );
       } catch (e) {
         if (_disposed || epoch != _inputEpoch) return;
         error = e.toString();
         // Do not await our own queue tail from inside it.
-        _endingControl = true;
-        _inputEpoch++;
-        try {
-          await api.control(false);
-        } catch (_) {
-          // A disconnected transport has already released remote input. Keep
-          // the queue usable for a subsequent explicitly opened session.
-        }
-        _notify();
+        await _interruptInput();
       } finally {
         _inFlight--;
       }
     });
+    if (move != null) move.done = operation;
     _inputTail = operation;
     await operation;
+  }
+
+  Future<void> _interruptInput() async {
+    _endingControl = true;
+    _inputEpoch++;
+    _pendingMove = null;
+    try {
+      await api.control(false);
+    } catch (_) {
+      // Transport loss already releases remote input. The current invitation
+      // may reconnect, but queued clicks and keys are never replayed.
+    }
+    _notify();
   }
 
   void _notify() {
@@ -649,6 +898,8 @@ class DesktopStore extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _target = null;
+    _retryTimer?.cancel();
     _timer?.cancel();
     _inputEpoch++;
     unawaited(_clearVideo());
@@ -657,4 +908,12 @@ class DesktopStore extends ChangeNotifier {
     videoPresentation.dispose();
     super.dispose();
   }
+}
+
+class _PendingMove {
+  _PendingMove(this.rendered, this.event, this.epoch);
+  DesktopStatus rendered;
+  Map<String, Object?> event;
+  final int epoch;
+  late Future<void> done;
 }

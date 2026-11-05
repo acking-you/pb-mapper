@@ -163,6 +163,22 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
         })
         .await
         .unwrap();
+        let releases = observed.releases.load(Ordering::Relaxed);
+        for _ in 0..1000 {
+            viewer.release_input().unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while observed.releases.load(Ordering::Relaxed) <= releases {
+                observed.changed.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+        frame(&mut frames, |f| {
+            f.status.frame_id > controlled.status.frame_id
+        })
+        .await;
+        assert_eq!(viewer.status().state, "streaming");
         viewer.input(event(&controlled, 3)).unwrap(); // host rejects duplicate
         host.set_control_allowed(false);
         let revoked = frame(&mut frames, |f| {

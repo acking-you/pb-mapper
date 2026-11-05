@@ -249,18 +249,28 @@ void main() {
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       Completer<void>? accepted;
-      var expectedMethod = 'submit';
+      var resets = 0;
       messenger.setMockMethodCallHandler(_channel, (call) async {
-        if (call.method == expectedMethod && accepted?.isCompleted == false) {
+        if (call.method == 'reset') resets++;
+        if (call.method == 'submit' && accepted?.isCompleted == false) {
           accepted!.complete();
         }
         return call.method == 'create' ? 9 : null;
       });
       Future<void> emit(int generation, int frame, {bool blank = false}) async {
         accepted = Completer<void>();
-        expectedMethod = blank ? 'reset' : 'submit';
+        void received() {
+          if (blank &&
+              store.frame?.status.frameId == frame &&
+              !accepted!.isCompleted) {
+            accepted!.complete();
+          }
+        }
+
+        store.addListener(received);
         api.emit(generation, frame, blank: blank);
         await accepted!.future;
+        store.removeListener(received);
       }
 
       await store.connect('test', false);
@@ -286,7 +296,12 @@ void main() {
       );
       expect(api.presentations, [(3, 1)]);
 
+      final beforeUnavailable = resets;
+      final texture = store.videoTexture;
       await emit(4, 3, blank: true);
+      await emit(4, 3, blank: true);
+      expect(resets, beforeUnavailable);
+      expect(identical(store.videoTexture, texture), isTrue);
       await _nativePresentation(9, 3, 1);
       expect(store.fresh, false);
       await emit(4, 4);

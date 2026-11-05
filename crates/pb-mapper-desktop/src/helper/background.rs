@@ -68,12 +68,8 @@ struct Response {
 }
 
 async fn call(command: Command) -> Result<Snapshot> {
+    super::status().ensure_ready()?;
     let config = configuration()?;
-    if !super::status().authorized_application {
-        return Err(error(
-            "Open the installed application to manage background hosting",
-        ));
-    }
     let mut pipe = ipc::connect(PIPE)?;
     os::verify_server(&pipe, &config.helper_executable, None)?;
     tokio::time::timeout(CALL_TIMEOUT, async {

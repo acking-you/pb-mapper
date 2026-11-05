@@ -25,7 +25,10 @@ class _DesktopPageState extends State<DesktopPage> {
   final _invitation = TextEditingController();
   int? _display;
   bool _control = false, _relayOnly = false, _showInvitation = false;
-  bool _privileged = false;
+  // Full desktop access is the default once the user has explicitly installed
+  // and authorized the protected application. Limited sharing is a deliberate
+  // choice, never a silent fallback when UAC becomes inaccessible.
+  bool _ordinaryOnly = false;
   bool _remember = false, _autoStart = false;
   bool _background = false;
   @override
@@ -49,6 +52,21 @@ class _DesktopPageState extends State<DesktopPage> {
     builder: (context, _) {
       final store = widget.store;
       final l = context.l10n;
+      final hostHelper = store.capabilities.helper;
+      final helperReady =
+          hostHelper?.installed == true &&
+          hostHelper?.running == true &&
+          hostHelper?.authorized == true;
+      final setupAction = hostHelper == null || helperReady
+          ? null
+          : !hostHelper.installed ||
+                !hostHelper.canOpenApplication && !hostHelper.authorized
+          ? 'install'
+          : !hostHelper.running
+          ? 'enable'
+          : 'open';
+      final needsSecureSetup =
+          hostHelper != null && !_ordinaryOnly && !helperReady;
       return Scaffold(
         appBar: AppBar(
           title: Text(l.desktopTitle),
@@ -158,74 +176,125 @@ class _DesktopPageState extends State<DesktopPage> {
                     const Divider(),
                   ],
                   if (store.capabilities.helper case final helper?) ...[
-                    Text(
-                      l.desktopHelperTitle,
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(l.desktopHelperHelp),
-                    if (helper.installed)
-                      Text(
-                        helper.running
-                            ? l.desktopHelperRunning
-                            : l.desktopHelperStopped,
-                      ),
-                    if (helper.installed && !helper.authorized)
-                      Text(l.desktopHelperRestart),
-                    Wrap(
-                      spacing: 8,
-                      children: [
-                        TextButton(
-                          onPressed: store.busy || store.sharing
-                              ? null
-                              : () => store.helperAction('install'),
-                          child: Text(l.desktopHelperInstall),
-                        ),
-                        if (helper.installed) ...[
-                          if (!helper.running)
-                            TextButton(
-                              onPressed: store.busy || store.sharing
-                                  ? null
-                                  : () => store.helperAction('enable'),
-                              child: Text(l.desktopHelperEnable),
+                    Card(
+                      margin: EdgeInsets.zero,
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(
+                                  helperReady
+                                      ? Icons.verified_user_outlined
+                                      : Icons.admin_panel_settings_outlined,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    l.desktopSecureSetupTitle,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleMedium,
+                                  ),
+                                ),
+                              ],
                             ),
-                          TextButton(
-                            key: const Key('desktop-helper-disable'),
-                            // Keep the OS service stop available when its
-                            // management pipe cannot stop a background host.
-                            onPressed: store.busy
-                                ? null
-                                : () => store.helperAction('disable'),
-                            child: Text(l.desktopHelperDisable),
-                          ),
-                          TextButton(
-                            key: const Key('desktop-helper-uninstall'),
-                            onPressed: store.busy
-                                ? null
-                                : () => store.helperAction('uninstall'),
-                            child: Text(l.desktopHelperUninstall),
-                          ),
-                          if (!helper.authorized)
-                            TextButton(
-                              onPressed: store.busy
-                                  ? null
-                                  : () => store.helperAction('open'),
-                              child: Text(l.desktopHelperOpen),
-                            ),
-                        ],
-                      ],
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(l.desktopHelperUse),
-                      value: _privileged && helper.running && helper.authorized,
-                      onChanged:
-                          store.sharing || !helper.running || !helper.authorized
-                          ? null
-                          : (value) => setState(() {
-                              _privileged = value;
-                              if (!value) _background = false;
+                            const SizedBox(height: 8),
+                            Text(switch (setupAction) {
+                              'install' => l.desktopSecureSetupRequired,
+                              'enable' => l.desktopSecureSetupStopped,
+                              'open' => l.desktopSecureSetupOpen,
+                              _ => l.desktopSecureSetupReady,
                             }),
+                            if (!helperReady) ...[
+                              const SizedBox(height: 12),
+                              FilledButton.icon(
+                                key: const Key('desktop-secure-setup-action'),
+                                // A cached background grant must not disable
+                                // opening its approved app or restarting an
+                                // unavailable service. FFI still serializes
+                                // install/enable against a local host.
+                                onPressed:
+                                    store.busy ||
+                                        (setupAction != 'open' &&
+                                            store.sharing &&
+                                            store
+                                                    .snapshot
+                                                    .background
+                                                    ?.enabled !=
+                                                true)
+                                    ? null
+                                    : () => store.helperAction(setupAction!),
+                                icon: const Icon(Icons.shield_outlined),
+                                label: Text(switch (setupAction) {
+                                  'install' => l.desktopHelperInstall,
+                                  'enable' => l.desktopHelperEnable,
+                                  _ => l.desktopHelperOpen,
+                                }),
+                              ),
+                            ],
+                            if (!store.sharing)
+                              SwitchListTile(
+                                key: const Key('desktop-ordinary-only'),
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(l.desktopOrdinaryOnly),
+                                subtitle: Text(l.desktopOrdinaryOnlyHelp),
+                                value: _ordinaryOnly,
+                                onChanged: store.busy
+                                    ? null
+                                    : (value) => setState(() {
+                                        _ordinaryOnly = value;
+                                        if (value) _background = false;
+                                      }),
+                              ),
+                            ExpansionTile(
+                              key: const Key('desktop-helper-maintenance'),
+                              tilePadding: EdgeInsets.zero,
+                              title: Text(l.desktopHelperMaintenance),
+                              children: [
+                                Wrap(
+                                  spacing: 8,
+                                  children: [
+                                    TextButton(
+                                      onPressed: store.busy || store.sharing
+                                          ? null
+                                          : () => store.helperAction('install'),
+                                      child: Text(l.desktopHelperInstall),
+                                    ),
+                                    if (helper.installed) ...[
+                                      TextButton(
+                                        key: const Key(
+                                          'desktop-helper-disable',
+                                        ),
+                                        // An unavailable management pipe must
+                                        // never hide the OS service stop path.
+                                        onPressed: store.busy
+                                            ? null
+                                            : () =>
+                                                  store.helperAction('disable'),
+                                        child: Text(l.desktopHelperDisable),
+                                      ),
+                                      TextButton(
+                                        key: const Key(
+                                          'desktop-helper-uninstall',
+                                        ),
+                                        onPressed: store.busy
+                                            ? null
+                                            : () => store.helperAction(
+                                                'uninstall',
+                                              ),
+                                        child: Text(l.desktopHelperUninstall),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                     const Divider(),
                   ],
@@ -311,8 +380,7 @@ class _DesktopPageState extends State<DesktopPage> {
                       value: _control,
                       onChanged: (value) => setState(() => _control = value),
                     ),
-                    if (store.capabilities.helper case final helper?
-                        when helper.running && helper.authorized)
+                    if (helperReady)
                       SwitchListTile(
                         key: const Key('desktop-background'),
                         contentPadding: EdgeInsets.zero,
@@ -322,7 +390,7 @@ class _DesktopPageState extends State<DesktopPage> {
                         onChanged: (value) => setState(() {
                           _background = value;
                           if (value) {
-                            _privileged = true;
+                            _ordinaryOnly = false;
                             _remember = true;
                             _autoStart = true;
                           }
@@ -352,7 +420,9 @@ class _DesktopPageState extends State<DesktopPage> {
                     FilledButton.icon(
                       key: const Key('desktop-share'),
                       onPressed:
-                          store.busy || store.capabilities.displays.isEmpty
+                          store.busy ||
+                              store.capabilities.displays.isEmpty ||
+                              needsSecureSetup
                           ? null
                           : () async {
                               await store.startHost(
@@ -361,7 +431,7 @@ class _DesktopPageState extends State<DesktopPage> {
                                     store.capabilities.displays.first.id,
                                 _control,
                                 _relayOnly,
-                                privileged: _privileged,
+                                privileged: !_ordinaryOnly && helperReady,
                                 remember: _remember,
                                 autoStart: _autoStart,
                                 background: _background,
@@ -373,6 +443,11 @@ class _DesktopPageState extends State<DesktopPage> {
                       icon: const Icon(Icons.screen_share_outlined),
                       label: Text(l.desktopShare),
                     ),
+                    if (needsSecureSetup)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(l.desktopShareNeedsSetup),
+                      ),
                   ],
                   const Divider(height: 40),
                   Text(

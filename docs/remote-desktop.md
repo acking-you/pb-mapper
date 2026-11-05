@@ -36,8 +36,12 @@ to preserve responsiveness; 90 FPS is not a relay acceptance requirement.
 4. On the controller, open Remote desktop, paste the invitation, and open its
    screen. Request control explicitly; viewing alone never acquires input
    admission. Choose **relay only** before connecting to exercise that path.
-5. Use touch/click, drag, scroll, text entry, and the key-combination toolbar.
-   Switch to Zoom / pan to navigate the image. Unicode insertion is supported;
+5. Touch mode uses a single tap for left click and a two-finger tap for right
+   click; drag directly to drag a remote item. Trackpad mode moves the remote
+   cursor with one finger and uses a long press to drag. Two fingers always
+   zoom/pan in either mode, without switching away from mouse control. The
+   toolbar also exposes mouse buttons, scrolling, text and key combinations.
+   Unicode insertion is supported;
    it is not a remote IME session. Secure-attention sequences are unsupported.
 6. End control to retain viewing, or disconnect. The host retains a persistent
    **Stop sharing** action across navigation and can revoke input independently.
@@ -45,7 +49,8 @@ to preserve responsiveness; 90 FPS is not a relay acceptance requirement.
 There is one selected display and one viewer. Stop and restart sharing to select
 another display. Input uses the selected display's physical coordinates, DPI,
 letterboxing and viewer transform, including negative monitor origins. A stale
-screen is visibly blocked. The H.264 capture backend currently rejects rotated
+screen disables input while keeping the texture visible with a status hint.
+The H.264 capture backend currently rejects rotated
 displays instead of presenting incorrect geometry. Cursor metadata shows a
 generic position indicator, not the original Windows cursor bitmap or shape.
 
@@ -109,9 +114,14 @@ keep a cached Default desktop apparently live. Elevated windows can reject its
 input. The separate helper is the implementation path for elevated-window/UAC
 access, **pending actual OS acceptance**.
 
-Preparation in the UI is **Install / update helper**, deliberately complete
-Windows' local administrator consent, open the protected installed app, then
-enable **Use authorized secure desktop helper** before sharing. The first
+Windows sharing defaults to full desktop access. Its preparation card checks
+that the helper is installed, running, and that this application is authorized.
+Follow **Install / update helper**, deliberately complete Windows' local
+administrator consent, then open the protected installed app. Sharing selects
+the helper automatically when ready; restarting a stopped service and opening
+the approved application remain available even if background management lost
+its connection. **Ordinary desktop only** is an explicit limited mode and
+does not support UAC or the lock screen. The first
 elevation of a portable app may need a person locally. A phone cannot approve a
 desktop the unprivileged app cannot access. No UAC policy is changed, no prompt
 is auto-consented, and no administrator password is retained.
@@ -198,7 +208,8 @@ does not require Flutter or a POCOX runtime.
 - `Viewer` uses `Client::connect_tcp` and the existing registration, namespace,
   direct commit and pre-commit relay fallback. The private loopback pair retains
   its bound listener until accepted. Established application streams do not
-  reconnect or replay input automatically.
+  reconnect or replay input automatically at the SDK transport layer. The UI
+  owns a separate bounded recovery policy described below.
 - TLS 1.3 runs inside both direct and relayed tunnels. The invitation pins the
   exact host certificate; rustls also checks its validity, name and signature.
   The separate random capability is sent only after host verification and is
@@ -215,6 +226,29 @@ does not require Flutter or a POCOX runtime.
   endpoint; local desktop stop does.
 
 ## Media and rendering
+
+The viewer's status bar continuously reports connecting, waiting for a local
+desktop, recovering video, reconnect countdown or live/delayed video. Frame age
+is time since receipt of the displayed picture; frame confirmation time includes
+encoding/transport/render/return feedback and is not a one-way latency estimate.
+After a stall the UI requests a keyframe first. A failed stream or continued
+stall opens a fresh authenticated session with the same in-memory invitation and
+path preference, using 1/2/4/8/15-second retry intervals. Capture-unavailable
+heartbeats wait for the local desktop instead of retrying around missing Windows
+permissions. Manual disconnect cancels recovery; backgrounding pauses retries
+and ends control. A foreground retry may restore previously requested control
+only after a fresh picture and host permission. No queued clicks/keys are
+replayed, and the invitation is not persisted by this policy.
+
+Input release/revoke messages coalesce in a bounded mailbox. Consecutive unsent
+pointer moves coalesce only between click/key barriers; input congestion releases
+held input without deliberately tearing down video. Desktop transitions retire
+old presentation debt without allowing viewer keyframe requests to extend the
+ACK timeout. On Android, decoder reset is acknowledged by the codec worker,
+preserves the texture/Surface, and cannot asynchronously close a newer codec.
+The renderer drops obsolete decoded pictures after a stall while preserving
+compressed H.264 references. Pinch/pan transforms keep the same mounted texture;
+an opaque stale-picture overlay must not block its consumption callbacks.
 
 Windows H.264 hosting uses DXGI Desktop Duplication, D3D11 textures and GPU NV12
 conversion, followed by a low-latency Media Foundation hardware encoder with no
