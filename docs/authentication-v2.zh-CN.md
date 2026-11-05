@@ -142,11 +142,12 @@ pb-mapper admin --server relay.example.com:7666 \
 
 可分配的命名空间是 `1` 到 `2^32 - 1`，即 key ID 布局中的 generation `0`。任何 key 的
 generation 都不会是 `0`，因此两类命名空间不会冲突。每个编号只发放一次：高水位先写入并
-落盘，然后才返回编号，崩溃或响应丢失最多浪费一个编号，绝不会重复。高水位放在单独的
-文件中，所以根密钥轮换、认证状态重置、从损坏的 snapshot 执行重置都不会影响它，调用方可以
-在这些操作之后继续使用已保存的命名空间。只有丢失整个状态目录才会丢失高水位，此后向已保存
-的编号签发会返回 `namespace_not_allocated`，直到分配器再次越过该编号；调用方应将其视为
-中继丢失了状态，并在自己一侧保证编号唯一。
+落盘，然后才返回编号，崩溃或响应丢失最多浪费一个编号，绝不会重复。高水位保存两份，一份在
+单独的文件中，一份在加密状态中，所以根密钥轮换、认证状态重置、从损坏的 snapshot 执行重置以及
+丢失该文件都不会影响它，调用方可以在这些情况之后继续使用已保存的命名空间。只有两份都丢失才会
+丢失高水位，实际上就是丢失状态目录。此后向已保存的编号签发会返回
+`namespace_not_allocated`，直到分配器再次越过该编号，并且分配器可能重复发放旧编号。调用方应将
+该错误视为中继丢失了状态，并在自己一侧保证编号唯一。
 
 具备上述能力的中继会在 `admin status` 的 `capabilities` 中列出 `key_namespaces`，SDK 的
 `Admin::supports_key_namespaces` 读取的就是它。旧版中继不报告任何能力，并以
@@ -154,7 +155,8 @@ generation 都不会是 `0`，因此两类命名空间不会冲突。每个编�
 
 未指定命名空间签发的 key 的存储格式与之前完全相同。把中继回退到不支持命名空间的版本时，
 状态仍然可读，但该版本会忽略 key 的命名空间，这类 key 会落到自身 key ID 对应的命名空间：
-仍然隔离，但不再与同伴共享服务。
+仍然隔离，但不再与同伴共享服务。它的第一次 compact（五分钟内）会把不含命名空间的状态写回，
+此后再升级也无法恢复：这些 key 必须重新签发。
 
 ### 到期、吊销与 GC
 
@@ -220,7 +222,7 @@ Linux、macOS 与 Windows 桌面二进制默认写到用户可写的应用目录
 | `admin.key.next` | 轮换进行中的暂存根密钥 |
 | `server-instance-id` | 16 字节持久派生身份 |
 | `server-instance-id.next` | reset 进行中的暂存实例 ID |
-| `namespace-allocator` | 已发放的最后一个命名空间（十进制文本）。不是机密，reset 与根密钥轮换都不会替换它 |
+| `namespace-allocator` | 已发放的最后一个命名空间（十进制文本）。不是机密，reset 与根密钥轮换都不会替换它。加密状态中保存第二份 |
 | `auth.snapshot` | AES-256-GCM 加密的紧凑槽位快照 |
 | `auth.wal` | 带长度前缀、逐条加密的 mutation 与 audit |
 
@@ -229,8 +231,9 @@ WAL；snapshot 同时保存有上限的审计历史和仍有效的管理员重�
 这些安全记录。无效文件头、完整性验证失败、WAL 截断、schema 不匹配或 compact 失败
 都会进入 safe mode：临时凭据全部 fail closed，管理员仍可查看状态并执行显式 reset。
 `namespace-allocator` 损坏的影响范围更小：分配命名空间和向命名空间签发会以
-`namespace_allocator_unavailable` 失败（猜测可能导致编号重复），已有 key 和普通签发不受影响。
-恢复该文件即可解除。
+`namespace_allocator_unavailable` 失败，已有 key 和普通签发不受影响。删除该文件即可解除，这表示
+让中继继续使用加密状态中的那一份。如果中继同时处于 safe mode，那一份也已丢失：应从备份恢复该文件
+而不是删除它，否则编号可能重复。
 
 Flutter 启动服务端时使用应用配置目录下的 `auth/` 子目录，并且只有 TCP listener 与
 认证状态都初始化成功后才会报告 running；桌面和移动端无需写 `/var/lib`，初始化失败
@@ -243,7 +246,7 @@ pb-mapper admin --server relay.example.com:7666 status
 pb-mapper admin --server relay.example.com:7666 key list --page-size 100
 pb-mapper admin --server relay.example.com:7666 key show 4294967296
 pb-mapper admin --server relay.example.com:7666 key reveal 4294967296
-pb-mapper admin --server relay.example.com:7666 service list --key-id 4294967296
+pb-mapper admin --server relay.example.com:7666 service list --namespace 4294967296
 pb-mapper admin --server relay.example.com:7666 connection list --all
 pb-mapper admin --server relay.example.com:7666 connection retire echo --all
 pb-mapper admin --server relay.example.com:7666 legacy-protocol set deny

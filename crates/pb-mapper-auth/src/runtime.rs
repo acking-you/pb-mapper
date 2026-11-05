@@ -166,6 +166,12 @@ impl AuthRuntime {
                 entry.tombstoned_at = Some(entry.tombstoned_at.unwrap_or(entry.expires_at));
             }
         }
+        let namespace_high_water = restore_namespace_high_water(
+            &config.state_dir,
+            loaded
+                .as_ref()
+                .map_or(0, |state| state.namespace_high_water),
+        );
         let inner = Arc::new(AuthStateInner {
             admin: RwLock::new(AdminState {
                 key: admin_key,
@@ -183,6 +189,7 @@ impl AuthRuntime {
             auth_successes: AtomicU64::new(0),
             auth_failures: AtomicU64::new(0),
             root_epoch: AtomicU64::new(loaded.as_ref().map(|state| state.root_epoch).unwrap_or(0)),
+            namespace_high_water: AtomicU64::new(namespace_high_water),
             previous_root: RwLock::new(None),
             audit_records: RwLock::new(audit_records),
             cold: RwLock::new(cold),

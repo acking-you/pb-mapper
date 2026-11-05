@@ -671,6 +671,10 @@ mod tests {
 
     #[test]
     fn accepts_documented_option_aliases() {
+        for filter in ["--namespace", "--key-id"] {
+            Cli::try_parse_from(["pb-mapper", "admin", "service", "list", filter, "7"])
+                .expect("a listing should filter by namespace under either name");
+        }
         Cli::try_parse_from([
             "pb-mapper",
             "server",

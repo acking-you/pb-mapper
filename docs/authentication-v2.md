@@ -183,12 +183,14 @@ Allocated namespaces are `1` to `2^32 - 1`, which is generation `0` of the key-I
 layout. No key ever has generation `0`, so the two kinds cannot collide. A number
 is handed out once, ever: the high-water mark is written and synced before the
 number is returned, so a crash or a lost response can waste one but never repeat
-it. The mark is in its own file so that root rotation, an auth-state reset, and a
-reset out of a damaged snapshot all leave it alone. A caller that stores a namespace
-against a tenant can therefore keep it across all of those. Only losing the whole
-state directory loses the mark, and issuing into a stored number then fails with
-`namespace_not_allocated` until the allocator passes it again; a caller should
-treat that as a relay that lost its state and enforce uniqueness on its side.
+it. The mark is kept twice, in its own file and in the encrypted state, so root
+rotation, an auth-state reset, a reset out of a damaged snapshot, and losing the file
+all leave it intact. A caller that stores a namespace against a tenant can therefore
+keep it across all of those. Only losing both copies loses the mark, which in
+practice means losing the state directory. Issuing into a stored number then fails
+with `namespace_not_allocated` until the allocator passes it again, and the allocator
+can repeat numbers it handed out before. A caller should treat that error as a relay
+that lost its state, and enforce uniqueness on its side.
 
 `admin status` lists `key_namespaces` under `capabilities` on a relay that does all
 of this, and the SDK's `Admin::supports_key_namespaces` reads it. An older relay
@@ -198,7 +200,9 @@ without side effects.
 Keys issued without a namespace are stored exactly as before. Rolling a relay back
 to a version without namespaces keeps its state readable, but that version ignores a
 key's namespace, so such a key lands in the namespace of its own key ID: isolated,
-and no longer with its peers.
+and no longer with its peers. Its first compaction, within five minutes, writes the
+state back without namespaces, so upgrading again after that does not restore them:
+those keys must be reissued.
 
 ### Expiry, revocation, and garbage collection
 
@@ -234,7 +238,11 @@ rather than requiring local `/var/lib` access.
 
 An explicit auth-state reset also invalidates all temporary credentials. It
 rotates the server instance ID so credentials from a corrupted or lost slot
-table cannot become valid again if a key ID is later reused.
+table cannot become valid again if a key ID is later reused. That reuse is real: a
+reset out of a damaged snapshot cannot know the old generations and starts them over.
+`key show`, `key reveal`, `key renew` and `key revoke` act on whichever key holds the
+ID now, so anything that stored a key ID should compare `server_instance_id` from
+`admin status` first and treat a change as the old key being gone.
 
 ## Namespace authorization
 
@@ -283,7 +291,7 @@ user-writable application directory instead of `/var/lib`:
 | `admin.key.next` | Staged root key for an in-flight rotation |
 | `server-instance-id` | 16-byte persistent derivation identity |
 | `server-instance-id.next` | Staged instance id for an in-flight reset |
-| `namespace-allocator` | The last namespace handed out, as decimal text. Not secret, and not replaced by reset or rotation |
+| `namespace-allocator` | The last namespace handed out, as decimal text. Not secret, and not replaced by reset or rotation. The encrypted state holds a second copy |
 | `auth.snapshot` | AES-256-GCM encrypted compact slot state |
 | `auth.wal` | Length-prefixed, individually encrypted mutations and audit records |
 
@@ -303,8 +311,10 @@ records, schema mismatch, and failed compaction place temporary authentication
 in safe mode. Administrator authentication stays available for inspection and
 explicit reset; temporary authentication fails closed. A damaged
 `namespace-allocator` is narrower: allocating and issuing into a namespace fail with
-`namespace_allocator_unavailable`, because guessing could repeat a number, while
-existing keys and ordinary issuance keep working. Restore the file to clear it.
+`namespace_allocator_unavailable`, while existing keys and ordinary issuance keep
+working. Remove the file to clear it, which tells the relay to continue from the
+encrypted state's copy. If the relay is also in safe mode, that copy is gone too:
+restore the file from a backup rather than removing it, or numbers can repeat.
 
 ## Administration and output contracts
 
@@ -313,7 +323,7 @@ pb-mapper admin --server relay.example.com:7666 status
 pb-mapper admin --server relay.example.com:7666 key list --page-size 100
 pb-mapper admin --server relay.example.com:7666 key show 4294967296
 pb-mapper admin --server relay.example.com:7666 key reveal 4294967296
-pb-mapper admin --server relay.example.com:7666 service list --key-id 4294967296
+pb-mapper admin --server relay.example.com:7666 service list --namespace 4294967296
 pb-mapper admin --server relay.example.com:7666 connection list --all
 pb-mapper admin --server relay.example.com:7666 connection retire echo --all
 pb-mapper admin --server relay.example.com:7666 legacy-protocol set deny
@@ -364,8 +374,8 @@ state.
 ### Relay starts in safe mode
 
 1. Preserve the entire auth directory for diagnosis.
-2. Confirm `admin.key`, `server-instance-id`, snapshot, and WAL belong to the
-   same server instance and were not partially restored.
+2. Confirm `admin.key`, `server-instance-id`, `namespace-allocator`, snapshot, and
+   WAL belong to the same server instance and were not partially restored.
 3. Use `pb-mapper admin status`; administrator access remains available.
 4. If recovery is impossible, run `auth-state reset --confirm`, then issue new
    temporary credentials. Reset rotates the server instance ID and closes old

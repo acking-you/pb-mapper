@@ -373,8 +373,10 @@ fn cancelled_lease_failure(is_admin: bool, lease: &AuthLease) -> AuthFailure {
 /// ```
 ///
 /// This is why [`SlotHot::retire`] clears the row but preserves `generation`,
-/// and why a generation is never reset — not by expiry, GC, root rotation, or a
-/// full state reset.
+/// and why expiry, GC, root rotation and a state reset all keep it. The one
+/// exception is a reset out of a damaged snapshot, which cannot know the generations
+/// and starts them over. Only the rotated instance id then keeps an old credential
+/// from authenticating, so a key id from before it may name a different key.
 ///
 /// ## The lifecycle
 ///
@@ -508,6 +510,9 @@ struct AuthStateInner {
     auth_successes: AtomicU64,
     auth_failures: AtomicU64,
     root_epoch: AtomicU64,
+    /// The encrypted state's copy of the allocator's mark, which snapshots carry. See
+    /// `persistence/namespaces.rs` for the other copy.
+    namespace_high_water: AtomicU64,
     previous_root: RwLock<Option<PreviousRoot>>,
     audit_records: RwLock<VecDeque<AuditRecord>>,
 }
@@ -756,6 +761,10 @@ struct PersistedSnapshot {
     audit_records: VecDeque<AuditRecord>,
     #[serde(default)]
     root_epoch: u64,
+    /// The last namespace handed out as of this snapshot. See
+    /// `persistence/namespaces.rs`.
+    #[serde(default)]
+    namespace_high_water: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -793,6 +802,11 @@ struct AuditRecord {
     action: String,
     key_id: Option<KeyId>,
     label: Option<String>,
+    /// The namespace an allocation handed out. Replaying this is how the encrypted
+    /// state learns the allocator's mark, in a field an older relay ignores rather
+    /// than a WAL record it could not decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    namespace: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -815,9 +829,9 @@ pub(crate) use persistence::{
     fail_closed_on_uncertain_wal, hex, key_matches_existing_state, load_or_create_instance_id,
     load_persisted_state, normalize_tombstone_times, open_blob, prepare_state_dir_and_lock,
     push_audit_record, push_persisted_audit, random_instance_id, read_namespace_high_water,
-    recover_instance_id_after_reset, reset_already_installed, rotation_already_installed,
-    split_high_slot_state, truncate_auth_wal, unix_seconds, write_admin_key,
-    write_namespace_high_water, write_snapshot_and_truncate_wal,
+    recover_instance_id_after_reset, reset_already_installed, restore_namespace_high_water,
+    rotation_already_installed, split_high_slot_state, truncate_auth_wal, unix_seconds,
+    write_admin_key, write_namespace_high_water, write_snapshot_and_truncate_wal,
 };
 #[cfg(test)]
 pub(crate) use persistence::{prepare_state_dir, read_instance_id_file, try_load_persisted_state};

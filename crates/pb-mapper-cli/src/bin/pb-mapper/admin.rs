@@ -102,8 +102,10 @@ struct AdminServiceArgs {
 /// The paging flags every inventory listing takes, declared once.
 #[derive(Debug, Clone, Args)]
 struct AdminListArgs {
-    #[arg(long)]
-    key_id: Option<u64>,
+    /// List only this namespace. A key issued into a namespace has a different id, so
+    /// its id here lists nothing.
+    #[arg(long, visible_alias = "key-id")]
+    namespace: Option<u64>,
     #[arg(long, default_value_t = 0)]
     page: u32,
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
@@ -130,8 +132,8 @@ enum AdminConnectionCommand {
         /// Service to retire connections for, unscoped by the namespace prefix.
         service_name: String,
         /// Namespace owning the service. Omit for the unscoped namespace.
-        #[arg(long)]
-        key_id: Option<u64>,
+        #[arg(long, visible_alias = "key-id")]
+        namespace: Option<u64>,
         /// Retire just this connection, as reported by `admin connection list`.
         #[arg(long, group = "target")]
         conn_id: Option<u32>,
@@ -285,7 +287,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
         },
         AdminCommand::Connection(AdminConnectionArgs { command }) => match command {
             AdminConnectionCommand::List(AdminListArgs {
-                key_id,
+                namespace,
                 page,
                 page_size,
                 all,
@@ -296,7 +298,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                     page,
                     all,
                     |page| AdminRequest::ConnectionList {
-                        key_id,
+                        key_id: namespace,
                         page,
                         page_size,
                     },
@@ -305,7 +307,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
             }
             AdminConnectionCommand::Retire {
                 service_name,
-                key_id,
+                namespace,
                 conn_id,
                 all,
             } => {
@@ -315,7 +317,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 let response = send_admin_request(
                     remote_addr,
                     AdminRequest::ConnectionRetire {
-                        key_id,
+                        key_id: namespace,
                         service_name,
                         conn_id,
                     },
@@ -327,7 +329,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
         AdminCommand::Service(AdminServiceArgs {
             command:
                 AdminServiceCommand::List(AdminListArgs {
-                    key_id,
+                    namespace,
                     page,
                     page_size,
                     all,
@@ -335,7 +337,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
         }) => {
             stream_pages::<AdminServicePage, _>(remote_addr, args.output, page, all, |page| {
                 AdminRequest::ServiceList {
-                    key_id,
+                    key_id: namespace,
                     page,
                     page_size,
                 }
@@ -646,11 +648,11 @@ fn print_human_admin_response(response: &AdminResponse) {
             println!("capabilities: {}", status.capabilities.join(", "));
         }
         AdminResponse::Services(page) => {
-            println!("KEY ID\tSERVICE\tTRANSPORT\tCODEC\tCONNECTIONS");
+            println!("NAMESPACE\tSERVICE\tTRANSPORT\tCODEC\tCONNECTIONS");
             for service in &page.items {
                 println!(
                     "{}\t{}\t{}\t{}\t{}",
-                    service.key_id,
+                    service.namespace,
                     service.service_name,
                     service.transport,
                     service.codec_enabled,
@@ -665,11 +667,11 @@ fn print_human_admin_response(response: &AdminResponse) {
             // IDLE MS is what tells an operator which connection to retire: a
             // registration well past its lease is one the relay is holding for
             // nothing.
-            println!("KEY ID\tSERVICE\tCONN ID\tHEALTHY\tIDLE MS\tTRANSPORT\tCODEC");
+            println!("NAMESPACE\tSERVICE\tCONN ID\tHEALTHY\tIDLE MS\tTRANSPORT\tCODEC");
             for connection in &page.items {
                 println!(
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    connection.key_id,
+                    connection.namespace,
                     connection.service_name,
                     connection.conn_id,
                     connection.healthy,

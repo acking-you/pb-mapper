@@ -66,6 +66,12 @@ impl Timer {
         run(callback);
     }
 
+    /// Discards the callback unrun, for a timer whose work no longer applies.
+    pub(super) fn disarm(&self) {
+        let callback = self.callback.lock().take();
+        drop(callback);
+    }
+
     /// Moves the callback to a new timer, leaving this one with nothing to run.
     ///
     /// This is how a deadline moves in either direction. Scheduling the same timer

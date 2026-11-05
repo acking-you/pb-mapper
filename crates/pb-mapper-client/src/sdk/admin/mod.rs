@@ -161,6 +161,10 @@ impl Admin {
 
     admin_rpc!(
         /// Metadata for one credential, *with* its secret.
+        ///
+        /// Acts on whichever key holds `key_id` now. An auth-state reset out of a
+        /// damaged snapshot starts key ids over, so a caller holding an id from before
+        /// one should compare [`AuthStatusInfo::server_instance_id`] first.
         reveal_key(key_id: u64) -> IssuedKey,
         request: AdminRequest::KeyReveal { key_id },
         response: KeyShown(issued) => IssuedKey::from(issued)
@@ -170,6 +174,10 @@ impl Admin {
         /// Set a credential's lifetime to `ttl` from now, sooner or later than it
         /// was. The credential text does not change, so it also recovers a text a
         /// caller lost.
+        ///
+        /// Acts on whichever key holds `key_id` now. An auth-state reset out of a
+        /// damaged snapshot starts key ids over, so a caller holding an id from before
+        /// one should compare [`AuthStatusInfo::server_instance_id`] first.
         renew_key(key_id: u64, ttl: Duration) -> IssuedKey,
         request: AdminRequest::KeyRenew { key_id, ttl_seconds: ttl.as_secs() },
         response: KeyRenewed(issued) => IssuedKey::from(issued)
@@ -177,6 +185,10 @@ impl Admin {
 
     admin_rpc!(
         /// Revoke a credential, taking effect on the relay immediately.
+        ///
+        /// Acts on whichever key holds `key_id` now. An auth-state reset out of a
+        /// damaged snapshot starts key ids over, so a caller holding an id from before
+        /// one should compare [`AuthStatusInfo::server_instance_id`] first.
         revoke_key(key_id: u64) -> KeyMetadata,
         request: AdminRequest::KeyRevoke { key_id },
         response: KeyRevoked(meta) => KeyMetadata::from(meta)

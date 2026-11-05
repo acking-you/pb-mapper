@@ -118,7 +118,19 @@ impl Leases {
 
     /// Hands a key's remaining life to a replacement lease, for a renewal whose
     /// original lease had already been cancelled.
+    ///
+    /// The stages it replaces are disarmed first. They identify the key rather than
+    /// the lease, so at the old deadline they would otherwise end the key this renewal
+    /// just extended.
     pub(super) fn adopt(&mut self, lease: &Arc<AuthLease>) {
+        if let Some(stages) = self.stages.remove(&lease.key_id()) {
+            for timer in [stages.retire, stages.reap]
+                .iter()
+                .filter_map(Weak::upgrade)
+            {
+                timer.disarm();
+            }
+        }
         self.watch(lease.key_id(), lease.clone());
     }
 

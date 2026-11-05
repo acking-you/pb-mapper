@@ -411,5 +411,6 @@ fn audit(action: &str, key_id: Option<KeyId>, label: Option<String>) -> AuditRec
         action: action.to_string(),
         key_id,
         label,
+        namespace: None,
     }
 }

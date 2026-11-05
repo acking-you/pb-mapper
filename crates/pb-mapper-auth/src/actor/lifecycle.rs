@@ -86,6 +86,13 @@ fn key_state(inner: &AuthStateInner, key_id: KeyId) -> Result<KeyState, AuthFail
     })
 }
 
+/// The last namespace handed out, by whichever copy of the mark knows more. A damaged
+/// file refuses rather than deferring to the other copy; see `persistence/namespaces.rs`.
+fn namespace_high_water(inner: &AuthStateInner, config: &AuthConfig) -> Result<u64, AuthFailure> {
+    Ok(read_namespace_high_water(&config.state_dir)?
+        .max(inner.namespace_high_water.load(Ordering::Acquire)))
+}
+
 /// Hand out the next namespace.
 ///
 /// The new high-water mark reaches the disk before the number leaves the actor, so
@@ -95,7 +102,7 @@ pub(super) fn actor_allocate_namespace(
     config: &AuthConfig,
 ) -> Result<u64, AuthFailure> {
     ensure_store_available(inner)?;
-    let namespace = read_namespace_high_water(&config.state_dir)?.saturating_add(1);
+    let namespace = namespace_high_water(inner, config)?.saturating_add(1);
     if namespace > MAX_ALLOCATED_NAMESPACE {
         return Err(AuthFailure::new(
             "namespace_space_exhausted",
@@ -104,22 +111,28 @@ pub(super) fn actor_allocate_namespace(
         ));
     }
     write_namespace_high_water(&config.state_dir, namespace)?;
+    inner
+        .namespace_high_water
+        .store(namespace, Ordering::Release);
     append_audit(
         config,
         inner,
-        audit(
-            "namespace_allocate",
-            None,
-            Some(format!("namespace={namespace}")),
-        ),
+        AuditRecord {
+            namespace: Some(namespace),
+            ..audit("namespace_allocate", None, None)
+        },
     )?;
     Ok(namespace)
 }
 
 /// Refuse a namespace the allocator never handed out. That covers namespace 0 and
 /// every key's own namespace, whose ids all lie above the allocatable range.
-fn ensure_namespace_allocated(config: &AuthConfig, namespace: u64) -> Result<(), AuthFailure> {
-    if namespace == 0 || namespace > read_namespace_high_water(&config.state_dir)? {
+fn ensure_namespace_allocated(
+    inner: &AuthStateInner,
+    config: &AuthConfig,
+    namespace: u64,
+) -> Result<(), AuthFailure> {
+    if namespace == 0 || namespace > namespace_high_water(inner, config)? {
         return Err(AuthFailure::new(
             "namespace_not_allocated",
             format!("namespace {namespace} was not allocated by this relay"),
@@ -141,7 +154,7 @@ pub(super) fn actor_issue(
     let expires_at = validate_ttl(config, ttl)?;
     let label = validate_label(label)?;
     if let Some(namespace) = namespace {
-        ensure_namespace_allocated(config, namespace)?;
+        ensure_namespace_allocated(inner, config, namespace)?;
     }
     let issued_at = unix_seconds();
     let (index, generation, key_id, entry) = {

@@ -433,3 +433,190 @@ async fn a_shortening_below_the_minimum_is_refused_and_changes_nothing() {
     assert_eq!(shown.metadata.expires_at, issued.metadata.expires_at);
     let _ = std::fs::remove_dir_all(state_dir);
 }
+
+/// What the allocator's file alone cannot promise: losing it must not repeat a
+/// number, including one whose keys are all gone, which is every namespace of a
+/// tenant that has gone quiet.
+#[tokio::test]
+async fn losing_the_allocator_file_does_not_repeat_a_namespace() {
+    let state_dir = temp_state_dir("namespace-allocator-lost");
+    let allocator = state_dir.join("namespace-allocator");
+    let (runtime, admin) = start(&state_dir).await;
+
+    // The mark as the WAL has it: nothing has compacted yet.
+    let in_wal = runtime.allocate_namespace(&admin).await.unwrap();
+    std::fs::remove_file(&allocator).unwrap();
+    let (runtime, admin) = restart(runtime, &state_dir).await;
+    let after_wal = runtime.allocate_namespace(&admin).await.unwrap();
+    assert!(after_wal > in_wal);
+
+    // The mark as the snapshot has it, with no key anywhere in that namespace.
+    let issued = runtime
+        .issue_in_namespace(&admin, after_wal, HOUR, None)
+        .await
+        .unwrap();
+    runtime
+        .revoke(&admin, issued.metadata.key_id)
+        .await
+        .unwrap();
+    runtime.gc(&admin).await.unwrap();
+    std::fs::remove_file(&allocator).unwrap();
+    let (runtime, admin) = restart(runtime, &state_dir).await;
+    assert_eq!(
+        std::fs::read_to_string(&allocator).unwrap(),
+        after_wal.to_string(),
+        "a restart should put the file back while the encrypted state can"
+    );
+    let after_snapshot = runtime.allocate_namespace(&admin).await.unwrap();
+    assert!(after_snapshot > after_wal);
+
+    // Lost under a running relay, which still knows.
+    std::fs::remove_file(&allocator).unwrap();
+    let while_running = runtime.allocate_namespace(&admin).await.unwrap();
+    assert!(while_running > after_snapshot);
+    // A number the file no longer vouches for is still one this relay handed out.
+    std::fs::remove_file(&allocator).unwrap();
+    runtime
+        .issue_in_namespace(&admin, while_running, HOUR, None)
+        .await
+        .unwrap();
+
+    // The documented recovery for a damaged file: remove it.
+    std::fs::write(&allocator, b"not a count").unwrap();
+    assert_eq!(
+        runtime.allocate_namespace(&admin).await.unwrap_err().code,
+        "namespace_allocator_unavailable"
+    );
+    std::fs::remove_file(&allocator).unwrap();
+    assert!(runtime.allocate_namespace(&admin).await.unwrap() > while_running);
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+/// A key's old deadline passes after a renewal replaced its cancelled lease. The
+/// timers of the lease it replaced must not end the key that was just extended: the
+/// WAL says it is active, so a row that says otherwise could not even be revoked.
+#[tokio::test]
+async fn a_renewal_that_replaced_a_cancelled_lease_outlives_the_old_deadline() {
+    let state_dir = temp_state_dir("renew-replaced-lease");
+    let (runtime, admin) = start(&state_dir).await;
+    let issued = runtime.issue(&admin, MIN_TEMP_KEY_TTL, None).await.unwrap();
+    let key_id = issued.metadata.key_id;
+    let context = authenticate_for_test(&runtime, key_id).unwrap();
+    context.ensure_active().unwrap().cancel_expired();
+
+    let renewed = runtime.renew(&admin, key_id, HOUR).await.unwrap();
+    assert!(renewed.metadata.expires_at > issued.metadata.expires_at);
+    let replacement = authenticate_for_test(&runtime, key_id).unwrap();
+    let cancellation = replacement.cancellation_token().unwrap();
+
+    // Past the old deadline, by more than the actor's one-second tick.
+    tokio::time::sleep(MIN_TEMP_KEY_TTL + Duration::from_secs(3)).await;
+    assert!(!cancellation.is_cancelled());
+    let shown = runtime.show(&admin, key_id, false).await.unwrap();
+    assert_eq!(shown.metadata.state, "active");
+    authenticate_for_test(&runtime, key_id).unwrap();
+    runtime.revoke(&admin, key_id).await.unwrap();
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+/// Compaction replaces the snapshot and then truncates the WAL. A crash between the
+/// two replays records for keys the snapshot already finished with, which must not
+/// take every other key down with safe mode.
+#[tokio::test]
+async fn a_crash_during_compaction_replays_records_for_finished_keys_harmlessly() {
+    let state_dir = temp_state_dir("wal-replay-finished-key");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let config = config_for(&state_dir);
+    let instance_id = load_or_create_instance_id(&state_dir).unwrap();
+    let now = unix_seconds();
+    let live = KeyId::new(Generation::from_u32(1), SlotIndex::from_index(0));
+    // Slot 1 is on generation 4: this key was reaped from the row at that generation,
+    // and the next was an earlier tenant of a row that has moved on.
+    let reaped = KeyId::new(Generation::from_u32(4), SlotIndex::from_index(1));
+    let older_tenant = KeyId::new(Generation::from_u32(3), SlotIndex::from_index(1));
+    let snapshot = format!(
+        r#"{{"schema_version":1,"instance_id":{instance_id:?},"generations":[1,4,0,0,0,0,0,0],"entries":[{{"key_id":{live},"state":"active","issued_at":{now},"expires_at":{},"label":null}}],"legacy_protocol":"allow"}}"#,
+        now + 600,
+    );
+    atomic_write(
+        &auth_snapshot_path(&state_dir),
+        &seal_blob(&ADMIN_KEY, snapshot.as_bytes()).unwrap(),
+        0o600,
+    )
+    .unwrap();
+    let audit = |action: &str, key_id: KeyId| AuditRecord {
+        at: now,
+        action: action.to_string(),
+        key_id: Some(key_id),
+        label: None,
+        namespace: None,
+    };
+    for mutation in [
+        (
+            StateMutation::Renew {
+                key_id: reaped,
+                expires_at: now + 600,
+            },
+            audit("temporary_key_renew", reaped),
+        ),
+        (
+            StateMutation::Revoke {
+                key_id: older_tenant,
+                at: now,
+            },
+            audit("temporary_key_revoke", older_tenant),
+        ),
+    ] {
+        append_wal(
+            &config,
+            &ADMIN_KEY,
+            &WalRecord::Mutation {
+                mutation: mutation.0,
+                audit: mutation.1,
+            },
+        )
+        .unwrap();
+    }
+
+    let (runtime, admin) = start(&state_dir).await;
+    assert!(!runtime.status(&admin).await.unwrap().safe_mode);
+    authenticate_for_test(&runtime, live).unwrap();
+    // A dead key stays dead rather than coming back through its own old record.
+    assert_eq!(
+        runtime.show(&admin, reaped, false).await.unwrap_err().code,
+        "temporary_key_not_found"
+    );
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+/// A record for a generation the snapshot never reached means the record that
+/// issued it is gone, which really is a damaged store.
+#[tokio::test]
+async fn a_record_for_a_key_the_snapshot_never_issued_still_fails_closed() {
+    let state_dir = temp_state_dir("wal-replay-unknown-key");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let now = unix_seconds();
+    let unknown = KeyId::new(Generation::from_u32(2), SlotIndex::from_index(0));
+    append_wal(
+        &config_for(&state_dir),
+        &ADMIN_KEY,
+        &WalRecord::Mutation {
+            mutation: StateMutation::Renew {
+                key_id: unknown,
+                expires_at: now + 600,
+            },
+            audit: AuditRecord {
+                at: now,
+                action: "temporary_key_renew".to_string(),
+                key_id: Some(unknown),
+                label: None,
+                namespace: None,
+            },
+        },
+    )
+    .unwrap();
+
+    let (runtime, admin) = start(&state_dir).await;
+    assert!(runtime.status(&admin).await.unwrap().safe_mode);
+    let _ = std::fs::remove_dir_all(state_dir);
+}
