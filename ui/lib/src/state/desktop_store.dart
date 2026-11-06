@@ -371,6 +371,10 @@ class DesktopStore extends ChangeNotifier {
       return;
     }
     final status = snapshot.viewer;
+    if (status?.message.startsWith('input_failed:') == true) {
+      _controlWanted = false;
+      _endingControl = true;
+    }
     if (status?.state == 'capture_unavailable') {
       // The transport is alive. Wait for the host desktop instead of making a
       // network retry loop around a local Windows permission requirement.
@@ -925,7 +929,16 @@ class DesktopStore extends ChangeNotifier {
     } catch (e) {
       if (!_disposed && serial == _sessionSerial) {
         error = e.toString();
-        _mediaFailed = true;
+        if (e is DesktopCallException && e.code == 'INVALID_ARGUMENT') {
+          // Local validation cannot recover by retrying the same invitation.
+          // Return ownership to the input page without opening a viewer route.
+          _target = null;
+          _controlWanted = false;
+          _mediaFailed = false;
+          snapshot = snapshot.withViewer(null);
+        } else {
+          _mediaFailed = true;
+        }
       }
     } finally {
       if (_attemptSerial == serial) _attemptSerial = null;

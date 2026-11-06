@@ -33,7 +33,6 @@ struct Ready {
 struct Sent {
     generation: u64,
     id: u64,
-    ready: Instant,
     at: Instant,
     bytes: usize,
     keyframe: bool,
@@ -52,6 +51,7 @@ struct State {
     recovering: bool,
     baseline: Option<Duration>,
     baseline_calibrated: bool,
+    probe_sent: Option<Instant>,
     observed_since: Option<Instant>,
     delay_total: Duration,
     delay_samples: u32,
@@ -88,6 +88,7 @@ impl Feedback {
                 recovering: false,
                 baseline: None,
                 baseline_calibrated: false,
+                probe_sent: None,
                 observed_since: None,
                 delay_total: Duration::ZERO,
                 delay_samples: 0,
@@ -114,6 +115,32 @@ impl Feedback {
         while state.ready.len() > 256 {
             state.ready.pop_front();
         }
+    }
+    /// One small startup flight, sent before video. A peer that does not echo
+    /// it keeps the existing frame-based fallback; no extra timer is needed.
+    pub fn start_probe(&self) -> u64 {
+        self.state.lock().probe_sent = Some(Instant::now());
+        1
+    }
+    pub fn probe_received(&self, nonce: u64) {
+        self.probe_received_at(nonce, Instant::now());
+    }
+    fn probe_received_at(&self, nonce: u64, now: Instant) {
+        if nonce != 1 {
+            return;
+        }
+        let mut state = self.state.lock();
+        let Some(sent) = state.probe_sent.take() else {
+            return;
+        };
+        let roundtrip = now.saturating_duration_since(sent);
+        if roundtrip > crate::wire::IO_TIMEOUT {
+            return;
+        }
+        // This receipt bypasses decoder and display work. Never retire sent
+        // frames, renew the stall deadline or grant presentation/input credit.
+        state.baseline = Some(roundtrip);
+        state.baseline_calibrated = true;
     }
     /// Only the host's capture context may retire an unavailable desktop's
     /// presentation obligation. A renderer request cannot extend this deadline.
@@ -188,7 +215,6 @@ impl Feedback {
         state.sent.push_back(Sent {
             generation: frame.status.generation,
             id: frame.status.frame_id,
-            ready,
             at: now,
             bytes,
             keyframe,
@@ -237,7 +263,11 @@ impl Feedback {
         else {
             return;
         };
-        let latency = now.saturating_duration_since(state.sent[index].ready);
+        // Compare the same send-to-presentation interval as the path baseline.
+        // Time spent waiting for our own admission credit is bounded separately
+        // by MAX_READY_AGE; counting it as network pressure creates a feedback
+        // loop in which a smaller window continually cuts its own bitrate.
+        let latency = now.saturating_duration_since(state.sent[index].at);
         let baseline_sample = state.sent[index]
             .baseline_sample
             .then(|| now.saturating_duration_since(state.sent[index].at));
@@ -697,6 +727,33 @@ mod tests {
     }
 
     #[test]
+    fn startup_probe_measures_path_without_retiring_presentation_debt() {
+        let feedback = Feedback::new(VideoPreferences::default());
+        let nonce = feedback.start_probe();
+        let sent = feedback.state.lock().probe_sent.unwrap();
+        let initial = frame(1, 128 * 1024);
+        ready(&feedback, &initial, sent);
+        assert_eq!(
+            feedback.admit_at(&initial, initial.bytes.len(), sent),
+            Admission::Send
+        );
+        feedback.probe_received_at(nonce + 1, sent + Duration::from_millis(350));
+        assert!(!feedback.state.lock().baseline_calibrated);
+        feedback.probe_received_at(nonce, sent + Duration::from_millis(350));
+        feedback.probe_received_at(nonce, sent + Duration::from_secs(2));
+        let state = feedback.state.lock();
+        assert_eq!(state.baseline, Some(Duration::from_millis(350)));
+        assert!(state.baseline_calibrated);
+        assert_eq!(state.window, INITIAL_WINDOW);
+        assert_eq!(state.sent.len(), 1);
+        assert_eq!(state.bytes, initial.bytes.len());
+        assert_eq!(state.last_ack, None);
+        assert_eq!(state.unacknowledged_since, Some(sent));
+        drop(state);
+        assert!(feedback.stalled_at(sent + Duration::from_secs(4)));
+    }
+
+    #[test]
     fn slow_first_idr_does_not_normalize_persistent_video_delay() {
         let feedback = Feedback::new(VideoPreferences::default());
         let start = Instant::now();
@@ -738,7 +795,9 @@ mod tests {
             for offset in 0..3 {
                 let image = frame(batch * 3 + offset, 1024);
                 let ready_at = at + Duration::from_millis(offset * 5);
-                ready(&feedback, &image, ready_at);
+                // Admission may wait for the previous flight's ACK. Its local
+                // queue age must not be added to a send-to-ACK path baseline.
+                ready(&feedback, &image, ready_at - Duration::from_millis(200));
                 assert_eq!(feedback.admit_at(&image, 1024, ready_at), Admission::Send);
             }
             let latency = if batch % 5 == 0 { 900 } else { 420 };

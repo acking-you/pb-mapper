@@ -203,6 +203,7 @@ impl Viewer {
         let priority = Arc::new(Controls::default());
         let controls = priority.clone();
         let (presented, mut presentation) = watch::channel((0, 0));
+        let (probe, mut probes) = presentation_feedback.then(|| watch::channel(0u64)).unzip();
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let observation = status.clone();
@@ -221,6 +222,17 @@ impl Viewer {
                         })
                         .await
                         .map_err(error)??;
+                    if jpeg.is_empty()
+                        && let Some(nonce) = state.roundtrip_probe.take()
+                    {
+                        // Only a peer explicitly advertising this optional
+                        // message receives an echo. Keep it off UI/decoder work
+                        // and never publish it as a fresh frame or input grant.
+                        if let Some(probe) = &probe {
+                            probe.send_replace(nonce);
+                        }
+                        continue;
+                    }
                     state.path = path.into();
                     state.direct_stage.clone_from(&direct_stage);
                     state.direct_failure.clone_from(&direct_failure);
@@ -291,6 +303,12 @@ impl Viewer {
                         },
                         command = controls.next() => { while inputs.try_recv().is_ok() {} command },
                         Ok(()) = keyframes.changed() => { keyframes.borrow_and_update(); Command::Keyframe },
+                        Ok(nonce) = async {
+                            let Some(probes) = &mut probes else { return std::future::pending().await };
+                            probes.changed().await?;
+                            let nonce = *probes.borrow_and_update();
+                            Ok::<_, watch::error::RecvError>(nonce)
+                        } => Command::Probe { nonce },
                         Ok(()) = presentation.changed() => { let (generation, frame_id) = *presentation.borrow_and_update(); Command::Presented { generation, frame_id } },
                         _ = heartbeat.tick() => Command::Ping,
                         Some(command) = inputs.recv() => command,

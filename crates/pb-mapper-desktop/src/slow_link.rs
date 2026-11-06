@@ -5,10 +5,76 @@ use crate::{wire::Command, *};
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
 use pb_mapper_testkit::Relay;
 use std::{
+    collections::VecDeque,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncReadExt, sync::Notify};
+
+/// Delay each byte batch in both directions without sleeping the reader or
+/// imposing a bitrate. The 32 x 16 KiB channel bounds this test-only link.
+async fn delayed_copy(
+    mut read: impl tokio::io::AsyncRead + Unpin,
+    mut write: impl tokio::io::AsyncWrite + Unpin,
+    delay: Duration,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let (send, mut receive) = tokio::sync::mpsc::channel::<(tokio::time::Instant, Vec<u8>)>(32);
+    let incoming = async {
+        loop {
+            let mut bytes = vec![0; 16 * 1024];
+            let size = read.read(&mut bytes).await?;
+            if size == 0 {
+                break;
+            }
+            bytes.truncate(size);
+            send.send((tokio::time::Instant::now() + delay, bytes))
+                .await
+                .map_err(error)?;
+        }
+        drop(send);
+        Ok::<_, std::io::Error>(())
+    };
+    let outgoing = async {
+        while let Some((due, bytes)) = receive.recv().await {
+            tokio::time::sleep_until(due).await;
+            write.write_all(&bytes).await?;
+        }
+        write.shutdown().await
+    };
+    tokio::try_join!(incoming, outgoing)?;
+    Ok(())
+}
+
+async fn delayed_relay(
+    relay: std::net::SocketAddr,
+    roundtrip_ms: u64,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let join = tokio::spawn(async move {
+        let mut peers = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let Ok((client, _)) = accepted else { return };
+                    peers.spawn(async move {
+                        let server = tokio::net::TcpStream::connect(relay).await?;
+                        client.set_nodelay(true)?;
+                        server.set_nodelay(true)?;
+                        let (client_read, client_write) = client.into_split();
+                        let (server_read, server_write) = server.into_split();
+                        let delay = Duration::from_micros(roundtrip_ms * 500);
+                        tokio::try_join!(delayed_copy(client_read, server_write, delay), delayed_copy(server_read, client_write, delay))?;
+                        Ok::<_, std::io::Error>(())
+                    });
+                }
+                Some(_) = peers.join_next(), if !peers.is_empty() => {}
+            }
+        }
+    });
+    (addr, join)
+}
 
 const FRAME_BYTES: usize = 64 * 1024;
 #[derive(Default)]
@@ -22,6 +88,209 @@ struct SyntheticVideo {
     probe: Arc<Probe>,
     next: Instant,
     adaptive: Option<VideoPreferences>,
+}
+
+/// Models an asynchronous encoder: completed outputs still need polling, and
+/// holding one for 250 ms loses predictive references like the Windows MFT.
+struct AsyncVideo {
+    source: SyntheticVideo,
+    pending: VecDeque<(Instant, EncodedFrame)>,
+    expired: Arc<AtomicU32>,
+    independent: bool,
+}
+impl Backend for AsyncVideo {
+    fn configure_video(&mut self, preferences: VideoPreferences) -> Result<()> {
+        self.source.configure_video(preferences)
+    }
+    fn display(&mut self) -> Result<Display> {
+        self.source.display()
+    }
+    fn capture(&mut self) -> Result<Vec<u8>> {
+        self.source.capture()
+    }
+    fn capture_video(
+        &mut self,
+        expected: &DesktopContext,
+        codec: VideoCodec,
+        keyframe: bool,
+        bitrate: u32,
+    ) -> Result<Option<EncodedFrame>> {
+        let ready = self.drain_video(expected)?;
+        if self.pending.len() < 2
+            && let Some(frame) =
+                self.source
+                    .capture_video(expected, codec, keyframe || self.independent, bitrate)?
+        {
+            self.pending.push_back((Instant::now(), frame));
+        }
+        Ok(ready)
+    }
+    fn drain_video(&mut self, _: &DesktopContext) -> Result<Option<EncodedFrame>> {
+        if self
+            .pending
+            .front()
+            .is_none_or(|(at, _)| at.elapsed() < Duration::from_millis(20))
+        {
+            return Ok(None);
+        }
+        let (at, frame) = self.pending.pop_front().unwrap();
+        if at.elapsed() > Duration::from_millis(250) {
+            self.expired.fetch_add(1, Ordering::Relaxed);
+            self.independent = true;
+            return Ok(None);
+        }
+        if self.independent && !frame.format.keyframe {
+            return Ok(None);
+        }
+        self.independent = false;
+        Ok(Some(frame))
+    }
+    fn input(&mut self, event: &Input) -> Result<()> {
+        self.source.input(event)
+    }
+    fn release(&mut self) {
+        self.source.release();
+    }
+}
+
+/// Real relay/TLS and an asynchronous source, with independent feedback delay
+/// and consumer speed. These are pipeline observations, not real rendered FPS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit low/WAN delay and slow-consumer feedback acceptance"]
+async fn delayed_feedback_does_not_starve_async_encoder() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("pb_mapper_desktop::feedback=debug")
+        .try_init();
+    feedback_case("low_delay", 20, 0, 8).await;
+    feedback_case("fixed_wan", 350, 0, 16).await;
+    feedback_case("slow_consumer", 20, 67, 8).await;
+}
+
+async fn feedback_case(label: &str, roundtrip_ms: u64, consumer_ms: u64, seconds: u64) {
+    let relay = Relay::start("desktop-async-wan").await;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let probe = Arc::new(Probe::default());
+    let expired = Arc::new(AtomicU32::new(0));
+    let source = probe.clone();
+    let failures = expired.clone();
+    let preferences = VideoPreferences {
+        bitrate: 4_000_000,
+        max_fps: 60,
+        ..Default::default()
+    };
+    let host = Host::start_with_backend(
+        &client,
+        HostOptions {
+            service: "desktop:async-wan".into(),
+            display_id: 1,
+            allow_control: false,
+            allow_direct: false,
+        },
+        Arc::new(move || {
+            Ok(Box::new(AsyncVideo {
+                source: SyntheticVideo {
+                    probe: source.clone(),
+                    next: Instant::now(),
+                    adaptive: Some(preferences),
+                },
+                pending: VecDeque::new(),
+                expired: failures.clone(),
+                independent: false,
+            }))
+        }),
+    )
+    .await
+    .unwrap();
+    let (delayed_addr, delayed) = delayed_relay(relay.addr(), roundtrip_ms).await;
+    let remote = Client::from_credential(
+        delayed_addr.to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let viewer = Viewer::connect_with_presentation_feedback(
+        &remote,
+        host.invitation().clone(),
+        ConnectOptions {
+            path: PathPolicy::RelayOnly,
+            ..Default::default()
+        },
+        vec![VideoCodec::H264],
+        preferences,
+    )
+    .await
+    .unwrap();
+    let mut deferred = VecDeque::new();
+    let mut images = 0u32;
+    let mut keyframes = 0u32;
+    let mut peak = 0usize;
+    let start = Instant::now();
+    let mut next_consume = start;
+    let mut tick = tokio::time::interval(Duration::from_millis(5));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    while start.elapsed() < Duration::from_secs(seconds) {
+        tick.tick().await;
+        while Instant::now() >= next_consume
+            && let Some(frame) = viewer.next_frame()
+        {
+            if !frame.bytes.is_empty() {
+                next_consume = Instant::now() + Duration::from_millis(consumer_ms);
+                images += 1;
+                keyframes += u32::from(frame.status.video.keyframe);
+                deferred.push_back((
+                    Instant::now(),
+                    frame.status.generation,
+                    frame.status.frame_id,
+                ));
+                peak = peak.max(deferred.len());
+            }
+        }
+        let mut newest = None;
+        while deferred
+            .front()
+            .is_some_and(|(due, _, _)| *due <= Instant::now())
+        {
+            newest = deferred.pop_front();
+        }
+        if let Some((_, generation, id)) = newest {
+            viewer.presented(generation, id);
+        }
+    }
+    let status = viewer.status();
+    viewer.stop().await.unwrap();
+    host.stop().await.unwrap();
+    delayed.abort();
+    let _ = delayed.await;
+    let expired = expired.load(Ordering::Relaxed);
+    println!(
+        "async_feedback case={label} roundtrip_ms={roundtrip_ms} consumer_ms={consumer_ms} source_fps=60 elapsed_s={:.3} consumed={images} keyframes={keyframes} expired_encoder_outputs={expired} peak_deferred_acks={peak} bitrate={} dropped={} state={}",
+        start.elapsed().as_secs_f64(),
+        status.bitrate,
+        status.dropped_frames,
+        status.state
+    );
+    assert_eq!(status.state, "streaming");
+    if consumer_ms == 0 {
+        assert_eq!(
+            status.bitrate, preferences.bitrate,
+            "fixed propagation delay is not congestion"
+        );
+    } else {
+        assert!(
+            status.bitrate < preferences.bitrate,
+            "actual consumer backlog must still apply backpressure"
+        );
+    }
+    assert!(peak <= crate::media::MAX_QUEUED_FRAMES);
+    assert_eq!(
+        expired, 0,
+        "network credit must not starve completed encoder output"
+    );
 }
 impl Backend for SyntheticVideo {
     fn configure_video(&mut self, preferences: VideoPreferences) -> Result<()> {

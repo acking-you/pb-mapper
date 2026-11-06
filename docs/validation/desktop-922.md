@@ -1,5 +1,10 @@
 # Desktop build 0.10.2+922 validation
 
+Subsequent physical-phone testing exposed installed-worker input failures and
+video backpressure defects that these earlier checks did not cover. See the
+[installed input regression](desktop-input-backpressure.md); the video numbers
+below do not establish working real-service clicks or physical-phone fluidity.
+
 This is an unpublished local development build. Windows uses the ordinary
 `lib/main.dart` entry and includes the matching FFI DLL and helper. Android ARM64
 and x64 packages use the same production entry, persistent signing identity and

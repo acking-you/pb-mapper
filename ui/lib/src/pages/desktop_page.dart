@@ -43,7 +43,7 @@ class _DesktopPageState extends State<DesktopPage> {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: widget.store,
+    listenable: Listenable.merge([widget.store, _invitation]),
     builder: (context, _) {
       final store = widget.store;
       final l = context.l10n;
@@ -165,12 +165,14 @@ class _DesktopPageState extends State<DesktopPage> {
                       maxLines: 4,
                       autocorrect: false,
                       enableSuggestions: false,
+                      smartQuotesType: SmartQuotesType.disabled,
+                      smartDashesType: SmartDashesType.disabled,
                       decoration: InputDecoration(labelText: l.desktopPaste),
                     ),
                     const SizedBox(height: 12),
                     FilledButton.icon(
                       key: const Key('desktop-connect'),
-                      onPressed: store.busy
+                      onPressed: store.busy || _invitation.text.trim().isEmpty
                           ? null
                           : () async {
                               final serial = _viewerOpenSerial;
@@ -178,7 +180,6 @@ class _DesktopPageState extends State<DesktopPage> {
                                 _invitation.text.trim(),
                                 _relayOnly,
                               );
-                              _invitation.clear();
                               if (context.mounted &&
                                   store.connected &&
                                   serial == _viewerOpenSerial) {

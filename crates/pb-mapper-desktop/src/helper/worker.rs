@@ -318,7 +318,10 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                     let mut video = None;
                     let observe_cursor = matches!(
                         &request,
-                        Request::Context | Request::Capture | Request::CaptureVideo { .. }
+                        Request::Context
+                            | Request::Capture
+                            | Request::CaptureVideo { .. }
+                            | Request::DrainVideo { .. }
                     );
                     let image = match request {
                         Request::Start { .. } | Request::Context => vec![],
@@ -329,6 +332,18 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                             vec![]
                         }
                         Request::Capture => backend.capture_consistent(&context)?,
+                        Request::DrainVideo { expected } => {
+                            if expected != context {
+                                return Err(error("stale video drain request"));
+                            }
+                            match backend.drain_video(&expected)? {
+                                Some(frame) => {
+                                    video = Some(frame.format);
+                                    frame.bytes
+                                }
+                                None => vec![],
+                            }
+                        }
                         Request::CaptureVideo {
                             expected,
                             codec,

@@ -1,0 +1,195 @@
+{
+  "date": "2026-11-06",
+  "base_revision": "d4daea6",
+  "scope": "Windows test host, local TCP relay and actual endpoint TLS; synthetic asynchronous encoder, no GPU decoder, physical display, OS input or phone performance measurement.",
+  "environment": {
+    "source_max_fps": 60,
+    "source_bitrate_ceiling_bps": 4000000,
+    "source_max_dimensions": [
+      1280,
+      720
+    ],
+    "encoder_completion_delay_ms": 20,
+    "encoder_pending_limit": 2,
+    "encoder_output_expiry_ms": 250,
+    "network_simulation": "Viewer-to-relay TCP proxy delays each byte batch equally in both directions. Read and write run independently; delay does not impose a bitrate.",
+    "proxy_direction_queue_bytes": 524288,
+    "sender_outstanding_frame_limit_unchanged": 8,
+    "sender_maximum_byte_window_unchanged": 524288,
+    "receiver_encoded_queue_limit_unchanged": 8,
+    "production_sender_ready_expiry_ms_unchanged": 250
+  },
+  "encoder_drain_regression": {
+    "test": "worker::tests::presentation_backpressure_drains_encoder_without_new_capture",
+    "before": "Completed asynchronous output remained unavailable until the 250 ms test deadline while the initial IDR held credit.",
+    "after_drain_ms": 2.403,
+    "submissions_before_and_after": 2,
+    "ack_delay_only_8_second_comparison": {
+      "note": "This earlier test delayed frame ACKs by 350 ms; it did not model propagation RTT and must not be presented as pure network data.",
+      "before": {
+        "consumed": 154,
+        "keyframes": 14,
+        "expired_encoder_outputs": 4,
+        "reported_dropped_frames": 3
+      },
+      "after": {
+        "consumed": 157,
+        "keyframes": 9,
+        "expired_encoder_outputs": 0,
+        "reported_dropped_frames": 1
+      }
+    }
+  },
+  "network_probe_comparison": {
+    "before_changes": "Encoder draining and send-to-ACK clock corrected; no startup RTT probe.",
+    "after_changes": "Same limits with one optional transport-only startup probe echoed before decoder/UI work.",
+    "before_log": "target/issue50-real-wan-before.log",
+    "after_log": "target/issue50-real-wan-after.log",
+    "before": [
+      {
+        "case": "low_delay",
+        "configured_network_rtt_ms": 20,
+        "consumer_interval_ms": 0,
+        "measurement_seconds": 8,
+        "elapsed_including_teardown_seconds": 8.041,
+        "consumed_synthetic_access_units": 452,
+        "keyframes": 2,
+        "expired_encoder_outputs": 0,
+        "minimum_sampled_bitrate_bps": 4000000,
+        "final_observed_bitrate_bps": 4000000,
+        "reported_dropped_frames": 0,
+        "state": "streaming"
+      },
+      {
+        "case": "fixed_wan",
+        "configured_network_rtt_ms": 350,
+        "consumer_interval_ms": 0,
+        "measurement_seconds": 16,
+        "elapsed_including_teardown_seconds": 16.378,
+        "consumed_synthetic_access_units": 294,
+        "keyframes": 13,
+        "expired_encoder_outputs": 0,
+        "minimum_sampled_bitrate_bps": 256000,
+        "final_observed_bitrate_bps": 1306500,
+        "reported_dropped_frames": 3,
+        "state": "streaming"
+      },
+      {
+        "case": "slow_consumer",
+        "configured_network_rtt_ms": 20,
+        "consumer_interval_ms": 67,
+        "measurement_seconds": 8,
+        "elapsed_including_teardown_seconds": 8.04,
+        "consumed_synthetic_access_units": 104,
+        "keyframes": 11,
+        "expired_encoder_outputs": 0,
+        "minimum_sampled_bitrate_bps": 256000,
+        "final_observed_bitrate_bps": 256000,
+        "reported_dropped_frames": 3,
+        "state": "streaming"
+      }
+    ],
+    "after": [
+      {
+        "case": "low_delay",
+        "configured_network_rtt_ms": 20,
+        "consumer_interval_ms": 0,
+        "measurement_seconds": 8,
+        "elapsed_including_teardown_seconds": 8.038,
+        "consumed_synthetic_access_units": 451,
+        "keyframes": 2,
+        "expired_encoder_outputs": 0,
+        "minimum_sampled_bitrate_bps": 4000000,
+        "final_observed_bitrate_bps": 4000000,
+        "reported_dropped_frames": 0,
+        "state": "streaming"
+      },
+      {
+        "case": "fixed_wan",
+        "configured_network_rtt_ms": 350,
+        "consumer_interval_ms": 0,
+        "measurement_seconds": 16,
+        "elapsed_including_teardown_seconds": 16.377,
+        "consumed_synthetic_access_units": 310,
+        "keyframes": 3,
+        "expired_encoder_outputs": 0,
+        "minimum_sampled_bitrate_bps": 4000000,
+        "final_observed_bitrate_bps": 4000000,
+        "reported_dropped_frames": 1,
+        "state": "streaming"
+      },
+      {
+        "case": "slow_consumer",
+        "configured_network_rtt_ms": 20,
+        "consumer_interval_ms": 67,
+        "measurement_seconds": 8,
+        "elapsed_including_teardown_seconds": 8.04,
+        "consumed_synthetic_access_units": 104,
+        "keyframes": 12,
+        "expired_encoder_outputs": 0,
+        "minimum_sampled_bitrate_bps": 256000,
+        "final_observed_bitrate_bps": 256000,
+        "reported_dropped_frames": 5,
+        "state": "streaming"
+      }
+    ]
+  },
+  "legacy_fallback": {
+    "test": "slow_link::presentation_feedback_recovers_after_slow_tls_and_renderer",
+    "peer": "Raw TLS receiver ignores the optional startup probe.",
+    "conditions": "First 8 seconds: 100 KiB/s reader and 100 ms presentation cadence; seconds 8-12: 600 ms cadence; thereafter 20 ms cadence.",
+    "minimum_bitrate_bps": 256000,
+    "recovered_bitrate_at_30_seconds_bps": 9057221,
+    "recovered_dimensions": [
+      960,
+      540
+    ],
+    "no_ack_stop_ms": 4179.52,
+    "result": "passed",
+    "log": "target/issue50-feedback-legacy-fallback.log"
+  },
+  "checks": {
+    "cargo_test_desktop_all_features_lib_and_session": {
+      "unit_passed": 46,
+      "explicit_benchmarks_ignored": 3,
+      "session_passed": 2
+    },
+    "cargo_clippy_desktop_all_targets_all_features_deny_warnings": "passed",
+    "cargo_fmt_all": "passed",
+    "git_diff_check": "passed",
+    "regressions": [
+      "worker::tests::presentation_backpressure_drains_encoder_without_new_capture",
+      "congestion::tests::cumulative_small_frame_acks_calibrate_wan_delay_and_recover_through_jitter",
+      "congestion::tests::startup_probe_measures_path_without_retiring_presentation_debt",
+      "slow_link::delayed_feedback_does_not_starve_async_encoder",
+      "slow_link::presentation_feedback_recovers_after_slow_tls_and_renderer"
+    ]
+  },
+  "references": [
+    {
+      "source": "Local RustDesk design review only, no AGPL code copied",
+      "paths": [
+        "src/client/io_loop.rs:fps_control",
+        "src/server/video_qos.rs:UserDelay",
+        "src/server/video_service.rs:VideoFrameController"
+      ]
+    },
+    {
+      "source": "WebRTC encoder admission and asynchronous output separation",
+      "url": "https://webrtc.googlesource.com/src/+/refs/heads/main/video/video_stream_encoder.cc"
+    },
+    {
+      "source": "WebRTC pacing budget and queue time are distinct from decoder queues",
+      "url": "https://webrtc.googlesource.com/src/+/refs/heads/main/modules/pacing/pacing_controller.cc"
+    },
+    {
+      "source": "WebRTC bounded receive/decode scheduling",
+      "url": "https://webrtc.googlesource.com/src/+/refs/heads/main/video/video_stream_buffer_controller.cc"
+    }
+  ],
+  "limits": [
+    "8 outstanding frames still limit throughput on a 350 ms RTT path. This change does not promise 60 FPS over that path.",
+    "A receiver genuinely consuming about 15 frames/s still causes congestion adaptation; its retained presentation obligation is not bypassed.",
+    "Phone presentation and real Windows input require separate user-level acceptance. No service was restarted or UI controlled for this video test."
+  ]
+}

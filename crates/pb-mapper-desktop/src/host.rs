@@ -178,6 +178,10 @@ impl Host {
                             let receive = async {
                                 loop {
                                     let Some(command) = tokio::time::timeout(wire::IO_TIMEOUT, wire::read_json_or_eof::<_, Command>(&mut read)).await.map_err(error)?? else { return Ok::<(), std::io::Error>(()) };
+                                    if let Command::Probe { nonce } = command {
+                                        if let Some(feedback) = &worker.feedback { feedback.probe_received(nonce); }
+                                        continue;
+                                    }
                                     // Permission/stale input errors are reported with the next
                                     // status frame; malformed frames terminate the transport.
                                     let _ = worker.command(command).await;
@@ -186,6 +190,14 @@ impl Host {
                             let send = async {
                                 let mut pending = None;
                                 let mut last_sent = std::time::Instant::now();
+                                if let Some(feedback) = &worker.feedback {
+                                    let mut probe = session_status.lock().clone();
+                                    probe.roundtrip_probe = Some(feedback.start_probe());
+                                    tokio::time::timeout(wire::IO_TIMEOUT, async {
+                                        wire::write_json(&mut write, &probe).await?;
+                                        wire::write_bytes(&mut write, &[], wire::MAX_FRAME).await
+                                    }).await.map_err(error)??;
+                                }
                                 loop {
                                     if worker.feedback.as_ref().is_some_and(|feedback| feedback.stalled()) {
                                         let mut state = session_status.lock().clone();

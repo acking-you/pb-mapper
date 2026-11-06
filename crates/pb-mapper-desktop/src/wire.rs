@@ -26,6 +26,9 @@ pub(crate) enum Command {
     },
     Release,
     Ping,
+    Probe {
+        nonce: u64,
+    },
     Keyframe,
     Presented {
         generation: u64,

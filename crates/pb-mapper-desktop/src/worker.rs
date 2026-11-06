@@ -188,10 +188,12 @@ impl Worker {
                                 }
                                 engine.presentation(generation, frame_id)
                             }
-                            Command::Authenticate { .. } => Err(error("already authenticated")),
+                            Command::Authenticate { .. } | Command::Probe { .. } => {
+                                Err(error("unexpected worker command"))
+                            }
                         };
                         if let Err(e) = &result {
-                            engine.state.message = e.to_string();
+                            engine.report_command_failure(e);
                         }
                         let _ = reply.send(result);
                     }
@@ -240,14 +242,16 @@ impl Worker {
                         engine.bitrate = rate.load(Ordering::Relaxed);
                     }
                     engine.state.bitrate = engine.bitrate;
-                    // Flow control pauses production without losing references.
+                    // Flow control pauses new submissions, not completion of
+                    // asynchronous encoder work already in flight. Holding MFT
+                    // output until the next ACK makes a healthy codec look stale.
                     // Only actual queue loss, stale output or a context change
                     // requires an IDR; restarting every credit window otherwise
                     // spends the available bandwidth repeatedly on keyframes.
                     engine.keyframe |= outgoing.take_keyframe_request();
                     engine.state.dropped_frames = outgoing.dropped();
                     let started = Instant::now();
-                    if !paused && let Some(frame) = engine.capture_video() {
+                    if let Some(frame) = engine.capture_video(!paused) {
                         if let Some(feedback) = &renderer {
                             engine.sync_feedback(feedback, &mut feedback_context);
                             feedback.captured(&frame);
@@ -339,8 +343,19 @@ struct Engine {
     sample_frames: u64,
     admission: Option<Arc<dyn crate::ControlAdmission>>,
     lease: Option<Box<dyn crate::ControlLease>>,
+    input_failure: Option<String>,
 }
 impl Engine {
+    fn report_command_failure(&mut self, failure: &std::io::Error) {
+        // Input failure ends the grant and invalidates already queued releases
+        // and acknowledgements. Their secondary errors must not hide why
+        // control ended, otherwise a viewer may automatically request it again.
+        self.state.message = self
+            .input_failure
+            .clone()
+            .unwrap_or_else(|| failure.to_string());
+    }
+
     fn sync_feedback(&self, feedback: &crate::congestion::Feedback, observed: &mut (u64, bool)) {
         let context = (
             self.state.generation,
@@ -371,6 +386,7 @@ impl Engine {
             sample_frames: 0,
             admission: None,
             lease: None,
+            input_failure: None,
         }
     }
     fn invalidate(&mut self) {
@@ -412,6 +428,7 @@ impl Engine {
             return Ok(());
         }
         self.release_control();
+        self.input_failure = None;
         if enabled {
             if !allowed {
                 return Err(error("control is not authorized at the host"));
@@ -479,7 +496,8 @@ impl Engine {
     }
     #[cfg(test)]
     fn capture(&mut self) -> Frame {
-        self.capture_video().expect("fake capture returns an image")
+        self.capture_video(true)
+            .expect("fake capture returns an image")
     }
     fn sample_cursor(&mut self) {
         let result = self.geometry().and_then(|()| {
@@ -500,15 +518,18 @@ impl Engine {
             }
         }
     }
-    fn capture_video(&mut self) -> Option<Frame> {
+    fn capture_video(&mut self, submit: bool) -> Option<Frame> {
         let image = self.geometry().and_then(|()| {
             let context = self
                 .context
                 .as_ref()
                 .ok_or_else(|| error("missing desktop context"))?;
-            let frame =
+            let frame = if submit {
                 self.backend
-                    .capture_video(context, self.codec, self.keyframe, self.bitrate)?;
+                    .capture_video(context, self.codec, self.keyframe, self.bitrate)?
+            } else {
+                self.backend.drain_video(context)?
+            };
             frame
                 .map(|frame| self.backend.cursor(context).map(|cursor| (frame, cursor)))
                 .transpose()
@@ -525,7 +546,7 @@ impl Engine {
                 self.state.cursor = cursor;
                 let jpeg = image.bytes;
                 self.state.state = "streaming".into();
-                self.state.message.clear();
+                self.state.message = self.input_failure.clone().unwrap_or_default();
                 self.state.frame_id += 1;
                 self.state.frames += 1;
                 self.state.bytes += jpeg.len() as u64;
@@ -586,9 +607,17 @@ impl Engine {
             .as_ref()
             .ok_or_else(|| error("missing desktop context"))?;
         self.presented = Some((event.generation, event.frame_id));
-        self.backend
-            .input_in_context(context, &event.input)
-            .inspect_err(|_| self.backend.release())
+        if let Err(failure) = self.backend.input_in_context(context, &event.input) {
+            // A live picture is not proof of working control. End the grant and
+            // retain this failure across successful captures until the viewer
+            // explicitly requests control again; queued presses are not replayed.
+            self.release_control();
+            let failure = format!("input_failed: {failure}");
+            self.state.message.clone_from(&failure);
+            self.input_failure = Some(failure.clone());
+            return Err(error(failure));
+        }
+        Ok(())
     }
 }
 impl Drop for Engine {
@@ -710,6 +739,90 @@ mod tests {
     }
 
     #[test]
+    fn native_input_failure_ends_control_and_survives_new_video() {
+        struct FailingInput {
+            backend: Fake,
+            rejected: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Backend for FailingInput {
+            fn display(&mut self) -> Result<Display> {
+                self.backend.display()
+            }
+            fn capture(&mut self) -> Result<Vec<u8>> {
+                self.backend.capture()
+            }
+            fn input(&mut self, event: &Input) -> Result<()> {
+                if self.rejected.load(Ordering::SeqCst) {
+                    Err(error("native injection rejected"))
+                } else {
+                    self.backend.input(event)
+                }
+            }
+            fn release(&mut self) {
+                self.backend.release();
+            }
+        }
+        let counts = Arc::new(parking_lot::Mutex::new((10, 0, 0, 0)));
+        let rejected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut engine = Engine::new(Box::new(FailingInput {
+            backend: Fake(counts.clone()),
+            rejected: rejected.clone(),
+        }));
+        engine.control(true, true).unwrap();
+        let frame = engine.capture();
+        let mut event = InputEvent {
+            generation: frame.status.generation,
+            frame_id: frame.status.frame_id,
+            sequence: 1,
+            input: Input::Button {
+                button: crate::Button::Left,
+                down: true,
+            },
+        };
+        let failure = engine.input(event.clone(), true).unwrap_err();
+        engine.report_command_failure(&failure);
+        assert!(!engine.state.controlling);
+        assert!(counts.lock().2 > 0);
+        let failed = engine.state.message.clone();
+        assert!(!failed.is_empty());
+        let late_ack = engine
+            .presentation(event.generation, event.frame_id)
+            .unwrap_err();
+        engine.report_command_failure(&late_ack);
+        assert_eq!(engine.state.message, failed);
+        event.sequence += 1;
+        event.input = Input::Button {
+            button: crate::Button::Left,
+            down: false,
+        };
+        let queued_release = engine.input(event, true).unwrap_err();
+        engine.report_command_failure(&queued_release);
+        assert_eq!(engine.state.message, failed);
+        assert_eq!(engine.capture().status.message, failed);
+        assert_eq!(engine.capture().status.message, failed);
+        rejected.store(false, Ordering::SeqCst);
+        engine.control(true, true).unwrap();
+        let retry = engine.capture();
+        assert!(retry.status.message.is_empty());
+        engine
+            .input(
+                InputEvent {
+                    generation: retry.status.generation,
+                    frame_id: retry.status.frame_id,
+                    sequence: 3,
+                    input: Input::Button {
+                        button: crate::Button::Left,
+                        down: false,
+                    },
+                },
+                true,
+            )
+            .unwrap();
+        assert!(engine.state.controlling);
+        assert_eq!(counts.lock().1, 1);
+    }
+
+    #[test]
     fn observation_never_acquires_write_admission_and_revocation_releases_it() {
         struct Admission(Arc<AtomicU64>);
         struct Lease(Arc<AtomicU64>);
@@ -779,6 +892,130 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), worker.stop())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn presentation_backpressure_drains_encoder_without_new_capture() {
+        #[derive(Default)]
+        struct Pipeline {
+            submitted: u32,
+            output_ready: bool,
+            drained: bool,
+        }
+        struct Video(Arc<parking_lot::Mutex<Pipeline>>);
+        fn encoded(keyframe: bool) -> crate::EncodedFrame {
+            crate::EncodedFrame {
+                format: crate::VideoFormat {
+                    codec: crate::VideoCodec::H264,
+                    width: 16,
+                    height: 16,
+                    keyframe,
+                    ..Default::default()
+                },
+                bytes: vec![1; if keyframe { 128 * 1024 } else { 1024 }],
+            }
+        }
+        impl Backend for Video {
+            fn display(&mut self) -> Result<Display> {
+                Ok(Display {
+                    id: 1,
+                    name: "async pipeline".into(),
+                    x: 0,
+                    y: 0,
+                    width: 16,
+                    height: 16,
+                })
+            }
+            fn capture(&mut self) -> Result<Vec<u8>> {
+                unreachable!()
+            }
+            fn capture_video(
+                &mut self,
+                _: &crate::DesktopContext,
+                _: crate::VideoCodec,
+                _: bool,
+                _: u32,
+            ) -> Result<Option<crate::EncodedFrame>> {
+                let mut state = self.0.lock();
+                // The first completed IDR has a second submission still in the
+                // encoder. Do not complete it until admission closes the window.
+                if state.submitted == 0 {
+                    state.submitted = 2;
+                    return Ok(Some(encoded(true)));
+                }
+                if state.output_ready {
+                    state.submitted += 1;
+                }
+                Ok(None)
+            }
+            fn drain_video(
+                &mut self,
+                _: &crate::DesktopContext,
+            ) -> Result<Option<crate::EncodedFrame>> {
+                let mut state = self.0.lock();
+                if state.output_ready && !state.drained {
+                    state.drained = true;
+                    return Ok(Some(encoded(false)));
+                }
+                Ok(None)
+            }
+            fn input(&mut self, _: &Input) -> Result<()> {
+                Ok(())
+            }
+            fn release(&mut self) {}
+        }
+        let pipeline = Arc::new(parking_lot::Mutex::new(Pipeline::default()));
+        let source = pipeline.clone();
+        let mut worker = Worker::start_video(
+            Arc::new(move || Ok(Box::new(Video(source.clone())))),
+            Arc::new(Policy::new(false)),
+            Arc::new(parking_lot::Mutex::new(SessionStatus::default())),
+            crate::VideoCodec::H264,
+            crate::VideoPreferences::default(),
+            true,
+            None,
+        );
+        worker.frames.changed().await.unwrap();
+        let initial = worker.media.pop().unwrap();
+        let feedback = worker.feedback.clone().unwrap();
+        assert_eq!(
+            feedback.admit(&initial, initial.bytes.len()),
+            crate::congestion::Admission::Send
+        );
+        assert!(feedback.budget().2);
+        pipeline.lock().output_ready = true;
+        worker.wake.notify();
+        let started = Instant::now();
+        let drained = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if let Some(frame) = worker.media.pop() {
+                    break frame;
+                }
+                worker.frames.changed().await.unwrap();
+            }
+        })
+        .await;
+        // Always join the worker, including the pre-fix failure, so this test
+        // cannot leave a capture task running inside the shared test runtime.
+        worker.stop().await;
+        let drained = drained
+            .expect("ACK backpressure must not hold completed encoder output past its age limit");
+        assert_eq!(
+            pipeline.lock().submitted,
+            2,
+            "no new capture is allowed without credit"
+        );
+        assert_eq!(drained.status.generation, initial.status.generation);
+        assert_eq!(drained.status.frame_id, initial.status.frame_id + 1);
+        assert!(!drained.status.video.keyframe);
+        assert!(
+            feedback.budget().2,
+            "draining is not a presentation acknowledgment"
+        );
+        println!(
+            "paused_encoder drain_ms={:.3} submissions=2",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     #[tokio::test]

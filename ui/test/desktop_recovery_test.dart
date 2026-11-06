@@ -13,7 +13,7 @@ class _RecoveryApi extends FakeDesktopApi {
   final connectionEvents = StreamController<void>.broadcast(sync: true);
   final disconnectEvents = StreamController<void>.broadcast(sync: true);
   Completer<void>? connectGate, disconnectGate;
-  bool failNext = false;
+  Object? nextFailure;
   int keyframes = 0, serial = 0;
 
   @override
@@ -25,9 +25,9 @@ class _RecoveryApi extends FakeDesktopApi {
     connectGate = null;
     await gate?.future;
     if (current != serial) return;
-    if (failNext) {
-      failNext = false;
-      throw StateError('test transport unavailable');
+    if (nextFailure case final failure?) {
+      nextFailure = null;
+      throw failure;
     }
     sources.add(StreamController<DesktopFrame>(sync: true));
     viewer = const DesktopStatus(state: 'connecting');
@@ -55,11 +55,16 @@ class _RecoveryApi extends FakeDesktopApi {
   @override
   Future<void> keyframe() async => keyframes++;
 
-  void emit({bool controlling = false, bool unavailable = false}) {
+  void emit({
+    bool controlling = false,
+    bool unavailable = false,
+    String message = '',
+  }) {
     viewer = DesktopStatus(
       state: unavailable ? 'capture_unavailable' : 'streaming',
       controlling: controlling,
       controlAllowed: true,
+      message: message,
       generation: connections.length,
       frameId: 1,
     );
@@ -98,6 +103,58 @@ Future<void> _noConnectionFor(_RecoveryApi api, Duration duration) =>
     );
 
 void main() {
+  test('host input failure does not automatically regain control', () async {
+    final api = _RecoveryApi();
+    final store = DesktopStore(api);
+    addTearDown(() async {
+      await store.disconnect();
+      store.dispose();
+      await api.close();
+    });
+    await store.connect('private invitation', false);
+    api.emit();
+    await _until(store, () => api.controls.contains(true));
+    api.emit(message: 'input_failed: Windows rejected remote input');
+    await _until(
+      store,
+      () => store.snapshot.viewer?.message.startsWith('input_failed:') == true,
+    );
+    await store.poll();
+    await store.poll();
+    expect(api.controls, [true]);
+    expect(store.controlling, isFalse);
+    await store.control(true);
+    api.emit(controlling: true);
+    await _until(store, () => store.controlling);
+    expect(api.controls, [true, true]);
+  });
+
+  test(
+    'invalid invitation returns to input without automatic retries',
+    () async {
+      final api = _RecoveryApi()
+        ..nextFailure = const DesktopCallException(
+          'INVALID_ARGUMENT',
+          'invalid desktop invitation',
+        );
+      final store = DesktopStore(api);
+      addTearDown(() async {
+        await store.disconnect();
+        store.dispose();
+        await api.close();
+      });
+      await store.connect('malformed invitation', false);
+      expect(store.connected, isFalse);
+      expect(store.error, isNotNull);
+      expect(store.reconnectAttempt, 0);
+      await _noConnectionFor(api, const Duration(milliseconds: 1100));
+      expect(api.connections.length, 1);
+      await store.connect('corrected invitation', false);
+      expect(store.connected, isTrue);
+      expect(api.connections.last.$1, 'corrected invitation');
+    },
+  );
+
   test(
     'a failed stream retries the same target and path, restores only fresh control, and manual stop cancels retries',
     () async {
@@ -119,7 +176,7 @@ void main() {
       api.emit(controlling: true);
       await _until(store, () => store.controlling);
       expect(store.controlling, isTrue);
-      api.failNext = true;
+      api.nextFailure = StateError('test transport unavailable');
       api.sources.last.addError(StateError('connection reset'));
       await _until(
         store,

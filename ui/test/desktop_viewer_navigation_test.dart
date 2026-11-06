@@ -13,9 +13,15 @@ import 'fake_desktop_api.dart';
 class _SlowConnectionApi extends FakeDesktopApi {
   final connectGate = Completer<void>();
   final connectStarted = Completer<void>();
+  final invitations = <String>[];
+  final video = StreamController<DesktopFrame>.broadcast(sync: true);
+
+  @override
+  Stream<DesktopFrame> frames() => video.stream;
 
   @override
   Future<void> connect(String invitation, {required bool relayOnly}) async {
+    invitations.add(invitation);
     if (!connectStarted.isCompleted) connectStarted.complete();
     await connectGate.future;
     viewer = const DesktopStatus(state: 'connecting');
@@ -29,6 +35,7 @@ void main() {
     final api = _SlowConnectionApi()
       ..available = const DesktopCapabilities(host: false);
     final store = DesktopStore(api);
+    addTearDown(api.video.close);
     await tester.pumpWidget(
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -37,10 +44,17 @@ void main() {
       ),
     );
     await tester.pump();
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('desktop-connect')))
+          .onPressed,
+      isNull,
+    );
     await tester.enterText(
       find.byKey(const Key('desktop-invitation')),
       'private test invitation',
     );
+    await tester.pump();
     await tester.tap(find.byKey(const Key('desktop-connect')));
     await tester.pump();
     expect(api.connectStarted.isCompleted, isTrue);
@@ -77,11 +91,33 @@ void main() {
     )!;
     var reopenedRemoved = false;
     unawaited(reopened.completed.then((_) => reopenedRemoved = true));
-    await tester.pageBack();
+    await tester.tap(
+      find.descendant(
+        of: find.byType(DesktopViewer),
+        matching: find.text('Disconnect'),
+      ),
+    );
+    await tester.runAsync(store.disconnect);
     for (var frame = 0; frame < 30 && !reopenedRemoved; frame++) {
       await tester.pump(const Duration(milliseconds: 50));
     }
     expect(reopenedRemoved, isTrue);
+    expect(store.connected, isFalse);
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('desktop-invitation')))
+          .controller!
+          .text,
+      'private test invitation',
+    );
+    await tester.tap(find.byKey(const Key('desktop-connect')));
+    await tester.pump();
+    await tester.pump(transitionDuration);
+    expect(api.invitations, [
+      'private test invitation',
+      'private test invitation',
+    ]);
+    expect(find.byType(DesktopViewer, skipOffstage: false), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
     store.dispose();
     expect(tester.takeException(), isNull);

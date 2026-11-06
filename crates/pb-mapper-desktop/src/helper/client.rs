@@ -148,6 +148,15 @@ impl Backend for RemoteBackend {
             .clone();
         self.input_in_context(&context, input)
     }
+    fn drain_video(&mut self, expected: &DesktopContext) -> Result<Option<crate::EncodedFrame>> {
+        let bytes = self.call(Request::DrainVideo {
+            expected: expected.clone(),
+        })?;
+        Ok(self
+            .video
+            .take()
+            .map(|format| crate::EncodedFrame { format, bytes }))
+    }
     fn input_in_context(&mut self, expected: &DesktopContext, input: &Input) -> Result<()> {
         input.validate(&expected.display)?;
         self.sequence += 1;

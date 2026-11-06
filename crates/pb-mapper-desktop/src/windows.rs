@@ -3,10 +3,18 @@ use crate::{Backend, Button, CursorPosition, DesktopContext, Display, Input, Key
 use enigo::{Axis, Direction, Enigo, Keyboard, Mouse};
 use std::collections::HashSet;
 use windows::Win32::{
-    Foundation::{HANDLE, POINT},
+    Foundation::{CloseHandle, GetLastError, HANDLE, POINT},
     Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFOEXW},
-    System::StationsAndDesktops::{
-        CloseDesktop, DESKTOP_READOBJECTS, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
+    Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
+        TOKEN_QUERY, TokenIntegrityLevel, TokenSessionId, TokenUIAccess,
+    },
+    System::{
+        StationsAndDesktops::{
+            CloseDesktop, DESKTOP_READOBJECTS, GetUserObjectInformationW, OpenInputDesktop,
+            UOI_NAME,
+        },
+        Threading::{GetCurrentProcess, OpenProcessToken},
     },
     UI::{
         HiDpi::{
@@ -137,6 +145,23 @@ struct Desktop {
     video_preferences: crate::VideoPreferences,
 }
 impl Desktop {
+    fn finish_video(
+        &mut self,
+        expected: &DesktopContext,
+        image: Result<Option<crate::video::windows::Encoded>>,
+    ) -> Result<Option<crate::EncodedFrame>> {
+        if &self.context()? != expected {
+            self.encoder = None;
+            return Err(error("desktop changed during video capture"));
+        }
+        match image {
+            Ok(image) => Ok(image.map(Into::into)),
+            Err(e) => {
+                self.encoder = None;
+                Err(e)
+            }
+        }
+    }
     fn prepare(&mut self) -> Result<()> {
         let Some(secure) = &mut self.secure else {
             return available().inspect_err(|_| {
@@ -280,27 +305,21 @@ impl Backend for Desktop {
             .1;
         encoder.set_bitrate(bitrate.min(self.video_preferences.bitrate))?;
         let image = encoder.next_frame(keyframe);
+        self.finish_video(expected, image)
+    }
+    fn drain_video(&mut self, expected: &DesktopContext) -> Result<Option<crate::EncodedFrame>> {
+        let _dpi = DpiScope::enter();
         if &self.context()? != expected {
-            self.encoder = None;
-            return Err(error("desktop changed during video capture"));
+            return Err(error("desktop changed before video drain"));
         }
-        match image {
-            Ok(image) => Ok(image.map(|image| crate::EncodedFrame {
-                format: crate::VideoFormat {
-                    codec,
-                    width: image.width,
-                    height: image.height,
-                    keyframe: image.keyframe,
-                    pts_us: image.pts_us,
-                    duplicate: image.duplicate,
-                },
-                bytes: image.bytes,
-            })),
-            Err(e) => {
-                self.encoder = None;
-                Err(e)
-            }
+        let Some((context, encoder)) = &mut self.encoder else {
+            return Ok(None);
+        };
+        if context != expected {
+            return Ok(None);
         }
+        let image = encoder.drain();
+        self.finish_video(expected, image)
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;
@@ -321,13 +340,14 @@ impl Backend for Desktop {
                 // Enigo 0.6 absolute movement normalizes to the primary screen.
                 // The Windows API accepts physical virtual-desktop coordinates,
                 // including a selected display left/above the primary display.
-                unsafe { SetCursorPos(d.x + *x as i32, d.y + *y as i32) }.map_err(error)?;
+                unsafe { SetCursorPos(d.x + *x as i32, d.y + *y as i32) }
+                    .map_err(native_input_error)?;
             }
             Input::Button { button, down } => {
                 apply_held(&mut self.buttons, *button, *down, |direction| {
                     self.input
                         .button(button_code(*button), direction)
-                        .map_err(error)
+                        .map_err(native_input_error)
                 })?;
             }
             Input::Wheel {
@@ -337,26 +357,90 @@ impl Backend for Desktop {
                 if *horizontal != 0 {
                     self.input
                         .scroll(*horizontal, Axis::Horizontal)
-                        .map_err(error)?;
+                        .map_err(native_input_error)?;
                 }
                 if *vertical != 0 {
                     self.input
                         .scroll(*vertical, Axis::Vertical)
-                        .map_err(error)?;
+                        .map_err(native_input_error)?;
                 }
             }
             Input::Key { key, down } => {
                 apply_held(&mut self.keys, *key, *down, |direction| {
-                    self.input.key(key_code(*key), direction).map_err(error)
+                    self.input
+                        .key(key_code(*key), direction)
+                        .map_err(native_input_error)
                 })?;
             }
-            Input::Text { text } => self.input.text(text).map_err(error)?,
+            Input::Text { text } => self.input.text(text).map_err(native_input_error)?,
         }
         Ok(())
     }
     fn release(&mut self) {
         release_input(&mut self.input, &mut self.buttons, &mut self.keys);
     }
+}
+
+fn native_input_error(failure: impl std::fmt::Display) -> std::io::Error {
+    // Capture the native error before querying any token information. Windows
+    // does not identify UIPI failures with a distinct code; retain the actual
+    // launch context so a failed worker can be diagnosed without guessing or
+    // requesting broader privileges. This runs only after failed injection.
+    let code = unsafe { GetLastError() }.0;
+    let mut token = HANDLE::default();
+    let context = (|| -> windows::core::Result<String> {
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }?;
+        let mut ui_access = 0u32;
+        let mut session = 0u32;
+        let mut length = 0;
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenUIAccess,
+                Some((&mut ui_access as *mut u32).cast()),
+                4,
+                &mut length,
+            )?;
+            GetTokenInformation(
+                token,
+                TokenSessionId,
+                Some((&mut session as *mut u32).cast()),
+                4,
+                &mut length,
+            )?;
+        }
+        let mut label = [0usize; 16];
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                Some(label.as_mut_ptr().cast()),
+                size_of_val(&label) as u32,
+                &mut length,
+            )?;
+            let sid = (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid);
+            let integrity = *GetSidSubAuthority(sid, u32::from(count - 1));
+            Ok(format!(
+                "session={session}, integrity={integrity:#x}, ui_access={ui_access}"
+            ))
+        }
+    })();
+    if !token.is_invalid() {
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+    }
+    let detail = format!(
+        "{failure}; Win32={code}; {}",
+        context.unwrap_or_else(|e| format!("worker token unavailable: {e}"))
+    );
+    #[cfg(feature = "windows-helper")]
+    crate::helper::record_input_failure(&detail);
+    tracing::warn!(%detail, "native desktop input failed");
+    error(format!(
+        "Windows rejected remote input (Win32={code}); check the desktop service log"
+    ))
 }
 
 fn release_input(input: &mut Enigo, buttons: &mut HashSet<Button>, keys: &mut HashSet<Key>) {

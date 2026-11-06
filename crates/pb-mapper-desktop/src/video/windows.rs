@@ -46,6 +46,22 @@ pub struct Encoded {
     pub pts_us: u64,
 }
 
+impl From<Encoded> for crate::EncodedFrame {
+    fn from(image: Encoded) -> Self {
+        Self {
+            format: crate::VideoFormat {
+                codec: crate::VideoCodec::H264,
+                width: image.width,
+                height: image.height,
+                keyframe: image.keyframe,
+                pts_us: image.pts_us,
+                duplicate: image.duplicate,
+            },
+            bytes: image.bytes,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Statistics {
     pub unique_captures: u64,
@@ -254,9 +270,10 @@ impl Encoder {
         Ok(())
     }
 
-    pub fn next_frame(&mut self, force_keyframe: bool) -> Result<Option<Encoded>> {
+    /// Complete previously submitted work even while network admission is
+    /// closed. This never acquires a desktop texture or calls ProcessInput.
+    pub fn drain(&mut self) -> Result<Option<Encoded>> {
         self.check_thread()?;
-        self.force_keyframe |= force_keyframe;
         self.codec.events()?;
         let mut ready = None;
         if self.codec.have_output > 0 {
@@ -273,8 +290,7 @@ impl Encoder {
                 }
                 let bytes = sample_bytes(&sample)?;
                 let (bytes, keyframe) = self.codec.annex_b(bytes)?;
-                // Admission can pause polling while waiting for the renderer.
-                // Never relabel an old GPU surface as a newly captured picture.
+                // A genuinely late codec output is not a newly captured picture.
                 if at.elapsed() > Duration::from_millis(250) {
                     self.wait_independent_output = true;
                     self.force_keyframe = true;
@@ -311,6 +327,12 @@ impl Encoder {
         {
             return Err(error("hardware video encoder stalled"));
         }
+        Ok(ready)
+    }
+
+    pub fn next_frame(&mut self, force_keyframe: bool) -> Result<Option<Encoded>> {
+        self.force_keyframe |= force_keyframe;
+        let ready = self.drain()?;
         if self.pending.len() >= MAX_IN_FLIGHT
             || self.codec.need_input == 0
             || Instant::now() < self.next_capture

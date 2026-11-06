@@ -158,6 +158,10 @@ pub struct SessionStatus {
     /// Zero means no current-generation renderer acknowledgment has been measured.
     #[serde(default)]
     pub frame_ack_ms: f32,
+    /// Optional transport-only startup probe. Older viewers ignore it; newer
+    /// viewers echo it before any decoder/UI work. It is never a picture ACK.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roundtrip_probe: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +337,12 @@ pub trait Backend: 'static {
             },
             bytes: self.capture_consistent(expected)?,
         }))
+    }
+    /// Retrieve already submitted asynchronous encoder output without capturing
+    /// or submitting another image. Backpressure pauses production, not codec
+    /// completion; synchronous backends have nothing to drain.
+    fn drain_video(&mut self, _expected: &DesktopContext) -> Result<Option<EncodedFrame>> {
+        Ok(None)
     }
     fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
         if &self.context()? != expected {

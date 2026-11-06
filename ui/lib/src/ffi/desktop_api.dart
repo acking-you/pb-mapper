@@ -3,6 +3,13 @@ import 'dart:io';
 import 'dart:ui' as ui;
 import 'pb_mapper_service.dart';
 
+class DesktopCallException implements Exception {
+  const DesktopCallException(this.code, this.message);
+  final String code, message;
+  @override
+  String toString() => message;
+}
+
 class DesktopDisplay {
   const DesktopDisplay(this.id, this.name, this.width, this.height);
   factory DesktopDisplay.fromJson(Map<String, dynamic> json) => DesktopDisplay(
@@ -342,7 +349,8 @@ class DesktopApi implements DesktopApiClient {
   ]) async {
     final result = await PbMapperService().desktopCall({'op': op, ...args});
     if (result['success'] != true) {
-      throw StateError(
+      throw DesktopCallException(
+        result['code'] as String? ?? 'INTERNAL',
         result['message'] as String? ?? 'Desktop operation failed',
       );
     }

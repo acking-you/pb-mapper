@@ -26,6 +26,11 @@ pub(crate) use os::SessionIdentity;
 pub use os::request_installation;
 pub use restart::prepare as prepare_application_restart;
 
+#[cfg(feature = "windows-helper")]
+pub(crate) fn record_input_failure(detail: &str) {
+    os::record_service_event("input_failed", detail);
+}
+
 const SERVICE: &str = "PbMapperDesktop";
 const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v1";
 const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
@@ -160,6 +165,9 @@ enum Request {
         codec: crate::VideoCodec,
         keyframe: bool,
         bitrate: u32,
+    },
+    DrainVideo {
+        expected: DesktopContext,
     },
     Presented {
         generation: u64,

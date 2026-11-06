@@ -721,6 +721,8 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             native_video,
             video,
         } => {
+            let invitation = Invitation::decode(&invitation)
+                .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?;
             state
                 .connect_viewer(async {
                     // Configuration can wait behind other app operations. Keep
@@ -734,7 +736,6 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     )
                     .with_relay_transport(config.relay_transport)
                     .map_err(err)?;
-                    let invitation = Invitation::decode(&invitation).map_err(err)?;
                     let options = ConnectOptions {
                         path: if relay_only {
                             PathPolicy::RelayOnly
@@ -1579,11 +1580,36 @@ mod tests {
             // must be cancelled while the lock is still held, before loading
             // credentials or contacting a relay.
             let config = handle.state.lock().await;
-            let connect = || {
+            let invalid = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
                 call(
                     &handle,
                     Request::Connect {
                         invitation: String::new(),
+                        relay_only: false,
+                        native_video: false,
+                        video: None,
+                    },
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(invalid.code(), crate::error::ErrorCode::InvalidArgument);
+            assert!(handle.desktop.connecting.lock().is_none());
+            let invitation = Invitation {
+                version: 1,
+                service: "desktop:test".into(),
+                certificate: String::new(),
+                token: "a".repeat(43),
+            }
+            .encode()
+            .unwrap();
+            let connect = || {
+                call(
+                    &handle,
+                    Request::Connect {
+                        invitation: invitation.clone(),
                         relay_only: false,
                         native_video: false,
                         video: None,
