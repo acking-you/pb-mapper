@@ -38,7 +38,7 @@ owner/login binding, authenticated IPC, removed privileges and one-process job.
 An opt-in Windows regression binds using the production access mask and submits
 a zero-distance relative mouse move. It checks actual OS acceptance without
 clicking, typing, moving the pointer or switching the visible desktop. The
-installed final worker still requires end-to-end event delivery; ordinary-window
+installed final worker passed end-to-end event delivery below; ordinary-window
 success alone does not establish secure-desktop or lock-screen operation.
 
 Input failure now ends the control grant. It remains visible across subsequent
@@ -119,7 +119,24 @@ presentation FPS nor RustDesk-equivalent end-to-end latency.
   [the video evidence](desktop-video-backpressure.json).
 - Restricted UIAccess candidate: installed and failed real button delivery;
   UIAccess is removed. Desktop-handle access was reproduced with a controlled
-  before/after fixture; final installed-service acceptance is pending.
+  before/after fixture. The explicit native desktop-handle regression passed.
+- Build 0.10.2+925: the complete protected Windows installation matches every
+  packaged file hash and runs Automatic/Running. Its ordinary user UI reports
+  background sharing enabled. Production 922 and 925 FFI viewers verified real
+  left/right clicks, held drag, wheel, keyboard and text on the owned window.
+  The high-resolution 925 direct input probe observed all 45 positions at both
+  30 and 60 Hz; 60 Hz mean was 3.117 ms, p95 4.758 ms, maximum 6.224 ms on this
+  same-machine path. These are actual cursor observations, not video latency.
+- The same 925 FFI handle connected direct, disconnected, then connected through
+  the deployed relay three times with the original invitation. Every session
+  delivered fresh 1920×1080 H264 access units. ACKs simulate consumption and do
+  not measure display FPS. These probes use an isolated TCP override; the saved
+  QUIC app profile is unchanged. The standalone saved-QUIC probe still fails with
+  Windows socket error 10054, as previously recorded; no broader cause is claimed.
+- Build 925 Android ARM64/x64 APKs passed signing, identity, increasing version,
+  ABI, 16 KiB alignment and upgrade checks. The x64 APK installed and launched on
+  the Android 36 emulator with no crash-buffer entries. This is package smoke
+  coverage only. [Installed input and reconnect evidence](desktop-925-installed-input.json).
 - Physical phone fluidity, remote secure-desktop input and independent WAN
   performance remain unverified by these local checks.
 
