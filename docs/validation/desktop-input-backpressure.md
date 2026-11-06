@@ -19,12 +19,27 @@ helper reported `SendInput` failure with Win32 5 (`ERROR_ACCESS_DENIED`), sessio
 1, System integrity (`0x4000`) and `TokenUIAccess=0`. The generic Enigo error's
 mention of UIPI alone was not sufficient to diagnose the cause.
 
-The candidate gives only the dedicated restricted worker `TokenUIAccess=1`,
-sets it while the launcher holds scoped SeTcb, and verifies the token before
-launch. It retains the protected image, owner/login binding, authenticated IPC,
-removed privileges and one-process job. This is a candidate until the installed
-worker successfully delivers real input. Ordinary-window success does not by
-itself establish secure-desktop or lock-screen operation.
+The first candidate set `TokenUIAccess=1` on the restricted worker. Installed
+acceptance disproved this diagnosis: the worker reported UIAccess=1 but still
+returned Win32 5 and delivered neither button event. That token change is removed.
+
+The desktop handle lacked `DESKTOP_JOURNALPLAYBACK`. A separate ordinary-user
+process reproduced the boundary on the same owned window: binding a fresh thread
+with the previous `0x181` access mask made `SendInput` return zero and Win32 5;
+adding only journal-playback access (`0x1a1`) sent both events and the window
+observed button-down and button-up. No token changes or desktop ACL changes were
+needed. RustDesk's desktop binding requests `GENERIC_WRITE`, which includes this
+right; pb-mapper now requests the specific additional right. See
+[Microsoft's desktop access mapping](https://learn.microsoft.com/en-us/windows/win32/winstation/desktop-security-and-access-rights)
+and [RustDesk's Windows binding](https://github.com/rustdesk/rustdesk/blob/master/src/platform/windows.cc).
+
+The worker retains its restricted SYSTEM token without UIAccess, protected image,
+owner/login binding, authenticated IPC, removed privileges and one-process job.
+An opt-in Windows regression binds using the production access mask and submits
+a zero-distance relative mouse move. It checks actual OS acceptance without
+clicking, typing, moving the pointer or switching the visible desktop. The
+installed final worker still requires end-to-end event delivery; ordinary-window
+success alone does not establish secure-desktop or lock-screen operation.
 
 Input failure now ends the control grant. It remains visible across subsequent
 captures, queued button releases and stale presentation ACKs. The UI does not
@@ -91,7 +106,8 @@ presentation FPS nor RustDesk-equivalent end-to-end latency.
 
 - Rust desktop: 46 library tests and two direct/relay session tests passed;
   workspace formatting and all-target/all-feature Clippy passed with warnings
-  denied. Three explicit performance/slow-link tests remain opt-in.
+  denied. Three explicit performance/slow-link tests and the interactive desktop
+  permission regression are opt-in.
 - Flutter: 22 focused desktop tests and analysis passed.
 - FFI: all 39 library tests passed, including malformed-invitation/configuration
   cancellation.
@@ -101,8 +117,9 @@ presentation FPS nor RustDesk-equivalent end-to-end latency.
   30, and stops 4.18 seconds after presentation ACKs cease. Detailed counters,
   source references and commands are in
   [the video evidence](desktop-video-backpressure.json).
-- Restricted UIAccess worker: built; installed input acceptance is pending the
-  Windows UAC confirmation for the candidate update.
+- Restricted UIAccess candidate: installed and failed real button delivery;
+  UIAccess is removed. Desktop-handle access was reproduced with a controlled
+  before/after fixture; final installed-service acceptance is pending.
 - Physical phone fluidity, remote secure-desktop input and independent WAN
   performance remain unverified by these local checks.
 

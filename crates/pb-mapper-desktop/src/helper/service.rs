@@ -260,39 +260,6 @@ fn spawn_worker(config: &Configuration, session: u32, pipe: &str) -> Result<Chil
     }
     .map_err(error)?;
     let restricted = unsafe { os::Handle::own(restricted) };
-    // This is the dedicated, authenticated capture/input worker, not the
-    // service or UI. System integrity alone is insufficient for SendInput from
-    // a service token moved into the interactive session (ERROR_ACCESS_DENIED
-    // even against ordinary windows). Grant only the UI capability before
-    // launch; the worker still has no TCB, debug, assign-primary-token or
-    // increase-quota privileges. The job below forbids additional processes.
-    // Setting this flag requires the launcher's scoped SeTcbPrivilege, which
-    // is restored before returning and is never retained in this token.
-    let ui_access = 1u32;
-    unsafe {
-        SetTokenInformation(
-            restricted.raw(),
-            TokenUIAccess,
-            (&ui_access as *const u32).cast(),
-            size_of::<u32>() as u32,
-        )
-    }
-    .map_err(error)?;
-    let mut confirmed_ui_access = 0u32;
-    let mut returned = 0;
-    unsafe {
-        GetTokenInformation(
-            restricted.raw(),
-            TokenUIAccess,
-            Some((&mut confirmed_ui_access as *mut u32).cast()),
-            size_of::<u32>() as u32,
-            &mut returned,
-        )
-    }
-    .map_err(error)?;
-    if confirmed_ui_access != 1 {
-        return Err(error("Windows did not authorize desktop worker input"));
-    }
     let job = unsafe { os::Handle::own(CreateJobObjectW(None, None).map_err(error)?) };
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags =

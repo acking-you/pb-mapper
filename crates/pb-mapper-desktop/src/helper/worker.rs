@@ -6,6 +6,15 @@ use windows::Win32::{Foundation::*, System::StationsAndDesktops::*, UI::WindowsA
 #[cfg(feature = "windows-helper")]
 use windows::Win32::{System::Threading::*, UI::Accessibility::*};
 static EPOCH: AtomicU64 = AtomicU64::new(1);
+// SendInput requires journal-playback access on the bound desktop handle.
+// READ/WRITEOBJECTS alone allows SetCursorPos but rejects buttons and keys,
+// even for a SYSTEM process with UIAccess. Do not broaden the worker token.
+const INPUT_DESKTOP_ACCESS: DESKTOP_ACCESS_FLAGS = DESKTOP_ACCESS_FLAGS(
+    DESKTOP_READOBJECTS.0
+        | DESKTOP_WRITEOBJECTS.0
+        | DESKTOP_SWITCHDESKTOP.0
+        | DESKTOP_JOURNALPLAYBACK.0,
+);
 #[cfg(feature = "windows-helper")]
 unsafe extern "system" fn desktop_event(
     _: HWINEVENTHOOK,
@@ -175,16 +184,8 @@ impl DesktopBinding {
         // Sample before opening: a later notification must not be acknowledged
         // as if it described the handle we already opened.
         let epoch = EPOCH.load(Ordering::Acquire);
-        let desktop = unsafe {
-            OpenInputDesktop(
-                Default::default(),
-                false,
-                DESKTOP_ACCESS_FLAGS(
-                    DESKTOP_READOBJECTS.0 | DESKTOP_WRITEOBJECTS.0 | DESKTOP_SWITCHDESKTOP.0,
-                ),
-            )
-        }
-        .map_err(error)?;
+        let desktop = unsafe { OpenInputDesktop(Default::default(), false, INPUT_DESKTOP_ACCESS) }
+            .map_err(error)?;
         let mut bound = false;
         let result = (|| {
             let mut text = [0u16; 256];
@@ -460,6 +461,41 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an unlocked interactive Windows desktop; sends a zero-distance mouse move"]
+    fn bound_input_desktop_allows_send_input() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput,
+        };
+
+        // Use a fresh thread with no windows/hooks, just like the worker. A
+        // zero-distance relative move checks the OS permission without clicking,
+        // typing, moving the pointer or switching the user's visible desktop.
+        std::thread::spawn(|| unsafe {
+            let original = GetThreadDesktop(GetCurrentThreadId()).unwrap();
+            let desktop =
+                OpenInputDesktop(Default::default(), false, INPUT_DESKTOP_ACCESS).unwrap();
+            let result = (|| -> Result<u32> {
+                SetThreadDesktop(desktop).map_err(error)?;
+                let input = INPUT {
+                    r#type: INPUT_MOUSE,
+                    Anonymous: INPUT_0 {
+                        mi: MOUSEINPUT {
+                            dwFlags: MOUSEEVENTF_MOVE,
+                            ..Default::default()
+                        },
+                    },
+                };
+                Ok(SendInput(&[input], size_of::<INPUT>() as i32))
+            })();
+            SetThreadDesktop(original).unwrap();
+            CloseDesktop(desktop).unwrap();
+            assert_eq!(result.unwrap(), 1, "desktop handle denied native input");
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn desktop_transition_releases_before_binding_and_retries_without_committing_failure() {
