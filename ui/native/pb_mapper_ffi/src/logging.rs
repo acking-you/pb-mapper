@@ -3,7 +3,7 @@
 use std::ffi::{CString, c_char, c_int};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::callback::CallbackSlot;
+use parking_lot::RwLock;
 
 /// Log callback function type.
 /// level: 0=trace, 1=debug, 2=info, 3=warn, 4=error
@@ -11,12 +11,15 @@ use crate::callback::CallbackSlot;
 /// timestamp: unix timestamp (seconds)
 pub type LogCallback = extern "C" fn(level: c_int, message: *const c_char, timestamp: u64);
 
-/// Global log callback
-static LOG_CALLBACK: CallbackSlot<LogCallback> = CallbackSlot::empty();
+/// Hold the read guard through the nonblocking NativeCallable.listener call.
+/// Clearing the callback then waits for in-flight native invocations before
+/// Dart closes the callable, including invocations from the log worker.
+static LOG_CALLBACK: RwLock<Option<LogCallback>> = RwLock::new(None);
 
 /// Internal function to send log to callback
 pub(crate) fn send_log(level: c_int, message: &str) {
-    let Some(callback) = LOG_CALLBACK.load() else {
+    let registered = LOG_CALLBACK.read();
+    let Some(callback) = *registered else {
         return;
     };
 
@@ -36,7 +39,7 @@ pub(crate) fn send_log(level: c_int, message: &str) {
 /// `callback` must be a valid function pointer or null to disable logging.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_set_log_callback(callback: Option<LogCallback>) {
-    LOG_CALLBACK.store(callback);
+    *LOG_CALLBACK.write() = callback;
 }
 
 /// Free a string allocated by the library (e.g., from log callback or JSON result).
@@ -118,14 +121,24 @@ pub extern "C" fn pb_mapper_init_logging() {
     use tracing_subscriber::util::SubscriberInitExt;
 
     let _ = tracing_subscriber::registry()
-        .with({
-            let filter = tracing_subscriber::EnvFilter::from_default_env();
-            match "pb_mapper=info".parse() {
-                Ok(directive) => filter.add_directive(directive),
-                Err(_) => filter,
-            }
-        })
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .with(FfiLogLayer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(|| crate::disk_log::DiskWriter),
+        )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
         .try_init();
+}
+
+/// Stop log callbacks and drain persistent diagnostics before Flutter exits.
+/// Idempotent; safe even if the application directory was never configured.
+#[unsafe(no_mangle)]
+pub extern "C" fn pb_mapper_shutdown_logging() {
+    *LOG_CALLBACK.write() = None;
+    crate::disk_log::shutdown();
 }

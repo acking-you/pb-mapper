@@ -430,6 +430,11 @@ class PbMapperFFI {
         'pb_mapper_init_logging',
       );
 
+  late final pbMapperShutdownLogging = lib
+      .lookupFunction<Void Function(), void Function()>(
+        'pb_mapper_shutdown_logging',
+      );
+
   late final pbMapperFreeString = lib
       .lookupFunction<_PbMapperFreeStringNative, _PbMapperFreeStringDart>(
         'pb_mapper_free_string',

@@ -380,12 +380,12 @@ class PbMapperService {
 
   void initLogging() {
     if (_loggingInitialized) return;
-    ensureInitialized();
 
     _logCallable = NativeCallable<LogCallbackNative>.listener(_logCallback);
     _ffi.pbMapperSetLogCallback(_logCallable!.nativeFunction);
     _ffi.pbMapperInitLogging();
     _loggingInitialized = true;
+    ensureInitialized();
   }
 
   static void _logCallback(int level, Pointer<Utf8> message, int timestamp) {
@@ -444,6 +444,9 @@ class PbMapperService {
     _disposeRequested = true;
     stopDesktopFrames();
     _destroyIfIdle();
+    // The tray exits the process immediately after dispose, even when an FFI
+    // call still owns the handle. Drain disk logs before that exit as well.
+    if (_loggingInitialized) _ffi.pbMapperShutdownLogging();
   }
 
   // Worker isolates borrow the handle: one still in a call, a tunnel event

@@ -55,6 +55,7 @@ parking_lot = "0.12"
 portmapper = { package = "portmapper-plus", path = "deps/portmapper/portmapper", version = "0.20.0", default-features = false }
 rand = "0.10"
 ring = "0.17.14"
+rolling-file = "0.2.0"
 # Pinned forks, published by `release-sdk.yml` as quinn-plus (with
 # quinn-proto-plus and quinn-udp-plus) and rcgen-plus, under the crate names
 # the code imports. Bump a fork's version whenever its pinned source changes:
@@ -69,6 +70,7 @@ subtle = "2.6.1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 tracing = "0.1.40"
+tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.18", features = [
     "env-filter",
     "fmt",

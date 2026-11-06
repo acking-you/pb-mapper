@@ -96,7 +96,7 @@ impl PbMapperState {
     }
 
     #[allow(unused_variables)]
-    fn get_config_dir(app_directory_path: &Option<String>) -> PathBuf {
+    pub(crate) fn get_config_dir(app_directory_path: &Option<String>) -> PathBuf {
         // An explicit path wins everywhere. Mobile is where it normally comes
         // from — Flutter hands it over, because there is no OS config dir to
         // discover — but honouring it on desktop too is what lets a test point

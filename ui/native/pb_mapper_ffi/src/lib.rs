@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod ctl;
 mod desktop;
+mod disk_log;
 mod error;
 mod events;
 mod galaxy;
@@ -40,7 +41,10 @@ pub use handle::{
     PbMapperHandle, pb_mapper_create, pb_mapper_destroy, pb_mapper_set_app_dir,
     pb_mapper_start_control_server,
 };
-pub use logging::{pb_mapper_free_string, pb_mapper_init_logging, pb_mapper_set_log_callback};
+pub use logging::{
+    pb_mapper_free_string, pb_mapper_init_logging, pb_mapper_set_log_callback,
+    pb_mapper_shutdown_logging,
+};
 pub use relay::pb_mapper_relay_call_json;
 pub use server::{
     pb_mapper_force_refresh_server_status_json, pb_mapper_get_local_server_status_json,

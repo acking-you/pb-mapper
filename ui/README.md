@@ -67,7 +67,44 @@ located under `ui/native`.
   - `pb_mapper_ffi.dart`: raw `dart:ffi` symbols and dynamic library loading.
   - `ui/native/pb_mapper_ffi`: Rust C ABI crate exposing JSON responses.
 - **Logging**: Rust logs are pushed to Dart via `NativeCallable` and streamed
-  through `PbMapperService.logStream`.
+  through `PbMapperService.logStream`. The Logs page keeps the latest 1,000
+  entries; native runtime diagnostics also persist independently under the
+  configuration directory's `logs/` folder. Clearing or filtering the page
+  does not change those files.
+
+### Persistent runtime logs
+
+Logs default to **the most recent hour**. A minute's records share a
+`runtime-<Unix minute>.log` file, with `.1` through `.3` size archives (newest
+first). Startup and a background task running every 15 seconds remove expired
+files, including while the application is idle. The entire oldest minute shard
+is removed when its start crosses the one-hour boundary; this can discard up to
+59 seconds of younger records in that shard. Cleanup resumes at the next launch
+when the application is closed, and after the OS resumes a suspended app.
+
+Files rotate before exceeding 8 MiB. Each record is capped at 16 KiB with a
+visible truncation marker; the nonblocking worker and startup buffer each hold
+at most 512 records. Overflow is reported in the file. Simultaneous UI processes
+use up to four locked directories (`runtime-0` through `runtime-3`), each with
+a 32 MiB capacity limit as well as the one-hour limit, so all slots together
+retain at most 128 MiB. Capacity pressure removes the oldest files first.
+If every slot is occupied or storage fails, the live log reports the error.
+
+The directory is `%APPDATA%\pb-mapper-ui\logs` on Windows,
+`~/Library/Application Support/pb-mapper-ui/logs` on macOS, and
+`$XDG_CONFIG_HOME/pb-mapper-ui/logs` (normally `~/.config/pb-mapper-ui/logs`)
+on Linux. Android/iOS use
+`<application documents>/pb-mapper-ui/logs`. Startup also emits the actual
+resolved path. Existing files are appended across restarts.
+
+Logging defaults to `info`, including transport-library warnings and errors;
+set `RUST_LOG` before launching for a diagnostic session, for example
+`info,pb_mapper_client::direct=debug`.
+The worker flushes drained batches and is explicitly drained on normal exit,
+with a bounded shutdown wait. Forced process termination, a stalled disk or
+queue overflow can lose the newest records. File persistence currently covers
+Rust runtime events; Flutter framework errors and Android system logs remain
+in their platform diagnostics.
 
 ### Why the FFI API returns JSON
 
