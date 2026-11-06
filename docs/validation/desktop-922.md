@@ -66,9 +66,38 @@ right click, reached a benign owned Windows target. Text insertion and scrolling
 also reached that target. These checks used actual input events and target
 counters, separately from the no-input video measurements.
 
-The installed service candidate predates the final revocation/close fixes.
-The final package contains those fixes; successful local installer consent is
-not evidence of remote control on the Windows secure desktop.
+### Final protected-service update, 2026-11-06
+
+The user subsequently approved installation of the final package built from
+`33275f87413040f8e6b1dfc1237b775898a07cea`. The protected helper, FFI DLL, UI
+executable and Dart AOT file all match the delivered package by SHA-256. The
+upgrade replaced service PID 99536 with 97260, retained Automatic startup and
+reopened the unprivileged UI with sharing enabled. A newly copied invitation
+matched its fingerprint before the upgrade.
+
+The final normal UI displayed live video on both direct and forced-relay paths,
+automatically acquired the existing control grant after a current picture, and
+disconnected without a host error. These were functional checks, not new FPS
+benchmarks. Full UI process termination left the service running. With no
+desktop test UI process present, a separate production-FFI viewer received 680
+and 306 distinct H264 frame IDs in eight-second direct and forced-relay runs,
+respectively. It used a TCP relay carrier, simulated consumption ACKs, never
+requested control, and did not decode or present the pictures. This establishes
+background video delivery, not displayed FPS or motion-to-photon latency.
+
+Stop remained effective after fully terminating and reopening the UI. A single
+Enable then resumed sharing without UAC and retained the same freshly copied
+invitation. The final service was left Running/Automatic with sharing enabled.
+The private test invitation file was removed. Hashes and bounded observations
+are in [`desktop-922-installed.json`](desktop-922-installed.json).
+
+The independent Python/FFI probe failed with Windows socket error 10054 using
+the saved QUIC relay carrier; the normal UI direct/relay checks and the same
+probe using a temporary TCP profile succeeded. The user's saved profile and
+network policies were not changed. No broader QUIC diagnosis follows from this
+check. Successful local installer consent is not evidence of remote control on
+the Windows secure desktop. Upgrade-driven service replacement was verified;
+standalone SCM restart, OS reboot and sleep/resume remain separate checks.
 
 ## Measurement environment and rejected experiments
 
@@ -120,8 +149,10 @@ remain partly combined in its timing measurements.
 
 ## Outstanding acceptance
 
-Physical phone; remote UAC consent and standard-user credential prompts under
+Physical phone (deferred by the user until a device is available); remote UAC
+consent and standard-user credential prompts under
 default Windows policy; same-owner lock-screen password entry; service/OS
-restart and sleep/resume; independent-NAT UI operation. No Windows password was
+restart outside the verified upgrade and sleep/resume; independent-NAT UI
+operation. No Windows password was
 stored, no UAC policy was changed, and no secure-desktop success is inferred from
 ordinary desktop viewing or a local installation confirmation.

@@ -112,8 +112,12 @@ revision needs its own measurements. They establish neither physical-phone
 
 Separate build 922 checks passed installed-UI exit/relaunch and Stop/Enable with
 the service still Running/Automatic and the same freshly copied invitation.
+The final protected installation subsequently passed hash matching, upgrade
+restart, normal-UI direct/relay viewing and persistent Stop across UI restart.
+A separate FFI viewer received direct/relay video while the test UIs were absent;
+it used a TCP relay carrier and simulated H264 ACKs, not native presentation.
 Android VM touch and trackpad gestures reached an owned Windows input target;
-text and scrolling also passed. OS reboot, service restart, physical-phone and
+text and scrolling also passed. OS reboot, standalone SCM restart, physical-phone and
 secure-desktop/UAC control remain unverified. See
 [the current evidence summary](../../docs/remote-desktop.md#measurements-and-remaining-acceptance)
 for the environment, provenance and remaining acceptance boundaries. Never

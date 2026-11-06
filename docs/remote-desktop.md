@@ -445,8 +445,17 @@ matched the value before UI exit. Stop removed the sharing banner and restored
 Enable; enabling again resumed sharing within seconds without another UAC prompt
 for the already-authorized installation. Replacing the clipboard with a marker
 before copying again confirmed that the unchanged invitation was freshly copied.
-This verifies UI exit/relaunch and Stop/Enable, not OS reboot, service restart,
-sleep/resume or remote control of a UAC prompt.
+That first check used a candidate. On 2026-11-06 the final helper, FFI, UI and
+Dart AOT files were installed and matched the delivered package hashes. The
+upgrade restarted the service as PID 97260 and restored sharing with the same
+invitation. Final UI direct and forced-relay viewing passed. With all desktop
+test UI processes exited, a separate production-FFI viewer received fresh video
+over both paths using a TCP relay carrier. Stop also persisted across a full UI
+exit/reopen; Enable restored the same invitation without another UAC prompt.
+See [the final installation evidence](validation/desktop-922-installed.json)
+and [its limits](validation/desktop-922.md#final-protected-service-update-2026-11-06).
+This verifies upgrade-driven service replacement and UI exit/relaunch, not OS
+reboot, standalone SCM restart, sleep/resume or remote control of a UAC prompt.
 
 Android VM touch tap, hold-drag, two-finger right click and pinch, plus trackpad
 hold-drag/right click, passed against a benign owned Windows target with event
@@ -484,7 +493,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | iOS viewer | Shared Flutter/JPEG path exists; packaged build and device validation outstanding |
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
-| Windows service-owned background host | Installed build 922 passed UI exit/relaunch and Stop/Enable with the same invitation; OS boot, service restart and sleep/resume acceptance pending |
+| Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |
 | Rotated GPU capture, macOS/Linux hosts | Unsupported |
