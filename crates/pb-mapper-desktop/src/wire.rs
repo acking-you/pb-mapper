@@ -16,7 +16,6 @@ pub(crate) const MAX_PAYLOAD: usize = 4 * 1024 * 1024;
 /// a large IDR on a slow cellular link is not mistaken for a dead peer.
 pub(crate) const WRITE_FLOOR_BPS: u64 = 1_000_000;
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write_timeout(bytes: usize) -> Duration {
     IO_TIMEOUT + Duration::from_secs_f64(bytes as f64 * 8.0 / WRITE_FLOOR_BPS as f64)
 }
@@ -27,7 +26,6 @@ fn timed_out() -> std::io::Error {
 
 /// One message: the header record and, for video only, its payload record,
 /// buffered together and flushed once, all within `write_timeout`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn write_message<W: AsyncWrite + Unpin, T: Serialize>(
     w: &mut W,
     header: &T,
@@ -58,7 +56,6 @@ pub(crate) async fn write_message<W: AsyncWrite + Unpin, T: Serialize>(
 
 /// The next header, waiting at most `timeout` for it. `None` is a clean EOF
 /// between messages; EOF inside a record is an error.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn read_header<R: AsyncRead + Unpin, T: DeserializeOwned>(
     r: &mut R,
     timeout: Duration,
@@ -140,21 +137,6 @@ pub(crate) async fn write_json<W: AsyncWrite + Unpin, T: Serialize>(
 pub(crate) async fn read_json<R: AsyncRead + Unpin, T: DeserializeOwned>(io: &mut R) -> Result<T> {
     let bytes = read_bytes(io, MAX_JSON).await?;
     serde_json::from_slice(&bytes).map_err(|_| error("invalid desktop message"))
-}
-/// EOF is normal only before the next message. TLS reports an unannounced
-/// transport close as an error; truncated headers/bodies remain errors too.
-pub(crate) async fn read_json_or_eof<R: AsyncRead + Unpin, T: DeserializeOwned>(
-    io: &mut R,
-) -> Result<Option<T>> {
-    let mut header = [0; 4];
-    if io.read(&mut header[..1]).await? == 0 {
-        return Ok(None);
-    }
-    io.read_exact(&mut header[1..]).await?;
-    let bytes = read_body(io, u32::from_be_bytes(header) as usize, MAX_JSON).await?;
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| error("invalid desktop message"))
 }
 pub(crate) async fn write_bytes<W: AsyncWrite + Unpin>(
     io: &mut W,

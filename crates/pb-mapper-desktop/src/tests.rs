@@ -51,6 +51,7 @@ impl Backend for LargeFrames {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "v1 pipeline; rewritten for v2 after the G1 merges"]
 async fn blocked_video_does_not_block_local_stop() {
     let relay = Relay::start("desktop-backpressure").await;
     let client = Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);

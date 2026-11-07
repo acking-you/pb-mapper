@@ -1,19 +1,38 @@
 use crate::{
     DesktopKind, HostPath, HostState, HostStatus, HostViewer, Invitation, QualityPreset, Result,
-    SessionStatus, error, platform,
+    VideoCodec, VideoLimits, error, platform,
+    protocol::{
+        CAPABILITY_LOCK, HostMessage, RejectReason, SessionState, ViewerMessage, valid_capabilities,
+    },
+    session::{self, Session},
     shared::Policy,
-    wire::{self, Command},
-    worker::{Factory, Worker},
+    wire,
+    worker::{self, Factory, WorkerConfig},
 };
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{Client, RegisterOptions, RegisterRequest, Registration, Transport};
 use std::{
-    sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
-use tokio::io::AsyncWriteExt;
-use tokio::{net::TcpListener, sync::Mutex as AsyncMutex, task::JoinSet};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
+};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_util::sync::CancellationToken;
+
+/// The TLS handshake and the viewer's `Authenticate` must arrive within this.
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+/// A `Rejected` and the close after it.
+pub(crate) const REJECT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Connections in their handshake or session at once; one holds the viewer slot.
+const MAX_CONNECTIONS: usize = 8;
 
 pub struct HostOptions {
     pub service: String,
@@ -24,10 +43,10 @@ pub struct HostOptions {
 
 pub struct Host {
     invitation: Invitation,
-    allowed: Arc<Policy>,
-    status: Arc<Mutex<SessionStatus>>,
-    /// The viewer session holding the single viewer slot, if any.
-    session: Arc<Mutex<Option<ActiveSession>>>,
+    policy: Arc<Policy>,
+    /// The session holding the single viewer slot, if any.
+    session: Arc<Mutex<Option<Arc<Session>>>>,
+    stopped: AtomicBool,
     cancel: CancellationToken,
     registration: Registration,
     join: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -132,193 +151,26 @@ impl Host {
                     .map_or(String::new(), |detail| format!("; {detail}")),
             )));
         }
-        let allowed = Arc::new(Policy::new(options.allow_control));
-        let status = Arc::new(Mutex::new(SessionStatus {
-            state: "waiting".into(),
-            control_allowed: options.allow_control,
-            ..Default::default()
-        }));
+        let policy = Arc::new(Policy::new(options.allow_control));
         let session = Arc::new(Mutex::new(None));
         let cancel = CancellationToken::new();
-        let stop = cancel.clone();
-        let permission = allowed.clone();
-        let observation = status.clone();
-        let viewer = session.clone();
-        let token = invitation.token_text();
-        let join = tokio::spawn(async move {
-            let active = Arc::new(tokio::sync::Semaphore::new(1));
-            let mut sessions = JoinSet::new();
-            loop {
-                tokio::select! {
-                    () = stop.cancelled() => break,
-                    Some(_) = sessions.join_next(), if !sessions.is_empty() => {},
-                    result = listener.accept(), if sessions.len() < 8 => {
-                        let Ok((socket, _)) = result else { break };
-                        let (tls, token, active, factory, allowed, status, stop) = (tls.clone(), token.clone(), active.clone(), factory.clone(), permission.clone(), observation.clone(), stop.clone());
-                        let admission = admission.clone();
-                        let viewer = viewer.clone();
-                        sessions.spawn(async move {
-                            let handshake = async {
-                                // Status and small video access units must not
-                                // wait for Nagle/delayed-ACK coalescing on the
-                                // publisher's accepted loopback connection.
-                                socket.set_nodelay(true)?;
-                                let mut stream = tls.accept(socket).await?;
-                                let Command::Authenticate { token: presented, codecs, video, presentation_feedback } = wire::read_json(&mut stream).await? else { return Err(error("authentication required")) };
-                                if codecs.len() > 2 { return Err(error("too many video codecs")); }
-                                let codec = if codecs.contains(&crate::VideoCodec::H264) { crate::VideoCodec::H264 } else { crate::VideoCodec::Jpeg };
-                                use ring::digest::{digest, SHA256};
-                                use subtle::ConstantTimeEq;
-                                if !bool::from(digest(&SHA256, presented.as_bytes()).as_ref().ct_eq(digest(&SHA256, token.as_bytes()).as_ref())) { return Err(error("desktop permission denied")); }
-                                let preferences = video.unwrap_or_default();
-                                preferences.validate()?;
-                                let permit = active.try_acquire_owned().map_err(|_| error("a viewer is already connected"))?;
-                                Ok((stream, permit, codec, preferences, presentation_feedback))
-                            };
-                            let connected = tokio::select! {
-                                () = stop.cancelled() => return,
-                                result = tokio::time::timeout(wire::IO_TIMEOUT, handshake) => result,
-                            };
-                            let Ok(Ok((stream, permit, codec, preferences, presentation_feedback))) = connected else { return };
-                            // The permit makes this the only session; it owns the slot until it ends.
-                            let ended = stop.child_token();
-                            *viewer.lock() = Some(ActiveSession {
-                                cancel: ended.clone(),
-                                epoch: Instant::now(),
-                                started_unix_ms: SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX)),
-                            });
-                            let session_status = status.clone();
-                            let mut worker = Worker::start_video(factory, allowed, status, codec, preferences, presentation_feedback, admission);
-                            let (mut read, mut write) = tokio::io::split(stream);
-                            let mut frames = worker.frames.clone();
-                            let mut cursor = worker.cursor.clone();
-                            let receive = async {
-                                loop {
-                                    let Some(command) = tokio::time::timeout(wire::IO_TIMEOUT, wire::read_json_or_eof::<_, Command>(&mut read)).await.map_err(error)?? else { return Ok::<(), std::io::Error>(()) };
-                                    if let Command::Probe { nonce } = command {
-                                        if let Some(feedback) = &worker.feedback { feedback.probe_received(nonce); }
-                                        continue;
-                                    }
-                                    // Permission/stale input errors are reported with the next
-                                    // status frame; malformed frames terminate the transport.
-                                    let _ = worker.command(command).await;
-                                }
-                            };
-                            let send = async {
-                                let mut pending = None;
-                                let mut last_sent = std::time::Instant::now();
-                                if let Some(feedback) = &worker.feedback {
-                                    let mut probe = session_status.lock().clone();
-                                    probe.roundtrip_probe = Some(feedback.start_probe());
-                                    tokio::time::timeout(wire::IO_TIMEOUT, async {
-                                        wire::write_json(&mut write, &probe).await?;
-                                        wire::write_bytes(&mut write, &[], wire::MAX_FRAME).await
-                                    }).await.map_err(error)??;
-                                }
-                                loop {
-                                    if worker.feedback.as_ref().is_some_and(|feedback| feedback.stalled()) {
-                                        let mut state = session_status.lock().clone();
-                                        state.state = "stopped".into();
-                                        state.controlling = false;
-                                        state.message = "Renderer stopped acknowledging presented frames; reconnect the viewer".into();
-                                        tokio::time::timeout(wire::IO_TIMEOUT, async {
-                                            wire::write_json(&mut write, &state).await?;
-                                            wire::write_bytes(&mut write, &[], wire::MAX_FRAME).await
-                                        }).await.map_err(error)??;
-                                        return Err(error(&state.message));
-                                    }
-                                    // Cursor observations bypass the predictive-media queue
-                                    // and its presentation credits. A watch retains only
-                                    // the newest position while a network write is busy.
-                                    if cursor.has_changed().map_err(error)? {
-                                        let update = cursor.borrow_and_update().clone();
-                                        if let Some(state) = update
-                                            && state.generation == session_status.lock().generation {
-                                            tokio::time::timeout(wire::IO_TIMEOUT, async {
-                                                wire::write_json(&mut write, &state).await?;
-                                                wire::write_bytes(&mut write, &[], wire::MAX_FRAME).await
-                                            }).await.map_err(error)??;
-                                            last_sent = std::time::Instant::now();
-                                        }
-                                    }
-                                    if pending.is_none() { pending = worker.media.pop(); }
-                                    if let Some(frame) = pending.as_mut() {
-                                        let current = session_status.lock();
-                                        if frame.status.generation == current.generation {
-                                            // An older queued picture must not undo a newer
-                                            // independently delivered pointer observation.
-                                            frame.status.cursor = current.cursor;
-                                        }
-                                    }
-                                    let mut waiting = false;
-                                    if let Some(frame) = pending.as_ref()
-                                        && let Some(feedback) = &worker.feedback {
-                                            let state = serde_json::to_vec(&frame.status).map_err(error)?;
-                                            match feedback.admit(frame, state.len() + frame.bytes.len() + 8) {
-                                                crate::congestion::Admission::Send => {},
-                                                crate::congestion::Admission::Wait => waiting = true,
-                                                crate::congestion::Admission::Discard => { pending = None; worker.media.resynchronize(); }
-                                            }
-                                    }
-                                    if pending.is_none() || waiting {
-                                        if let Some(feedback) = &worker.feedback {
-                                            if last_sent.elapsed() >= Duration::from_secs(1) {
-                                                // Transport liveness without inventing a new
-                                                // image/presentation or renewing input freshness.
-                                                let state = session_status.lock().clone();
-                                                tokio::time::timeout(wire::IO_TIMEOUT, async {
-                                                    wire::write_json(&mut write, &state).await?;
-                                                    wire::write_bytes(&mut write, &[], wire::MAX_FRAME).await
-                                                }).await.map_err(error)??;
-                                                last_sent = std::time::Instant::now();
-                                            }
-                                            tokio::select! { result = cursor.changed() => { result.map_err(error)?; cursor.mark_changed(); }, result = frames.changed() => { result.map_err(error)?; }, () = feedback.changed.notified() => {}, () = tokio::time::sleep(Duration::from_millis(20)) => {} }
-                                        } else {
-                                            tokio::select! { result = cursor.changed() => { result.map_err(error)?; cursor.mark_changed(); }, result = frames.changed() => { result.map_err(error)?; } }
-                                        }
-                                        continue;
-                                    }
-                                    let frame = pending.take().ok_or_else(|| error("missing admitted desktop frame"))?;
-                                    let started = std::time::Instant::now();
-                                    tokio::time::timeout(wire::IO_TIMEOUT, async {
-                                        wire::write_json(&mut write, &frame.status).await?;
-                                        wire::write_bytes(&mut write, &frame.bytes, wire::MAX_FRAME).await
-                                    }).await.map_err(error)??;
-                                    worker.sent(frame.bytes.len(), started.elapsed());
-                                    last_sent = std::time::Instant::now();
-                                }
-                                #[allow(unreachable_code)] Ok::<(), std::io::Error>(())
-                            };
-                            let outcome = tokio::select! { biased; () = ended.cancelled() => Ok(()), result = receive => result, result = send => result };
-                            worker.stop().await;
-                            viewer.lock().take();
-                            if let Err(e) = outcome {
-                                session_status.lock().message = e.to_string();
-                            } else {
-                                session_status.lock().message.clear();
-                                // Acknowledge normal TLS closure before the viewer
-                                // tears down its owned forwarding connection. Local
-                                // stop must never wait for a slow peer to drain video.
-                                tokio::select! {
-                                    biased;
-                                    () = stop.cancelled() => {},
-                                    _ = tokio::time::timeout(wire::IO_TIMEOUT, write.shutdown()) => {},
-                                }
-                            }
-                            drop(permit);
-                        });
-                    }
-                }
-            }
-            while sessions.join_next().await.is_some() {}
+        let acceptor = Arc::new(Acceptor {
+            tls,
+            token: invitation.token_text(),
+            factory,
+            admission,
+            policy: policy.clone(),
+            capabilities: capabilities(),
+            session: session.clone(),
+            slot: Arc::new(Semaphore::new(1)),
+            cancel: cancel.clone(),
         });
+        let join = tokio::spawn(acceptor.accept(listener));
         Ok(Self {
             invitation,
-            allowed,
-            status,
+            policy,
             session,
+            stopped: AtomicBool::new(false),
             cancel,
             registration,
             join: AsyncMutex::new(Some(join)),
@@ -328,66 +180,73 @@ impl Host {
     pub fn invitation(&self) -> &Invitation {
         &self.invitation
     }
-    /// The host's state and its viewer, if one is connected. The v1
-    /// session reports no typed reason, path, pause or preset.
+    /// The host's state and its viewer, if one is connected.
     pub fn status(&self) -> HostStatus {
-        let status = self.status.lock().clone();
-        let control_allowed = self.allowed.allowed();
-        let viewer = self.session.lock().as_ref().map(|session| HostViewer {
-            since_ms: u64::try_from(session.epoch.elapsed().as_millis()).unwrap_or(u64::MAX),
-            started_unix_ms: session.started_unix_ms,
-            path: HostPath::Unknown,
-            controlling: control_allowed && status.controlling,
-            paused: false,
-            quality: QualityPreset::default(),
-        });
+        let control_allowed = self.policy.allowed();
+        let Some(session) = self.session.lock().clone() else {
+            return HostStatus {
+                state: if self.stopped.load(Ordering::Acquire) {
+                    HostState::Stopped
+                } else {
+                    HostState::Waiting
+                },
+                reason: None,
+                message: String::new(),
+                control_allowed,
+                viewer: None,
+                display: None,
+                desktop: DesktopKind::Ordinary,
+                capabilities: Vec::new(),
+            };
+        };
+        let engine = session.shared.state.borrow().clone();
         HostStatus {
-            state: match status.state.as_str() {
-                "connecting" => HostState::Connecting,
-                "streaming" => HostState::Streaming,
-                "capture_unavailable" => HostState::CaptureUnavailable,
-                "stopped" => HostState::Stopped,
-                _ => HostState::Waiting,
+            state: match engine.state {
+                SessionState::Connecting => HostState::Connecting,
+                SessionState::Streaming => HostState::Streaming,
+                SessionState::Paused => HostState::Paused,
+                SessionState::CaptureUnavailable => HostState::CaptureUnavailable,
             },
-            reason: None,
-            message: status.message,
+            reason: engine.reason,
+            message: engine.message,
             control_allowed,
-            viewer,
-            display: status.display,
-            desktop: if status.desktop == "secure" {
-                DesktopKind::Secure
-            } else {
-                DesktopKind::Ordinary
-            },
+            viewer: Some(HostViewer {
+                since_ms: u64::try_from(session.shared.epoch.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                started_unix_ms: session.started_unix_ms,
+                path: HostPath::Unknown,
+                controlling: control_allowed && engine.controlling,
+                paused: false,
+                quality: QualityPreset::default(),
+            }),
+            display: engine.display,
+            desktop: engine.desktop,
             capabilities: Vec::new(),
         }
     }
-    /// The v1 session status, for the v1 transport tests until they are
+    /// The pre-v2 status shape, for the v1 transport tests until they are
     /// rewritten for v2 after the G1 merges.
     #[cfg(test)]
-    pub(crate) fn v1_status(&self) -> SessionStatus {
-        let mut status = self.status.lock().clone();
-        status.control_allowed = self.allowed.allowed();
-        if !status.control_allowed {
-            status.controlling = false;
-        }
-        status
+    pub(crate) fn v1_status(&self) -> crate::SessionStatus {
+        crate::legacy_host_status(&self.status())
     }
     /// "Disconnect": end the connected viewer's session. Hosting continues,
     /// and the viewer may connect again with the same invitation.
     pub fn end_session(&self) {
         if let Some(session) = self.session.lock().as_ref() {
-            session.cancel.cancel();
+            session.close();
         }
     }
-    /// Revocation gates every subsequent input before it reaches the backend.
-    /// The worker releases held state at its next scheduling point.
+    /// "Make view-only" and back. Revocation gates every later input at the
+    /// edge, and the worker releases held input within one backend step.
     pub fn set_control_allowed(&self, allowed: bool) {
-        self.allowed.set(allowed);
-        self.status.lock().control_allowed = allowed;
+        self.policy.set(allowed);
+        if let Some(session) = self.session.lock().as_ref() {
+            session.shared.wake.notify();
+        }
     }
     pub async fn stop(&self) -> Result<()> {
-        self.allowed.set(false);
+        self.policy.set(false);
         self.cancel.cancel();
         let mut join = self.join.lock().await;
         if let Some(task) = join.as_mut() {
@@ -395,29 +254,198 @@ impl Host {
         }
         join.take();
         self.registration.stop().await.map_err(error)?;
-        self.status.lock().state = "stopped".into();
+        self.stopped.store(true, Ordering::Release);
         Ok(())
     }
 }
 impl Drop for Host {
     fn drop(&mut self) {
-        self.allowed.set(false);
+        self.policy.set(false);
         self.cancel.cancel();
     }
 }
 
-/// The viewer session that holds the host's single viewer slot.
-struct ActiveSession {
-    /// A child of the host's cancel: ends this session only.
+/// What every Windows backend can do: the native desktop and the helper both
+/// lock the workstation.
+fn capabilities() -> Vec<String> {
+    if cfg!(windows) {
+        vec![CAPABILITY_LOCK.into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// What the viewer asked for in an accepted `Authenticate`.
+struct Request {
+    codec: VideoCodec,
+    limits: VideoLimits,
+    quality: QualityPreset,
+}
+
+/// The listener's side of the host: every connection's handshake and session.
+struct Acceptor {
+    tls: TlsAcceptor,
+    token: String,
+    factory: Factory,
+    admission: Option<Arc<dyn crate::ControlAdmission>>,
+    policy: Arc<Policy>,
+    capabilities: Vec<String>,
+    session: Arc<Mutex<Option<Arc<Session>>>>,
+    /// The single viewer slot.
+    slot: Arc<Semaphore>,
     cancel: CancellationToken,
-    epoch: Instant,
-    started_unix_ms: u64,
+}
+impl Acceptor {
+    async fn accept(self: Arc<Self>, listener: TcpListener) {
+        let mut connections = JoinSet::new();
+        loop {
+            tokio::select! {
+                () = self.cancel.cancelled() => break,
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                accepted = listener.accept(), if connections.len() < MAX_CONNECTIONS => {
+                    let Ok((socket, _)) = accepted else { break };
+                    connections.spawn(self.clone().serve(socket));
+                }
+            }
+        }
+        // Each session sees the cancel and ends with `Stopped`.
+        while connections.join_next().await.is_some() {}
+    }
+
+    async fn serve(self: Arc<Self>, socket: TcpStream) {
+        let accepted = tokio::select! {
+            () = self.cancel.cancelled() => return,
+            accepted = self.handshake(socket) => accepted,
+        };
+        let Some((stream, permit, request)) = accepted else {
+            return;
+        };
+        let session = Session::new(
+            self.policy.clone(),
+            self.cancel.child_token(),
+            request.codec,
+            request.limits,
+            request.quality,
+        );
+        *self.session.lock() = Some(session.clone());
+        let mut worker = worker::spawn_session(
+            session.shared.clone(),
+            self.factory.clone(),
+            WorkerConfig {
+                codec: request.codec,
+                limits: request.limits,
+                nominal_fps: request.limits.max_fps,
+                admission: self.admission.clone(),
+            },
+        );
+        session::run(
+            session.clone(),
+            stream,
+            async move { worker.exited().await },
+        )
+        .await;
+        let mut slot = self.session.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &session))
+        {
+            slot.take();
+        }
+        drop(slot);
+        drop(permit);
+    }
+
+    /// TLS, `Authenticate`, then `Accepted` or `Rejected`. The token is
+    /// checked first, so `busy` never tells a stranger that someone is
+    /// connected.
+    async fn handshake(
+        &self,
+        socket: TcpStream,
+    ) -> Option<(TlsStream<TcpStream>, OwnedSemaphorePermit, Request)> {
+        // State and small video units must not wait for Nagle/delayed-ACK
+        // coalescing on the publisher's accepted loopback connection.
+        socket.set_nodelay(true).ok()?;
+        let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        let mut stream = tokio::time::timeout_at(deadline, self.tls.accept(socket))
+            .await
+            .ok()?
+            .ok()?;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(Some(ViewerMessage::Authenticate {
+            token,
+            codecs,
+            limits,
+            quality,
+            capabilities,
+        })) = wire::read_header(&mut stream, remaining).await
+        else {
+            return None;
+        };
+        let rejected = if !self.token_matches(&token) {
+            RejectReason::Denied
+        } else if !(1..=2).contains(&codecs.len())
+            || limits.validate().is_err()
+            || !valid_capabilities(&capabilities)
+        {
+            RejectReason::InvalidRequest
+        } else if let Ok(permit) = self.slot.clone().try_acquire_owned() {
+            let codec = if codecs.contains(&VideoCodec::H264) {
+                VideoCodec::H264
+            } else {
+                VideoCodec::Jpeg
+            };
+            let accepted = HostMessage::Accepted {
+                codec,
+                limits,
+                nominal_fps: limits.max_fps,
+                quality,
+                capabilities: self.capabilities.clone(),
+            };
+            wire::write_message(&mut stream, &accepted, None)
+                .await
+                .ok()?;
+            return Some((
+                stream,
+                permit,
+                Request {
+                    codec,
+                    limits,
+                    quality,
+                },
+            ));
+        } else {
+            RejectReason::Busy
+        };
+        let _ = tokio::time::timeout(REJECT_WRITE_TIMEOUT, async {
+            let rejected = HostMessage::Rejected { reason: rejected };
+            wire::write_message(&mut stream, &rejected, None).await?;
+            stream.shutdown().await
+        })
+        .await;
+        None
+    }
+
+    /// A constant-time comparison, over digests so the length leaks nothing.
+    fn token_matches(&self, presented: &str) -> bool {
+        use ring::digest::{SHA256, digest};
+        use subtle::ConstantTimeEq;
+        bool::from(
+            digest(&SHA256, presented.as_bytes())
+                .as_ref()
+                .ct_eq(digest(&SHA256, self.token.as_bytes()).as_ref()),
+        )
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod trust_tests {
     use super::*;
+    use crate::security;
+    use pb_mapper_client::sdk::{ConnectOptions, Connection, PathPolicy};
+    use std::sync::atomic::AtomicU32;
+    use tokio_rustls::client::TlsStream as ClientStream;
+
     struct Screen;
     impl crate::Backend for Screen {
         fn display(&mut self) -> Result<crate::Display> {
@@ -446,8 +474,146 @@ mod trust_tests {
             allow_direct: false,
         }
     }
-    #[tokio::test]
-    #[ignore = "v1 pipeline; rewritten for v2 after the G1 merges"]
+
+    /// A scripted v2 viewer: its TLS stream, and the tunnel it rides on.
+    struct Viewer {
+        stream: ClientStream<TcpStream>,
+        _connection: Connection,
+    }
+
+    /// A v2 viewer's TLS connection to `invitation`, pinned to its fingerprint.
+    async fn tls(client: &Client, invitation: &Invitation) -> std::io::Result<Viewer> {
+        let (socket, connection) = client
+            .connect_tcp(
+                invitation.service.clone(),
+                ConnectOptions {
+                    path: PathPolicy::RelayOnly,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(error)?;
+        let stream = security::client(invitation.fingerprint)?
+            .connect(
+                quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
+                socket,
+            )
+            .await?;
+        Ok(Viewer {
+            stream,
+            _connection: connection,
+        })
+    }
+
+    /// Authenticate with `token`; returns the viewer and the host's answer.
+    async fn authenticate(
+        client: &Client,
+        invitation: &Invitation,
+        token: String,
+        codecs: Vec<VideoCodec>,
+    ) -> (Viewer, HostMessage) {
+        let mut viewer = tls(client, invitation).await.unwrap();
+        let authenticate = ViewerMessage::Authenticate {
+            token,
+            codecs,
+            limits: VideoLimits::for_viewer(60.0),
+            quality: QualityPreset::Balanced,
+            capabilities: vec![],
+        };
+        wire::write_message(&mut viewer.stream, &authenticate, None)
+            .await
+            .unwrap();
+        let answer = wire::read_header(&mut viewer.stream, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .unwrap();
+        (viewer, answer)
+    }
+
+    /// The next message of a kind other than probe or stats; `None` at a
+    /// clean close.
+    async fn next(viewer: &mut Viewer) -> Option<HostMessage> {
+        loop {
+            match wire::read_header(&mut viewer.stream, Duration::from_secs(5))
+                .await
+                .unwrap()?
+            {
+                HostMessage::Probe { .. } | HostMessage::Stats { .. } => {}
+                message => return Some(message),
+            }
+        }
+    }
+
+    fn rejected(answer: &HostMessage) -> Option<RejectReason> {
+        match answer {
+            HostMessage::Rejected { reason } => Some(*reason),
+            _ => None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn handshake_reports_denied_and_busy_before_close() {
+        let relay = pb_mapper_testkit::Relay::start("desktop-handshake").await;
+        let client = Client::from_credential(
+            relay.addr().to_string(),
+            pb_mapper_testkit::admin_credential(),
+            true,
+            None,
+        );
+        let backends = Arc::new(AtomicU32::new(0));
+        let created = backends.clone();
+        let factory: Factory = Arc::new(move || {
+            created.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(Screen))
+        });
+        let host = Host::start_with_backend(&client, options(), factory)
+            .await
+            .unwrap();
+        let invitation = host.invitation().clone();
+        let token = invitation.token_text();
+        let wrong = "A".repeat(token.len());
+
+        // A wrong token is denied, then closed, before any capture starts.
+        let (mut denied, answer) =
+            authenticate(&client, &invitation, wrong.clone(), vec![VideoCodec::Jpeg]).await;
+        assert_eq!(rejected(&answer), Some(RejectReason::Denied));
+        assert!(next(&mut denied).await.is_none());
+        assert_eq!(backends.load(Ordering::Relaxed), 0);
+
+        // The first viewer holds the slot ...
+        let (mut first, answer) =
+            authenticate(&client, &invitation, token.clone(), vec![VideoCodec::Jpeg]).await;
+        assert!(
+            matches!(
+                answer,
+                HostMessage::Accepted {
+                    codec: VideoCodec::Jpeg,
+                    nominal_fps: 60,
+                    ..
+                }
+            ),
+            "{answer:?}"
+        );
+        // ... so a second viewer with the right token is busy, a malformed
+        // request is invalid, and a wrong token is still denied, never busy.
+        let (_, answer) =
+            authenticate(&client, &invitation, token.clone(), vec![VideoCodec::H264]).await;
+        assert_eq!(rejected(&answer), Some(RejectReason::Busy));
+        let (_, answer) = authenticate(&client, &invitation, token.clone(), vec![]).await;
+        assert_eq!(rejected(&answer), Some(RejectReason::InvalidRequest));
+        let (_, answer) = authenticate(&client, &invitation, wrong, vec![VideoCodec::Jpeg]).await;
+        assert_eq!(rejected(&answer), Some(RejectReason::Denied));
+
+        // The first viewer's session is unaffected.
+        assert!(matches!(
+            next(&mut first).await,
+            Some(HostMessage::State { .. })
+        ));
+        drop(first);
+        host.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn remembered_invitation_survives_restart_but_not_revocation() {
         let relay = pb_mapper_testkit::Relay::start("desktop-trust").await;
         let client = Client::from_credential(
@@ -468,7 +634,8 @@ mod trust_tests {
         )
         .await
         .unwrap();
-        let invitation = host.invitation().clone();
+        // What the viewer keeps is the pbd1 text.
+        let invitation = Invitation::decode(&host.invitation().encode()).unwrap();
         host.stop().await.unwrap();
         let resumed = Host::start_with_backend_and_identity(
             &client,
@@ -479,24 +646,25 @@ mod trust_tests {
         )
         .await
         .unwrap();
-        let viewer = crate::Viewer::connect(
+        let (mut viewer, answer) = authenticate(
             &client,
-            invitation.clone(),
-            pb_mapper_client::sdk::ConnectOptions {
-                path: pb_mapper_client::sdk::PathPolicy::RelayOnly,
-                ..Default::default()
-            },
+            &invitation,
+            invitation.token_text(),
+            vec![VideoCodec::Jpeg],
         )
-        .await
-        .unwrap();
-        let mut frames = viewer.frames();
-        tokio::time::timeout(Duration::from_secs(5), frames.changed())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!frames.borrow().as_ref().unwrap().status.control_allowed);
-        viewer.stop().await.unwrap();
+        .await;
+        assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+        assert!(matches!(
+            next(&mut viewer).await,
+            Some(HostMessage::State {
+                control_allowed: false,
+                ..
+            })
+        ));
+        drop(viewer);
         resumed.stop().await.unwrap();
+
+        // A new identity revokes the remembered invitation: the pin fails.
         let replacement = Host::start_with_backend_and_identity(
             &client,
             options(),
@@ -506,17 +674,10 @@ mod trust_tests {
         )
         .await
         .unwrap();
-        assert!(
-            crate::Viewer::connect(
-                &client,
-                invitation,
-                pb_mapper_client::sdk::ConnectOptions {
-                    path: pb_mapper_client::sdk::PathPolicy::RelayOnly,
-                    ..Default::default()
-                }
-            )
-            .await
-            .is_err()
+        let failure = tls(&client, &invitation).await.err().unwrap();
+        assert_eq!(
+            security::handshake_failure(&failure),
+            Some(security::HandshakeFailure::IdentityChanged)
         );
         replacement.stop().await.unwrap();
     }
