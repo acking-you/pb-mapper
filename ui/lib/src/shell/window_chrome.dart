@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/theme/motion.dart';
 import 'package:window_manager/window_manager.dart';
 
 /// The native title bar is hidden on every desktop (see `main.dart`), so the
@@ -59,12 +62,29 @@ Future<void> _toggleMaximize() async {
   }
 }
 
+/// What the caption buttons are drawn over: the app's own surfaces.
+enum CaptionTone { surface }
+
+/// The four marks a caption button draws.
+enum CaptionGlyph { minimize, maximize, restore, close }
+
+/// One caption button: Windows' own width, but shorter than its title bar,
+/// so it sits centred in the page's bar with room above and below.
+const Size kCaptionButtonSize = Size(46, 32);
+const double kCaptionButtonRadius = 6;
+
+/// The glyph's box, in logical pixels.
+const double kCaptionGlyphExtent = 10;
+
+/// Windows' close red.
+const Color _closeRed = Color(0xFFC42B1C);
+
 /// Minimize, maximize-or-restore and close, drawn for Windows and Linux,
 /// which lose theirs with the native title bar.
 class CaptionButtons extends StatefulWidget {
-  const CaptionButtons({super.key, this.height = 40});
+  const CaptionButtons({super.key, this.tone = CaptionTone.surface});
 
-  final double height;
+  final CaptionTone tone;
 
   @override
   State<CaptionButtons> createState() => _CaptionButtonsState();
@@ -101,6 +121,16 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
   @override
   void onWindowUnmaximize() => setState(() => _maximized = false);
 
+  // Leaving a minimized or full-screen window can land either way.
+  @override
+  void onWindowRestore() => _sync();
+
+  @override
+  void onWindowEnterFullScreen() => _sync();
+
+  @override
+  void onWindowLeaveFullScreen() => _sync();
+
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
@@ -108,24 +138,26 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
       mainAxisSize: MainAxisSize.min,
       children: [
         _CaptionButton(
-          icon: Icons.remove,
+          key: const Key('caption-minimize'),
+          glyph: CaptionGlyph.minimize,
           tooltip: l10n.windowMinimize,
-          height: widget.height,
+          tone: widget.tone,
           onTap: () => windowManager.minimize(),
         ),
         _CaptionButton(
-          icon: _maximized ? Icons.filter_none : Icons.crop_square,
-          iconSize: _maximized ? 12.5 : 14,
+          key: const Key('caption-maximize'),
+          glyph: _maximized ? CaptionGlyph.restore : CaptionGlyph.maximize,
           tooltip: _maximized ? l10n.windowRestore : l10n.windowMaximize,
-          height: widget.height,
+          tone: widget.tone,
           onTap: _toggleMaximize,
         ),
         // Closing hides to the tray: main.dart owns that through
         // setPreventClose, so this goes through close() rather than exiting.
         _CaptionButton(
-          icon: Icons.close,
+          key: const Key('caption-close'),
+          glyph: CaptionGlyph.close,
           tooltip: l10n.windowClose,
-          height: widget.height,
+          tone: widget.tone,
           close: true,
           onTap: () => windowManager.close(),
         ),
@@ -136,20 +168,19 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
 
 class _CaptionButton extends StatefulWidget {
   const _CaptionButton({
-    required this.icon,
+    super.key,
+    required this.glyph,
     required this.tooltip,
     required this.onTap,
-    required this.height,
+    required this.tone,
     this.close = false,
-    this.iconSize = 15,
   });
 
-  final IconData icon;
+  final CaptionGlyph glyph;
   final String tooltip;
   final VoidCallback onTap;
-  final double height;
+  final CaptionTone tone;
   final bool close;
-  final double iconSize;
 
   @override
   State<_CaptionButton> createState() => _CaptionButtonState();
@@ -157,43 +188,197 @@ class _CaptionButton extends StatefulWidget {
 
 class _CaptionButtonState extends State<_CaptionButton> {
   bool _hover = false;
+  bool _pressed = false;
+
+  void _press(bool pressed) => setState(() => _pressed = pressed);
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // Idle and lit ink, and the washes under hover and press, per tone.
+    final (idle, lit, hover, pressed) = switch (widget.tone) {
+      CaptionTone.surface => (
+        scheme.onSurfaceVariant,
+        scheme.onSurface,
+        scheme.onSurface.withValues(alpha: 0.08),
+        scheme.onSurface.withValues(alpha: 0.12),
+      ),
+    };
     final Color bg;
     final Color fg;
-    if (_hover && widget.close) {
-      bg = const Color(0xFFC42B1C);
+    if (widget.close && _pressed) {
+      bg = _closeRed.withValues(alpha: 0.9);
+      fg = Colors.white.withValues(alpha: 0.9);
+    } else if (widget.close && _hover) {
+      bg = _closeRed;
       fg = Colors.white;
+    } else if (_pressed) {
+      bg = pressed;
+      fg = lit;
     } else if (_hover) {
-      bg = scheme.onSurface.withValues(alpha: 0.08);
-      fg = scheme.onSurface;
+      bg = hover;
+      fg = lit;
     } else {
       bg = Colors.transparent;
-      fg = scheme.onSurfaceVariant;
+      fg = idle;
     }
     return Tooltip(
       message: widget.tooltip,
-      child: MouseRegion(
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 90),
-            width: 44,
-            height: widget.height,
-            decoration: BoxDecoration(
-              color: bg,
-              borderRadius: BorderRadius.circular(10),
+      excludeFromSemantics: true,
+      child: Semantics(
+        button: true,
+        label: widget.tooltip,
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (_) => _press(true),
+            onTapUp: (_) => _press(false),
+            onTapCancel: () => _press(false),
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              duration: Motion.of(context, const Duration(milliseconds: 90)),
+              width: kCaptionButtonSize.width,
+              height: kCaptionButtonSize.height,
+              decoration: BoxDecoration(
+                color: bg,
+                borderRadius: BorderRadius.circular(kCaptionButtonRadius),
+              ),
+              child: Center(
+                child: CaptionGlyphIcon(glyph: widget.glyph, color: fg),
+              ),
             ),
-            alignment: Alignment.center,
-            child: Icon(widget.icon, size: widget.iconSize, color: fg),
           ),
         ),
       ),
     );
+  }
+}
+
+/// A caption glyph, drawn rather than taken from an icon font so its one
+/// pixel stroke lands on whole device pixels at every scale factor.
+class CaptionGlyphIcon extends LeafRenderObjectWidget {
+  const CaptionGlyphIcon({super.key, required this.glyph, required this.color});
+
+  final CaptionGlyph glyph;
+  final Color color;
+
+  @override
+  RenderCaptionGlyph createRenderObject(BuildContext context) =>
+      RenderCaptionGlyph(
+        glyph: glyph,
+        color: color,
+        devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
+      );
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    RenderCaptionGlyph renderObject,
+  ) {
+    renderObject
+      ..glyph = glyph
+      ..color = color
+      ..devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+  }
+}
+
+/// Paints a [CaptionGlyph] in a [kCaptionGlyphExtent] box, in device pixels:
+/// the box starts on a device pixel, its side and stroke are whole device
+/// pixels, and odd strokes sit on pixel centres, so the lines stay sharp at
+/// 125 % and 150 % rather than smearing across two rows.
+class RenderCaptionGlyph extends RenderBox {
+  RenderCaptionGlyph({
+    required CaptionGlyph glyph,
+    required Color color,
+    required double devicePixelRatio,
+  }) : _glyph = glyph,
+       _color = color,
+       _devicePixelRatio = devicePixelRatio;
+
+  CaptionGlyph get glyph => _glyph;
+  CaptionGlyph _glyph;
+  set glyph(CaptionGlyph value) {
+    if (value == _glyph) return;
+    _glyph = value;
+    markNeedsPaint();
+  }
+
+  Color get color => _color;
+  Color _color;
+  set color(Color value) {
+    if (value == _color) return;
+    _color = value;
+    markNeedsPaint();
+  }
+
+  double get devicePixelRatio => _devicePixelRatio;
+  double _devicePixelRatio;
+  set devicePixelRatio(double value) {
+    if (value == _devicePixelRatio) return;
+    _devicePixelRatio = value;
+    markNeedsPaint();
+  }
+
+  @override
+  bool get sizedByParent => true;
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) =>
+      constraints.constrain(const Size.square(kCaptionGlyphExtent));
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final dpr = _devicePixelRatio;
+    // Nudge the box onto the device pixel grid.
+    final g = localToGlobal(Offset.zero) * dpr;
+    final snap = Offset(
+      (g.dx.roundToDouble() - g.dx) / dpr,
+      (g.dy.roundToDouble() - g.dy) / dpr,
+    );
+    final s = math.max(1, dpr.round());
+    final b = (kCaptionGlyphExtent * dpr).roundToDouble();
+    final h = s / 2;
+    final r = Radius.circular(math.max(1, dpr.round()).toDouble());
+    final o = (2 * dpr).roundToDouble();
+    final paint = Paint()
+      ..color = _color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = s.toDouble()
+      ..strokeCap = StrokeCap.butt
+      ..isAntiAlias = true;
+
+    final canvas = context.canvas
+      ..save()
+      ..translate(offset.dx + snap.dx, offset.dy + snap.dy)
+      ..scale(1 / dpr);
+    switch (_glyph) {
+      case CaptionGlyph.minimize:
+        final y = (b / 2).floorToDouble() + (s.isOdd ? 0.5 : 0);
+        canvas.drawLine(Offset(0, y), Offset(b, y), paint);
+      case CaptionGlyph.maximize:
+        canvas.drawRRect(RRect.fromLTRBR(h, h, b - h, b - h, r), paint);
+      case CaptionGlyph.restore:
+        // The window in front, and the visible top-right of the one behind.
+        canvas.drawRRect(RRect.fromLTRBR(h, o + h, b - o - h, b - h, r), paint);
+        canvas.drawPath(
+          Path()
+            ..moveTo(o + h, o + h)
+            ..lineTo(o + h, h + r.x)
+            ..arcToPoint(Offset(o + h + r.x, h), radius: r)
+            ..lineTo(b - h - r.x, h)
+            ..arcToPoint(Offset(b - h, h + r.x), radius: r)
+            ..lineTo(b - h, b - o - h - r.x)
+            ..arcToPoint(Offset(b - h - r.x, b - o - h), radius: r)
+            ..lineTo(b - o - h, b - o - h),
+          paint,
+        );
+      case CaptionGlyph.close:
+        canvas
+          ..drawLine(Offset(h, h), Offset(b - h, b - h), paint)
+          ..drawLine(Offset(b - h, h), Offset(h, b - h), paint);
+    }
+    canvas.restore();
   }
 }

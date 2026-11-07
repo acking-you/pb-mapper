@@ -194,6 +194,13 @@ The native title bar is hidden on desktop. The page's own title bar is window
 chrome: its empty space drags, and on Windows and Linux it carries the caption
 buttons (`shell/window_chrome.dart`). macOS keeps its traffic lights.
 
+The caption buttons are 46×32 with a 6 px radius, centred in the 58 px bar,
+16 px after the page's last action and 16 px inside the sheet's edge, so the
+close button's red never reaches the sheet's rounded corner; the setup screen
+keeps them 16 px from the window's edge. Their glyphs are drawn, not icons:
+10 px, a one-pixel stroke, snapped to device pixels so they stay sharp at
+125 % and 150 %.
+
 Below 720 px (900 px on a touch screen) the rail becomes a bottom bar and the
 page fills the window. Cards reflow by the width they get, not by a global
 breakpoint.
