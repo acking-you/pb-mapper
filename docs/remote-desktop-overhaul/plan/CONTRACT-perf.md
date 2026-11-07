@@ -37,9 +37,9 @@ new invitation). These sections now say what the merged code does:
   cannot host; the 6 s tunnel read runs only while a tunnel is live; the
   cursor timer is 16 ms.
 - 4.4: `HostMessage::State(StateRecord)` is the one internally tagged newtype
-  variant, with `deny_unknown_fields` on `StateRecord` (JSON unchanged). This
-  exception to the inline-struct rule awaits the owner's confirmation;
-  reverting commit 6a388c7 alone restores the inline variant.
+  variant, with `deny_unknown_fields` on `StateRecord` (JSON unchanged). The
+  owner kept this exception to the inline-struct rule (2026-11-08): one
+  record replaces four copies of the nine fields.
 - 4.5: `VideoFormat` carries `gop`; `Backend::video_gop` is gone.
 - 5.1 and 5.5: `EngineState.record`; B-send writes `State` when the record
   changes, and after `Stopped` reads and drops input until the viewer closes.
