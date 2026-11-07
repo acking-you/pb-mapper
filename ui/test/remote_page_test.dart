@@ -35,6 +35,36 @@ class _Api extends FakePbMapperApi {
   _HostDesktop get desktop => _host;
 }
 
+/// A remembered grant Windows cannot unlock: every read of it fails, as
+/// `trust_status` does, until it is revoked.
+class _UnreadableTrust extends FakeDesktopApi {
+  bool unreadable = true;
+
+  @override
+  Future<DesktopTrust> trustStatus() async {
+    if (!unreadable) return super.trustStatus();
+    calls.add(('trust_status', const {}));
+    throw const DesktopCallException(
+      'IO',
+      'Windows could not unlock desktop trust for this user; revoke it and '
+          'authorize a new invitation',
+    );
+  }
+
+  @override
+  Future<void> revokeTrust() async {
+    unreadable = false;
+    await super.revokeTrust();
+  }
+}
+
+class _UnreadableApi extends FakePbMapperApi {
+  final _host = _UnreadableTrust();
+
+  @override
+  _UnreadableTrust get desktop => _host;
+}
+
 Finder _key(String key) => find.byKey(Key(key));
 
 /// Scrolls [finder] into view and taps it, without waiting for anything
@@ -223,6 +253,35 @@ void main() {
       await settle(tester);
       expect(api.desktop.hostSnapshot.background?.enabled, isFalse);
       expect(sharingDot, findsNothing);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'a remembered grant Windows cannot unlock says so and offers Revoke, '
+    'without retrying in the background',
+    (tester) async {
+      final api = _UnreadableApi();
+      await pumpApp(tester, api, page: AppPage.remote);
+      expect(find.textContaining('could not unlock'), findsOneWidget);
+      // Enabling would read the same grant and fail the same way.
+      expect(tester.widget<FilledButton>(_key('host-enable')).onPressed, isNull);
+
+      // Only a visit reads it again, never a timer.
+      final reads = api.desktop.argsOf('trust_status').length;
+      await tester.pump(const Duration(seconds: 30));
+      expect(api.desktop.argsOf('trust_status'), hasLength(reads));
+
+      await _tapIn(tester, _key('host-error-revoke'));
+      await settle(tester);
+      await tester.tap(_key('confirm-destructive'));
+      await settle(tester);
+      expect(api.desktop.ops, contains('trust_revoke'));
+      expect(_key('host-error'), findsNothing);
+      expect(
+        tester.widget<FilledButton>(_key('host-enable')).onPressed,
+        isNotNull,
+      );
       await finish(tester);
     },
   );

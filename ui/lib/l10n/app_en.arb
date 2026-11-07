@@ -451,6 +451,7 @@
   "hostRevokeConfirmTitle": "Revoke the invitation?",
   "hostRevokeConfirmBody": "Everyone holding the current invitation loses access. A new invitation is created the next time you turn sharing on.",
   "hostRevokeAction": "Revoke and stop sharing",
+  "hostRevokeUnreadable": "Revoke the saved invitation",
   "hostAllowControl": "Allow remote mouse and keyboard",
   "hostEnable": "Turn on remote control",
   "hostEnabling": "Turning on…",

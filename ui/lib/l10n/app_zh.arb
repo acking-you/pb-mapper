@@ -391,6 +391,7 @@
   "hostRevokeConfirmTitle": "撤销邀请？",
   "hostRevokeConfirmBody": "持有当前邀请的人都会失去访问权限。下次开启共享时会生成新的邀请。",
   "hostRevokeAction": "撤销并停止共享",
+  "hostRevokeUnreadable": "撤销已保存的邀请",
   "hostAllowControl": "允许远程操作鼠标和键盘",
   "hostEnable": "开启远程控制",
   "hostEnabling": "正在开启…",

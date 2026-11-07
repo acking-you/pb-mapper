@@ -64,7 +64,7 @@ class HostCard extends StatelessWidget {
     return ValueListenableBuilder<DesktopHostView>(
       valueListenable: desktop.hostView,
       builder: (context, v, _) => switch (hostCardPhase(v)) {
-        HostCardPhase.loading => const _LoadingCard(),
+        HostCardPhase.loading => _LoadingCard(view: v),
         HostCardPhase.unsupported => const SizedBox.shrink(),
         HostCardPhase.notEnabled ||
         HostCardPhase.enabling ||
@@ -176,31 +176,70 @@ Widget notSharingPill(BuildContext context) => StatusChip(
   label: context.l10n.remoteNotSharing,
 );
 
-/// The host's error, under the header in every phase.
+/// The host's error, under the header in every phase. A remembered grant
+/// that cannot be read is mended only by revoking it, so its error carries
+/// that action.
 class _HostError extends StatelessWidget {
-  const _HostError(this.error);
-  final String error;
+  const _HostError(this.view);
+  final DesktopHostView view;
 
   @override
-  Widget build(BuildContext context) => Text(
-    error,
-    key: const Key('host-error'),
-    style: TextStyle(
-      fontSize: 12.5,
-      color: Theme.of(context).colorScheme.error,
-    ),
+  Widget build(BuildContext context) {
+    final error = view.error;
+    if (error == null) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    final text = Text(
+      error,
+      key: const Key('host-error'),
+      style: TextStyle(fontSize: 12.5, color: scheme.error),
+    );
+    if (!view.trustUnreadable) return text;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        text,
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          key: const Key('host-error-revoke'),
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size(0, 36),
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            foregroundColor: scheme.error,
+            side: BorderSide(color: scheme.error),
+            textStyle: buttonLabel(context, 13, weight: FontWeight.w500),
+          ),
+          onPressed: () =>
+              unawaited(_revoke(context, AppScope.of(context).store.desktop)),
+          icon: const Icon(AppIcons.screenShareOff, size: AppIconSize.inline),
+          label: Text(context.l10n.hostRevokeUnreadable),
+        ),
+      ],
+    );
+  }
+}
+
+/// Revokes the invitation once the user confirms it.
+Future<void> _revoke(BuildContext context, DesktopStore desktop) async {
+  final l10n = context.l10n;
+  final yes = await confirmDestructive(
+    context,
+    title: l10n.hostRevokeConfirmTitle,
+    body: l10n.hostRevokeConfirmBody,
+    action: l10n.hostRevokeAction,
   );
+  if (yes) await desktop.revokeTrust();
 }
 
 class _LoadingCard extends StatelessWidget {
-  const _LoadingCard();
+  const _LoadingCard({required this.view});
+  final DesktopHostView view;
 
   @override
-  Widget build(BuildContext context) => const _Card(
+  Widget build(BuildContext context) => _Card(
     padding: 24,
-    gap: 0,
+    gap: 20,
     children: [
-      _HostHeader(
+      const _HostHeader(
         active: false,
         subtitle: '',
         trailing: SizedBox.square(
@@ -208,6 +247,7 @@ class _LoadingCard extends StatelessWidget {
           child: CircularProgressIndicator(strokeWidth: 2),
         ),
       ),
+      if (view.error != null) _HostError(view),
     ],
   );
 }
@@ -257,7 +297,8 @@ class _SetupCardState extends State<_SetupCard> {
     final v = widget.view;
     final phase = hostCardPhase(v);
     final busy = phase != HostCardPhase.notEnabled;
-    final canEnable = !busy && _display != null;
+    // Enabling reads the remembered grant too, and would fail the same way.
+    final canEnable = !busy && _display != null && !v.trustUnreadable;
     final hairline = BorderSide(color: scheme.outlineVariant);
     return _Card(
       padding: 28,
@@ -268,7 +309,7 @@ class _SetupCardState extends State<_SetupCard> {
           subtitle: l10n.hostOff,
           trailing: notSharingPill(context),
         ),
-        if (v.error case final error?) _HostError(error),
+        if (v.error != null) _HostError(v),
         Text(
           l10n.setupHeadline,
           style: const TextStyle(
@@ -505,7 +546,7 @@ class _SharingCard extends StatelessWidget {
                 )
               : notSharingPill(context),
         ),
-        if (v.error case final error?) _HostError(error),
+        if (v.error != null) _HostError(v),
         if (sharing && viewer != null)
           ViewerPanel(
             viewer: viewer,
@@ -1115,20 +1156,6 @@ class HostMoreMenu extends StatelessWidget {
         label: Text(l10n.more),
       ),
     );
-  }
-
-  static Future<void> _revoke(
-    BuildContext context,
-    DesktopStore desktop,
-  ) async {
-    final l10n = context.l10n;
-    final yes = await confirmDestructive(
-      context,
-      title: l10n.hostRevokeConfirmTitle,
-      body: l10n.hostRevokeConfirmBody,
-      action: l10n.hostRevokeAction,
-    );
-    if (yes) await desktop.revokeTrust();
   }
 
   static Future<void> _rename(
