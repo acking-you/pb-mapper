@@ -304,10 +304,14 @@ impl Backend for Desktop {
             .as_mut()
             .ok_or_else(|| error("video encoder unavailable"))?
             .1;
-        encoder.set_bitrate(rate.bitrate)?;
-        let image = encoder.next_frame(keyframe);
+        // The worker paces: drain what is finished, then submit one capture.
+        let image = encoder
+            .set_rate(rate)
+            .and_then(|()| encoder.drain())
+            .and_then(|image| encoder.submit(keyframe).map(|_| image));
         self.finish_video(expected, image)
     }
+    /// Never blocks: the wait bounds only the helper's long-poll.
     fn drain_video(
         &mut self,
         expected: &DesktopContext,
@@ -325,6 +329,11 @@ impl Backend for Desktop {
         }
         let image = encoder.drain();
         self.finish_video(expected, image)
+    }
+    fn pending_video(&self) -> usize {
+        self.encoder
+            .as_ref()
+            .map_or(0, |(_, encoder)| encoder.pending_len())
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;

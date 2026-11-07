@@ -16,7 +16,7 @@ use windows::{
         Foundation::RECT,
         Graphics::{
             Direct3D11::*,
-            Dxgi::{Common::*, IDXGIDevice},
+            Dxgi::{Common::*, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIDevice},
         },
         Media::MediaFoundation::*,
         System::{
@@ -50,6 +50,8 @@ pub struct Encoded {
     pub duplicate: bool,
     /// Monotonic capture timestamp relative to this encoder's creation.
     pub pts_us: u64,
+    /// Submit to output, in microseconds.
+    pub encode_us: u32,
 }
 
 impl From<Encoded> for crate::EncodedFrame {
@@ -62,7 +64,7 @@ impl From<Encoded> for crate::EncodedFrame {
                 keyframe: image.keyframe,
                 pts_us: image.pts_us,
                 duplicate: image.duplicate,
-                encode_us: 0,
+                encode_us: image.encode_us,
             },
             bytes: image.bytes,
         }
@@ -135,7 +137,6 @@ pub struct Encoder {
     fps: u32,
     bitrate: u32,
     created: Instant,
-    next_capture: Instant,
     last_submit: Option<Instant>,
     last_present: i64,
     force_keyframe: bool,
@@ -248,7 +249,6 @@ impl Encoder {
             fps,
             bitrate,
             created: now,
-            next_capture: now,
             last_submit: None,
             last_present: 0,
             force_keyframe: true,
@@ -265,17 +265,22 @@ impl Encoder {
         self.stats.clone()
     }
 
-    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+    /// Apply a QoS rate. Only the mean bitrate reaches the encoder, and only
+    /// when it changed. The pace is the caller's own: the media type, nominal
+    /// frame rate and GOP never change, so a rate change never rebuilds.
+    pub fn set_rate(&mut self, rate: crate::VideoRate) -> Result<()> {
         self.check_thread()?;
-        if !(256_000..=80_000_000).contains(&bitrate) {
+        if !(256_000..=80_000_000).contains(&rate.bitrate) {
             return Err(error("video bitrate outside supported bounds"));
         }
-        if self.bitrate == bitrate {
+        if self.bitrate == rate.bitrate {
             return Ok(());
         }
-        self.codec
-            .property(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))?;
-        self.bitrate = bitrate;
+        self.codec.property(
+            &CODECAPI_AVEncCommonMeanBitRate,
+            &VARIANT::from(rate.bitrate),
+        )?;
+        self.bitrate = rate.bitrate;
         Ok(())
     }
 
@@ -319,7 +324,8 @@ impl Encoder {
                     self.stats.encoded += 1;
                     self.stats.unique_encoded += u64::from(!duplicate);
                     self.stats.bytes += bytes.len() as u64;
-                    self.stats.encode_time_us += at.elapsed().as_micros() as u64;
+                    let encode_us = at.elapsed().as_micros();
+                    self.stats.encode_time_us += encode_us as u64;
                     ready = Some(Encoded {
                         bytes,
                         width: self.width,
@@ -327,6 +333,7 @@ impl Encoder {
                         keyframe,
                         duplicate,
                         pts_us,
+                        encode_us: u32::try_from(encode_us).unwrap_or(u32::MAX),
                     });
                 }
                 // Some hardware MFTs issue NeedInput only when ProcessOutput
@@ -352,21 +359,6 @@ impl Encoder {
         self.pending.len()
     }
 
-    /// The v1 worker's call: drain, then submit on this encoder's own fps grid.
-    /// It goes once the capture worker paces and calls `submit` itself.
-    pub fn next_frame(&mut self, force_keyframe: bool) -> Result<Option<Encoded>> {
-        self.force_keyframe |= force_keyframe;
-        let ready = self.drain()?;
-        let now = Instant::now();
-        if now >= self.next_capture && self.submit(false)? {
-            // Preserve the target clock across display refreshes. Starting a new
-            // interval after every captured refresh rounds 120 FPS on a 165 Hz
-            // display down to 82.5 FPS. Never catch up with a burst after a stall.
-            self.next_capture = (self.next_capture + self.frame_period()).max(now);
-        }
-        Ok(ready)
-    }
-
     /// Capture the newest desktop image and submit at most one sample; the
     /// caller paces, and this never waits. Call `drain` first, which collects
     /// the encoder's input requests. Returns false without submitting while the
@@ -380,41 +372,7 @@ impl Encoder {
         if self.pending.len() >= MAX_IN_FLIGHT || self.codec.need_input == 0 {
             return Ok(false);
         }
-        let changed = match self.capture.acquire_next_frame(0) {
-            Ok(frame) => {
-                let present = frame.frame_info().LastPresentTime;
-                if present != 0 && present != self.last_present {
-                    self.last_present = present;
-                    self.stats.unique_captures += 1;
-                    if self.latest.is_none() {
-                        let mut desc = *frame.texture_desc();
-                        desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
-                        desc.MiscFlags = 0;
-                        let mut texture = None;
-                        unsafe {
-                            frame
-                                .device()
-                                .CreateTexture2D(&desc, None, Some(&mut texture))
-                                .map_err(error)?;
-                        }
-                        self.latest = texture;
-                    }
-                    let latest = self
-                        .latest
-                        .as_ref()
-                        .ok_or_else(|| error("missing capture texture"))?;
-                    unsafe {
-                        frame.device_context().CopyResource(latest, frame.texture());
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(windows_capture::dxgi_duplication_api::Error::Timeout) => false,
-            Err(e) => return Err(error(e)),
-        };
-        self.latest_pending |= changed;
+        self.latest_pending |= self.acquire()?;
         // Static desktops still send a fresh, verified liveness frame. These
         // repetitions are excluded from unique_captures and benchmark FPS.
         if !self.latest_pending
@@ -467,6 +425,60 @@ impl Encoder {
         self.stats.submitted += 1;
         self.stats.max_in_flight = self.stats.max_in_flight.max(self.pending.len());
         Ok(true)
+    }
+
+    /// Copy a new desktop image, if there is one, into `latest`, and release
+    /// the duplication frame at once. A frame held until the next acquire (as
+    /// windows-capture's `acquire_next_frame` does) keeps DXGI from
+    /// accumulating the next update meanwhile, so an acquire at the next tick
+    /// races that update and misses about every other one.
+    fn acquire(&mut self) -> Result<bool> {
+        let duplication = self.capture.duplication();
+        let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+        let mut resource = None;
+        match unsafe { duplication.AcquireNextFrame(0, &mut info, &mut resource) } {
+            Ok(()) => {}
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+            Err(e) => return Err(error(e)),
+        }
+        let copied = (|| {
+            let present = info.LastPresentTime;
+            // Zero: only the pointer moved.
+            if present == 0 || present == self.last_present {
+                return Ok(false);
+            }
+            let frame: ID3D11Texture2D = resource
+                .as_ref()
+                .ok_or_else(|| error("missing desktop frame"))?
+                .cast()
+                .map_err(error)?;
+            if self.latest.is_none() {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { frame.GetDesc(&mut desc) };
+                desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
+                desc.MiscFlags = 0;
+                desc.CPUAccessFlags = 0;
+                desc.Usage = D3D11_USAGE_DEFAULT;
+                let mut texture = None;
+                unsafe {
+                    self.capture
+                        .device()
+                        .CreateTexture2D(&desc, None, Some(&mut texture))
+                        .map_err(error)?;
+                }
+                self.latest = texture;
+            }
+            let latest = self
+                .latest
+                .as_ref()
+                .ok_or_else(|| error("missing capture texture"))?;
+            unsafe { self.capture.device_context().CopyResource(latest, &frame) };
+            self.last_present = present;
+            self.stats.unique_captures += 1;
+            Ok(true)
+        })();
+        let released = unsafe { duplication.ReleaseFrame() }.map_err(error);
+        copied.and_then(|copied| released.map(|()| copied))
     }
 
     fn frame_period(&self) -> Duration {
