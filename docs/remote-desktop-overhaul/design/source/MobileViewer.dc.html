@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>手机 · 横屏查看器</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 844px; height: 390px; position: relative; overflow: hidden; background: #000000; font-family: Inter, 'Noto Sans SC', system-ui, sans-serif; color: #EDEDEF">
+  <div style="position: absolute; left: 75px; top: 0; width: 694px; height: 390px">
+    <dc-import name="RemoteScreen" hint-size="694px,390px"></dc-import>
+  </div>
+
+  <div style="position: absolute; left: 75px; top: 0; width: 694px; height: 390px; pointer-events: none">
+    <span style="position: absolute; left: 470px; top: 262px; width: 44px; height: 44px; border-radius: 22px; background: rgba(255,255,255,0.22); border: 1.5px solid rgba(255,255,255,0.8)"></span>
+    <div role="status" style="position: absolute; top: 12px; left: 50%; transform: translateX(-50%); white-space: nowrap; height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-radius: 16px; background: rgba(24,24,26,0.86); font-size: 12.5px">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7DB6F2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"></rect><path d="M12 15v-3"></path></svg>
+      触控板模式：单指滑动移动光标，轻点单击
+    </div>
+  </div>
+
+  <div style="position: absolute; left: 0; top: 0; width: 75px; height: 390px; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 16px 0; box-sizing: border-box">
+    <button type="button" aria-label="返回远程列表" style="width: 44px; height: 44px; border-radius: 22px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; display: flex; align-items: center; justify-content: center">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m15 6-6 6 6 6"></path></svg>
+    </button>
+    <button type="button" aria-label="连接质量：直连，60 帧每秒" style="width: 56px; padding: 8px 0; border-radius: 14px; border: none; background: transparent; color: #EDEDEF; font: inherit; display: flex; flex-direction: column; align-items: center; gap: 3px">
+      <span style="width: 8px; height: 8px; border-radius: 4px; background: #57C27A"></span>
+      <span style="font-size: 11px">直连</span>
+      <span style="font-family: 'Geist Mono', ui-monospace, monospace; font-size: 14px; font-weight: 500">60</span>
+      <span style="font-size: 10.5px; color: #B4B4B8">fps</span>
+    </button>
+    <button type="button" aria-label="切换操作方式，当前为触控板" style="width: 56px; border: none; background: transparent; color: #EDEDEF; font: inherit; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0">
+      <span style="width: 44px; height: 44px; border-radius: 22px; background: rgba(125,182,242,0.2); color: #7DB6F2; display: flex; align-items: center; justify-content: center">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"></rect><path d="M3 15h18M12 15v4"></path></svg>
+      </span>
+      <span style="font-size: 10.5px">触控板</span>
+    </button>
+  </div>
+
+  <div role="toolbar" aria-label="远程操作" style="position: absolute; right: 0; top: 0; width: 75px; height: 390px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px">
+    <button type="button" style="width: 56px; border: none; background: transparent; color: #EDEDEF; font: inherit; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0">
+      <span style="width: 44px; height: 44px; border-radius: 22px; background: rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2"></rect><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M8 16h8"></path></svg></span>
+      <span style="font-size: 10.5px">键盘</span>
+    </button>
+    <button type="button" style="width: 56px; border: none; background: transparent; color: #EDEDEF; font: inherit; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0">
+      <span style="width: 44px; height: 44px; border-radius: 22px; background: rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: center; font-size: 17px">⌘</span>
+      <span style="font-size: 10.5px">快捷键</span>
+    </button>
+    <button type="button" style="width: 56px; border: none; background: transparent; color: #EDEDEF; font: inherit; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0">
+      <span style="width: 44px; height: 44px; border-radius: 22px; background: rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="3" width="12" height="18" rx="6"></rect><path d="M12 3v7M6 10h12"></path><path d="M12.6 3.4A6 6 0 0 1 18 9.4V10h-6z" fill="currentColor" stroke="none"></path></svg></span>
+      <span style="font-size: 10.5px">右键</span>
+    </button>
+    <button type="button" style="width: 56px; border: none; background: transparent; color: #EDEDEF; font: inherit; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0">
+      <span style="width: 44px; height: 44px; border-radius: 22px; background: rgba(255,255,255,0.1); display: flex; align-items: center; justify-content: center"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg></span>
+      <span style="font-size: 10.5px">更多</span>
+    </button>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":844,"height":390}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

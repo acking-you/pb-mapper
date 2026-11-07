@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>手机 · 键盘与修饰键条</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 844px; height: 390px; position: relative; overflow: hidden; background: #000000; font-family: Inter, 'Noto Sans SC', system-ui, sans-serif; color: #EDEDEF">
+  <div style="position: absolute; left: 0; top: 0; width: 844px; height: 156px; overflow: hidden">
+    <div style="position: absolute; left: -880px; top: -430px; width: 1600px; height: 900px">
+      <dc-import name="RemoteScreen" cursor="{{ false }}" hint-size="1600px,900px"></dc-import>
+    </div>
+    <div role="img" aria-label="小地图：当前显示远程屏幕的右下部分" style="position: absolute; right: 12px; top: 10px; width: 96px; height: 54px; border-radius: 6px; background: rgba(20,20,22,0.8); border: 1px solid rgba(255,255,255,0.25)">
+      <span style="position: absolute; left: 53px; top: 25px; width: 38px; height: 10px; border: 1.5px solid #7DB6F2; border-radius: 2px"></span>
+    </div>
+    <div role="status" style="position: absolute; left: 12px; bottom: 10px; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 15px; background: rgba(24,24,26,0.88); font-size: 12.5px; white-space: nowrap">
+      <span style="width: 7px; height: 7px; border-radius: 4px; background: #7DB6F2"></span>
+      Ctrl 已锁定：下一个键会和 Ctrl 一起发送
+    </div>
+  </div>
+
+  <div role="toolbar" aria-label="修饰键与常用键" style="position: absolute; left: 0; right: 0; top: 156px; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 8px; background: #1C1C1E; border-top: 1px solid rgba(255,255,255,0.08); font-family: 'Geist Mono', ui-monospace, monospace; font-size: 13px; overflow: hidden; white-space: nowrap">
+    <button type="button" aria-pressed="true" style="height: 32px; min-width: 46px; padding: 0 10px; border-radius: 8px; border: none; background: #EDEDEF; color: #1D1D1F; font: inherit; font-weight: 600">Ctrl</button>
+    <button type="button" aria-pressed="false" style="height: 32px; min-width: 42px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Alt</button>
+    <button type="button" aria-pressed="false" style="height: 32px; min-width: 42px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Shift</button>
+    <button type="button" aria-pressed="false" style="height: 32px; min-width: 42px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Win</button>
+    <span style="width: 1px; height: 20px; background: rgba(255,255,255,0.14); margin: 0 2px"></span>
+    <button type="button" style="height: 32px; min-width: 40px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Esc</button>
+    <button type="button" style="height: 32px; min-width: 40px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Tab</button>
+    <button type="button" aria-pressed="false" style="height: 32px; min-width: 40px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Fn</button>
+    <span style="width: 1px; height: 20px; background: rgba(255,255,255,0.14); margin: 0 2px"></span>
+    <button type="button" aria-label="左" style="height: 32px; width: 36px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">←</button>
+    <button type="button" aria-label="上" style="height: 32px; width: 36px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">↑</button>
+    <button type="button" aria-label="下" style="height: 32px; width: 36px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">↓</button>
+    <button type="button" aria-label="右" style="height: 32px; width: 36px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">→</button>
+    <span style="width: 1px; height: 20px; background: rgba(255,255,255,0.14); margin: 0 2px"></span>
+    <button type="button" style="height: 32px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Del</button>
+    <button type="button" style="height: 32px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Ctrl+C</button>
+    <button type="button" style="height: 32px; padding: 0 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.1); color: #EDEDEF; font: inherit">Ctrl+V</button>
+    <span style="flex: 1"></span>
+    <button type="button" aria-label="收起键盘" style="height: 32px; width: 40px; border-radius: 8px; border: none; background: transparent; color: #EDEDEF; display: flex; align-items: center; justify-content: center">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+    </button>
+  </div>
+
+  <div aria-label="系统键盘区域" style="position: absolute; left: 0; right: 0; bottom: 0; height: 190px; box-sizing: border-box; padding: 10px 8px 12px; background: #2B2B2E; display: flex; flex-direction: column; gap: 8px">
+    <div style="display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 6px; height: 34px">
+      <span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 6px; height: 34px; padding: 0 30px">
+      <span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 6px; height: 34px">
+      <span style="border-radius: 6px; background: #3A3A3E"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #48484C"></span><span style="border-radius: 6px; background: #3A3A3E"></span>
+    </div>
+    <div style="display: flex; gap: 6px; height: 34px">
+      <span style="width: 110px; border-radius: 6px; background: #3A3A3E"></span>
+      <span style="flex: 1; border-radius: 6px; background: #48484C; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #B4B4B8">系统键盘</span>
+      <span style="width: 110px; border-radius: 6px; background: #3A3A3E"></span>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":844,"height":390}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

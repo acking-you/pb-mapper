@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>查看器状态</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 1440px; height: 1400px; box-sizing: border-box; padding: 24px; background: #F4F4F2; font-family: Inter, 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif; color: #1D1D1F; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; row-gap: 32px; align-content: start">
+
+  <figure style="margin: 0; display: flex; flex-direction: column; gap: 10px">
+    <figcaption style="height: 34px"><span style="font-size: 15px; font-weight: 600">正在连接</span><span style="font-size: 13px; color: #4A4A4D; margin-left: 10px">每一步完成就打勾，失败时停在那一步并说明原因</span></figcaption>
+    <div style="position: relative; height: 383px; border-radius: 12px; overflow: hidden; background: #0F0F10; display: flex; align-items: center; justify-content: center; color: #EDEDEF">
+      <div style="width: 320px; box-sizing: border-box; padding: 20px 22px; border-radius: 16px; background: #1C1C1E; border: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; gap: 14px">
+        <div style="display: flex; align-items: center; gap: 10px">
+          <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="2.5"></circle><path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke="#7DB6F2" stroke-width="2.5" stroke-linecap="round"></path></svg>
+          <span style="font-size: 15px; font-weight: 600">正在连接 办公室电脑</span>
+        </div>
+        <ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px">
+          <li style="display: flex; align-items: center; gap: 8px; color: #B4B4B8"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57C27A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>找到主机，走直连路径</li>
+          <li style="display: flex; align-items: center; gap: 8px; color: #B4B4B8"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57C27A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>校验主机身份</li>
+          <li style="display: flex; align-items: center; gap: 8px; color: #EDEDEF"><span style="width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center"><span style="width: 7px; height: 7px; border-radius: 4px; background: #7DB6F2"></span></span>等待第一帧画面</li>
+        </ul>
+        <button type="button" style="align-self: flex-end; height: 32px; padding: 0 14px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.18); background: transparent; color: #EDEDEF; font: inherit; font-size: 13px">取消</button>
+      </div>
+    </div>
+  </figure>
+
+  <figure style="margin: 0; display: flex; flex-direction: column; gap: 10px">
+    <figcaption style="height: 34px"><span style="font-size: 15px; font-weight: 600">画面变慢 · 连接质量</span><span style="font-size: 13px; color: #4A4A4D; margin-left: 10px">点工具栏上的状态打开，数字每秒刷新</span></figcaption>
+    <div style="position: relative; height: 383px; border-radius: 12px; overflow: hidden; background: #0F0F10">
+      <div style="position: absolute; inset: 0"><dc-import name="RemoteScreen" hint-size="680px,383px"></dc-import></div>
+      <div style="position: absolute; top: 12px; left: 50%; transform: translateX(-50%); height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 12px; background: rgba(32,32,35,0.92); border: 1px solid rgba(255,255,255,0.08); color: #EDEDEF; font-size: 12.5px; white-space: nowrap">
+        <span style="width: 8px; height: 8px; border-radius: 4px; background: #E0A647"></span>直连 · 画面延迟
+        <span style="font-family: 'Geist Mono', ui-monospace, monospace; color: #E0A647">420 ms</span>
+      </div>
+      <div style="position: absolute; top: 56px; right: 14px; width: 236px; box-sizing: border-box; padding: 14px 16px; border-radius: 14px; background: rgba(28,28,30,0.94); border: 1px solid rgba(255,255,255,0.08); color: #EDEDEF; font-size: 12.5px; display: flex; flex-direction: column; gap: 7px">
+        <div style="font-size: 13px; font-weight: 600; margin-bottom: 2px">连接质量</div>
+        <div style="display: flex"><span style="flex: 1; color: #B4B4B8">路径</span><span>直连 · IPv6</span></div>
+        <div style="display: flex"><span style="flex: 1; color: #B4B4B8">网络往返</span><span style="font-family: 'Geist Mono', ui-monospace, monospace">48 ms</span></div>
+        <div style="display: flex"><span style="flex: 1; color: #B4B4B8">画面延迟</span><span style="font-family: 'Geist Mono', ui-monospace, monospace; color: #E0A647">420 ms</span></div>
+        <div style="display: flex"><span style="flex: 1; color: #B4B4B8">显示帧率</span><span style="font-family: 'Geist Mono', ui-monospace, monospace">38 fps</span></div>
+        <div style="display: flex"><span style="flex: 1; color: #B4B4B8">码率</span><span style="font-family: 'Geist Mono', ui-monospace, monospace">3.1 Mbps</span></div>
+        <div style="display: flex"><span style="flex: 1; color: #B4B4B8">分辨率</span><span style="font-family: 'Geist Mono', ui-monospace, monospace">1920 × 1080</span></div>
+        <div style="display: flex"><span style="flex: 1; color: #B4B4B8">编码</span><span>H.264 硬件</span></div>
+        <div style="color: #B4B4B8; margin-top: 4px; line-height: 1.5">已自动降低码率，优先保证操作跟手</div>
+      </div>
+    </div>
+  </figure>
+
+  <figure style="margin: 0; display: flex; flex-direction: column; gap: 10px">
+    <figcaption style="height: 34px"><span style="font-size: 15px; font-weight: 600">等待远程桌面</span><span style="font-size: 13px; color: #4A4A4D; margin-left: 10px">UAC 或锁屏无法显示时，保留画面并暂停输入</span></figcaption>
+    <div style="position: relative; height: 383px; border-radius: 12px; overflow: hidden; background: #0F0F10">
+      <div style="position: absolute; inset: 0"><dc-import name="RemoteScreen" hint-size="680px,383px"></dc-import></div>
+      <div style="position: absolute; inset: 0; background: rgba(15,15,16,0.72); display: flex; align-items: center; justify-content: center">
+        <div style="width: 360px; box-sizing: border-box; padding: 20px 22px; border-radius: 16px; background: #1C1C1E; border: 1px solid rgba(255,255,255,0.08); color: #EDEDEF; display: flex; flex-direction: column; gap: 10px">
+          <div style="display: flex; align-items: center; gap: 10px">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#E0A647" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+            <span style="font-size: 15px; font-weight: 600">远程电脑正在显示安全桌面</span>
+          </div>
+          <div style="font-size: 13px; line-height: 1.6; color: #B4B4B8">出现了 UAC 提示或锁屏。这台电脑没有启用辅助服务，无法显示这一画面；恢复到普通桌面后自动继续。</div>
+          <span style="align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 12px; background: rgba(255,255,255,0.08); font-size: 12px; color: #EDEDEF">已暂停输入</span>
+        </div>
+      </div>
+    </div>
+  </figure>
+
+  <figure style="margin: 0; display: flex; flex-direction: column; gap: 10px">
+    <figcaption style="height: 34px"><span style="font-size: 15px; font-weight: 600">正在重连</span><span style="font-size: 13px; color: #4A4A4D; margin-left: 10px">画面变灰，表示这是断开前的最后一帧</span></figcaption>
+    <div style="position: relative; height: 383px; border-radius: 12px; overflow: hidden; background: #0F0F10">
+      <div style="position: absolute; inset: 0; filter: grayscale(1) brightness(0.5)"><dc-import name="RemoteScreen" hint-size="680px,383px"></dc-import></div>
+      <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center">
+        <div role="status" style="display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 8px 0 16px; border-radius: 24px; background: rgba(28,28,30,0.95); border: 1px solid rgba(255,255,255,0.1); color: #EDEDEF; font-size: 13.5px; white-space: nowrap">
+          <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="2.5"></circle><path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke="#7DB6F2" stroke-width="2.5" stroke-linecap="round"></path></svg>
+          连接中断，3 秒后第 2 次重连
+          <span style="color: #B4B4B8">已暂停输入</span>
+          <button type="button" style="height: 34px; padding: 0 14px; border-radius: 17px; border: none; background: #FFFFFF; color: #1D1D1F; font: inherit; font-size: 13px; font-weight: 600">立即重试</button>
+        </div>
+      </div>
+    </div>
+  </figure>
+
+  <figure style="margin: 0; display: flex; flex-direction: column; gap: 10px">
+    <figcaption style="height: 34px"><span style="font-size: 15px; font-weight: 600">主机身份已变化</span><span style="font-size: 13px; color: #4A4A4D; margin-left: 10px">安全问题：停止自动重连，必须由人处理</span></figcaption>
+    <div style="position: relative; height: 383px; border-radius: 12px; overflow: hidden; background: #0F0F10; display: flex; align-items: center; justify-content: center">
+      <div role="alert" style="width: 380px; box-sizing: border-box; padding: 22px; border-radius: 16px; background: #1C1C1E; border: 1px solid rgba(242,184,181,0.35); color: #EDEDEF; display: flex; flex-direction: column; gap: 12px">
+        <div style="display: flex; align-items: center; gap: 10px">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#F2B8B5" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path><path d="M12 9v4M12 17h.01"></path></svg>
+          <span style="font-size: 15px; font-weight: 600">主机身份已变化</span>
+        </div>
+        <div style="font-size: 13px; line-height: 1.6; color: #B4B4B8">这台电脑的身份与邀请里记录的不一致，已停止自动重连。请向对方要一条新的邀请，不要继续使用旧邀请。</div>
+        <div style="display: flex; justify-content: flex-end; gap: 8px">
+          <button type="button" style="height: 34px; padding: 0 14px; border-radius: 17px; border: 1px solid rgba(255,255,255,0.18); background: transparent; color: #EDEDEF; font: inherit; font-size: 13px">断开</button>
+          <button type="button" style="height: 34px; padding: 0 14px; border-radius: 17px; border: none; background: #FFFFFF; color: #1D1D1F; font: inherit; font-size: 13px; font-weight: 600">粘贴新邀请</button>
+        </div>
+      </div>
+    </div>
+  </figure>
+
+  <figure style="margin: 0; display: flex; flex-direction: column; gap: 10px">
+    <figcaption style="height: 34px"><span style="font-size: 15px; font-weight: 600">工具栏收起 · 仅查看</span><span style="font-size: 13px; color: #4A4A4D; margin-left: 10px">未固定时，鼠标离开 2 秒收起成顶部把手</span></figcaption>
+    <div style="position: relative; height: 383px; border-radius: 12px; overflow: hidden; background: #0F0F10">
+      <div style="position: absolute; inset: 0"><dc-import name="RemoteScreen" hint-size="680px,383px"></dc-import></div>
+      <button type="button" aria-label="展开工具栏" style="position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 72px; height: 20px; border-radius: 0 0 10px 10px; border: 1px solid rgba(255,255,255,0.1); border-top: none; background: rgba(32,32,35,0.9); color: #EDEDEF; display: flex; align-items: center; justify-content: center; padding: 0">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+      </button>
+      <div style="position: absolute; left: 12px; bottom: 34px; display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; border-radius: 15px; background: rgba(32,32,35,0.9); border: 1px solid rgba(255,255,255,0.08); color: #EDEDEF; font-size: 12.5px; white-space: nowrap">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        仅查看 · 对方未允许控制
+      </div>
+    </div>
+  </figure>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1400}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
