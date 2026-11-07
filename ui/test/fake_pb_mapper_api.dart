@@ -46,11 +46,9 @@ class FakePbMapperApi implements PbMapperApiClient {
   bool configFails = false;
 
   /// Holds a forced relay check until it completes, standing in for a relay
-  /// that has not answered yet. The Rust side holds its one state lock for
-  /// the whole check, so while one waits here, reading the config or the
-  /// tunnels waits behind it.
+  /// that has not answered yet. Other calls go on meanwhile, as the Rust
+  /// side's do: it asks the relay without holding its state lock.
   Completer<void>? relayGate;
-  Future<void>? _relayHeld;
 
   /// Every call that changes something, in order, so a test can assert what
   /// the view asked for rather than only what it drew.
@@ -70,7 +68,6 @@ class FakePbMapperApi implements PbMapperApiClient {
 
   @override
   Future<ConfigStatus> fetchConfig() async {
-    if (_relayHeld case final held?) await held;
     if (configDelay > Duration.zero) await Future<void>.delayed(configDelay);
     if (configFails) throw StateError('reading the config failed');
     return config;
@@ -194,8 +191,7 @@ class FakePbMapperApi implements PbMapperApiClient {
   @override
   Future<ServerStatusDetail> forceRefreshServerStatus() async {
     if (relayGate case final gate? when !gate.isCompleted) {
-      await (_relayHeld = gate.future);
-      _relayHeld = null;
+      await gate.future;
     }
     return getServerStatusDetail();
   }
@@ -209,7 +205,6 @@ class FakePbMapperApi implements PbMapperApiClient {
 
   @override
   Future<List<ServiceConfigInfo>> getServiceConfigs() async {
-    if (_relayHeld case final held?) await held;
     return services;
   }
 
@@ -282,7 +277,6 @@ class FakePbMapperApi implements PbMapperApiClient {
 
   @override
   Future<List<ClientConfigInfo>> getClientConfigs() async {
-    if (_relayHeld case final held?) await held;
     return clients;
   }
 

@@ -147,11 +147,9 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       Future.wait([_prefs.load(), _viewerPrefs.load()]),
       _store.ready,
     ).wait;
-    // Whether this install needs setup comes from that same read. Reading
-    // again would queue behind the relay check the store makes next, which
-    // holds the native state lock until the relay answers. A read that failed
-    // is not evidence of a new install, and dropping an existing user into
-    // setup is the worse mistake.
+    // Whether this install needs setup comes from that same read. A read that
+    // failed is not evidence of a new install, and dropping an existing user
+    // into setup is the worse mistake.
     final setup =
         widget.needsSetup ??
         (read &&
