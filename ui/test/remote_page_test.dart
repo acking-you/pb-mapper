@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
@@ -652,5 +653,68 @@ void main() {
       await finish(tester);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    "a remembered computer's rename and remove are reachable without a mouse",
+    (tester) async {
+      const id = '0123456789abcdef0123456789abcdef';
+      final semantics = tester.ensureSemantics();
+      final vault = FakeRemoteComputerVault()
+        ..records.add(
+          const RemoteComputer(
+            id: id,
+            name: 'Lab',
+            service: 'desktop:lab',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            relay: 'lb7666.top:7666',
+            namespace: 0,
+          ),
+        );
+      await pumpApp(
+        tester,
+        FakePbMapperApi(serverServices: ['desktop:lab']),
+        page: AppPage.remote,
+        vault: vault,
+      );
+      Element inside(String key, Type type) => tester.element(
+        find.descendant(of: _key(key), matching: find.byType(type)),
+      );
+
+      // Nothing hovers or focuses the row, and a screen reader still finds
+      // its menu button.
+      expect(
+        tester.getSemantics(
+          find.descendant(
+            of: _key('computer-more-$id'),
+            matching: find.byType(InkWell),
+          ),
+        ),
+        isSemantics(isButton: true),
+      );
+
+      // Shift+Tab from Open reaches it, shown while it has focus, and Enter
+      // opens the menu.
+      Focus.of(inside('computer-open-$id', Text)).requestFocus();
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(
+        Focus.of(inside('computer-more-$id', Icon)).hasPrimaryFocus,
+        isTrue,
+      );
+      final shown = find.ancestor(
+        of: _key('computer-more-$id'),
+        matching: find.byType(Opacity),
+      );
+      expect(tester.widget<Opacity>(shown.first).opacity, 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+      expect(_key('computer-remove-$id'), findsOneWidget);
+      semantics.dispose();
+      await finish(tester);
+    },
   );
 }
