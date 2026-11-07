@@ -46,6 +46,7 @@ class VideoFeederTest {
         }
         override fun presented(consumer: Long, generation: Long, frameId: Long) = 1
         override fun keyframe(consumer: Long, reason: Int) = 1
+        override fun failed(consumer: Long, message: String) = 1
         override fun report(consumer: Long, decoder: String, hardware: Boolean) = 0
         override fun detach(consumer: Long) = detached.countDown()
     }

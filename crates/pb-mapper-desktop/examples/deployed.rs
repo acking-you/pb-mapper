@@ -4,6 +4,8 @@
 //! `selftest` views the host from this machine through a simulated renderer
 //! that presents every unit at once; options `--max-width`, `--max-height`,
 //! `--fps` and `--quality quality|balanced|smooth` set what that viewer asks.
+//! `--no-decoder-hints` has the phone tool configure its decoder without the
+//! low-latency hint (case F).
 use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
 use pb_mapper_desktop::{
     Host, HostOptions, Pull, QualityPreset, VideoCodec, VideoLimits, Viewer, ViewerConfig,
@@ -95,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = Client::new(ClientConfig { server: config.server_address.clone(), credential: key.credential.clone(), keep_alive: true, namespace: None })?.with_relay_transport(config.relay_transport)?;
         let display = pb_mapper_desktop::displays()?.into_iter().next().ok_or("no display")?;
         let host = Host::start(&client, HostOptions { service: format!("desktop:acceptance-{}",std::process::id()), display_id:display.id, allow_control:args.iter().any(|arg| arg == "--control"),allow_direct:true }).await?;
-        let controller = serde_json::json!({"server":config.server_address,"credential":key.credential,"transport":config.relay_transport,"invitation":host.invitation().encode()});
+        let controller = serde_json::json!({"server":config.server_address,"credential":key.credential,"transport":config.relay_transport,"invitation":host.invitation().encode(),"decoder_hints":!args.iter().any(|arg| arg == "--no-decoder-hints")});
         std::fs::write(output.join("controller.json"),serde_json::to_vec(&controller)?)?;
         println!("host_ready display={}x{} duration={seconds} mode={mode}", display.width,display.height);
         if mode == "serve" {

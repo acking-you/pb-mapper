@@ -42,7 +42,7 @@ use std::{io, time::Duration};
 
 pub use host::{Host, HostOptions};
 pub use invite::{Invitation, InvitationError, InvitationFormat};
-pub use platform::{capabilities, displays, native_backend};
+pub use platform::{capabilities, displays, media_foundation, native_backend};
 pub use protocol::{
     Adaptation, DesktopKind, NoticeCode, RateModel, RejectReason, Route, SessionState, StateReason,
     StopReason, VideoSize,

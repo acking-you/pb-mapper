@@ -55,13 +55,8 @@ pub struct Host {
 }
 impl Host {
     pub async fn start(client: &Client, options: HostOptions) -> Result<Self> {
-        let id = options.display_id;
-        Self::start_with_backend(
-            client,
-            options,
-            Arc::new(move || platform::native_backend(id)),
-        )
-        .await
+        let factory = native_factory(options.display_id)?;
+        Self::start_with_backend(client, options, factory).await
     }
     pub async fn start_with_backend(
         client: &Client,
@@ -93,15 +88,8 @@ impl Host {
         options: HostOptions,
         identity: crate::HostIdentity,
     ) -> Result<Self> {
-        let id = options.display_id;
-        Self::start_with_backend_and_identity(
-            client,
-            options,
-            Arc::new(move || platform::native_backend(id)),
-            None,
-            identity,
-        )
-        .await
+        let factory = native_factory(options.display_id)?;
+        Self::start_with_backend_and_identity(client, options, factory, None, identity).await
     }
     pub async fn start_with_backend_and_identity(
         client: &Client,
@@ -285,6 +273,20 @@ impl Drop for Host {
         self.policy.set(false);
         self.cancel.cancel();
     }
+}
+
+/// The platform's own capture and encoder for `display_id`. Refused before
+/// the host registers where there are none, so that no service is published
+/// only to fail every viewer at its encoder.
+fn native_factory(display_id: u32) -> Result<Factory> {
+    if !platform::capabilities().host {
+        return Err(error(if cfg!(windows) {
+            "Desktop hosting requires Windows Media Foundation"
+        } else {
+            "Desktop hosting currently requires Windows"
+        }));
+    }
+    Ok(Arc::new(move || platform::native_backend(display_id)))
 }
 
 /// What every Windows backend can do: the native desktop and the helper both

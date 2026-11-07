@@ -327,6 +327,7 @@
   "remoteMobileHostNote": "手机可以查看并控制 Windows 电脑，暂不能被远程控制。",
   "remoteRelayOnly": "仅使用中继",
   "hostUnsupported": "目前仅 Windows 可以共享桌面。此设备可以查看远程桌面。",
+  "hostNeedsMediaFoundation": "共享此桌面需要 Windows Media Foundation（请安装媒体功能包，Windows Server 上请启用 Media Foundation 功能）。此电脑仍可查看远程桌面。",
 
   "addTitle": "添加远程电脑",
   "inviteLabel": "私密邀请",

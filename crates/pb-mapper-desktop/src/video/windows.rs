@@ -92,7 +92,12 @@ struct Runtime {
     thread: ThreadId,
 }
 impl Runtime {
+    /// Every Media Foundation call follows this one. The DLL is delay-loaded,
+    /// so without it `MFStartup` would raise rather than fail.
     fn new() -> Result<Self> {
+        if !crate::media_foundation() {
+            return Err(error("Windows Media Foundation is not installed"));
+        }
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED)
                 .ok()

@@ -7,8 +7,9 @@ import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_ffi.dart';
 
 void main() {
-  // Rust writes these structs and Dart reads them; nothing else checks that
-  // the mirrors agree with the C offsets (perf 7.4, 7.5).
+  // Rust writes these structs and Dart reads them. Rust and the Windows runner
+  // pin the C offsets at compile time; this pins Dart's mirrors to the same
+  // ones (perf 7.4, 7.5).
   test('the view leaf and video meta mirror the 56-byte C layouts', () {
     expect(sizeOf<PbDesktopViewV1>(), 56);
     expect(sizeOf<PbDesktopVideoMetaV1>(), 56);

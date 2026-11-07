@@ -106,8 +106,6 @@ final class RemoteInput implements RemotePointerSink {
   /// Fires when the local prediction moves or a stroke starts or ends.
   Listenable get cursorChanges => _cursorChanges;
 
-  Duration? get lastLocalMoveAt => _lastLocalMoveAt;
-
   bool get strokeActive => _strokeActive;
 
   @override

@@ -167,7 +167,8 @@ class _RemotePageState extends State<RemotePage> {
 }
 
 /// Why there is no host card: phones view and control but are not
-/// controlled; macOS and Linux cannot share yet.
+/// controlled; macOS and Linux cannot share yet; Windows shares only where
+/// Media Foundation is installed.
 class _HostUnsupportedNote extends StatelessWidget {
   const _HostUnsupportedNote();
 
@@ -178,6 +179,11 @@ class _HostUnsupportedNote extends StatelessWidget {
     final phone =
         defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS;
+    final note = phone
+        ? l10n.remoteMobileHostNote
+        : defaultTargetPlatform == TargetPlatform.windows
+        ? l10n.hostNeedsMediaFoundation
+        : l10n.hostUnsupported;
     final style = TextStyle(fontSize: 12.5, color: quietText(scheme));
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -194,7 +200,7 @@ class _HostUnsupportedNote extends StatelessWidget {
           ],
           Expanded(
             child: Text(
-              phone ? l10n.remoteMobileHostNote : l10n.hostUnsupported,
+              note,
               key: const Key('remote-host-note'),
               style: style,
             ),

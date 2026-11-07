@@ -40,6 +40,8 @@ pub(crate) const ALREADY_ATTACHED: i32 = -6;
 const MAX_WAIT: Duration = Duration::from_secs(1);
 /// The longest decoder name `report` reads, in bytes.
 const MAX_DECODER_NAME: usize = 64;
+/// The longest failure text `failed` reads, in bytes.
+const MAX_FAILURE_MESSAGE: usize = 512;
 
 const FLAG_KEYFRAME: u32 = 1;
 const FLAG_DISCONTINUITY: u32 = 1 << 1;
@@ -65,7 +67,22 @@ pub struct PbDesktopVideoMetaV1 {
     /// Bit 0 keyframe, 1 discontinuity, 2 JPEG (else H.264), 3 duplicate.
     pub flags: u32,
 }
-const _: () = assert!(std::mem::size_of::<PbDesktopVideoMetaV1>() == 56);
+// The layout of perf 7.5, field by field, as the Windows runner asserts it
+// too; desktop_ffi_test.dart pins Dart's mirror to the same offsets.
+const _: () = {
+    use std::mem::offset_of;
+    type M = PbDesktopVideoMetaV1;
+    assert!(size_of::<M>() == 56);
+    assert!(offset_of!(M, generation) == 0);
+    assert!(offset_of!(M, frame_id) == 8);
+    assert!(offset_of!(M, seq) == 16);
+    assert!(offset_of!(M, pts_us) == 24);
+    assert!(offset_of!(M, age_us) == 32);
+    assert!(offset_of!(M, width) == 40);
+    assert!(offset_of!(M, height) == 44);
+    assert!(offset_of!(M, len) == 48);
+    assert!(offset_of!(M, flags) == 52);
+};
 
 impl PbDesktopVideoMetaV1 {
     pub(crate) fn of(unit: &VideoUnit) -> Self {
@@ -199,7 +216,6 @@ pub(crate) fn presented(consumer: u64, generation: u64, frame_id: u64) -> i32 {
 
 pub(crate) fn keyframe(consumer: u64, reason: u32) -> i32 {
     let reason = match reason {
-        0 => KeyframeReason::DecoderError,
         1 => KeyframeReason::Gap,
         2 => KeyframeReason::Backlog,
         3 => KeyframeReason::Stall,
@@ -207,6 +223,10 @@ pub(crate) fn keyframe(consumer: u64, reason: u32) -> i32 {
         _ => return INVALID,
     };
     with_consumer(consumer, |consumer| consumer.keyframe(reason).into())
+}
+
+pub(crate) fn failed(consumer: u64, message: &str) -> i32 {
+    with_consumer(consumer, |consumer| consumer.failed(message).into())
 }
 
 pub(crate) fn report(consumer: u64, decoder: &str, hardware: bool) -> i32 {
@@ -295,11 +315,42 @@ pub extern "C" fn pb_mapper_desktop_video_presented_v1(
     guard(INVALID, || presented(consumer, generation, frame_id))
 }
 
-/// The decoder needs a keyframe: 0 decoder error, 1 gap, 2 backlog, 3 stall,
-/// 4 user. 1 queued, 0 limited or paused, or `CLOSED`. Non-blocking.
+/// The decoder needs a keyframe: 1 gap, 2 backlog, 3 stall, 4 user; a decoder
+/// error goes through `failed`. 1 queued, 0 limited or paused, or `CLOSED`.
+/// Non-blocking.
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_mapper_desktop_video_keyframe_v1(consumer: u64, reason: u32) -> i32 {
     guard(INVALID, || keyframe(consumer, reason))
+}
+
+/// The decoder failed, and why: it asks for a keyframe, counts toward giving
+/// up on the video, and the text is logged and ends the session's message.
+/// 1 queued, 0 limited or paused, or `CLOSED`. Non-blocking.
+///
+/// # Safety
+/// `message_utf8` must be null or a NUL-terminated string; at most 512 bytes
+/// before the NUL are read. Null or invalid UTF-8 still counts, so a failure
+/// is never lost to its text.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pb_mapper_desktop_video_failed_v1(
+    consumer: u64,
+    message_utf8: *const c_char,
+) -> i32 {
+    guard(INVALID, || {
+        let message: &[u8] = if message_utf8.is_null() {
+            &[]
+        } else {
+            let text = message_utf8.cast::<u8>();
+            // SAFETY: the string is NUL-terminated, and the scan stops at the
+            // NUL or after the longest message, whichever comes first.
+            let len = (0..MAX_FAILURE_MESSAGE)
+                .find(|&i| unsafe { *text.add(i) } == 0)
+                .unwrap_or(MAX_FAILURE_MESSAGE);
+            // SAFETY: the `len` bytes at `text` were just read.
+            unsafe { std::slice::from_raw_parts(text, len) }
+        };
+        failed(consumer, &String::from_utf8_lossy(message))
+    })
 }
 
 /// Names the decoder in use, for the overlay; bit 0 of `flags` is hardware.
@@ -821,6 +872,11 @@ mod tests {
         assert_eq!(meta.flags, FLAG_KEYFRAME | FLAG_DISCONTINUITY);
         assert!(buffer.iter().all(|&byte| byte == 1));
         assert_eq!(pb_mapper_desktop_video_keyframe_v1(consumer, 9), INVALID);
+        // A failure is taken without its text; no host streams, so 0.
+        assert_eq!(
+            unsafe { pb_mapper_desktop_video_failed_v1(consumer, std::ptr::null()) },
+            0
+        );
         assert_eq!(
             unsafe {
                 pb_mapper_desktop_video_next_v1(
@@ -859,6 +915,10 @@ mod tests {
         );
         assert_eq!(pb_mapper_desktop_video_presented_v1(consumer, 1, 1), CLOSED);
         assert_eq!(pb_mapper_desktop_video_keyframe_v1(consumer, 1), CLOSED);
+        assert_eq!(
+            unsafe { pb_mapper_desktop_video_failed_v1(consumer, name.as_ptr()) },
+            CLOSED
+        );
         assert_eq!(
             unsafe { pb_mapper_desktop_video_report_v1(consumer, name.as_ptr(), 1) },
             CLOSED

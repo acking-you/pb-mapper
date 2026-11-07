@@ -104,8 +104,8 @@ final class UnavailableRemoteComputerVault implements RemoteComputerVault {
 }
 
 /// The vault in Rust (`desktop_computers.rs`), sealed with DPAPI on Windows
-/// and with an Android-Keystore-wrapped AES key on Android. Until a build
-/// carries the `computers_*` ops, [open] reports the vault unavailable.
+/// and with an Android-Keystore-wrapped AES key on Android. Elsewhere
+/// [open] reports it unavailable.
 final class FfiRemoteComputerVault implements RemoteComputerVault {
   FfiRemoteComputerVault(
     this._service, {

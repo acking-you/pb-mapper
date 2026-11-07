@@ -11,7 +11,6 @@ abstract interface class DesktopVideoTexture {
   /// Binds the decoder to a viewer's video source. A reconnect binds the new
   /// source; the texture and its last picture persist.
   Future<void> attach(int videoSource);
-  Future<void> detach();
 
   /// Writes the last presented picture as a JPEG at most [maxWidth] wide
   /// (D23). False when there is none. The caller bounds the wait.
@@ -24,18 +23,23 @@ abstract interface class DesktopVideoTexture {
 typedef DesktopTextureFactory =
     Future<DesktopVideoTexture> Function({required int instanceToken});
 
-/// Android and Windows decode H.264 natively; elsewhere video is JPEG.
+/// Android and Windows can decode H.264 natively; the session's codec decides
+/// (Windows without Media Foundation takes JPEG).
 bool get nativeDesktopVideo => Platform.isAndroid || Platform.isWindows;
 
-/// The channel-backed texture (`pb_mapper/desktop_video` v2).
+/// The channel-backed texture (`pb_mapper/desktop_video` v2). [decoderHints]
+/// false configures Android's decoder without its low-latency hint; only the
+/// acceptance tool's case F sends it.
 Future<DesktopVideoTexture> createDesktopVideoTexture({
   required int instanceToken,
+  bool decoderHints = true,
 }) async {
   if (!nativeDesktopVideo) {
     throw UnsupportedError('Native desktop video unavailable');
   }
   final id = await _ChannelVideoTexture._channel.invokeMethod<int>('create', {
     'instance': instanceToken,
+    'decoderHints': decoderHints,
   });
   if (id == null || id < 0) {
     throw StateError('Native texture creation failed');
@@ -58,12 +62,6 @@ class _ChannelVideoTexture implements DesktopVideoTexture {
       'textureId': textureId,
       'source': videoSource,
     });
-  }
-
-  @override
-  Future<void> detach() async {
-    if (_disposed) return;
-    await _channel.invokeMethod<void>('detach', {'textureId': textureId});
   }
 
   @override

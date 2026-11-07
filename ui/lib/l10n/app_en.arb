@@ -378,6 +378,7 @@
   "remoteMobileHostNote": "This phone can view and control Windows computers; it can't be controlled itself.",
   "remoteRelayOnly": "Relay only",
   "hostUnsupported": "Only Windows can share its desktop for now. This device can view remote desktops.",
+  "hostNeedsMediaFoundation": "Sharing this desktop needs Windows Media Foundation (install the Media Feature Pack, or the Media Foundation feature on Windows Server). This computer can still view remote desktops.",
 
   "addTitle": "Add a remote computer",
   "inviteLabel": "Private invitation",
