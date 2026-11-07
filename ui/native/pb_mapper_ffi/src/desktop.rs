@@ -20,7 +20,7 @@ use pb_mapper::{
         VideoLimits, Viewer, ViewerConfig,
     },
 };
-use pb_mapper_core::checksum::{Credential, get_process_credential};
+use pb_mapper_core::checksum::get_process_credential;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::ffi::c_char;
@@ -449,21 +449,6 @@ fn inspection(invitation: &Invitation) -> Value {
             InvitationFormat::JsonV1 => "json_v1",
         },
     })
-}
-
-/// A client of the configured relay.
-fn relay_client(
-    config: &crate::state::AppConfig,
-    credential: Credential,
-) -> Result<Client, CtlError> {
-    Client::from_credential(
-        &config.server_address,
-        credential,
-        config.keep_alive_enabled,
-        None,
-    )
-    .with_relay_transport(config.relay_transport)
-    .map_err(err)
 }
 
 fn background_configured(snapshot: &Value) -> bool {
@@ -1062,8 +1047,7 @@ async fn connect(
             };
             // Configuration can wait behind other app operations. Keep that
             // wait inside the registered, cancellable attempt.
-            let relay = handle.state.lock().await.get_config_status().await;
-            let client = relay_client(&relay, get_process_credential().map_err(err)?)?;
+            let client = handle.state.lock().await.relay_client()?;
             let options = ConnectOptions {
                 path: if relay_only {
                     PathPolicy::RelayOnly
@@ -1123,11 +1107,15 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
             "this desktop belongs to the background service; enable it to reuse its invitation",
         ));
     }
-    let (directory, config) = {
+    let (directory, config, client) = {
         let state = handle.state.lock().await;
-        (state.desktop_config_dir(), state.get_config_status().await)
+        (
+            state.desktop_config_dir(),
+            state.get_config_status().await,
+            state.relay_client()?,
+        )
     };
-    let credential = get_process_credential().map_err(err)?;
+    let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
     #[cfg(windows)]
     if let Request::HostStart {
         background: true,
@@ -1195,7 +1183,6 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
         relay: config.server_address.clone(),
         namespace: credential.key_id(),
     };
-    let client = relay_client(&config, credential)?;
     let saved = if matches!(
         request,
         Request::HostRestore | Request::HostStart { remember: true, .. }
@@ -1351,14 +1338,16 @@ async fn restart_host(
         .identity
         .invitation(settings.service.clone())
         .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?;
-    let config = handle.state.lock().await.get_config_status().await;
-    let credential = get_process_credential().map_err(err)?;
+    let (config, client) = {
+        let state = handle.state.lock().await;
+        (state.get_config_status().await, state.relay_client()?)
+    };
+    let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
     if config.server_address != local.scope.relay || credential.key_id() != local.scope.namespace {
         return Err(err(
             "the relay settings changed since sharing started; stop sharing and share again",
         ));
     }
-    let client = relay_client(&config, credential)?;
     let persisted = local
         .remembered
         .then(|| trust::Saved::new(&local.scope, settings.clone(), &local.identity))
@@ -2459,6 +2448,30 @@ mod tests {
             assert!(handle.desktop.viewer.read().is_none());
             assert!(handle.desktop.connecting.lock().is_none());
         });
+    }
+
+    /// Without a credential no retry can succeed: the attempt ends with a
+    /// reason the person can act on, not an IO failure the viewer retries.
+    #[test]
+    fn connect_without_a_credential_ends_the_attempt() {
+        let handle = test_handle("no-credential");
+        let _credential_guard =
+            pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
+        pb_mapper_core::checksum::set_process_msg_header_key(None).unwrap();
+        let failure = handle
+            .runtime
+            .block_on(call(
+                &handle,
+                Request::Connect {
+                    invitation: Some(invitation().encode()),
+                    computer_id: None,
+                    relay_only: false,
+                    quality: QualityPreset::Balanced,
+                    refresh_hz: 60.0,
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(failure.code(), ErrorCode::InvalidArgument);
     }
 
     #[tokio::test]
