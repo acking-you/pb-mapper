@@ -866,6 +866,11 @@ impl Reader<'_> {
                 pts_us,
                 host_us,
             } => {
+                // Its header answers an awaited IDR; the payload may take
+                // seconds on a slow link.
+                if keyframe && generation == self.generation {
+                    self.sink.idr_arriving();
+                }
                 let bytes = wire::read_payload(read).await.map_err(Ended::failed)?;
                 let now = Instant::now();
                 // Transport credit first: it covers every unit read, including
@@ -1404,6 +1409,28 @@ mod tests {
         let due = Instant::now();
         viewer.resume();
         age_within(due);
+        drop(host);
+        viewer.stop().await.unwrap();
+    }
+
+    /// An IDR slower to cross than the hold after a new generation: its
+    /// header answers the hold, so nothing asks for another while its payload
+    /// is still in transit.
+    #[tokio::test]
+    async fn an_idr_slower_than_the_hold_is_not_asked_for_again() {
+        let (viewer, mut host, _) = connect(accepted()).await;
+        let viewer = viewer.unwrap();
+        send(&mut host, state(1, false), None).await;
+        // The header now, its payload record only once the hold has expired.
+        send(&mut host, video(1, 1, 1, true), None).await;
+        tokio::time::sleep(recovery::HOLD_AFTER_DISCONTINUITY + 3 * VIEWER_TICK).await;
+        host.write_u32(64).await.unwrap();
+        host.write_all(&[1; 64]).await.unwrap();
+        until(&mut host, |m| {
+            matches!(m, ViewerMessage::Received { seq: 1 })
+        })
+        .await;
+        assert_eq!(viewer.status().stats.keyframes_requested, 0);
         drop(host);
         viewer.stop().await.unwrap();
     }

@@ -20,9 +20,11 @@
 //! its `State` says `streaming` again, so that `paused` is no unavailability.
 //!
 //! While an IDR is awaited, requests go at most at 0.5, 1, 2, 4, 4 … s
-//! intervals; a received IDR resets that backoff, and the timer re-requests
-//! only while no IDR answered the last request, so a renderer that takes
-//! frames but shows nothing is not fed an IDR every half second.
+//! intervals, and a received IDR resets that backoff. The timer re-requests
+//! only while no IDR answered the last request, and an IDR answers once its
+//! header is read, so neither an IDR slower to cross than the next request
+//! nor a renderer that takes frames but shows nothing brings another IDR
+//! every half second.
 use crate::{KeyframeReason, viewer::DecoderState};
 use std::{
     collections::VecDeque,
@@ -53,8 +55,8 @@ struct Awaiting {
     attempt: u32,
     /// No request but a `User` one goes before this.
     not_before: Instant,
-    /// An IDR arrived since the last request: the timer waits for it to be
-    /// shown instead of asking again.
+    /// An IDR began to arrive since the last request: the timer waits for it
+    /// to be shown instead of asking again.
     answered: bool,
     /// The first IDR handed out in this episode, `(generation, frame_id)`.
     /// Presenting it, or a later frame of its generation, ends the episode.
@@ -142,6 +144,15 @@ impl Recovery {
                 self.retry(now).then_some(awaiting.reason)
             }
             _ => None,
+        }
+    }
+
+    /// An IDR's header was read: the host answered, so the timer waits for it
+    /// instead of asking again. The hold and the backoff still apply to other
+    /// requests until it reaches the sink.
+    pub fn on_idr_arriving(&mut self) {
+        if let Phase::AwaitingIdr(awaiting) = &mut self.phase {
+            awaiting.answered = true;
         }
     }
 
@@ -404,6 +415,19 @@ mod tests {
         recovery.on_host_state(true, false, at(300));
         assert!(recovery.live());
         assert_eq!(recovery.tick(at(5000), false), None);
+        assert_eq!(recovery.requested(), 0);
+
+        // An IDR's header stops the timer while its payload crosses, but the
+        // hold still holds back other requests until the IDR reaches the sink.
+        let mut recovery = live(start);
+        recovery.on_host_state(true, true, at(0));
+        recovery.on_idr_arriving();
+        assert!(!recovery.request(DecoderError, at(700)));
+        assert_eq!(recovery.tick(at(1500), false), None);
+        recovery.on_idr_received(at(2000));
+        recovery.on_idr_handed(2, 1);
+        recovery.on_presented(2, 1);
+        assert!(recovery.live());
         assert_eq!(recovery.requested(), 0);
     }
 }

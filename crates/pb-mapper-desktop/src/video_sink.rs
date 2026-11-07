@@ -380,6 +380,17 @@ impl VideoSink {
         self.ready.notify_one();
     }
 
+    /// The read task read an IDR's header: its payload is on the way, so the
+    /// awaited IDR is answered now, not once its last byte lands. The timer
+    /// then follows an IDR that takes longer than the hold or a backoff step
+    /// to cross instead of asking for another.
+    pub(crate) fn idr_arriving(&self) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.state.lock().recovery.on_idr_arriving();
+    }
+
     /// The consumer fell behind: drop the queue, wait for the next IDR and
     /// ask for one, and let the fps cap know once it judges the consumer.
     fn drop_to_idr(&self, state: &mut SinkState, cause: Backlog, now: Instant) {

@@ -9,19 +9,14 @@ use pb_mapper_desktop::{
     ViewerStatus,
 };
 use pb_mapper_server::DirectServerConfig;
-use pb_mapper_testkit::{Relay, admin_credential};
+use pb_mapper_testkit::{Relay, Shape, admin_credential, shaped_link};
 use std::{
-    net::SocketAddr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
-};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
 
 /// What a test backend saw, shared with the test.
@@ -277,61 +272,6 @@ impl Drop for Renderer {
     }
 }
 
-/// A TCP hop in front of the relay that holds every byte `delay_ms` in each
-/// direction. The delay can change while connections run; bytes stay in order.
-async fn delayed_link(relay: SocketAddr, delay_ms: Arc<AtomicU64>) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((near, _)) = listener.accept().await {
-            let Ok(far) = tokio::net::TcpStream::connect(relay).await else {
-                return;
-            };
-            near.set_nodelay(true).unwrap();
-            far.set_nodelay(true).unwrap();
-            let (near_read, near_write) = near.into_split();
-            let (far_read, far_write) = far.into_split();
-            tokio::spawn(delayed_copy(near_read, far_write, delay_ms.clone()));
-            tokio::spawn(delayed_copy(far_read, near_write, delay_ms.clone()));
-        }
-    });
-    addr
-}
-async fn delayed_copy(
-    mut read: OwnedReadHalf,
-    mut write: OwnedWriteHalf,
-    delay_ms: Arc<AtomicU64>,
-) {
-    let (send, mut receive) = tokio::sync::mpsc::channel::<(tokio::time::Instant, Vec<u8>)>(256);
-    let incoming = async move {
-        loop {
-            let mut bytes = vec![0; 16 * 1024];
-            match read.read(&mut bytes).await {
-                Ok(0) | Err(_) => break,
-                Ok(size) => bytes.truncate(size),
-            }
-            if send
-                .send((tokio::time::Instant::now(), bytes))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    };
-    let outgoing = async move {
-        while let Some((read_at, bytes)) = receive.recv().await {
-            let delay = Duration::from_millis(delay_ms.load(Ordering::Relaxed));
-            tokio::time::sleep_until(read_at + delay).await;
-            if write.write_all(&bytes).await.is_err() {
-                return;
-            }
-        }
-        let _ = write.shutdown().await;
-    };
-    tokio::join!(incoming, outgoing);
-}
-
 async fn wait(viewer: &Viewer, condition: impl Fn(&ViewerStatus) -> bool) -> ViewerStatus {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -580,8 +520,8 @@ async fn pause_stops_video_and_resume_starts_with_an_idr() {
     let observed = Arc::new(Observation::default());
     let cursor = Arc::new(AtomicU32::new(0));
     let host = encoded_host(&client, "desktop:pause", &observed, &cursor, 4096).await;
-    let delay_ms = Arc::new(AtomicU64::new(0));
-    let link = delayed_link(relay.addr(), delay_ms.clone()).await;
+    let shape = Arc::new(Shape::default());
+    let link = shaped_link(relay.addr(), shape.clone()).await;
     let remote = Client::from_credential(link.to_string(), admin_credential(), true, None);
     let viewer = relay_viewer(&remote, &host, VideoCodec::H264).await;
     let renderer = Renderer::start(&viewer);
@@ -598,7 +538,7 @@ async fn pause_stops_video_and_resume_starts_with_an_idr() {
     let pulled = renderer.pulled();
     // A slower link shows in the host's probe round trip only if the paused
     // viewer still echoes probes.
-    delay_ms.store(100, Ordering::Relaxed);
+    shape.delay_ms.store(100, Ordering::Relaxed);
     let paused = wait(&viewer, |status| {
         status.last_video_age_ms.is_some_and(|age| age >= 2000)
             && status.stats.rtt_ms.is_some_and(|rtt| rtt >= 150)
@@ -609,7 +549,7 @@ async fn pause_stops_video_and_resume_starts_with_an_idr() {
     assert_eq!(host.status().state, HostState::Paused);
     assert_eq!(renderer.pulled(), pulled);
 
-    delay_ms.store(0, Ordering::Relaxed);
+    shape.delay_ms.store(0, Ordering::Relaxed);
     viewer.resume();
     let first = renderer.unit(pulled).await;
     assert!(first.keyframe && first.discontinuity, "{first:?}");
@@ -630,7 +570,9 @@ async fn control_grant_with_queued_video_keeps_the_session() {
     let observed = Arc::new(Observation::default());
     let cursor = Arc::new(AtomicU32::new(0));
     let host = encoded_host(&client, "desktop:grant", &observed, &cursor, 64 * 1024).await;
-    let link = delayed_link(relay.addr(), Arc::new(AtomicU64::new(50))).await;
+    let shape = Arc::new(Shape::default());
+    shape.delay_ms.store(50, Ordering::Relaxed);
+    let link = shaped_link(relay.addr(), shape).await;
     let remote = Client::from_credential(link.to_string(), admin_credential(), true, None);
     let viewer = relay_viewer(&remote, &host, VideoCodec::H264).await;
     let renderer = Renderer::start(&viewer);

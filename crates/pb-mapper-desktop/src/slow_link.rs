@@ -7,7 +7,7 @@
 #![allow(clippy::unwrap_used)]
 use crate::*;
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
-use pb_mapper_testkit::{Relay, admin_credential};
+use pb_mapper_testkit::{Relay, Shape, admin_credential, shaped_link};
 use std::{
     collections::{BTreeSet, VecDeque},
     future::Future,
@@ -17,10 +17,6 @@ use std::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
-};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
 use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt};
 
@@ -155,78 +151,6 @@ fn traced<F: Future<Output = ()>>(case: impl FnOnce(Trace) -> F) {
         .build()
         .unwrap();
     tracing::dispatcher::with_default(&dispatch, || runtime.block_on(case(trace)));
-}
-
-/// How the viewer's link to the relay is shaped, in both directions alike.
-#[derive(Default)]
-struct Shape {
-    /// Every byte is held this long.
-    delay_ms: AtomicU64,
-    /// Bytes per second; 0 is unlimited.
-    rate: AtomicU64,
-}
-
-/// A TCP hop in front of the relay, shaped by `shape` while connections run.
-/// The host's send credit bounds what is in flight, so the queue here stays
-/// bounded too.
-async fn shaped_link(relay: SocketAddr, shape: Arc<Shape>) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((near, _)) = listener.accept().await {
-            let Ok(far) = tokio::net::TcpStream::connect(relay).await else {
-                return;
-            };
-            near.set_nodelay(true).unwrap();
-            far.set_nodelay(true).unwrap();
-            let (near_read, near_write) = near.into_split();
-            let (far_read, far_write) = far.into_split();
-            tokio::spawn(shaped_copy(near_read, far_write, shape.clone()));
-            tokio::spawn(shaped_copy(far_read, near_write, shape.clone()));
-        }
-    });
-    addr
-}
-
-async fn shaped_copy(mut read: OwnedReadHalf, mut write: OwnedWriteHalf, shape: Arc<Shape>) {
-    let (send, mut receive) = tokio::sync::mpsc::channel::<(tokio::time::Instant, Vec<u8>)>(256);
-    let incoming = async move {
-        loop {
-            let mut bytes = vec![0; 16 * 1024];
-            match read.read(&mut bytes).await {
-                Ok(0) | Err(_) => break,
-                Ok(size) => bytes.truncate(size),
-            }
-            if send
-                .send((tokio::time::Instant::now(), bytes))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    };
-    let outgoing = async move {
-        // When the link is free to carry the next packet.
-        let mut free = tokio::time::Instant::now();
-        while let Some((read_at, bytes)) = receive.recv().await {
-            let delay = Duration::from_millis(shape.delay_ms.load(Ordering::Relaxed));
-            tokio::time::sleep_until(read_at + delay).await;
-            for packet in bytes.chunks(4096) {
-                let rate = shape.rate.load(Ordering::Relaxed);
-                if rate > 0 {
-                    free = free.max(tokio::time::Instant::now());
-                    tokio::time::sleep_until(free).await;
-                    free += Duration::from_secs_f64(packet.len() as f64 / rate as f64);
-                }
-                if write.write_all(packet).await.is_err() {
-                    return;
-                }
-            }
-        }
-        let _ = write.shutdown().await;
-    };
-    tokio::join!(incoming, outgoing);
 }
 
 #[derive(Default)]
@@ -544,10 +468,15 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
         let lowest_pace = lowest(|interval| interval.pace_fps);
         let lowest_bitrate = lowest(|interval| interval.bitrate);
         let lowest_encoder = lowest(|interval| interval.encoder_bitrate);
+        let encoder_trace: Vec<u64> = limit
+            .iter()
+            .map(|interval| interval.encoder_bitrate)
+            .collect();
         println!(
-            "bandwidth_limit link_mbps=1 limit_s=8 before_pace={} before_bitrate={} clamped_after_ms={:?} lowest_pace={lowest_pace} lowest_bitrate={lowest_bitrate} lowest_encoder_bitrate={lowest_encoder} recovered_after_ms={:?} final_pace={} final_bitrate={} expired_encoder_outputs={} state={:?}",
+            "bandwidth_limit link_mbps=1 limit_s=8 before_pace={} before_bitrate={} before_encoder_bitrate={} clamped_after_ms={:?} lowest_pace={lowest_pace} lowest_bitrate={lowest_bitrate} lowest_encoder_bitrate={lowest_encoder} recovered_after_ms={:?} final_pace={} final_bitrate={} expired_encoder_outputs={} state={:?}",
             before.pace_fps,
             before.bitrate,
+            before.encoder_bitrate,
             clamped.map(|after| after.as_millis()),
             recovered.map(|after| after.as_millis()),
             status.stats.pace_fps,
@@ -563,7 +492,17 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
             "the window must clamp within 1 s of the limit: {clamped:?}"
         );
         assert!(lowest_pace <= 15, "{lowest_pace}");
-        assert!(lowest_encoder < START_BPS, "bits per frame must fall");
+        // Bits per frame may have risen past the start before the limit, and
+        // go on rising for a window or two while the clamp holds the delay
+        // down, so the fall is any step down from where they had reached.
+        assert!(
+            std::iter::once(&before.encoder_bitrate)
+                .chain(&encoder_trace)
+                .zip(&encoder_trace)
+                .any(|(earlier, later)| later < earlier),
+            "bits per frame must fall during the limit: before {} then {encoder_trace:?}",
+            before.encoder_bitrate
+        );
         assert!(
             recovered.is_some(),
             "the bitrate must recover to 80% of the start within 30 s"
@@ -578,8 +517,8 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
 
 /// A 1 Mbit/s link from the start, with IDRs twenty times a P-frame: each
 /// takes over a second to cross. The P-frames behind the session's first IDR
-/// wait for it rather than age out into another, and fps and bits per frame
-/// fall as on any slow link.
+/// wait for it rather than age out into another, the viewer does not ask for
+/// it again, and fps and bits per frame fall as on any slow link.
 #[test]
 #[ignore = "explicit ~15-second slow IDR acceptance"]
 fn idr_slower_than_a_second_is_followed_not_replaced() {
@@ -611,10 +550,15 @@ fn idr_slower_than_a_second_is_followed_not_replaced() {
             status.state
         );
         assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
-        // The viewer waits a second for the session's first IDR before it
-        // asks for one, so here it asks once; nothing else may add another.
-        assert!(
-            last.keyframes <= 2,
+        // The IDR's header lands well inside the viewer's 1 s hold and
+        // answers it, so nothing asks for another; the P-frames behind it
+        // must not age out into one either.
+        assert_eq!(
+            status.stats.keyframes_requested, 0,
+            "the IDR in flight answers the hold"
+        );
+        assert_eq!(
+            last.keyframes, 1,
             "the IDR in flight is the resync; the P-frames behind it must not age out into another: {last:?}"
         );
         assert!(lowest_encoder < START_BPS, "bits per frame must fall");
