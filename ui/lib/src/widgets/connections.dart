@@ -73,7 +73,7 @@ class _ConnectionsDisclosureState extends State<ConnectionsDisclosure> {
               duration: Motion.of(context, Motion.fast),
               child: Icon(
                 AppIcons.chevronRight,
-                size: 15,
+                size: AppIconSize.inline,
                 color: scheme.onSurfaceVariant,
               ),
             ),

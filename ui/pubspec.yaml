@@ -38,9 +38,6 @@ dependencies:
     sdk: flutter
   intl: any
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
   # Native buffers for the galaxy's per-frame call into pb_mapper_galaxy_frame_v1.
   ffi: ^2.1.0
   # The app's one icon family (Lucide, ISC), mapped in lib/src/theme/app_icons.dart.
@@ -54,6 +51,11 @@ dependencies:
   toastification: ^3.2.0
   package_info_plus: ^10.2.2
   crypto: ^3.0.7
+  # The remote desktop invitation as a QR code, drawn by our own painter.
+  qr: 3.0.3
+  # Scanning that QR code on Android and iOS, with ML Kit's bundled model.
+  # Frames never reach Dart (returnImage stays false).
+  mobile_scanner: 7.5.0
 
 # The published tray_manager sizes the Windows tray icon with GetSystemMetrics,
 # which is not per-monitor DPI aware, and never reloads it when the scaling

@@ -333,7 +333,7 @@ class _Pill extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 13, color: ink),
+          Icon(icon, size: AppIconSize.inline, color: ink),
           const SizedBox(width: 5),
           Text(
             text,
@@ -534,7 +534,7 @@ class _Missed extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(AppIcons.info, size: 14, color: caution),
+          Icon(AppIcons.info, size: AppIconSize.inline, color: caution),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -727,7 +727,11 @@ class _EventRowState extends State<_EventRow> {
                     color: color.withValues(alpha: 0.13),
                     shape: BoxShape.circle,
                   ),
-                  child: Icon(reading.icon, size: 15, color: color),
+                  child: Icon(
+                    reading.icon,
+                    size: AppIconSize.inline,
+                    color: color,
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(

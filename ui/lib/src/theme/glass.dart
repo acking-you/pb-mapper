@@ -702,6 +702,7 @@ class GlassSegment<T> {
     required this.label,
     this.icon,
     this.key,
+    this.enabled = true,
   });
 
   final T value;
@@ -710,6 +711,10 @@ class GlassSegment<T> {
 
   /// The key of its tappable area.
   final Key? key;
+
+  /// Whether it can be chosen. A disabled segment stays in place, faded, so
+  /// the choice it would offer is still visible.
+  final bool enabled;
 }
 
 /// A segmented control in the app's material: a recessed track with a pane of
@@ -808,9 +813,14 @@ class GlassSegmented<T> extends StatelessWidget {
   ) {
     final scheme = Theme.of(context).colorScheme;
     final chosen = segment.value == selected;
-    final ink = chosen ? scheme.onSurface : scheme.onSurfaceVariant;
+    final ink = !segment.enabled
+        ? scheme.onSurface.withValues(alpha: 0.38)
+        : chosen
+        ? scheme.onSurface
+        : scheme.onSurfaceVariant;
     return Semantics(
       selected: chosen,
+      enabled: segment.enabled,
       button: true,
       child: Material(
         type: MaterialType.transparency,
@@ -818,7 +828,9 @@ class GlassSegmented<T> extends StatelessWidget {
           key: segment.key,
           mouseCursor: clickable,
           borderRadius: radius,
-          onTap: chosen ? null : () => onChanged(segment.value),
+          onTap: chosen || !segment.enabled
+              ? null
+              : () => onChanged(segment.value),
           child: Center(
             child: Row(
               mainAxisSize: MainAxisSize.min,

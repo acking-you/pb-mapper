@@ -63,7 +63,7 @@ class GalaxyPanel extends StatelessWidget {
           child: IconButton(
             key: const Key('galaxy-panel-close'),
             tooltip: context.l10n.close,
-            icon: const Icon(AppIcons.close, size: 17),
+            icon: const Icon(AppIcons.close, size: AppIconSize.button),
             onPressed: onClose,
           ),
         ),
@@ -149,7 +149,11 @@ class _SystemDetail extends StatelessWidget {
         _Header(
           leading: system.home
               ? const BrandMark(size: 34)
-              : Icon(AppIcons.relay, size: 28, color: scheme.onSurfaceVariant),
+              : Icon(
+                  AppIcons.relayLarge,
+                  size: AppIconSize.tile,
+                  color: scheme.onSurfaceVariant,
+                ),
           title: system.label,
           subtitle: system.home
               ? '${l10n.summaryShared(shares)} · ${l10n.summaryConnected(connections)}'
@@ -336,12 +340,15 @@ class _PlanetDetail extends StatelessWidget {
                       tooltip: l10n.tunnelDiagnostics,
                       onPressed: () =>
                           openTunnelDiagnostics(context, store, tunnel),
-                      icon: const Icon(AppIcons.diagnostics, size: 17),
+                      icon: const Icon(
+                        AppIcons.diagnostics,
+                        size: AppIconSize.button,
+                      ),
                     ),
                   IconButton(
                     tooltip: l10n.copyKey,
                     onPressed: () => copyText(context, tunnel.key),
-                    icon: const Icon(AppIcons.copy, size: 17),
+                    icon: const Icon(AppIcons.copy, size: AppIconSize.button),
                   ),
                 ],
               ),
@@ -397,7 +404,7 @@ class _PlanetDetail extends StatelessWidget {
                   IconButton(
                     tooltip: l10n.copyKey,
                     onPressed: () => copyText(context, name),
-                    icon: const Icon(AppIcons.copy, size: 17),
+                    icon: const Icon(AppIcons.copy, size: AppIconSize.button),
                   ),
                 ],
               ),
@@ -421,7 +428,7 @@ class _Fact extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 14, color: scheme.onSurfaceVariant),
+        Icon(icon, size: AppIconSize.inline, color: scheme.onSurfaceVariant),
         const SizedBox(width: 4),
         Text(text, style: mono(fontSize: 12, color: scheme.onSurfaceVariant)),
       ],

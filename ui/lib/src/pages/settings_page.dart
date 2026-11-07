@@ -320,7 +320,7 @@ class _RelayCardState extends State<RelayCard> {
                     setState(() => _showCredential = !_showCredential),
                 icon: Icon(
                   _showCredential ? AppIcons.hide : AppIcons.show,
-                  size: 17,
+                  size: AppIconSize.button,
                 ),
               ),
             ),

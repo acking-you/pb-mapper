@@ -194,6 +194,13 @@ The native title bar is hidden on desktop. The page's own title bar is window
 chrome: its empty space drags, and on Windows and Linux it carries the caption
 buttons (`shell/window_chrome.dart`). macOS keeps its traffic lights.
 
+The caption buttons are 46×32 with a 6 px radius, centred in the 58 px bar,
+16 px after the page's last action and 16 px inside the sheet's edge, so the
+close button's red never reaches the sheet's rounded corner; the setup screen
+keeps them 16 px from the window's edge. Their glyphs are drawn, not icons:
+10 px, a one-pixel stroke, snapped to device pixels so they stay sharp at
+125 % and 150 %.
+
 Below 720 px (900 px on a touch screen) the rail becomes a bottom bar and the
 page fills the window. Cards reflow by the width they get, not by a global
 breakpoint.
@@ -201,7 +208,15 @@ breakpoint.
 Type is Google Sans Flex for prose (Segoe UI on Windows) and Geist Mono for
 keys, addresses and logs; Chinese falls back to the bundled Noto Sans SC subset
 on Windows and Linux and to PingFang SC on Apple platforms
-(`theme/fonts.dart`). Icons are Lucide at its 300 stroke (`theme/app_icons.dart`).
+(`theme/fonts.dart`).
+
+Icons are Lucide only, through `theme/app_icons.dart`, named for what each
+means here; no Material `Icons.*`. Four sizes (`AppIconSize`): 16 beside a
+label or inline, 18 in buttons and menus, 20 in the rail and the bottom bar,
+24 for empty states and tiles. Weight follows size: the 400 stroke up to
+20 px, where the 300 stroke thins to grey, and the 300 stroke (the `…Large`
+constants) from 24 px. An icon takes the colour of its text; status is told
+by coloured dots, and blue stays for this computer and live traffic.
 
 ## The galaxy
 

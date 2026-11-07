@@ -117,7 +117,11 @@ class _TitleBar extends StatelessWidget {
         children: [
           const Positioned.fill(child: WindowDragArea()),
           Padding(
-            padding: EdgeInsetsDirectional.only(start: lead, end: 8),
+            // The caption buttons keep clear of the sheet's rounded corner.
+            padding: EdgeInsetsDirectional.only(
+              start: lead,
+              end: drawsCaptionButtons ? 16 : 8,
+            ),
             child: Row(
               children: [
                 Expanded(
@@ -164,8 +168,8 @@ class _TitleBar extends StatelessWidget {
                     ),
                 ],
                 if (drawsCaptionButtons) ...[
-                  const SizedBox(width: 10),
-                  const CaptionButtons(height: 36),
+                  const SizedBox(width: 16),
+                  const CaptionButtons(),
                 ],
               ],
             ),

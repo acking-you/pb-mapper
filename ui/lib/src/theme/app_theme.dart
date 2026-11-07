@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
 import 'package:pb_mapper_ui/src/theme/metrics.dart';
@@ -99,6 +100,12 @@ Color cautionColor(ColorScheme scheme) => scheme.brightness == Brightness.light
 /// uses `onSurfaceVariant`.
 Color onSurfaceMuted(ColorScheme scheme) =>
     scheme.onSurface.withValues(alpha: 0.55);
+
+/// Text a step quieter than `onSurfaceVariant`: help under a control, a
+/// footnote, a service name beside its title. Still above 4.5:1 on cards.
+Color quietText(ColorScheme scheme) => scheme.brightness == Brightness.light
+    ? const Color(0xFF6E6E73)
+    : const Color(0xFF8E8E93);
 
 /// A faint neutral wash: a highlighted option, a chip that is "on" without
 /// being a status.
@@ -397,6 +404,7 @@ ThemeData _base(ColorScheme scheme) {
     iconButtonTheme: IconButtonThemeData(
       style: IconButton.styleFrom(
         minimumSize: const Size(44, 44),
+        iconSize: AppIconSize.button,
         foregroundColor: scheme.onSurfaceVariant,
         shape: const CircleBorder(),
       ),
@@ -611,7 +619,6 @@ ThemeData desktopize(ThemeData base) {
     iconButtonTheme: IconButtonThemeData(
       style: IconButton.styleFrom(
         minimumSize: const Size(34, 34),
-        iconSize: 18,
       ).copyWith(mouseCursor: clickable).merge(base.iconButtonTheme.style),
     ),
     listTileTheme: base.listTileTheme.copyWith(mouseCursor: clickable),

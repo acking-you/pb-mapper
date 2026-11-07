@@ -1,0 +1,2 @@
+/* 扫描远程桌面邀请时的相机权限说明。 */
+"NSCameraUsageDescription" = "pb-mapper 使用相机扫描另一台电脑的远程桌面二维码，画面不会保存或上传。";

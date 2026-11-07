@@ -580,7 +580,11 @@ class _NamespaceNote extends StatelessWidget {
     return Row(
       key: const Key('tunnel-namespace'),
       children: [
-        Icon(AppIcons.key, size: 15, color: scheme.onSurfaceVariant),
+        Icon(
+          AppIcons.key,
+          size: AppIconSize.inline,
+          color: scheme.onSurfaceVariant,
+        ),
         const SizedBox(width: 8),
         Expanded(
           child: Text(
@@ -596,7 +600,7 @@ class _NamespaceNote extends StatelessWidget {
             tooltip: l10n.tunnelNamespaceClear,
             visualDensity: VisualDensity.compact,
             onPressed: onClear,
-            icon: const Icon(AppIcons.close, size: 15),
+            icon: const Icon(AppIcons.close, size: AppIconSize.inline),
           ),
       ],
     );

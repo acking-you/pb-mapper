@@ -147,7 +147,7 @@ class _CredentialRow extends StatelessWidget {
               color: color.withValues(alpha: 0.14),
               borderRadius: BorderRadius.circular(10),
             ),
-            child: Icon(AppIcons.key, size: 17, color: color),
+            child: Icon(AppIcons.key, size: AppIconSize.button, color: color),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -199,7 +199,7 @@ class _CredentialRow extends StatelessWidget {
                   l10n.credentialSetupCopied,
                 );
               },
-              icon: const Icon(AppIcons.export, size: 17),
+              icon: const Icon(AppIcons.export, size: AppIconSize.button),
             ),
           _CredentialMenu(credential: key, relay: relay, store: store),
         ],
@@ -299,7 +299,11 @@ class _CredentialMenu extends StatelessWidget {
       value: value,
       child: Row(
         children: [
-          Icon(icon, size: 17, color: danger ? scheme.error : null),
+          Icon(
+            icon,
+            size: AppIconSize.button,
+            color: danger ? scheme.error : null,
+          ),
           const SizedBox(width: 10),
           Text(label, style: danger ? TextStyle(color: scheme.error) : null),
         ],
