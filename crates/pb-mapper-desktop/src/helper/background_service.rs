@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Host, HostIdentity, HostOptions, HostState};
+use crate::{Host, HostIdentity, HostOptions, HostState, StopReason};
 use pb_mapper_client::sdk::{Client, ClientConfig};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
@@ -182,17 +182,22 @@ impl Supervisor {
             message: self.message.clone(),
         }
     }
+    /// Stop hosting; a connected viewer hears `Stopped{host_stopped}`.
     async fn deactivate(&mut self) {
+        self.deactivate_with(StopReason::HostStopped).await;
+    }
+    /// Stop hosting, telling a connected viewer why, as `Host::stop_with`.
+    async fn deactivate_with(&mut self, reason: StopReason) {
         if let Some(pending) = self.pending.take() {
             pending.abort();
             // A completed task may already own a Host. Stopping that result
             // avoids detaching it when stop races relay readiness.
             if let Ok(Ok(host)) = pending.await {
-                let _ = host.stop().await;
+                let _ = host.stop_with(reason).await;
             }
         }
         if let Some(host) = self.host.take() {
-            let _ = host.stop().await;
+            let _ = host.stop_with(reason).await;
         }
         self.session = None;
         self.capture_failure_since = None;
@@ -267,7 +272,8 @@ impl Supervisor {
             }
             Command::Revoke {} | Command::RevokeScope { .. } => {
                 self.enabled = false;
-                self.deactivate().await;
+                // Its viewer's access is withdrawn, so it does not reconnect.
+                self.deactivate_with(StopReason::Revoked).await;
                 self.saved = None;
                 self.persist_restriction(root).await?;
                 self.message.clear();
@@ -821,6 +827,102 @@ mod tests {
             .unwrap();
         assert_eq!(host.invitation().encode(), invitation);
         host.stop().await.unwrap();
+    }
+
+    /// Poll `condition` for up to 5 s.
+    async fn until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A one-pixel desktop, enough to hold a viewer's session open.
+    struct Pixel;
+    impl crate::Backend for Pixel {
+        fn display(&mut self) -> Result<crate::Display> {
+            Ok(crate::Display {
+                id: 1,
+                name: "background".into(),
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            })
+        }
+        fn capture(&mut self) -> Result<Vec<u8>> {
+            Ok(vec![1])
+        }
+        fn input(&mut self, _: &crate::Input) -> Result<()> {
+            Ok(())
+        }
+        fn release(&mut self) {}
+    }
+
+    /// Revoking the grant tells the background host's viewer `revoked`, as an
+    /// in-app host's revocation does, so it does not reconnect; stopping is
+    /// still `host_stopped`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn revocation_tells_the_viewer_its_access_was_withdrawn() {
+        use crate::{QualityPreset, VideoCodec, VideoLimits, Viewer, ViewerConfig};
+        use crate::{ViewerReason, ViewerState};
+        use pb_mapper_client::sdk::{ConnectOptions, PathPolicy};
+        let relay = pb_mapper_testkit::Relay::start("background-revocation").await;
+        let mut configured = options();
+        configured.server = relay.addr().to_string();
+        configured.credential = pb_mapper_testkit::TEST_ADMIN_KEY.into();
+        let saved = Saved::prepare(configured, "owner-one", None, None).unwrap();
+        let client = client(&saved.options).unwrap();
+        for (command, heard) in [
+            (Command::Stop {}, ViewerReason::HostStopped),
+            (Command::Revoke {}, ViewerReason::Revoked),
+        ] {
+            let host = Host::start_with_backend_and_identity(
+                &client,
+                HostOptions {
+                    service: saved.options.settings.service.clone(),
+                    display_id: 1,
+                    allow_control: false,
+                    allow_direct: false,
+                },
+                Arc::new(|| Ok(Box::new(Pixel))),
+                None,
+                saved.identity.clone(),
+            )
+            .await
+            .unwrap();
+            let viewer = Viewer::connect(
+                &client,
+                host.invitation(),
+                ConnectOptions {
+                    path: PathPolicy::RelayOnly,
+                    ..Default::default()
+                },
+                ViewerConfig {
+                    codecs: vec![VideoCodec::Jpeg],
+                    limits: VideoLimits::for_viewer(60.0),
+                    quality: QualityPreset::Balanced,
+                    progress: None,
+                },
+            )
+            .await
+            .unwrap();
+            // `Accepted` reaches the viewer before the host holds the session.
+            until(|| host.status().viewer.is_some()).await;
+            let mut supervisor = state(saved.clone());
+            supervisor.host = Some(host);
+            // Outside the protected installation persisting fails, but only
+            // after the host has stopped.
+            let _ = supervisor
+                .command(command, &std::env::temp_dir(), "owner-one")
+                .await;
+            assert!(supervisor.host.is_none());
+            until(|| viewer.status().state == ViewerState::Stopped).await;
+            assert_eq!(viewer.status().reason, Some(heard));
+        }
     }
 
     #[test]
