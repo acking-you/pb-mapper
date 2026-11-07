@@ -128,6 +128,7 @@ impl Backend for Fake {
                 width: 16,
                 height: 10,
                 keyframe,
+                gop: u32::MAX,
                 ..VideoFormat::default()
             },
             bytes: vec![1; 8],
@@ -161,9 +162,6 @@ impl Backend for Fake {
     }
     fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
         *self.guard.lock()
-    }
-    fn video_gop(&self) -> Option<u32> {
-        Some(u32::MAX)
     }
 }
 

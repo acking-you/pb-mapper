@@ -204,6 +204,11 @@ pub struct VideoFormat {
     /// Encoder submit to output, for the host's `host_us`. Zero when unknown.
     #[serde(default)]
     pub encode_us: u32,
+    /// The GOP length the encoder read back when it was built, for the host's
+    /// `gop`. Zero when unknown (JPEG, or an encoder that reports none). It
+    /// rides with each unit, so it crosses the helper IPC as the unit does.
+    #[serde(default)]
+    pub gop: u32,
 }
 
 pub struct EncodedFrame {
@@ -411,11 +416,6 @@ pub trait Backend: 'static {
     /// Units submitted to the encoder and not yet output (the submit gate).
     fn pending_video(&self) -> usize {
         0
-    }
-    /// The GOP length the current encoder read back when it was built. `None`
-    /// without an encoder, or when it reports none.
-    fn video_gop(&self) -> Option<u32> {
-        None
     }
     fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
         if &self.context()? != expected {
