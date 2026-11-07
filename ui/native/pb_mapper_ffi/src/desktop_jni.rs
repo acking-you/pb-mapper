@@ -142,6 +142,24 @@ pub extern "system" fn Java_com_pb_1mapper_ui_DesktopVideoNative_keyframe(
     }
 }
 
+/// The decoder failed, and why (160 characters are kept). A message JNI
+/// cannot read still counts, without its text.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_pb_1mapper_ui_DesktopVideoNative_failed(
+    mut env: JNIEnv,
+    _class: JClass,
+    consumer: jlong,
+    message: JString,
+) -> jint {
+    call(&mut env, |env| {
+        let Ok(consumer) = u64::try_from(consumer) else {
+            return Ok(INVALID);
+        };
+        let message: String = env.get_string(&message).map(Into::into).unwrap_or_default();
+        Ok(video::failed(consumer, &message))
+    })
+}
+
 /// The decoder's name (64 characters are kept) and whether it is hardware.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_pb_1mapper_ui_DesktopVideoNative_report(

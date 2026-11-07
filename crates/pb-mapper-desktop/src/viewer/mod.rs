@@ -1034,8 +1034,13 @@ impl Writer<'_> {
             let now = Instant::now();
             let mut failure = None;
             if now >= next_tick {
-                if self.tick(now) {
-                    failure = Some((ViewerReason::DecoderFailed, DECODER_FAILED.into()));
+                if let Some(error) = self.tick(now) {
+                    let message = if error.is_empty() {
+                        DECODER_FAILED.into()
+                    } else {
+                        format!("{DECODER_FAILED}: {error}")
+                    };
+                    failure = Some((ViewerReason::DecoderFailed, message));
                 }
                 next_tick = now + VIEWER_TICK;
             }
@@ -1066,9 +1071,9 @@ impl Writer<'_> {
     }
 
     /// Every `VIEWER_TICK`: the fps cap, keyframe retries and the stall
-    /// watchdog; once a second also the path and the stats roll-up. True when
-    /// the decoder failed for good.
-    fn tick(&mut self, now: Instant) -> bool {
+    /// watchdog; once a second also the path and the stats roll-up. Why the
+    /// decoder failed, once it failed for good.
+    fn tick(&mut self, now: Instant) -> Option<String> {
         let second = self.ticks.is_multiple_of(TICKS_PER_SECOND);
         self.ticks += 1;
         if second && let Some(connection) = self.connection {
@@ -1096,7 +1101,7 @@ impl Writer<'_> {
                 .lock()
                 .roll(now, streaming, sink.presented_fps, sink.viewer_ms);
         }
-        self.sink.decoder_failed()
+        self.sink.decoder_failure()
     }
 }
 
@@ -1419,14 +1424,16 @@ mod tests {
         assert!(consumer.presented(1, 1));
 
         // The first error asks for an IDR; the fifth with no picture since
-        // gives up, and the app is told why.
-        assert!(consumer.keyframe(KeyframeReason::DecoderError));
+        // gives up, and the app is told why, in the decoder's words.
+        let error = "Create H.264 decoder (0x80040154)";
+        assert!(consumer.failed(error));
         for _ in 0..4 {
-            assert!(!consumer.keyframe(KeyframeReason::DecoderError));
+            assert!(!consumer.failed(error));
         }
         eventually(|| viewer.status().state == ViewerState::Stopped).await;
         let status = viewer.status();
         assert_eq!(status.reason, Some(ViewerReason::DecoderFailed));
+        assert!(status.message.contains("0x80040154"), "{}", status.message);
         assert_eq!(status.decoder.state, DecoderState::Failed);
         assert!(matches!(
             consumer.next(Duration::ZERO, 1 << 20),

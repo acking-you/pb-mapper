@@ -8,6 +8,8 @@ internal interface VideoSourceApi {
     fun next(consumer: Long, timeoutMs: Int, buffer: ByteBuffer, meta: LongArray): Int
     fun presented(consumer: Long, generation: Long, frameId: Long): Int
     fun keyframe(consumer: Long, reason: Int): Int
+    /** A decoder error and its text, which Rust logs and counts toward giving up. */
+    fun failed(consumer: Long, message: String): Int
     fun report(consumer: Long, decoder: String, hardware: Boolean): Int
     fun detach(consumer: Long)
 }
@@ -51,7 +53,6 @@ internal object DesktopVideoNative {
     const val FLAG_JPEG = 4L
     const val FLAG_DUPLICATE = 8L
 
-    const val REASON_DECODER_ERROR = 0
     const val REASON_GAP = 1
     const val REASON_STALL = 3
 
@@ -60,6 +61,7 @@ internal object DesktopVideoNative {
     @JvmStatic external fun next(consumer: Long, timeoutMs: Int, buffer: ByteBuffer, meta: LongArray): Int
     @JvmStatic external fun presented(consumer: Long, generation: Long, frameId: Long): Int
     @JvmStatic external fun keyframe(consumer: Long, reason: Int): Int
+    @JvmStatic external fun failed(consumer: Long, message: String): Int
     @JvmStatic external fun report(consumer: Long, decoder: String, hardware: Boolean): Int
     @JvmStatic external fun detach(consumer: Long)
 
@@ -72,6 +74,7 @@ internal object DesktopVideoNative {
         override fun presented(consumer: Long, generation: Long, frameId: Long) =
             DesktopVideoNative.presented(consumer, generation, frameId)
         override fun keyframe(consumer: Long, reason: Int) = DesktopVideoNative.keyframe(consumer, reason)
+        override fun failed(consumer: Long, message: String) = DesktopVideoNative.failed(consumer, message)
         override fun report(consumer: Long, decoder: String, hardware: Boolean) =
             DesktopVideoNative.report(consumer, decoder, hardware)
         override fun detach(consumer: Long) = DesktopVideoNative.detach(consumer)

@@ -55,6 +55,8 @@ pub(crate) const BACKLOG_MIN_UNITS: usize = 3;
 pub(crate) const IDR_GRACE: Duration = Duration::from_millis(500);
 /// Longest decoder name kept for the overlay.
 const DECODER_NAME_MAX: usize = 64;
+/// Longest decoder failure text kept for the end message.
+const DECODER_ERROR_MAX: usize = 160;
 /// A detached sink has no session limits; this is the largest allowed.
 const DETACHED_MAX_FPS: u32 = 120;
 
@@ -181,6 +183,8 @@ struct SinkState {
     /// The name and hardware flag the consumer reported; the state comes
     /// from `recovery`.
     decoder: DecoderInfo,
+    /// The text of the consumer's last `failed`.
+    decoder_error: String,
 }
 impl SinkState {
     fn new(epoch: Instant, max_fps: u32) -> Self {
@@ -201,6 +205,7 @@ impl SinkState {
             backlog_drops: 0,
             overflow_drops: 0,
             decoder: DecoderInfo::default(),
+            decoder_error: String::new(),
         }
     }
     /// Drops everything queued and returns how many units that was.
@@ -483,9 +488,11 @@ impl VideoSink {
     }
 
     /// The decoder failed `DECODER_FAILURE_LIMIT` times without showing a
-    /// picture: the session's video cannot recover.
-    pub(crate) fn decoder_failed(&self) -> bool {
-        self.state.lock().recovery.failed()
+    /// picture, so the session's video cannot recover: why it last failed,
+    /// empty when the consumer did not say.
+    pub(crate) fn decoder_failure(&self) -> Option<String> {
+        let state = self.state.lock();
+        state.recovery.failed().then(|| state.decoder_error.clone())
     }
 
     /// The presentation that stamps new input, only while it is fresh.
@@ -710,9 +717,26 @@ impl VideoConsumer {
 
     /// The decoder needs an independently decodable picture. The request goes
     /// through the viewer's recovery and its limiter; false means it was held
-    /// back. `DecoderError` reports also count toward giving up on the video.
+    /// back. Decoder errors go through `failed`.
     pub fn keyframe(&self, reason: KeyframeReason) -> bool {
         self.current() && self.sink.request_keyframe(reason)
+    }
+
+    /// The decoder failed: like `keyframe(DecoderError)`, which counts toward
+    /// giving up on the video, plus why, which is logged and kept for the end
+    /// message. At most 160 characters are kept.
+    pub fn failed(&self, message: &str) -> bool {
+        if !self.current() {
+            return false;
+        }
+        let message: String = message.chars().take(DECODER_ERROR_MAX).collect();
+        tracing::warn!(
+            target: "pb_mapper_desktop::frames",
+            error = %message,
+            "desktop_decoder_error"
+        );
+        self.sink.state.lock().decoder_error = message;
+        self.sink.request_keyframe(KeyframeReason::DecoderError)
     }
 
     /// The decoder in use, for the overlay. At most 64 characters are kept.

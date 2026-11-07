@@ -395,7 +395,7 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             try { old?.release() } catch (_: Exception) {}
         }
 
-        private fun fail(reason: Int, message: String) {
+        private fun fail(message: String, ask: () -> Unit) {
             releaseCodec()
             if (closed) return
             // The next keyframe configures a new codec in a new revision.
@@ -404,8 +404,11 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             lastRecovery = message
             // Rust rate-limits requests. A paused source asks for nothing:
             // its resume already starts with an IDR.
-            if (!paused) api.keyframe(consumer, reason)
+            if (!paused) ask()
         }
+
+        private fun stalled(message: String) =
+            fail(message) { api.keyframe(consumer, DesktopVideoNative.REASON_STALL) }
 
         private fun configure(unit: FeedUnit, parameterSets: Map<Int, ByteArray>) {
             // Async flush leaves callbacks carrying invalid buffer indices.
@@ -506,9 +509,12 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             }
         }
 
+        // Rust logs the text, counts it toward giving up, and ends the
+        // session's message with it.
         private fun codecFailed(error: Exception) {
             Log.w(TAG, "Native H.264 decoder failed", error)
-            fail(DesktopVideoNative.REASON_DECODER_ERROR, "Native H.264 decoding unavailable")
+            val message = error.toString()
+            fail(message) { api.failed(consumer, message) }
         }
 
         private fun pump() {
@@ -567,11 +573,11 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                 val nowMs = SystemClock.elapsedRealtime()
                 val resumed = resumedAtMs
                 if (surfacePtsUs != null && nowMs - maxOf(surfaceReleasedAtMs, resumed) > 2000) {
-                    fail(DesktopVideoNative.REASON_STALL, "Native video texture was not consumed")
+                    stalled("Native video texture was not consumed")
                     return
                 }
                 if (waitingOutputs > 0 && nowMs - maxOf(lastProgress, resumed) > 2000) {
-                    fail(DesktopVideoNative.REASON_STALL, "Native video decoder stalled")
+                    stalled("Native video decoder stalled")
                     return
                 }
                 // Input/output/consumption callbacks wake us as work arrives.
@@ -582,8 +588,7 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                 if (waitingOutputs > 0) delayMs = minOf(delayMs, 2001 - (nowMs - maxOf(lastProgress, resumed)))
                 if (delayMs != Long.MAX_VALUE) schedulePump(delayMs.coerceAtLeast(1))
             } catch (error: Exception) {
-                Log.w(TAG, "Native H.264 decoder failed", error)
-                fail(DesktopVideoNative.REASON_DECODER_ERROR, "Native H.264 decoding unavailable")
+                codecFailed(error)
             } finally {
                 metrics?.pumpWork?.add(System.nanoTime() - startedNs)
             }

@@ -68,7 +68,6 @@ constexpr int32_t kVideoNeedCapacity = -2;
 constexpr int32_t kVideoPaused = -3;
 constexpr uint32_t kFlagKeyframe = 1;
 constexpr uint32_t kFlagDiscontinuity = 2;
-constexpr uint32_t kReasonDecoderError = 0;
 constexpr uint32_t kReasonGap = 1;
 constexpr uint32_t kPullTimeoutMs = 50;
 
@@ -78,6 +77,7 @@ struct VideoLibrary {
   int32_t (*next)(uint64_t consumer, uint32_t timeout_ms, uint8_t* dst, uint32_t capacity, PbDesktopVideoMetaV1* meta) = nullptr;
   int32_t (*presented)(uint64_t consumer, uint64_t generation, uint64_t frame_id) = nullptr;
   int32_t (*keyframe)(uint64_t consumer, uint32_t reason) = nullptr;
+  int32_t (*failed)(uint64_t consumer, const char* message_utf8) = nullptr;
   int32_t (*report)(uint64_t consumer, const char* decoder_utf8, uint32_t flags) = nullptr;
   void (*detach)(uint64_t consumer) = nullptr;
   uint64_t (*instance_token)() = nullptr;
@@ -107,6 +107,7 @@ std::shared_ptr<const VideoLibrary> LoadVideoLibrary() {
       !Resolve(module, library->next, "pb_mapper_desktop_video_next_v1") ||
       !Resolve(module, library->presented, "pb_mapper_desktop_video_presented_v1") ||
       !Resolve(module, library->keyframe, "pb_mapper_desktop_video_keyframe_v1") ||
+      !Resolve(module, library->failed, "pb_mapper_desktop_video_failed_v1") ||
       !Resolve(module, library->report, "pb_mapper_desktop_video_report_v1") ||
       !Resolve(module, library->detach, "pb_mapper_desktop_video_detach_v1") ||
       !Resolve(module, library->instance_token, "pb_mapper_desktop_instance_token_v1")) {
@@ -125,8 +126,12 @@ bool MediaFoundationInstalled() {
   return installed;
 }
 
+// "Create H.264 decoder (0x80040154)": the HRESULT as it is searched for.
 void Check(HRESULT hr, const char* operation) {
-  if (FAILED(hr)) throw std::runtime_error(std::string(operation) + " (" + std::to_string(static_cast<unsigned long>(hr)) + ")");
+  if (SUCCEEDED(hr)) return;
+  char code[16];
+  snprintf(code, sizeof(code), "0x%08lX", static_cast<unsigned long>(hr));
+  throw std::runtime_error(std::string(operation) + " (" + code + ")");
 }
 int64_t Number(const Map& map, const char* key) {
   const auto it = map.find(Value(key));
@@ -452,9 +457,10 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     ++recoveries_;
     { std::lock_guard<std::mutex> lock(mutex_); last_recovery_ = reason; }
     OutputDebugStringA(("Native H.264 decoding failed: " + reason + "\n").c_str());
-    // Rust rate-limits requests. A paused source asks for nothing: its
-    // resume already starts with an IDR.
-    if (!paused_) video_->keyframe(consumer, kReasonDecoderError);
+    // Rust logs the reason, counts it toward giving up and rate-limits the
+    // request. A paused source asks for nothing: its resume already starts
+    // with an IDR.
+    if (!paused_) video_->failed(consumer, reason.c_str());
   }
 
   struct Decoder {
