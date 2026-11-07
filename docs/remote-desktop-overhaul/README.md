@@ -2,7 +2,7 @@
 
 这里存放 PR #51 后续改造的全部开发文档：已确认的设计稿、性能分析、实现清单，以及实现时使用的需求、决策、接口契约和工作计划。PR #51 仍因真机流畅度阻塞合并；这些文档描述的改造完成并经用户在真机上认可之前，阻塞不解除。
 
-截至 2026-11-07：设计已由用户确认；[`plan/WORKPLAN.md`](plan/WORKPLAN.md) 的 9 个工作包，以及对抗性审查发现问题的修复，都已在分支 `claude/remote-desktop-overhaul` 上实现。合并后的分支通过了 `cargo fmt`、`cargo clippy`、全部 Rust 测试（含被忽略的慢链路验收用例）、`cargo doc`、FFI 发布构建、Android 的 `cargo ndk` 检查、`flutter analyze`、Flutter 测试和 Android 单元测试；[`plan/WORKPLAN.md`](plan/WORKPLAN.md) §3.3 里的 APK 与 Windows 构建、验收工具构建，以及需要部署环境或 Windows 交互的检查（`deployed selftest`、`input_acceptance`、辅助服务重装路径）还没有在合并后的分支上运行。PR #51 仍保持合并阻塞，直到用户在真机上认可流畅度。
+截至 2026-11-07：设计已由用户确认；[`plan/WORKPLAN.md`](plan/WORKPLAN.md) 的 9 个工作包，以及对抗性审查发现问题的修复，都已在分支 `claude/remote-desktop-overhaul` 上实现。合并后的分支通过了 `cargo fmt`、`cargo clippy`、全部 Rust 测试（含被忽略的慢链路验收用例）、`cargo doc`、FFI 发布构建、Android 的 `cargo ndk` 检查、`flutter analyze`、Flutter 测试和 Android 单元测试，APK 与 Windows 发布构建、验收工具构建也已从合并后的分支构建成功；[`plan/WORKPLAN.md`](plan/WORKPLAN.md) §3.3 里需要部署环境或 Windows 交互的检查（`deployed selftest`、`input_acceptance`、辅助服务重装路径）和真机验收由用户完成。PR #51 仍保持合并阻塞，直到用户在真机上认可流畅度。
 
 ## 先看这三份
 
