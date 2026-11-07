@@ -286,6 +286,43 @@ void main() {
     },
   );
 
+  testWidgets('a stopped host is renamed only once it shares again', (
+    tester,
+  ) async {
+    final api = FakePbMapperApi();
+    api.desktop.trust = const DesktopTrust(
+      supported: true,
+      matchesRelay: true,
+      saved: DesktopTrustedHost(
+        relay: 'localhost:7666',
+        service: 'desktop:here',
+        displayId: 1,
+        invitation: FakeDesktopApi.localInvitation,
+      ),
+    );
+    await pumpApp(tester, api, page: AppPage.remote);
+    await _tapIn(tester, _key('host-more'));
+    await settle(tester);
+    expect(tester.widget<MenuItemButton>(_key('host-rename')).onPressed, isNull);
+    await tester.tapAt(Offset.zero);
+    await settle(tester);
+
+    await _tapIn(tester, _key('host-start'));
+    await settle(tester);
+    await _tapIn(tester, _key('host-more'));
+    await settle(tester);
+    await tester.tap(_key('host-rename'));
+    await settle(tester);
+    await tester.enterText(_key('host-rename-field'), 'den');
+    await tester.tap(_key('host-rename-save'));
+    await settle(tester);
+    expect(api.desktop.argsOf('host_rename'), [
+      {'service': 'desktop:den'},
+    ]);
+    expect(_key('host-error'), findsNothing);
+    await finish(tester);
+  });
+
   testWidgets(
     'the invitation QR shows only on request and hides when the page is left '
     'or the app goes inactive',

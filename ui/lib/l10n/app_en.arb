@@ -447,6 +447,7 @@
   "hostStopNote": "The invitation is kept and works again when you start sharing",
   "hostServiceName": "Desktop service name…",
   "hostServiceRenameBody": "Computers that saved the old invitation will need a new one.",
+  "hostRenameStartFirst": "Start sharing to change this",
   "hostRevoke": "Revoke invitation and stop sharing",
   "hostRevokeConfirmTitle": "Revoke the invitation?",
   "hostRevokeConfirmBody": "Everyone holding the current invitation loses access. A new invitation is created the next time you turn sharing on.",

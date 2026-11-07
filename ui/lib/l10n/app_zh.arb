@@ -387,6 +387,7 @@
   "hostStopNote": "停止后邀请保留，下次开启继续可用",
   "hostServiceName": "桌面服务名称…",
   "hostServiceRenameBody": "已保存旧邀请的电脑需要新的邀请。",
+  "hostRenameStartFirst": "请先开启共享再修改",
   "hostRevoke": "撤销邀请并停止共享",
   "hostRevokeConfirmTitle": "撤销邀请？",
   "hostRevokeConfirmBody": "持有当前邀请的人都会失去访问权限。下次开启共享时会生成新的邀请。",

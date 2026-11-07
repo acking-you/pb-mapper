@@ -1093,14 +1093,21 @@ class HostMoreMenu extends StatelessWidget {
     final desktop = AppScope.of(context).store.desktop;
     final v = view;
     final helperBusy = v.enabling || v.restarting;
+    // A rename restarts the running local host under the new name: the
+    // background service's name is fixed, and a stopped host has none.
+    final renameHint = v.background
+        ? l10n.hostBackgroundStopFirst
+        : v.sharing
+        ? null
+        : l10n.hostRenameStartFirst;
     Widget rename = MenuItemButton(
       key: const Key('host-rename'),
       leadingIcon: const Icon(AppIcons.edit, size: AppIconSize.inline),
-      onPressed: v.background ? null : () => _rename(context, desktop, v),
+      onPressed: renameHint == null ? () => _rename(context, desktop, v) : null,
       child: Text(l10n.hostServiceName),
     );
-    if (v.background) {
-      rename = Tooltip(message: l10n.hostBackgroundStopFirst, child: rename);
+    if (renameHint != null) {
+      rename = Tooltip(message: renameHint, child: rename);
     }
     return MenuAnchor(
       menuChildren: [
@@ -1167,7 +1174,6 @@ class HostMoreMenu extends StatelessWidget {
       context: context,
       builder: (_) => _RenameServiceDialog(
         current: v.service ?? defaultServiceName(Platform.localHostname),
-        sharing: v.sharing,
       ),
     );
     if (service != null && service != v.service) {
@@ -1177,10 +1183,9 @@ class HostMoreMenu extends StatelessWidget {
 }
 
 class _RenameServiceDialog extends StatefulWidget {
-  const _RenameServiceDialog({required this.current, required this.sharing});
+  const _RenameServiceDialog({required this.current});
 
   final String current;
-  final bool sharing;
 
   @override
   State<_RenameServiceDialog> createState() => _RenameServiceDialogState();
@@ -1227,13 +1232,11 @@ class _RenameServiceDialogState extends State<_RenameServiceDialog> {
             ),
             onSubmitted: (_) => _save(),
           ),
-          if (widget.sharing) ...[
-            const SizedBox(height: 12),
-            Text(
-              l10n.hostServiceRenameBody,
-              style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant),
-            ),
-          ],
+          const SizedBox(height: 12),
+          Text(
+            l10n.hostServiceRenameBody,
+            style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant),
+          ),
         ],
       ),
       actions: [
