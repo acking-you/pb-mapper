@@ -13,6 +13,10 @@ import 'desktop_store.dart';
 /// Rust keeps at most this many (D20).
 const kMaxRememberedComputers = 50;
 
+/// The longest name the vault keeps, in Unicode scalar values (`runes`),
+/// which is what Rust counts; a character can be several.
+const kComputerNameMax = 128;
+
 /// A computer this device remembers, as Dart sees it: never its invitation,
 /// which stays in Rust's vault and is used by [id].
 @immutable
@@ -107,8 +111,9 @@ class RemoteComputer {
 }
 
 /// Whether this device can remember computers. Widgets say why not in their
-/// own words (`addRememberUnavailable`); [RememberUnavailable.reason] is for
-/// the log.
+/// own words: `unreadable` is saved computers that cannot be opened, which
+/// [RemoteComputerStore.reset] clears; any other [RememberUnavailable.reason]
+/// is for the log (`addRememberUnavailable`).
 sealed class RememberSupport {
   const RememberSupport();
   const factory RememberSupport.available() = RememberAvailable;
@@ -204,14 +209,56 @@ class RemoteComputerStore extends ChangeNotifier {
         computers = await _vault.list();
       } catch (error) {
         debugPrint('Remembered computers could not be read: $error');
-        support = const RememberSupport.unavailable('unreadable');
+        // Only a file that was read and cannot be opened is offered for
+        // clearing; any other failure may pass, and the next load tries
+        // again.
+        support = RememberSupport.unavailable(
+          error is RemoteComputerVaultException && error.code == 'PROTOCOL'
+              ? 'unreadable'
+              : 'failed',
+        );
       }
     }
+    if (support.available) _deleteStrayPictures(computers);
     if (_disposed) return;
     if (!support.available) _loading = null;
     _support = support;
     _computers = _sorted(computers);
     notifyListeners();
+  }
+
+  /// Deletes the last pictures of computers the vault does not have: it was
+  /// reset, or a forget could not delete one (D23). At most a few dozen
+  /// small files, once a load.
+  void _deleteStrayPictures(List<RemoteComputer> computers) {
+    final dir = _thumbnails;
+    if (dir == null) return;
+    final kept = {for (final c in computers) '${c.id}.thumb'};
+    try {
+      for (final entry in dir.listSync()) {
+        final name = entry.uri.pathSegments.last;
+        if (entry is! File || !name.endsWith('.thumb') || kept.contains(name)) {
+          continue;
+        }
+        entry.deleteSync();
+        _evict(entry);
+      }
+    } catch (error) {
+      debugPrint('Old last pictures could not be deleted: $error');
+    }
+  }
+
+  /// Deletes every remembered computer and its last picture, then loads
+  /// again: the way out of saved computers that cannot be opened.
+  Future<void> reset() async {
+    try {
+      await _vault.reset();
+    } catch (error) {
+      // Still unreadable after the load below, so the page still offers it.
+      debugPrint('Remembered computers could not be reset: $error');
+    }
+    _loading = null;
+    await load();
   }
 
   static List<RemoteComputer> _sorted(Iterable<RemoteComputer> computers) =>
@@ -312,7 +359,11 @@ class RemoteComputerStore extends ChangeNotifier {
         ),
       );
     } catch (error) {
-      if (error is! RemoteComputerVaultException || error.code != 'NOT_FOUND') {
+      final code = error is RemoteComputerVaultException ? error.code : null;
+      if (code == 'INVALID_ARGUMENT') {
+        // Refused: the record stays as it was, and the vault still works.
+        debugPrint('Not changed: $error');
+      } else if (code != 'NOT_FOUND') {
         _failed(error);
       } else if (!_disposed) {
         // Forgotten elsewhere meanwhile.

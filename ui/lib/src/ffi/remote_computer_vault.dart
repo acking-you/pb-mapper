@@ -42,6 +42,10 @@ abstract interface class RemoteComputerVault {
 
   /// Idempotent.
   Future<void> forget(String id);
+
+  /// Deletes every remembered computer: the way out of a vault that can no
+  /// longer be read.
+  Future<void> reset();
 }
 
 /// A refused vault call. [code] is the FFI `ErrorCode`: `INVALID_ARGUMENT`
@@ -95,6 +99,8 @@ final class UnavailableRemoteComputerVault implements RemoteComputerVault {
   }) => Future.error(_refused);
   @override
   Future<void> forget(String id) async {}
+  @override
+  Future<void> reset() async {}
 }
 
 /// The vault in Rust (`desktop_computers.rs`), sealed with DPAPI on Windows
@@ -157,21 +163,29 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
       await _call('computers_key') as Map,
     );
     final wrapped = stored['wrapped'] as String?;
+    String? gone;
     if (wrapped != null) {
-      Uint8List? key;
       try {
-        key = await _keystore.invokeMethod<Uint8List>(
+        final key = await _keystore.invokeMethod<Uint8List>(
           'unwrap',
           base64Decode(wrapped),
         );
-      } on PlatformException catch (error) {
-        // The Keystore key is gone, as after a device restore: what it
-        // sealed can never be read again, so the vault starts empty.
-        debugPrint('Remembered computers reset: ${error.message}');
-      }
-      if (key != null) {
+        if (key == null) {
+          throw const RemoteComputerVaultException(
+            'IO',
+            'the Keystore unwrap failed',
+          );
+        }
         await _call('computers_unlock', {'key': base64Encode(key)});
         return;
+      } on PlatformException catch (error) {
+        // Any other Keystore failure may pass: the vault is left as it is,
+        // and the next load tries again.
+        if (error.code != 'KEY_GONE') rethrow;
+        // The Keystore key is gone, or no longer opens its wrapped copy:
+        // what it sealed can never be read again, so the vault starts
+        // empty under a new key.
+        gone = error.message ?? error.code;
       }
     }
     final key = Uint8List.fromList([
@@ -184,10 +198,15 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
         'the Keystore wrap failed',
       );
     }
+    // Only a Keystore that seals a new key starts the vault over: one that
+    // cannot may be failing for now, and the next load tries again.
+    if (gone != null) {
+      await reset();
+      debugPrint('Remembered computers reset: $gone');
+    }
     await _call('computers_unlock', {
       'key': base64Encode(key),
       'wrapped': base64Encode(sealed),
-      if (wrapped != null) 'reset': true,
     });
   }
 
@@ -241,4 +260,7 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
 
   @override
   Future<void> forget(String id) => _call('computers_forget', {'id': id});
+
+  @override
+  Future<void> reset() => _call('computers_reset');
 }

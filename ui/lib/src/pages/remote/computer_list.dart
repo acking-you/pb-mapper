@@ -185,11 +185,43 @@ class PresenceLine extends StatelessWidget {
 bool cannotRemember(RememberSupport support) =>
     support is RememberUnavailable && support.reason != 'loading';
 
-/// The footnote under the list: what is kept, or that nothing can be.
-String rememberNote(BuildContext context, RememberSupport support) =>
-    cannotRemember(support)
-    ? context.l10n.addRememberUnavailable
-    : context.l10n.remoteRememberNote;
+/// The footnote under the list: what is kept, or why nothing can be. Saved
+/// computers that cannot be opened come with the way to clear them.
+class RememberNote extends StatelessWidget {
+  const RememberNote({super.key, required this.support, this.fontSize = 12.5});
+  final RememberSupport support;
+  final double fontSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final note = Text(
+      cannotRemember(support)
+          ? cannotRememberText(context, support)
+          : context.l10n.remoteRememberNote,
+      style: TextStyle(fontSize: fontSize, color: quietText(scheme)),
+    );
+    if (!vaultUnreadable(support)) return note;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        note,
+        const SizedBox(height: 6),
+        TextButton(
+          key: const Key('remote-vault-reset'),
+          style: TextButton.styleFrom(
+            foregroundColor: scheme.error,
+            padding: EdgeInsets.zero,
+            minimumSize: const Size(0, 32),
+            textStyle: buttonLabel(context, 13.5),
+          ),
+          onPressed: () => unawaited(resetComputers(context)),
+          child: Text(context.l10n.remoteVaultReset),
+        ),
+      ],
+    );
+  }
+}
 
 /// The remembered computers on a wide window (Main): each with its state on
 /// the relay and the one thing to do with it, then Add computer.
@@ -210,14 +242,20 @@ class RemoteComputerList extends StatelessWidget {
       ]),
       builder: (context, _) {
         final (:transient, :open, :closed) = remoteEntries(store);
+        final support = store.computers.support;
         if (transient == null && open.isEmpty && closed.isEmpty) {
-          return RemoteEmptyCard(minHeight: emptyMinHeight);
+          return RemoteEmptyCard(
+            minHeight: emptyMinHeight,
+            note: vaultUnreadable(support)
+                ? RememberNote(support: support)
+                : null,
+          );
         }
         return _ListCard(
           count: store.computers.computers.length,
           entries: [?transient, ...open],
           closed: closed,
-          note: rememberNote(context, store.computers.support),
+          support: support,
         );
       },
     );
@@ -229,12 +267,12 @@ class _ListCard extends StatelessWidget {
     required this.count,
     required this.entries,
     required this.closed,
-    required this.note,
+    required this.support,
   });
 
   final int count;
   final List<RemoteEntry> entries, closed;
-  final String note;
+  final RememberSupport support;
 
   @override
   Widget build(BuildContext context) {
@@ -338,10 +376,7 @@ class _ListCard extends StatelessWidget {
             const AddComputerTile(),
             Padding(
               padding: const EdgeInsets.fromLTRB(4, 10, 4, 0),
-              child: Text(
-                note,
-                style: TextStyle(fontSize: 12.5, color: quietText(scheme)),
-              ),
+              child: RememberNote(support: support),
             ),
           ],
         ),
@@ -753,8 +788,11 @@ class AddComputerTile extends StatelessWidget {
 
 /// No remembered computers and no session (HostSetup): how to get one.
 class RemoteEmptyCard extends StatelessWidget {
-  const RemoteEmptyCard({super.key, this.minHeight = 0});
+  const RemoteEmptyCard({super.key, this.minHeight = 0, this.note});
   final double minHeight;
+
+  /// Said under the card's body, as saved computers that cannot be opened.
+  final Widget? note;
 
   @override
   Widget build(BuildContext context) {
@@ -830,6 +868,11 @@ class RemoteEmptyCard extends StatelessWidget {
                   ],
                 ),
               ),
+              if (note case final note?)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: note,
+                ),
             ],
           ),
         ),

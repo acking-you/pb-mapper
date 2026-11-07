@@ -2,9 +2,10 @@ import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
 import 'package:pb_mapper_ui/src/state/desktop_models.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
 
-/// An in-memory vault. It can be unavailable, and it refuses as Rust does:
-/// at most [capacity] computers, and (when [live] is set) only the computer
-/// the live session is.
+/// An in-memory vault. It can be unavailable or fail to [list], and it
+/// refuses as Rust does: at most [capacity] computers, names of at most 128
+/// Unicode scalar values, and (when [live] is set) only the computer the
+/// live session is.
 class FakeRemoteComputerVault implements RemoteComputerVault {
   FakeRemoteComputerVault({
     this.support = const RememberSupport.available(),
@@ -14,6 +15,10 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   RememberSupport support;
   final int capacity;
   final records = <RemoteComputer>[];
+
+  /// The code [list] fails with until [reset]: `PROTOCOL` is a file that is
+  /// there but cannot be opened, `IO` a read that failed.
+  String? listFails;
 
   /// The live session's service and short fingerprint, as Rust's
   /// `current_invitation()`; null accepts any.
@@ -34,6 +39,7 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   @override
   Future<List<RemoteComputer>> list() async {
     calls.add(('list', const {}));
+    if (listFails case final code?) throw RemoteComputerVaultException(code);
     return [...records];
   }
 
@@ -60,7 +66,7 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
         'replace_id': replaceId,
       },
     ));
-    if (!support.available) throw _refused;
+    if (!support.available || !_validName(name)) throw _refused;
     if (live case (final s, final f) when s != service || f != fingerprint) {
       throw _refused;
     }
@@ -96,6 +102,7 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
     calls.add(('update', {'id': id}));
     final at = records.indexWhere((c) => c.id == id);
     if (at < 0) throw const RemoteComputerVaultException('NOT_FOUND');
+    if (name != null && !_validName(name)) throw _refused;
     final c = records[at];
     return records[at] = RemoteComputer(
       id: c.id,
@@ -117,4 +124,15 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
     calls.add(('forget', {'id': id}));
     records.removeWhere((c) => c.id == id);
   }
+
+  @override
+  Future<void> reset() async {
+    calls.add(('reset', const {}));
+    records.clear();
+    listFails = null;
+  }
+
+  /// Rust's `Record::check`, which counts `chars()`.
+  static bool _validName(String name) =>
+      name.trim().isNotEmpty && name.runes.length <= kComputerNameMax;
 }

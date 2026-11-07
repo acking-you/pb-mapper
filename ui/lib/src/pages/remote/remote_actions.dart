@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
@@ -86,8 +88,64 @@ Future<void> removeComputer(BuildContext context, RemoteComputer c) async {
   if (yes) await computers.forget(c.id);
 }
 
-/// The longest name the vault keeps.
-const kComputerNameMax = 128;
+/// Keeps a typed name within [kComputerNameMax] Unicode scalar values, the
+/// unit the vault counts, cutting only between characters. Flutter's own
+/// [LengthLimitingTextInputFormatter] counts characters, and an emoji or an
+/// accented letter can be several scalar values: it lets through names the
+/// vault refuses. Otherwise this behaves as it does: a full name refuses a
+/// keystroke rather than losing its end, and an input method's composition
+/// is cut with the text rather than dropped.
+final computerNameLimit = TextInputFormatter.withFunction((old, value) {
+  if (value.text.runes.length <= kComputerNameMax) return value;
+  if (old.text.runes.length == kComputerNameMax &&
+      old.selection.isCollapsed &&
+      !old.composing.isValid) {
+    return old;
+  }
+  var runes = 0;
+  final kept = value.text.characters
+      .takeWhile((c) => (runes += c.runes.length) <= kComputerNameMax)
+      .join();
+  final composing = value.composing;
+  return TextEditingValue(
+    text: kept,
+    selection: value.selection.copyWith(
+      baseOffset: math.min(value.selection.start, kept.length),
+      extentOffset: math.min(value.selection.end, kept.length),
+    ),
+    composing: !composing.isCollapsed && composing.start < kept.length
+        ? TextRange(
+            start: composing.start,
+            end: math.min(composing.end, kept.length),
+          )
+        : TextRange.empty,
+  );
+});
+
+/// The saved computers are there but cannot be opened: the list offers to
+/// clear them.
+bool vaultUnreadable(RememberSupport support) =>
+    support is RememberUnavailable && support.reason == 'unreadable';
+
+/// Why nothing can be remembered, in the page's words.
+String cannotRememberText(BuildContext context, RememberSupport support) =>
+    vaultUnreadable(support)
+    ? context.l10n.remoteVaultUnreadable
+    : context.l10n.addRememberUnavailable;
+
+/// Clears saved computers that cannot be opened, with their last pictures,
+/// after asking.
+Future<void> resetComputers(BuildContext context) async {
+  final computers = AppScope.of(context).store.computers;
+  final l10n = context.l10n;
+  final yes = await confirmDestructive(
+    context,
+    title: l10n.remoteVaultResetTitle,
+    body: l10n.remoteVaultResetBody,
+    action: l10n.remoteVaultResetAction,
+  );
+  if (yes) await computers.reset();
+}
 
 class _RenameDialog extends StatefulWidget {
   const _RenameDialog({required this.initial});
@@ -124,7 +182,7 @@ class _RenameDialogState extends State<_RenameDialog> {
         key: const Key('computer-rename-field'),
         controller: _name,
         autofocus: true,
-        inputFormatters: [LengthLimitingTextInputFormatter(kComputerNameMax)],
+        inputFormatters: [computerNameLimit],
         decoration: InputDecoration(labelText: l10n.addName),
         onSubmitted: (_) => _save(),
       ),
