@@ -199,6 +199,31 @@ void main() {
   );
 
   testWidgets(
+    'a name typed after the invitation is recognised is the one remembered',
+    (tester) async {
+      final api = FakePbMapperApi();
+      final vault = FakeRemoteComputerVault();
+      await pumpApp(tester, api, page: AppPage.remote, vault: vault);
+      await _tapIn(tester, _key('remote-add-empty'));
+      await settle(tester);
+      await tester.enterText(_key('add-invite'), 'pbd1.office-pc.TOKEN-0123');
+      await tester.pump(const Duration(milliseconds: 300));
+      await settle(tester);
+      await tester.enterText(_key('add-name'), 'Studio');
+      await tester.tap(_key('add-connect'));
+      // The viewer's Connecting spinner never settles.
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      api.desktop.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      expect(vault.records.single.name, 'Studio');
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
     'enabling shares view-only or with control, Stop works while busy, and '
     'helper maintenance stays reachable',
     (tester) async {

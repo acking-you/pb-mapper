@@ -230,13 +230,19 @@ class AddComputerController extends ChangeNotifier {
     _defaultName = name;
   }
 
-  /// What Connect runs; null until an invitation is recognised and any
-  /// conflicting saved identity is replaced on purpose.
+  /// Connect is offered: an invitation is recognised, and any conflicting
+  /// saved identity is replaced on purpose.
+  bool get ready =>
+      _state == AddState.recognised &&
+      _info != null &&
+      (conflict == null || _replaceConfirmed);
+
+  /// What Connect runs, built as it is pressed: typing a name does not
+  /// notify, so a result built earlier would miss it. Null unless [ready].
   AddComputerResult? result() {
     final info = _info;
-    if (_state != AddState.recognised || info == null) return null;
+    if (!ready || info == null) return null;
     final conflict = this.conflict;
-    if (conflict != null && !_replaceConfirmed) return null;
     final replacing = this.replacing;
     final typed = nameField.text.trim();
     return AddComputerResult(
@@ -260,6 +266,11 @@ class AddComputerController extends ChangeNotifier {
     super.dispose();
   }
 }
+
+/// Connect's action: the flow's result as it is when pressed, so it carries
+/// the name in the field then.
+VoidCallback? _connect(BuildContext context, AddComputerController add) =>
+    add.ready ? () => Navigator.of(context).pop(add.result()) : null;
 
 Future<String?> _readClipboard() async {
   try {
@@ -305,57 +316,52 @@ class _AddComputerDialogState extends State<AddComputerDialog> {
         ),
         child: ListenableBuilder(
           listenable: _add,
-          builder: (context, _) {
-            final result = _add.result();
-            return SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _Header(title: l10n.addTitle, size: 18),
+          builder: (context, _) => SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _Header(title: l10n.addTitle, size: 18),
+                const SizedBox(height: 20),
+                InviteField(controller: _add),
+                if (_add.state == AddState.recognised) ...[
                   const SizedBox(height: 20),
-                  InviteField(controller: _add),
-                  if (_add.state == AddState.recognised) ...[
-                    const SizedBox(height: 20),
-                    RecognisedHostCard(controller: _add),
-                    const SizedBox(height: 20),
-                    _NameField(controller: _add),
-                  ],
+                  RecognisedHostCard(controller: _add),
                   const SizedBox(height: 20),
-                  _Options(controller: _add),
-                  const SizedBox(height: 20),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          minimumSize: const Size(0, 40),
-                        ),
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: Text(l10n.cancel),
-                      ),
-                      const SizedBox(width: 10),
-                      FilledButton(
-                        key: const Key('add-connect'),
-                        style: FilledButton.styleFrom(
-                          minimumSize: const Size(0, 40),
-                          textStyle: buttonLabel(
-                            context,
-                            14,
-                            weight: FontWeight.w600,
-                          ),
-                        ),
-                        onPressed: result == null
-                            ? null
-                            : () => Navigator.of(context).pop(result),
-                        child: Text(l10n.connect),
-                      ),
-                    ],
-                  ),
+                  _NameField(controller: _add),
                 ],
-              ),
-            );
-          },
+                const SizedBox(height: 20),
+                _Options(controller: _add),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(0, 40),
+                      ),
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: Text(l10n.cancel),
+                    ),
+                    const SizedBox(width: 10),
+                    FilledButton(
+                      key: const Key('add-connect'),
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 40),
+                        textStyle: buttonLabel(
+                          context,
+                          14,
+                          weight: FontWeight.w600,
+                        ),
+                      ),
+                      onPressed: _connect(context, _add),
+                      child: Text(l10n.connect),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -409,7 +415,6 @@ class _AddComputerSheetState extends State<AddComputerSheet> {
       listenable: _add,
       builder: (context, _) {
         final recognised = _add.state == AddState.recognised;
-        final result = _add.result();
         return SingleChildScrollView(
           padding: EdgeInsets.fromLTRB(
             20,
@@ -432,9 +437,7 @@ class _AddComputerSheetState extends State<AddComputerSheet> {
                   style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(48),
                   ),
-                  onPressed: result == null
-                      ? null
-                      : () => Navigator.of(context).pop(result),
+                  onPressed: _connect(context, _add),
                   child: Text(l10n.connect),
                 ),
               ] else if (_scan) ...[
