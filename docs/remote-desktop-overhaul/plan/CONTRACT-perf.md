@@ -23,6 +23,9 @@ what the merged code does:
   and a recovery on an unchanged context starts no generation.
 - 5.16 item 3: the helper worker's wait for the next request is unbounded;
   the 3 s timeout bounds each answer and write.
+- 5.16 item 5: an upgrade's SCM stop ends a background host's session with
+  `Stopped{host_stopped}`, which is terminal; its viewer does not reconnect
+  by itself.
 - 6.10 and 9.6.2: `last_video_age_ms` counts from the later of the last
   video and the last entry into streaming.
 
@@ -1491,7 +1494,15 @@ impl Host {
 5. **Background pipe v2.**
    - `Snapshot.host: Option<HostStatus>`.
    - A new `EndSession` request (D15 for background hosts).
-   - Background hosts drop their sessions on upgrade, and viewers reconnect.
+   - An upgrade stops the service through SCM, as Disable and uninstall
+     do, and that stop ends a background host's session with
+     `Stopped{host_stopped}`: `run` in `D/helper/background_service.rs`
+     deactivates the host as soon as the stop token is cancelled. Unlike
+     the app's host in item 4, its viewer does not reconnect:
+     `host_stopped` is terminal (9.6.2), and the ended card says that
+     sharing stopped and offers Reconnect. The restarted service resumes
+     background hosting with the saved identity, so once it has registered
+     again the same invitation works and Reconnect connects.
    - There is no display switch or rename for a background host. The FFI
      `host_set_display` and `host_rename` (7.2) refuse while background
      hosting is configured, and the UI disables both controls there with a
