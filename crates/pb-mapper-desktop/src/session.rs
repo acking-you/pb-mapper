@@ -293,6 +293,7 @@ pub(crate) async fn run<S>(
 ) where
     S: AsyncRead + AsyncWrite,
 {
+    let started = Instant::now();
     let (mut reader, writer) = tokio::io::split(stream);
     let send = Sender::new(&session, writer).run();
     tokio::pin!(send, worker);
@@ -325,6 +326,18 @@ pub(crate) async fn run<S>(
     if !exited {
         worker.await;
     }
+    // No reason: the transport closed or the viewer left.
+    let (reason, detail) = session.outcome().unzip();
+    let produced = session.shared.outgoing.produced();
+    tracing::info!(
+        target: "pb_mapper_desktop::session",
+        event = "desktop_host_session_ended",
+        reason = ?reason,
+        detail = ?detail.unwrap_or_default(),
+        seconds = started.elapsed().as_secs(),
+        frames = produced.frames,
+        keyframes = produced.keyframes,
+    );
     // The viewer closes once it has read `Stopped`; until then, within the
     // stop budget, its input is read and dropped. Closing with input unread
     // resets the connection, and a reset can discard the `Stopped` still on

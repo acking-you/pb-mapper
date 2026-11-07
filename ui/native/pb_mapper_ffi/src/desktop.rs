@@ -1091,7 +1091,10 @@ async fn connect(
             });
             let viewer = Viewer::connect(&client, &invitation, options, config(progress))
                 .await
-                .map_err(connect_error)?;
+                .map_err(|failure| {
+                    tracing::warn!(event = "desktop_connect_failed", failure = ?failure);
+                    connect_error(failure)
+                })?;
             Ok((viewer, invitation))
         })
         .await

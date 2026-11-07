@@ -362,6 +362,12 @@ impl Viewer {
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let accepted = handshake(&mut stream, token, &config).await?;
+        tracing::info!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_viewer_connected",
+            codec = ?accepted.codec,
+            quality = ?accepted.quality,
+        );
         let now = Instant::now();
         let shared = Arc::new(ViewerShared {
             state: Mutex::new(ViewerStateSlot {
@@ -755,6 +761,7 @@ struct Session {
 
 /// The supervisor: the first task to end ends the session.
 async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, session: Session) {
+    let started = Instant::now();
     let Session {
         shared,
         sink,
@@ -806,6 +813,21 @@ async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, session: Ses
     cancel.cancel();
     sink.close();
     shared.mark_stopped(reason, message);
+    // The first stop recorded, not this one: a local stop after a failure
+    // keeps the failure. No reason: stopped here.
+    let (reason, detail) = shared.state.lock().stopped.clone().unwrap_or_default();
+    let keyframes = shared.stats.lock().host.map_or(0, |host| host.keyframes);
+    let local = sink.snapshot(Instant::now());
+    tracing::info!(
+        target: "pb_mapper_desktop::session",
+        event = "desktop_viewer_ended",
+        reason = ?reason,
+        detail = ?detail,
+        seconds = started.elapsed().as_secs(),
+        keyframes,
+        keyframes_requested = local.keyframes_requested,
+        backlog_drops = local.backlog_drops,
+    );
 }
 
 struct Reader<'a> {

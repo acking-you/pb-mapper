@@ -342,6 +342,15 @@ impl Acceptor {
         let Some((stream, permit, request)) = accepted else {
             return;
         };
+        tracing::info!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_host_accepted",
+            codec = ?request.codec,
+            max_width = request.limits.max_width,
+            max_height = request.limits.max_height,
+            max_fps = request.limits.max_fps,
+            quality = ?request.quality,
+        );
         let session = Session::new(
             self.policy.clone(),
             self.cancel.child_token(),
@@ -438,6 +447,11 @@ impl Acceptor {
         } else {
             RejectReason::Busy
         };
+        tracing::info!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_host_rejected",
+            reason = ?rejected,
+        );
         let _ = tokio::time::timeout(REJECT_WRITE_TIMEOUT, async {
             let rejected = HostMessage::Rejected { reason: rejected };
             wire::write_message(&mut stream, &rejected, None).await?;
