@@ -357,6 +357,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
             {Value("decoded"), Value(static_cast<int64_t>(decoded_.load()))},
             {Value("presented"), Value(static_cast<int64_t>(presented_.load()))},
             {Value("dropped"), Value(static_cast<int64_t>(dropped_.load()))},
+            {Value("configurations"), Value(static_cast<int64_t>(configurations_.load()))},
             {Value("recoveries"), Value(static_cast<int64_t>(recoveries_.load()))},
             {Value("lastRecovery"), Value(last_recovery_)},
             {Value("decoder"), Value(decoder_name_)}};
@@ -680,6 +681,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         if (!frame.key) throw std::runtime_error("A fresh key frame is required");
         decoder.reset();
         decoder = std::make_unique<Decoder>(frame, adapter_.Get());
+        ++configurations_;
         video_->report(consumer, decoder_name_.c_str(), 1);
       } else if (decoder->revision != frame.revision) {
         decoder->Flush(frame.revision);
@@ -750,7 +752,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
   std::atomic<uint64_t> consumer_{0};
   std::atomic<bool> stopping_{false};
   std::atomic<uint64_t> revision_{1};
-  std::atomic<uint64_t> submitted_{0}, decoded_{0}, presented_{0}, dropped_{0}, recoveries_{0};
+  std::atomic<uint64_t> submitted_{0}, decoded_{0}, presented_{0}, dropped_{0}, configurations_{0}, recoveries_{0};
   mutable std::mutex mutex_;
   // Guarded by mutex_.
   std::shared_ptr<Surface> latest_;
