@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
@@ -86,8 +88,25 @@ Future<void> removeComputer(BuildContext context, RemoteComputer c) async {
   if (yes) await computers.forget(c.id);
 }
 
-/// The longest name the vault keeps.
-const kComputerNameMax = 128;
+/// Keeps a typed name within [kComputerNameMax] Unicode scalar values, the
+/// unit the vault counts, cutting only between characters. Flutter's own
+/// [LengthLimitingTextInputFormatter] counts characters, and an emoji or an
+/// accented letter can be several scalar values: it lets through names the
+/// vault refuses.
+final computerNameLimit = TextInputFormatter.withFunction((_, value) {
+  if (value.text.runes.length <= kComputerNameMax) return value;
+  var runes = 0;
+  final kept = value.text.characters
+      .takeWhile((c) => (runes += c.runes.length) <= kComputerNameMax)
+      .join();
+  return TextEditingValue(
+    text: kept,
+    selection: value.selection.copyWith(
+      baseOffset: math.min(value.selection.start, kept.length),
+      extentOffset: math.min(value.selection.end, kept.length),
+    ),
+  );
+});
 
 /// The saved computers are there but cannot be opened: the list offers to
 /// clear them.
@@ -149,7 +168,7 @@ class _RenameDialogState extends State<_RenameDialog> {
         key: const Key('computer-rename-field'),
         controller: _name,
         autofocus: true,
-        inputFormatters: [LengthLimitingTextInputFormatter(kComputerNameMax)],
+        inputFormatters: [computerNameLimit],
         decoration: InputDecoration(labelText: l10n.addName),
         onSubmitted: (_) => _save(),
       ),

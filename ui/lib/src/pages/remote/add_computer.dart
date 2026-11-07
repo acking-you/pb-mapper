@@ -788,7 +788,7 @@ class _NameField extends StatelessWidget {
           key: const Key('add-name'),
           controller: controller.nameField,
           enabled: controller.duplicate == null,
-          inputFormatters: [LengthLimitingTextInputFormatter(kComputerNameMax)],
+          inputFormatters: [computerNameLimit],
           decoration: InputDecoration(fillColor: cardFieldFill(scheme)),
         ),
       ],

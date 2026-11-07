@@ -13,6 +13,10 @@ import 'desktop_store.dart';
 /// Rust keeps at most this many (D20).
 const kMaxRememberedComputers = 50;
 
+/// The longest name the vault keeps, in Unicode scalar values (`runes`),
+/// which is what Rust counts; a character can be several.
+const kComputerNameMax = 128;
+
 /// A computer this device remembers, as Dart sees it: never its invitation,
 /// which stays in Rust's vault and is used by [id].
 @immutable
@@ -348,7 +352,11 @@ class RemoteComputerStore extends ChangeNotifier {
         ),
       );
     } catch (error) {
-      if (error is! RemoteComputerVaultException || error.code != 'NOT_FOUND') {
+      final code = error is RemoteComputerVaultException ? error.code : null;
+      if (code == 'INVALID_ARGUMENT') {
+        // Refused: the record stays as it was, and the vault still works.
+        debugPrint('Not changed: $error');
+      } else if (code != 'NOT_FOUND') {
         _failed(error);
       } else if (!_disposed) {
         // Forgotten elsewhere meanwhile.

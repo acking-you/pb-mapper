@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/pages/remote/remote_actions.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
 
@@ -40,6 +41,41 @@ void main() {
     await store.reset();
     expect(store.support.available, isTrue);
     expect(await picture.exists(), isFalse);
+  });
+
+  test('a name the field takes is one the vault keeps, and a refused rename '
+      'leaves the vault working', () async {
+    final dir = await Directory.systemTemp.createTemp('pbm-remote-');
+    addTearDown(() => dir.delete(recursive: true));
+    final store = RemoteComputerStore(
+      FakeRemoteComputerVault(),
+      thumbnailDir: () async => dir,
+    );
+    addTearDown(store.dispose);
+    await store.load();
+    final id = store.newId();
+    await store.rememberSession(
+      id: id,
+      name: 'Office',
+      service: _office.service,
+      fingerprint: _office.fingerprint,
+      relay: 'relay.example:7666',
+      namespace: 0,
+      relayOnly: false,
+      quality: DesktopQuality.balanced,
+    );
+
+    // A flag is one character of two scalar values; Rust counts the latter.
+    final flags = '🇺🇳' * 100;
+    final typed = computerNameLimit
+        .formatEditUpdate(TextEditingValue.empty, TextEditingValue(text: flags))
+        .text;
+    await store.rename(id, typed);
+    expect(store.byId(id)?.name, typed);
+
+    await store.rename(id, flags);
+    expect(store.support.available, isTrue);
+    expect(store.byId(id)?.name, typed);
   });
 
   test('forgetting a computer deletes its thumbnail, and a changed identity is '
