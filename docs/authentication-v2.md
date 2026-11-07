@@ -25,7 +25,7 @@ pre-shared credential; it is not a replacement for a public-key PKI.
 | Administrator key | The sole 32-byte root credential. It can manage keys and inspect every namespace. |
 | Temporary credential | A printable `pbmt1_...` value containing a key ID and derived 32-byte secret. |
 | Key ID | A 64-bit `generation:u32 | slot:u32` identifier used for direct slot lookup. |
-| Namespace | `0` for the administrator, otherwise the temporary key ID. |
+| Namespace | `0` for the administrator; for a temporary key, the namespace it was issued into, otherwise its own key ID. |
 | Service name | A user-facing name within one namespace. Equal names in different temporary namespaces do not collide. |
 | Credential lease | The cancellation object shared by connections authenticated with one credential. |
 
@@ -141,8 +141,11 @@ failure.
 `key issue` allocates a free fixed-table slot, increments its generation,
 derives the secret, appends an encrypted WAL mutation, calls `fsync`, and only
 then exposes the credential. `key renew` keeps the same credential and key ID,
-updates its absolute expiry, and inserts a new versioned timing-wheel entry.
-Stale wheel entries are ignored.
+sets its absolute expiry to the given TTL from now, sooner or later than before,
+and inserts a new versioned timing-wheel entry. Stale wheel entries are ignored.
+A shortened key ends at its new deadline exactly as an expired key does, and the
+deadline survives a restart. Renewal is also how a caller recovers a credential
+text it lost; `key reveal` returns the same text without changing the expiry.
 
 ```bash
 export MSG_HEADER_KEY="$(sudo cat /var/lib/pb-mapper/auth/admin.key)"
@@ -156,6 +159,50 @@ pb-mapper admin --server relay.example.com:7666 \
 
 Temporary TTLs are at least 10 seconds and at most 30 days by default. The
 server maximum is configurable.
+
+### Namespaces shared by several keys
+
+By default a key owns a namespace named by its key ID, and every device holding
+that key shares it. To give a tenant one key per device instead, so that removing a
+device revokes one key without moving the others, allocate a namespace and issue
+into it:
+
+```bash
+pb-mapper admin --server relay.example.com:7666 namespace allocate
+pb-mapper admin --server relay.example.com:7666 \
+  key issue --ttl 24h --label laptop --namespace 1
+```
+
+Every key in a namespace sees the same services, and each is revoked, renewed and
+expired on its own. A namespace outlives its keys, so a key issued later meets the
+same services. Only the administrator can allocate or issue, and issuing into a
+namespace the allocator did not hand out is `namespace_not_allocated`, which covers
+namespace `0` and any key's own.
+
+Allocated namespaces are `1` to `2^32 - 1`, which is generation `0` of the key-ID
+layout. No key ever has generation `0`, so the two kinds cannot collide. A number
+is handed out once, ever: the high-water mark is written and synced before the
+number is returned, so a crash or a lost response can waste one but never repeat
+it. The mark is kept twice, in its own file and in the encrypted state, so root
+rotation, an auth-state reset, a reset out of a damaged snapshot, and losing the file
+all leave it intact. A caller that stores a namespace against a tenant can therefore
+keep it across all of those. Only losing both copies loses the mark, which in
+practice means losing the state directory. Issuing into a stored number then fails
+with `namespace_not_allocated` until the allocator passes it again, and the allocator
+can repeat numbers it handed out before. A caller should treat that error as a relay
+that lost its state, and enforce uniqueness on its side.
+
+`admin status` lists `key_namespaces` under `capabilities` on a relay that does all
+of this, and the SDK's `Admin::supports_key_namespaces` reads it. An older relay
+reports no capabilities and refuses both requests as `request_decode_failed`
+without side effects.
+
+Keys issued without a namespace are stored exactly as before. Rolling a relay back
+to a version without namespaces keeps its state readable, but that version ignores a
+key's namespace, so such a key lands in the namespace of its own key ID: isolated,
+and no longer with its peers. Its first compaction, within five minutes, writes the
+state back without namespaces, so upgrading again after that does not restore them:
+those keys must be reissued.
 
 ### Expiry, revocation, and garbage collection
 
@@ -191,16 +238,21 @@ rather than requiring local `/var/lib` access.
 
 An explicit auth-state reset also invalidates all temporary credentials. It
 rotates the server instance ID so credentials from a corrupted or lost slot
-table cannot become valid again if a key ID is later reused.
+table cannot become valid again if a key ID is later reused. That reuse is real: a
+reset out of a damaged snapshot cannot know the old generations and starts them over.
+`key show`, `key reveal`, `key renew` and `key revoke` act on whichever key holds the
+ID now, so anything that stored a key ID should compare `server_instance_id` from
+`admin status` first and treat a change as the old key being gone.
 
 ## Namespace authorization
 
 Temporary credentials may perform `register`, `connect`, and `status` only in
-their own namespace. They cannot issue keys, reveal credentials, inspect other
+their own namespace, whether that is one they were issued into or the one their
+key ID names. They cannot issue keys, reveal credentials, inspect other
 namespaces, alter protocol policy, reset auth state, or rotate the root key.
 
 The administrator defaults to namespace `0`. It may inspect or connect to a
-temporary namespace with `--namespace <key-id>`. Registering into another
+temporary namespace with `--namespace <namespace>`. Registering into another
 namespace additionally requires `--force` to avoid accidental ownership
 confusion.
 
@@ -212,10 +264,20 @@ registration connections, active streams, and new-stream rate.
 | --- | --- | --- | --- | --- |
 | Stateless signed token | Minimal server state | Requires a deny list | Token claim based | One request |
 | Stateful hash map | Proportional allocations and hashing | Direct | Direct | One request |
-| Fixed slots plus derived secrets | Fixed hot memory and O(1) lookup | Direct slot cancellation | Key ID is namespace | One request |
+| Fixed slots plus derived secrets | Fixed hot memory and O(1) lookup | Direct slot cancellation | Key ID, or an allocated namespace | One request |
 
 The fixed-slot design deliberately accepts bounded server state to make early
 revocation and hard connection closure deterministic.
+
+Revocation is enforced where a key would start something new: first-flight
+authentication, which covers `register`, subscribe and stream connections over TCP
+and QUIC, and direct coordination. A relayed stream closes when either end's key
+dies. Direct setups differ because the commit happens between the endpoints. Once a
+key is revoked the relay stops offering and attaching setups for it and cancels the
+ones its consumer had in flight. A grant the endpoints already hold stays good for
+that one session until its setup deadline, at most 8 seconds, and authorizes nothing
+after that. An established direct session belongs to its endpoints and survives
+revocation; stopping the owning endpoint closes it.
 
 ## Persistence and safe mode
 
@@ -229,6 +291,7 @@ user-writable application directory instead of `/var/lib`:
 | `admin.key.next` | Staged root key for an in-flight rotation |
 | `server-instance-id` | 16-byte persistent derivation identity |
 | `server-instance-id.next` | Staged instance id for an in-flight reset |
+| `namespace-allocator` | The last namespace handed out, as decimal text. Not secret, and not replaced by reset or rotation. The encrypted state holds a second copy |
 | `auth.snapshot` | AES-256-GCM encrypted compact slot state |
 | `auth.wal` | Length-prefixed, individually encrypted mutations and audit records |
 
@@ -246,7 +309,12 @@ without pretending that a failed `/var/lib` initialization succeeded.
 Invalid authentication-state headers, failed integrity checks, truncated WAL
 records, schema mismatch, and failed compaction place temporary authentication
 in safe mode. Administrator authentication stays available for inspection and
-explicit reset; temporary authentication fails closed.
+explicit reset; temporary authentication fails closed. A damaged
+`namespace-allocator` is narrower: allocating and issuing into a namespace fail with
+`namespace_allocator_unavailable`, while existing keys and ordinary issuance keep
+working. Remove the file to clear it, which tells the relay to continue from the
+encrypted state's copy. If the relay is also in safe mode, that copy is gone too:
+restore the file from a backup rather than removing it, or numbers can repeat.
 
 ## Administration and output contracts
 
@@ -255,7 +323,7 @@ pb-mapper admin --server relay.example.com:7666 status
 pb-mapper admin --server relay.example.com:7666 key list --page-size 100
 pb-mapper admin --server relay.example.com:7666 key show 4294967296
 pb-mapper admin --server relay.example.com:7666 key reveal 4294967296
-pb-mapper admin --server relay.example.com:7666 service list --key-id 4294967296
+pb-mapper admin --server relay.example.com:7666 service list --namespace 4294967296
 pb-mapper admin --server relay.example.com:7666 connection list --all
 pb-mapper admin --server relay.example.com:7666 connection retire echo --all
 pb-mapper admin --server relay.example.com:7666 legacy-protocol set deny
@@ -306,8 +374,8 @@ state.
 ### Relay starts in safe mode
 
 1. Preserve the entire auth directory for diagnosis.
-2. Confirm `admin.key`, `server-instance-id`, snapshot, and WAL belong to the
-   same server instance and were not partially restored.
+2. Confirm `admin.key`, `server-instance-id`, `namespace-allocator`, snapshot, and
+   WAL belong to the same server instance and were not partially restored.
 3. Use `pb-mapper admin status`; administrator access remains available.
 4. If recovery is impossible, run `auth-state reset --confirm`, then issue new
    temporary credentials. Reset rotates the server instance ID and closes old

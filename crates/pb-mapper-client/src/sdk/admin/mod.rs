@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pb_mapper_auth::{
-    discard_staged_admin_key, generate_admin_key, stage_admin_key_candidate, write_admin_key_file,
+    CAPABILITY_KEY_NAMESPACES, discard_staged_admin_key, generate_admin_key,
+    stage_admin_key_candidate, write_admin_key_file,
 };
 use pb_mapper_core::checksum::parse_credential;
 use pb_mapper_core::config::control_io_timeout;
@@ -126,6 +127,31 @@ impl Admin {
         response: KeyIssued(issued) => IssuedKey::from(issued)
     );
 
+    admin_rpc_struct!(
+        /// Reserve a namespace that no key owns, for
+        /// [`Admin::issue_key_in_namespace`].
+        ///
+        /// A number is handed out once, ever, so it stays safe to store against a
+        /// tenant after all of that tenant's keys are gone. Allocating is not
+        /// idempotent: a caller that loses the response wastes the number and asks
+        /// again. A relay too old to allocate fails this without side effects; see
+        /// [`Admin::supports_key_namespaces`].
+        allocate_namespace() -> u64,
+        request: AdminRequest::NamespaceAllocate,
+        response: NamespaceAllocated { namespace } => namespace
+    );
+
+    admin_rpc!(
+        /// Mint a temporary credential inside an allocated namespace.
+        ///
+        /// Every key in a namespace sees the same services, and each is revoked on
+        /// its own without moving the others. A namespace [`Admin::allocate_namespace`]
+        /// did not hand out is refused, including another key's own.
+        issue_key_in_namespace(namespace: u64, ttl: Duration, label: Option<String>) -> IssuedKey,
+        request: AdminRequest::KeyIssueScoped { namespace, ttl_seconds: ttl.as_secs(), label },
+        response: KeyIssued(issued) => IssuedKey::from(issued)
+    );
+
     admin_rpc!(
         /// Metadata for one credential, without its secret.
         show_key(key_id: u64) -> IssuedKey,
@@ -135,13 +161,23 @@ impl Admin {
 
     admin_rpc!(
         /// Metadata for one credential, *with* its secret.
+        ///
+        /// Acts on whichever key holds `key_id` now. An auth-state reset out of a
+        /// damaged snapshot starts key ids over, so a caller holding an id from before
+        /// one should compare [`AuthStatusInfo::server_instance_id`] first.
         reveal_key(key_id: u64) -> IssuedKey,
         request: AdminRequest::KeyReveal { key_id },
         response: KeyShown(issued) => IssuedKey::from(issued)
     );
 
     admin_rpc!(
-        /// Extend a credential's lifetime to `ttl` from now.
+        /// Set a credential's lifetime to `ttl` from now, sooner or later than it
+        /// was. The credential text does not change, so it also recovers a text a
+        /// caller lost.
+        ///
+        /// Acts on whichever key holds `key_id` now. An auth-state reset out of a
+        /// damaged snapshot starts key ids over, so a caller holding an id from before
+        /// one should compare [`AuthStatusInfo::server_instance_id`] first.
         renew_key(key_id: u64, ttl: Duration) -> IssuedKey,
         request: AdminRequest::KeyRenew { key_id, ttl_seconds: ttl.as_secs() },
         response: KeyRenewed(issued) => IssuedKey::from(issued)
@@ -149,6 +185,10 @@ impl Admin {
 
     admin_rpc!(
         /// Revoke a credential, taking effect on the relay immediately.
+        ///
+        /// Acts on whichever key holds `key_id` now. An auth-state reset out of a
+        /// damaged snapshot starts key ids over, so a caller holding an id from before
+        /// one should compare [`AuthStatusInfo::server_instance_id`] first.
         revoke_key(key_id: u64) -> KeyMetadata,
         request: AdminRequest::KeyRevoke { key_id },
         response: KeyRevoked(meta) => KeyMetadata::from(meta)
@@ -191,7 +231,7 @@ impl Admin {
     );
 
     admin_rpc!(
-        /// One page of registered services, optionally scoped to one credential.
+        /// One page of registered services, optionally scoped to one namespace.
         list_services(key_id: Option<u64>, page: u32, page_size: u16) -> ServicePage,
         request: AdminRequest::ServiceList {
             key_id,
@@ -202,7 +242,7 @@ impl Admin {
     );
 
     admin_rpc!(
-        /// One page of live connections, optionally scoped to one credential.
+        /// One page of live connections, optionally scoped to one namespace.
         list_connections(key_id: Option<u64>, page: u32, page_size: u16) -> ConnectionPage,
         request: AdminRequest::ConnectionList {
             key_id,
@@ -225,18 +265,28 @@ impl Admin {
         response: ConnectionsRetired { retired } => retired
     );
 
+    /// Whether this relay can allocate namespaces, issue keys into them, and keep
+    /// each key's namespace across a restart.
+    pub async fn supports_key_namespaces(&self) -> Result<bool> {
+        let status = self.auth_status().await?;
+        Ok(status
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_KEY_NAMESPACES))
+    }
+
     /// Every temporary credential, paging until the relay stops handing back a
     /// cursor.
     pub async fn list_keys_all(&self) -> Result<Vec<KeyMetadata>> {
         collect_pages(|page| self.list_keys(page, COLLECT_PAGE_SIZE)).await
     }
 
-    /// Every registered service, optionally scoped to one credential.
+    /// Every registered service, optionally scoped to one namespace.
     pub async fn list_services_all(&self, key_id: Option<u64>) -> Result<Vec<ServiceInfo>> {
         collect_pages(|page| self.list_services(key_id, page, COLLECT_PAGE_SIZE)).await
     }
 
-    /// Every live connection, optionally scoped to one credential.
+    /// Every live connection, optionally scoped to one namespace.
     pub async fn list_connections_all(&self, key_id: Option<u64>) -> Result<Vec<ConnectionInfo>> {
         collect_pages(|page| self.list_connections(key_id, page, COLLECT_PAGE_SIZE)).await
     }
@@ -416,6 +466,7 @@ mod tests {
                 .iter()
                 .map(|&key_id| KeyMetadata {
                     key_id,
+                    namespace: key_id,
                     state: "active".into(),
                     issued_at: 0,
                     expires_at: 0,

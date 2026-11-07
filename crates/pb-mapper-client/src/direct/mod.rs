@@ -15,6 +15,7 @@ use crate::{
 };
 use control::{Control, io_error};
 use endpoint::Network;
+use pb_mapper_auth::ADMIN_NAMESPACE;
 use pb_mapper_core::checksum::Credential;
 use pb_mapper_protocol::{
     command::{PbConnRequest, PbConnStatusReq, PbConnStatusResp},
@@ -243,10 +244,16 @@ impl Consumer {
             }
         };
         let deadline = deadline.min(Instant::now() + Duration::from_millis(grant.ttl_ms));
+        // Only a namespace this client named, or the administrator's, can be checked
+        // here. A temporary credential's is the relay's to know: one issued into a
+        // namespace does not carry it, and its key id names something else.
+        let expected_namespace = self
+            .namespace
+            .or_else(|| self.credential.is_admin().then_some(ADMIN_NAMESPACE));
         if grant.service != key
             || grant.is_datagram != self.is_datagram
             || grant.consumer_key != self.credential.key_id()
-            || grant.namespace != self.namespace.unwrap_or(self.credential.key_id())
+            || expected_namespace.is_some_and(|namespace| grant.namespace != namespace)
             || grant.ttl_ms == 0
             || grant.ttl_ms > SETUP_TTL_MS
             || grant.consumer.certificate != network.identity.certificate

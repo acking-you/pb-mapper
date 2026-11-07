@@ -28,6 +28,8 @@ pub(super) struct AdminArgs {
 enum AdminCommand {
     /// Issue, inspect, renew, reveal, revoke, or collect temporary keys.
     Key(AdminKeyArgs),
+    /// Reserve namespaces that several temporary keys can share.
+    Namespace(AdminNamespaceArgs),
     /// List relay connections across namespaces.
     Connection(AdminConnectionArgs),
     /// List registered services across namespaces.
@@ -55,6 +57,10 @@ enum AdminKeyCommand {
         ttl: Duration,
         #[arg(long)]
         label: Option<String>,
+        /// Issue into a namespace from `admin namespace allocate`. Omit for a key
+        /// that owns a namespace of its own.
+        #[arg(long)]
+        namespace: Option<u64>,
     },
     List {
         #[arg(long, default_value_t = 0)]
@@ -96,8 +102,10 @@ struct AdminServiceArgs {
 /// The paging flags every inventory listing takes, declared once.
 #[derive(Debug, Clone, Args)]
 struct AdminListArgs {
-    #[arg(long)]
-    key_id: Option<u64>,
+    /// List only this namespace. A key issued into a namespace has a different id, so
+    /// its id here lists nothing.
+    #[arg(long, visible_alias = "key-id")]
+    namespace: Option<u64>,
     #[arg(long, default_value_t = 0)]
     page: u32,
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
@@ -124,8 +132,8 @@ enum AdminConnectionCommand {
         /// Service to retire connections for, unscoped by the namespace prefix.
         service_name: String,
         /// Namespace owning the service. Omit for the unscoped namespace.
-        #[arg(long)]
-        key_id: Option<u64>,
+        #[arg(long, visible_alias = "key-id")]
+        namespace: Option<u64>,
         /// Retire just this connection, as reported by `admin connection list`.
         #[arg(long, group = "target")]
         conn_id: Option<u32>,
@@ -141,6 +149,18 @@ enum AdminConnectionCommand {
 enum AdminServiceCommand {
     /// List registered services across namespaces.
     List(AdminListArgs),
+}
+
+#[derive(Debug, Args)]
+struct AdminNamespaceArgs {
+    #[command(subcommand)]
+    command: AdminNamespaceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AdminNamespaceCommand {
+    /// Reserve a namespace. Its number is never handed out again.
+    Allocate,
 }
 
 #[derive(Debug, Args)]
@@ -199,16 +219,29 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
     let remote_addr = pb_mapper_server_addr(args.server.as_deref())?;
     let remote_addr = remote_addr.as_str();
     match args.command {
+        AdminCommand::Namespace(AdminNamespaceArgs { command }) => match command {
+            AdminNamespaceCommand::Allocate => {
+                let response =
+                    send_admin_request(remote_addr, AdminRequest::NamespaceAllocate).await?;
+                print_admin_response(args.output, &response)?;
+            }
+        },
         AdminCommand::Key(AdminKeyArgs { command }) => match command {
-            AdminKeyCommand::Issue { ttl, label } => {
-                let response = send_admin_request(
-                    remote_addr,
-                    AdminRequest::KeyIssue {
-                        ttl_seconds: ttl.as_secs(),
+            AdminKeyCommand::Issue {
+                ttl,
+                label,
+                namespace,
+            } => {
+                let ttl_seconds = ttl.as_secs();
+                let request = match namespace {
+                    Some(namespace) => AdminRequest::KeyIssueScoped {
+                        namespace,
+                        ttl_seconds,
                         label,
                     },
-                )
-                .await?;
+                    None => AdminRequest::KeyIssue { ttl_seconds, label },
+                };
+                let response = send_admin_request(remote_addr, request).await?;
                 print_admin_response(args.output, &response)?;
             }
             AdminKeyCommand::List {
@@ -254,7 +287,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
         },
         AdminCommand::Connection(AdminConnectionArgs { command }) => match command {
             AdminConnectionCommand::List(AdminListArgs {
-                key_id,
+                namespace,
                 page,
                 page_size,
                 all,
@@ -265,7 +298,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                     page,
                     all,
                     |page| AdminRequest::ConnectionList {
-                        key_id,
+                        key_id: namespace,
                         page,
                         page_size,
                     },
@@ -274,7 +307,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
             }
             AdminConnectionCommand::Retire {
                 service_name,
-                key_id,
+                namespace,
                 conn_id,
                 all,
             } => {
@@ -284,7 +317,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
                 let response = send_admin_request(
                     remote_addr,
                     AdminRequest::ConnectionRetire {
-                        key_id,
+                        key_id: namespace,
                         service_name,
                         conn_id,
                     },
@@ -296,7 +329,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
         AdminCommand::Service(AdminServiceArgs {
             command:
                 AdminServiceCommand::List(AdminListArgs {
-                    key_id,
+                    namespace,
                     page,
                     page_size,
                     all,
@@ -304,7 +337,7 @@ pub(super) async fn run_admin(args: AdminArgs) -> Result<(), Box<dyn Error>> {
         }) => {
             stream_pages::<AdminServicePage, _>(remote_addr, args.output, page, all, |page| {
                 AdminRequest::ServiceList {
-                    key_id,
+                    key_id: namespace,
                     page,
                     page_size,
                 }
@@ -558,6 +591,7 @@ fn print_human_admin_response(response: &AdminResponse) {
         | AdminResponse::KeyShown(key)
         | AdminResponse::KeyRenewed(key) => {
             println!("key id: {}", key.metadata.key_id);
+            println!("namespace: {}", key.metadata.effective_namespace());
             println!("state: {}", key.metadata.state);
             println!("expires at: {}", key.metadata.expires_at);
             if let Some(label) = &key.metadata.label {
@@ -571,11 +605,12 @@ fn print_human_admin_response(response: &AdminResponse) {
             println!("key {}: {}", key.key_id, key.state);
         }
         AdminResponse::KeyList(page) => {
-            println!("KEY ID\tSTATE\tEXPIRES\tLABEL");
+            println!("KEY ID\tNAMESPACE\tSTATE\tEXPIRES\tLABEL");
             for key in &page.items {
                 println!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     key.key_id,
+                    key.effective_namespace(),
                     key.state,
                     key.expires_at,
                     key.label.as_deref().unwrap_or("")
@@ -585,6 +620,7 @@ fn print_human_admin_response(response: &AdminResponse) {
                 println!("next page: {next}");
             }
         }
+        AdminResponse::NamespaceAllocated { namespace } => println!("namespace: {namespace}"),
         AdminResponse::KeyGc { removed } => println!("removed {removed} inactive keys"),
         AdminResponse::AuthStatus(status) => {
             println!("safe mode: {}", status.safe_mode);
@@ -609,13 +645,14 @@ fn print_human_admin_response(response: &AdminResponse) {
                 status.auth_successes, status.auth_failures
             );
             println!("server instance: {}", status.server_instance_id);
+            println!("capabilities: {}", status.capabilities.join(", "));
         }
         AdminResponse::Services(page) => {
-            println!("KEY ID\tSERVICE\tTRANSPORT\tCODEC\tCONNECTIONS");
+            println!("NAMESPACE\tSERVICE\tTRANSPORT\tCODEC\tCONNECTIONS");
             for service in &page.items {
                 println!(
                     "{}\t{}\t{}\t{}\t{}",
-                    service.key_id,
+                    service.namespace,
                     service.service_name,
                     service.transport,
                     service.codec_enabled,
@@ -630,11 +667,11 @@ fn print_human_admin_response(response: &AdminResponse) {
             // IDLE MS is what tells an operator which connection to retire: a
             // registration well past its lease is one the relay is holding for
             // nothing.
-            println!("KEY ID\tSERVICE\tCONN ID\tHEALTHY\tIDLE MS\tTRANSPORT\tCODEC");
+            println!("NAMESPACE\tSERVICE\tCONN ID\tHEALTHY\tIDLE MS\tTRANSPORT\tCODEC");
             for connection in &page.items {
                 println!(
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    connection.key_id,
+                    connection.namespace,
                     connection.service_name,
                     connection.conn_id,
                     connection.healthy,

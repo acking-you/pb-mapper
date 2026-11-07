@@ -46,9 +46,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let revealed = admin.reveal_key(issued.key_id).await?;
     assert_eq!(revealed.credential, issued.credential);
 
-    // Renew: extend the lifetime to `ttl` from now. The secret is unchanged.
+    // Renew: set the lifetime to `ttl` from now, sooner or later than it was. The
+    // secret is unchanged.
     let renewed = admin.renew_key(issued.key_id, ttl * 2).await?;
     println!("renewed until {}", renewed.expires_at);
+
+    // Several keys in one namespace: they see the same services, and each can be
+    // revoked without moving the others. Older relays cannot do this.
+    if admin.supports_key_namespaces().await? {
+        let namespace = admin.allocate_namespace().await?;
+        for device in ["laptop", "phone"] {
+            let key = admin
+                .issue_key_in_namespace(namespace, ttl, Some(device.into()))
+                .await?;
+            println!("key {} for {device} in namespace {namespace}", key.key_id);
+        }
+    }
 
     // List every credential, paging on our behalf.
     for key in admin.list_keys_all().await? {

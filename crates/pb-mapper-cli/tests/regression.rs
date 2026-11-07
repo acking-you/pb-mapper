@@ -428,6 +428,12 @@ async fn temporary_credentials_are_isolated_denied_admin_and_revoked_live() {
 
     for admin_request in [
         AdminRequest::AuthStatus,
+        AdminRequest::NamespaceAllocate,
+        AdminRequest::KeyIssueScoped {
+            namespace: 1,
+            ttl_seconds: 60,
+            label: None,
+        },
         AdminRequest::ServiceList {
             key_id: None,
             page: 0,

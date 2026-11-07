@@ -19,11 +19,11 @@
 //! GC, and dropping the wheel runs it for a rotation or shutdown.
 //!
 //! `timers` maps each key to a `Weak` handle on its current timer, which is what
-//! keeps key identity out of the wheel. Renewing upgrades the handle and
-//! schedules the same timer at the later deadline: the earlier placement still
-//! drains, but it is no longer the last reference, so nothing fires. Because the
-//! map holds only `Weak` references, an entry whose timer has fired costs nothing
-//! but a stale key, cleared by the callback itself.
+//! keeps key identity out of the wheel. Renewing moves the callback onto a fresh
+//! timer at the new deadline, sooner or later than the old one: the earlier
+//! placement still drains, but the timer it holds has nothing left to run. Because
+//! the map holds only `Weak` references, an entry whose timer has fired costs
+//! nothing but a stale key, cleared by the callback itself.
 //!
 //! The callbacks hold a `Weak<AuthStateInner>`, so they neither keep the state
 //! alive nor touch it after a runtime has shut down.
@@ -94,7 +94,13 @@ impl Leases {
 
     /// Takes over a newly issued key: records its description and schedules both
     /// stages of its teardown.
-    pub(super) fn issue(&mut self, lease: &Arc<AuthLease>, issued_at: u64, label: Option<String>) {
+    pub(super) fn issue(
+        &mut self,
+        lease: &Arc<AuthLease>,
+        issued_at: u64,
+        label: Option<String>,
+        namespace: Option<u64>,
+    ) {
         let Some(inner) = self.inner.upgrade() else {
             return;
         };
@@ -103,6 +109,7 @@ impl Leases {
             ColdMetadata {
                 issued_at,
                 label,
+                namespace,
                 tombstoned_at: 0,
             },
         );
@@ -111,23 +118,40 @@ impl Leases {
 
     /// Hands a key's remaining life to a replacement lease, for a renewal whose
     /// original lease had already been cancelled.
+    ///
+    /// The stages it replaces are disarmed first. They identify the key rather than
+    /// the lease, so at the old deadline they would otherwise end the key this renewal
+    /// just extended.
     pub(super) fn adopt(&mut self, lease: &Arc<AuthLease>) {
+        if let Some(stages) = self.stages.remove(&lease.key_id()) {
+            for timer in [stages.retire, stages.reap]
+                .iter()
+                .filter_map(Weak::upgrade)
+            {
+                timer.disarm();
+            }
+        }
         self.watch(lease.key_id(), lease.clone());
     }
 
-    /// Moves a renewed key to its new expiry, and its reap along with it. Returns
-    /// `false` for a key with no live stages, as for a high slot.
+    /// Moves a renewed key to its new expiry, sooner or later than the old one,
+    /// and its reap along with it. Returns `false` for a key with no live stages,
+    /// as for a high slot.
     ///
-    /// Each timer is scheduled a second time rather than moved: its earlier
-    /// placement drains on the old deadline but is no longer the last reference,
-    /// so it fires nothing.
+    /// See [`Timer::supersede`] for why this cannot just schedule each timer a
+    /// second time: a timer fires with its last placement, so a shortened key would
+    /// keep running to its old deadline.
     pub(super) fn renew(&mut self, key_id: KeyId, expires_at: u64) -> bool {
-        let Some(stages) = self.stages.get(&key_id) else {
+        let Some(stages) = self.stages.get_mut(&key_id) else {
             return false;
         };
         let (Some(retire), Some(reap)) = (stages.retire.upgrade(), stages.reap.upgrade()) else {
             return false;
         };
+        let retire = retire.supersede();
+        let reap = reap.supersede();
+        stages.retire = Arc::downgrade(&retire);
+        stages.reap = Arc::downgrade(&reap);
         self.schedule_at(expires_at, retire);
         self.schedule_at(retention_ends(expires_at), reap);
         true

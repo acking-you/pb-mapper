@@ -74,7 +74,7 @@ impl AuthRuntime {
         let mut cold = HashMap::new();
         let mut restored_leases = Vec::new();
 
-        let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, u64::MAX));
+        let admin_lease = Arc::new(AuthLease::new(ADMIN_KEY_ID, None, u64::MAX));
         if let Some(state) = loaded.as_ref() {
             for (index, generation) in state.generations.iter().copied().enumerate() {
                 if let Some(slot) = slots.get_mut(index) {
@@ -101,6 +101,7 @@ impl AuthRuntime {
                     ColdMetadata {
                         issued_at: entry.issued_at,
                         label: entry.label.clone(),
+                        namespace: entry.namespace,
                         tombstoned_at: match state {
                             SlotState::Expired => entry.tombstoned_at.unwrap_or(entry.expires_at),
                             SlotState::Revoked => entry.tombstoned_at.unwrap_or(now),
@@ -109,7 +110,11 @@ impl AuthRuntime {
                     },
                 );
                 if state == SlotState::Active {
-                    let lease = Arc::new(AuthLease::new(entry.key_id, entry.expires_at));
+                    let lease = Arc::new(AuthLease::new(
+                        entry.key_id,
+                        entry.namespace,
+                        entry.expires_at,
+                    ));
                     slot.lease = Arc::downgrade(&lease);
                     // Held only until the schedule below adopts them; the wheel
                     // is the lasting owner.
@@ -161,6 +166,12 @@ impl AuthRuntime {
                 entry.tombstoned_at = Some(entry.tombstoned_at.unwrap_or(entry.expires_at));
             }
         }
+        let namespace_high_water = restore_namespace_high_water(
+            &config.state_dir,
+            loaded
+                .as_ref()
+                .map_or(0, |state| state.namespace_high_water),
+        );
         let inner = Arc::new(AuthStateInner {
             admin: RwLock::new(AdminState {
                 key: admin_key,
@@ -178,6 +189,7 @@ impl AuthRuntime {
             auth_successes: AtomicU64::new(0),
             auth_failures: AtomicU64::new(0),
             root_epoch: AtomicU64::new(loaded.as_ref().map(|state| state.root_epoch).unwrap_or(0)),
+            namespace_high_water: AtomicU64::new(namespace_high_water),
             previous_root: RwLock::new(None),
             audit_records: RwLock::new(audit_records),
             cold: RwLock::new(cold),
@@ -449,9 +461,51 @@ impl AuthRuntime {
         ttl: Duration,
         label: Option<String>,
     ) -> Result<IssuedTemporaryKey, AuthFailure> {
+        self.issue_scoped(authorization, None, ttl, label).await
+    }
+
+    /// Reserve a namespace that no key owns, for [`Self::issue_in_namespace`].
+    ///
+    /// A number is handed out once, ever. A caller that loses the response wastes
+    /// it and asks again.
+    pub async fn allocate_namespace(
+        &self,
+        authorization: &AuthContext,
+    ) -> Result<u64, AuthFailure> {
+        let authority = authorization.admin_authority()?;
+        self.request(|response| AuthCommand::AllocateNamespace {
+            authority,
+            response,
+        })
+        .await
+    }
+
+    /// Issue a key into a namespace from [`Self::allocate_namespace`].
+    ///
+    /// Every key in a namespace sees the same services and is revoked on its own.
+    /// A namespace that was not allocated is refused, including another key's own.
+    pub async fn issue_in_namespace(
+        &self,
+        authorization: &AuthContext,
+        namespace: u64,
+        ttl: Duration,
+        label: Option<String>,
+    ) -> Result<IssuedTemporaryKey, AuthFailure> {
+        self.issue_scoped(authorization, Some(namespace), ttl, label)
+            .await
+    }
+
+    async fn issue_scoped(
+        &self,
+        authorization: &AuthContext,
+        namespace: Option<u64>,
+        ttl: Duration,
+        label: Option<String>,
+    ) -> Result<IssuedTemporaryKey, AuthFailure> {
         let authority = authorization.admin_authority()?;
         self.request(|response| AuthCommand::Issue {
             authority,
+            namespace,
             ttl,
             label,
             response,

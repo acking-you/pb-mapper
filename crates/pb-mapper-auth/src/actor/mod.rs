@@ -122,9 +122,15 @@ pub(super) async fn run_auth_actor(
                         });
                         let _ = response.send(result);
                     }
-                    AuthCommand::Issue { authority, ttl, label, response } => {
+                    AuthCommand::AllocateNamespace { authority, response } => {
                         let result = validate_admin_authority(&inner, &authority)
-                            .and_then(|()| actor_issue(&inner, &config, &mut leases, ttl, label));
+                            .and_then(|()| actor_allocate_namespace(&inner, &config));
+                        let _ = response.send(result);
+                    }
+                    AuthCommand::Issue { authority, namespace, ttl, label, response } => {
+                        let result = validate_admin_authority(&inner, &authority).and_then(|()| {
+                            actor_issue(&inner, &config, &mut leases, namespace, ttl, label)
+                        });
                         let _ = response.send(result);
                     }
                     AuthCommand::List { authority, page, page_size, response } => {
@@ -307,6 +313,7 @@ fn actor_status(inner: &Arc<AuthStateInner>) -> AuthStatus {
         auth_successes: inner.auth_successes.load(Ordering::Relaxed),
         auth_failures: inner.auth_failures.load(Ordering::Relaxed),
         server_instance_id: hex(&inner.instance_id()),
+        capabilities: vec![CAPABILITY_KEY_NAMESPACES.to_string()],
     }
 }
 
@@ -404,5 +411,6 @@ fn audit(action: &str, key_id: Option<KeyId>, label: Option<String>) -> AuditRec
         action: action.to_string(),
         key_id,
         label,
+        namespace: None,
     }
 }

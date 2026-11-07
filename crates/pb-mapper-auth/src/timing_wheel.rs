@@ -30,17 +30,17 @@
 //!
 //! Only the wheel holds strong references to a timer, so it runs when the last
 //! chain holding it is dropped. The wheel never looks a timer up, compares
-//! identities, or has to be told one was superseded: to move a deadline, schedule
-//! the same timer again — the earlier chain still drains, but it is no longer the
-//! last reference, so it fires nothing.
+//! identities, or has to be told one was superseded: to move a deadline, hand the
+//! callback to a new timer with [`Timer::supersede`] and schedule that. The earlier
+//! chain still drains, but the timer at its end has nothing left to run.
 
 use super::*;
 
 /// A callback that runs once: when its delay elapses, or when it is cancelled,
 /// whichever comes first.
 pub(super) struct Timer {
-    /// `None` once the callback has run, so any route still holding this timer is
-    /// inert and a cancelled timer cannot fire twice.
+    /// `None` once the callback has run or moved on, so any route still holding this
+    /// timer is inert and a cancelled timer cannot fire twice.
     ///
     /// WHY a lock for state a single task owns: running a `FnOnce` moves it out,
     /// which needs `&mut`, but a timer is reached through a shared handle so that
@@ -64,6 +64,23 @@ impl Timer {
     pub(super) fn fire(&self) {
         let callback = self.callback.lock().take();
         run(callback);
+    }
+
+    /// Discards the callback unrun, for a timer whose work no longer applies.
+    pub(super) fn disarm(&self) {
+        let callback = self.callback.lock().take();
+        drop(callback);
+    }
+
+    /// Moves the callback to a new timer, leaving this one with nothing to run.
+    ///
+    /// This is how a deadline moves in either direction. Scheduling the same timer
+    /// twice could only postpone it: it runs when its last placement drains, so the
+    /// old, later placement would hold a shortened deadline back until it came due.
+    pub(super) fn supersede(&self) -> Arc<Self> {
+        Arc::new(Self {
+            callback: Mutex::new(self.callback.lock().take()),
+        })
     }
 }
 

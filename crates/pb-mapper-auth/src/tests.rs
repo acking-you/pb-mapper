@@ -14,6 +14,8 @@ use pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK;
 
 use super::*;
 
+mod namespaces;
+
 fn temp_state_dir(name: &str) -> PathBuf {
     let mut suffix = [0_u8; 8];
     let mut rng = rand::rng();
@@ -503,6 +505,7 @@ async fn env_recovery_key_is_not_written_when_it_cannot_decrypt_existing_state()
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
         root_epoch: 0,
+        namespace_high_water: 0,
     };
     write_snapshot_and_truncate_wal(&config, &good, &snapshot).unwrap();
     set_process_msg_header_key(Some(std::str::from_utf8(&bad).unwrap())).unwrap();
@@ -539,6 +542,7 @@ async fn env_recovery_key_is_accepted_for_wal_only_state() {
             action: "issue".to_string(),
             key_id: None,
             label: None,
+            namespace: None,
         }),
     )
     .unwrap();
@@ -574,6 +578,7 @@ async fn env_recovery_key_is_not_written_when_wal_only_state_does_not_match() {
             action: "issue".to_string(),
             key_id: None,
             label: None,
+            namespace: None,
         }),
     )
     .unwrap();
@@ -1114,6 +1119,7 @@ fn recover_instance_id_promotes_next_when_snapshot_matches() {
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
         root_epoch: 0,
+        namespace_high_water: 0,
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
     std::fs::write(state_dir.join("auth.wal"), b"old-instance-wal").unwrap();
@@ -1151,6 +1157,7 @@ fn reset_already_installed_accepts_matching_live_id_and_snapshot() {
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
         root_epoch: 1,
+        namespace_high_water: 0,
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
     assert!(reset_already_installed(&state_dir, &admin_key, &new_id));
@@ -1186,6 +1193,7 @@ fn recover_instance_id_discards_stale_next_when_snapshot_still_matches_current()
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
         root_epoch: 0,
+        namespace_high_water: 0,
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
 
@@ -1220,6 +1228,7 @@ fn recover_admin_key_discards_leftover_wal_from_the_old_key() {
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
         root_epoch: 0,
+        namespace_high_water: 0,
     };
     write_snapshot_and_truncate_wal(&config, &new_key, &snapshot).unwrap();
     std::fs::write(state_dir.join("auth.wal"), b"old-key-wal").unwrap();
@@ -1255,6 +1264,7 @@ fn rotation_finalize_requires_the_live_admin_key() {
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
         root_epoch: 1,
+        namespace_high_water: 0,
     };
     write_snapshot_and_truncate_wal(&config, &new_key, &snapshot).unwrap();
     assert!(!rotation_already_installed(&state_dir, new_key_str));
@@ -1298,6 +1308,7 @@ async fn interrupted_reset_recovers_the_staged_instance_id_on_restart() {
         admin_replays: Vec::new(),
         audit_records: VecDeque::new(),
         root_epoch: 0,
+        namespace_high_water: 0,
     };
     write_snapshot_and_truncate_wal(&config, &admin_key, &snapshot).unwrap();
     std::fs::write(state_dir.join("auth.wal"), b"old-instance-wal").unwrap();
@@ -1652,6 +1663,7 @@ fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
         expires_at: 20_000,
         label: None,
         tombstoned_at: None,
+        namespace: None,
     };
     let revoked_without_audit = PersistedEntry {
         key_id: KeyId::new(Generation::from_u32(1), SlotIndex::from_index(1)),
@@ -1660,6 +1672,7 @@ fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
         expires_at: 20_000,
         label: None,
         tombstoned_at: None,
+        namespace: None,
     };
     let audit_at = now - 30;
     let mut snapshot = PersistedSnapshot {
@@ -1677,8 +1690,10 @@ fn tombstone_migration_prefers_audit_time_and_persists_fail_closed_fallback() {
                 SlotIndex::from_index(0),
             )),
             label: None,
+            namespace: None,
         }]),
         root_epoch: 0,
+        namespace_high_water: 0,
     };
 
     assert!(normalize_tombstone_times(&mut snapshot, now));

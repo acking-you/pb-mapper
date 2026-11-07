@@ -40,7 +40,7 @@ pub struct ClientConfig {
     pub credential: String,
     pub keep_alive: bool,
     /// Administrator-only target namespace. Temporary credentials always use
-    /// their own key id when this is `None`.
+    /// their own namespace when this is `None`.
     pub namespace: Option<u64>,
 }
 

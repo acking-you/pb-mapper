@@ -78,6 +78,23 @@ async fn execute(
             .issue(authorization, Duration::from_secs(ttl_seconds), label)
             .await
             .map(AdminResponse::KeyIssued),
+        AdminRequest::NamespaceAllocate => auth
+            .allocate_namespace(authorization)
+            .await
+            .map(|namespace| AdminResponse::NamespaceAllocated { namespace }),
+        AdminRequest::KeyIssueScoped {
+            namespace,
+            ttl_seconds,
+            label,
+        } => auth
+            .issue_in_namespace(
+                authorization,
+                namespace,
+                Duration::from_secs(ttl_seconds),
+                label,
+            )
+            .await
+            .map(AdminResponse::KeyIssued),
         AdminRequest::KeyList { page, page_size } => {
             audit_action(
                 &auth,

@@ -17,6 +17,20 @@
 //!
 //! All three are `#[serde(transparent)]`, so persisted snapshots and the admin
 //! wire protocol keep the plain-integer encoding they already had.
+//!
+//! # Namespaces
+//!
+//! A namespace is a bare `u64`, because the wire and the routing keys already
+//! treat it as one. Two kinds share that space without being able to meet:
+//!
+//! ```text
+//!  a key's own      generation >= 1 | slot      named by the key that owns it
+//!  allocated        generation 0    | counter   shared by every key issued into it
+//!  administrator    0
+//! ```
+//!
+//! [`Generation::next`] is the only source of a key's generation and starts at 1,
+//! so no key id can ever have the bit pattern of an allocated namespace.
 
 use std::fmt;
 
@@ -42,6 +56,10 @@ pub struct SlotIndex(u32);
 
 /// The administrator, which owns no slot and never expires.
 pub const ADMIN_KEY_ID: KeyId = KeyId(0);
+
+/// The last namespace the allocator can hand out: the top of generation 0, which
+/// no key id uses. See the module docs.
+pub const MAX_ALLOCATED_NAMESPACE: u64 = u32::MAX as u64;
 
 impl KeyId {
     pub const fn new(generation: Generation, slot: SlotIndex) -> Self {
@@ -71,6 +89,15 @@ impl KeyId {
 
     pub const fn from_u64(raw: u64) -> Self {
         Self(raw)
+    }
+
+    /// The namespace a key with this id lives in: the one it was issued into, or
+    /// else the one its own id names.
+    pub const fn namespace(self, issued_into: Option<u64>) -> u64 {
+        match issued_into {
+            Some(namespace) => namespace,
+            None => self.0,
+        }
     }
 }
 
