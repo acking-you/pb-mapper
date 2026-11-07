@@ -5,7 +5,8 @@ import '../../../theme/viewer_palette.dart';
 
 /// Where the visible part of a zoomed or occluded picture lies in the
 /// whole (ui §9.5). Only an outline: no second texture, so it costs nothing
-/// at the picture's rate. It never takes a touch.
+/// at the picture's rate, and on its own layer, so a pan frame repaints the
+/// outline alone. It never takes a touch.
 class Minimap extends StatelessWidget {
   const Minimap({
     super.key = const Key('minimap'),
@@ -44,7 +45,9 @@ class Minimap extends StatelessWidget {
           borderRadius: BorderRadius.circular(6),
           border: Border.all(color: Colors.white.withValues(alpha: 0.25)),
         ),
-        child: CustomPaint(painter: MinimapPainter(region)),
+        child: RepaintBoundary(
+          child: CustomPaint(painter: MinimapPainter(region)),
+        ),
       ),
     ),
   );

@@ -2,12 +2,16 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/minimap.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_cursor_layer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_input.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_surface.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_viewport.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_gestures.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
@@ -444,6 +448,106 @@ void main() {
       expect(tester.element(scene), same(picture));
       expect(transform(), before);
       expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    'a trackpad stroke repaints the cursor and the ring alone, and a pan the '
+    'stage and the minimap alone',
+    (tester) async {
+      _size(tester, const Size(844, 390));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump(kHintDuration);
+      final centre = tester.getCenter(
+        find.byKey(const Key('remote-scene-transform')),
+      );
+
+      /// While [moves] run, frame by frame, what paints lies under [owners]
+      /// and nowhere else.
+      Future<void> repaintsOnly(
+        List<Type> owners,
+        Future<void> Function() moves,
+      ) async {
+        var inside = 0;
+        final outside = <String>{};
+        debugOnProfilePaint = (o) {
+          final element = (o.debugCreator! as DebugCreator).element;
+          var owned = owners.contains(element.widget.runtimeType);
+          element.visitAncestorElements((e) {
+            owned |= owners.contains(e.widget.runtimeType);
+            return !owned;
+          });
+          if (owned) {
+            inside++;
+          } else {
+            outside.add('${element.widget.runtimeType}');
+          }
+        };
+        try {
+          await moves();
+        } finally {
+          debugOnProfilePaint = null;
+        }
+        expect(inside, isPositive);
+        expect(outside, isEmpty);
+      }
+
+      // Pinched in: the minimap shows. Two fingers pan on.
+      final a = await tester.startGesture(centre - const Offset(30, 0));
+      final b = await tester.startGesture(centre + const Offset(30, 0));
+      await tester.pump(kNavigateStart);
+      for (var i = 0; i < 5; i++) {
+        await a.moveBy(const Offset(-15, 0));
+        await b.moveBy(const Offset(15, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(find.byKey(const Key('minimap')), findsOneWidget);
+      await repaintsOnly([ViewerStage, Minimap], () async {
+        for (var i = 0; i < 3; i++) {
+          await a.moveBy(const Offset(4, 3));
+          await b.moveBy(const Offset(4, 3));
+          await tester.pump();
+        }
+      });
+      await a.up();
+      await b.up();
+      await tester.pump(const Duration(seconds: 1));
+
+      // One finger strokes the cursor, with the ring under it.
+      final finger = await tester.startGesture(centre);
+      await tester.pump(const Duration(milliseconds: 16));
+      await finger.moveBy(const Offset(20, 0));
+      await tester.pump(const Duration(milliseconds: 16));
+      await repaintsOnly([RemoteCursorLayer, TouchIndicator], () async {
+        for (var i = 0; i < 3; i++) {
+          await finger.moveBy(const Offset(3, 2));
+          await tester.pump();
+        }
+      });
+      await finger.up();
+      await tester.pump(const Duration(seconds: 1));
 
       await tester.pumpWidget(const SizedBox.shrink());
       demand.dispose();

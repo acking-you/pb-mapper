@@ -344,19 +344,21 @@ class _TouchViewerState extends State<TouchViewer> {
 
   @override
   Widget build(BuildContext context) {
+    // The viewer fills the window, as its padding and insets assume. Not a
+    // LayoutBuilder: it lays itself out again for any rebuild beneath it,
+    // and so repaints the whole viewer at the rate of a stroke or a pan.
+    final size = MediaQuery.sizeOf(context);
     final padding = MediaQuery.paddingOf(context);
     return Scaffold(
       backgroundColor: ViewerPalette.black,
       // The keyboard never resizes the picture: it occludes it.
       resizeToAvoidBottomInset: false,
-      body: LayoutBuilder(
-        builder: (context, box) => ValueListenableBuilder(
-          valueListenable: _desktop.picture,
-          builder: (context, picture, _) => _layers(
-            box.biggest,
-            padding,
-            picture?.aspectRatio ?? _viewport.aspectRatio,
-          ),
+      body: ValueListenableBuilder(
+        valueListenable: _desktop.picture,
+        builder: (context, picture, _) => _layers(
+          size,
+          padding,
+          picture?.aspectRatio ?? _viewport.aspectRatio,
         ),
       ),
     );

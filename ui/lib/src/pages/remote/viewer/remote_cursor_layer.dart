@@ -8,6 +8,9 @@ import 'remote_viewport.dart';
 /// the store publishes it from the view leaf, or the local prediction while
 /// this viewer moves it, since the host does not echo a mover's cursor back
 /// for [kCursorEchoWindow]. The local OS pointer stays visible on desktop.
+///
+/// Its own layer: the arrow moves with every stroke, hover and sample, and
+/// repaints nothing around it.
 class RemoteCursorLayer extends StatelessWidget {
   const RemoteCursorLayer({
     super.key,
@@ -28,17 +31,19 @@ class RemoteCursorLayer extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => IgnorePointer(
-    child: ClipRect(
-      child: CustomPaint(
-        size: Size.infinite,
-        painter: RemoteCursorPainter(
-          at: _at,
-          repaint: Listenable.merge([
-            hostCursor,
-            viewport,
-            input.cursorChanges,
-          ]),
+  Widget build(BuildContext context) => RepaintBoundary(
+    child: IgnorePointer(
+      child: ClipRect(
+        child: CustomPaint(
+          size: Size.infinite,
+          painter: RemoteCursorPainter(
+            at: _at,
+            repaint: Listenable.merge([
+              hostCursor,
+              viewport,
+              input.cursorChanges,
+            ]),
+          ),
         ),
       ),
     ),
