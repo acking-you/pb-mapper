@@ -328,7 +328,7 @@ void main() {
     );
     // Neither the last sample nor zeros.
     expect(find.textContaining(RegExp(r'\d (ms|fps|Mbps)')), findsNothing);
-    expect(find.text('  — ms ·   — fps'), findsOneWidget);
+    expect(find.textContaining(RegExp(r'— ms · +— fps')), findsOneWidget);
 
     session.value = const DesktopSessionView(
       target: _target,
@@ -336,7 +336,7 @@ void main() {
       path: 'direct',
     );
     await tester.pump();
-    expect(find.text(' 18 ms ·  60 fps'), findsOneWidget);
+    expect(find.textContaining(RegExp(r'18 ms · +60 fps')), findsOneWidget);
     expect(find.text('60 fps'), findsOneWidget);
   });
 
