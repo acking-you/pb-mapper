@@ -49,6 +49,18 @@ pub(crate) const CURSOR_ECHO_SUPPRESS: Duration = Duration::from_millis(300);
 const CREDIT_RECHECK: Duration = Duration::from_millis(20);
 const CONTROL_DENIED: &str = "Control is not allowed on this computer";
 
+/// What a viewer is told when the host ends its session.
+pub(crate) fn stop_message(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::HostStopped => "The host stopped sharing",
+        StopReason::HostEnded => "The host ended the session",
+        StopReason::Restarting => "The host is restarting sharing",
+        StopReason::Revoked => "The host withdrew this viewer's access",
+        StopReason::CaptureFailed => "The host could not capture its screen",
+        StopReason::ProtocolError => "The desktop protocol was broken",
+    }
+}
+
 /// How a session ended; the first decision wins.
 #[derive(Clone)]
 enum End {
@@ -127,8 +139,21 @@ impl Session {
         match self.ending.lock().clone() {
             Some(End::Stopped(reason, message)) => Some((reason, message)),
             Some(End::Closed) => None,
-            None => Some((StopReason::HostStopped, "The host stopped sharing".into())),
+            None => Some((
+                StopReason::HostStopped,
+                stop_message(StopReason::HostStopped).into(),
+            )),
         }
+    }
+
+    /// The viewer is hidden: no capture and no control until it resumes.
+    pub fn paused(&self) -> bool {
+        self.shared.targets.paused.load(Ordering::Acquire)
+    }
+
+    /// The preset the viewer chose last.
+    pub fn quality(&self) -> QualityPreset {
+        self.qos.lock().preset()
     }
 
     /// Change the controller and publish its targets to C. The targets are

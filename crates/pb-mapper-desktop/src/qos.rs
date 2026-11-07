@@ -381,6 +381,10 @@ impl Qos {
         self.rtt.iter().min().copied()
     }
 
+    pub fn preset(&self) -> QualityPreset {
+        self.preset
+    }
+
     pub fn view(&self, now: Instant) -> QosView {
         let targets = self.targets(now);
         QosView {

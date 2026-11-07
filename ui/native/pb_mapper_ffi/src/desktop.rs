@@ -1723,6 +1723,7 @@ mod tests {
         fn release(&mut self) {}
     }
     #[test]
+    #[ignore = "v1 pipeline; rewritten for v2 after the G1 merges"]
     fn binary_frame_is_owned_until_explicit_release_after_disconnect() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _credential =

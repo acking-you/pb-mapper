@@ -2,9 +2,10 @@ use crate::{
     DesktopKind, HostPath, HostState, HostStatus, HostViewer, Invitation, QualityPreset, Result,
     VideoCodec, VideoLimits, error, platform,
     protocol::{
-        CAPABILITY_LOCK, HostMessage, RejectReason, SessionState, ViewerMessage, valid_capabilities,
+        CAPABILITY_LOCK, HostMessage, RejectReason, SessionState, StopReason, ViewerMessage,
+        valid_capabilities,
     },
-    session::{self, Session},
+    session::{self, Session, stop_message},
     shared::Policy,
     wire,
     worker::{self, Factory, WorkerConfig},
@@ -44,6 +45,7 @@ pub struct HostOptions {
 pub struct Host {
     invitation: Invitation,
     policy: Arc<Policy>,
+    capabilities: Vec<String>,
     /// The session holding the single viewer slot, if any.
     session: Arc<Mutex<Option<Arc<Session>>>>,
     stopped: AtomicBool,
@@ -169,6 +171,7 @@ impl Host {
         Ok(Self {
             invitation,
             policy,
+            capabilities: capabilities(),
             session,
             stopped: AtomicBool::new(false),
             cancel,
@@ -180,9 +183,12 @@ impl Host {
     pub fn invitation(&self) -> &Invitation {
         &self.invitation
     }
-    /// The host's state and its viewer, if one is connected.
+    /// The host's state and its viewer, if one is connected: when its session
+    /// started, whether it runs direct or through the relay, and whether it
+    /// controls, has paused, and which quality it chose.
     pub fn status(&self) -> HostStatus {
         let control_allowed = self.policy.allowed();
+        let capabilities = self.capabilities.clone();
         let Some(session) = self.session.lock().clone() else {
             return HostStatus {
                 state: if self.stopped.load(Ordering::Acquire) {
@@ -196,12 +202,14 @@ impl Host {
                 viewer: None,
                 display: None,
                 desktop: DesktopKind::Ordinary,
-                capabilities: Vec::new(),
+                capabilities,
             };
         };
         let engine = session.shared.state.borrow().clone();
+        let paused = session.paused();
         HostStatus {
             state: match engine.state {
+                _ if paused => HostState::Paused,
                 SessionState::Connecting => HostState::Connecting,
                 SessionState::Streaming => HostState::Streaming,
                 SessionState::Paused => HostState::Paused,
@@ -214,14 +222,23 @@ impl Host {
                 since_ms: u64::try_from(session.shared.epoch.elapsed().as_millis())
                     .unwrap_or(u64::MAX),
                 started_unix_ms: session.started_unix_ms,
-                path: HostPath::Unknown,
+                path: self.path(),
                 controlling: control_allowed && engine.controlling,
-                paused: false,
-                quality: QualityPreset::default(),
+                paused,
+                quality: session.quality(),
             }),
             display: engine.display,
             desktop: engine.desktop,
-            capabilities: Vec::new(),
+            capabilities,
+        }
+    }
+    /// The one viewer's path, sampled from the registration's sessions.
+    fn path(&self) -> HostPath {
+        match self.registration.diagnostics().direct {
+            None => HostPath::Relay,
+            Some(paths) if paths.active_direct > 0 => HostPath::Direct,
+            Some(paths) if paths.active_relay > 0 => HostPath::Relay,
+            Some(_) => HostPath::Unknown,
         }
     }
     /// The pre-v2 status shape, for the v1 transport tests until they are
@@ -230,11 +247,12 @@ impl Host {
     pub(crate) fn v1_status(&self) -> crate::SessionStatus {
         crate::legacy_host_status(&self.status())
     }
-    /// "Disconnect": end the connected viewer's session. Hosting continues,
-    /// and the viewer may connect again with the same invitation.
+    /// "Disconnect": end the connected viewer's session; it hears
+    /// `Stopped{host_ended}`. Hosting continues, and the viewer may connect
+    /// again with the same invitation.
     pub fn end_session(&self) {
         if let Some(session) = self.session.lock().as_ref() {
-            session.close();
+            session.end(StopReason::HostEnded, stop_message(StopReason::HostEnded));
         }
     }
     /// "Make view-only" and back. Revocation gates every later input at the
@@ -245,8 +263,18 @@ impl Host {
             session.shared.wake.notify();
         }
     }
+    /// Stop hosting; a connected viewer hears `Stopped{host_stopped}`.
     pub async fn stop(&self) -> Result<()> {
+        self.stop_with(StopReason::HostStopped).await
+    }
+    /// Stop hosting, telling a connected viewer why: `Restarting` when sharing
+    /// resumes at once with the same identity (a display switch), so it
+    /// reconnects; `Revoked` when its access was withdrawn.
+    pub async fn stop_with(&self, reason: StopReason) -> Result<()> {
         self.policy.set(false);
+        if let Some(session) = self.session.lock().as_ref() {
+            session.end(reason, stop_message(reason));
+        }
         self.cancel.cancel();
         let mut join = self.join.lock().await;
         if let Some(task) = join.as_mut() {
@@ -611,6 +639,101 @@ mod trust_tests {
         ));
         drop(first);
         host.stop().await.unwrap();
+    }
+
+    /// Poll `condition` for up to 5 s.
+    async fn until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn status_reports_the_viewer_and_end_session_keeps_hosting() {
+        let relay = pb_mapper_testkit::Relay::start("desktop-viewer").await;
+        let client = Client::from_credential(
+            relay.addr().to_string(),
+            pb_mapper_testkit::admin_credential(),
+            true,
+            None,
+        );
+        let host = Host::start_with_backend(
+            &client,
+            HostOptions {
+                allow_control: true,
+                ..options()
+            },
+            Arc::new(|| Ok(Box::new(Screen))),
+        )
+        .await
+        .unwrap();
+        let status = host.status();
+        assert_eq!(status.state, HostState::Waiting);
+        assert!(status.viewer.is_none() && status.control_allowed);
+        assert_eq!(status.capabilities, capabilities());
+
+        let invitation = host.invitation().clone();
+        let token = invitation.token_text();
+        let (mut viewer, answer) =
+            authenticate(&client, &invitation, token.clone(), vec![VideoCodec::Jpeg]).await;
+        assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+        let watching = host.status().viewer.unwrap();
+        assert_eq!(
+            (
+                watching.path,
+                watching.controlling,
+                watching.paused,
+                watching.quality
+            ),
+            (HostPath::Relay, false, false, QualityPreset::Balanced)
+        );
+        assert!(watching.started_unix_ms > 0);
+
+        // The viewer hides and picks another preset; the host shows both.
+        for message in [
+            ViewerMessage::Pause {},
+            ViewerMessage::Quality {
+                preset: QualityPreset::Smooth,
+            },
+        ] {
+            wire::write_message(&mut viewer.stream, &message, None)
+                .await
+                .unwrap();
+        }
+        until(|| {
+            host.status()
+                .viewer
+                .is_some_and(|viewer| viewer.paused && viewer.quality == QualityPreset::Smooth)
+        })
+        .await;
+        assert_eq!(host.status().state, HostState::Paused);
+
+        // Disconnect ends this session only: the viewer hears why ...
+        host.end_session();
+        loop {
+            match next(&mut viewer).await {
+                Some(HostMessage::Stopped { reason, .. }) => {
+                    assert_eq!(reason, StopReason::HostEnded);
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("closed without Stopped"),
+            }
+        }
+        assert!(next(&mut viewer).await.is_none());
+        until(|| host.status().viewer.is_none()).await;
+        assert_eq!(host.status().state, HostState::Waiting);
+
+        // ... and hosting continues with the same invitation.
+        let (_again, answer) =
+            authenticate(&client, &invitation, token, vec![VideoCodec::Jpeg]).await;
+        assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+        host.stop().await.unwrap();
+        assert_eq!(host.status().state, HostState::Stopped);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
