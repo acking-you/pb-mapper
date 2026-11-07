@@ -315,6 +315,8 @@ void main() {
   ) async {
     final api = _WedgedStopApi();
     final store = DesktopStore(api);
+    final viewer = store.demand(DesktopDemand.viewer);
+    await _live(tester, store, api);
     var done = false;
     unawaited(store.shutdown().then((_) => done = true));
     await tester.pump(const Duration(milliseconds: 1500));
@@ -323,7 +325,11 @@ void main() {
       {'on_exit': true},
     ]);
     expect(api.ops, contains('disconnect'));
+    // The closed viewer is not taken for a lost one while the app exits.
+    await tester.pump(const Duration(seconds: 5));
+    expect(api.argsOf('connect'), hasLength(1));
     api.wedge.complete();
+    viewer.dispose();
     store.dispose();
   });
 

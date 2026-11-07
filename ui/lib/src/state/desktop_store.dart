@@ -1749,6 +1749,12 @@ class DesktopStore {
   /// views sees a clean close. The service's background host is not this
   /// app's to stop. Bounded, so a wedged native call cannot hold the exit.
   Future<void> shutdown() async {
+    // The session ends here, as on dispose: no status read may take the
+    // closing viewer for a lost one, and no retry may connect again.
+    _serial++;
+    _target = null;
+    _cancelRetry();
+    _schedulePolling();
     try {
       await Future.wait([
         _disconnectNative(),
