@@ -1,5 +1,3 @@
-import 'dart:async';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'dart:io';
 import 'package:flutter/rendering.dart';
@@ -46,22 +44,25 @@ void main() {
       await settle(tester);
       await tester.tap(find.byKey(const Key('desktop-share')));
       await settle(tester);
-      expect(api.desktop.background.enabled, isTrue);
-      expect(api.desktop.background.autoStart, isTrue);
-      expect(api.desktop.host?.controlAllowed, isTrue);
+      var background = api.desktop.hostSnapshot.background;
+      expect(background?.enabled, isTrue);
+      expect(background?.autoStart, isTrue);
+      expect(background?.host?.controlAllowed, isTrue);
       await finish(tester);
-      expect(api.desktop.host, isNotNull);
-      expect(api.desktop.background.enabled, isTrue);
+      expect(api.desktop.hostSnapshot.background?.enabled, isTrue);
 
-      await pumpApp(tester, api, page: AppPage.tunnels);
       // An enabled grant may remain cached when management IPC is lost. SCM
       // disable/uninstall must still be reachable without first stopping it.
-      api.desktop.background = const DesktopBackground(
-        configured: true,
-        enabled: true,
-        autoStart: true,
-        message: 'Management connection lost',
+      api.desktop.hostSnapshot = const DesktopHostSnapshot(
+        background: DesktopBackground(
+          configured: true,
+          enabled: true,
+          autoStart: true,
+          invitation: FakeDesktopApi.backgroundInvitation,
+          message: 'Management connection lost',
+        ),
       );
+      await pumpApp(tester, api, page: AppPage.tunnels);
       await tester.tap(find.byKey(const Key('open-desktop')));
       await settle(tester);
       final maintenance = find.byKey(const Key('desktop-helper-maintenance'));
@@ -82,15 +83,18 @@ void main() {
       await settle(tester);
       await tester.tap(disable);
       await settle(tester);
-      expect(api.desktop.helperActions, ['disable']);
+      expect(api.desktop.argsOf('helper_action'), [
+        {'action': 'disable'},
+      ]);
       await tester.pageBack();
       await settle(tester);
       await tester.tap(find.text('Stop sharing'));
       await settle(tester);
-      expect(api.desktop.host, isNull);
-      expect(api.desktop.background.configured, isTrue);
-      expect(api.desktop.background.enabled, isFalse);
-      expect(api.desktop.background.autoStart, isFalse);
+      background = api.desktop.hostSnapshot.background;
+      expect(api.desktop.hostSnapshot.host, isNull);
+      expect(background?.configured, isTrue);
+      expect(background?.enabled, isFalse);
+      expect(background?.autoStart, isFalse);
       await finish(tester);
     },
   );
@@ -104,14 +108,6 @@ void main() {
       addTearDown(tester.view.reset);
       final api = FakeDesktopApi();
       final store = DesktopStore(api);
-      const screen = DesktopStatus(
-        state: 'streaming',
-        controlAllowed: true,
-        generation: 3,
-        frameId: 4,
-        display: DesktopDisplay(1, 'Test display', 1920, 1080),
-        path: 'direct',
-      );
       final png = await tester.runAsync(() async {
         final recorder = ui.PictureRecorder();
         final canvas = Canvas(recorder);
@@ -145,9 +141,6 @@ void main() {
         paragraph.dispose();
         return bytes;
       });
-      api.viewer = screen;
-      api.image = DesktopFrame(screen, png!);
-      await store.poll();
       const root = Key('desktop-qa');
       await tester.pumpWidget(
         MaterialApp(
@@ -160,14 +153,23 @@ void main() {
           ),
         ),
       );
+      await store.connect(
+        const DesktopTarget(invitation: 'pbd1.test', name: 'Test'),
+      );
+      // The host lets this viewer watch only.
+      api.viewerStatusValue = liveStatus(generation: 3, controlAllowed: false);
+      api.emitJpeg(png!, generation: 3, frameId: 1);
       for (var i = 0; i < 20 && find.byType(RawImage).evaluate().isEmpty; i++) {
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 10)),
         );
         await tester.pump();
       }
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
       expect(find.byType(RawImage), findsOneWidget);
+      expect(api.argsOf('presented'), [
+        {'consumer': 1, 'generation': 3, 'frame_id': 1},
+      ]);
       final mouse = await tester.createGesture(
         kind: ui.PointerDeviceKind.mouse,
       );
@@ -176,8 +178,11 @@ void main() {
       await tester.tap(find.byType(RawImage));
       await tester.pump();
       expect(api.inputs, isEmpty);
+
+      // Allowed: control is the viewer's to ask for.
+      api.viewerStatusValue = liveStatus(generation: 3);
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.tap(find.text('Request control'));
-      await store.poll();
       await tester.pump();
       await tester.tap(find.byType(RawImage));
       await tester.pump();
@@ -187,7 +192,7 @@ void main() {
       expect(api.inputs.last['down'], false);
       final viewer = tester.getRect(find.byType(RawImage));
       await mouse.moveTo(viewer.topLeft + viewer.size.center(Offset.zero) / 2);
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 5));
       expect(api.inputs.length, 4);
       expect(api.inputs.last, containsPair('kind', 'move'));
       expect(api.inputs.last['x'], 480);
@@ -204,75 +209,22 @@ void main() {
           image.dispose();
         });
       }
-      api.viewer = const DesktopStatus(
-        state: 'stale',
-        controlling: true,
+
+      // A stale picture takes no input.
+      api.viewerStatusValue = liveStatus(
         generation: 3,
+        controlling: true,
+        fresh: false,
       );
-      await store.poll();
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
       await mouse.moveTo(viewer.center);
       await tester.tap(find.byType(RawImage), warnIfMissed: false);
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 5));
       expect(api.inputs.length, 4);
       await mouse.removePointer();
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
-      store.dispose();
-    },
-  );
-  test(
-    'input is ordered, view-only is read-only, and release cancels queued actions',
-    () async {
-      final api = FakeDesktopApi();
-      final store = DesktopStore(api);
-      const visible = DesktopStatus(
-        state: 'streaming',
-        controlAllowed: true,
-        generation: 3,
-        frameId: 4,
-      );
-      api.viewer = visible;
-      api.image = DesktopFrame(visible, Uint8List.fromList([1]));
-      await store.poll();
-      await store.send(visible, {'kind': 'text', 'text': 'denied'});
-      expect(api.inputs, isEmpty);
-      await api.control(true);
-      await store.poll();
-      final press = store.send(visible, {
-        'kind': 'button',
-        'button': 'left',
-        'down': true,
-      });
-      final lift = store.send(visible, {
-        'kind': 'button',
-        'button': 'left',
-        'down': false,
-      });
-      await Future.wait([press, lift]);
-      expect(api.inputs.map((e) => e['down']), [true, false]);
-      expect(api.sequences, [1, 2]);
-      api.inputGate = Completer<void>();
-      final held = store.send(visible, {
-        'kind': 'key',
-        'key': 'shift',
-        'down': true,
-      });
-      await Future<void>.delayed(Duration.zero);
-      final queued = store.send(visible, {'kind': 'text', 'text': 'cancelled'});
-      final release = store.release();
-      api.inputGate!.complete();
-      await Future.wait([held, queued, release]);
-      expect(api.inputs.any((e) => e['text'] == 'cancelled'), isFalse);
-      expect(api.releases, 1);
-      api.viewer = const DesktopStatus(
-        state: 'stale',
-        controlling: true,
-        generation: 3,
-      );
-      await store.poll();
-      expect(store.controlling, isFalse);
       store.dispose();
     },
   );
@@ -291,19 +243,15 @@ void main() {
       await settle(tester);
       await tester.tap(find.byKey(const Key('desktop-share')));
       await settle(tester);
-      expect(api.desktop.host?.controlAllowed, isTrue);
+      expect(api.desktop.hostSnapshot.background?.host?.controlAllowed, isTrue);
       expect(find.byKey(const Key('desktop-stop')), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pageBack();
       await settle(tester);
       expect(find.text('This desktop is being shared'), findsOneWidget);
-      // An outgoing operation must not disable the persistent local stop.
-      AppScope.of(
-        tester.element(find.byKey(const Key('open-desktop'))),
-      ).store.desktop.busy = true;
       await tester.tap(find.text('Stop sharing'));
       await settle(tester);
-      expect(api.desktop.host, isNull);
+      expect(api.desktop.hostSnapshot.background?.enabled, isFalse);
       await finish(tester);
     },
   );

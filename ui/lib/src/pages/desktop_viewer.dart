@@ -1,10 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import '../common/l10n_extension.dart';
-import '../ffi/desktop_api.dart';
 import '../state/desktop_store.dart';
 import 'desktop_connection_banner.dart';
 import 'desktop_gesture_surface.dart';
@@ -16,216 +16,120 @@ class DesktopViewer extends StatefulWidget {
   State<DesktopViewer> createState() => _DesktopViewerState();
 }
 
-class _DesktopViewerState extends State<DesktopViewer>
-    with WidgetsBindingObserver {
-  ui.Image? _image;
-  DesktopFrame? _decoded;
-  DesktopStatus? _rendered, _videoGeometry;
-  int _viewEpoch = -1;
-  int? _renderedEpoch;
-  DateTime? _decodedAt;
-  bool _decoding = false, _trackpad = false, _foreground = true;
-  double _lastAspectRatio = 16 / 9;
+class _DesktopViewerState extends State<DesktopViewer> {
+  late DesktopDemandHandle _demand;
+  Timer? _cursorTimer;
+  bool _trackpad = false;
   final _focus = FocusNode();
   final _keys = <LogicalKeyboardKey>{};
   final _surface = GlobalKey<DesktopGestureSurfaceState>();
   DesktopStore get store => widget.store;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _foreground =
-        WidgetsBinding.instance.lifecycleState == null ||
-        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
-    store.setViewerForeground(_foreground);
-    store.addListener(_update);
-    store.cursorStatus.addListener(_updateCursor);
-    _update();
+    _attach();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    final foreground = state == AppLifecycleState.resumed;
-    if (_foreground && !foreground) {
-      _releaseLocalInput();
-    }
-    _foreground = foreground;
-    store.setViewerForeground(foreground);
-  }
-
-  void _update() {
-    if (_viewEpoch != store.mediaEpoch) {
-      _viewEpoch = store.mediaEpoch;
-      final previous = _image;
-      _image = null;
-      _decoded = null;
-      _rendered = null;
-      _videoGeometry = null;
-      _renderedEpoch = null;
-      _decodedAt = null;
-      _keys.clear();
-      if (previous != null) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => previous.dispose());
-      }
-    }
-    if (store.frame?.status.codec == 'h264') {
-      final video = store.frame!.status;
-      if (video.videoWidth >= 2 && video.videoHeight >= 2) {
-        _videoGeometry = video;
-        _lastAspectRatio = video.videoWidth / video.videoHeight;
-      }
-      _rendered = store.videoPresented;
-      _renderedEpoch = _rendered == null ? null : store.mediaEpoch;
-    }
-    if (mounted) setState(() {});
-    _updateCursor();
-    final frame = store.frame;
-    if (_decoding ||
-        frame == null ||
-        frame.status.codec == 'h264' ||
-        identical(frame, _decoded) ||
-        frame.bytes.isEmpty) {
-      return;
-    }
-    _decoding = true;
-    unawaited(_decode(frame, store.mediaEpoch));
-  }
-
-  void _updateCursor() {
-    final status = store.cursorStatus.value;
-    final display = _rendered?.display;
-    final cursor = status?.generation == _rendered?.generation
-        ? status?.cursor
-        : null;
-    _surface.currentState?.updateRemoteCursor(
-      cursor == null ||
-              !cursor.visible ||
-              display == null ||
-              display.width == 0 ||
-              display.height == 0
-          ? null
-          : Offset(cursor.x / display.width, cursor.y / display.height),
+  /// The viewer on screen is what keeps the session resumed (D13).
+  void _attach() {
+    _demand = store.demand(DesktopDemand.viewer);
+    store.session.addListener(_sessionChanged);
+    _cursorTimer = Timer.periodic(
+      const Duration(milliseconds: 33),
+      (_) => _updateCursor(),
     );
   }
 
-  Future<void> _decode(DesktopFrame frame, int epoch) async {
-    final received = DateTime.now();
-    try {
-      final buffer = await ui.ImmutableBuffer.fromUint8List(frame.bytes);
-      final codec = await ui.instantiateImageCodecWithSize(
-        buffer,
-        getTargetSize: (width, height) {
-          final scale = math.min(1.0, math.min(1600 / width, 1000 / height));
-          return ui.TargetImageSize(
-            width: math.max(1, (width * scale).round()),
-            height: math.max(1, (height * scale).round()),
-          );
-        },
-      );
-      final info = await codec.getNextFrame();
-      codec.dispose();
-      if (!mounted ||
-          epoch != store.mediaEpoch ||
-          store.frame?.status.generation != frame.status.generation ||
-          store.frame?.status.codec == 'h264' ||
-          DateTime.now().difference(received) >= const Duration(seconds: 2)) {
-        info.image.dispose();
-        return;
-      }
-      final previous = _image;
-      setState(() {
-        _image = info.image;
-        _lastAspectRatio = info.image.width / info.image.height;
-        _decoded = frame;
-        _rendered = null;
-        _renderedEpoch = null;
-        _decodedAt = received;
-      });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        previous?.dispose();
-        if (mounted &&
-            epoch == store.mediaEpoch &&
-            identical(_decoded, frame)) {
-          setState(() {
-            _rendered = frame.status;
-            _renderedEpoch = epoch;
-          });
-          store.acknowledgePresented(frame.status, epoch);
-        }
-      });
-    } catch (e) {
-      if (mounted && epoch == store.mediaEpoch) {
-        store.error = e.toString();
-      }
-    } finally {
-      _decoding = false;
-      // Pick up a newer frame only. A decode failure is not retried in a loop.
-      if (mounted && !identical(store.frame, frame)) _update();
-    }
+  void _detach(DesktopStore store) {
+    _cursorTimer?.cancel();
+    store.session.removeListener(_sessionChanged);
+    _demand.dispose();
   }
 
   @override
   void didUpdateWidget(covariant DesktopViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.store, store)) {
-      oldWidget.store.removeListener(_update);
-      oldWidget.store.cursorStatus.removeListener(_updateCursor);
-      oldWidget.store.setViewerForeground(false);
-      _viewEpoch = -1;
-      store.setViewerForeground(_foreground);
-      store.addListener(_update);
-      store.cursorStatus.addListener(_updateCursor);
-      _update();
+      _detach(oldWidget.store);
+      _keys.clear();
+      _attach();
     }
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    store.removeListener(_update);
-    store.cursorStatus.removeListener(_updateCursor);
-    store.setViewerForeground(false);
+    _detach(store);
     _focus.dispose();
-    _image?.dispose();
     super.dispose();
   }
 
+  void _sessionChanged() {
+    // Control or freshness lost: the host has released everything already.
+    if (!store.session.value.inputLive) _keys.clear();
+  }
+
+  void _updateCursor() {
+    final view = store.readView();
+    final geometry = store.geometry.value;
+    _surface.currentState?.updateRemoteCursor(
+      view == null ||
+              !view.cursorVisible ||
+              geometry == null ||
+              view.generation != geometry.generation ||
+              geometry.displayWidth == 0 ||
+              geometry.displayHeight == 0
+          ? null
+          : Offset(
+              view.cursorX / geometry.displayWidth,
+              view.cursorY / geometry.displayHeight,
+            ),
+    );
+  }
+
   bool get _interactive =>
-      store.controlling &&
-      _rendered != null &&
-      _renderedEpoch == store.mediaEpoch &&
-      (store.frame?.status.codec == 'h264' ||
-          (_decodedAt != null &&
-              DateTime.now().difference(_decodedAt!) <
-                  const Duration(seconds: 2))) &&
-      _rendered!.generation == store.frame?.status.generation;
-  Future<void> _send(Map<String, Object?> event) async {
-    final rendered = _rendered;
-    if (rendered != null && _interactive) {
-      await store.send(rendered, event, mediaEpoch: _renderedEpoch);
-    }
+      store.session.value.inputLive && store.geometry.value != null;
+
+  bool _send(DesktopInput input) {
+    final geometry = store.geometry.value;
+    return geometry != null && store.send(input, geometryEpoch: geometry.epoch);
   }
 
-  Future<void> _move(Offset normalized) => _send({
-    'kind': 'move',
-    'x': (normalized.dx * (_rendered?.display?.width ?? 0)).floor().clamp(
-      0,
-      math.max(0, (_rendered?.display?.width ?? 1) - 1),
-    ),
-    'y': (normalized.dy * (_rendered?.display?.height ?? 0)).floor().clamp(
-      0,
-      math.max(0, (_rendered?.display?.height ?? 1) - 1),
-    ),
-  });
-  Future<void> _click(String button) async {
-    await _send({'kind': 'button', 'button': button, 'down': true});
-    await _send({'kind': 'button', 'button': button, 'down': false});
+  bool _sequence(List<DesktopInput> inputs) {
+    final geometry = store.geometry.value;
+    return geometry != null &&
+        store.sendSequence(inputs, geometryEpoch: geometry.epoch);
   }
 
-  Future<void> _key(String key) async {
-    await _send({'kind': 'key', 'key': key, 'down': true});
-    await _send({'kind': 'key', 'key': key, 'down': false});
+  Future<void> _move(Offset normalized) async {
+    final geometry = store.geometry.value;
+    if (geometry == null) return;
+    final width = geometry.displayWidth, height = geometry.displayHeight;
+    _send(
+      DesktopInput.move(
+        (normalized.dx * width).floor().clamp(0, math.max(0, width - 1)),
+        (normalized.dy * height).floor().clamp(0, math.max(0, height - 1)),
+      ),
+    );
   }
+
+  static RemoteButton _button(String name) => switch (name) {
+    'right' => RemoteButton.right,
+    'middle' => RemoteButton.middle,
+    _ => RemoteButton.left,
+  };
+
+  void _click(RemoteButton button) => _sequence([
+    DesktopInput.button(button, true),
+    DesktopInput.button(button, false),
+  ]);
+
+  void _tap(RemoteKey key, {List<RemoteKey> held = const []}) => _sequence([
+    for (final modifier in held) DesktopInput.key(modifier, true),
+    DesktopInput.key(key, true),
+    DesktopInput.key(key, false),
+    for (final modifier in held.reversed) DesktopInput.key(modifier, false),
+  ]);
 
   KeyEventResult _keyboard(FocusNode node, KeyEvent event) {
     if (!_interactive) return KeyEventResult.ignored;
@@ -236,9 +140,7 @@ class _DesktopViewerState extends State<DesktopViewer>
       } else {
         _keys.add(event.logicalKey);
       }
-      unawaited(
-        _send({'kind': 'key', 'key': key, 'down': event is! KeyUpEvent}),
-      );
+      _send(DesktopInput.key(key, event is! KeyUpEvent));
       return KeyEventResult.handled;
     }
     if (event is! KeyUpEvent &&
@@ -246,172 +148,188 @@ class _DesktopViewerState extends State<DesktopViewer>
         !HardwareKeyboard.instance.isControlPressed &&
         !HardwareKeyboard.instance.isAltPressed &&
         !HardwareKeyboard.instance.isMetaPressed) {
-      unawaited(_send({'kind': 'text', 'text': event.character}));
+      _send(DesktopInput.text(event.character!));
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
   }
 
+  /// Best effort: the G2 smoke checks that the native snapshot is written.
+  Future<void> _disconnect(BuildContext context) async {
+    String? snapshot;
+    try {
+      final directory = Directory(
+        '${(await getApplicationSupportDirectory()).path}/desktop-thumbnails',
+      );
+      await directory.create(recursive: true);
+      snapshot = '${directory.path}/smoke.thumb';
+    } catch (_) {
+      // No application directory: disconnect without a thumbnail.
+    }
+    await store.disconnect(snapshotPath: snapshot);
+    if (context.mounted) Navigator.pop(context);
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
-    final status = store.snapshot.viewer;
-    final hasGrant = status?.controlling == true;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(l.desktopTitle),
-        actions: [
-          TextButton(
-            onPressed: () async {
-              await store.disconnect();
-              if (context.mounted) Navigator.pop(context);
-            },
-            child: Text(l.desktopDisconnect),
+    return ListenableBuilder(
+      listenable: Listenable.merge([store.session, store.geometry]),
+      builder: (context, _) {
+        final session = store.session.value;
+        final interactive = _interactive;
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(l.desktopTitle),
+            actions: [
+              TextButton(
+                onPressed: () => _disconnect(context),
+                child: Text(l.desktopDisconnect),
+              ),
+            ],
           ),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            DesktopConnectionBanner(store: store),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  FilledButton.tonal(
-                    onPressed: hasGrant
-                        ? () => store.control(false)
-                        : store.busy ||
-                              !store.fresh ||
-                              status?.controlAllowed != true
-                        ? null
-                        : () => store.control(true),
-                    child: Text(
-                      hasGrant ? l.desktopEndControl : l.desktopRequestControl,
-                    ),
+          body: SafeArea(
+            child: Column(
+              children: [
+                DesktopConnectionBanner(store: store),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 4,
                   ),
-                  SegmentedButton<bool>(
-                    key: const Key('desktop-touch-mode'),
-                    showSelectedIcon: false,
-                    segments: [
-                      ButtonSegment(
-                        value: false,
-                        label: Text(l.desktopTouchMode),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      FilledButton.tonal(
+                        onPressed: session.controlling
+                            ? () => store.control(false)
+                            : !session.fresh || !session.controlAllowed
+                            ? null
+                            : () => store.control(true),
+                        child: Text(
+                          session.controlling
+                              ? l.desktopEndControl
+                              : l.desktopRequestControl,
+                        ),
                       ),
-                      ButtonSegment(
-                        value: true,
-                        label: Text(l.desktopTrackpadMode),
+                      SegmentedButton<bool>(
+                        key: const Key('desktop-touch-mode'),
+                        showSelectedIcon: false,
+                        segments: [
+                          ButtonSegment(
+                            value: false,
+                            label: Text(l.desktopTouchMode),
+                          ),
+                          ButtonSegment(
+                            value: true,
+                            label: Text(l.desktopTrackpadMode),
+                          ),
+                        ],
+                        selected: {_trackpad},
+                        onSelectionChanged: (values) {
+                          _releaseLocalInput();
+                          setState(() => _trackpad = values.single);
+                        },
                       ),
                     ],
-                    selected: {_trackpad},
-                    onSelectionChanged: (values) {
-                      _releaseLocalInput();
-                      setState(() => _trackpad = values.single);
-                    },
                   ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: Text(
-                l.desktopGestureHelp,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
-            Expanded(
-              child: Focus(
-                focusNode: _focus,
-                autofocus: true,
-                onKeyEvent: _keyboard,
-                onFocusChange: (focused) {
-                  if (!focused) _releaseLocalInput();
-                },
-                child: ColoredBox(
-                  color: Colors.black,
-                  child: _screen(context, status),
                 ),
-              ),
-            ),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.all(8),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: l.desktopKeyboard,
-                    onPressed: _interactive ? () => _text(context) : null,
-                    icon: const Icon(Icons.keyboard_outlined),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 4,
                   ),
-                  IconButton(
-                    tooltip: l.desktopLeftClick,
-                    onPressed: _interactive ? () => _click('left') : null,
-                    icon: const Icon(Icons.ads_click),
+                  child: Text(
+                    l.desktopGestureHelp,
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
-                  IconButton(
-                    tooltip: l.desktopRightClick,
-                    onPressed: _interactive ? () => _click('right') : null,
-                    icon: const Icon(Icons.mouse_outlined),
-                  ),
-                  IconButton(
-                    tooltip: l.desktopScrollUp,
-                    onPressed: _interactive
-                        ? () => _send({
-                            'kind': 'wheel',
-                            'horizontal': 0,
-                            'vertical': -3,
-                          })
-                        : null,
-                    icon: const Icon(Icons.arrow_upward),
-                  ),
-                  IconButton(
-                    tooltip: l.desktopScrollDown,
-                    onPressed: _interactive
-                        ? () => _send({
-                            'kind': 'wheel',
-                            'horizontal': 0,
-                            'vertical': 3,
-                          })
-                        : null,
-                    icon: const Icon(Icons.arrow_downward),
-                  ),
-                  for (final key in ['escape', 'tab', 'enter', 'backspace'])
-                    TextButton(
-                      onPressed: _interactive ? () => _key(key) : null,
-                      child: Text(key),
+                ),
+                Expanded(
+                  child: Focus(
+                    focusNode: _focus,
+                    autofocus: true,
+                    onKeyEvent: _keyboard,
+                    onFocusChange: (focused) {
+                      if (!focused) _releaseLocalInput();
+                    },
+                    child: ColoredBox(
+                      color: Colors.black,
+                      child: _screen(context, session, interactive),
                     ),
-                  TextButton(
-                    onPressed: _interactive
-                        ? () async {
-                            await _send({
-                              'kind': 'key',
-                              'key': 'control',
-                              'down': true,
-                            });
-                            await _key('a');
-                            await _send({
-                              'kind': 'key',
-                              'key': 'control',
-                              'down': false,
-                            });
-                          }
-                        : null,
-                    child: const Text('Ctrl+A'),
                   ),
-                  IconButton(
-                    tooltip: l.desktopRelease,
-                    onPressed: store.release,
-                    icon: const Icon(Icons.pan_tool_outlined),
+                ),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.all(8),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        tooltip: l.desktopKeyboard,
+                        onPressed: interactive ? () => _text(context) : null,
+                        icon: const Icon(Icons.keyboard_outlined),
+                      ),
+                      IconButton(
+                        tooltip: l.desktopLeftClick,
+                        onPressed: interactive
+                            ? () => _click(RemoteButton.left)
+                            : null,
+                        icon: const Icon(Icons.ads_click),
+                      ),
+                      IconButton(
+                        tooltip: l.desktopRightClick,
+                        onPressed: interactive
+                            ? () => _click(RemoteButton.right)
+                            : null,
+                        icon: const Icon(Icons.mouse_outlined),
+                      ),
+                      IconButton(
+                        tooltip: l.desktopScrollUp,
+                        onPressed: interactive
+                            ? () => _send(DesktopInput.wheel(0, -3))
+                            : null,
+                        icon: const Icon(Icons.arrow_upward),
+                      ),
+                      IconButton(
+                        tooltip: l.desktopScrollDown,
+                        onPressed: interactive
+                            ? () => _send(DesktopInput.wheel(0, 3))
+                            : null,
+                        icon: const Icon(Icons.arrow_downward),
+                      ),
+                      for (final key in const [
+                        RemoteKey.escape,
+                        RemoteKey.tab,
+                        RemoteKey.enter,
+                        RemoteKey.backspace,
+                      ])
+                        TextButton(
+                          onPressed: interactive ? () => _tap(key) : null,
+                          child: Text(key.wire),
+                        ),
+                      TextButton(
+                        onPressed: interactive
+                            ? () => _tap(
+                                RemoteKey.a,
+                                held: const [RemoteKey.control],
+                              )
+                            : null,
+                        child: const Text('Ctrl+A'),
+                      ),
+                      IconButton(
+                        tooltip: l.desktopRelease,
+                        onPressed: store.release,
+                        icon: const Icon(Icons.pan_tool_outlined),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -419,102 +337,94 @@ class _DesktopViewerState extends State<DesktopViewer>
     _surface.currentState?.cancelInput();
     if (_keys.isNotEmpty) {
       _keys.clear();
-      unawaited(store.release());
+      store.release();
     }
   }
 
-  Widget _screen(BuildContext context, DesktopStatus? status) {
-    final texture = store.videoTexture;
-    final video = texture == null ? null : _videoGeometry;
-    final image = _image;
-    final hasPicture = video != null || image != null;
-    final display = _rendered?.display;
-    final cursor = status?.generation == _rendered?.generation
-        ? status?.cursor
-        : _rendered?.cursor;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        DesktopGestureSurface(
-          key: _surface,
-          aspectRatio: _lastAspectRatio,
-          enabled: _interactive,
-          trackpad: _trackpad,
-          inputEpoch: (store, store.mediaEpoch, store.frame?.status.generation),
-          cursor:
-              cursor == null ||
-                  !cursor.visible ||
-                  display == null ||
-                  display.width == 0 ||
-                  display.height == 0
-              ? null
-              : Offset(cursor.x / display.width, cursor.y / display.height),
-          onFocus: _focus.requestFocus,
-          onMove: _move,
-          onButton: (button, down) =>
-              _send({'kind': 'button', 'button': button, 'down': down}),
-          onWheel: (delta) => _send({
-            'kind': 'wheel',
-            'horizontal': (delta.dx / 30).round().clamp(-100, 100),
-            'vertical': (delta.dy / 30).round().clamp(-100, 100),
-          }),
-          onRelease: store.release,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              if (video != null)
-                Texture(
-                  key: ValueKey(texture!.textureId),
-                  textureId: texture.textureId,
-                  filterQuality: FilterQuality.low,
-                )
-              else if (image != null)
-                RawImage(
-                  image: image,
-                  fit: BoxFit.fill,
-                  filterQuality: FilterQuality.low,
-                ),
-            ],
-          ),
-        ),
-        if (!hasPicture)
-          IgnorePointer(
-            child: Center(
-              child: Text(
-                status?.state == 'stopped'
-                    ? context.l10n.desktopStopped
-                    : context.l10n.desktopConnecting,
-                style: const TextStyle(color: Colors.white),
+  Widget _screen(
+    BuildContext context,
+    DesktopSessionView session,
+    bool interactive,
+  ) => ValueListenableBuilder(
+    valueListenable: store.picture,
+    builder: (context, picture, _) {
+      final geometry = store.geometry.value;
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          DesktopGestureSurface(
+            key: _surface,
+            aspectRatio: picture?.aspectRatio ?? 16 / 9,
+            enabled: interactive,
+            trackpad: _trackpad,
+            inputEpoch: (store, geometry?.epoch),
+            onFocus: _focus.requestFocus,
+            onMove: _move,
+            onButton: (button, down) async =>
+                _send(DesktopInput.button(_button(button), down)),
+            onWheel: (delta) async => _send(
+              DesktopInput.wheel(
+                (delta.dx / 30).round(),
+                (delta.dy / 30).round(),
               ),
             ),
-          )
-        else if (!store.fresh)
-          // Never cover the entire native texture with an opaque layer. Flutter
-          // still needs to consume it to acknowledge the next recovered frame.
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: IgnorePointer(
-              child: Container(
-                margin: const EdgeInsets.all(12),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.65),
-                  borderRadius: BorderRadius.circular(8),
-                ),
+            onRelease: () async => store.release(),
+            child: picture?.textureId != null
+                ? Texture(
+                    key: ValueKey(picture!.textureId),
+                    textureId: picture.textureId!,
+                    filterQuality: FilterQuality.low,
+                  )
+                : ValueListenableBuilder(
+                    valueListenable: store.jpegImage,
+                    builder: (context, image, _) => image == null
+                        ? const SizedBox.expand()
+                        : RawImage(
+                            image: image,
+                            fit: BoxFit.fill,
+                            filterQuality: FilterQuality.low,
+                          ),
+                  ),
+          ),
+          if (picture == null)
+            IgnorePointer(
+              child: Center(
                 child: Text(
-                  context.l10n.desktopStale,
+                  session.phase == DesktopPhase.ended
+                      ? context.l10n.desktopStopped
+                      : context.l10n.desktopConnecting,
                   style: const TextStyle(color: Colors.white),
-                  textAlign: TextAlign.center,
+                ),
+              ),
+            )
+          else if (!session.fresh)
+            // Never cover the native texture with an opaque layer: Flutter
+            // must keep consuming it to present the recovered picture.
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: IgnorePointer(
+                child: Container(
+                  margin: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.65),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    context.l10n.desktopStale,
+                    style: const TextStyle(color: Colors.white),
+                    textAlign: TextAlign.center,
+                  ),
                 ),
               ),
             ),
-          ),
-      ],
-    );
-  }
+        ],
+      );
+    },
+  );
 
   Future<void> _text(BuildContext context) async {
     final field = TextEditingController();
@@ -532,37 +442,35 @@ class _DesktopViewerState extends State<DesktopViewer>
       ),
     );
     field.dispose();
-    if (text != null && text.isNotEmpty) {
-      await _send({'kind': 'text', 'text': text});
-    }
+    if (text != null && text.isNotEmpty) _send(DesktopInput.text(text));
   }
 }
 
-final _keyNames = <LogicalKeyboardKey, String>{
-  LogicalKeyboardKey.shiftLeft: 'shift',
-  LogicalKeyboardKey.shiftRight: 'shift',
-  LogicalKeyboardKey.controlLeft: 'control',
-  LogicalKeyboardKey.controlRight: 'control',
-  LogicalKeyboardKey.altLeft: 'alt',
-  LogicalKeyboardKey.altRight: 'alt',
-  LogicalKeyboardKey.metaLeft: 'meta',
-  LogicalKeyboardKey.metaRight: 'meta',
-  LogicalKeyboardKey.enter: 'enter',
-  LogicalKeyboardKey.escape: 'escape',
-  LogicalKeyboardKey.tab: 'tab',
-  LogicalKeyboardKey.backspace: 'backspace',
-  LogicalKeyboardKey.delete: 'delete',
-  LogicalKeyboardKey.arrowLeft: 'left',
-  LogicalKeyboardKey.arrowRight: 'right',
-  LogicalKeyboardKey.arrowUp: 'up',
-  LogicalKeyboardKey.arrowDown: 'down',
-  LogicalKeyboardKey.home: 'home',
-  LogicalKeyboardKey.end: 'end',
-  LogicalKeyboardKey.pageUp: 'page_up',
-  LogicalKeyboardKey.pageDown: 'page_down',
-  LogicalKeyboardKey.keyA: 'a',
-  LogicalKeyboardKey.keyC: 'c',
-  LogicalKeyboardKey.keyV: 'v',
-  LogicalKeyboardKey.keyX: 'x',
-  LogicalKeyboardKey.keyZ: 'z',
+final _keyNames = <LogicalKeyboardKey, RemoteKey>{
+  LogicalKeyboardKey.shiftLeft: RemoteKey.shift,
+  LogicalKeyboardKey.shiftRight: RemoteKey.shift,
+  LogicalKeyboardKey.controlLeft: RemoteKey.control,
+  LogicalKeyboardKey.controlRight: RemoteKey.control,
+  LogicalKeyboardKey.altLeft: RemoteKey.alt,
+  LogicalKeyboardKey.altRight: RemoteKey.alt,
+  LogicalKeyboardKey.metaLeft: RemoteKey.meta,
+  LogicalKeyboardKey.metaRight: RemoteKey.meta,
+  LogicalKeyboardKey.enter: RemoteKey.enter,
+  LogicalKeyboardKey.escape: RemoteKey.escape,
+  LogicalKeyboardKey.tab: RemoteKey.tab,
+  LogicalKeyboardKey.backspace: RemoteKey.backspace,
+  LogicalKeyboardKey.delete: RemoteKey.delete,
+  LogicalKeyboardKey.arrowLeft: RemoteKey.left,
+  LogicalKeyboardKey.arrowRight: RemoteKey.right,
+  LogicalKeyboardKey.arrowUp: RemoteKey.up,
+  LogicalKeyboardKey.arrowDown: RemoteKey.down,
+  LogicalKeyboardKey.home: RemoteKey.home,
+  LogicalKeyboardKey.end: RemoteKey.end,
+  LogicalKeyboardKey.pageUp: RemoteKey.pageUp,
+  LogicalKeyboardKey.pageDown: RemoteKey.pageDown,
+  LogicalKeyboardKey.keyA: RemoteKey.a,
+  LogicalKeyboardKey.keyC: RemoteKey.c,
+  LogicalKeyboardKey.keyV: RemoteKey.v,
+  LogicalKeyboardKey.keyX: RemoteKey.x,
+  LogicalKeyboardKey.keyZ: RemoteKey.z,
 };
