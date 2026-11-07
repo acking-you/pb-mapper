@@ -1,11 +1,11 @@
 //! Explicitly authorized hosting owned by the installed Windows service.
 //! The UI is a management client; closing it does not own or stop this host.
 use super::{configuration, ipc, os};
-use crate::{Result, SessionStatus, error};
+use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
 
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v1";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v2";
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const FILE_NAME: &str = "background-host.dpapi";
 const REVOKED_MARKER: &str = "background-host.revoked";
@@ -43,7 +43,7 @@ impl std::fmt::Debug for Options {
 pub struct Snapshot {
     pub configured: bool,
     pub enabled: bool,
-    pub host: Option<SessionStatus>,
+    pub host: Option<HostStatus>,
     /// Returned only to the approved local application, never written to logs.
     pub invitation: Option<String>,
     pub settings: Option<Settings>,
@@ -60,10 +60,14 @@ enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity: Option<crate::HostIdentity>,
     },
-    Status,
-    Start,
-    Stop,
-    Revoke,
+    // Struct variants throughout: serde ignores extra fields on an internally
+    // tagged unit variant, which would undo `deny_unknown_fields`.
+    Status {},
+    Start {},
+    Stop {},
+    Revoke {},
+    /// End the connected viewer's session; hosting continues.
+    EndSession {},
     RevokeScope {
         server: String,
         namespace: Option<u64>,
@@ -121,20 +125,24 @@ pub async fn configure_with_identity(
     .await
 }
 pub async fn status() -> Result<Snapshot> {
-    call(Command::Status).await
+    call(Command::Status {}).await
 }
 /// Restore the saved grant and automatic startup. A renderer still requests
 /// control only after presenting the current desktop.
 pub async fn start() -> Result<Snapshot> {
-    call(Command::Start).await
+    call(Command::Start {}).await
+}
+/// Disconnect the viewer; the background host keeps sharing.
+pub async fn end_session() -> Result<Snapshot> {
+    call(Command::EndSession {}).await
 }
 /// Stop active hosting and disable automatic startup, retaining the invitation.
 pub async fn stop() -> Result<Snapshot> {
-    call(Command::Stop).await
+    call(Command::Stop {}).await
 }
 /// Stop active hosting and destroy the stored invitation and relay credential.
 pub async fn revoke() -> Result<Snapshot> {
-    call(Command::Revoke).await
+    call(Command::Revoke {}).await
 }
 /// Revoke the current application's relay scope, including a just-completed
 /// handoff that its UI has not observed. The service checks the scope atomically.

@@ -45,6 +45,14 @@ pub fn connect(name: &str) -> Result<NamedPipeClient> {
     unsafe { NamedPipeClient::from_raw_handle(owned.into_raw_handle()) }
 }
 
+/// Whether a server has created pipe `name`, without connecting to it. Only a
+/// definite "no such pipe" counts as absent; busy instances are present.
+pub fn exists(name: &str) -> bool {
+    let name = os::wide(name);
+    unsafe { windows::Win32::System::Pipes::WaitNamedPipeW(PCWSTR(name.as_ptr()), 1) }.as_bool()
+        || std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+}
+
 pub fn raw<T: std::os::windows::io::AsRawHandle>(pipe: &T) -> HANDLE {
     HANDLE(pipe.as_raw_handle())
 }

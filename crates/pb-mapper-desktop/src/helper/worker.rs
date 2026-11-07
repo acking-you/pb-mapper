@@ -281,21 +281,12 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                 Ok(backend) => backend,
                 Err(e) => {
                     if let Ok((_, reply)) = incoming.recv_timeout(TIMEOUT) {
-                        let _ = reply.send((
-                            Response {
-                                context: None,
-                                error: Some(e.to_string()),
-                                video: None,
-                                cursor: None,
-                            },
-                            vec![],
-                        ));
+                        let _ = reply.send((Response::failed(e.to_string(), 0), vec![]));
                     }
                     return;
                 }
             };
             let mut sequence = 0;
-            let mut pace_fps = crate::VideoPreferences::default().max_fps;
             let mut last_input = std::time::Instant::now();
             while !stopped.is_cancelled() {
                 if last_input.elapsed() > std::time::Duration::from_secs(2) {
@@ -310,115 +301,17 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                 if stopped.is_cancelled() {
                     break;
                 }
-                let close = matches!(request, Request::Close);
-                let result = (|| {
-                    if matches!(request, Request::Release | Request::Close) {
-                        backend.release();
-                        return Ok((None, vec![], None, None));
-                    }
-                    let context = backend.context()?;
-                    let mut video = None;
-                    let observe_cursor = matches!(
-                        &request,
-                        Request::Context
-                            | Request::Capture
-                            | Request::CaptureVideo { .. }
-                            | Request::DrainVideo { .. }
-                    );
-                    let image = match request {
-                        Request::Start { .. } | Request::Context => vec![],
-                        Request::Attach { .. } => return Err(error("worker is already attached")),
-                        Request::ConfigureVideo { preferences } => {
-                            preferences.validate()?;
-                            backend.configure_video(preferences.limits(), preferences.max_fps)?;
-                            pace_fps = preferences.max_fps;
-                            vec![]
-                        }
-                        Request::Capture => backend.capture_consistent(&context)?,
-                        Request::DrainVideo { expected } => {
-                            if expected != context {
-                                return Err(error("stale video drain request"));
-                            }
-                            match backend.drain_video(&expected, std::time::Duration::ZERO)? {
-                                Some(frame) => {
-                                    video = Some(frame.format);
-                                    frame.bytes
-                                }
-                                None => vec![],
-                            }
-                        }
-                        Request::CaptureVideo {
-                            expected,
-                            codec,
-                            keyframe,
-                            bitrate,
-                        } => {
-                            if expected != context || !(256_000..=40_000_000).contains(&bitrate) {
-                                return Err(error("invalid or stale video request"));
-                            }
-                            let rate = crate::VideoRate { bitrate, pace_fps };
-                            match backend.capture_video(&expected, codec, keyframe, rate)? {
-                                Some(frame) => {
-                                    video = Some(frame.format);
-                                    frame.bytes
-                                }
-                                None => vec![],
-                            }
-                        }
-                        Request::Presented { generation } => {
-                            if generation != context.generation {
-                                return Err(error("stale helper presentation"));
-                            }
-                            last_input = std::time::Instant::now();
-                            vec![]
-                        }
-                        Request::Input {
-                            generation,
-                            sequence: seq,
-                            input,
-                        } => {
-                            if generation != context.generation || seq <= sequence {
-                                backend.release();
-                                return Err(error("stale or repeated helper input"));
-                            }
-                            sequence = seq;
-                            backend.input_in_context(&context, &input)?;
-                            last_input = std::time::Instant::now();
-                            vec![]
-                        }
-                        Request::Release | Request::Close => unreachable!(),
-                    };
-                    // Context polling observes the pointer even when capture is
-                    // idle or paused. The backend checks this desktop identity;
-                    // observing it never renews last_input or acknowledges video.
-                    let cursor = if observe_cursor {
-                        backend.cursor(&context)?
-                    } else {
-                        None
-                    };
-                    Ok::<_, std::io::Error>((Some(context), image, video, cursor))
-                })();
+                let close = matches!(request, Request::Close {});
+                let result = serve(&mut *backend, request, &mut sequence, &mut last_input);
+                let pending = u32::try_from(backend.pending_video()).unwrap_or(u32::MAX);
                 let response = match result {
-                    Ok((context, image, video, cursor)) => (
-                        Response {
-                            context,
-                            error: None,
-                            video,
-                            cursor,
-                        },
-                        image,
-                    ),
+                    Ok((mut response, image)) => {
+                        response.pending = pending;
+                        (response, image)
+                    }
                     Err(e) => {
                         backend.release();
-                        (
-                            Response {
-                                context: None,
-                                error: Some(e.to_string()),
-                                video: None,
-                                cursor: None,
-                            },
-                            vec![],
-                        )
+                        (Response::failed(e.to_string(), pending), vec![])
                     }
                 };
                 let _ = reply.send(response);
@@ -431,7 +324,7 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         let exchange = async {
             let mut request = Request::Start { display_id };
             loop {
-                let close = matches!(request, Request::Close);
+                let close = matches!(request, Request::Close {});
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 requests.try_send((request, tx)).map_err(error)?;
                 let (response, image) = tokio::time::timeout(TIMEOUT, rx)
@@ -458,6 +351,152 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         let _ = join.join();
         exchange
     })
+}
+
+#[cfg(feature = "windows-helper")]
+impl Response {
+    fn failed(error: String, pending: u32) -> Self {
+        Self {
+            context: None,
+            error: Some(error),
+            video: None,
+            cursor: None,
+            pending,
+            double_click: None,
+        }
+    }
+}
+
+/// One request on the worker's desktop-bound thread. The host's thread C
+/// paces and authorises; this checks the desktop generation and the input
+/// sequence again at the injection boundary.
+#[cfg(feature = "windows-helper")]
+fn serve(
+    backend: &mut dyn Backend,
+    request: Request,
+    sequence: &mut u64,
+    last_input: &mut std::time::Instant,
+) -> Result<(Response, Vec<u8>)> {
+    let mut response = Response {
+        context: None,
+        error: None,
+        video: None,
+        cursor: None,
+        pending: 0,
+        double_click: None,
+    };
+    if matches!(request, Request::Release {} | Request::Close {}) {
+        backend.release();
+        return Ok((response, vec![]));
+    }
+    let context = backend.context()?;
+    // Context polling observes the pointer even when capture is idle or
+    // paused. The backend checks this desktop identity; observing it never
+    // renews last_input or acknowledges video.
+    let observe_cursor = matches!(
+        request,
+        Request::Context {} | Request::Capture {} | Request::Video { .. }
+    );
+    let image = match request {
+        Request::Start { .. } => {
+            // This worker runs in the interactive session: its settings are
+            // the user's, which the service in session 0 cannot read.
+            response.double_click = backend.double_click_guard();
+            vec![]
+        }
+        Request::Context {} | Request::Release {} | Request::Close {} => vec![],
+        Request::Attach { .. } => return Err(error("worker is already attached")),
+        Request::ConfigureVideo {
+            limits,
+            nominal_fps,
+        } => {
+            if !(1..=120).contains(&nominal_fps) {
+                return Err(error("invalid video configuration"));
+            }
+            backend.configure_video(limits, nominal_fps)?;
+            vec![]
+        }
+        Request::Capture {} => backend.capture_consistent(&context)?,
+        Request::Video {
+            expected,
+            codec,
+            submit,
+            keyframe,
+            rate,
+            wait_ms,
+        } => {
+            if expected != context
+                || wait_ms > DRAIN_WAIT_MAX_MS
+                || submit
+                    && (!(256_000..=40_000_000).contains(&rate.bitrate)
+                        || !(1..=120).contains(&rate.pace_fps))
+            {
+                return Err(error("invalid or stale video request"));
+            }
+            let frame = if submit {
+                backend.capture_video(&expected, codec, keyframe, rate)?
+            } else {
+                drain(
+                    backend,
+                    &expected,
+                    std::time::Duration::from_millis(wait_ms.into()),
+                )?
+            };
+            match frame {
+                Some(frame) => {
+                    response.video = Some(frame.format);
+                    frame.bytes
+                }
+                None => vec![],
+            }
+        }
+        Request::Presented { generation } => {
+            if generation != context.generation {
+                return Err(error("stale helper presentation"));
+            }
+            *last_input = std::time::Instant::now();
+            vec![]
+        }
+        Request::Input {
+            generation,
+            sequence: next,
+            input,
+        } => {
+            if generation != context.generation || next <= *sequence {
+                backend.release();
+                return Err(error("stale or repeated helper input"));
+            }
+            *sequence = next;
+            backend.input_in_context(&context, &input)?;
+            *last_input = std::time::Instant::now();
+            vec![]
+        }
+    };
+    if observe_cursor {
+        response.cursor = backend.cursor(&context)?;
+    }
+    response.context = Some(context);
+    Ok((response, image))
+}
+
+/// Drain one unit, waiting up to `wait` while the encoder still holds units,
+/// so the host polls a busy encoder without a pipe round trip per poll.
+#[cfg(feature = "windows-helper")]
+fn drain(
+    backend: &mut dyn Backend,
+    expected: &DesktopContext,
+    wait: std::time::Duration,
+) -> Result<Option<crate::EncodedFrame>> {
+    let until = std::time::Instant::now() + wait;
+    loop {
+        if let Some(frame) = backend.drain_video(expected, std::time::Duration::ZERO)? {
+            return Ok(Some(frame));
+        }
+        if backend.pending_video() == 0 || std::time::Instant::now() >= until {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 #[cfg(all(test, feature = "windows-helper"))]

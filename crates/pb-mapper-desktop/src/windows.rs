@@ -10,6 +10,7 @@ use windows::Win32::{
         TOKEN_QUERY, TokenIntegrityLevel, TokenSessionId, TokenUIAccess,
     },
     System::{
+        Shutdown::LockWorkStation,
         StationsAndDesktops::{
             CloseDesktop, DESKTOP_READOBJECTS, GetUserObjectInformationW, OpenInputDesktop,
             UOI_NAME,
@@ -21,8 +22,10 @@ use windows::Win32::{
             DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
             SetThreadDpiAwarenessContext,
         },
+        Input::KeyboardAndMouse::GetDoubleClickTime,
         WindowsAndMessaging::{
-            CURSOR_SHOWING, CURSOR_SUPPRESSED, CURSORINFO, GetCursorInfo, SetCursorPos,
+            CURSOR_SHOWING, CURSOR_SUPPRESSED, CURSORINFO, GetCursorInfo, GetSystemMetrics,
+            SM_CXDOUBLECLK, SM_CYDOUBLECLK, SetCursorPos,
         },
     },
 };
@@ -304,10 +307,14 @@ impl Backend for Desktop {
             .as_mut()
             .ok_or_else(|| error("video encoder unavailable"))?
             .1;
-        encoder.set_bitrate(rate.bitrate)?;
-        let image = encoder.next_frame(keyframe);
+        // The worker paces: drain what is finished, then submit one capture.
+        let image = encoder
+            .set_rate(rate)
+            .and_then(|()| encoder.drain())
+            .and_then(|image| encoder.submit(keyframe).map(|_| image));
         self.finish_video(expected, image)
     }
+    /// Never blocks: the wait bounds only the helper's long-poll.
     fn drain_video(
         &mut self,
         expected: &DesktopContext,
@@ -325,6 +332,11 @@ impl Backend for Desktop {
         }
         let image = encoder.drain();
         self.finish_video(expected, image)
+    }
+    fn pending_video(&self) -> usize {
+        self.encoder
+            .as_ref()
+            .map_or(0, |(_, encoder)| encoder.pending_len())
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;
@@ -379,12 +391,32 @@ impl Backend for Desktop {
             }
             Input::Text { text } => self.input.text(text).map_err(native_input_error)?,
             // LockWorkStation arrives with the v2 worker.
-            Input::Lock {} => return Err(error("this host cannot lock the workstation yet")),
+            // The interactive session's own lock; the desktop switch that
+            // follows invalidates the generation through the context check.
+            Input::Lock {} => unsafe { LockWorkStation() }
+                .map_err(|e| error(format!("Windows could not lock the workstation: {e}")))?,
         }
         Ok(())
     }
     fn release(&mut self) {
         release_input(&mut self.input, &mut self.buttons, &mut self.keys);
+    }
+    /// This process runs in the interactive session (the helper's worker does
+    /// too), so these are the signed-in user's settings.
+    fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
+        let _dpi = DpiScope::enter();
+        let (time_ms, width, height) = unsafe {
+            (
+                GetDoubleClickTime(),
+                GetSystemMetrics(SM_CXDOUBLECLK),
+                GetSystemMetrics(SM_CYDOUBLECLK),
+            )
+        };
+        let half = |size: i32| u32::try_from(size).unwrap_or(0) / 2;
+        Some(crate::DoubleClickGuard {
+            time_ms,
+            half_box: (half(width), half(height)),
+        })
     }
 }
 

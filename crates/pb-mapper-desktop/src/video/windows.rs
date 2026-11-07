@@ -16,7 +16,7 @@ use windows::{
         Foundation::RECT,
         Graphics::{
             Direct3D11::*,
-            Dxgi::{Common::*, IDXGIDevice},
+            Dxgi::{Common::*, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIDevice},
         },
         Media::MediaFoundation::*,
         System::{
@@ -33,6 +33,12 @@ use windows_capture::{
 
 const MAX_IN_FLIGHT: usize = 3;
 const MAX_ACCESS_UNIT: usize = 4 * 1024 * 1024;
+/// A static desktop still submits a verified repeat this often, which keeps a
+/// presented frame fresh enough to authorise input.
+const LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
+/// GOP sizes to request, longest first: keyframes come only on demand. Never
+/// 0, which asks the encoder for its own default GOP rather than an endless one.
+const GOP_CANDIDATES: [u32; 4] = [u32::MAX, 0x7FFF_FFFF, 65_535, 3_600];
 
 pub struct Encoded {
     pub bytes: Vec<u8>,
@@ -44,6 +50,8 @@ pub struct Encoded {
     pub duplicate: bool,
     /// Monotonic capture timestamp relative to this encoder's creation.
     pub pts_us: u64,
+    /// Submit to output, in microseconds.
+    pub encode_us: u32,
 }
 
 impl From<Encoded> for crate::EncodedFrame {
@@ -56,7 +64,7 @@ impl From<Encoded> for crate::EncodedFrame {
                 keyframe: image.keyframe,
                 pts_us: image.pts_us,
                 duplicate: image.duplicate,
-                encode_us: 0,
+                encode_us: image.encode_us,
             },
             bytes: image.bytes,
         }
@@ -72,6 +80,9 @@ pub struct Statistics {
     pub bytes: u64,
     pub max_in_flight: usize,
     pub encode_time_us: u64,
+    /// The GOP size the encoder reads back: a `GOP_CANDIDATES` entry, or what
+    /// it clamped them to. 0 when it reports none.
+    pub gop: u32,
 }
 
 struct Runtime {
@@ -108,8 +119,10 @@ impl Drop for Runtime {
     }
 }
 
-/// Bounded hardware encoder. `None` means no access unit is ready yet; callers
-/// must continue servicing input/stop while waiting, rather than busy-spinning.
+/// Bounded hardware encoder. The caller paces: `submit` sends at most one
+/// capture per call, and `drain` collects finished output. `None` means no
+/// access unit is ready yet; callers must continue servicing input/stop while
+/// waiting, rather than busy-spinning.
 pub struct Encoder {
     capture: DxgiDuplicationApi,
     codec: Codec,
@@ -124,8 +137,7 @@ pub struct Encoder {
     fps: u32,
     bitrate: u32,
     created: Instant,
-    next_capture: Instant,
-    last_sent: Instant,
+    last_submit: Option<Instant>,
     last_present: i64,
     force_keyframe: bool,
     wait_independent_output: bool,
@@ -219,6 +231,10 @@ impl Encoder {
                 .map_err(error)?;
         }
         let now = Instant::now();
+        let stats = Statistics {
+            gop: codec.gop,
+            ..Statistics::default()
+        };
         Ok(Self {
             capture,
             codec,
@@ -233,12 +249,11 @@ impl Encoder {
             fps,
             bitrate,
             created: now,
-            next_capture: now,
-            last_sent: now,
+            last_submit: None,
             last_present: 0,
             force_keyframe: true,
             wait_independent_output: true,
-            stats: Statistics::default(),
+            stats,
             _runtime: runtime,
         })
     }
@@ -250,17 +265,22 @@ impl Encoder {
         self.stats.clone()
     }
 
-    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+    /// Apply a QoS rate. Only the mean bitrate reaches the encoder, and only
+    /// when it changed. The pace is the caller's own: the media type, nominal
+    /// frame rate and GOP never change, so a rate change never rebuilds.
+    pub fn set_rate(&mut self, rate: crate::VideoRate) -> Result<()> {
         self.check_thread()?;
-        if !(256_000..=80_000_000).contains(&bitrate) {
+        if !(256_000..=80_000_000).contains(&rate.bitrate) {
             return Err(error("video bitrate outside supported bounds"));
         }
-        if self.bitrate == bitrate {
+        if self.bitrate == rate.bitrate {
             return Ok(());
         }
-        self.codec
-            .property(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))?;
-        self.bitrate = bitrate;
+        self.codec.property(
+            &CODECAPI_AVEncCommonMeanBitRate,
+            &VARIANT::from(rate.bitrate),
+        )?;
+        self.bitrate = rate.bitrate;
         Ok(())
     }
 
@@ -304,7 +324,8 @@ impl Encoder {
                     self.stats.encoded += 1;
                     self.stats.unique_encoded += u64::from(!duplicate);
                     self.stats.bytes += bytes.len() as u64;
-                    self.stats.encode_time_us += at.elapsed().as_micros() as u64;
+                    let encode_us = at.elapsed().as_micros();
+                    self.stats.encode_time_us += encode_us as u64;
                     ready = Some(Encoded {
                         bytes,
                         width: self.width,
@@ -312,6 +333,7 @@ impl Encoder {
                         keyframe,
                         duplicate,
                         pts_us,
+                        encode_us: u32::try_from(encode_us).unwrap_or(u32::MAX),
                     });
                 }
                 // Some hardware MFTs issue NeedInput only when ProcessOutput
@@ -331,72 +353,58 @@ impl Encoder {
         Ok(ready)
     }
 
-    pub fn next_frame(&mut self, force_keyframe: bool) -> Result<Option<Encoded>> {
+    /// Samples submitted and not yet output. The worker's submit gate counts
+    /// them, so a slow encoder backs capture off instead of queueing it.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Capture the newest desktop image and submit at most one sample; the
+    /// caller paces, and this never waits. Call `drain` first, which collects
+    /// the encoder's input requests. Returns false without submitting while the
+    /// encoder has no room (`MAX_IN_FLIGHT`, no input request, no free sample),
+    /// or when nothing is worth sending: no new image, no keyframe due, and a
+    /// submit within `LIVENESS_INTERVAL`. A requested keyframe stays requested
+    /// until a sample carries it.
+    pub fn submit(&mut self, force_keyframe: bool) -> Result<bool> {
+        self.check_thread()?;
         self.force_keyframe |= force_keyframe;
-        let ready = self.drain()?;
-        if self.pending.len() >= MAX_IN_FLIGHT
-            || self.codec.need_input == 0
-            || Instant::now() < self.next_capture
-        {
-            return Ok(ready);
+        if self.pending.len() >= MAX_IN_FLIGHT || self.codec.need_input == 0 {
+            return Ok(false);
         }
-        let changed = match self.capture.acquire_next_frame(0) {
-            Ok(frame) => {
-                let present = frame.frame_info().LastPresentTime;
-                if present != 0 && present != self.last_present {
-                    self.last_present = present;
-                    self.stats.unique_captures += 1;
-                    if self.latest.is_none() {
-                        let mut desc = *frame.texture_desc();
-                        desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
-                        desc.MiscFlags = 0;
-                        let mut texture = None;
-                        unsafe {
-                            frame
-                                .device()
-                                .CreateTexture2D(&desc, None, Some(&mut texture))
-                                .map_err(error)?;
-                        }
-                        self.latest = texture;
-                    }
-                    let latest = self
-                        .latest
-                        .as_ref()
-                        .ok_or_else(|| error("missing capture texture"))?;
-                    unsafe {
-                        frame.device_context().CopyResource(latest, frame.texture());
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(windows_capture::dxgi_duplication_api::Error::Timeout) => false,
-            Err(e) => return Err(error(e)),
-        };
-        self.latest_pending |= changed;
+        self.latest_pending |= self.acquire()?;
         // Static desktops still send a fresh, verified liveness frame. These
         // repetitions are excluded from unique_captures and benchmark FPS.
         if !self.latest_pending
             && !self.force_keyframe
-            && self.last_sent.elapsed() < Duration::from_millis(250)
+            && self
+                .last_submit
+                .is_some_and(|at| at.elapsed() < LIVENESS_INTERVAL)
         {
-            return Ok(ready);
+            return Ok(false);
         }
         let Some(texture) = &self.latest else {
-            return Ok(ready);
+            return Ok(false);
         };
         let sample = match unsafe { self.allocator.AllocateSample() } {
             Ok(sample) => sample,
-            Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => return Ok(ready),
+            Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => return Ok(false),
             Err(e) => return Err(error(e)),
         };
         self.converter.convert(texture, &sample)?;
-        let pts_us = self.created.elapsed().as_micros() as u64;
+        let now = Instant::now();
+        let pts_us = now.duration_since(self.created).as_micros() as u64;
+        // Variable frame rate: a sample lasts the real interval since the
+        // previous one, while MF_MT_FRAME_RATE stays nominal. Pace changes
+        // therefore never touch the media type or rebuild the encoder.
+        let duration = self.last_submit.map_or(self.frame_period(), |last| {
+            now.duration_since(last)
+                .clamp(self.frame_period(), Duration::from_secs(1))
+        });
         unsafe {
             sample.SetSampleTime((pts_us * 10) as i64).map_err(error)?;
             sample
-                .SetSampleDuration((10_000_000 / self.fps) as i64)
+                .SetSampleDuration((duration.as_nanos() / 100) as i64)
                 .map_err(error)?;
         }
         if self.force_keyframe {
@@ -411,19 +419,70 @@ impl Encoder {
         }
         self.codec.need_input -= 1;
         self.force_keyframe = false;
-        self.last_sent = Instant::now();
-        // Preserve the target clock across display refreshes. Starting a new
-        // interval after every captured refresh rounds 120 FPS on a 165 Hz
-        // display down to 82.5 FPS. Never catch up with a burst after a stall.
-        self.next_capture = (self.next_capture
-            + Duration::from_nanos(1_000_000_000 / u64::from(self.fps)))
-        .max(self.last_sent);
-        self.pending
-            .push_back((pts_us, self.last_sent, !self.latest_pending));
+        self.last_submit = Some(now);
+        self.pending.push_back((pts_us, now, !self.latest_pending));
         self.latest_pending = false;
         self.stats.submitted += 1;
         self.stats.max_in_flight = self.stats.max_in_flight.max(self.pending.len());
-        Ok(ready)
+        Ok(true)
+    }
+
+    /// Copy a new desktop image, if there is one, into `latest`, and release
+    /// the duplication frame at once. A frame held until the next acquire (as
+    /// windows-capture's `acquire_next_frame` does) keeps DXGI from
+    /// accumulating the next update meanwhile, so an acquire at the next tick
+    /// races that update and misses about every other one.
+    fn acquire(&mut self) -> Result<bool> {
+        let duplication = self.capture.duplication();
+        let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+        let mut resource = None;
+        match unsafe { duplication.AcquireNextFrame(0, &mut info, &mut resource) } {
+            Ok(()) => {}
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+            Err(e) => return Err(error(e)),
+        }
+        let copied = (|| {
+            let present = info.LastPresentTime;
+            // Zero: only the pointer moved.
+            if present == 0 || present == self.last_present {
+                return Ok(false);
+            }
+            let frame: ID3D11Texture2D = resource
+                .as_ref()
+                .ok_or_else(|| error("missing desktop frame"))?
+                .cast()
+                .map_err(error)?;
+            if self.latest.is_none() {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { frame.GetDesc(&mut desc) };
+                desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
+                desc.MiscFlags = 0;
+                desc.CPUAccessFlags = 0;
+                desc.Usage = D3D11_USAGE_DEFAULT;
+                let mut texture = None;
+                unsafe {
+                    self.capture
+                        .device()
+                        .CreateTexture2D(&desc, None, Some(&mut texture))
+                        .map_err(error)?;
+                }
+                self.latest = texture;
+            }
+            let latest = self
+                .latest
+                .as_ref()
+                .ok_or_else(|| error("missing capture texture"))?;
+            unsafe { self.capture.device_context().CopyResource(latest, &frame) };
+            self.last_present = present;
+            self.stats.unique_captures += 1;
+            Ok(true)
+        })();
+        let released = unsafe { duplication.ReleaseFrame() }.map_err(error);
+        copied.and_then(|copied| released.map(|()| copied))
+    }
+
+    fn frame_period(&self) -> Duration {
+        Duration::from_nanos(1_000_000_000 / u64::from(self.fps))
     }
 }
 
@@ -448,6 +507,18 @@ fn scaled_size(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32
     ((width & !1).max(2), (height & !1).max(2))
 }
 
+/// Keep the first GOP candidate the encoder accepts and reads back unchanged.
+/// When it changes every one, report what it holds instead (0: nothing), so a
+/// clamp to a finite GOP is visible rather than mistaken for an endless one.
+fn pick_gop(mut set: impl FnMut(u32) -> bool, mut read: impl FnMut() -> Option<u32>) -> u32 {
+    for gop in GOP_CANDIDATES {
+        if set(gop) && read() == Some(gop) {
+            return gop;
+        }
+    }
+    read().unwrap_or(0)
+}
+
 struct Codec {
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
@@ -458,6 +529,7 @@ struct Codec {
     need_input: u32,
     have_output: u32,
     parameter_sets: ParameterSets,
+    gop: u32,
 }
 impl Codec {
     fn new(
@@ -583,6 +655,7 @@ impl Codec {
             need_input: 0,
             have_output: 0,
             parameter_sets: ParameterSets::default(),
+            gop: 0,
         };
         let mut input_ids = [0];
         let mut output_ids = [0];
@@ -605,7 +678,10 @@ impl Codec {
             &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
         );
         let _ = codec.property(&CODECAPI_AVEncCommonQualityVsSpeed, &VARIANT::from(0u32));
-        let _ = codec.property(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(fps));
+        // Before the media types: once streaming starts, the NVIDIA MFT still
+        // accepts a GOP SetValue but keeps its default of one IDR per fps frames.
+        codec.gop = codec.set_infinite_gop();
+        tracing::info!(encoder = %codec.name, gop = codec.gop, "desktop video encoder GOP");
         let output = media_type(&MFVideoFormat_H264, width, height, fps)?;
         let input = media_type(&MFVideoFormat_NV12, width, height, fps)?;
         unsafe {
@@ -641,6 +717,21 @@ impl Codec {
                 .SetValue(key, value)
                 .map_err(|e| error(format!("codec property {key:?}: {e}")))
         }
+    }
+    /// Vendors accept a GOP setting and then clamp or ignore it, so only a
+    /// value read back unchanged counts. Returns the GOP the encoder reports.
+    fn set_infinite_gop(&self) -> u32 {
+        pick_gop(
+            |gop| {
+                self.property(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(gop))
+                    .is_ok()
+            },
+            || {
+                unsafe { self.api.GetValue(&CODECAPI_AVEncMPVGOPSize) }
+                    .ok()
+                    .and_then(|value| u32::try_from(&value).ok())
+            },
+        )
     }
     fn events(&mut self) -> Result<()> {
         for _ in 0..32 {
@@ -1115,6 +1206,26 @@ mod tests {
         assert_eq!(scaled_size(1280, 720, 1920, 1080), (1280, 720));
         assert_eq!(scaled_size(3440, 1440, 1920, 1080), (1920, 802));
         assert_eq!(scaled_size(1080, 1920, 1920, 1080), (606, 1080));
+    }
+    #[test]
+    fn gop_is_trusted_only_when_read_back_unchanged() {
+        // An encoder that accepts every value and holds `holds(value)`.
+        let gop_with = |holds: fn(u32) -> u32| {
+            let held = std::cell::Cell::new(0);
+            pick_gop(
+                |gop| {
+                    held.set(holds(gop));
+                    true
+                },
+                || Some(held.get()),
+            )
+        };
+        assert_eq!(gop_with(|gop| gop), u32::MAX);
+        assert_eq!(gop_with(|gop| gop.min(65_535)), 65_535);
+        // Clamped below every candidate: report the clamp, not a candidate.
+        assert_eq!(gop_with(|gop| gop.min(300)), 300);
+        // Nothing reads back: unknown, never assumed endless.
+        assert_eq!(pick_gop(|_| true, || None), 0);
     }
     #[test]
     fn parameter_sets_survive_partial_updates_and_emulation_prevention() -> Result<()> {

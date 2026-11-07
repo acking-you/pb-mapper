@@ -1,5 +1,9 @@
 //! A bounded access-unit queue. Dropping a predictive frame invalidates the
 //! remaining GOP: discard it and request an IDR instead of decoding corrupt refs.
+//! The viewer now hands video to a `VideoSink`; only the v1 host's congestion
+//! control (its frame bound, and this queue in its tests) still uses this
+//! module, which the G1 cleanup deletes.
+#![cfg_attr(not(test), allow(dead_code))]
 use crate::{CursorPosition, Frame, SessionStatus, VideoCodec};
 use parking_lot::Mutex;
 use std::{

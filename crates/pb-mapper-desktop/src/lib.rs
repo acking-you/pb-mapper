@@ -57,7 +57,11 @@ pub use protocol::{
 };
 pub use security::HostIdentity;
 pub use video_sink::{AttachError, Pull, VideoConsumer, VideoSink, VideoUnit};
-pub use viewer::Viewer;
+pub use viewer::{
+    ConnectError, ConnectStage, DecoderInfo, DecoderState, DesktopView, InputError, IntervalStats,
+    NoticeInfo, PresentedInfo, VideoInfo, Viewer, ViewerConfig, ViewerReason, ViewerState,
+    ViewerStats, ViewerStatus,
+};
 
 /// Embedding applications coordinate their other input writers here. Merely
 /// viewing a desktop never acquires this lease. Drop releases write admission
