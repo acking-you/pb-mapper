@@ -10,7 +10,8 @@ use std::{
 
 pub(crate) const OUTGOING_CAPACITY: usize = 4;
 pub(crate) const OUTGOING_BYTES: usize = 8 * 1024 * 1024;
-/// A head older than this is cleared and replaced by a requested IDR.
+/// A head older than this is cleared and replaced by a requested IDR. Time it
+/// waits behind an IDR in flight does not count (`CreditLedger::aging_since`).
 pub(crate) const OUTGOING_MAX_AGE: Duration = Duration::from_secs(1);
 
 pub(crate) struct HostUnit {

@@ -68,6 +68,8 @@ pub(crate) struct CreditLedger {
     in_flight_bytes: usize,
     /// The oldest IDR in flight; probes written behind it are tainted.
     idr_inflight: Option<u64>,
+    /// When the last receipt that covered an IDR came in.
+    idr_received: Option<Instant>,
     /// `(receipt time, ack delay)` of the newest unit each receipt covered.
     ack_samples: VecDeque<(Instant, Duration)>,
     /// `(receipt time, bytes)` of every receipted unit.
@@ -84,6 +86,7 @@ impl CreditLedger {
             in_flight: VecDeque::new(),
             in_flight_bytes: 0,
             idr_inflight: None,
+            idr_received: None,
             ack_samples: VecDeque::new(),
             delivered: VecDeque::new(),
             delivery_since: None,
@@ -179,6 +182,9 @@ impl CreditLedger {
             self.in_flight_bytes -= sent.bytes as usize;
             self.delivered.push_back((now, sent.bytes));
             newest = Some(sent.sent_at);
+            if sent.keyframe {
+                self.idr_received = Some(now);
+            }
             self.in_flight.pop_front();
         }
         if let Some(sent_at) = newest {
@@ -213,6 +219,17 @@ impl CreditLedger {
 
     pub fn idr_inflight(&self) -> Option<u64> {
         self.idr_inflight
+    }
+
+    /// When a unit ready at `ready_at` began to age while it waits to be
+    /// written: when it was ready, or when the last IDR was receipted if that
+    /// came later. `None` while an IDR is in flight: waiting behind it is not
+    /// staleness, since that IDR is already the resync.
+    pub fn aging_since(&self, ready_at: Instant) -> Option<Instant> {
+        if self.idr_inflight.is_some() {
+            return None;
+        }
+        Some(self.idr_received.map_or(ready_at, |at| at.max(ready_at)))
     }
 
     pub fn view(&self) -> CreditView {
@@ -354,5 +371,28 @@ mod tests {
         // A JPEG session has a fixed window.
         let jpeg = CreditLedger::new(t0).window(VideoCodec::Jpeg, 8, 0, None, t0);
         assert_eq!((jpeg.frames, jpeg.bytes), (4, 2 * 1024 * KIB));
+    }
+
+    #[test]
+    fn a_waiting_unit_ages_from_the_last_idr_receipt() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut credit = CreditLedger::new(t0);
+        let idr = credit.book(160 * KIB, true, ms(10));
+        credit.book(8 * KIB, false, ms(20));
+        // Waiting behind an IDR in flight is not staleness.
+        assert_eq!(credit.aging_since(ms(30)), None);
+        // Once it is receipted, with the P-frame still in flight, a unit ready
+        // before the receipt ages from it, and one ready after from then.
+        credit.on_receipt(idr, ms(1400)).unwrap();
+        assert_eq!(credit.aging_since(ms(30)), Some(ms(1400)));
+        assert_eq!(credit.aging_since(ms(1500)), Some(ms(1500)));
+
+        // A JPEG session books no IDR: a unit always ages from when it was ready.
+        let mut jpeg = CreditLedger::new(t0);
+        let seq = jpeg.book(300 * KIB, false, ms(10));
+        assert_eq!(jpeg.aging_since(ms(30)), Some(ms(30)));
+        jpeg.on_receipt(seq, ms(1400)).unwrap();
+        assert_eq!(jpeg.aging_since(ms(30)), Some(ms(30)));
     }
 }

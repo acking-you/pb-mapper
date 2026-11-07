@@ -321,36 +321,54 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
             }
             backend.release();
         });
-        let exchange = async {
-            let mut request = Request::Start { display_id };
-            loop {
-                let close = matches!(request, Request::Close {});
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                requests.try_send((request, tx)).map_err(error)?;
-                let (response, image) = tokio::time::timeout(TIMEOUT, rx)
-                    .await
-                    .map_err(error)?
-                    .map_err(error)?;
-                tokio::time::timeout(TIMEOUT, async {
-                    ipc::write_json(&mut pipe, &response).await?;
-                    ipc::write_bytes(&mut pipe, &image, ipc::MAX_FRAME).await
-                })
-                .await
-                .map_err(error)??;
-                if close {
-                    return Ok(());
-                }
-                request = tokio::time::timeout(TIMEOUT, ipc::read_json(&mut pipe))
-                    .await
-                    .map_err(error)??;
+        let exchange = exchange(&mut pipe, display_id, |request| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let sent = requests.try_send((request, tx)).map_err(error);
+            async move {
+                sent?;
+                rx.await.map_err(error)
             }
-        }
+        })
         .await;
         cancel.cancel();
         drop(requests);
         let _ = join.join();
         exchange
     })
+}
+
+/// Hand the host's requests to the desktop-bound thread, one at a time, until
+/// `Close`. Each answer is bounded by `TIMEOUT`, but the wait for the next
+/// request is not: a host whose viewer is paused sends nothing for as long as
+/// the pause lasts. The pipe closing ends that wait, and the service closes
+/// it when its caller's pipe closes, or when the owner or its login ends.
+#[cfg(feature = "windows-helper")]
+async fn exchange<P, A>(
+    pipe: &mut P,
+    display_id: u32,
+    mut serve: impl FnMut(Request) -> A,
+) -> Result<()>
+where
+    P: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    A: std::future::Future<Output = Result<(Response, Vec<u8>)>>,
+{
+    let mut request = Request::Start { display_id };
+    loop {
+        let close = matches!(request, Request::Close {});
+        let (response, image) = tokio::time::timeout(TIMEOUT, serve(request))
+            .await
+            .map_err(error)??;
+        tokio::time::timeout(TIMEOUT, async {
+            ipc::write_json(pipe, &response).await?;
+            ipc::write_bytes(pipe, &image, ipc::MAX_FRAME).await
+        })
+        .await
+        .map_err(error)??;
+        if close {
+            return Ok(());
+        }
+        request = ipc::read_json(pipe).await?;
+    }
 }
 
 #[cfg(feature = "windows-helper")]
@@ -390,8 +408,8 @@ fn serve(
         return Ok((response, vec![]));
     }
     let context = backend.context()?;
-    // Context polling observes the pointer even when capture is idle or
-    // paused. The backend checks this desktop identity; observing it never
+    // Context checks observe the pointer too, so it follows while capture is
+    // idle. The backend checks this desktop identity; observing it never
     // renews last_input or acknowledges video.
     let observe_cursor = matches!(
         request,
@@ -621,6 +639,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.generation, 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_worker_waits_out_a_paused_host() {
+        async fn answer(host: &mut tokio::io::DuplexStream) -> Result<Response> {
+            let response = ipc::read_json(host).await?;
+            ipc::read_bytes(host, ipc::MAX_FRAME).await?;
+            Ok(response)
+        }
+        let (mut host, mut worker) = tokio::io::duplex(1 << 16);
+        let exchange = tokio::spawn(async move {
+            exchange(&mut worker, 1, |_| async {
+                Ok((
+                    Response {
+                        context: None,
+                        error: None,
+                        video: None,
+                        cursor: None,
+                        pending: 0,
+                        double_click: None,
+                    },
+                    vec![],
+                ))
+            })
+            .await
+        });
+        answer(&mut host).await.unwrap();
+        // The viewer stays paused for a minute: its host sends nothing.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        ipc::write_json(&mut host, &Request::Context {})
+            .await
+            .unwrap();
+        answer(&mut host).await.unwrap();
+        ipc::write_json(&mut host, &Request::Close {})
+            .await
+            .unwrap();
+        answer(&mut host).await.unwrap();
+        exchange.await.unwrap().unwrap();
     }
 
     #[test]

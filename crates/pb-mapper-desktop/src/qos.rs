@@ -127,11 +127,12 @@ struct Probe {
     tainted: bool,
 }
 
-/// One bits-per-frame window: the worst untainted delay and the production
-/// counters it started from.
+/// One bits-per-frame window: the worst untainted delay, the worst tainted
+/// one, and the production counters it started from.
 struct RatioWindow {
     started: Instant,
     max_delay: Option<u32>,
+    max_tainted: Option<u32>,
     produced: ProducedSnapshot,
 }
 impl RatioWindow {
@@ -139,6 +140,7 @@ impl RatioWindow {
         Self {
             started,
             max_delay: None,
+            max_tainted: None,
             produced,
         }
     }
@@ -329,6 +331,15 @@ impl Qos {
         self.rtt.push_back(rtt);
         self.tainted = probe.tainted;
         if probe.tainted {
+            // Kept apart, for a window that has nothing else to go on.
+            if let Some(base) = self.base_rtt() {
+                let delay = rtt
+                    .saturating_sub(base)
+                    .as_millis()
+                    .min(u128::from(u32::MAX)) as u32;
+                let max = &mut self.window.max_tainted;
+                *max = Some(max.map_or(delay, |max| max.max(delay)));
+            }
             return;
         }
         if self.history.len() == DELAY_HISTORY {
@@ -537,9 +548,15 @@ impl Qos {
                 );
             }
         }
-        // No untainted sample in the window: hold.
-        if let Some(max_delay) = self.window.max_delay {
-            self.step_bpf(max_delay, dynamic, now);
+        match (self.window.max_delay, self.window.max_tainted) {
+            (Some(max_delay), _) => self.step_bpf(max_delay, dynamic, now),
+            // Only probes behind IDRs: their delay is mostly the IDRs' own
+            // transfer. It may lower bits per frame, which shrinks the IDRs,
+            // but never raise them; otherwise a link where every IDR takes
+            // seconds would freeze the controller.
+            (None, Some(tainted)) => self.step_bpf(tainted, false, now),
+            // No sample in the window: hold.
+            (None, None) => {}
         }
         self.window = RatioWindow::new(now, produced);
     }
@@ -759,13 +776,24 @@ mod tests {
         qos.control_fps(250);
         qos.tick(s(12), &idle(), produced(200, 0, 0));
         assert!((qos.bpf - held * 0.90).abs() < 1e-6);
+        // Only probes behind IDRs: a quick IDR holds, even with moving
+        // content ...
+        let lowered = qos.bpf;
+        sample(&mut qos, s(12), 60, true);
+        qos.tick(s(15), &idle(), produced(300, 0, 0));
+        assert_eq!(qos.bpf, lowered);
+        // ... and IDRs that take over a second to cross step bits per frame
+        // down, which shrinks them.
+        sample(&mut qos, s(15), 1220, true);
+        qos.tick(s(18), &idle(), produced(400, 0, 0));
+        assert!((qos.bpf - lowered * 0.80).abs() < 1e-6, "{}", qos.bpf);
         // The preset floor and max bound every step.
         for n in 0..40 {
             qos.control_fps(900);
-            qos.tick(s(15 + 3 * n), &idle(), produced(200, 0, 0));
+            qos.tick(s(21 + 3 * n), &idle(), produced(400, 0, 0));
         }
         assert_eq!(qos.bpf, 16_667.0);
-        let mut unique = 200;
+        let mut unique = 400;
         for n in 0..400 {
             unique += 100;
             qos.control_fps(0);

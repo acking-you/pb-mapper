@@ -12,8 +12,8 @@ pub(crate) const HOST_IDR_MIN_INTERVAL: Duration = Duration::from_millis(300);
 /// request: the encoder starts with an IDR and replaces late output with one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IdrReason {
-    /// `Engine::invalidate`: a control grant or revoke, an input failure, or
-    /// capture recovered.
+    /// `Engine::invalidate`: a control grant or revoke, an input failure, a
+    /// new desktop, or a capture failure that ended streaming.
     Generation,
     Resume,
     Viewer(KeyframeReason),
@@ -25,14 +25,15 @@ pub(crate) struct IdrPolicy {
     /// The first reason since the last IDR (coalesced).
     pending: Option<IdrReason>,
     forced: bool,
-    last_emitted: Option<Instant>,
+    /// When the last IDR was handed to the encoder, or left it.
+    last: Option<Instant>,
 }
 impl IdrPolicy {
     pub fn new() -> Self {
         Self {
             pending: None,
             forced: false,
-            last_emitted: None,
+            last: None,
         }
     }
 
@@ -47,21 +48,24 @@ impl IdrPolicy {
         self.note(reason);
     }
 
-    /// Whether the next submit must be an IDR. It stays true until the encoder
-    /// emits one, so a submit the encoder refused does not lose the request.
+    /// Whether the next submit must be an IDR.
     pub fn take_due(&mut self, now: Instant) -> bool {
         self.forced
             || (self.pending.is_some()
-                && self.last_emitted.is_none_or(|last| {
+                && self.last.is_none_or(|last| {
                     now.saturating_duration_since(last) >= HOST_IDR_MIN_INTERVAL
                 }))
     }
 
-    /// An IDR left the encoder: it answers every request made so far.
-    pub fn on_emitted(&mut self, now: Instant) {
+    /// An IDR was handed to the encoder, or left it: it answers every request
+    /// made so far. Handing one over is enough, since the encoder keeps a
+    /// request it has no room for yet and replaces late output with an IDR;
+    /// asking again while it encodes would only add a second one. One that
+    /// leaves the encoder also answers what was asked meanwhile.
+    pub fn answered(&mut self, now: Instant) {
         self.pending = None;
         self.forced = false;
-        self.last_emitted = Some(now);
+        self.last = Some(now);
     }
 
     #[cfg(test)]
@@ -92,23 +96,23 @@ mod tests {
         for n in 0..10 {
             idr.request(IdrReason::Viewer(KeyframeReason::Gap));
             if idr.take_due(ms(n * 10)) {
-                idr.on_emitted(ms(n * 10));
+                idr.answered(ms(n * 10));
                 emitted.push(n * 10);
             }
         }
         assert_eq!(emitted, [0]);
         assert_eq!(idr.pending(), Some(IdrReason::Viewer(KeyframeReason::Gap)));
-        // A deferred request stays due until the encoder emits it.
+        // A deferred request stays due until an IDR answers it.
         assert!(!idr.take_due(ms(299)));
         assert!(idr.take_due(ms(300)));
         assert!(idr.take_due(ms(316)));
-        idr.on_emitted(ms(316));
+        idr.answered(ms(316));
         assert!(!idr.take_due(ms(400)));
 
         // A force bypasses the interval.
         idr.force(IdrReason::Generation);
         assert!(idr.take_due(ms(320)));
-        idr.on_emitted(ms(320));
+        idr.answered(ms(320));
         assert_eq!(idr.pending(), None);
         assert!(!idr.take_due(ms(10_000)));
     }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    CursorPosition, Display, Input, VideoFormat,
+    CursorPosition, Display, Input, KeyframeReason, VideoFormat,
     lane::LANE_CAPACITY,
     outgoing::HostUnit,
     shared::{Policy, Targets},
@@ -33,12 +33,19 @@ struct Fake {
     width: Arc<AtomicU32>,
     fail_input: Arc<AtomicBool>,
     fail_lock: Arc<AtomicBool>,
+    /// Every capture fails, while the desktop stays as it was.
+    fail_capture: Arc<AtomicBool>,
     /// The OS double-click time and box; `None` never holds a press.
     guard: Arc<Mutex<Option<crate::DoubleClickGuard>>>,
     /// How long a capture call takes, in real time.
     delay: Duration,
     /// Told when a capture call starts.
     started: Option<std::sync::mpsc::SyncSender<()>>,
+    /// How long a picture stays in the encoder, at the engine's clock; zero
+    /// returns it from the capture call itself.
+    latency: Arc<Mutex<Duration>>,
+    /// Submitted pictures, with when each is ready to drain.
+    encoding: Arc<Mutex<VecDeque<(Instant, EncodedFrame)>>>,
 }
 impl Fake {
     fn new(clock: Clock) -> Self {
@@ -48,10 +55,24 @@ impl Fake {
             width: Arc::new(AtomicU32::new(10)),
             fail_input: Arc::default(),
             fail_lock: Arc::default(),
+            fail_capture: Arc::default(),
             guard: Arc::default(),
             delay: Duration::ZERO,
             started: None,
+            latency: Arc::default(),
+            encoding: Arc::default(),
         }
+    }
+
+    /// The oldest picture the encoder has finished, if any.
+    fn finished(&self) -> Option<EncodedFrame> {
+        let now = (self.clock)();
+        let mut encoding = self.encoding.lock();
+        encoding
+            .front()
+            .is_some_and(|(ready, _)| *ready <= now)
+            .then(|| encoding.pop_front().map(|(_, frame)| frame))
+            .flatten()
     }
 }
 impl Backend for Fake {
@@ -98,7 +119,10 @@ impl Backend for Fake {
             .lock()
             .captures
             .push((started, (self.clock)(), keyframe, rate));
-        Ok(Some(EncodedFrame {
+        if self.fail_capture.load(Ordering::SeqCst) {
+            return Err(error("no compatible hardware encoder"));
+        }
+        let frame = EncodedFrame {
             format: VideoFormat {
                 codec,
                 width: 16,
@@ -107,7 +131,21 @@ impl Backend for Fake {
                 ..VideoFormat::default()
             },
             bytes: vec![1; 8],
-        }))
+        };
+        let latency = *self.latency.lock();
+        if latency.is_zero() {
+            return Ok(Some(frame));
+        }
+        // As the Windows encoder: drain what is finished, then submit.
+        let finished = self.finished();
+        self.encoding.lock().push_back((started + latency, frame));
+        Ok(finished)
+    }
+    fn drain_video(&mut self, _: &DesktopContext, _: Duration) -> Result<Option<EncodedFrame>> {
+        Ok(self.finished())
+    }
+    fn pending_video(&self) -> usize {
+        self.encoding.lock().len()
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         if self.fail_input.load(Ordering::SeqCst)
@@ -155,6 +193,8 @@ struct Harness {
     fake: Fake,
     sequence: u64,
     presented: (u64, u64),
+    /// The state each step published.
+    published: Vec<SessionState>,
 }
 impl Harness {
     fn new(allowed: bool, admission: Option<Arc<dyn ControlAdmission>>) -> Self {
@@ -173,6 +213,7 @@ impl Harness {
             fake,
             sequence: 0,
             presented: (0, 0),
+            published: Vec::new(),
         }
     }
     fn now(&self) -> Instant {
@@ -180,15 +221,18 @@ impl Harness {
     }
     /// One iteration at the current time; returns its deadline.
     fn step(&mut self) -> Instant {
-        match self.engine.iterate() {
+        let deadline = match self.engine.iterate() {
             Step::Wait(deadline) => deadline,
             Step::Exit(exit) => panic!("thread C exited: {exit:?}"),
-        }
+        };
+        self.published.push(self.state().state);
+        deadline
     }
     /// Iterate at every deadline for `span`, with B-send taking every unit when
     /// `send` is set.
     fn run(&mut self, span: Duration, send: bool) {
         let end = self.now() + span;
+        let mut spins = 0;
         loop {
             let deadline = self.step();
             if send {
@@ -199,6 +243,8 @@ impl Harness {
                 return;
             }
             let now = self.now();
+            spins = if deadline > now { 0 } else { spins + 1 };
+            assert!(spins < 1000, "thread C spins without waiting");
             *self.now.lock() = deadline.max(now);
         }
     }
@@ -449,6 +495,51 @@ fn fps_and_preset_changes_never_reconfigure_the_encoder() {
     assert!(rebuilt[1..].iter().all(|(_, keyframe, _)| !keyframe));
     assert!(h.state().generation > generation);
     assert_eq!(h.state().display.map(|display| display.width), Some(20));
+}
+
+#[test]
+fn an_idr_slower_than_a_tick_is_asked_for_once() {
+    let mut h = Harness::new(true, None);
+    // An IDR spends 40 ms in the encoder, over two ticks at 60 fps.
+    *h.fake.latency.lock() = Duration::from_millis(40);
+    let keyframes = |h: &Harness| h.captures().iter().filter(|capture| capture.1).count();
+    h.run(Duration::from_millis(300), true);
+    assert_eq!(keyframes(&h), 1, "the new encoder's IDR");
+    // A forced IDR, and a requested one, are each asked for once.
+    h.send(LaneCommand::Control { enabled: true });
+    h.run(Duration::from_millis(300), true);
+    assert_eq!(keyframes(&h), 2);
+    h.shared
+        .idr
+        .lock()
+        .request(IdrReason::Viewer(KeyframeReason::Gap));
+    h.run(Duration::from_millis(500), true);
+    assert_eq!(keyframes(&h), 3);
+}
+
+#[test]
+fn a_capture_that_keeps_failing_is_retried_every_unavailable_retry() {
+    let mut h = Harness::new(true, None);
+    h.run(Duration::from_millis(100), true);
+    let generation = h.state().generation;
+    h.fake.fail_capture.store(true, Ordering::SeqCst);
+    let before = h.captures().len();
+    h.published.clear();
+    h.run(Duration::from_secs(1), true);
+    // One retry at once, since a failure while streaming may be a desktop
+    // switch, then one every 200 ms, never at the capture pace. Only the
+    // first failure starts a new generation, and no retry shows as
+    // recovered.
+    let attempts = h.captures().len() - before;
+    assert!((5..=7).contains(&attempts), "{attempts} captures in 1 s");
+    let failing = h.state();
+    assert_eq!(failing.state, SessionState::CaptureUnavailable);
+    assert_eq!(failing.generation, generation + 1);
+    assert!(!h.published.contains(&SessionState::Connecting));
+
+    h.fake.fail_capture.store(false, Ordering::SeqCst);
+    h.run(Duration::from_millis(300), true);
+    assert_eq!(h.state().state, SessionState::Streaming);
 }
 
 #[tokio::test]

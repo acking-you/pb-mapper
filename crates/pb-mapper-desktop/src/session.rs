@@ -673,7 +673,11 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
 
     /// Write every unit credit admits. Returns whether the head waits for
     /// credit. Units of a generation older than the last `State` are dropped
-    /// without a seq, so the seq stays contiguous.
+    /// without a seq, so the seq stays contiguous. A head that ages past
+    /// `OUTGOING_MAX_AGE` is replaced by an IDR, but never while one is in
+    /// flight: on a link where an IDR takes longer than that to cross, the
+    /// P-frames behind it would age out into another IDR, and that one into
+    /// the next.
     async fn video(&mut self) -> Result<bool, Abandoned> {
         let shared = self.session.shared.clone();
         loop {
@@ -691,7 +695,8 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
                 }
                 continue;
             }
-            if now.saturating_duration_since(head.ready_at) > OUTGOING_MAX_AGE {
+            let aging = self.session.credit.lock().aging_since(head.ready_at);
+            if aging.is_some_and(|since| now.saturating_duration_since(since) > OUTGOING_MAX_AGE) {
                 self.counters.dropped += shared.outgoing.clear() as u64;
                 shared.idr.lock().request(IdrReason::HostResync);
                 shared.wake.notify();

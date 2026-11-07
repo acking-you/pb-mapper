@@ -49,6 +49,8 @@ struct Interval {
     unresponsive: bool,
     timestamp_model: bool,
     skipped_ticks: u64,
+    /// IDRs the host produced since the session began.
+    keyframes: u64,
 }
 impl Interval {
     fn new(at: Instant) -> Self {
@@ -64,6 +66,7 @@ impl Interval {
             unresponsive: false,
             timestamp_model: false,
             skipped_ticks: 0,
+            keyframes: 0,
         }
     }
 }
@@ -81,6 +84,7 @@ impl tracing::field::Visit for Interval {
             "encoder_bitrate" => self.encoder_bitrate = value,
             "viewer_cap" => self.viewer_cap = Some(value),
             "skipped_ticks" => self.skipped_ticks = value,
+            "keyframes" => self.keyframes = value,
             _ => {}
         }
     }
@@ -233,15 +237,24 @@ struct Probe {
     held: AtomicBool,
 }
 
+/// What the synthetic encoder's pictures weigh.
+#[derive(Clone, Copy)]
+enum Sizes {
+    /// The per-frame budget `bitrate / nominal_fps`, and an IDR `idr` times it.
+    Budget { idr: usize },
+    /// Every picture, IDR or not.
+    Fixed(usize),
+}
+/// A desktop's usual IDR, four times a P-frame.
+const TYPICAL: Sizes = Sizes::Budget { idr: 4 };
+
 /// A synthetic asynchronous H.264 encoder at 1080p, run as thread C runs the
 /// Windows MFT: each capture submits one picture, whose output is ready
 /// `ENCODE_TIME` later and must be drained; an output left in it longer than
-/// `ENCODER_EXPIRY` is lost. A picture spends the per-frame budget
-/// `bitrate / nominal_fps`, an IDR four times that, unless `fixed` sets its
-/// size. No decoder reads the bytes.
+/// `ENCODER_EXPIRY` is lost. No decoder reads the bytes.
 struct SyntheticEncoder {
     probe: Arc<Probe>,
-    fixed: Option<usize>,
+    sizes: Sizes,
     nominal_fps: u32,
     frames: u64,
     pending: VecDeque<(Instant, EncodedFrame)>,
@@ -293,10 +306,12 @@ impl Backend for SyntheticEncoder {
         self.frames += 1;
         self.probe.captures.fetch_add(1, Ordering::Relaxed);
         let budget = rate.bitrate as usize / self.nominal_fps.max(1) as usize / 8;
-        let bytes = self
-            .fixed
-            .unwrap_or(if keyframe { 4 * budget } else { budget })
-            .clamp(256, wire::MAX_PAYLOAD);
+        let bytes = match self.sizes {
+            Sizes::Budget { idr } if keyframe => idr * budget,
+            Sizes::Budget { .. } => budget,
+            Sizes::Fixed(bytes) => bytes,
+        }
+        .clamp(256, wire::MAX_PAYLOAD);
         let frame = EncodedFrame {
             format: VideoFormat {
                 codec: VideoCodec::H264,
@@ -381,7 +396,7 @@ struct Rig {
     _relay: Relay,
 }
 impl Rig {
-    async fn start(name: &str, shape: Option<Arc<Shape>>, fixed: Option<usize>) -> Self {
+    async fn start(name: &str, shape: Option<Arc<Shape>>, sizes: Sizes) -> Self {
         let relay = Relay::start(&format!("desktop-{name}")).await;
         let client = |addr: SocketAddr| {
             Client::from_credential(addr.to_string(), admin_credential(), true, None)
@@ -400,7 +415,7 @@ impl Rig {
             Arc::new(move || {
                 Ok(Box::new(SyntheticEncoder {
                     probe: source.clone(),
-                    fixed,
+                    sizes,
                     nominal_fps: 0,
                     frames: 0,
                     pending: VecDeque::new(),
@@ -459,7 +474,7 @@ fn fixed_wan_keeps_full_rate_at_fixed_resolution() {
     traced(|trace| async move {
         let shape = Arc::new(Shape::default());
         shape.delay_ms.store(175, Ordering::Relaxed);
-        let rig = Rig::start("fixed-wan", Some(shape), None).await;
+        let rig = Rig::start("fixed-wan", Some(shape), TYPICAL).await;
         let decoder = Decoder::start(&rig.viewer, Duration::ZERO);
         tokio::time::sleep(Duration::from_secs(20)).await;
         let status = rig.viewer.status();
@@ -499,7 +514,7 @@ fn fixed_wan_keeps_full_rate_at_fixed_resolution() {
 fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
     traced(|trace| async move {
         let shape = Arc::new(Shape::default());
-        let rig = Rig::start("bandwidth", Some(shape.clone()), None).await;
+        let rig = Rig::start("bandwidth", Some(shape.clone()), TYPICAL).await;
         let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
         tokio::time::sleep(Duration::from_secs(6)).await;
         let before = trace.last();
@@ -561,6 +576,56 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
     });
 }
 
+/// A 1 Mbit/s link from the start, with IDRs twenty times a P-frame: each
+/// takes over a second to cross. The P-frames behind the session's first IDR
+/// wait for it rather than age out into another, and fps and bits per frame
+/// fall as on any slow link.
+#[test]
+#[ignore = "explicit ~15-second slow IDR acceptance"]
+fn idr_slower_than_a_second_is_followed_not_replaced() {
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape.rate.store(125_000, Ordering::Relaxed);
+        let rig = Rig::start("slow-idr", Some(shape), Sizes::Budget { idr: 20 }).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        let started = Instant::now();
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        let status = rig.viewer.status();
+        let intervals = trace.between(started, Instant::now());
+        rig.stop().await;
+        let last = *intervals.last().unwrap();
+        let lowest_encoder = intervals
+            .iter()
+            .map(|interval| interval.encoder_bitrate)
+            .min()
+            .unwrap();
+        println!(
+            "slow_idr link_mbps=1 idr_kib={} keyframes={} received_keyframes={} keyframes_requested={} lowest_encoder_bitrate={lowest_encoder} final_pace={} received_fps={:.1} presented_fps={:.1} state={:?}",
+            20 * START_BPS / CEILING_FPS / 8 / 1024,
+            last.keyframes,
+            status.stats.keyframes,
+            status.stats.keyframes_requested,
+            last.pace_fps,
+            status.stats.received_fps,
+            status.stats.presented_fps,
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        // The viewer waits a second for the session's first IDR before it
+        // asks for one, so here it asks once; nothing else may add another.
+        assert!(
+            last.keyframes <= 2,
+            "the IDR in flight is the resync; the P-frames behind it must not age out into another: {last:?}"
+        );
+        assert!(lowest_encoder < START_BPS, "bits per frame must fall");
+        assert!(
+            status.stats.received_fps >= 2.0,
+            "P-frames must follow the IDR: {:.1} fps",
+            status.stats.received_fps
+        );
+    });
+}
+
 /// A decoder that takes 67 ms per frame: the viewer's fps cap brings the host
 /// down to what it presents, while the host's own controller, its bits per
 /// frame and its rate model stay where the network puts them.
@@ -568,7 +633,7 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
 #[ignore = "explicit ~20-second slow presenter acceptance"]
 fn slow_presenter_is_capped_by_fps_cap_not_host_backpressure() {
     traced(|trace| async move {
-        let rig = Rig::start("slow-presenter", None, None).await;
+        let rig = Rig::start("slow-presenter", None, TYPICAL).await;
         let _decoder = Decoder::start(&rig.viewer, Duration::from_millis(67));
         tokio::time::sleep(Duration::from_secs(20)).await;
         let measured = Instant::now();
@@ -630,7 +695,7 @@ fn sustained_slow_tls_reader() {
     traced(|trace| async move {
         let shape = Arc::new(Shape::default());
         shape.rate.store(LINK_BYTES_PER_SECOND, Ordering::Relaxed);
-        let rig = Rig::start("slow-tls", Some(shape), Some(FRAME_BYTES)).await;
+        let rig = Rig::start("slow-tls", Some(shape), Sizes::Fixed(FRAME_BYTES)).await;
         let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
         let (host, viewer, probe) = (&rig.host, &rig.viewer, &rig.probe);
         let start = Instant::now();

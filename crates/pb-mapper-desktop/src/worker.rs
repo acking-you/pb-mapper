@@ -188,7 +188,8 @@ struct Engine {
     paused: bool,
     sequence: u64,
     frame_id: u64,
-    /// The next submit must be an IDR (new encoder, pause).
+    /// The next submit must be an IDR (new encoder, pause); the submit that
+    /// carries it clears it.
     keyframe: bool,
     pacer: Pacer,
     pace_fps: u32,
@@ -548,7 +549,9 @@ impl Engine {
     }
 
     /// Check the desktop identity. A new context or a recovery rebuilds the
-    /// encoder once and starts a new generation. False while unavailable.
+    /// encoder once; a new context also starts a new generation, while the
+    /// failure a recovery follows already started one if anything had been
+    /// produced. False while unavailable.
     fn geometry(&mut self, now: Instant) -> bool {
         let context = match self.backend.context() {
             Ok(context) => context,
@@ -559,11 +562,14 @@ impl Engine {
         };
         self.context_due = now + CONTEXT_CHECK_INTERVAL;
         let recovered = self.unavailable.is_some();
-        if !recovered && self.context.as_ref() == Some(&context) {
+        let changed = self.context.as_ref() != Some(&context);
+        if !recovered && !changed {
             return true;
         }
         if self.context.is_some() || recovered {
-            self.invalidate();
+            if changed && self.context.is_some() {
+                self.invalidate();
+            }
             self.keyframe = true;
             if let Err(failure) = self.backend.configure_video(self.limits, self.nominal_fps) {
                 self.fail(failure, now);
@@ -582,14 +588,16 @@ impl Engine {
         true
     }
 
-    /// Capture is unavailable until a context check succeeds: at once after a
-    /// fresh failure, then every `UNAVAILABLE_RETRY`. A sticky link failure
-    /// ends the session instead.
+    /// Capture is unavailable until a retry succeeds. A failure that ends
+    /// streaming may be a desktop switch: it starts a new generation and is
+    /// retried at once. Any other, such as a capture failing again right
+    /// after a recovery, is retried every `UNAVAILABLE_RETRY`, never at the
+    /// capture pace. A sticky link failure ends the session instead.
     fn fail(&mut self, failure: io::Error, now: Instant) {
         if failure.kind() == io::ErrorKind::NotConnected {
             self.fatal = Some(failure.to_string());
         }
-        self.context_due = if self.unavailable.is_none() {
+        self.context_due = if self.unavailable.is_none() && self.streaming {
             self.invalidate();
             now
         } else {
@@ -626,10 +634,10 @@ impl Engine {
             return;
         }
         self.paused = false;
-        if self.unavailable.is_some() {
-            if now >= self.context_due {
-                self.geometry(now);
-            }
+        // A retry checks the context and then captures at once, so a failure
+        // that persists never shows as recovered in between.
+        let retry = self.unavailable.is_some();
+        if retry && now < self.context_due {
             return;
         }
         if (self.context.is_none() || now >= self.context_due) && !self.geometry(now) {
@@ -643,7 +651,7 @@ impl Engine {
             self.pace_fps = pace_fps;
             self.pacer.set_pace(pace_fps, now);
         }
-        if self.pacer.due(now) {
+        if retry || self.pacer.due(now) {
             if self.shared.outgoing.len() + self.backend.pending_video() < SUBMIT_GATE {
                 let keyframe = self.keyframe || self.shared.idr.lock().take_due(now);
                 let rate = VideoRate {
@@ -653,6 +661,12 @@ impl Engine {
                 let result = self
                     .backend
                     .capture_video(&context, self.codec, keyframe, rate);
+                if keyframe {
+                    // Handed over: an IDR still in the encoder at the next
+                    // tick must not be asked for again.
+                    self.keyframe = false;
+                    self.shared.idr.lock().answered(now);
+                }
                 let done = (self.clock)();
                 self.drain_due = done + DRAIN_POLL;
                 self.produced(result, done);
@@ -692,8 +706,7 @@ impl Engine {
         };
         let format = frame.format;
         if format.keyframe {
-            self.shared.idr.lock().on_emitted(at);
-            self.keyframe = false;
+            self.shared.idr.lock().answered(at);
             // A new encoder's first unit is an IDR: its GOP is known by then.
             self.state.gop = self.backend.video_gop().unwrap_or(0);
         }

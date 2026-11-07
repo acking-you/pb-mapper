@@ -52,33 +52,46 @@ fn connect_backend(display_id: u32, config: &Configuration) -> Result<Box<dyn Ba
         os::verify_server(&pipe, &config.helper_executable, None)?;
         pipe
     };
-    let mut backend = RemoteBackend {
-        runtime,
-        pipe: Some(pipe),
-        context: None,
-        video: None,
-        cursor: None,
-        pending: 0,
-        double_click: None,
-        codec: crate::VideoCodec::H264,
-        rate: crate::VideoRate {
-            bitrate: 0,
-            pace_fps: 0,
-        },
-        sequence: 0,
-        failed: false,
-    };
+    let mut backend = RemoteBackend::new(runtime, pipe);
     backend.call(Request::Start { display_id })?;
     Ok(Box::new(backend))
 }
 impl RemoteBackend {
+    fn new(runtime: tokio::runtime::Runtime, pipe: NamedPipeClient) -> Self {
+        Self {
+            runtime,
+            pipe: Some(pipe),
+            context: None,
+            video: None,
+            cursor: None,
+            pending: 0,
+            double_click: None,
+            codec: crate::VideoCodec::H264,
+            rate: crate::VideoRate {
+                bitrate: 0,
+                pace_fps: 0,
+            },
+            sequence: 0,
+            failed: false,
+        }
+    }
+
     /// One request and its response. A lost or stalled pipe fails every later
     /// call with `NotConnected`, which ends the session: a reinstalled or
-    /// crashed helper never leaves a viewer waiting.
+    /// crashed helper never leaves a viewer waiting. The desktop and pointer
+    /// the helper last reported stay until a response reports others: Release
+    /// and Close report no desktop, only Context, Capture and Video observe
+    /// the pointer, and an error answers the request, not the desktop. The
+    /// engine's own context checks notice a desktop change.
     fn call(&mut self, request: Request) -> Result<Vec<u8>> {
         if self.failed {
             return Err(disconnected("helper disconnected; restart desktop sharing"));
         }
+        let reports = !matches!(request, Request::Release {} | Request::Close {});
+        let observes = matches!(
+            request,
+            Request::Context {} | Request::Capture {} | Request::Video { .. }
+        );
         let result = self.runtime.block_on(async {
             tokio::time::timeout(TIMEOUT, async {
                 let pipe = self
@@ -90,14 +103,16 @@ impl RemoteBackend {
                 let image = ipc::read_bytes(pipe, ipc::MAX_FRAME).await?;
                 self.pending = response.pending as usize;
                 if let Some(reason) = response.error {
-                    self.context = None;
                     self.video = None;
-                    self.cursor = None;
                     return Ok(Err(error(reason)));
                 }
-                self.context = response.context;
+                if reports {
+                    self.context = response.context;
+                }
+                if observes {
+                    self.cursor = response.cursor;
+                }
                 self.video = response.video;
-                self.cursor = response.cursor;
                 self.double_click = response.double_click.or(self.double_click);
                 Ok::<_, std::io::Error>(Ok(image))
             })
@@ -166,7 +181,10 @@ impl Backend for RemoteBackend {
         self.call(Request::Capture {})
     }
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
-        if self.failed || self.context.as_ref() != Some(expected) {
+        if self.failed {
+            return Err(disconnected("helper disconnected; restart desktop sharing"));
+        }
+        if self.context.as_ref() != Some(expected) {
             return Err(error("helper cursor belongs to a different desktop"));
         }
         Ok(self.cursor)
@@ -230,5 +248,106 @@ impl Drop for RemoteBackend {
         if !self.failed {
             let _ = self.call(Request::Close {});
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    #[test]
+    fn a_helper_error_keeps_the_desktop_and_its_pointer() {
+        let desktop = DesktopContext {
+            display: crate::Display {
+                id: 1,
+                name: "helper".into(),
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+            generation: 1,
+            desktop: "ordinary".into(),
+        };
+        let pointer = crate::CursorPosition {
+            x: 3,
+            y: 4,
+            visible: true,
+        };
+        // A helper whose LockWorkStation fails: Input gets an error, Release
+        // and Close report no desktop, Presented reports it without looking
+        // at the pointer, and the rest report both.
+        let name = format!(
+            r"\\.\pipe\pb-mapper.desktop-helper-test.{}",
+            crate::security::secret().unwrap()
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut server = {
+            let _entered = runtime.enter();
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&name)
+                .unwrap()
+        };
+        let reported = desktop.clone();
+        let helper = std::thread::spawn(move || {
+            runtime.block_on(async move {
+                server.connect().await.unwrap();
+                loop {
+                    let request: Request = ipc::read_json(&mut server).await.unwrap();
+                    let close = matches!(request, Request::Close {});
+                    let mut response = Response {
+                        context: None,
+                        error: None,
+                        video: None,
+                        cursor: None,
+                        pending: 0,
+                        double_click: None,
+                    };
+                    match request {
+                        Request::Input { .. } => response.error = Some("lock failed".into()),
+                        Request::Release {} | Request::Close {} => {}
+                        Request::Presented { .. } => response.context = Some(reported.clone()),
+                        _ => {
+                            response.context = Some(reported.clone());
+                            response.cursor = Some(pointer);
+                        }
+                    }
+                    ipc::write_json(&mut server, &response).await.unwrap();
+                    ipc::write_bytes(&mut server, &[], ipc::MAX_FRAME)
+                        .await
+                        .unwrap();
+                    if close {
+                        return;
+                    }
+                }
+            });
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pipe = {
+            let _entered = runtime.enter();
+            ipc::connect(&name).unwrap()
+        };
+        let mut backend = RemoteBackend::new(runtime, pipe);
+        assert_eq!(backend.context().unwrap(), desktop);
+        assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
+        // Neither a failed lock nor a release says the desktop changed, and
+        // a lease renewal does not observe the pointer.
+        assert!(backend.input_in_context(&desktop, &Input::Lock {}).is_err());
+        assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
+        backend.release();
+        assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
+        backend.presented(&desktop).unwrap();
+        assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
+        drop(backend);
+        helper.join().unwrap();
     }
 }
