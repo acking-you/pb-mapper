@@ -257,7 +257,8 @@ statements stay until the owner accepts fluidity.
    the capsule's dot menu opens over the buttons, no hover grey paints over
    it, and Disconnect viewer responds right up to its top edge. A restored
    window resizes from its top edge, over the buttons too, and still drags
-   just below it. The icons look right on every page.
+   just below it. Win+Z opens Snap Layouts for the window (hovering Maximize
+   does not; that is a known gap). The icons look right on every page.
 3. Navigation: six rail entries; five bar entries on the phone; Logs is
    reachable from Settings, and its back button returns.
 4. Host (Windows):

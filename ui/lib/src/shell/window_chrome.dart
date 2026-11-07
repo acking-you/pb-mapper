@@ -335,10 +335,12 @@ class _CaptionButtonState extends State<_CaptionButton> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    // Idle and lit ink, and the washes under hover and press, per tone.
+    // Idle and lit ink, and the washes under hover and press, per tone. On
+    // the app's surfaces the glyphs are the primary ink, as Windows' are, so
+    // they still read over a dialog's scrim.
     final (idle, lit, hover, pressed) = switch (widget.tone) {
       CaptionTone.surface => (
-        scheme.onSurfaceVariant,
+        scheme.onSurface,
         scheme.onSurface,
         scheme.onSurface.withValues(alpha: 0.08),
         scheme.onSurface.withValues(alpha: 0.12),
@@ -371,6 +373,8 @@ class _CaptionButtonState extends State<_CaptionButton> {
     return Tooltip(
       message: widget.tooltip,
       excludeFromSemantics: true,
+      // Below the plate, however tall its bar, not over its lower edge.
+      verticalOffset: widget.size.height / 2 + 6,
       child: Semantics(
         button: true,
         label: widget.tooltip,
@@ -488,8 +492,12 @@ class RenderCaptionGlyph extends RenderBox {
     final h = s / 2;
     final r = Radius.circular(math.max(1, dpr.round()).toDouble());
     final o = (2 * dpr).roundToDouble();
+    // Strokes that meet (the close's X, the restore's joins) would add their
+    // alpha there, leaving a darker dot; a translucent ink is laid on as one
+    // layer instead.
+    final translucent = _color.a < 1;
     final paint = Paint()
-      ..color = _color
+      ..color = _color.withValues(alpha: 1)
       ..style = PaintingStyle.stroke
       ..strokeWidth = s.toDouble()
       ..strokeCap = StrokeCap.butt
@@ -499,6 +507,12 @@ class RenderCaptionGlyph extends RenderBox {
       ..save()
       ..translate(offset.dx + snap.dx, offset.dy + snap.dy)
       ..scale(1 / dpr);
+    if (translucent) {
+      canvas.saveLayer(
+        Rect.fromLTWH(-h, -h, b + s, b + s),
+        Paint()..color = Color.fromRGBO(0, 0, 0, _color.a),
+      );
+    }
     switch (_glyph) {
       case CaptionGlyph.minimize:
         final y = (b / 2).floorToDouble() + (s.isOdd ? 0.5 : 0);
@@ -525,6 +539,7 @@ class RenderCaptionGlyph extends RenderBox {
           ..drawLine(Offset(h, h), Offset(b - h, b - h), paint)
           ..drawLine(Offset(b - h, h), Offset(h, b - h), paint);
     }
+    if (translucent) canvas.restore();
     canvas.restore();
   }
 }

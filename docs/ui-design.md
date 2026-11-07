@@ -337,7 +337,7 @@ chrome: its empty space drags, and on Windows and Linux the caption buttons
 sit over its end (`shell/window_chrome.dart`). macOS keeps its traffic lights.
 
 The caption buttons are where Windows puts its own and look like them: 46 px
-wide, square, flush in the window's top-right corner, on the page's surface
+wide, square-cornered, flush in the window's top-right corner, on the page's surface
 rather than inside a card on the backdrop. Like Windows' in a tall title bar
 that holds controls, they are as tall as the bar under them — 58 px beside
 the rail, 54 on a compact window, 36 over the viewer, Windows' 32 while
@@ -351,8 +351,9 @@ over them in the root overlay, as Windows' menus open over its own. Each
 plate is a whole number of device pixels, so the hover fills reach both edges
 without a fringe at 125 % and 150 %; the close button's red runs into the
 corner, which Windows rounds itself, and a maximised window's close sits
-where the pointer stops at the screen's corner. While the window is not the
-active one their glyphs dim, as Windows' do. The page's actions keep 16 px
+where the pointer stops at the screen's corner. Their glyphs are the primary
+ink, as Windows' are, and dim while the window is not the active one, laid on
+as one layer so the close's crossing does not darken. The page's actions keep 16 px
 clear of them. Their glyphs are drawn, not icons: 10 px, a one-pixel stroke,
 snapped to device pixels so they stay sharp at 125 % and 150 %.
 
@@ -361,7 +362,9 @@ over the caption buttons too, as native windows do: the hidden title bar
 leaves Windows next to none of its own there. Its other edges are Windows'.
 A known gap: hovering Maximize does not offer Snap Layouts, which Windows
 shows only over a button it hit-tests natively; buttons Flutter draws would
-need that hit-testing added to the runner. Win+Z still opens them.
+need that hit-testing added to the runner. Win+Z, which Windows handles for
+any window with a maximise box, should still open them; the acceptance
+procedure checks it.
 
 Below 720 px (900 px on a touch screen) the rail becomes a bottom bar and the
 page fills the window. Cards reflow by the width they get, not by a global

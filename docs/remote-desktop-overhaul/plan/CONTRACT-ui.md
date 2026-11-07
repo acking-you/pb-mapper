@@ -90,7 +90,7 @@ merged code does:
   `WindowControls` (`U/shell/window_chrome.dart`) for the app's life,
   `Positioned.fill` last in `MaterialApp.builder`'s `Stack`, above the
   navigator and `SharingFallbackLayer`; `Overlay.wrap` around that `Stack`
-  gives their tooltips an overlay. Square plates, 46 wide
+  gives their tooltips an overlay. Square-cornered plates, 46 wide
   (`kCaptionButtonWidth`) and as tall as the bar on screen, flush in the
   window's top-right corner: `kPageBarHeight` 58 and `kCompactPageBarHeight`
   54 (`U/shell/page_frame.dart`, also behind `PageFrame.barHeight`),
@@ -98,9 +98,13 @@ merged code does:
   (`V/viewer_title_bar.dart`), `kCaptionButtonHeight` 32 while loading and on
   the setup screen. Each plate's width and height are rounded to whole device
   pixels and set at once, never tweened; only the hover and press washes ease
-  over 90 ms. `WindowControls` alone listens to `window_manager`: maximised
-  (the middle glyph), full screen (it hides) and focus (an inactive window's
-  idle glyphs are the tone's ink at 36 %). The page bar keeps
+  over 90 ms. `WindowControls` is the caption buttons' one listener to
+  `window_manager` (the viewer and `SharingFallbackLayer` keep their own
+  full-screen state): maximised (the middle glyph), full screen (it hides)
+  and focus (an inactive window's idle glyphs are the tone's ink at 36 %,
+  laid on as one layer). On the app's surfaces the idle glyph is
+  `onSurface`, Windows' primary ink, so it still reads over a scrim; the
+  tooltip sits 6 px below the plate, whatever its height. The page bar keeps
   `kCaptionButtonsWidth + 16` clear at its end; the viewer's bar ends with
   `SizedBox(width: kCaptionButtonsWidth)` after its 12 px gap, end padding 0;
   the setup screen's card is centred and keeps nothing. On Windows only, a
