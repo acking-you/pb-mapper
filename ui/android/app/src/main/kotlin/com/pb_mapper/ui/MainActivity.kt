@@ -23,6 +23,14 @@ class MainActivity : FlutterActivity() {
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
+    // Back at the root leaves the app running, as Home does. FlutterActivity
+    // would finish instead, destroying the engine but not the native handle,
+    // whose tunnels and paused viewer would outlive it unseen.
+    override fun popSystemNavigator(): Boolean {
+        moveTaskToBack(true)
+        return true
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         updates?.onActivityResult(requestCode)
