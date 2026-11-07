@@ -372,4 +372,27 @@ mod tests {
         let jpeg = CreditLedger::new(t0).window(VideoCodec::Jpeg, 8, 0, None, t0);
         assert_eq!((jpeg.frames, jpeg.bytes), (4, 2 * 1024 * KIB));
     }
+
+    #[test]
+    fn a_waiting_unit_ages_from_the_last_idr_receipt() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut credit = CreditLedger::new(t0);
+        let idr = credit.book(160 * KIB, true, ms(10));
+        credit.book(8 * KIB, false, ms(20));
+        // Waiting behind an IDR in flight is not staleness.
+        assert_eq!(credit.aging_since(ms(30)), None);
+        // Once it is receipted, with the P-frame still in flight, a unit ready
+        // before the receipt ages from it, and one ready after from then.
+        credit.on_receipt(idr, ms(1400)).unwrap();
+        assert_eq!(credit.aging_since(ms(30)), Some(ms(1400)));
+        assert_eq!(credit.aging_since(ms(1500)), Some(ms(1500)));
+
+        // A JPEG session books no IDR: a unit always ages from when it was ready.
+        let mut jpeg = CreditLedger::new(t0);
+        let seq = jpeg.book(300 * KIB, false, ms(10));
+        assert_eq!(jpeg.aging_since(ms(30)), Some(ms(30)));
+        jpeg.on_receipt(seq, ms(1400)).unwrap();
+        assert_eq!(jpeg.aging_since(ms(30)), Some(ms(30)));
+    }
 }
