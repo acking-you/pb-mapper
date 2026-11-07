@@ -321,15 +321,9 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       builder: (context, child) => ToastificationWrapper(
         child: Column(
           children: [
-            ListenableBuilder(
-              listenable: _store,
-              builder: (context, _) {
-                final desktop = _store.activeDesktop;
-                return desktop == null
-                    ? const SizedBox.shrink()
-                    : DesktopSharingBanner(store: desktop);
-              },
-            ),
+            // It listens to the host alone: desktop changes no longer
+            // reach the app store (D14).
+            DesktopSharingBanner(store: _store.desktop),
             Expanded(child: child ?? const SizedBox.shrink()),
           ],
         ),

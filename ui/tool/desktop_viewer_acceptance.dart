@@ -1,6 +1,8 @@
 // Explicit native UI acceptance entry, never the packaged application entry.
 // Build with --target tool/desktop_viewer_acceptance.dart and the defines below.
-// The bootstrap contains only a dedicated expiring test scope from `deployed`.
+// The bootstrap contains only a dedicated expiring test scope from `deployed`,
+// and takes the report back with PUT /report (scripts/test/desktop-bootstrap.cjs),
+// so a release build, whose private storage cannot be read, works too.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -10,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
+import 'package:pb_mapper_ui/src/ffi/desktop_video.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
 import 'package:pb_mapper_ui/src/pages/desktop_viewer.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
@@ -17,17 +20,13 @@ import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final setup = Uri.parse(const String.fromEnvironment('setupUrl'));
-  const reportPath = String.fromEnvironment('reportPath');
   const defaultSeconds = int.fromEnvironment('seconds', defaultValue: 30);
   const defaultRelayOnly = bool.fromEnvironment('relayOnly');
   if (setup.scheme != 'http' ||
       !['127.0.0.1', 'localhost', '::1'].contains(setup.host) ||
-      reportPath.isEmpty ||
       defaultSeconds < 15 ||
       defaultSeconds > 1800) {
-    throw ArgumentError(
-      'Set a loopback setupUrl, reportPath and seconds 15..1800',
-    );
+    throw ArgumentError('Set a loopback setupUrl and seconds 15..1800');
   }
   final http = HttpClient()..connectionTimeout = const Duration(seconds: 5);
   late final Map<String, dynamic> config;
@@ -54,8 +53,17 @@ Future<void> main() async {
   service.ensureInitialized();
   final support = await getApplicationSupportDirectory();
   await service.setAppDirectoryPath('${support.path}/desktop-acceptance');
-  final api = _AcceptanceApi();
-  final store = DesktopStore(api);
+  // The store keeps its texture to itself; the report reads the native
+  // presentation counters through the same one.
+  DesktopVideoTexture? texture;
+  final store = DesktopStore(
+    DesktopApi(),
+    textures: ({required instanceToken}) async =>
+        texture = await createDesktopVideoTexture(instanceToken: instanceToken),
+  );
+  // Statistics are sampled only while something listens.
+  void sampled() {}
+  store.stats.addListener(sampled);
   final rendering = _RenderTimings();
   WidgetsBinding.instance.addTimingsCallback(rendering.add);
   try {
@@ -75,42 +83,37 @@ Future<void> main() async {
         home: DesktopViewer(store: store),
       ),
     );
-    await store.load();
-    await store.connect(config['invitation'] as String, relayOnly);
+    await store.connect(
+      DesktopTarget(
+        invitation: config['invitation'] as String,
+        name: 'acceptance',
+        relayOnly: relayOnly,
+      ),
+    );
     final clock = Stopwatch()..start();
     final samples = <Map<String, Object?>>[];
     for (var i = 0; i < seconds; i++) {
       await Future<void>.delayed(const Duration(seconds: 1));
-      final state = store.snapshot.viewer;
-      final native = await store.videoTexture?.stats();
+      final session = store.session.value;
+      final stats = store.stats.value;
+      final geometry = store.geometry.value;
+      final native = await texture?.stats();
       samples.add({
         'elapsed_us': clock.elapsedMicroseconds,
-        'state': state?.state,
-        'codec': state?.codec,
-        'path': state?.path,
-        'direct_stage': state?.directStage,
-        'direct_failure': state?.directFailure,
-        'capture_fps': state?.captureFps,
-        'receive_fps': state?.receiveFps,
-        'present_fps': store.presentFps,
-        'dropped': state?.droppedFrames,
-        'frame_id': state?.frameId,
-        'bytes': state?.bytes,
-        'bitrate': state?.bitrate,
-        'width': state?.videoWidth,
-        'height': state?.videoHeight,
-        'frame_ack_ms': state?.frameAckMs,
-        'has_error': store.error != null,
-        'error': store.error,
-        'recovery': store.recoveryReason,
-        'phase': store.connectionPhase.name,
-        'reconnects': store.reconnectAttempt,
-        'controlling': store.controlling,
-        'picture_age_ms': store.pictureAge?.inMilliseconds,
-        'texture_id': store.videoTexture?.textureId,
-        'presented_generation': store.videoPresented?.generation,
-        'presented_frame_id': store.videoPresented?.frameId,
-        'feedback': api.snapshot(),
+        'phase': session.phase.name,
+        'codec': stats.codec,
+        'path': session.path,
+        'receive_fps': stats.receivedFps,
+        'present_fps': stats.presentedFps,
+        'bitrate': stats.bitrateBps,
+        'width': geometry?.videoWidth,
+        'height': geometry?.videoHeight,
+        'picture_latency_ms': stats.pictureLatencyMs,
+        'has_error': session.failure != null,
+        'error': session.failure?.code,
+        'reconnects': session.reconnectAttempt,
+        'controlling': session.controlling,
+        'texture_id': store.picture.value?.textureId,
         'native': native,
         'flutter': rendering.snapshot(),
       });
@@ -139,60 +142,35 @@ Future<void> main() async {
           : (lastPresented - firstPresented) * 1000000 / durationUs,
       'samples': samples,
     };
-    final file = File(reportPath);
-    await file.parent.create(recursive: true);
-    await file.writeAsString(
-      const JsonEncoder.withIndent('  ').convert(report),
-    );
+    await _upload(setup.resolve('/report'), report);
     debugPrint(
-      'DESKTOP_ACCEPTANCE report saved; credentials and images excluded',
+      'DESKTOP_ACCEPTANCE report uploaded; credentials and images excluded',
     );
   } finally {
     WidgetsBinding.instance.removeTimingsCallback(rendering.add);
+    store.stats.removeListener(sampled);
     await store.disconnect();
     store.dispose();
     service.dispose();
   }
 }
 
-// Observe the ordinary API without changing its feedback timing or behavior.
-class _AcceptanceApi extends DesktopApi {
-  int acknowledgments = 0, acknowledgmentErrors = 0, keyframes = 0;
-  int keyframeErrors = 0;
-  int? generation, frameId;
-
-  @override
-  Future<void> presented(int generation, int frameId) async {
-    try {
-      await super.presented(generation, frameId);
-      acknowledgments++;
-      this.generation = generation;
-      this.frameId = frameId;
-    } catch (_) {
-      acknowledgmentErrors++;
-      rethrow;
+// The bootstrap names and keeps the file. It refuses more than 8 MiB, so the
+// report goes compact.
+Future<void> _upload(Uri target, Map<String, Object?> report) async {
+  final http = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+  try {
+    final request = await http.putUrl(target);
+    request.headers.contentType = ContentType.json;
+    request.add(utf8.encode(jsonEncode(report)));
+    final response = await request.close();
+    await response.drain<void>();
+    if (response.statusCode != HttpStatus.created) {
+      throw StateError('Report upload refused: HTTP ${response.statusCode}');
     }
+  } finally {
+    http.close(force: true);
   }
-
-  @override
-  Future<void> keyframe() async {
-    keyframes++;
-    try {
-      await super.keyframe();
-    } catch (_) {
-      keyframeErrors++;
-      rethrow;
-    }
-  }
-
-  Map<String, Object?> snapshot() => {
-    'acknowledgments': acknowledgments,
-    'ack_errors': acknowledgmentErrors,
-    'last_generation': generation,
-    'last_frame_id': frameId,
-    'keyframes': keyframes,
-    'keyframe_errors': keyframeErrors,
-  };
 }
 
 // Explicit acceptance diagnostics only; no callback is installed by the app.
