@@ -6,6 +6,21 @@ restate the contracts. Each package session reads its own entry here plus the
 contract sections the entry names. Where this plan amends a contract, the
 amendment is marked **AMEND** and takes precedence for that point only.
 
+Amended in the optimisation round (2026-11-08), with the helper GOP product
+call merged just before it. These entries now say what the merged code does:
+
+- Command conventions: CI also gates UI translations and Dart formatting,
+  lints and tests the desktop and FFI crates on Windows, and runs the Android
+  clippy of pb-mapper-ffi and the Gradle unit tests (`android-check`); the
+  file-ownership row for `syntax-check.yml` says so.
+- §1.1 (FFI ops for R-UI-1): `host_status` carries `busy`, read as "keep
+  the last host".
+- P3 (helper tests): the readiness test is
+  `readiness_requires_the_current_protocol` (helper protocol 4).
+- P6 (Android): the texture channel has no `detach`.
+- §4.2: acceptance case F switches the decoder hint with `deployed …
+  --no-decoder-hints`, with no rebuild.
+
 Repo: `<repo>`.
 Integration branch: `claude/remote-desktop-overhaul`.
 
@@ -24,12 +39,17 @@ Command conventions:
 - Gradle: `ui/android/gradlew.bat` is git-ignored and is created by the first
   `flutter build apk`. Run unit tests from `ui/android` as
   `.\gradlew.bat :app:testDebugUnitTest`.
-- CI (`.github/workflows/syntax-check.yml`) runs on **Linux only**: `cargo fmt
+- CI (`.github/workflows/syntax-check.yml`) runs on Linux `cargo fmt
   --check`, `clippy --workspace --all-targets --all-features -D warnings`,
-  `cargo test --workspace --all-features`, `cargo doc`, `flutter analyze
-  --no-fatal-infos` and `flutter test`. Windows-only Rust (capture, encoder,
-  helper, DPAPI) is checked **only locally**, so every Rust package also runs
-  its checks on this Windows machine.
+  `cargo test --workspace --all-features`, `cargo doc`, the l10n and `dart
+  format` gates, `flutter analyze --no-fatal-infos` and `flutter test`. On
+  Windows (`rust-windows-desktop`) it runs clippy and `cargo test` for
+  `pb-mapper-desktop` and `pb-mapper-ffi`, all targets and features. When
+  Android-facing paths change (`android-check`) it runs `cargo ndk -t
+  arm64-v8a clippy -p pb-mapper-ffi -- -D warnings` and `./gradlew
+  :app:testDebugUnitTest`. The rest of the workspace's Windows checks run
+  only locally, so every Rust package also runs its checks on this Windows
+  machine.
 
 ---
 
@@ -218,7 +238,7 @@ The C rule (P3, `D/worker.rs`; it amends ui §2.2 R-UI-3):
 | --- | --- |
 | `connect` | Exactly one of `invitation: string` or `computer_id: string`; anything else → `INVALID_ARGUMENT`. Plus `relay_only`, `quality`, `refresh_hz`. `computer_id` resolves through `desktop_computers::invitation_for(handle, id) -> Result<Option<Invitation>, CtlError>`. `None` → `NOT_FOUND` "remembered computer not found". |
 | `trust_status` | `saved` gains `invitation: string \| null`: the pbd1 of the saved identity (`HostIdentity::invitation(service)`), or null when `matches_relay` is false. **New (for R-UI-1).** |
-| `host_status` | `host` is `{status: HostStatus, service, invitation}` or null (perf §7.2). **New (for R-UI-1).** `host_set_display` / `host_rename` refuse with `INVALID_ARGUMENT` while background hosting is configured (perf §5.16.5). |
+| `host_status` | `host` is `{status: HostStatus, service, invitation}` or null (perf §7.2); `busy` is true while a lifecycle call holds the host, which the store reads as 'keep the last host'. **New (for R-UI-1).** `host_set_display` / `host_rename` refuse with `INVALID_ARGUMENT` while background hosting is configured (perf §5.16.5). |
 | `connect{computer_id}` failures | A locked or unreadable vault → `VAULT_UNAVAILABLE` (new `ErrorCode`, perf §7.8); unknown id → `NOT_FOUND`. Both terminal (perf §9.6.2). |
 | `computers_remember` | Also takes `service` and `fingerprint`; refuses with `INVALID_ARGUMENT` unless they match `current_invitation()` (UI §5.3), so a late `live` during a fast switch cannot store computer B's token under A's id. |
 | `pb_mapper_desktop_call_json` | An op name starting with `computers_` is routed **before** `Request` is deserialised, to `desktop_computers::call(handle, op, value).await` under the same `block_on` |
@@ -542,7 +562,7 @@ unworkable stops and reports evidence.
     - `drag_start_press_waits_out_the_double_click_time` (with the
       re-authorisation cases of section 1.1);
     - `wake_ends_a_wait_on_every_platform` (also green on Linux);
-    - `readiness_requires_protocol_2`;
+    - `readiness_requires_the_current_protocol`;
     - the kept worker and helper tests.
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
     on Windows, and `cargo build -p pb-mapper-ffi --release`.
@@ -697,7 +717,7 @@ unworkable stops and reports evidence.
 
 - **Goal.**
   - Android: `DesktopVideoNative`, `VideoFeeder` with `BufferPool` (no
-    permit leak), channel v2 (`create{instance}`, `attach`, `detach`,
+    permit leak), channel v2 (`create{instance}`, `attach`,
     `snapshot`, `stats`, `dispose`), the same-size discontinuity rule,
     presentation receipts to Rust, `PAUSED` handling and a `PixelCopy`
     snapshot. `VideoFeeder` takes its thread-priority call as a parameter,
@@ -1013,7 +1033,7 @@ or remove a `p7-d1` member afterwards. It may only add members.
 | `CLAUDE.md` | P5 (FFI, G2), P1 (UI, finish) | sequential |
 | `CHANGELOG.md` | Wave 0 master merge, then P1 (with text from P2, P3 and P4) | — |
 | `docs/ui-design.md`, `docs/assets/poster*.png` | P1 only | — |
-| `.github/workflows/syntax-check.yml` | P1 (Icons grep). Gradle tests in CI are the owner's call. | — |
+| `.github/workflows/syntax-check.yml` | P1 (Icons grep); `android-check` runs the Gradle unit tests and the Android clippy of pb-mapper-ffi | — |
 
 ---
 
@@ -1179,7 +1199,7 @@ perf §11.4. They are proposals, and the owner decides.
      5 min. Without a freeze: a picture within 1 s, no reconnect. After a
      freeze: one immediate reconnect and a picture within 3 s (OD-2
      default). Always ≤ 2 IDRs per resume and no input replay.
-   - F: decoder hints on versus off.
+   - F: decoder hints on versus off (`deployed … --no-decoder-hints`; no rebuild).
    - G: UAC prompt, lock screen and Win+L through the helper.
    - H: RustDesk side by side.
    - I: `video_bench --pace 60,30,15,5` and `video_bench 60 60` on each

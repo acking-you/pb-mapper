@@ -29,6 +29,47 @@ what the merged code does:
 - 6.10 and 9.6.2: `last_video_age_ms` counts from the later of the last
   video and the last entry into streaming.
 
+Amended in the optimisation round (2026-11-08), with the three product calls
+merged just before it (helper GOP, background stops and the hand-off, Paste
+new invitation). These sections now say what the merged code does:
+
+- 3 (Dart polls): host polling stops after the first load where this device
+  cannot host; the tunnel timer runs only while a tunnel is live; the cursor
+  timer is 16 ms.
+- 4.4: `HostMessage::State(StateRecord)` is the one internally tagged newtype
+  variant, with `deny_unknown_fields` on `StateRecord` (JSON unchanged). This
+  exception to the inline-struct rule awaits the owner's confirmation;
+  reverting commit 6a388c7 alone restores the inline variant.
+- 4.5: `VideoFormat` carries `gop`; `Backend::video_gop` is gone.
+- 5.1 and 5.5: `EngineState.record`; B-send writes `State` when the record
+  changes, and after `Stopped` reads and drops input until the viewer closes.
+- 5.2 and 7.2: a hand-off to a ready service with the same invitation stops
+  with `restarting`; a trust revoke stops a background host with `revoked`.
+- 5.10.2: a drain checks no desktop; only a submit does.
+- 5.12.3, 5.14 and 5.16: an input is checked against the desktop only when a
+  check is due, the boundary checks the whole context, and a boundary refusal
+  first re-runs `geometry()`; the helper's `Request::Input` carries
+  `expected: DesktopContext`; `HELPER_PROTOCOL` is 4 with `.v4` pipes; an
+  outdated helper is installed with `enable` in one prompt.
+- 5.15: `Host::start` and `start_with_identity` refuse before registering
+  where `capabilities().host` is false (no Media Foundation, or not Windows).
+- 6.1, 6.5 and 6.8: `VideoConsumer::failed(message)`; the end message carries
+  the decoder's text; an IDR whose header has been read stops the timer's
+  re-requests; the FFI offers JPEG on Windows without Media Foundation.
+- 7.2: `host_status` has `busy`; `helper_action` and `background_action`
+  verbs are typed; a missing credential is `INVALID_ARGUMENT`.
+- 7.5 and 7.6: `failed_v1` and its JNI twin; `keyframe_v1` takes no reason 0.
+- 8.1 and 8.2: Android reports `failed`, falls back from a rejected
+  low-latency hint and takes `decoderHints`; the channel has no `detach`; the
+  runner reports `failed_` and delay-loads `mfplat.dll`.
+- 9.2-9.6: `hostCursor` replaces `readView()`; `hostStatus` carries `busy`;
+  `DesktopEndReason.unreachable` ends a retry run after 2 min; a session left
+  paused by a hidden window ends like one left by Back; the texture has no
+  `detach`.
+- 10.1, 10.3 and 11.3: the readiness test is
+  `readiness_requires_the_current_protocol`; the Gradle tests run in CI's
+  `android-check`; case F has its switch.
+
 Base: `design/perf-minimal.md`, the overall winner. Grafts come from
 `design/perf-robust.md` and `design/perf-rustdesk.md`. Every must-fix raised
 by the three judges is resolved, and section 1 traces each one.
@@ -284,8 +325,8 @@ cursor:   C sample 16 ms -> watch -> B-send CursorGate (300 ms echo suppression)
 | `FEED_QUEUE_MAX` / feeder `next` timeout / buffer pool | 2 / 50 ms / 3 × 1 MiB, grows to 4 MiB | Kotlin |
 | snapshot | ≤ 320 px wide, JPEG q80, ≤ 300 ms, never blocks close | native |
 | `NO_VIDEO_RECONNECT` / Dart backoff / `PROTOCOL_RETRY_LIMIT` | 5 s / 1, 2, 4, 8, 15 s / 3 consecutive attempts that end in `protocol` | Dart |
-| Dart polls | `viewer_status` 500 ms with a viewer demand, 1 s otherwise with a session; host 1 s with a page demand, 2 s while sharing; none otherwise | Dart |
-| Dart move coalescing / cursor timer | ≤ 1 move per 4 ms / 33 ms | Dart |
+| Dart polls | `viewer_status` 500 ms with a viewer demand, 1 s otherwise with a session; host 1 s with a page demand where this device can host (after the first load, none where it cannot), 2 s while sharing; tunnels 6 s only while one is live; none otherwise | Dart |
+| Dart move coalescing / cursor timer | ≤ 1 move per 4 ms / 16 ms | Dart |
 
 ---
 
@@ -377,17 +418,7 @@ pub enum Route { Direct, RelayTcp, RelayQuic }
 pub(crate) enum HostMessage {
     Accepted { codec: VideoCodec, limits: VideoLimits, nominal_fps: u32, quality: QualityPreset, capabilities: Vec<String> },
     Rejected { reason: RejectReason },                 // written only after the token check, 1 s timeout, then close
-    State {
-        state: SessionState,
-        #[serde(default, skip_serializing_if = "Option::is_none")] reason: Option<StateReason>,
-        message: String,                               // human text; UI keys off `reason`
-        control_allowed: bool,
-        controlling: bool,
-        generation: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")] display: Option<Display>,   // physical px, input space
-        desktop: DesktopKind,
-        #[serde(default, skip_serializing_if = "Option::is_none")] video: Option<VideoSize>,   // encoded size of this generation
-    },
+    State(StateRecord),          // internally tagged newtype: JSON identical to the inline struct it replaced
     /// Followed by exactly one payload record (Annex B access unit or JPEG).
     Video {
         seq: u64,                // 1, 2, 3 … per session; assigned at admission (5.7.2)
@@ -414,6 +445,20 @@ pub(crate) enum HostMessage {
     Stopped { reason: StopReason, message: String },   // final, best effort (STOP_WRITE_TIMEOUT)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StateRecord {     // fields are `pub` in code
+    state: SessionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")] reason: Option<StateReason>,
+    message: String,                               // human text; UI keys off `reason`
+    control_allowed: bool,
+    controlling: bool,
+    generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")] display: Option<Display>,   // physical px, input space
+    desktop: DesktopKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")] video: Option<VideoSize>,   // encoded size of this generation
+}
+
 #[derive(..., Serialize, Deserialize)] #[serde(rename_all = "snake_case")] pub enum RejectReason { Denied, Busy, InvalidRequest }
 #[serde(rename_all = "snake_case")] pub enum SessionState { Connecting, Streaming, Paused, CaptureUnavailable }
 #[serde(rename_all = "snake_case")] pub enum StateReason { SecureDesktop, HelperUnavailable, CaptureFailed, InputFailed, ControlDenied, InputCongestion, StalePresentation, DisplayLost }
@@ -425,9 +470,12 @@ pub(crate) enum HostMessage {
 #[serde(rename_all = "snake_case")] pub enum StopReason { HostStopped, HostEnded, Restarting, Revoked, CaptureFailed, ProtocolError }
 ```
 
-Every enum variant is an inline struct, because internally tagged newtype
-variants combined with `deny_unknown_fields` are fragile in serde. Every
-struct is `deny_unknown_fields`.
+Every enum variant is an inline struct, except `HostMessage::State(StateRecord)`,
+because internally tagged newtype variants combined with `deny_unknown_fields`
+are fragile in serde. An internally tagged newtype does not inherit the enum's
+`deny_unknown_fields`, so `StateRecord` carries its own, and
+`strict_parsing_and_version_gate` proves an extra field is still rejected.
+Every struct is `deny_unknown_fields`.
 
 ### 4.5 Shared public types (`D/lib.rs`)
 
@@ -491,7 +539,10 @@ Ctrl+Alt+Del stays unrepresentable. Keys outside this vocabulary
 (Ctrl+punctuation such as Ctrl+- or Ctrl+/, PrintScreen, CapsLock, the Menu
 key) are not sent; `docs/remote-desktop.md` lists them as a limitation.
 
-`VideoFormat` gains `#[serde(default)] encode_us: u32`. `SessionStatus`
+`VideoFormat` gains `#[serde(default)] encode_us: u32` and
+`#[serde(default)] gop: u32`, the encoder's read-back GOP (0 when unknown).
+Thread C sets `EngineState.gop` from each unit, so it crosses the helper IPC
+inside `Response.video`; there is no `Backend::video_gop`. `SessionStatus`
 (`D/lib.rs:125-165`) and `VideoPreferences` are **deleted at the G1 cleanup**
 (X4 in WORKPLAN §1.2). Until then they stay beside the new types, because
 the v1 pipeline still runs on the integration branch between G0 and G1.
@@ -648,9 +699,7 @@ pub(crate) struct Targets {
 }
 #[derive(Clone, PartialEq)]
 pub(crate) struct EngineState {
-    pub state: SessionState, pub reason: Option<StateReason>, pub message: String,
-    pub control_allowed: bool, pub controlling: bool, pub generation: u64,
-    pub display: Option<Display>, pub desktop: DesktopKind, pub video: Option<VideoSize>,
+    pub record: StateRecord,                              // what State carries (4.4)
     pub capture_fps: f32, pub skipped_ticks: u64, pub dropped_frames: u64, pub gop: u32,
     pub notice: Option<(NoticeCode, String, u64 /*serial*/)>,  // B-send writes each serial once
     pub input_wait: InputWaitStats,                       // p50/p99/max µs over the last second (trace)
@@ -684,7 +733,8 @@ Streaming <--context error / context ok--> CaptureUnavailable{secure_desktop|dis
 any --policy revoke--> same state, controlling=false
 any --Host::end_session--> [Stopped{host_ended}] Closed        (D15; hosting continues)
 any --host restart for a display change--> [Stopped{restarting}] Closed
-any --Host::stop--> [Stopped{host_stopped}];  --trust revoke--> [Stopped{revoked}]
+any --hand-off of a local host to a ready service with the same invitation (host_enable)--> [Stopped{restarting}] Closed
+any --Host::stop--> [Stopped{host_stopped}];  --trust revoke, in the app or the background service (Revoke/RevokeScope)--> [Stopped{revoked}]
 any --worker exits fatally (helper lost, encoder unrecoverable)--> [Stopped{capture_failed}] Closed
 any --protocol violation--> [Stopped{protocol_error}] Closed
 any --read timeout (HOST_READ_TIMEOUT) / write timeout--> Closed (no message)
@@ -731,9 +781,11 @@ Unresponsiveness never closes a session.
 
 ### 5.5 B-send loop (exact order per pass)
 
-1. Cancelled → `Stopped{reason}` (`STOP_WRITE_TIMEOUT`) → shutdown.
-2. **State.** If the `State`-visible subset of `EngineState` changed → write
-   `State`. `last_state_generation` = its generation.
+1. Cancelled → `Stopped{reason}` → shutdown → read and drop the viewer's
+   input until it closes; the three share `STOP_WRITE_TIMEOUT` from the
+   cancel. Skipped when the viewer ended the session or the transport failed.
+2. **State.** If `EngineState.record` changed → write `State`.
+   `last_state_generation` = its generation.
 3. **Notice.** For each new notice serial → write `Notice`.
 4. **QoS tick.** Every `QOS_TICK`: `qos.tick(now, credit snapshot)`
    (unresponsive, startup expiry, 3 s bpf window, latch); then publish
@@ -1071,7 +1123,8 @@ The context check (`backend.context()`) runs:
 - at most every `CONTEXT_CHECK_INTERVAL`;
 - right before each retry's capture while unavailable;
 - once per submitted capture, inside the backend (the existing
-  `capture_consistent` / encoder finish check).
+  `capture_consistent` / `capture_video` post-submit check). A drain is not
+  a submit: `drain_video` checks nothing.
 
 That replaces several `OpenInputDesktop` calls per 2 ms tick. The injection
 boundary still re-checks on every input (`input_in_context`).
@@ -1314,7 +1367,10 @@ impl InputLane {
 - `Input(e)` → `Engine::input`. The checks run in this order:
   1. The sequence must strictly increase. It is updated before the other
      checks.
-  2. `geometry()`.
+  2. `geometry()` when a context check is due (no context yet, unavailable,
+     or `CONTEXT_CHECK_INTERVAL` elapsed); otherwise the last checked
+     context. The injection boundary re-checks the whole context for every
+     input.
   3. `allowed && controlling`.
   4. `state == Streaming`.
   5. `auth.admits(e.generation, e.frame_id, now)`. On failure:
@@ -1323,6 +1379,10 @@ impl InputLane {
   6. `backend.input_in_context`.
 
   On failure of `input_in_context`:
+  - Any failure other than `NotConnected` first runs `geometry()`: when it
+    reports unavailable or a new generation, the event is dropped and
+    control stays (the boundary saw a desktop change the engine had not
+    checked yet). Otherwise the rules below apply.
   - `Input::Lock`: control is **not** released, because nothing was held.
     Set notice `LockFailed` with the Win32 text, for `NOTICE_TTL`.
   - Any other input: `release_control()` and a sticky `input_failed: …`
@@ -1381,7 +1441,8 @@ input" is that viewer while it is controlling.
 
 `Input::Lock` → `Engine::input`, with every check in 5.12.3. The ordinary
 host calls `LockWorkStation()`. The privileged host sends
-`Request::Input{generation, sequence, input: Lock}`, which the helper worker
+`Request::Input{expected, sequence, input: Lock}`, where `expected` is the
+whole `DesktopContext` the host admitted the input on, which the helper worker
 executes on its `winsta0\default`-bound thread. Both Windows backends put
 `"lock"` in `capabilities`.
 
@@ -1433,25 +1494,37 @@ impl Host {
 }
 ```
 
-### 5.16 Helper IPC v2 and upgrade (D2) (`D/helper/*`, WP-HL)
+`Host::start` and `start_with_identity` use the platform's own backend and
+refuse before registering when `capabilities().host` is false (off Windows,
+or Windows without Media Foundation), so no service is published only to fail
+every viewer at its encoder.
+
+### 5.16 Helper IPC (v2, now protocol 4) and upgrade (D2) (`D/helper/*`, WP-HL)
 
 1. **Version marker.**
-   - `HELPER_PROTOCOL: u32 = 2` lives in `helper/mod.rs`.
-   - Pipes are renamed to `\\.\pipe\pb-mapper.desktop-helper.v2` (and
-     `.v2.worker.<n>`) and `\\.\pipe\pb-mapper.desktop-background.v2`.
-   - `installation.json` gets `schema: 2` and `"protocol": 2`. Schema 1 is
-     still parsed and means protocol 1.
+   - `HELPER_PROTOCOL: u32 = 4` lives in `helper/mod.rs` (3: `VideoFormat`
+     carries the encoder's GOP; 4: `Request::Input` carries the expected
+     desktop).
+   - Pipes are renamed to `\\.\pipe\pb-mapper.desktop-helper.v4` (and
+     `.v4.worker.<n>`) and `\\.\pipe\pb-mapper.desktop-background.v4`.
+   - `installation.json` gets `schema: 2` and `"protocol": 4`
+     (`HELPER_PROTOCOL`; the schema stays 2). Schema 1 is still parsed and
+     means protocol 1.
 2. **`helper::Status`** gains `protocol: u32` and `update_required: bool`.
    `update_required` is true when installed and any of these holds:
    - schema 1;
-   - `protocol != 2`;
-   - SCM reports the service running while the v2 pipe is absent.
+   - `protocol != HELPER_PROTOCOL` (4);
+   - SCM reports the service running while the current (v4) pipe is absent.
 
    `ensure_ready()` fails first when an update is required, with "Update the
    Windows desktop service to use remote desktop". FFI `capabilities` passes
    both fields through. The UI offers `helper_action install`, which already
-   upgrades in place (`helper/install.rs:488-536`). `background-host.dpapi`
-   is kept.
+   upgrades in place (`helper/install.rs`, `install`/`install_bundle`) and
+   still preserves a stopped or Disabled service. `host_enable` (Turn on
+   remote control) asks for `helper::Action::Install { enable: true }`
+   (helper argv `install <bundle> <sid> enable`) for an outdated, foreign or
+   unverified helper: it updates in place and restores automatic startup in
+   one prompt, never `enable` alone. `background-host.dpapi` is kept.
 3. **IPC v2.** It stays one request and one response, `deny_unknown_fields`
    and sticky failure. The 3 s timeout bounds each answer and each write.
    The helper worker's wait for the next request is unbounded
@@ -1468,7 +1541,7 @@ impl Host {
        ConfigureVideo { limits: VideoLimits, nominal_fps: u32 },
        Video { expected: DesktopContext, codec: VideoCodec, submit: bool, keyframe: bool, rate: VideoRate, wait_ms: u32 /*0..=4*/ },
        Presented { generation: u64 },
-       Input { generation: u64, sequence: u64, input: Input },     // includes Input::Lock
+       Input { expected: DesktopContext, sequence: u64, input: Input }, // includes Input::Lock; `expected` is the whole context the host admitted it on
        Release, Close,
    }
    struct Response { context: Option<DesktopContext>, error: Option<String>, video: Option<VideoFormat>,
@@ -1491,7 +1564,8 @@ impl Host {
    becomes sticky-failed and returns `NotConnected`, the worker exits with
    `CaptureFailed`, and the host sends `Stopped{capture_failed}`. Dart
    reconnects with backoff (9.6.2) and never waits forever (must-fix).
-5. **Background pipe v2.**
+5. **Background pipe v4** (renamed with the protocol; its messages are
+   unchanged).
    - `Snapshot.host: Option<HostStatus>`.
    - A new `EndSession` request (D15 for background hosts).
    - An upgrade stops the service through SCM, as Disable and uninstall
@@ -1576,7 +1650,7 @@ impl Host {
 
 ```rust
 pub struct ViewerConfig {
-    pub codecs: Vec<VideoCodec>,           // FFI: [H264] on Android/Windows, [Jpeg] elsewhere
+    pub codecs: Vec<VideoCodec>,           // FFI: [H264] on Android, and on Windows where Media Foundation is installed; [Jpeg] elsewhere
     pub limits: VideoLimits,               // FFI: VideoLimits::for_viewer(refresh_hz)
     pub quality: QualityPreset,
     pub progress: Option<Arc<dyn Fn(ConnectStage) + Send + Sync>>,
@@ -1760,6 +1834,7 @@ impl VideoConsumer {
     pub fn next(&self, timeout: Duration, capacity: usize) -> Pull;
     pub fn presented(&self, generation: u64, frame_id: u64) -> bool;          // 6.6
     pub fn keyframe(&self, reason: KeyframeReason) -> bool;                  // through the limiter (6.8)
+    pub fn failed(&self, message: &str) -> bool;                           // keyframe(DecoderError) plus why: logged, ≤ 160 chars kept for the end message
     pub fn report(&self, decoder: &str, hardware: bool);                     // ≤ 64 chars; overlay
 }
 impl Drop for VideoConsumer { /* attached = 0; notify_all */ }
@@ -1902,7 +1977,7 @@ any --State != Streaming--> HostUnavailable (no requests)
 HostUnavailable --Streaming of a new generation--> AwaitingIdr with HOLD (host invalidate sends the IDR)
 new generation while Live --> AwaitingIdr with HOLD
 AwaitingIdr --DECODER_FAILURE_LIMIT DecoderError reports within 30 s with no presented frame--> Failed
-Failed: no requests; ViewerStatus.reason = decoder_failed; the UI offers Retry (reconnect)
+Failed: no requests; ViewerStatus.reason = decoder_failed; ViewerStatus.message ends with the last `failed` text ("the remote picture could not be decoded: <text>"); the UI offers Retry (reconnect)
 ```
 
 - `request(reason)` is the only path to `Outbound.keyframe`. It covers native
@@ -1912,7 +1987,7 @@ Failed: no requests; ViewerStatus.reason = decoder_failed; the UI offers Retry (
 - **Stall watchdog** (from Dart `desktop_store.dart:412-425`, now in Rust):
   units were handed in the last 700 ms but none was presented for 700 ms,
   while Live and not paused → `request(Stall)`.
-- Any received IDR resets the backoff.
+- Any received IDR resets the backoff. An IDR whose header has been read already stops the timer's re-requests; the hold and the backoff still gate other requests until it is received.
 
 ### 6.9 Pause and resume (D13)
 
@@ -2037,15 +2112,15 @@ pub(crate) struct DesktopState {
 | Op | Change | Request | `data` |
 | --- | --- | --- | --- |
 | `capabilities` | changed | — | `helper` gains `protocol`, `update_required` |
-| `host_status` | **new**, replaces `status` | — | `{host: {status: HostStatus, service: string, invitation: string}\|null, background: BackgroundSnapshot\|null}`. `invitation` is `Host::invitation().encode()` (pbd1) of the running local host; the background snapshot already carries its own `invitation`. The invitation stays out of `HostStatus` itself, so nothing that serialises a status (traces, the background pipe) carries the secret. |
+| `host_status` | **new**, replaces `status` | — | `{host: {status: HostStatus, service: string, invitation: string}\|null, busy: bool, background: BackgroundSnapshot\|null}`. `busy` is true while a lifecycle call (display switch, rename, helper action, permission save) holds the host lock; `host` is then unknown, not absent, and the store keeps the previous one. `invitation` is `Host::invitation().encode()` (pbd1) of the running local host; the background snapshot already carries its own `invitation`. The invitation stays out of `HostStatus` itself, so nothing that serialises a status (traces, the background pipe) carries the secret. |
 | `status` | **removed** | | |
-| `host_enable` | changed | `service, display_id, allow_control` | as today |
-| `host_start`, `host_stop`, `host_permission`, `host_restore`, `trust_status`, `trust_revoke`, `helper_action`, `background_action` | unchanged | | invitations are `pbd1` |
+| `host_enable` | changed | `service, display_id, allow_control` | as today. A running local host is stopped first. Its viewer gets `Stopped{restarting}` when the service takes the same identity and service and the helper is ready (no installation), otherwise `Stopped{host_stopped}`. An outdated, foreign or unverified helper is installed with `helper::Action::Install { enable: true }` in the same prompt. |
+| `host_start`, `host_stop`, `host_permission`, `host_restore`, `trust_status`, `trust_revoke`, `helper_action`, `background_action` | unchanged | | invitations are `pbd1`. A background host's viewer now gets `Stopped{revoked}` on `trust_revoke`, as a local host's does. `helper_action`: `install\|disable\|uninstall`; `background_action`: `status\|start`; any other verb is `INVALID_ARGUMENT` at parse (`host_start` is `deny_unknown_fields` too). `request_installation` takes a typed `helper::Action`. A missing process credential fails `connect`, `host_start`, `host_restore`, `host_enable` and the restarts with `INVALID_ARGUMENT` ("This computer has no usable credential: …"), never `IO`; the client is the window's cached `relay_client()`. |
 | `host_end_session` | **new** (D15) | — | `{}`. Local `Host::end_session()`, or the background pipe `EndSession` |
 | `host_set_display` | **new** | `display_id` | `{invitation}`. Restarts the host with the same identity and service on the new display. The current viewer gets `Stopped{restarting}`, which is reconnectable. While background hosting is configured → `INVALID_ARGUMENT` "stop the background host first" (5.16.5). |
 | `host_rename` | **new** | `service` | `{invitation}`. Restarts with a new service. The viewer gets `Stopped{host_stopped}`. While background hosting is configured → `INVALID_ARGUMENT`, as above. |
 | `inspect_invitation` | **new** (D3, no network) | `invitation` | `{service, name, fingerprint: "AB12-CD34-EF56-7890", format: "pbd1"\|"json_v1"}`. Errors: `SETUP_STRING`, `INVALID_INVITATION`. |
-| `connect` | changed | `invitation` **or** `computer_id` (WORKPLAN §1.1), `relay_only=false, quality="balanced", refresh_hz: f64` | `{video_source: u64, codec: "h264"\|"jpeg"}`. Errors: `IDENTITY_CHANGED`, `VERSION_MISMATCH`, `HOST_BUSY`, `ACCESS_DENIED`, `INVALID_INVITATION`, `NOT_FOUND` (no such remembered computer), `VAULT_UNAVAILABLE` (the vault is locked or unreadable), `IO`. |
+| `connect` | changed | `invitation` **or** `computer_id` (WORKPLAN §1.1), `relay_only=false, quality="balanced", refresh_hz: f64` | `{video_source: u64, codec: "h264"\|"jpeg"}`. Errors: `IDENTITY_CHANGED`, `VERSION_MISMATCH`, `HOST_BUSY`, `ACCESS_DENIED`, `INVALID_INVITATION`, `NOT_FOUND` (no such remembered computer), `VAULT_UNAVAILABLE` (the vault is locked or unreadable), `INVALID_ARGUMENT` (no usable credential), `IO`. The offered codec is H.264 on Android and on Windows where Media Foundation is installed, JPEG elsewhere. |
 | `disconnect` | changed | — | `{}` (7.1 order) |
 | `control`, `release`, `keyframe`, `presented`, `input` | **removed here** | | moved to the hot export (7.3) or the video exports (7.5) |
 
@@ -2122,7 +2197,8 @@ int64_t  pb_mapper_desktop_video_attach_v1(uint64_t source);       /* > 0 consum
 int32_t  pb_mapper_desktop_video_next_v1(uint64_t consumer, uint32_t timeout_ms /* ≤ 1000 */,
                                          uint8_t* dst, uint32_t capacity, PbDesktopVideoMetaV1* meta);
 int32_t  pb_mapper_desktop_video_presented_v1(uint64_t consumer, uint64_t generation, uint64_t frame_id); /* 1 accepted, 0 rejected, CLOSED */
-int32_t  pb_mapper_desktop_video_keyframe_v1(uint64_t consumer, uint32_t reason); /* 0 decoder_error, 1 gap, 2 backlog, 3 stall, 4 user; 1 queued, 0 limited/paused, CLOSED */
+int32_t  pb_mapper_desktop_video_keyframe_v1(uint64_t consumer, uint32_t reason); /* 1 gap, 2 backlog, 3 stall, 4 user; 0 INVALID; 1 queued, 0 limited/paused, CLOSED */
+int32_t  pb_mapper_desktop_video_failed_v1(uint64_t consumer, const char* message_utf8 /* to NUL or 512 bytes; may be null; invalid UTF-8 replaced */); /* decoder error with its text: 1 queued, 0 limited/paused, CLOSED */
 int32_t  pb_mapper_desktop_video_report_v1(uint64_t consumer, const char* decoder_utf8 /* ≤ 64 bytes */, uint32_t flags /* bit0 hardware */); /* 0 ok, CLOSED */
 void     pb_mapper_desktop_video_detach_v1(uint64_t consumer);     /* idempotent; wakes a blocked next */
 uint64_t pb_mapper_desktop_instance_token_v1(void);                /* address of a static: D9 single-instance check */
@@ -2135,9 +2211,9 @@ Rules:
 - `next_v1` is the only blocking call. It waits on the sink `Condvar` and
   never touches the tokio runtime. It must never run on a UI thread or on the
   Dart UI isolate.
-- `presented_v1` and `keyframe_v1` are non-blocking: a registry lookup plus a
-  mutex. They are safe on the Windows raster thread and the Android codec
-  thread.
+- `presented_v1`, `keyframe_v1` and `failed_v1` are non-blocking: a registry
+  lookup plus a mutex. They are safe on the Windows raster thread and the
+  Android codec thread.
 - No ownership crosses the ABI. Every unit is copied into `dst`. The
   `release_v1` export, with its double-release and use-after-release
   hazards, does not exist.
@@ -2179,6 +2255,7 @@ no `ndk_context` initialisation.
 | `next(consumer: Long, timeoutMs: Int, buffer: ByteBuffer, meta: LongArray): Int` | `…_next(env, _, consumer: jlong, timeout_ms: jint, buffer: JByteBuffer, meta: JLongArray) -> jint` |
 | `presented(consumer: Long, generation: Long, frameId: Long): Int` | `…_presented(…) -> jint` |
 | `keyframe(consumer: Long, reason: Int): Int` | `…_keyframe(…) -> jint` |
+| `failed(consumer: Long, message: String): Int` | `…_failed(…, message: JString) -> jint` (an unreadable string still counts, with empty text) |
 | `report(consumer: Long, decoder: String, hardware: Boolean): Int` | `…_report(…, decoder: JString, hardware: jboolean) -> jint` |
 | `detach(consumer: Long)` | `…_detach(…)` |
 
@@ -2314,6 +2391,7 @@ internal interface VideoSourceApi {                    // JVM-testable seam
     fun next(consumer: Long, timeoutMs: Int, buffer: ByteBuffer, meta: LongArray): Int
     fun presented(consumer: Long, generation: Long, frameId: Long): Int
     fun keyframe(consumer: Long, reason: Int): Int
+    fun failed(consumer: Long, message: String): Int
     fun report(consumer: Long, decoder: String, hardware: Boolean): Int
     fun detach(consumer: Long)
 }
@@ -2325,12 +2403,13 @@ internal object DesktopVideoNative : VideoSourceApi {
     const val META_AGE_US = 4; const val META_WIDTH = 5; const val META_HEIGHT = 6; const val META_LEN = 7
     const val META_FLAGS = 8; const val META_SIZE = 10
     const val FLAG_KEYFRAME = 1L; const val FLAG_DISCONTINUITY = 2L; const val FLAG_JPEG = 4L; const val FLAG_DUPLICATE = 8L
-    const val REASON_DECODER_ERROR = 0; const val REASON_GAP = 1; const val REASON_STALL = 3
+    const val REASON_GAP = 1; const val REASON_STALL = 3
     @JvmStatic external fun instanceToken(): Long
     @JvmStatic external override fun attach(source: Long): Long
     @JvmStatic external override fun next(consumer: Long, timeoutMs: Int, buffer: ByteBuffer, meta: LongArray): Int
     @JvmStatic external override fun presented(consumer: Long, generation: Long, frameId: Long): Int
     @JvmStatic external override fun keyframe(consumer: Long, reason: Int): Int
+    @JvmStatic external override fun failed(consumer: Long, message: String): Int
     @JvmStatic external override fun report(consumer: Long, decoder: String, hardware: Boolean): Int
     @JvmStatic external override fun detach(consumer: Long)
 }
@@ -2389,11 +2468,10 @@ thread):
 
 | Method | Args | Behaviour |
 | --- | --- | --- |
-| `create` | `instance: Long` | Token check (8.1.1), which fails closed. Creates the `SurfaceTextureEntry` and the codec `HandlerThread` `pb-desktop-video` at `THREAD_PRIORITY_DISPLAY`. Returns `textureId`. |
+| `create` | `instance: Long, decoderHints: Boolean = true` (false only from the acceptance tool, case F) | Token check (8.1.1), which fails closed. Creates the `SurfaceTextureEntry` and the codec `HandlerThread` `pb-desktop-video` at `THREAD_PRIORITY_DISPLAY`. Returns `textureId`. |
 | `attach` | `textureId, source: Long` | Stops and joins the old feeder. `revision++`, `clearQueue()`, `acceptedGeneration = -1`, `lastAccepted = 0`, `awaitingKey = true`. The **texture and the last picture persist** (greyed reconnect overlay). Then `api.attach(source)`: a value > 0 starts a `VideoFeeder`; otherwise reply with an error. |
-| `detach` | `textureId` | Stops the feeder (which detaches). Keeps the texture. |
 | `snapshot` | `textureId, path: String, maxWidth: Int` | D23, below. Replies `Boolean` within 300 ms. |
-| `stats` | `textureId` | Kept: decoder name, counters, timings. |
+| `stats` | `textureId` | Kept: decoder name, counters, timings, and `lowLatency`. |
 | `dispose` | `textureId` | Stops the feeder, then today's dispose. |
 | **removed** | `submit`, `reset`, native → Dart `event` | Presentation and keyframes go to Rust. Decoder health reaches Dart through `viewer_status.decoder`. |
 
@@ -2440,8 +2518,9 @@ are unchanged. Impeller stays disabled (P1-4).
 **Recovery.**
 
 - `fail(packet, reason)` does `releaseCodec()`, `revision++`, `clearQueue`,
-  `awaitingKey`, and then `api.keyframe(consumer, REASON_DECODER_ERROR)`
-  unless paused.
+  `awaitingKey`, and then `api.failed(consumer, error.toString())` unless
+  paused (stalls still send `keyframe(REASON_STALL)`). Pump's catch goes
+  through `codecFailed` the same way.
 - A successful `configure` calls
   `api.report(consumer, codec.name, !codec.codecInfo.isSoftwareOnly /*API ≥ 29, else name heuristic*/)`.
 
@@ -2453,8 +2532,15 @@ are unchanged. Impeller stays disabled (P1-4).
 
 The next `UNIT` clears paused. The resume IDR carries `discontinuity`.
 
-**Decoder hints** (`const val DECODER_HINTS`, kept only if 11.3 case F shows a
-gain): `KEY_PRIORITY = 0` and `KEY_OPERATING_RATE = 60` in `configure`.
+**Decoder hint.** `configure` sets `KEY_LOW_LATENCY` (API ≥ 30) while the
+viewer's hint is on. A decoder on AOSP's OMX path fails `configure` when it
+rejects the hint, so a hinted `configure` that throws releases that codec and
+configures the same decoder (`createByCodecName`) without it, and the hint
+stays off for that viewer. `create{decoderHints:false}`, sent only by the
+acceptance tool, starts with it off for case F. `KEY_PRIORITY`/
+`KEY_OPERATING_RATE` and vendor keys are not set: the host's SPS already
+declares `max_num_reorder_frames` 0 (NVIDIA MFT), and they become candidates
+only if case F shows the hint matters.
 
 **Snapshot (D23).**
 
@@ -2488,7 +2574,7 @@ risk R6.
 - A token mismatch → `create` fails ("native video library loaded twice").
 - The runner still does not link the DLL at build time.
 
-**Channel:** `create`, `attach{textureId, source}`, `detach`,
+**Channel:** `create`, `attach{textureId, source}`,
 `snapshot{textureId, path, maxWidth}`, `stats`, `dispose`. `submit`, `reset`
 and the coalesced `event` are removed. `Events` stays only for the snapshot
 replies (`kWake` + `HandleMessage` on the platform thread).
@@ -2532,7 +2618,7 @@ copies `latest_` on this decoder thread, between two `next` calls.
 - **Receipts.** `AcquireSurface()` (raster thread, `:196-222`), on the first
   acquisition of a new `(revision, frame)`, calls
   `presented_(consumer_, gen, frame)` instead of `events_->Send`.
-- **Failures.** `Fail` calls `keyframe_(consumer_, 0)` unless `paused_`.
+- **Failures.** `Fail` calls `failed_(consumer_, e.what())` unless `paused_`; HRESULTs print as `0x%08X`.
   Decoder creation calls `report_(consumer_, "Media Foundation DXVA (<adapter>)", 1)`.
 - **Snapshot** (on the decoder thread, between `next` calls, ≤ 300 ms):
   1. `VideoProcessorBlt` or `CopyResource` from `latest_` to a staging
@@ -2542,7 +2628,7 @@ copies `latest_` on this decoder thread, between two `next` calls.
      `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`;
   4. reply through `Events`.
 
-  `CMakeLists.txt` links `windowscodecs`.
+  `CMakeLists.txt` links `windowscodecs` and delay-loads `mfplat.dll`; `Run` checks for it before `MFStartup`.
 - **Deleted:** `Submit`, `queue_`, `Submission`, `Events::replies` (apart
   from the snapshot replies), `Complete`, the `>= 4` overflow, and `Reset`.
 - **Optional, measure first:** a pool of 3 BGRA shared textures, respecting
@@ -2594,7 +2680,7 @@ enum DesktopInvitationFormat { pbd1, jsonV1 }
 abstract interface class DesktopApiClient {
   // ---- lifecycle export (async; PbMapperService compute isolate)
   Future<DesktopCapabilities> capabilities();               // helper.protocol, helper.updateRequired
-  Future<DesktopHostSnapshot> hostStatus();                 // {host: DesktopHostStatus?, background: DesktopBackground?};
+  Future<DesktopHostSnapshot> hostStatus();                 // {host: DesktopHostStatus?, busy: bool, background: DesktopBackground?};
                                                             // DesktopHostStatus carries the FFI siblings service and invitation (7.2)
   Future<DesktopHostEnable> enableHost(String service, int displayId, {required bool allowControl});
   Future<String> startHost({required String service, required int displayId, required bool allowControl,
@@ -2623,7 +2709,7 @@ abstract interface class DesktopApiClient {
   void pause();
   void resume();
   int instanceToken();
-  // ---- JPEG consumer (non-Android/Windows only)
+  // ---- JPEG consumer (JPEG sessions: not Android/Windows, or Windows without Media Foundation)
   Stream<DesktopJpegFrame> jpegFrames(int videoSource);     // frame carries consumer id
   bool presentedJpeg(int consumer, int generation, int frameId);
 }
@@ -2648,7 +2734,6 @@ compile error.
 abstract interface class DesktopVideoTexture {
   int get textureId;
   Future<void> attach(int videoSource);     // reconnect re-binds; the texture and last picture persist
-  Future<void> detach();
   Future<bool> snapshot(String path, {int maxWidth = 320});   // D23; caller time-boxes to 300 ms
   Future<Map<String, Object?>> stats();
   Future<void> dispose();
@@ -2698,7 +2783,7 @@ Test: "a sharing or configured host always has its invitation" (10.4).
 ```dart
 enum DesktopPhase { idle, connecting, live, recovering, waitingForDesktop, paused, reconnecting, identityChanged, ended }
 enum DesktopSetupStep { finding, verifying, authorizing, firstPicture }   // Rust stages path|identity|authorizing, then Dart's first picture
-enum DesktopEndReason { hostStopped, disconnectedByHost, revoked, versionMismatch, denied, invalidInvitation, decoderFailed, failed }
+enum DesktopEndReason { hostStopped, disconnectedByHost, revoked, versionMismatch, denied, invalidInvitation, decoderFailed, unreachable, failed }
 enum DesktopAdaptation { startup, steady, raising, loweringFps, loweringBitrate, unresponsive, paused }
 enum DesktopDemand { page, viewer }
 
@@ -2709,7 +2794,10 @@ class DesktopSessionView {
   final int reconnectAttempt; final DateTime? retryAt; final DesktopEndReason? end; final DesktopFailure? failure;
   final bool controlAllowed, controlWanted, controlling, fresh, secureDesktop, hasPicture, paused;
   bool get inputLive => fresh && controlling;
-  final String? path; final String? notice;                              // e.g. lock_failed text for NOTICE_TTL
+  bool get open;        // a target, and the phase is neither idle nor ended
+  bool get connected;   // live, recovering or waitingForDesktop
+  final String? path;   // from the current viewer status, null without one or while unknown; every path label uses it
+  final String? notice;                                                   // e.g. lock_failed text for NOTICE_TTL
   final List<String> capabilities;                                        // "lock"
 }
 class DesktopGeometry { final int epoch, generation, displayWidth, displayHeight, videoWidth, videoHeight; }  // epoch++ on generation/display/reconnect
@@ -2770,10 +2858,10 @@ class DesktopStore {
   ValueListenable<DesktopSessionView> get session;               // phase/target/control/setup/failure; on change
   ValueListenable<DesktopGeometry?> get geometry;                // generation/display/video size; never per frame
   ValueListenable<DesktopPicture?> get picture;                  // native texture (survives reconnect)
-  ValueListenable<ui.Image?> get jpegImage;                      // JPEG platforms only
+  ValueListenable<ui.Image?> get jpegImage;                      // JPEG sessions only
   ValueListenable<DesktopStats> get stats;                       // ≤ 1 Hz, sampled only while it has listeners
   ValueListenable<DesktopQuality> get quality;
-  DesktopView? readView();                                       // per frame; non-blocking leaf (cursor, freshness, flags)
+  ValueListenable<Offset?> get hostCursor;                      // normalised; null when hidden, unknown or another generation
   Future<DesktopInvitationInfo> inspectInvitation(String text);
   Future<void> connect(DesktopTarget target);
   Future<void> disconnect({String? snapshotPath});               // best-effort snapshot first (≤ 300 ms), never blocks
@@ -2796,9 +2884,9 @@ class DesktopStore {
 
 | Source | When it runs | Rate | Updates |
 | --- | --- | --- | --- |
-| `api.view()` leaf | `viewer` demand held | every rendered frame (persistent frame callback) plus a 33 ms timer that calls `scheduleFrame()` only if `cursorSeq`, `state`, `generation` or `flags` changed | `readView()` cache; `geometry` and `session` when generation, flags or state change |
+| `api.view()` leaf | `viewer` demand held | every rendered frame (persistent frame callback) plus a 16 ms timer; a cursor change updates `hostCursor` (inside a frame the store also schedules the next one); a change of state, generation or flags re-reads the status | `hostCursor`; `geometry` and `session` when generation, flags or state change |
 | `api.viewerStatus()` (hot, sync) | session exists | 500 ms with a `viewer` demand, else 1 s | `session` (phase, setup, failure, notice), `quality`; `stats` only while `stats` has listeners (≤ 1 Hz) |
-| `api.hostStatus()` (lifecycle) | `page` demand: 1 s; sharing without demand: 2 s (the D15 bar must see a viewer arrive) | — | `hostView` |
+| `api.hostStatus()` (lifecycle) | `page` demand on a device that can host: 1 s (where it cannot, the first load only); sharing without demand: 2 s (the D15 bar must see a viewer arrive) | — | `hostView` |
 | anything else | — | **no timer when idle** | — |
 
 - `AppStore.desktop` drops `..addListener(_notify)`
@@ -2834,6 +2922,13 @@ happens only when:
   not paused, and `decoder.state != failed`. Because `last_video_age_ms`
   restarts at every entry into streaming (6.10), this rule never counts time
   spent paused or in `capture_unavailable`.
+
+A run of failed attempts ends after 2 min (`_retryWindow`), counted from its
+first failure. A live picture, a connect, a disconnect or a retry after the
+end resets the run, and hiding the viewer restarts its window. The session
+then ends with `end = unreachable` and the last failure; it does not retry by
+itself. This also bounds a `restarting` hand-off that never completes and a
+host that stays busy. A missing credential (`INVALID_ARGUMENT`) is terminal.
 
 A resume (9.6.4) that finds the session `stopped` with `transport` or
 `timeout` (the process was frozen in the background, risk R13) reconnects at
@@ -2915,8 +3010,10 @@ visible = viewer demand held && lifecycle ∈ {resumed, inactive}
 No keyframe requests, no reconnects and no Dart watchdogs run while hidden.
 
 A paused session still holds the host's only slot (`Semaphore(1)`, 5.3). The
-store has no timer for that; the UI ends a session left paused by "Back to
-list" after `kPausedSessionTimeout` (10 min, UI §5.4, §10.1), and the host
+store has no timer for that; the UI ends an open session that stays paused
+(Back to list, a hidden or minimised window, the app in the background)
+after `kPausedSessionTimeout` (10 min, UI §5.4, §10.1); a session whose host
+identity changed holds no slot and is not ended by it. The host
 side shows "Connected · paused" from `HostViewer.paused` (UI §4.6).
 
 On Android the process can be frozen while in the background (risk R13).
@@ -2955,11 +3052,11 @@ that the runner forwards `WM_SIZE/SIZE_MINIMIZED` and the hide on the
 | --- | --- | --- |
 | `hostView` | `sharing`, `hostChanges`, `hostAction`, `hostError` | `hostView` (all fields inside `DesktopHostView`; `enabling`/`restarting` = host action, `error`) |
 | `session` | `session`, `viewerState` | `session` (`DesktopSessionView` carries target, phase, setup, end, failure, control flags) |
-| `geometry` | `view`, `picture` | `geometry` + `picture` + `readView()` |
+| `geometry` | `view`, `picture` | `geometry` + `picture` + `hostCursor` |
 | `stats` | `stats` | `stats` (no `ipFamily`; `hardwareDecoder` provided) |
 | `textureId` | `picture.textureId` | `picture.textureId` |
 | `jpegFrame` | `jpegImage` | `jpegImage` |
-| `latestCursor()` | `view` | `readView()` (cursor fields) |
+| `latestCursor()` | `view` | `hostCursor` |
 | `demand(page\|viewer)` | `retain(remotePage)`, `attachViewer/detachViewer` | `demand(DesktopDemand.page\|viewer)` |
 | `setViewerForeground` | `attachViewer/detachViewer` | `viewer` demand plus the store's own lifecycle listener |
 | `connect(DesktopConnectRequest)` | `connect(DesktopTarget)` | `connect(DesktopTarget)` |
@@ -3049,7 +3146,7 @@ its files (section 12).
 | `viewer::presented_precedes_input_that_references_it` | `Outbound` writes `Presented` before an `Input` with a newer `frame_id`, despite the throttle | V |
 | kept: `viewer::repeated_releases_are_bounded_and_revocation_precedes_a_new_grant` | `Controls` | V |
 | kept or adapted: `worker::input_requires_control_current_geometry_and_unique_sequence`, `native_input_failure_ends_control_and_survives_new_video`, `observation_never_acquires_write_admission_and_revocation_releases_it`, `unavailable_backend_reports_failure_and_stops`; `wire::clean_tls_close_is_eof_only_between_messages`; `host::remembered_invitation_survives_restart_but_not_revocation` (pbd1); `tests::blocked_video_does_not_block_local_stop`; `windows.rs` held-set and cursor-privacy tests; `video/windows.rs` `gpu_output_dimensions…` and `parameter_sets_survive_partial_updates_and_emulation_prevention`; helper binding tests | — | owners per file |
-| `helper::readiness_requires_protocol_2` | Schema 1, protocol ≠ 2, or running without the v2 pipe → `update_required` | HL |
+| `helper::readiness_tests::readiness_requires_the_current_protocol` | Schema 1, protocol ≠ `HELPER_PROTOCOL` (earlier protocols included), or running without the current pipe → `update_required` | HL |
 
 **Integration** (`crates/pb-mapper-desktop/tests/session.rs`, WP-V, runs at G1):
 
@@ -3134,15 +3231,15 @@ its files (section 12).
 - `DecoderRulesTest` (a pure function extracted from `pump`): a same-size
   discontinuity does not reconfigure. A size change or a missing codec does.
 - `VideoPresentationQueueTest` is kept.
-- `./gradlew :app:testDebugUnitTest` runs locally. Adding it to
-  `syntax-check.yml` is the owner's call.
+- `./gradlew :app:testDebugUnitTest` runs locally and in `syntax-check.yml`'s
+  `android-check` job.
 
 ### 10.4 Dart (`flutter test`, runs on Linux CI, WP-D)
 
 | Test (`test/desktop_store_test.dart` unless noted) | Guards |
 | --- | --- |
 | "input is sent with the geometry generation only and dropped when not live" | Rust stamps; `send` returns false on `!inputLive` or an epoch mismatch; `NOT_FRESH` is silent |
-| "polling runs only on demand" | `testWidgets` with `tester.pump(duration)` (its fake clock; no `fake_async` dependency, D21): no timers when idle; `viewerStatus` only with a session; host poll only with page demand or sharing; view polling only with viewer demand |
+| "polling runs only on demand" | `testWidgets` with `tester.pump(duration)` (its fake clock; no `fake_async` dependency, D21): no timers when idle; `viewerStatus` only with a session; host poll only with page demand or sharing; view polling only with viewer demand; none once a device that cannot host has loaded |
 | "a sharing or configured host always has its invitation" | 9.4 invariant: local sharing, background sharing, a restart with remembered trust (paused), and trust remembered under another relay (not configured, invitation null) |
 | "a second connect during an attempt connects the new target" | 9.6.2 supersede semantics: the first attempt is cancelled, the retry timer cleared, the second target connected |
 | "hidden viewer pauses once, never reconnects or requests keyframes; visible resumes" | D13, D14 |
@@ -3250,7 +3347,7 @@ afterwards.
 | C | cellular (direct and relay, as found) |
 | D | Smooth and Quality spot checks; a Windows viewer at the display refresh |
 | E | background 10 s, then resume, × 5; then once each for 60 s and 5 min (records whether the process was frozen, R13) |
-| F | decoder hints on vs off (A repeated) |
+| F | decoder hints on vs off (A repeated; `deployed … serve --no-decoder-hints` writes `decoder_hints: false`; the report's `decoder_hints` and `native.lowLatency` name the arm) |
 | G | UAC prompt and lock screen through the helper; Win+L via `lock` |
 | H | RustDesk with the same host, phone, network, 1080p content |
 | I | `video_bench --pace 60,30,15,5` and `video_bench 60 60` on each host GPU (rate model, GOP) |
@@ -3308,7 +3405,7 @@ phone and decoder, temperature and duration.
 | **WP-0 Foundation** (one engineer, first) | Shared types and the cross-module contracts, implemented in full: protocol types, framing, invite, pinning, ALPN, `Backend` trait, `SessionShared` and its small members, `VideoSink` skeleton, the host status types and `Host` signatures of 5.15 | `D/lib.rs` (types of 4.5, `Backend` of 5.10.3, `HostStatus`/`HostViewer`/`HostState`/`HostPath` of 5.15, module decls incl. `mod pacer;`); `D/protocol.rs` (new); `D/wire.rs` (v2 framing **added** beside the old `Command`, which is deleted at G1); `D/invite.rs` (new); `D/security.rs`; `D/shared.rs`, `D/auth.rs`, `D/lane.rs`, `D/outgoing.rs`, `D/idr.rs` (new, complete, with tests); `D/video_sink.rs` (new: public API, attach, Condvar `next`, `NeedCapacity`, close, plain FIFO); `D/pacer.rs` (empty); `D/windows.rs` **only** `key_code` and the `impl Backend for Desktop` signature adapters; `D/host.rs` (`Host::status() -> HostStatus` adapter and `Host::end_session()`, 5.15); `crates/pb-mapper-desktop/Cargo.toml` (`bytes`); a stub `worker::spawn_session(shared, factory, config) -> WorkerHandle`. **The G0 mechanical-edit set, exactly** (nothing else is touched at G0): every `impl Backend` for the new signature — `D/windows.rs:192`, `D/helper/client.rs:101`, `D/host.rs:347` (test), `D/slow_link.rs:101, 295`, `D/tests.rs:44`, `D/worker.rs:635, 747, 918, 1033, 1245` (test fakes) and the worker's call sites, `D/helper/worker.rs` call sites, `tests/session.rs:26, 212`, `examples/input_acceptance.rs:206`, `examples/video_bench.rs:67, 153` (calls on the backend), `F/desktop.rs:1706`; the `Invitation` change in `D/viewer.rs` and `F/desktop.rs`; the `Host::status()` callers `D/helper/background_service.rs:355, 806`, `examples/deployed.rs:84`, `examples/input_acceptance.rs:531` and the FFI `status` op (`F/desktop.rs:622`, through `legacy_host_status`). `VideoPreferences` and `SessionStatus` stay until the G1 cleanup, so their other users (`examples/{deployed,video_bench,viewer_probe}.rs`, `D/helper/{mod,background}.rs`) need no G0 edit. Every test that runs a v1 viewer against a v1 host (`tests/session.rs`; the cases of `D/tests.rs` that call `Viewer::connect*`) is marked `#[ignore = "v1 pipeline; rewritten for v2 after the G1 merges"]` in the G0 commit, because no package branch has both v2 ends before G1; the G0 check runs them once with `--include-ignored` |
 | **WP-H Host session and QoS** | B-recv, B-send, credit, QoS, handshake, Host API bodies, D24 | `D/session.rs` (new), `D/credit.rs` (new), `D/qos.rs` (new), `D/host.rs`; deletes `D/congestion.rs` at G1 |
 | **WP-W Worker and encoder** | Thread C: Engine on `AuthLedger`, lane drain, pacer, capture step, cursor, lock, the drag-start hold; encoder submit, VFR, GOP, rate; the cross-platform wake (5.10.2) | `D/worker.rs` (replaces the WP-0 stub; deletes the old `Worker` at G1), `D/pacer.rs` (fills the WP-0 file), `D/scheduler.rs`, `D/video/windows.rs`, `D/windows.rs` (lock, capture, `double_click_guard`; WP-0 already did `key_code` and the signature adapters), `D/platform.rs`, `examples/video_bench.rs` (also `--dump <path>`, which writes the `u32 BE len \| unit` clip that 7.5's test source plays), `examples/input_acceptance.rs`, `examples/capture_probe.rs`; `crates/pb-mapper-desktop/Cargo.toml` production `windows` features `Win32_System_Shutdown` and `Win32_UI_Input_KeyboardAndMouse` (5.10.3). **Before G0** it touches only `D/video/windows.rs` (GOP, `submit`, `set_rate`, `pending_len`), keeping `next_frame` alive, plus a throwaway bench on a scratch branch; it ports `D/windows.rs` and `video_bench.rs` and deletes `next_frame`/`next_capture` only after merging G0 |
-| **WP-HL Helper and upgrade** | IPC v2 (with the worker-session double-click metrics, 5.16.3), pipes, install schema, `update_required`, background v2 (on the G0 `HostStatus` and `Host::end_session`) | `D/helper/{mod,client,worker,install,background,background_service,service}.rs` |
+| **WP-HL Helper and upgrade** | IPC (protocol 4; with the worker-session double-click metrics, 5.16.3), pipes, install schema, `update_required`, background pipe (on the G0 `HostStatus` and `Host::end_session`) | `D/helper/{mod,client,worker,install,background,background_service,service}.rs` |
 | **WP-V Viewer** | Viewer tasks, `Outbound`, the full `VideoSink` policy, fps cap, recovery, status, view; integration tests; the SDK's public description | `D/viewer/` (new dir: `mod.rs`, `outbound.rs`, `fps_cap.rs`, `recovery.rs`, `status.rs`; deletes `D/viewer.rs`), `D/video_sink.rs` (after WP-0), `D/slow_link.rs`, `D/tests.rs`, `tests/session.rs`, `examples/{viewer_probe,deployed,transport_probe}.rs` (`deployed --feedback-log` also enables the `frames` target, 11.2), `crates/pb-mapper/README.md` (`crates/pb-mapper/src/lib.rs:67-70` re-exports this crate and `release-sdk.yml:205` publishes it; the README still documents `Viewer::next_frame`, `presented` and `VideoPreferences`, `:3-21`), plus the "SDK: breaking" CHANGELOG text handed to the UI finish package. Its end-to-end rewrite (`tests/session.rs`, `slow_link.rs`, the host↔viewer cases of `tests.rs`) is authored **after the G1 merges**, because it needs WP-H's session and WP-W's worker (12.3) |
 | **WP-F FFI** | `DesktopState`, lifecycle ops, hot export, view leaf, video exports, JNI, registry, error codes, shim, the synthetic test source | `F/desktop.rs`, `F/desktop_video.rs` (new), `F/desktop_jni.rs` (new), `F/desktop_shim.rs` (new, temporary), `F/error.rs`, `F/lib.rs`, `F/Cargo.toml` (feature `desktop-test-source`, 7.5), root `Cargo.toml` (`jni` in workspace deps) |
 | **WP-K Android** | JNI object, feeder, buffer pool, `DesktopVideo` changes, snapshot | `K/DesktopVideoNative.kt`, `K/VideoFeeder.kt`, `K/BufferPool.kt` (new), `K/DesktopVideo.kt`, `K/MainActivity.kt` (only if needed), `ui/android/app/src/test/kotlin/com/pb_mapper/ui/{VideoFeederTest,DecoderRulesTest}.kt`, `ui/android/app/build.gradle*` (test deps only) |
@@ -3426,7 +3523,7 @@ Commits are per work package (D27), with the tests in the same commits.
 | Secure desktop (helper) | The binding generation bumps, followed by invalidate, a new State and an IDR. Input needs a fresh frame of the new generation. | worker, sink | helper tests, case G |
 | Secure desktop (no helper) | `capture_unavailable{secure_desktop}`. No requests, no reconnect. | worker, Dart | Dart test, case G |
 | Helper reinstalled mid-session | `NotConnected` → `Stopped{capture_failed}`, and Dart reconnects | 5.16.4 | manual, G1 check |
-| Old helper with a new UI | `update_required` → "Update service". v2 pipes never reach v1. | 5.16 | readiness test |
+| Old helper with a new UI | `update_required` → "Update service". v4 pipes never reach an older helper. | 5.16 | readiness test |
 | Viewer acks an unsent seq | `Stopped{protocol_error}` | credit | credit test |
 | Input flood | Lane 512, outbound 512 events / 256 KiB, single moves coalesced. Overflow revokes control and never drops a key-up silently. A UI burst (≤ 288 events, ≈ 100 KB) never overflows. | lane, outbound | worker and viewer tests |
 | Revoke with input queued | B-recv drops at the edge. C releases on its next iteration. | 5.4, 5.12.3 | worker test |

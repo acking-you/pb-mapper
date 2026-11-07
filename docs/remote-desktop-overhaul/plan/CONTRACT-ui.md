@@ -35,6 +35,51 @@ what the merged code does:
 - §14.1: T4c added, T5 gains the Return test.
 - §18 (K5): the reset runs only on `KEY_GONE`.
 
+Amended in the optimisation round (2026-11-08), with the Paste new
+invitation product call merged just before it. These sections now say what
+the merged code does:
+
+- §1.1 (U27), §1.4, §2.1, §3, §7.2 and §7.4: the store's `hostCursor`
+  listenable replaces `readView()`; the cursor layer is stateless and has no
+  frame callback; the view timer is 16 ms. The stage, the cursor layer, the
+  touch ring and the minimap outline are each their own repaint layer.
+- §2.1 and §6.1: `JpegPicture` also serves Windows without Media Foundation,
+  where the Remote page shows `hostNeedsMediaFoundation` instead of the host
+  card.
+- §4.6, §8.2 and §12.1: the capsule's form is measured over the whole bar,
+  so the primary's label threshold is 560 in bar width; `SharingChrome`
+  gains `covered`, and the capsule steps aside while a popup covers it.
+- §5.2 and §5.3: `presenceOf` delegates to `listedPresence`, which the
+  viewer's not-sharing line also uses; `computerNameLimit` refuses a pasted
+  invitation.
+- §5.4: `RemoteDesktop.rememberedComputer`, `sharing` and `hasOpenSession`;
+  the paused-session timer runs from the session whenever an open session
+  (not `identityChanged`) is paused, so a hidden window ends it too; Paste new
+  invitation follows the remembered state as the card shows.
+- §6.4 and §6.5: a row's More is reachable by focus and screen readers; the
+  featured card has a More; the empty phone tab shows `RemoteEmptyMessage`.
+- §6.6: `AddComputerController.ready` and its listening to the store; the
+  dialog autofocuses, selects the recognised name and connects on Enter;
+  Connect builds the result when pressed.
+- §7.3 and §8.3: `unreachable` ends a retry run, with `viewerEndedBusy` or
+  `viewerEndedUnreachable`; the retry and reconnecting pills say when the
+  computer isn't sharing; `showsViewOnly` uses `DesktopSessionView.connected`.
+- §7.6, §8.3 and §9.2: the chip, quality panel and touch quality button show
+  no figures while the connection is down, take every path word from
+  `session.path`, and keep the chip's figures in fixed cells.
+- §9.1: `TouchViewer` sizes itself from `MediaQuery.sizeOf`, not a
+  `LayoutBuilder`.
+- §9.3 and §9.4: Disconnect is pinned at the foot of the side panel; the
+  modifier bar puts Del, Ctrl+C and Ctrl+V before Home…Ins.
+- §7.5, §10.4 and §10.6: `RemoteShortcut.needsControl`,
+  `RemoteInput.lastLocalMoveAt` and `RemoteViewport.navigatedSinceKeyboard`
+  are gone.
+- §10.1 and §14.1 (T1c, T9): `kPausedSessionTimeout` counts any pause; T1c
+  checks the labelled capsule at 1180 with a Segoe UI stand-in.
+- §13.2 and Appendix A: `remoteEmptyBodyMobile`, `hostNeedsMediaFoundation`,
+  `viewerEndedUnreachable`, `viewerEndedBusy`; plainer last-used English
+  strings; `computer-featured-more`.
+
 Base: `design/ui-interaction.md` (the winner of both judgements). Grafts come
 from `design/ui-structure.md`. Every must-fix raised by both judges is
 resolved; §1.3 traces each one.
@@ -126,7 +171,7 @@ raise it with evidence (DECISIONS preamble); never deviate silently.
 | U24 | Mobile modifier bar adds Home, End, PgUp, PgDn, Ins | BRIEF capability table; RustDesk `KeyHelpTools` more row (`remote_page.dart:1049-1075`) |
 | U25 | `ComputerPresence.otherRelay`: a computer remembered under another relay address or credential namespace is not shown as "not sharing" | structure §3.3 graft |
 | U26 | `RemoteDesktop` holds no `BuildContext`; confirmations live in page helpers (`R/remote_actions.dart`) | judge 2 flaw on interaction §4.4 |
-| U27 | The remote cursor is pulled with `readView()` from a post-frame callback chain (rides frames already rendered); no free-running `Ticker` | structure D11 reading (graft) + judge 2 must-fix on structure's Ticker |
+| U27 | The remote cursor is the store's `hostCursor` listenable, published by the per-frame leaf read and the 16 ms view timer; no free-running `Ticker`, no frame callback in the layer | structure D11 reading (graft) + judge 2 must-fix on structure's Ticker |
 | U28 | The toolbar's mode segment track is 36 tall | Viewer:44-53 (track padding 3 around 30-tall segments); judge 1 flaw |
 
 ### 1.2 Deviations from the artboards and the design-spec map
@@ -190,7 +235,7 @@ replaced in files rewritten later) is dropped (§17), `RemoteDesktop` takes no
 | Title-bar geometry test also covers the setup flow; ARB blocks next to `nav*`/`window*` | §14 T6, §13 |
 | Deterministic gesture machine | §10.2 |
 | Demand handles and the perf poll-rate table | §3 |
-| `readView()` pull for the cursor, no `Ticker` | §7.4 |
+| `hostCursor` for the cursor, no `Ticker` | §7.4 |
 | No-opaque-cover invariant in every presentable phase; no blur under chrome | §7.3, §8.3 |
 | `KeyRouting.route(event, latched)` honouring latches for hardware keys | §10.5.1 |
 | Tests: remember only after the first picture; forgetting deletes the thumbnail | §14 T9, T10 |
@@ -213,10 +258,10 @@ replaced in files rewritten later) is dropped (§17), `RemoteDesktop` takes no
 | `session: ValueListenable<DesktopSessionView>` | overlays, mode segment, `RemoteInput.ready`, list rows, `RemoteDesktop` |
 | `geometry: ValueListenable<DesktopGeometry?>` | `RemoteInput` (pixel mapping, `geometryEpoch`), cursor layer, viewport aspect |
 | `picture: ValueListenable<DesktopPicture?>` | `ViewerStage` picture (`Texture(textureId)`) |
-| `jpegImage: ValueListenable<ui.Image?>` | `JpegPicture` (non-Android/Windows) |
+| `jpegImage: ValueListenable<ui.Image?>` | `JpegPicture` (JPEG sessions: not Android/Windows, or Windows without Media Foundation) |
 | `stats: ValueListenable<DesktopStats>` (≤ 1 Hz, sampled only while listened to) | toolbar chip, quality panel, gutter quality button, viewing row meta |
 | `quality: ValueListenable<DesktopQuality>` | Display menu radios |
-| `readView()` | `RemoteCursorLayer` (§7.4) |
+| `hostCursor` | `RemoteCursorLayer` (§7.4) |
 | `inspectInvitation(String)` → `DesktopInvitationInfo{service, name, fingerprint, format}` | `AddComputerController` |
 | `connect(DesktopTarget)`, `disconnect({String? snapshotPath})`, `capturePicture(String)` | `RemoteDesktop` |
 | `retryNow()`, `control(bool)`, `release()`, `requestKeyframe()`, `lockRemote()`, `setQuality(DesktopQuality)` | overlays, toolbar, menus |
@@ -428,7 +473,7 @@ listens to the narrowest source:
 | Picture (`Texture` / `JpegPicture`) | `desktop.picture` / `desktop.jpegImage` | session, stats | per texture / per JPEG frame |
 | Overlay layer, mode segment, view-only pill, control hint | `desktop.session` | stats | per transition |
 | `RemoteInput.ready` | `desktop.session` (`inputLive`) + `desktop.geometry` | stats | on change |
-| Cursor layer | `readView()` pulled post-frame | everything else | per rendered frame |
+| Cursor layer | `desktop.hostCursor` | everything else | per cursor change (≤ 60 Hz) |
 | Minimap | `viewport.visibleRegion` | store | on zoom/pan |
 | Toolbar | `ToolbarController` | store | on expand/collapse |
 | Modifier bar, modifier pill | `ModifierLatch` | store | per tap |
@@ -605,6 +650,8 @@ final class SharingChrome {
   /// True when no capsule is reachable: none is mounted and visible, or a
   /// PopupRoute (whose barrier blocks the title bar) is on top.
   ValueListenable<bool> get fallbackNeeded;
+  /// True while a PopupRoute is on top: its barrier covers every capsule.
+  ValueListenable<bool> get covered;
   /// A capsule or the host card's viewer panel says whether it shows the
   /// controls. Applied in a post-frame callback (never during build).
   void setReachable(Object owner, bool reachable);
@@ -636,6 +683,9 @@ class SharingFallbackLayer extends StatefulWidget {   // state: with WindowListe
   connected); otherwise `SizedBox.shrink()`. It calls
   `chrome.setReachable(this, visible)` on every change and
   `setReachable(this, false)` on dispose.
+- While `chrome.covered`, the capsule is hidden with its size kept
+  (`Visibility` maintainSize), so only the fallback pill shows;
+  `setReachable` stays driven by `hostView` alone.
 - `full`: capsule height 30, radius 15, padding `fromSTEB(12, 0, 3, 0)`,
   fill `scheme.tertiaryContainer` (surface tone) / `Color(0x297DB6F2)`
   (viewer tone); `PulsingDot(signalColor, 7)` · 8 · label 12.5/600
@@ -654,8 +704,9 @@ class SharingFallbackLayer extends StatefulWidget {   // state: with WindowListe
   keys on the menu items).
 - Both actions bypass `busy` (perf `stopHost`; R-UI-10 for `endViewerSession`).
 - `Semantics(container: true, liveRegion: true, label: …)`.
-- Placement: `_TitleBar` (§12.1) and `ViewerTitleBar` (§8.2) each wrap their
-  row in a `LayoutBuilder` and pass `sharingFormFor(constraints.maxWidth)`.
+- Placement: `_TitleBar` (§12.1) and `ViewerTitleBar` (§8.2) each measure
+  the whole bar with a `LayoutBuilder` outside the bar's padding and pass
+  `sharingFormFor(constraints.maxWidth)`.
   At the narrowest rail window (720 → sheet 500) the fixed parts are lead 22
   + gap 12 + dot 30 + labelled primary ≈ 140 + 6 + 16 + captions 138 + end 16
   ≈ 380, so the `Expanded` title keeps ≥ 120 px; at 960 (default 1180
@@ -834,7 +885,12 @@ class RemoteComputerStore extends ChangeNotifier {
   collapsed selection, whether or not a keyboard is composing there: that is
   `LengthLimitingTextInputFormatter`'s enforced mode, Flutter's default on
   Android and Windows. When it truncates, it keeps the composing range
-  clipped to the kept text, as Flutter's `truncate()` does.
+  clipped to the kept text, as Flutter's `truncate()` does. It also keeps
+  the old value when an edit brings in text carrying an invitation and the
+  old value carried none: `carriesInvitation` (`R/remote_format.dart`),
+  `pbd1.` anywhere or a v1 JSON `"token"`. Names are shown in clear, so a
+  stray paste never shows a token, and a name that already carries one can
+  still be edited.
 - Owned by `AppStore` as `late final RemoteComputerStore computers`, loaded
   in `start()`. Tests inject `FakeRemoteComputerVault`
   (`T/fake_remote_computer_vault.dart`).
@@ -845,13 +901,22 @@ Presence (pure):
 enum ComputerPresence { viewing, online, notSharing, unknown, otherRelay }
 
 ComputerPresence presenceOf(RemoteComputer c, {required DesktopSessionView session,
-    required RelayState relay, required String relayAddress, required int ownNamespace,
+    required RelayState relay, required String relayAddress, required int? credentialKeyId,
     required Set<String> desktopServices}) =>
-  session.target?.computerId == c.id && session.phase != DesktopPhase.idle
-      && session.phase != DesktopPhase.ended                  ? ComputerPresence.viewing
-  : c.relay != relayAddress || c.namespace != ownNamespace    ? ComputerPresence.otherRelay
-  : relay != RelayState.online                                ? ComputerPresence.unknown
-  : desktopServices.contains(c.service)                       ? ComputerPresence.online
+  session.target?.computerId == c.id && session.open          ? ComputerPresence.viewing
+  : listedPresence(service: c.service, relay: c.relay, namespace: c.namespace,
+      relayState: relay, relayAddress: relayAddress, credentialKeyId: credentialKeyId,
+      desktopServices: desktopServices);
+
+/// What the relay's list says of a service saved under [relay] and [namespace];
+/// the viewer's not-sharing line uses it too (§7.3 row 3).
+ComputerPresence listedPresence({required String service, required String relay,
+    required int namespace, required RelayState relayState, required String relayAddress,
+    required int? credentialKeyId, required Set<String> desktopServices}) =>
+    credentialKeyId == null                                   ? ComputerPresence.unknown
+  : relay != relayAddress || namespace != credentialKeyId     ? ComputerPresence.otherRelay
+  : relayState != RelayState.online                           ? ComputerPresence.unknown
+  : desktopServices.contains(service)                         ? ComputerPresence.online
   :                                                             ComputerPresence.notSharing;
 ```
 
@@ -1034,6 +1099,17 @@ class RemoteDesktop {
 
   /// The title the viewer shows: the remembered name, else the target's name.
   String get title;
+  /// The remembered computer the session's computerId names, as the list stands
+  /// now; null for a session connected without remembering, which runs under its
+  /// own id. Title, Paste new invitation, the Back thumbnail, a quality change and
+  /// the ended session's record all decide through it.
+  RemoteComputer? get rememberedComputer;
+  /// Where the open or opening computer shares, for the viewer's not-sharing line
+  /// (D22): `open(c)` records c.relay and c.namespace; `connectNew` records the
+  /// current relay address and credential key id.
+  ({String service, String relay, int namespace})? get sharing;
+  /// An open session (`DesktopSessionView.open`) that is not `identityChanged`.
+  bool get hasOpenSession;
   /// Whether opening [c] would end another open session (a switch to confirm).
   bool switchesFrom(RemoteComputer c);
   /// Same computer active → viewer.open(). Otherwise: await computers.load()
@@ -1053,7 +1129,7 @@ class RemoteDesktop {
   /// rememberSession(id: <new id>, replaceId: <confirmed id>) and replaces that record.
   Future<void> connectNew(AddComputerResult result);
   /// Leave the picture, keep the session: best-effort thumbnail, then viewer.close().
-  /// Starts the kPausedSessionTimeout timer (below).
+  /// The pause this causes arms the kPausedSessionTimeout timer (below).
   void back();
   /// End the session: thumbnail, recordSession, desktop.disconnect(snapshotPath:), viewer.close().
   Future<void> disconnect();
@@ -1089,13 +1165,17 @@ Rules:
   (perf bounds both to 300 ms).
 - `disconnect()` also calls `recordSession(id, at: now, path: session.path,
   controlAllowed: session.controlAllowed)` for a remembered computer.
-- **Paused sessions end.** "Back to list" keeps the session paused, and a
-  paused session still holds the host's only slot (perf §5.3), so every other
-  viewer would get `HOST_BUSY` until this user returns. `back()` starts a
-  `kPausedSessionTimeout` (10 min, §10.1) timer; `viewer.open()`, `open`,
-  `connectNew`, `disconnect` and `dispose` cancel it. When it fires,
-  `disconnect()` runs; it writes no thumbnail (the session is paused, not
-  fresh), because `back()` already wrote one.
+- **Paused sessions end.** A session that stays paused (Back to list, a
+  hidden or minimised window including the close button's hide to the tray,
+  the app in the background) still holds the host's only slot (perf §5.3),
+  so every other viewer would get `HOST_BUSY`. `RemoteDesktop` arms a
+  `kPausedSessionTimeout` (10 min, §10.1) timer from `desktop.session`
+  whenever `hasOpenSession` (open, and not `identityChanged`) and the session
+  is `paused`, without restarting it while it stays paused, and cancels it
+  when it is not; `open`, `connectNew`, `reconnect`, `disconnect` and
+  `dispose` also cancel it. When it fires, `disconnect()` runs and closes the
+  viewer. It writes no thumbnail (the session is paused, not fresh); after
+  Back, `back()` already wrote one.
 - No `BuildContext` here (U26); confirmations live in `R/remote_actions.dart`.
 
 ### 5.5 `AppStore` changes (`U/state/app_store.dart`)
@@ -1141,7 +1221,8 @@ Body (`ListView(key: PageStorageKey('remote-page'))`):
   `CompactComputerList`, `AddComputerButtons`, footer note.
 - Host not supported (`v.loaded && !v.supported`): no host card; the list
   goes full width; a note row: `remoteMobileHostNote` (Android/iOS, leading
-  `AppIcons.phone` 16) or `hostUnsupported` (macOS/Linux).
+  `AppIcons.phone` 16) or `hostUnsupported` (macOS/Linux), or
+  `hostNeedsMediaFoundation` (Windows without Media Foundation).
 
 The page `build` depends only on layout and whether any computer exists;
 each card listens to its own sources (§3).
@@ -1275,7 +1356,7 @@ pill (fixed 86, `StatusChip(inkLabel: true)`) · action (fixed 96×34, radius
 
 | Presence | Row fill | Meta | Pill | Action |
 | --- | --- | --- | --- | --- |
-| viewing | `tertiaryContainer @ 0.45` | `remoteViewingMeta(path, rtt, fps)` from `desktop.stats` (nested builder, this row only); `remotePicturePaused(path)` while `session.paused` | `remoteViewing` (`signalColor`) | ink `FilledButton(Key('computer-open-<id>'), remoteBackToPicture)` → `remote.viewer.open()` |
+| viewing | `tertiaryContainer @ 0.45` | `remoteViewingMeta(path, rtt, fps)` from `desktop.stats` (nested builder, this row only), its path `pathLabel(session.path)`; `remotePicturePaused(path)` while `session.paused` | `remoteViewing` (`signalColor`) | ink `FilledButton(Key('computer-open-<id>'), remoteBackToPicture)` → `remote.viewer.open()` |
 | online | — | `remoteLastPath(when, path)` | `remoteOnline` (success) | ink `remoteOpen` → `openComputer(context, c)` |
 | unknown | — | `remoteLast(when)` | none | ink `remoteOpen` (the relay can't say; try) |
 | notSharing | — | `remoteLast(when)` | `remoteNotSharing` (grey) | disabled outlined `remoteOpen`, tooltip `remoteOfflineHint` |
@@ -1285,9 +1366,11 @@ pill (fixed 86, `StatusChip(inkLabel: true)`) · action (fixed 96×34, radius
 `remoteYesterday(HH:mm)`, `DateFormat.MMMd`, `DateFormat.yMd`) in
 `R/remote_format.dart`, which also holds `maskInvitation`,
 `formatSessionDuration` and `pathLabel` (`'direct'` → `pathDirect`,
-`'relay'` → `pathRelay`, else `—`). Row actions (DS §2.3.2 proposal): hover
-reveals `IconButton(Key('computer-more-<id>'), AppIcons.more 18)` before the
-action button; a secondary click opens the same `MenuAnchor` at the pointer:
+`'relay'` → `pathRelay`, else `—`). Row actions (DS §2.3.2 proposal): hover,
+an open menu, or focus within the row shows
+`IconButton(Key('computer-more-<id>'), AppIcons.more 18)` before the action
+button; it is always built (opacity 0 otherwise, semantics kept) so Tab and
+screen readers reach it; a secondary click opens the same `MenuAnchor` at the pointer:
 `remoteRename` → dialog → `computers.rename`; `remoteRemove` →
 `confirmDestructive(context, title: remoteRemoveConfirmTitle(name), body: remoteRemoveConfirmBody, action: remoteRemoveAction)`
 → `computers.forget` (removes the invite and the thumbnail).
@@ -1306,7 +1389,8 @@ compact list (§6.5), and the add form uses the same wording.
 `RemoteEmptyCard` (no computers and no session; HostSetup:96-115): min
 height 520; `RemoteEmptyIllustration` (`CustomPainter`, 120×84, strokes per
 DS §2.4); `remoteEmptyTitle` 16/600; `remoteEmptyBody`; outlined
-`Key('remote-add-empty')` `remoteAddComputer`.
+`Key('remote-add-empty')` `remoteAddComputer`. Its illustration, title and
+body are `RemoteEmptyMessage(body: remoteEmptyBody)`, shared with §6.5.
 
 ### 6.5 Remote tab, compact (`R/computer_list_compact.dart`, MobileHome)
 
@@ -1318,6 +1402,9 @@ DS §2.4); `remoteEmptyTitle` 16/600; `remoteEmptyBody`; outlined
   placeholder `#1F2328` + `AppIcons.remoteLarge` 24 `onSurfaceMuted`; badge
   `remoteLastPicture(when)`; name 17/600; sub `remotePathPermission(path)` /
   `remotePathViewOnly(path)` (last path and permission); status pill;
+  `IconButton(Key('computer-featured-more'), AppIcons.more 18, tooltip: more)`
+  after the pill → the rows' actions sheet (rename / remove; `addRemember`
+  for an unremembered session, which is always the featured one);
   full-width 46-tall ink button `Key('computer-featured-open')` `remoteOpen`
   / `remoteBackToPicture`.
 - `CompactComputerList`: a `RaisedSurface` of
@@ -1326,14 +1413,18 @@ DS §2.4); `remoteEmptyTitle` 16/600; `remoteEmptyBody`; outlined
   `remoteOfflineLast(when)` / `remoteLast(when)` / `remoteOtherRelay`),
   `AppIcons.chevronRight` 18. Tap → `openComputer` (notSharing → toast
   `remoteOfflineToast(name)`; otherRelay → toast `remoteOtherRelayHint`).
-  Long press → bottom sheet (rename / remove).
+  Long press → the same actions sheet as the featured card's More (rename /
+  remove).
 - `AddComputerButtons`: when `InviteScanner.supported`, two `DashedBorder`
   buttons 52 tall r16: `Key('remote-scan')` `AppIcons.scanQrCode` 18
   `remoteScanAdd` → `showAddComputer(context, mode: AddMode.scan)`;
   `Key('remote-paste')` `AppIcons.paste` 18 `remotePasteInvite` →
   `AddMode.paste` (reads the clipboard at once). Elsewhere one
   `AddComputerTile`.
-- Empty (DS proposal): only the buttons and the note.
+- Empty (no remembered computer and no session): `RemoteEmptyMessage`
+  (`RemoteEmptyIllustration`, `remoteEmptyTitle`, and `remoteEmptyBodyMobile`
+  where `InviteScanner.supported`, else `remoteEmptyBody`) above the
+  buttons, then the note.
 
 ### 6.6 Add computer (`R/add_computer.dart`, `R/invite_scanner.dart`)
 
@@ -1361,11 +1452,18 @@ class AddComputerController extends ChangeNotifier {
   void edit(String text);          // debounced 250 ms
   void paste(String text);         // inspects at once
   void clear();
-  AddComputerResult? result();     // null unless recognised && (conflict == null || replaceConfirmed),
-                                   // whatever Remember is; with Remember off the confirmation takes
-                                   // effect through a later Remember of the session (§5.4)
+  bool get ready;                  // recognised && (conflict == null || replaceConfirmed), whatever
+                                   // Remember is; with Remember off the confirmation takes effect
+                                   // through a later Remember of the session (§5.4)
+  AddComputerResult? result();     // null unless ready; built when Connect is pressed, so it carries
+                                   // the name in the field at that moment
 }
 ```
+
+While open, the controller listens to `RemoteComputerStore`: `duplicate`,
+`conflict`, the Remember switch and Connect follow the store. Remember is on
+by default, gated by `support.available` as it changes, not snapshotted at
+open. A duplicate that appears sets the field to its saved name.
 
 - `showAddComputer`: non-touch platform or `usesRail(context)` (the shell's
   own breakpoint: touch ≥ 900) →
@@ -1389,20 +1487,24 @@ class AddComputerController extends ChangeNotifier {
   + inline `OutlinedButton.icon(Key('add-paste'), AppIcons.paste 16, paste)`;
   recognised → a read-only well with `maskInvitation(raw)` +
   `IconButton(Key('add-invite-clear'), AppIcons.close)`. Errors under the
-  field in `scheme.error`.
+  field in `scheme.error`. `autofocus` in the dialog only (the sheet's camera
+  and clipboard come first); a Clear refocuses it.
 - `RecognisedHostCard(Key('add-recognised'))`: `tertiaryContainer @ 0.45`,
   r14: `AppIcons.helper` 20 `signalColor` · service mono 13 ·
   `addRecognized(fingerprint)` 12.5. `duplicate` → `addDuplicate(name)`.
   `conflict` → `addIdentityConflict(name)` +
   `SwitchListTile(Key('add-replace'), addReplaceConfirm)`.
-- Name `TextField(Key('add-name'), addName)`;
+- Name `TextField(Key('add-name'), addName)`, autofocused in the dialog once
+  recognised, its default name selected so typing replaces it; Enter or Done
+  connects as Connect does when it is enabled (dialog and sheet);
   `SwitchListTile(Key('add-remember'), addRemember, addRememberHelp | addRememberHelpMobile (Android/iOS))`,
   disabled with `cannotRememberText(support)` as its subtitle when the vault
   is unavailable (D20): `remoteVaultUnreadable` when it is `unreadable`,
   else `addRememberUnavailable`; disclosure `Key('add-more')` `addMoreOptions` →
   `SwitchListTile(Key('add-relay-only'), remoteRelayOnly)`.
 - Footer (dialog): `TextButton(cancel)`,
-  `FilledButton(Key('add-connect'), connect)` enabled iff `result() != null`.
+  `FilledButton(Key('add-connect'), connect)` enabled iff `ready`. A press
+  builds `result()` then and pops only a non-null result.
 - `AddComputerSheet` (MobileAdd): grabber, title `addTitle`, close; in scan
   mode (`InviteScanner.supported` and mode ≠ paste) a 330-tall
   `InviteScanner`; a divider with `scanOr`; full-width 48
@@ -1501,7 +1603,7 @@ class ViewerStage extends StatelessWidget {
   /// Takes listenables, not the store, so a widget test drives phases with ValueNotifiers.
   const ViewerStage({super.key, required this.session, required this.geometry,
       required this.picture, required this.jpegImage, required this.stats,
-      required this.readView, required this.viewport, required this.input,
+      required this.hostCursor, required this.viewport, required this.input,
       required this.machine, required this.touchMode, required this.title,
       required this.actions, this.compact = false, this.toolbarInset});
   final ValueListenable<DesktopSessionView> session;
@@ -1509,7 +1611,7 @@ class ViewerStage extends StatelessWidget {
   final ValueListenable<DesktopPicture?> picture;
   final ValueListenable<ui.Image?> jpegImage;
   final ValueListenable<DesktopStats> stats;
-  final DesktopView? Function() readView;
+  final ValueListenable<Offset?> hostCursor;
   final RemoteViewport viewport; final RemoteInput input; final TouchGestureMachine machine;
   final ValueListenable<TouchMode> touchMode; final String title;
   final ViewerActions actions;               // §7.5
@@ -1520,16 +1622,16 @@ class ViewerStage extends StatelessWidget {
 ```
 
 ```
-Stack(fit: expand)[
+RepaintBoundary(Stack(fit: expand)[        // the stage is its own layer
   RemoteSurface(viewport, input, machine, touchMode,                    // Listener + Transform(key 'remote-scene-transform')
     child: RepaintBoundary(child: ValueListenableBuilder(picture →
         textureId != null ? Texture(key: ValueKey(textureId), textureId: textureId, filterQuality: FilterQuality.low)
                           : JpegPicture(jpegImage))))
   GreyStill(viewport)               // only for retryWaiting / reconnecting with hasPicture; sibling, never a parent
-  RemoteCursorLayer(readView, geometry, viewport, input)
-  TouchIndicator(machine)           // trackpad only; 44 circle, fades 150 ms
+  RemoteCursorLayer(hostCursor, viewport, input)   // in its own RepaintBoundary
+  TouchIndicator(machine)           // in its own RepaintBoundary; trackpad only; 44 circle, fades 150 ms
   ViewerOverlayLayer(session, stats, title, actions, compact, toolbarInset)   // §7.3
-]
+])
 ```
 
 The picture element is the same across zoom, pan, overlays, reconnect
@@ -1553,16 +1655,15 @@ class ViewerOverlay {
 /// Pure; first match wins.
 ViewerOverlay viewerOverlayFor(DesktopSessionView s);
 bool showsViewOnly(DesktopSessionView s) => s.target != null && !s.controlAllowed
-    && (s.phase == DesktopPhase.live || s.phase == DesktopPhase.recovering
-        || s.phase == DesktopPhase.waitingForDesktop);
+    && s.connected;   // live, recovering or waitingForDesktop
 ```
 
 | # | Condition | Kind | Ground and hit testing | Content | Actions |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `phase == identityChanged` | identityChanged | **opaque** `ViewerScrim.opaque()` (the session is dead); absorbs | `ViewerCard(width: 380, alert: true)`: `AppIcons.warning` `ViewerPalette.danger`, `viewerIdentityTitle`, `viewerIdentityBody` | `viewerDisconnect` → `onDisconnect`; `viewerPasteNewInvite` → `onPasteNewInvite` (hidden when null) |
-| 2 | `phase == ended` | ended | **opaque**; absorbs | `ViewerCard(320)`: `viewerEndedTitle` + body by `s.end`: `hostStopped` → `viewerEndedStopped`, `disconnectedByHost` → `viewerEndedByHost`, `revoked` → `viewerEndedRevoked`, `versionMismatch` → `viewerEndedVersion`, `denied` → `viewerDenied`, `invalidInvitation` → `addInvalid`, `decoderFailed` → `viewerEndedDecoder`, `failed` with `s.failure?.code == 'VAULT_UNAVAILABLE'` or `'NOT_FOUND'` → `viewerVaultUnavailable`, other `failed` → `s.failure?.message ?? viewerEndedFailed`. With `!s.hasPicture` the three connect steps show, the one in `s.setup` marked failed (R-UI-8) | `back` → `onDisconnect`; `viewerReconnect` → `onReconnect` (hidden for `versionMismatch`, `denied`, `revoked`, `invalidInvitation`; `decoderFailed` shows `retry` → `desktop.retryNow()`); `viewerPasteNewInvite` for `denied`/`revoked` when `onPasteNewInvite != null` |
-| 3 | `phase == reconnecting` (`retryAt != null`) | `hasPicture` ? retryWaiting : connectRetry | retryWaiting: `GreyStill`; the pill absorbs, the rest passes (local zoom/pan stays). connectRetry: `ViewerScrim.translucent()` in `IgnorePointer`; the card absorbs | retryWaiting: `ViewerPill(height: 48)` `viewerRetry(attempt, seconds)` (seconds from `retryAt` by a local 1 s `Timer`) · secondary `viewerInputPaused` (or `viewerBusy` when `failure?.code == 'HOST_BUSY'`, R-UI-7). connectRetry: the connecting card with that line instead of the steps | `viewerRetryNow` → `desktop.retryNow()`; connectRetry also `cancel` → `onDisconnect` |
-| 4 | `phase == connecting && reconnectAttempt > 0` | `hasPicture` ? reconnecting : connectRetry | as 3 | reconnecting: `ViewerPill(height: 48)` spinner 16 + `viewerReconnecting(attempt)` · `viewerInputPaused` | connectRetry: `cancel` |
+| 2 | `phase == ended` | ended | **opaque**; absorbs | `ViewerCard(320)`: `viewerEndedTitle` + body by `s.end`: `hostStopped` → `viewerEndedStopped`, `disconnectedByHost` → `viewerEndedByHost`, `revoked` → `viewerEndedRevoked`, `versionMismatch` → `viewerEndedVersion`, `denied` → `viewerDenied`, `invalidInvitation` → `addInvalid`, `decoderFailed` → `viewerEndedDecoder`, `unreachable` → `viewerEndedBusy` when `s.failure?.code == 'HOST_BUSY'`, else `remoteOfflineToast(name)` when the relay does not list the service (the not-sharing test of row 3), else `viewerEndedUnreachable`, `failed` with `s.failure?.code == 'VAULT_UNAVAILABLE'` or `'NOT_FOUND'` → `viewerVaultUnavailable`, other `failed` → `s.failure?.message ?? viewerEndedFailed`. With `!s.hasPicture` the three connect steps show, the one in `s.setup` marked failed (R-UI-8) | `back` → `onDisconnect`; `viewerReconnect` → `onReconnect` (hidden for `versionMismatch`, `denied`, `revoked`, `invalidInvitation`; `decoderFailed` shows `retry` → `desktop.retryNow()`); `viewerPasteNewInvite` for `denied`/`revoked` when `onPasteNewInvite != null` |
+| 3 | `phase == reconnecting` (`retryAt != null`) | `hasPicture` ? retryWaiting : connectRetry | retryWaiting: `GreyStill`; the pill absorbs, the rest passes (local zoom/pan stays). connectRetry: `ViewerScrim.translucent()` in `IgnorePointer`; the card absorbs | retryWaiting: `ViewerPill(height: 48)` `viewerRetry(attempt, seconds)` (seconds from `retryAt` by a local 1 s `Timer`) · secondary `viewerBusy` when `failure?.code == 'HOST_BUSY'` (R-UI-7), else `remoteOfflineToast(name)` when the computer is not sharing, else `viewerInputPaused`. Not sharing is `listedPresence(service, relay, namespace of the open computer, …) == ComputerPresence.notSharing`, the rule `presenceOf` uses after its viewing case: false when the store's `credentialKeyId` is null or the relay address or credential differs from the one the computer was opened through (`RemoteDesktop.sharing`). connectRetry: the connecting card with that line instead of the steps, plus the not-sharing line keyed `viewer-retry-not-sharing`. Both rebuild on `AppStore` through a `ListenableBuilder` | `viewerRetryNow` → `desktop.retryNow()`; connectRetry also `cancel` → `onDisconnect` |
+| 4 | `phase == connecting && reconnectAttempt > 0` | `hasPicture` ? reconnecting : connectRetry | as 3 | reconnecting: `ViewerPill(height: 48)` spinner 16 + `viewerReconnecting(attempt)` · the same secondary line as row 3 (`viewerBusy`, else `remoteOfflineToast(name)`, else `viewerInputPaused`), so the reason stays across attempts | connectRetry: `cancel` |
 | 5 | `phase == connecting` | connecting | **translucent** `ViewerScrim.translucent()` (alpha 0.72) in `IgnorePointer`; the card absorbs. The first frame is presented in this phase (perf §9.6.2), and Android returns presentation credit only after Flutter consumes the texture (`DesktopVideo.kt:166-200`) | `ViewerCard(320)`: spinner 20, `viewerConnecting(name)`, `ConnectSteps(s.setup, s.path)`: row 1 `viewerStepFind` while `finding`, then `viewerStepFoundDirect` / `viewerStepFoundRelay` by `s.path`; row 2 `viewerStepIdentity` (`verifying` and `authorizing`); row 3 `viewerStepFirstFrame` (`firstPicture`); done ✓ / current dot / pending dot | `cancel` → `onDisconnect` |
 | 6 | `phase == waitingForDesktop` | `s.secureDesktop` ? secureDesktop : waitingDesktop | `ViewerScrim.translucent()` in `IgnorePointer`; the card absorbs | `ViewerCard(360)`: `AppIcons.secureDesktop` `ViewerPalette.caution`, `viewerSecureTitle`/`viewerSecureBody` (or `viewerWaitingTitle`/`viewerWaitingBody`), chip `viewerInputPaused` | — |
 | 7 | `phase == recovering \|\| phase == paused` | recovering | none; `IgnorePointer` | `ViewerPill(32)` spinner 16 + `viewerRecovering`, top centre at `toolbarInset` (desktop) / 12 (mobile) | — |
@@ -1606,30 +1707,27 @@ pill is `Semantics(liveRegion: true)`. Overlay keys:
 ### 7.4 Remote cursor (`V/remote_cursor_layer.dart`, D11)
 
 ```dart
-class RemoteCursorLayer extends StatefulWidget {
-  const RemoteCursorLayer({super.key, required this.readView, required this.geometry,
-      required this.viewport, required this.input});
-  final DesktopView? Function() readView; final ValueListenable<DesktopGeometry?> geometry;
+class RemoteCursorLayer extends StatelessWidget {
+  const RemoteCursorLayer({super.key, required this.hostCursor, required this.viewport,
+      required this.input});
+  final ValueListenable<Offset?> hostCursor;
   final RemoteViewport viewport; final RemoteInput input;
 }
 ```
 
-- The state keeps a post-frame callback chain while mounted:
-  `SchedulerBinding.instance.addPostFrameCallback(_onFrame)`, and `_onFrame`
-  re-adds itself. A post-frame callback never schedules a frame, so the
-  chain rides frames that are rendered anyway; when the cursor moves while
-  nothing else renders, the store's 33 ms view timer schedules one (perf
-  §9.6.1). No `Ticker`.
-- `_onFrame` reads `readView()` (non-blocking leaf). If `cursorSeq`,
-  position or `cursorVisible` changed **and** `view.generation ==
-  geometry.value?.generation`, it stores the sample and notifies its
-  `_repaint` `ChangeNotifier`.
-- `CustomPaint(painter: RemoteCursorPainter(repaint: Listenable.merge([_repaint, viewport, input.cursorChanges])))`
-  inside `IgnorePointer`; constant size 18×27 whatever the zoom.
+- The store publishes `hostCursor` (normalised; null when hidden, unknown or
+  of another generation than `geometry`) from every leaf read — per rendered
+  frame and on the 16 ms view timer — and whenever `geometry` changes. Read
+  by the timer, the painter's repaint asks for the one frame that draws it;
+  read in the persistent frame callback, after paint, the store schedules
+  the next frame itself. No `Ticker`, no frame callback in the layer.
+- `CustomPaint(painter: RemoteCursorPainter(repaint: Listenable.merge([hostCursor, viewport, input.cursorChanges])))`
+  inside `RepaintBoundary(IgnorePointer(ClipRect(…)))`; constant size 18×27
+  whatever the zoom.
 - It draws `input.cursor` (the local prediction) while a trackpad stroke runs
   or for `kCursorEchoWindow` (300 ms) after any local move (the host stops
-  echoing to the mover for 300 ms, D11); otherwise the remote sample
-  (`cursorX/Y ÷ displayWidth/Height`), hidden when `!cursorVisible`.
+  echoing to the mover for 300 ms, D11); otherwise `hostCursor`, hidden when
+  it is null.
 - The local OS pointer stays visible on desktop.
 
 ### 7.5 Menus and shortcuts (`V/viewer_menus.dart`, `V/remote_keys.dart`)
@@ -1691,7 +1789,6 @@ enum RemoteShortcut {
   ctrlAltDel,    // never enabled, hint shortcutUnsupported (security boundary)
   refresh,       // desktop.requestKeyframe()
   releaseKeys;   // input.releaseAll()
-  bool get needsControl => index <= lock.index;
 }
 ```
 
@@ -1720,17 +1817,20 @@ the picture when closed.
 `QualityPanel(Key('viewer-quality-panel'))`, 236 wide, padding 14/16, r14,
 `ViewerPalette.panel`; title `AppIcons.quality` 16 + `viewerQuality`
 13/600; rows (label `textSecondary` flex, value right, mono where marked)
-from `ValueListenableBuilder(desktop.stats)` (≤ 1 Hz, perf §9.5):
+from `ListenableBuilder(Listenable.merge([session, desktop.stats]))` (≤ 1 Hz, perf §9.5):
 
 | Row | Value (perf `DesktopStats`) | Mono |
 | --- | --- | --- |
-| `qualityPath` | `pathLabel(path)` (+ ` · {relayTransport.toUpperCase()}` when relay) | no |
+| `qualityPath` | `pathLabel(session.path)` (+ ` · {relayTransport.toUpperCase()}` when `session.path == 'relay'`) | no |
 | `qualityRtt` | `{rttMs} ms` or `—` | yes |
 | `qualityLatency` | `{pictureLatencyMs} ms` or `—`, `ViewerPalette.caution` when `degraded` | yes |
-| `qualityFps` | `{presentedFps.round()}` | yes |
-| `qualityBitrate` | `{receivedBitrateBps / 1e6:.1} Mbps` | yes |
+| `qualityFps` | `{presentedFps.round()}`, `—` while not connected | yes |
+| `qualityBitrate` | `{receivedBitrateBps / 1e6:.1} Mbps`, `—` while not connected | yes |
 | `qualityResolution` | `{width} × {height}` | yes |
 | `qualityCodec` | `hardwareDecoder == true` → `qualityHardware(codec)`; `false` → `qualitySoftware(codec)`; null → codec | no |
+
+While the connection is not up (`session.connected` false) every value is `—`
+and the footer is hidden.
 
 Footer 12.5 `textSecondary` by `adaptation`: `loweringBitrate` →
 `qualityAdaptBitrate`; `loweringFps` or `unresponsive` → `qualityAdaptFps`;
@@ -1773,8 +1873,15 @@ Explicit dependencies, no `AppScope` reads, so
 `tool/desktop_viewer_acceptance.dart` hosts it in a bare `MaterialApp` with
 `ViewerPrefs(persist: false)` and holds `desktop.demand(DesktopDemand.viewer)`
 itself (§17.2). `RemoteViewerScreen` passes `remote.back`,
-`remote.disconnect`, `remote.setQuality`, `remote.reconnect` and, for a
-remembered computer, `() => showAddComputer(context, replacing: computer)`.
+`remote.disconnect`, `remote.setQuality`, `remote.reconnect` and, while the
+session's computer is remembered (`remote.rememberedComputer`, which the
+screen follows through `RemoteComputerStore` as well as the session, so a
+computer remembered at its first picture in this viewing counts, even when
+the vault answers after the identity changed, and one forgotten meanwhile
+does not), `() => showAddComputer(context, replacing: computer)`. Both
+viewers rebuild their `ViewerActions` when `onPasteNewInvite` appears or
+goes; `TouchViewer` rebuilds its cached stage only then, on new prefs, or
+for a new title.
 
 State: `RemoteViewport _viewport`, `ModifierLatch _latch`, `RemoteInput
 _input`, `TouchGestureMachine _machine` (direct mode; Windows
@@ -1805,7 +1912,7 @@ that changes at media or state rate is a leaf builder (§3).
 ### 8.2 `ViewerTitleBar` (`V/viewer_title_bar.dart`, Viewer:17-27)
 
 `SizedBox(height: 36)`;
-`Stack[Positioned.fill(WindowDragArea()), Padding(start: trafficLightInset + 8, end: drawsCaptionButtons ? 4 : 12, LayoutBuilder(Row[…]))]`:
+`Stack[Positioned.fill(WindowDragArea()), LayoutBuilder(Padding(start: trafficLightInset + 8, end: drawsCaptionButtons ? 4 : 12, Row[…]))]` (the capsule's form is taken from the whole viewer bar):
 `if (onBack != null)` `_TitleBack` (28×28 r6, `AppIcons.back` 16
 `textSecondary`, `Key('viewer-back')`, tooltip `viewerBackToList`) · 8 ·
 `AppIcons.remote` 16 `ViewerPalette.signal` · 10 ·
@@ -1830,12 +1937,18 @@ Items:
 1. `viewer-pin` 36×36: `AppIcons.pin` (pinned, fill `fill`) /
    `AppIcons.unpin`; tooltip `viewerUnpin` / `viewerPin` →
    `controller.setPinned(v)` + `prefs.setToolbarPinned(v)`.
-2. sep · `ToolbarStatusChip(Key('viewer-quality-chip'))` from `desktop.stats`:
-   dot 8 (`success`; `caution` when `degraded`; `textQuiet` while
-   `session.phase != live`) + `pathLabel(path)` 13 + mono 12
-   `textSecondary` `"{rttMs} ms · {presentedFps} fps"`; degraded form
-   `viewerSlow(path)` + mono caution `"{pictureLatencyMs} ms"`
-   (ViewerStates:40-43). Tap toggles `prefs.qualityPanel`.
+2. sep · `ToolbarStatusChip(Key('viewer-quality-chip'))` from `session` and
+   `desktop.stats`: dot 8 (`success`; `caution` when `degraded`; `textQuiet`
+   while `session.phase != live`) + `pathLabel(session.path)` 13 (shown once
+   the path is known) + mono 12 `textSecondary`
+   `"{rttMs} ms · {presentedFps} fps"`, each figure right-aligned in 3 mono
+   cells; degraded form `viewerSlow(path)` + mono caution
+   `"{pictureLatencyMs} ms"` in 4 cells (ViewerStates:40-43). While the
+   session is not connected (`DesktopSessionView.connected`: live, recovering
+   or waitingForDesktop) the figures read `— ms · — fps`; the degraded form
+   appears only while live. `viewerLink(session, stats)` gives the dot and
+   `degraded` to the chip and the touch quality button alike. Tap toggles
+   `prefs.qualityPanel`.
 3. sep · mode `GlassSegmented<bool>(key: Key('viewer-mode'), height: 36, expand: false)`
    (U28): `false` = `AppIcons.viewOnly` + `viewerModeView`, `true` =
    `AppIcons.control` + `viewerModeControl`; selected
@@ -1894,7 +2007,7 @@ class TouchViewer extends StatefulWidget {
   (U21). `dispose`: `setEnabledSystemUIMode(SystemUiMode.edgeToEdge)` and
   `setPreferredOrientations(const [])`. Tablets rotate freely; layout
   adapts by geometry (§9.2).
-- `Scaffold(backgroundColor: ViewerPalette.black, resizeToAvoidBottomInset: false, body: LayoutBuilder(…))`
+- `Scaffold(backgroundColor: ViewerPalette.black, resizeToAvoidBottomInset: false, body: ValueListenableBuilder(picture → layers at MediaQuery.sizeOf))`. Not a `LayoutBuilder`: it lays itself out again for any rebuild beneath it, which repaints the whole viewer on every stroke or pan
   — the IME never resizes the stage (U12).
 - Layers:
 
@@ -1937,7 +2050,7 @@ GutterLayout gutterLayoutFor(Size screen, double aspect, EdgeInsets padding);
 Lead gutter (column, `spaceBetween`, padding 16/0):
 `GutterButton(Key('touch-back'), AppIcons.back, a11y touchBack)` →
 `onBack`; `QualityGutterButton(Key('touch-quality'))` 56 wide (dot 8,
-`pathLabel` 11, fps mono 14/500, "fps" 10.5; a11y `touchQualityA11y(path, fps)`)
+`pathLabel(session.path)` 11, fps mono 14/500, "fps" 10.5; fps `—` and a11y `viewerQuality` while the connection is not up, otherwise a11y `touchQualityA11y(path, fps)`)
 → toggles `prefs.qualityPanel`; `GutterButton(Key('touch-mode-toggle'))`:
 trackpad = fill `rgba(125,182,242,0.2)`, `AppIcons.trackpad` 20 `signal`;
 direct = `fill`, `AppIcons.directTouch`; label 10.5 `touchModeTrackpad` /
@@ -1964,7 +2077,10 @@ stroke can start anywhere (MobileGestures:30, "slide anywhere").
 = `showGeneralDialog(barrierDismissible: true, barrierColor: Color(0x52000000), transitionDuration: Motion.medium, …)`
 sliding a 300-wide full-height `ViewerPalette.panel` sheet in from the
 trailing edge; the same entries as the desktop menu, as 48-tall rows (check
-and radio slots, danger colour, disabled hint as a subtitle). Keeps immersive
+and radio slots, danger colour, disabled hint as a subtitle). A trailing run
+of `danger` items (touch More's `more-disconnect`) stays pinned below the
+scrolling rows, under a 1 px `ViewerPalette.edge` hairline that replaces the
+divider before it. Keeps immersive
 mode; Android back closes it first; `whenComplete` returns picture focus.
 
 ### 9.4 Keyboard and modifier bar (MobileKeyboard)
@@ -1983,9 +2099,12 @@ mode; Android back closes it first; `whenComplete` returns picture focus.
 | modifiers (fixed) | `Ctrl` (min 46) `Alt` `Shift` `Win` (min 42) — `modifier-control/alt/shift/meta` | `latch.tap` (§10.4). Armed: fill `text`, ink `#1D1D1F` 600. Locked: the same + a 2 px `signal` underline bar. `HapticFeedback.selectionClick()` per change |
 | keys | `Esc` `Tab` (min 40) `Fn` (min 40, `modifier-fn`) | `input.tapKey(escape \| tab)`; `Fn` toggles the scrolled groups to `F1`…`F12` |
 | arrows | `←` `↑` `↓` `→` (36 wide; a11y `keyArrow(dir)`) | tap = `tapKey`; hold = repeat (`pressKey`, 400 ms then every 60 ms, `releaseKey` on up) |
-| navigation (U24) | `Home` `End` `PgUp` `PgDn` | `tapKey(home \| end \| pageUp \| pageDown)`, hold = repeat |
-| edit | `Ins` `Del` `Ctrl+C` `Ctrl+V` | `tapKey(insert \| delete)`; `Ctrl+C` / `Ctrl+V` = `tapKey(c \| v, extra: {control})` |
+| edit | `Del` `Ctrl+C` `Ctrl+V` | `tapKey(delete)`; `Ctrl+C` / `Ctrl+V` = `tapKey(c \| v, extra: {control})` |
+| navigation (U24) | `Home` `End` `PgUp` `PgDn` `Ins` | `tapKey(home \| end \| pageUp \| pageDown \| insert)`, hold = repeat on the four navigation keys |
 | collapse (fixed) | 40×32 `AppIcons.chevronDown` 18, `Key('modifier-collapse')`, a11y `touchHideKeyboard` | `_textInput.hide()` |
+
+  The artboard's set (Esc Tab Fn, arrows, Del Ctrl+C Ctrl+V) comes first so it
+  fits an 844-wide landscape phone; U24's keys follow.
 
   With `Fn` on, the scrolled area shows `Esc Tab Fn | F1 … F12`. Key-cap
   literals are mono text, identical in both languages, not ARB keys.
@@ -1999,7 +2118,7 @@ mode; Android back closes it first; `whenComplete` returns picture focus.
 ### 9.5 Minimap (`V/minimap.dart`, MobileKeyboard:21-23)
 
 `Minimap(Key('minimap'))`: 96 × 96/aspect, r6, fill `rgba(20,20,22,0.8)`,
-1 px `white@0.25`; `MinimapPainter` draws `viewport.visibleRegion`
+1 px `white@0.25`; `MinimapPainter`, in its own RepaintBoundary, draws `viewport.visibleRegion`
 (normalised) as a 1.5 px `signal` r2 rectangle clamped to the box. No
 picture inside (no second `Texture`). `IgnorePointer`.
 `ValueListenableBuilder(viewport.visibleRegion)`; null (hidden) while the
@@ -2076,7 +2195,7 @@ Switch `virtualMouse` / `virtualMouseHelp` (enabled only in direct mode);
 | `kSequenceMax` | 16 inputs per `sendSequence` | `remote_input.dart` | perf §7.3 |
 | `kLatchedTextKeys` | 16 characters keyed per `typeText` call while a latch is active; the rest goes as `text` | `remote_input.dart` | perf §6.4 sizing (≤ 160 events) |
 | `kTextMaxBytes` | 64 KiB of UTF-8 per `typeText` call (≤ 64 `text` events); `TypeTextDialog` enforces it in its field, and an IME commit is cut there at a code-point boundary | `remote_input.dart` | perf §6.4 sizing (`INPUT_QUEUE_BYTES`) |
-| `kPausedSessionTimeout` | 10 min after `back()` | `remote_desktop.dart` | perf §9.6.4; the host's single slot |
+| `kPausedSessionTimeout` | 10 min that an open session stays paused (Back, hidden, background) | `remote_desktop.dart` | perf §9.6.4; the host's single slot |
 
 ### 10.2 Touch gesture state machine (`V/touch_gestures.dart`)
 
@@ -2242,7 +2361,7 @@ final class RemoteInput implements RemotePointerSink {
       required void Function() onLocalCancel, Duration Function()? clock});
   ValueListenable<bool> get ready;     // session.inputLive && geometry != null
   Listenable get cursorChanges;        // fires when the local prediction moves
-  Duration? get lastLocalMoveAt; bool get strokeActive;
+  bool get strokeActive;
   KeyEventResult handleHardwareKey(FocusNode node, KeyEvent event);   // §10.5.1
   void tapKey(RemoteKey key, {Set<RemoteKey> extra = const {}});      // latched + extra wrap one tap
   void pressKey(RemoteKey key); void releaseKey();                    // repeat from the modifier bar
@@ -2284,7 +2403,7 @@ Rules:
   `pressKey` sends `[m↓…, key↓]`, repeats `key↓` every 60 ms after 400 ms,
   and `releaseKey` sends `[key↑, m↑…]`.
 - `hover` and `move` go through `desktop.send(DesktopInput.move(x, y))` (the
-  store coalesces moves, perf §9.6.3); a local move stamps `lastLocalMoveAt`.
+  store coalesces moves, perf §9.6.3); a local move stamps the time `predicting` reads (D11).
 - `releaseAll`: `onLocalCancel()` (the machine cancels), `latch.clear()`,
   key repeat stops; if anything is held (hardware keys, buttons,
   `_heldMods`) → `desktop.release()`; the held sets clear.
@@ -2433,7 +2552,6 @@ final class RemoteViewport extends ChangeNotifier {
   void pinchPan(List<Offset> start, List<Offset> now);
   void ensureVisible(Offset normalized, {double margin = kFollowMargin});   // minimal pan
   void beginKeyboard(); void endKeyboard();
-  bool get navigatedSinceKeyboard;
   void setMode(ViewerScaleMode mode, {required Size remotePixels, required double dpr});
   void autoScrollTo(Offset pointer);
 }
@@ -2447,16 +2565,15 @@ fitted picture becomes pannable vertically without any change of scale.
 
 Keyboard sequence (`TouchViewer` watches `MediaQuery.viewInsetsOf(context).bottom`):
 
-1. inset becomes > 0 → `beginKeyboard()` saves `(scale, offset)` and clears
-   `navigatedSinceKeyboard`;
+1. inset becomes > 0 → `beginKeyboard()` saves `(scale, offset)` and clears its
+   navigated flag;
 2. **every** inset change → `setOcclusion(EdgeInsets.only(bottom: inset + 44))`
    — re-bound only; `scene` and `layoutSize` stay, so nothing relayouts;
 3. `kKeyboardSettle` (100 ms) after the **last** change →
    `ensureVisible(input.cursor)` (minimal pan);
 4. inset returns to 0 → `endKeyboard()` restores the saved `(scale, offset)`
-   exactly, unless the user pinched or panned meanwhile
-   (`navigatedSinceKeyboard`), in which case it keeps the current scale and
-   re-bounds.
+   exactly, unless the user pinched or panned meanwhile, in which case it
+   keeps the current scale and re-bounds.
 
 Nothing here calls the store, changes encode parameters or rebuilds the
 texture (P1-4). Trackpad strokes call `ensureVisible(cursor)` so the view
@@ -2681,13 +2798,18 @@ Padding(
 UI-3 then adds `onBack` (§4.3) and the capsule:
 
 ```dart
-Padding(…, child: LayoutBuilder(builder: (context, c) => Row(children: [
+LayoutBuilder(builder: (context, c) => Padding(…, child: Row(children: [
   if (onBack != null) ...[ IconButton(key: const Key('page-back'), …), const SizedBox(width: 4) ],
   Expanded(…title…),
   if (sharingIndicator) ...[ const SizedBox(width: 12), SharingIndicator(form: sharingFormFor(c.maxWidth)) ],
   ...actions, …primary…, …captions…,
 ])))
 ```
+
+The primary's label threshold counts the whole bar too: 560 for both the
+phone bar and the sheet. On a phone (24 px padding) nothing moves; a Windows
+sheet (38 px padding) shows the labelled primary from a 560 px bar instead of
+574, a macOS one (30 px) from 560 instead of 566.
 
 The bar stays 58 tall in the sheet (54 compact); the existing
 `Stack(alignment: centerStart)` centres the row, so the 32 px buttons sit 13
@@ -2854,6 +2976,7 @@ Remote page and list
 | `remoteListTitle` | Remote computers | 远程电脑 |
 | `remoteEmptyTitle` | No remote computers yet | 还没有远程电脑 |
 | `remoteEmptyBody` | Turn on remote control in pb-mapper on the other computer, copy its private invitation and paste it here. | 在另一台电脑的 pb-mapper 里开启远程控制，复制它的私密邀请，粘贴到这里。 |
+| `remoteEmptyBodyMobile` | Turn on remote control in pb-mapper on your Windows computer, then scan its QR code or paste its private invitation. | 在 Windows 电脑的 pb-mapper 里开启远程控制，然后扫描它的二维码或粘贴它的私密邀请。 |
 | `remoteAddHint` | Paste another computer's private invitation | 粘贴另一台电脑的私密邀请 |
 | `remoteRememberNote` | Only invitations you choose to remember are saved on this device, encrypted by the system. | 只有选择“记住此电脑”的邀请会保存在本机，并由系统加密。 |
 | `remoteViewing` | Viewing | 正在查看 |
@@ -2864,12 +2987,12 @@ Remote page and list
 | `remoteOtherRelayHint` | Saved under another relay or credential. Switch back in Settings to open it. | 保存于其他中继或凭据下，在“设置”中切换回去后才能打开。 |
 | `remoteOpen` | Open | 打开 |
 | `remoteBackToPicture` | Back to picture | 回到画面 |
-| `remoteLast` | Last {when} | 上次 {when} |
-| `remoteLastPath` | Last {when} · {path} | 上次 {when} · {path} |
+| `remoteLast` | Used {when} | 上次 {when} |
+| `remoteLastPath` | Used {when} · {path} | 上次 {when} · {path} |
 | `remoteViewingMeta` | {path} · {rtt} ms · {fps} fps | {path} · {rtt} ms · {fps} fps |
 | `remotePicturePaused` | {path} · picture paused | {path} · 画面已暂停 |
-| `remoteToday` | Today {time} | 今天 {time} |
-| `remoteYesterday` | Yesterday {time} | 昨天 {time} |
+| `remoteToday` | today {time} (only ever embedded through `formatLastSeen`) | 今天 {time} |
+| `remoteYesterday` | yesterday {time} | 昨天 {time} |
 | `remoteRename` | Rename | 重命名 |
 | `remoteRemove` | Remove this computer | 移除此电脑 |
 | `remoteRemoveConfirmTitle` | Remove “{name}”? | 移除“{name}”？ |
@@ -2890,12 +3013,13 @@ Remote page and list
 | `remotePathViewOnly` | {path} · view only | {path} · 仅查看 |
 | `remoteOthers` | Other computers | 其他电脑 |
 | `remoteOnlineLast` | Online · last via {path} | 在线 · 上次走{path} |
-| `remoteOfflineLast` | Not sharing · last {when} | 未在共享 · 上次 {when} |
+| `remoteOfflineLast` | Not sharing · used {when} | 未在共享 · 上次 {when} |
 | `remoteScanAdd` | Scan to add | 扫码添加 |
 | `remotePasteInvite` | Paste invitation | 粘贴邀请 |
-| `remoteMobileHostNote` | This phone can view and control Windows computers; it can't be controlled itself. | 手机可以查看并控制 Windows 电脑，暂不能被远程控制。 |
+| `remoteMobileHostNote` | This device can view and control Windows computers; it can't be controlled itself. | 手机可以查看并控制 Windows 电脑，暂不能被远程控制。 |
 | `remoteRelayOnly` | Relay only | 仅使用中继 |
 | `hostUnsupported` | Only Windows can share its desktop for now. This device can view remote desktops. | 目前仅 Windows 可以共享桌面。此设备可以查看远程桌面。 |
+| `hostNeedsMediaFoundation` | Sharing this desktop needs Windows Media Foundation (install the Media Feature Pack, or the Media Foundation feature on Windows Server). This computer can still view remote desktops. | 共享此桌面需要 Windows Media Foundation（请安装媒体功能包，Windows Server 上请启用 Media Foundation 功能）。此电脑仍可查看远程桌面。 |
 
 Add computer and scan
 
@@ -3048,6 +3172,8 @@ Viewer (both)
 | `viewerEndedVersion` | The other computer runs a different pb-mapper version. Update both to the latest. | 对方的 pb-mapper 版本不同，请两边都更新到最新版本。 |
 | `viewerEndedDecoder` | This device couldn't decode the picture. | 这台设备无法解码画面。 |
 | `viewerEndedFailed` | The connection failed. | 连接失败。 |
+| `viewerEndedUnreachable` | The other computer couldn't be reached. It may be asleep or offline. | 无法连接到对方，它可能已休眠或离线。 |
+| `viewerEndedBusy` | Another device is still viewing that computer. | 对方仍在被另一台设备查看。 |
 | `viewerVaultUnavailable` | This computer's saved invitation can't be read on this device. Remove it and add it again. | 无法在本机读取这台电脑保存的邀请，请移除后重新添加。 |
 | `viewerDenied` | The invitation is no longer valid. Ask for a new one. | 邀请已失效，请向对方要一条新的邀请。 |
 | `viewerReconnect` | Reconnect | 重新连接 |
@@ -3130,7 +3256,7 @@ glyph or layout-matrix tests.
 
 | Id | File (WP) | Test | Guards |
 | --- | --- | --- | --- |
-| T1c | `T/app_test.dart` (UI-3) | "the title bar never overflows while this computer is viewed" — Windows override, 720×640 and 1180×780, `FakeDesktopApi.hostSnapshot` with a viewer: every rail page pumps with no exception and shows `sharing-indicator` | §4.6 capsule forms |
+| T1c | `T/app_test.dart` (UI-3) | "the title bar never overflows while this computer is viewed" — Windows override, 720×640 and 1180×780, `FakeDesktopApi.hostSnapshot` with a viewer: every rail page pumps with no exception and shows `sharing-indicator`; with Google Sans Flex standing in for Segoe UI (CI has no Windows face), at 1180 the capsule carries its label on every page but Remote | §4.6 capsule forms |
 | T2 | `T/remote_surface_test.dart` (UI-5; replaces `desktop_gesture_test.dart`) | "zoom stays local through pinch, reconnects and the soft keyboard" — pinch: no sink call, same `Texture` element, scale > 1.2, a later direct tap maps through the zoom; a `geometry.epoch` change keeps the transform; `beginKeyboard()` + `setOcclusion(bottom: 200)` keeps `scale`, `scene` and the element; `endKeyboard()` restores the transform exactly unless the user panned meanwhile | P1-4 (the perf contract assigns this test to the UI) |
 | T3 | `T/sharing_test.dart` (UI-3) | "while viewed, Disconnect viewer and Stop sharing are reachable in the title bar, over a dialog and without a title bar, and work while busy" — `sharing-indicator-stop` on Tunnels while `busy` calls `host_stop`; with a dialog open `sharing-fallback-disconnect` is hit-testable above the barrier and calls `host_end_session`; on the setup flow the fallback shows | D15, local stop boundary |
 | T4a | `T/remote_input_test.dart` (UI-5) | "latched modifiers wrap one action and never stay held" — Ctrl tapped once: `tapKey(c)` sends one sequence `[control↓, c↓, c↑, control↑]` and the latch is off; tapped twice: two keys both wrapped, still locked; a click is wrapped; a hardware `F5` with Ctrl latched is wrapped and its key-up sends nothing; a dropped sequence leaves nothing held; `releaseAll` sends `release` only when something is held | D16 |
@@ -3142,7 +3268,7 @@ glyph or layout-matrix tests.
 | T7b | `T/viewer_chrome_test.dart` (UI-6) | "connection overlays follow the phase, stay translucent while a frame can arrive, and never replace the picture" — `ViewerStage` over `ValueNotifier`s: connecting shows `ViewerScrim` with `opaque == false`; live → reconnecting (retry pill offers Retry now) → waitingForDesktop → live keeps the same `Texture` element; identityChanged is opaque and wins | U18, §7.3, `desktop_viewer.dart:491-492` |
 | T7c | `T/viewer_chrome_test.dart` (UI-6; port of `desktop_test.dart:98-224` viewer case) | "the pointer maps to display pixels and nothing is sent unless input is live" | input authorisation |
 | T8 | `T/touch_gesture_test.dart` (UI-5; pure, explicit `Duration`s, no `fakeAsync`) | (a) "trackpad taps click at once and a held second tap drags without a remote double-click" — after the first `up()` the sink already has `click(left)`; a second touch within 300 ms held 300 ms produces no press before `clickAt + 520 ms`, then `press(dragStart: true), move…, release` in order; a quick second tap is a second immediate click. (b) "long press right-clicks, a two-finger tap does nothing, three fingers scroll without navigating, and a pinch never presses in direct touch" — 500 ms hold → one `click(right)`; two-finger tap → no sink call; a 72 px downward three-finger swipe → wheel events summing to −3, transform unchanged; direct touch: first finger moves 30 px, second lands at +60 ms → no `press` | D18, U3, U4, join grace |
-| T9 | `T/remote_desktop_test.dart` (UI-2a) | "a new computer is remembered only after its first picture; leaving the picture releases the viewer demand and Back to picture takes it again; an identity change never touches the saved computer; a session left paused is ended" — fake session: connecting → identity → no `rememberSession`; connecting → live with picture → one `rememberSession` carrying the target's service and fingerprint; `back()` → `pause` recorded, `viewer.open()` → `resume`; `back()` then `tester.pump(kPausedSessionTimeout)` → `disconnect` recorded | D20 timing, D13, the host's single slot |
+| T9 | `T/remote_desktop_test.dart` (UI-2a) | "a new computer is remembered only after its first picture; leaving the picture releases the viewer demand and Back to picture takes it again; an identity change never touches the saved computer; a session left paused, by Back or a hidden window, is ended" — fake session: connecting → identity → no `rememberSession`; connecting → live with picture → one `rememberSession` carrying the target's service and fingerprint; `back()` → `pause` recorded, `viewer.open()` → `resume`; `back()` then `tester.pump(kPausedSessionTimeout)` → `disconnect` recorded; the first `back()` stays paused 5 min before `viewer.open()`; a live session whose app goes inactive → hidden, then `tester.pump(kPausedSessionTimeout)` → `disconnect` recorded | D20 timing, D13, the host's single slot |
 | T10 | `T/remote_computers_test.dart` (UI-2a) | "forgetting a computer deletes its thumbnail, and a changed identity is a conflict, not a duplicate" | D23, invariant "replace, never merge" |
 | T11a | `T/remote_page_test.dart` (UI-4) | "an invitation is recognised before connecting and never shown in full" — `nav-remote` → `remote-add`; a setup string shows `addSetupString` and Connect stays disabled; a `pbd1.` invite shows service and fingerprint, the token is nowhere on screen, Remember is on; Connect → the fake records `connect` with a `computerId` and the viewer opens on the Connecting overlay | D3 inspect flow, invite secrecy |
 | T11b | `T/remote_page_test.dart` (UI-4; from `desktop_test.dart:19-96,280-309`, `desktop_host_readiness_test.dart:70-119`) | "enabling shares view-only or with control, Stop works while busy, and helper maintenance stays reachable" | host permission, local stop |
@@ -3330,7 +3456,7 @@ New: `nav-remote`, `settings-logs`, `page-back`, `caption-minimize`,
 `sharing-fallback`, `sharing-fallback-disconnect`, `sharing-fallback-stop`,
 `remote-add`, `remote-add-empty`, `remote-add-tile`, `remote-refresh`,
 `remote-scan`, `remote-paste`, `computer-<id>`, `computer-open-<id>`,
-`computer-more-<id>`, `computer-featured`, `computer-featured-open`,
+`computer-more-<id>`, `computer-featured`, `computer-featured-open`, `computer-featured-more`,
 `host-permission`, `host-copy`, `host-qr`, `host-qr-panel`, `host-display`,
 `host-allow-control`, `host-enable`, `host-enable-ordinary`, `host-start`,
 `host-stop`, `host-make-view-only`, `host-disconnect-viewer`,

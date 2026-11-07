@@ -176,7 +176,11 @@ Nothing in the SDK crates knows it exists.
   - `video/windows.rs`: Desktop Duplication → D3D11 → Media Foundation H.264
   - `helper/` (Windows): The opt-in UAC/Winlogon service and the UI's client to
     it; the service side and the `pb-mapper-desktop-helper` binary need
-    `--features windows-helper`
+    `--features windows-helper`. `HELPER_PROTOCOL` (`helper/mod.rs`) and the
+    `.v<n>` pipe names change together; an installed helper of another
+    protocol is offered Update
+  - `dpapi.rs` (Windows): The one DPAPI call every Windows store uses, current
+    user or machine scope; the FFI's vault and trust files go through it
   - `tests.rs`, `tests/session.rs`: Tests over a real relay and TLS, the second
     end to end; `slow_link.rs`: the ignored acceptance cases
   - `examples/`: Capture, transport and viewer probes, and `video_bench`, the
@@ -188,6 +192,8 @@ Nothing in the SDK crates knows it exists.
   - `tunnel.rs`: `TunnelSpec` / `Tunnel` / `TunnelHarness` — echo server plus
     `register` plus `connect`, each on reserved loopback ports
   - `echo.rs`, `traffic.rs`: Echo servers and the framed and raw traffic drivers
+  - `shaped.rs`: `Shape` / `shaped_link` — a TCP hop with delay and rate
+    adjustable while connections run, shared by the remote desktop's tests
   - A crate rather than `tests/common/mod.rs`: that module is compiled separately
     into every test binary, and whatever a binary does not use is reported as
     dead code — fatal under `-D warnings`
@@ -312,7 +318,8 @@ The design and its rules are in `docs/ui-design.md`.
       cannot: PowerShell without a console exits at once);
     - `pb_mapper_desktop_view_v1`, the remote desktop's per-frame view leaf:
       it fills a caller-owned 56-byte `PbDesktopViewV1` (mirrored in
-      `pb_mapper_ffi.dart`; a `size_of` assert guards it) and returns 1, 0
+      `pb_mapper_ffi.dart`; `size_of` and `offset_of` asserts guard it, as
+      they guard `PbDesktopVideoMetaV1` on both sides) and returns 1, 0
       without a viewer, or -1;
     - the desktop video exports and their JNI twins, below
   - `desktop.rs`: The remote desktop. `pb_mapper_desktop_call_json` takes
@@ -325,12 +332,15 @@ The design and its rules are in `docs/ui-design.md`.
     calls it, as it calls the view leaf. Errors are typed `ErrorCode`s
     (`error.rs`), never text to match
   - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
-    its consumer. On Windows and Android that is the native decoder (the
-    runner's decoder thread in `windows/runner/desktop_video.cpp`, the
-    Android feeder), so H.264 never passes through Dart; elsewhere it is
-    Dart's JPEG isolate. `connect` returns a `video_source`; a consumer
-    attaches to it and pulls with
-    `pb_mapper_desktop_video_{attach,next,presented,keyframe,report,detach}_v1`.
+    its consumer. On Android, and on Windows where Media Foundation is
+    installed, that is the native decoder (the runner's decoder thread in
+    `windows/runner/desktop_video.cpp`, the Android feeder), so H.264 never
+    passes through Dart; elsewhere, Windows without Media Foundation
+    included, it is Dart's JPEG isolate. The runner and this DLL delay-load
+    `mfplat.dll`, so the app starts without it. `connect` returns a
+    `video_source`; a consumer attaches to it and pulls with
+    `pb_mapper_desktop_video_{attach,next,presented,keyframe,failed,report,detach}_v1`;
+    `failed` reports a decoder failure with its text.
     Ids, never pointers, cross; no id is reused, so a stale one reads as
     closed. The return codes are one space (`PbVideo` in Dart). Only `next`
     blocks, never on a UI thread. `pb_mapper_desktop_instance_token_v1`
@@ -368,7 +378,8 @@ The design and its rules are in `docs/ui-design.md`.
     `pb_mapper_update_config` with the address and credential; a tunnel
     keeps the one it started with and reports it as `relayTransport`.
     `pb_mapper_start_server` takes a `quic_port` (0: none). The window's
-    own relay questions go through `relay_client()`, cached per config,
+    own relay questions, and the remote desktop's connects and host starts,
+    go through `relay_client()`, cached per config,
     which shares the process's QUIC connection with the tunnels. See
     "How this computer reaches the relay" in `docs/ui-design.md`
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`

@@ -55,7 +55,8 @@ is the Remote tab. How the page and the viewer are laid out is in
 4. On the controller, open Remote desktop and choose **Add computer** (on a
    phone, **Scan to add** or **Paste invitation**). The app recognises the
    host's service and fingerprint before connecting, and refuses a pb-mapper
-   setup string. **Connect** opens the viewer. **Remember this computer**,
+   setup string. **Connect** (or Enter in the name) opens the viewer.
+   **Remember this computer**,
    on by default, keeps it in the list once its first picture arrives;
    **Relay only** is under **More options**. The UI requests the host's
    permitted control only after a fresh frame is actually presented; the
@@ -171,11 +172,11 @@ the soft keyboard sends Ctrl+C.
 | --- | --- |
 | Connecting | Its steps — finding the host, going direct or through the relay, checking its identity, the first picture — with Cancel |
 | Live | The picture; the toolbar's chip says when it is delayed |
-| Reconnecting | The last picture greyed, a countdown (1, 2, 4, 8, then 15 s) and Retry now; a busy host is retried the same way |
+| Reconnecting | The last picture greyed, a countdown (1, 2, 4, 8, then 15 s) and Retry now; a busy host is retried the same way, and when the relay answers without listing the computer's service the viewer says it isn't sharing right now (only while the relay and credential are those it was opened through; after a settings change it says nothing). After two minutes of failures the session ends |
 | Waiting for the remote desktop | The last picture, and why: a UAC prompt or the lock screen without the helper, or no desktop at all |
 | Recovering the picture | The last picture while a new keyframe comes |
 | Host identity changed | An opaque card. Retries stop, and nothing replaces the saved identity except **Paste new invitation**, which opens the add flow for that computer |
-| Ended | Why — sharing stopped, the host ended the session, the invitation was revoked or refused, a different pb-mapper version, the picture could not be decoded — with Reconnect where it can help, Retry after a decoder failure, and Paste new invitation for a revoked or refused one |
+| Ended | Why — sharing stopped, the host ended the session, the invitation was revoked or refused, a different pb-mapper version, the picture could not be decoded, two minutes of failed retries (the computer isn't sharing, couldn't be reached, or another device is still viewing it) — with Reconnect where it can help, Retry after a decoder failure, and Paste new invitation for a revoked or refused one |
 
 Only the overlay for a changed identity is opaque; the others keep the last
 picture visible. Input goes to the host only while the picture is fresh and
@@ -188,11 +189,14 @@ message, never mid-session.
 
 **Back** keeps the session but pauses it: the host stops capturing, control
 ends, and the list shows the computer as Viewing with **Back to picture**,
-which resumes from a fresh keyframe. A session left paused ends after ten
-minutes, because it holds the host's only viewer slot and every other viewer
-would be told the computer is busy. A phone that goes to the background
-pauses the same way; if Android froze the app and the host closed the
-session meanwhile, the viewer reconnects once, at once, on its return.
+which resumes from a fresh keyframe. A hidden or minimised window, or a phone
+in the background, pauses it the same way. A session left paused ends after
+ten minutes, because it holds the host's only viewer slot and every other
+viewer would be told the computer is busy; closing the window to the tray
+counts. A session whose host identity changed holds no slot, so it keeps its
+card until you act. If Android froze the app and the host closed the session
+meanwhile, the viewer reconnects once, at once, on a return within those ten
+minutes.
 For a remembered computer, leaving the picture or disconnecting saves the
 last frame as its thumbnail.
 
@@ -210,7 +214,9 @@ While a viewer is connected, the host shows it in three places:
 
 Both actions work even while another host action is still running.
 **Disconnect viewer** is final for that session: the viewer is told the host
-ended it and does not reconnect by itself.
+ended it and does not reconnect by itself. **Quit** from the tray stops the
+app's own sharing first, so its viewer is told sharing stopped; the service's
+sharing continues.
 
 A sharing computer usually has its window closed to the tray, where an
 in-window capsule cannot be seen. So when a viewer arrives while the window is
@@ -242,8 +248,8 @@ pasting an invitation again:
   Other relay and opens only after switching back in Settings.
 - A changed host identity never touches the saved computer; only **Paste new
   invitation** replaces its invitation, once the new session is remembered:
-  at its first picture with **Remember this computer** on, or when its row is
-  remembered later. Until then the session is a computer of its own, and the
+  at its first picture with **Remember this computer** on, or when its row (on
+  a phone, its card) is remembered later. Until then the session is a computer of its own, and the
   saved one keeps its record and last picture.
 - **Remove this computer** deletes its invitation and its last picture.
 - Saved computers that can no longer be opened (DPAPI after a restored
@@ -276,11 +282,11 @@ mismatch stops automatic retries and never replaces the pinned identity.
 
 | Action | Result |
 | --- | --- |
-| Turn on remote control | Starts the service-owned host with input and automatic restoration enabled; reuses its invitation |
+| Turn on remote control | Starts the service-owned host with input and automatic restoration enabled; reuses its invitation; a viewer of the app's own sharing reconnects by itself when the service is already installed and running, and otherwise ends with sharing stopped |
 | Stop sharing | Closes sessions and disables automatic sharing; the same invitation resumes on the next explicit Start sharing |
 | Close the app | Stops its viewer; service-owned sharing continues |
 | Upgrade legacy app-owned sharing | Transfers the saved identity if no same-scope service identity exists; an existing service identity remains authoritative |
-| Revoke invitation and stop sharing | Deletes remembered trust, closes the current host, and requires a new invitation for future sharing |
+| Revoke invitation and stop sharing | Deletes remembered trust, closes the current host, and requires a new invitation for future sharing; its viewer is told the invitation was revoked, whether the app or the service hosts |
 
 Legacy app-owned grants and a pending installation handoff use current-user
 DPAPI in `desktop-trust.dpapi` beneath the existing configuration directory.
@@ -389,7 +395,10 @@ Windows service, independently of Flutter or an agent harness:
   management accepts only the protected installed UI and approved owner SID.
 - The worker can bind its capture/input thread to Default or the secure desktop
   within the approved console login, including its locked state. The worker
-  checks session ID, login time and user identity before context/input; a reused
+  checks session ID, login time and user identity before context/input. On the
+  ordinary desktop it reuses one answer for at most 4 ms, and never across a
+  desktop switch or a change of active console session. On the Winlogon
+  desktop, where UAC and the lock UI share a name, it asks every time. A reused
   session ID or another user's login cannot inherit the old admission.
   Desktop-switch and lock-state changes
   advance a generation independently of resolution. Capture and final input
@@ -410,8 +419,9 @@ reset after 24 hours. Normal Stop exits do not request recovery. Windows may
 apply the non-crash failure flag after the next OS restart. Disable and uninstall
 disable startup before stopping, so an already queued SCM restart cannot undo
 that action. **Turn on remote control** explicitly restores automatic service
-startup.
-Updating a disabled or stopped installation preserves that state.
+startup, even when it must first install or update the helper, in the same
+consent prompt. Updating a disabled or stopped installation from the helper
+row preserves that state.
 
 Disable stops the service and disables its startup. Uninstall stops/deletes the
 service and removes its authorization configuration. Upgrade preserves files
@@ -439,12 +449,18 @@ does not require Flutter or a POCOX runtime.
   embedder backend. `start_with_identity` and `start_with_backend_and_identity`
   resume an explicitly authorized `HostIdentity` without changing `HostOptions`
   literals. Discard that identity and stop its host to revoke durable access.
+  `start` and `start_with_identity` use the platform's own backend and refuse
+  before registering where `capabilities().host` is false: off Windows, or
+  without Media Foundation.
 - `Host::status` returns a `HostStatus`: the state and its reason, whether
   control is allowed, the display and desktop kind, the capabilities, and the
   connected viewer (`HostViewer`: since when, direct or relay, controlling,
   paused, quality preset). `end_session` ends the current viewer's session and
   keeps hosting. `stop` ends hosting, and `stop_with` tells the viewer why
-  (`restarting` for a display switch, `revoked` for revoked trust).
+  (`restarting` for a display switch, or when Turn on remote control hands the
+  app's sharing to a ready service under the same invitation; `revoked` for
+  revoked trust, whether the app or the service hosts). A stop returns once the
+  viewer has read `Stopped` and closed, or after 1 s.
   `set_control_allowed` revokes or restores control live.
 - A backend is constructed, used and dropped on its dedicated capture/input
   worker. `Backend` deliberately has no `Send` requirement: COM objects and
@@ -454,8 +470,9 @@ does not require Flutter or a POCOX runtime.
   for a new desktop context, a display change or an encoder recovery, never for
   a rate change. `capture_video` drains finished output and submits at most one
   capture at the rate it is given; `drain_video` and `pending_video` let the
-  worker collect an asynchronous encoder's output between ticks; `video_gop`
-  reports the GOP the encoder read back. A sticky link failure returns
+  worker collect an asynchronous encoder's output between ticks. Each unit's
+  `VideoFormat` carries `gop`, the GOP the encoder read back, so a unit relayed
+  by the helper reports it as well. A sticky link failure returns
   `NotConnected`, which ends the session instead of retrying.
 - `ControlAdmission::acquire` provides an optional embedder-controlled write
   lease. POCOX can pause its Computer Use writer when a human explicitly requests
@@ -481,7 +498,9 @@ does not require Flutter or a POCOX runtime.
   never a tokio worker, and returns a unit, `NeedCapacity` (the unit stays
   queued for a larger buffer), `Timeout`, `Paused` or `Closed`. The consumer
   reports each frame it actually showed with `presented(generation, frame_id)`,
-  asks for an IDR with `keyframe(reason)`, and names its decoder with `report`.
+  asks for an IDR with `keyframe(reason)`, reports a decoder failure and its
+  text with `failed(message)` (logged, counted toward giving up, and appended
+  to the session's end message), and names its decoder with `report`.
 - A host's `invitation()` encodes as `pbd1.` text (`Invitation::encode`,
   `Invitation::decode`): the service, the SHA-256 fingerprint of the host
   certificate and the bearer token. Decoding also accepts the earlier JSON
@@ -573,8 +592,10 @@ context check.
 Windows H.264 hosting uses DXGI Desktop Duplication, D3D11 textures and GPU NV12
 conversion, followed by a low-latency Media Foundation hardware encoder with no
 B-frame reordering. Each duplication frame is released at once, so no update is
-missed between ticks. Hosting requires a compatible hardware H.264 MFT on the
-capture GPU and reports an error when that path is unavailable. JPEG remains an
+missed between ticks. Hosting requires Media Foundation and a compatible
+hardware H.264 MFT on the capture GPU, and reports an error when that path is
+unavailable; without Media Foundation the capabilities report no host and a
+host refuses to start. JPEG remains an
 SDK compatibility path at up to 8 FPS; there is no promise that every hardware
 failure silently falls back to JPEG. The encoder runs at the session's nominal
 frame rate (the viewer's `max_fps`) and is never rebuilt for a frame rate,
@@ -743,8 +764,10 @@ so a phone that keeps up, or a static desktop, never ratchets the host down.
 One limiter covers every keyframe request: the decoder's, the sink's drops and
 the user's. While waiting for an IDR it asks at once (or after a 1 s hold that
 follows a new generation, a host recovery or a resume), then after 0.5, 1, 2
-and 4 s, and every 4 s after that; a user request skips the backoff but not the
-500 ms minimum. Units handed out with nothing presented for 700 ms also ask for
+and 4 s, and every 4 s after that, until an IDR's header arrives, even while
+its payload is still in transit; until that IDR has landed, the hold and the
+backoff still gate other requests. A user request skips the backoff but not
+the 500 ms minimum. Units handed out with nothing presented for 700 ms also ask for
 one. Five decoder errors in 30 s with nothing presented end the session with
 `decoder_failed`. No request is sent while paused or while the host reports
 capture unavailable.
@@ -795,7 +818,7 @@ input authorisation.
 | What | Value |
 | --- | --- |
 | Records | JSON header ≤ 8 KiB; video payload 1 B to 4 MiB |
-| Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s |
+| Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 4 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 buffered |
@@ -835,6 +858,16 @@ unit is traced as `desktop_frame` on `pb_mapper_desktop::frames` (trace level),
 and the viewer traces each accepted presentation as `desktop_frame_view` with
 the same `seq`. `deployed --feedback-log` enables both host targets.
 
+Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
+`desktop_host_accepted`, `desktop_host_rejected`, `desktop_host_session_ended`
+(reason, detail, seconds, frames, keyframes), `desktop_viewer_connected` and
+`desktop_viewer_ended` (reason, detail, seconds, keyframes,
+`keyframes_requested`, `backlog_drops`). The app also warns
+`desktop_connect_failed` with the typed failure, and a native decoder's
+failure is warned as `desktop_decoder_error` on `pb_mapper_desktop::frames`
+with its text. No line carries a token, invitation or fingerprint, and the
+background service's sessions are not logged.
+
 ### The app's video path
 
 The viewer's overlays report the states in [Viewer states](#viewer-states).
@@ -843,16 +876,19 @@ seconds without video while the viewer shows and the session streams
 (counted from the later of the last video and the session streaming again
 after a pause or unavailable capture), opens a fresh authenticated session
 with the same target and path preference after 1, 2, 4, 8 and 15
-seconds. Capture-unavailable states wait for the remote desktop instead of
-retrying around missing Windows permissions. Disconnect cancels recovery. A
+seconds. Retrying stops once failures have gone on for two minutes, counted
+from the first since the last live picture and never while the viewer is
+hidden; the session then ends, saying why, with Reconnect. Capture-unavailable
+states wait for the remote desktop instead of retrying around missing Windows
+permissions. Disconnect cancels recovery. A
 hidden viewer never reconnects; when it shows again, a session the host closed
 meanwhile reconnects at once. A retry restores previously requested control
 only after a fresh picture and host permission. No queued clicks or keys are
 replayed. A remembered computer reconnects by its id; a pasted invitation that
 was not remembered stays in memory only.
 
-Windows decodes H.264 with Media Foundation into D3D11 shared textures, and
-Android with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer.
+Windows decodes H.264 with Media Foundation into D3D11 shared textures (or
+takes JPEG where Media Foundation is not installed), and Android with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer.
 Capture, encoding, decoding and blocking FFI calls stay off the Dart UI
 isolate, and pinch and pan keep the same texture and decoder. On Android a
 decoder reset is acknowledged by the codec worker, keeps the Surface, and cannot
@@ -863,8 +899,8 @@ thread pulls through JNI on Android, and the runner's decoder thread through
 the `pb_mapper_desktop_video_*_v1` C exports on Windows. Each reports its
 presentations to `VideoConsumer::presented` directly. Dart reads only status,
 geometry, statistics and the latest cursor, through the per-frame view leaf.
-Other platforms take JPEG, which Dart decodes off the UI isolate. Video bytes
-never become JSON or base64.
+Other platforms, and Windows without Media Foundation, take JPEG, which Dart
+decodes off the UI isolate. Video bytes never become JSON or base64.
 
 ## Measurements and remaining acceptance
 
@@ -892,9 +928,9 @@ running:
 | Case | Result |
 | --- | --- |
 | Fixed 350 ms RTT | Pace 60 (the ceiling); bitrate 4.91 Mbit/s from a 4.0 start; 59 presented and 60 received FPS; one keyframe; one size (1920×1080); the encoder configured once |
-| 1 Mbit/s for 8 s after 6 s unlimited | Window clamped at the first trace interval after the limit (990 ms; 1001–1016 ms in three other runs); lowest pace 3; lowest expected bitrate 194 kbit/s; back to at least 3.2 Mbit/s 8.05 s after the limit lifted |
+| 1 Mbit/s for 8 s after 6 s unlimited | Window clamped at the first trace interval after the limit (990 ms; 1001–1016 ms in three other runs); lowest pace 3; lowest expected bitrate 194 kbit/s; back to at least 3.2 Mbit/s 8.05 s after the limit lifted (8.0–11.1 s over eight later runs: recovery moves in whole trace intervals) |
 | Decoder taking 67 ms a frame | Host pace held at a mean 12.5 FPS (14.3 in another run) by the viewer's fps cap, while the delay controller stayed at 60 FPS and the encoder bitrate at 8 Mbit/s: presentation lag never reaches congestion control |
-| 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (498 skipped ticks) instead of queueing; control 61 ms, release 47 ms, revoke 15.7 ms, host stop under 1 ms |
+| 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (498 skipped ticks) instead of queueing; control 61 ms, release 47 ms, revoke 15.7 ms, host stop under 1 ms (252 and 266 ms in two later runs, since a stop now waits for the viewer to read `Stopped`, at most 1 s) |
 
 Proposed phone criteria, which the owner decides: on a 60 Hz phone over direct
 Wi-Fi with Balanced, presented FPS p50 ≥ 55; present interval p95 ≤ 25 ms and
@@ -1027,7 +1063,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |
-| Rotated GPU capture, macOS/Linux hosts | Unsupported |
+| Rotated GPU capture, macOS/Linux hosts, Windows hosts without Media Foundation | Unsupported |
 | Audio, clipboard, file transfer, recording, multiple viewers | Not implemented |
 
 Background operation follows each platform's own constraints. Linux/macOS need
@@ -1080,7 +1116,11 @@ Dependencies include windows-capture 2.0.1 (MIT), windows-service 0.8.1
 compatibility, image (MIT/Apache-2.0), and tokio-rustls/rustls. rustls is accessed
 through `quinn::rustls`; versions are pinned in workspace dependencies. Video
 uses installed Windows Media Foundation/driver codecs and Android MediaCodec;
-no FFmpeg executable or libraries are bundled.
+no FFmpeg executable or libraries are bundled. The app and the FFI DLL
+delay-load `mfplat.dll`. Where it is missing (Windows N/KN without the Media
+Feature Pack, Windows Server without the feature), the app still starts, this
+computer cannot share (a host refuses to start, so a remembered grant is not
+restored either) and the Remote page says why, and viewing falls back to JPEG.
 
 Build Windows with `make build-pb-mapper-ffi-windows` (FFI DLL and optional helper),
 then the normal Flutter Windows build. Keep the entire

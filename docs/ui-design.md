@@ -42,7 +42,10 @@ keep-alive preference until the user continues. Every step can be skipped; the a
 the galaxy, where a new tunnel spirals out of its star.
 
 On a phone the bottom bar has room for five: Logs opens from a row in
-Settings, with a back button (and Android Back) to return there.
+Settings, with a back button (and Android Back) to return there. On
+Android, Back at the root sends the app to the background, as Home does, so
+tunnels and a paused session keep running. (On Android 16 the system decides
+this itself, and does it only for an app opened from the launcher.)
 
 All pages read one `AppStore` (`state/app_store.dart`), kept fresh by the Rust
 change stream and a slow relay check. The tray reads the same store instead of
@@ -178,9 +181,9 @@ form. Each tunnel keeps the carrier it started with.
 - **This computer's relay** can offer QUIC on a UDP port of its own, next
   to the TCP port; the TCP port's UDP twin already carries direct sessions.
 
-The window's own questions — the relay check, the Relay page — go over the
-chosen carrier through one client kept per relay setting, which shares its
-QUIC connection with the tunnels. Whether the relay offers QUIC is asked
+The window's own questions — the relay check, the Relay page, the remote
+desktop — go over the chosen carrier through one client kept per relay
+setting, which shares its QUIC connection with the tunnels. Whether the relay offers QUIC is asked
 over TCP beside them, so Settings can say so even when QUIC does not get
 through — once per relay setting, and again on Test, since a relay from
 before QUIC logs the question. The exception is a check over QUIC that
@@ -194,7 +197,9 @@ The Remote desktop page (`pages/remote/`) holds both ends: a card for this
 computer as a host, and the computers it views. A wide page sets them side
 by side, a narrower one stacks them. A phone shows the list and a note that
 it can view and control but not be controlled: only Windows shares its
-desktop for now.
+desktop for now. On Windows without Media Foundation the host card is
+replaced by a note saying sharing needs the Media Feature Pack; viewing
+still works, over JPEG.
 
 - **This computer** (`host_card.dart`). Off, one action turns remote
   control on: Windows' consent for the helper service when needed, then a
@@ -213,11 +218,17 @@ desktop for now.
   it was saved under another relay or credential. The open session's
   computer reads Viewing, with Back to picture. Only one remote computer is
   open at a time, so opening another asks first. A phone features the one
-  used last, with its last picture, above the others, and offers Scan to
-  add and Paste invitation.
+  used last, with its last picture and a More that renames, removes or
+  remembers it, above the others, and offers Scan to add and Paste
+  invitation; with none yet, it first says where an invitation comes from.
+  A wide list shows a row's More on hover, and also while focus is within
+  the row, so the keyboard and screen readers reach it.
 - **Adding** (`add_computer.dart`) recognises an invitation before
   connecting: it shows the host's service and the fingerprint the
-  connection will be held to, never the token. A pb-mapper setup string is
+  connection will be held to, never the token; a name refuses an invitation
+  pasted into it, since names are shown in clear. On a desktop the dialog
+  takes the paste at once, selects the recognised name, and connects on
+  Enter. A pb-mapper setup string is
   named as one and sent to Settings; a computer already in the list, or one
   whose identity changed, is said so and never merged in silently. On a
   phone or tablet narrower than the rail the camera reads the QR code
@@ -242,14 +253,18 @@ Viewing is a mode of the app, not a page: while the viewer shows it takes
 the whole window in place of the rail and the page
 (`pages/remote/viewer/viewer_screen.dart`), so there is only ever one. Back
 returns to the list and keeps the session, paused: the host stops capturing
-and the list offers Back to picture. A session left paused ends after ten
-minutes, since it holds the host's only viewer slot.
+and the list offers Back to picture. A session left paused, by Back or by a
+hidden or minimised window, ends after ten minutes, since it holds the
+host's only viewer slot; one whose host identity changed holds no slot and
+keeps its card until the user acts.
 
 Both layouts share one stage (`viewer_stage.dart`): the picture, the remote
 cursor and the overlays. Nothing opaque covers the picture while a frame can
 still arrive. Connecting lists its steps on a card over a dim scrim; a lost
 connection greys the last picture under a pill with the countdown and Retry
-now; a secure or missing remote desktop is said over the last picture. Only
+now, says when the relay it was opened through no longer lists the computer,
+and ends after two minutes of failures; a secure or missing remote desktop is
+said over the last picture. Only
 a changed host identity is opaque: it stops reconnecting and offers Paste
 new invitation for a remembered computer. An ended session says why, and
 offers Reconnect where that can help.
@@ -284,12 +299,13 @@ While a viewer is connected to this computer, Disconnect viewer and Stop
 sharing are always within reach (`shell/sharing_indicator.dart`):
 
 - **A capsule** in the title bar of every page and of the viewer — Being
-  viewed or Being controlled, then the two actions. It fits its bar: label
-  and buttons from 960 px, buttons alone from 640 px, below that a dot with
-  a menu. The Remote page's host card carries the same two actions instead.
+  viewed or Being controlled, then the two actions. It fits its bar's width:
+  label and buttons from a 960 px bar (the default window's sheet), buttons
+  alone from 640 px, below that a dot with a menu. The Remote page's host
+  card carries the same two actions instead.
 - **A pill above every route**, where no capsule can be reached: first-run
   setup, the full-screen viewer, and any dialog whose barrier covers the
-  title bar.
+  title bar; the capsule under it steps aside, so one set shows.
 - **The tray**: its active icon, a tooltip that leads with who is watching,
   and both actions in its menu. A sharing computer usually sits in the tray
   with its window closed, so when a viewer arrives the window comes back
