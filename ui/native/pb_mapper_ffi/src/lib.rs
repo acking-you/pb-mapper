@@ -7,6 +7,9 @@ mod client;
 mod config;
 mod ctl;
 mod desktop;
+#[cfg(target_os = "android")]
+mod desktop_jni;
+mod desktop_video;
 mod disk_log;
 mod error;
 mod events;
@@ -34,6 +37,27 @@ pub use config::{
 pub use desktop::{
     pb_mapper_desktop_call_json, pb_mapper_desktop_frame, pb_mapper_desktop_free_frame,
     pb_mapper_desktop_wait_frame,
+};
+#[cfg(target_os = "android")]
+pub use desktop_jni::{
+    Java_com_pb_1mapper_ui_DesktopVideoNative_attach,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_detach,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_instanceToken,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_keyframe,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_next,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_presented,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_report,
+};
+pub use desktop_video::{
+    PbDesktopVideoMetaV1, pb_mapper_desktop_instance_token_v1, pb_mapper_desktop_video_attach_v1,
+    pb_mapper_desktop_video_detach_v1, pb_mapper_desktop_video_keyframe_v1,
+    pb_mapper_desktop_video_next_v1, pb_mapper_desktop_video_presented_v1,
+    pb_mapper_desktop_video_report_v1,
+};
+#[cfg(feature = "desktop-test-source")]
+pub use desktop_video::{
+    pb_mapper_desktop_video_test_source_pause_v1, pb_mapper_desktop_video_test_source_stop_v1,
+    pb_mapper_desktop_video_test_source_v1,
 };
 pub use events::pb_mapper_set_change_callback;
 pub use galaxy::pb_mapper_galaxy_frame_v1;

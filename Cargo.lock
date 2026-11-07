@@ -3122,6 +3122,7 @@ name = "pb-mapper-desktop"
 version = "0.10.2"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "enigo",
  "image",
  "parking_lot",
@@ -3151,8 +3152,10 @@ name = "pb-mapper-ffi"
 version = "0.1.0"
 dependencies = [
  "better_mimalloc_rs",
+ "bytes",
  "clap",
  "dirs",
+ "jni 0.21.1",
  "parking_lot",
  "pb-mapper",
  "pb-mapper-auth",

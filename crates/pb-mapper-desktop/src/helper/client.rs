@@ -99,9 +99,11 @@ impl RemoteBackend {
     }
 }
 impl Backend for RemoteBackend {
-    fn configure_video(&mut self, preferences: crate::VideoPreferences) -> Result<()> {
-        preferences.validate()?;
-        self.call(Request::ConfigureVideo { preferences })?;
+    fn configure_video(&mut self, limits: crate::VideoLimits, _nominal_fps: u32) -> Result<()> {
+        limits.validate()?;
+        self.call(Request::ConfigureVideo {
+            preferences: limits.into(),
+        })?;
         Ok(())
     }
     fn display(&mut self) -> Result<crate::Display> {
@@ -127,13 +129,13 @@ impl Backend for RemoteBackend {
         expected: &DesktopContext,
         codec: crate::VideoCodec,
         keyframe: bool,
-        bitrate: u32,
+        rate: crate::VideoRate,
     ) -> Result<Option<crate::EncodedFrame>> {
         let bytes = self.call(Request::CaptureVideo {
             expected: expected.clone(),
             codec,
             keyframe,
-            bitrate,
+            bitrate: rate.bitrate,
         })?;
         Ok(self
             .video
@@ -148,7 +150,11 @@ impl Backend for RemoteBackend {
             .clone();
         self.input_in_context(&context, input)
     }
-    fn drain_video(&mut self, expected: &DesktopContext) -> Result<Option<crate::EncodedFrame>> {
+    fn drain_video(
+        &mut self,
+        expected: &DesktopContext,
+        _wait: std::time::Duration,
+    ) -> Result<Option<crate::EncodedFrame>> {
         let bytes = self.call(Request::DrainVideo {
             expected: expected.clone(),
         })?;

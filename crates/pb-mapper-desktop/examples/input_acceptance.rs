@@ -206,9 +206,10 @@ mod windows_test {
     impl Backend for Guarded {
         fn configure_video(
             &mut self,
-            preferences: pb_mapper_desktop::VideoPreferences,
+            limits: pb_mapper_desktop::VideoLimits,
+            nominal_fps: u32,
         ) -> Result<()> {
-            self.inner.configure_video(preferences)
+            self.inner.configure_video(limits, nominal_fps)
         }
         fn display(&mut self) -> Result<Display> {
             self.state.check()?;
@@ -233,13 +234,11 @@ mod windows_test {
             expected: &DesktopContext,
             codec: pb_mapper_desktop::VideoCodec,
             keyframe: bool,
-            bitrate: u32,
+            rate: pb_mapper_desktop::VideoRate,
         ) -> Result<Option<pb_mapper_desktop::EncodedFrame>> {
             self.state.check()?;
             let started = Instant::now();
-            let frame = self
-                .inner
-                .capture_video(expected, codec, keyframe, bitrate)?;
+            let frame = self.inner.capture_video(expected, codec, keyframe, rate)?;
             self.state
                 .capture_ms
                 .store(started.elapsed().as_millis() as u32, Ordering::Release);
@@ -536,11 +535,11 @@ mod windows_test {
                 let applied = state.applied.load(Ordering::Acquire);
                 send(&viewer, &state, &mut sequence, Input::Move { x: (point.x - display.x) as u32, y: (point.y - display.y) as u32 }).await?;
                 wait_for(&state, "native pointer move", || state.applied.load(Ordering::Acquire) > applied).await?;
-                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: true }).await?;
+                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: true, drag_start: false }).await?;
                 wait_for(&state, "native button down", || state.downs.load(Ordering::Acquire) == 1 && state.held.load(Ordering::Acquire)).await?;
-                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: false }).await?;
+                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: false, drag_start: false }).await?;
                 wait_for(&state, "native button up", || state.ups.load(Ordering::Acquire) == 1 && !state.held.load(Ordering::Acquire)).await?;
-                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: true }).await?;
+                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: true, drag_start: false }).await?;
                 wait_for(&state, "held button before disconnect", || state.downs.load(Ordering::Acquire) == 2 && state.held.load(Ordering::Acquire)).await?;
                 let at = Instant::now();
                 viewer.stop().await?;

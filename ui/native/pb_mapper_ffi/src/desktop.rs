@@ -619,7 +619,10 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                 .host
                 .try_lock()
                 .ok()
-                .and_then(|slot| slot.as_ref().map(|host| json!(host.status())))
+                .and_then(|slot| {
+                    slot.as_ref()
+                        .map(|host| json!(desktop::legacy_host_status(&host.status())))
+                })
                 .or_else(|| background.as_ref().and_then(background_host));
             let viewer = state.viewer.lock().await.as_ref().map(Viewer::status);
             return Ok(json!({"host": host, "viewer": viewer, "background": background}));
@@ -1051,7 +1054,7 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
             return Err(failure);
         }
     }
-    let invitation = host.invitation().encode().map_err(err)?;
+    let invitation = host.invitation().encode();
     *slot = Some(host);
     *handle.desktop.host_identity.lock().await = Some(local_identity);
     Ok(json!({"invitation": invitation}))
@@ -1597,14 +1600,11 @@ mod tests {
             .unwrap_err();
             assert_eq!(invalid.code(), crate::error::ErrorCode::InvalidArgument);
             assert!(handle.desktop.connecting.lock().is_none());
-            let invitation = Invitation {
-                version: 1,
-                service: "desktop:test".into(),
-                certificate: String::new(),
-                token: "a".repeat(43),
-            }
-            .encode()
-            .unwrap();
+            let invitation = desktop::HostIdentity::generate()
+                .unwrap()
+                .invitation("desktop:test".into())
+                .unwrap()
+                .encode();
             let connect = || {
                 call(
                     &handle,

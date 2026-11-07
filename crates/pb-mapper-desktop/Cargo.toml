@@ -20,6 +20,7 @@ serde_json.workspace = true
 ring.workspace = true
 base64.workspace = true
 parking_lot.workspace = true
+bytes.workspace = true
 subtle.workspace = true
 tracing.workspace = true
 
