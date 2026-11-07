@@ -197,33 +197,12 @@ typedef _PbMapperInitLoggingDart = void Function();
 typedef _PbMapperFreeStringNative = Void Function(Pointer<Utf8> s);
 typedef _PbMapperFreeStringDart = void Function(Pointer<Utf8> s);
 
-final class DesktopBuffer extends Struct {
-  external Pointer<Uint8> data;
-  @UintPtr()
-  external int len;
-}
-
 class PbMapperFFI {
   late final pbMapperDesktopCall = lib
       .lookupFunction<
         Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>),
         Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>)
       >('pb_mapper_desktop_call_json');
-  late final pbMapperDesktopFrame = lib
-      .lookupFunction<
-        Pointer<DesktopBuffer> Function(Pointer<Void>, Uint64, Uint64),
-        Pointer<DesktopBuffer> Function(Pointer<Void>, int, int)
-      >('pb_mapper_desktop_frame');
-  late final pbMapperDesktopWaitFrame = lib
-      .lookupFunction<
-        Pointer<DesktopBuffer> Function(Pointer<Void>, Uint64, Uint64),
-        Pointer<DesktopBuffer> Function(Pointer<Void>, int, int)
-      >('pb_mapper_desktop_wait_frame');
-  late final pbMapperDesktopFreeFrame = lib
-      .lookupFunction<
-        Void Function(Pointer<DesktopBuffer>),
-        void Function(Pointer<DesktopBuffer>)
-      >('pb_mapper_desktop_free_frame');
   static PbMapperFFI? _instance;
   static DynamicLibrary? _lib;
 

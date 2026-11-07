@@ -8,35 +8,29 @@ class DesktopConnectionBanner extends StatelessWidget {
   final DesktopStore store;
 
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: store,
-    builder: (context, _) {
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: store.session,
+    builder: (context, session, _) {
       final l = context.l10n;
-      final phase = store.connectionPhase;
-      final status = store.snapshot.viewer;
-      final active = phase == DesktopConnectionPhase.live;
+      final phase = session.phase;
       final label = switch (phase) {
-        DesktopConnectionPhase.idle => l.desktopStateIdle,
-        DesktopConnectionPhase.connecting => l.desktopStateConnecting,
-        DesktopConnectionPhase.live => l.desktopStateLive,
-        DesktopConnectionPhase.delayed => l.desktopStateDelayed,
-        DesktopConnectionPhase.waitingForDesktop =>
-          l.desktopStateWaitingDesktop,
-        DesktopConnectionPhase.recoveringVideo => l.desktopStateRecovering,
-        DesktopConnectionPhase.retryWaiting => l.desktopStateRetry,
-        DesktopConnectionPhase.reconnecting => l.desktopStateReconnecting,
-        DesktopConnectionPhase.identityMismatch => l.desktopIdentityMismatch,
+        DesktopPhase.idle => l.desktopStateIdle,
+        DesktopPhase.connecting when session.reconnectAttempt > 0 =>
+          l.desktopStateReconnecting,
+        DesktopPhase.connecting => l.desktopStateConnecting,
+        DesktopPhase.live => l.desktopStateLive,
+        DesktopPhase.recovering => l.desktopStateRecovering,
+        DesktopPhase.waitingForDesktop => l.desktopStateWaitingDesktop,
+        DesktopPhase.paused => l.desktopStale,
+        DesktopPhase.reconnecting => l.desktopStateRetry,
+        DesktopPhase.identityChanged => l.desktopIdentityMismatch,
+        DesktopPhase.ended => l.desktopStopped,
       };
-      final age = store.pictureAge;
-      final message = status?.message ?? '';
-      final needsHelper =
-          message.contains('secure_desktop_requires_helper') ||
-          message.contains('Secure/locked desktop unavailable');
-      final detail = needsHelper
-          ? l.desktopOrdinaryOnlyHelp
-          : phase == DesktopConnectionPhase.identityMismatch
+      final detail = phase == DesktopPhase.identityChanged
           ? l.desktopIdentityMismatchHelp
-          : store.recoveryReason ?? store.error ?? message;
+          : session.secureDesktop && phase == DesktopPhase.waitingForDesktop
+          ? l.desktopOrdinaryOnlyHelp
+          : session.failure?.toString() ?? '';
       return Container(
         key: const Key('desktop-connection-state'),
         width: double.infinity,
@@ -50,14 +44,15 @@ class DesktopConnectionBanner extends StatelessWidget {
                 SizedBox(
                   width: 14,
                   height: 14,
-                  child: active
+                  child: phase == DesktopPhase.live
                       ? Icon(
                           Icons.check_circle,
                           size: 14,
                           color: Theme.of(context).colorScheme.primary,
                         )
-                      : phase == DesktopConnectionPhase.idle ||
-                            phase == DesktopConnectionPhase.identityMismatch
+                      : phase == DesktopPhase.idle ||
+                            phase == DesktopPhase.ended ||
+                            phase == DesktopPhase.identityChanged
                       ? const Icon(Icons.link_off, size: 14)
                       : const CircularProgressIndicator(strokeWidth: 2),
                 ),
@@ -69,25 +64,25 @@ class DesktopConnectionBanner extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                if (phase == DesktopConnectionPhase.retryWaiting)
-                  Text('${(store.retryIn.inMilliseconds / 1000).ceil()} s'),
+                if (session.retryAt case final at?) _RetryCountdown(at: at),
               ],
             ),
-            Text(
-              [
-                if (status?.path.isNotEmpty == true) status!.path,
-                if (status?.codec == 'h264')
-                  '${store.presentFps.toStringAsFixed(0)} fps',
-                if (age != null)
-                  '${l.desktopFrameAge} ${(age.inMilliseconds / 1000).toStringAsFixed(1)} s',
-                if ((status?.frameAckMs ?? 0) > 0)
-                  '${l.desktopAckLatency} ${status!.frameAckMs.round()} ms',
-                if (store.reconnectAttempt > 0)
-                  '${l.desktopRecoveryAttempt} ${store.reconnectAttempt}',
-              ].join(' · '),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall,
+            ValueListenableBuilder(
+              valueListenable: store.stats,
+              builder: (context, stats, _) => Text(
+                [
+                  if (session.path case final path?) path,
+                  if (stats.presentedFps > 0)
+                    '${stats.presentedFps.toStringAsFixed(0)} fps',
+                  if (stats.pictureLatencyMs case final latency?)
+                    '${l.desktopAckLatency} $latency ms',
+                  if (session.reconnectAttempt > 0)
+                    '${l.desktopRecoveryAttempt} ${session.reconnectAttempt}',
+                ].join(' · '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ),
             SizedBox(
               height: 18,
@@ -103,4 +98,16 @@ class DesktopConnectionBanner extends StatelessWidget {
       );
     },
   );
+}
+
+class _RetryCountdown extends StatelessWidget {
+  const _RetryCountdown({required this.at});
+  final DateTime at;
+
+  @override
+  Widget build(BuildContext context) {
+    final left = at.difference(DateTime.now());
+    final seconds = left.isNegative ? 0 : (left.inMilliseconds / 1000).ceil();
+    return Text('$seconds s');
+  }
 }

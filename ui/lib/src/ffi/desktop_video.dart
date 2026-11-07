@@ -1,118 +1,95 @@
-import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
 
-/// Acknowledges consumption by the native texture, never queue acceptance.
-class DesktopVideoEvent {
-  const DesktopVideoEvent({
-    required this.generation,
-    required this.frameId,
-    required this.width,
-    required this.height,
-    required this.presented,
-    required this.needKeyframe,
-    this.message = '',
-  });
-  final int generation, frameId, width, height;
-  final bool presented, needKeyframe;
-  final String message;
+/// The native H.264 decoder and its Flutter texture. The decoder pulls video
+/// from Rust itself and receipts presentations there; Dart only binds it to a
+/// source, snapshots it, and disposes it.
+abstract interface class DesktopVideoTexture {
+  int get textureId;
 
-  factory DesktopVideoEvent.fromMap(Map<Object?, Object?> value) {
-    int integer(String key) => (value[key] as num?)?.toInt() ?? 0;
-    return DesktopVideoEvent(
-      generation: integer('generation'),
-      frameId: integer('frameId'),
-      width: integer('width'),
-      height: integer('height'),
-      presented: value['presented'] == true,
-      needKeyframe: value['needKeyframe'] == true,
-      message: value['message'] as String? ?? '',
-    );
-  }
+  /// Binds the decoder to a viewer's video source. A reconnect binds the new
+  /// source; the texture and its last picture persist.
+  Future<void> attach(int videoSource);
+  Future<void> detach();
+
+  /// Writes the last presented picture as a JPEG at most [maxWidth] wide
+  /// (D23). False when there is none. The caller bounds the wait.
+  Future<bool> snapshot(String path, {int maxWidth = 320});
+  Future<Map<String, Object?>> stats();
+  Future<void> dispose();
 }
 
-/// Native H.264 decoder and Flutter texture. Complete Annex-B access units are
-/// submitted in order; reset before reusing a texture for a different session.
-class DesktopVideoTexture {
-  DesktopVideoTexture._(this.textureId);
-  static const _channel = MethodChannel('pb_mapper/desktop_video');
-  static final _textures = <int, DesktopVideoTexture>{};
-  static bool _initialized = false;
-  static bool get supported => Platform.isAndroid || Platform.isWindows;
+/// [instanceToken] proves the native side uses the library Dart loaded (D9).
+typedef DesktopTextureFactory =
+    Future<DesktopVideoTexture> Function({required int instanceToken});
 
+/// Android and Windows decode H.264 natively; elsewhere video is JPEG.
+bool get nativeDesktopVideo => Platform.isAndroid || Platform.isWindows;
+
+/// The channel-backed texture (`pb_mapper/desktop_video` v2).
+Future<DesktopVideoTexture> createDesktopVideoTexture({
+  required int instanceToken,
+}) async {
+  if (!nativeDesktopVideo) {
+    throw UnsupportedError('Native desktop video unavailable');
+  }
+  final id = await _ChannelVideoTexture._channel.invokeMethod<int>('create', {
+    'instance': instanceToken,
+  });
+  if (id == null || id < 0) {
+    throw StateError('Native texture creation failed');
+  }
+  return _ChannelVideoTexture(id);
+}
+
+class _ChannelVideoTexture implements DesktopVideoTexture {
+  _ChannelVideoTexture(this.textureId);
+  static const _channel = MethodChannel('pb_mapper/desktop_video');
+
+  @override
   final int textureId;
-  final _events = StreamController<DesktopVideoEvent>.broadcast();
-  Stream<DesktopVideoEvent> get events => _events.stream;
   bool _disposed = false;
 
-  static Future<DesktopVideoTexture> create() async {
-    if (!supported) {
-      throw UnsupportedError('Native desktop video unavailable');
-    }
-    if (!_initialized) {
-      _channel.setMethodCallHandler((call) async {
-        if (call.method != 'event' || call.arguments is! Map) return;
-        final values = Map<Object?, Object?>.from(call.arguments as Map);
-        final id = (values['textureId'] as num?)?.toInt();
-        final texture = _textures[id];
-        if (texture != null && !texture._disposed) {
-          texture._events.add(DesktopVideoEvent.fromMap(values));
-        }
-      });
-      _initialized = true;
-    }
-    final id = await _channel.invokeMethod<int>('create');
-    if (id == null || id < 0) {
-      throw StateError('Native texture creation failed');
-    }
-    return _textures[id] = DesktopVideoTexture._(id);
-  }
-
-  Future<void> submit({
-    required Uint8List bytes,
-    required int generation,
-    required int frameId,
-    required int ptsUs,
-    required int width,
-    required int height,
-    required bool keyframe,
-  }) async {
+  @override
+  Future<void> attach(int videoSource) async {
     if (_disposed) return;
-    await _channel.invokeMethod<void>('submit', {
+    await _channel.invokeMethod<void>('attach', {
       'textureId': textureId,
-      'bytes': bytes,
-      'generation': generation,
-      'frameId': frameId,
-      'ptsUs': ptsUs,
-      'width': width,
-      'height': height,
-      'keyframe': keyframe,
+      'source': videoSource,
     });
   }
 
-  Future<void> reset() async {
-    if (!_disposed) {
-      await _channel.invokeMethod<void>('reset', {'textureId': textureId});
-    }
+  @override
+  Future<void> detach() async {
+    if (_disposed) return;
+    await _channel.invokeMethod<void>('detach', {'textureId': textureId});
   }
 
-  Future<Map<Object?, Object?>> stats() async {
-    if (_disposed) return const {};
-    return await _channel.invokeMapMethod<Object?, Object?>('stats', {
+  @override
+  Future<bool> snapshot(String path, {int maxWidth = 320}) async {
+    if (_disposed) return false;
+    return await _channel.invokeMethod<bool>('snapshot', {
           'textureId': textureId,
-        }) ??
-        const {};
+          'path': path,
+          'maxWidth': maxWidth,
+        }) ==
+        true;
   }
 
+  @override
+  Future<Map<String, Object?>> stats() async {
+    if (_disposed) return const {};
+    final stats = await _channel.invokeMapMethod<String, Object?>('stats', {
+      'textureId': textureId,
+    });
+    return stats ?? const {};
+  }
+
+  @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    _textures.remove(textureId);
-    try {
-      await _channel.invokeMethod<void>('dispose', {'textureId': textureId});
-    } finally {
-      await _events.close();
-    }
+    await _channel.invokeMethod<void>('dispose', {'textureId': textureId});
   }
 }

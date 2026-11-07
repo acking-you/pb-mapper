@@ -23,19 +23,19 @@ class DesktopPage extends StatefulWidget {
 class _DesktopPageState extends State<DesktopPage> {
   final _service = TextEditingController(text: 'desktop:my-computer');
   final _invitation = TextEditingController();
+  late final DesktopDemandHandle _demand;
   int? _display;
   bool _relayOnly = false, _viewerOpen = false;
-  int _viewerOpenSerial = 0;
+
   @override
   void initState() {
     super.initState();
-    scheduleMicrotask(() {
-      if (mounted) unawaited(widget.store.load());
-    });
+    _demand = widget.store.demand(DesktopDemand.page);
   }
 
   @override
   void dispose() {
+    _demand.dispose();
     _service.dispose();
     _invitation.dispose();
     super.dispose();
@@ -43,16 +43,19 @@ class _DesktopPageState extends State<DesktopPage> {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: Listenable.merge([widget.store, _invitation]),
+    listenable: Listenable.merge([
+      widget.store.hostView,
+      widget.store.session,
+      _invitation,
+    ]),
     builder: (context, _) {
       final store = widget.store;
+      final host = store.hostView.value;
+      final session = store.session.value;
       final l = context.l10n;
-      final background = store.snapshot.background;
-      final helper = store.capabilities.helper;
+      final error = host.error ?? session.failure?.toString();
       final fullyEnabled =
-          background?.enabled == true &&
-          background?.autoStart == true &&
-          store.snapshot.host?.controlAllowed == true;
+          host.sharing && host.background && host.controlAllowed;
       return Scaffold(
         appBar: AppBar(title: Text(l.desktopTitle)),
         body: SafeArea(
@@ -63,17 +66,17 @@ class _DesktopPageState extends State<DesktopPage> {
               child: ListView(
                 padding: const EdgeInsets.all(20),
                 children: [
-                  if (store.error != null)
+                  if (error != null)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 12),
                       child: Text(
-                        store.error!,
+                        error,
                         style: TextStyle(
                           color: Theme.of(context).colorScheme.error,
                         ),
                       ),
                     ),
-                  if (store.capabilities.host) ...[
+                  if (host.supported) ...[
                     Text(
                       l.desktopShare,
                       style: Theme.of(context).textTheme.titleLarge,
@@ -83,21 +86,16 @@ class _DesktopPageState extends State<DesktopPage> {
                       fullyEnabled ? l.desktopEnabledHelp : l.desktopEnableHelp,
                     ),
                     const SizedBox(height: 12),
-                    if (store.sharing) ...[
-                      if (store.snapshot.host?.message.isNotEmpty == true)
-                        Text(store.snapshot.host!.message),
-                      if (background?.message.isNotEmpty == true &&
-                          background?.message != store.snapshot.host?.message)
-                        Text(background!.message),
+                    if (host.sharing)
                       Wrap(
                         spacing: 8,
                         runSpacing: 8,
                         children: [
                           OutlinedButton.icon(
-                            onPressed: store.invitation == null
+                            onPressed: host.invitation == null
                                 ? null
                                 : () => Clipboard.setData(
-                                    ClipboardData(text: store.invitation!),
+                                    ClipboardData(text: host.invitation!),
                                   ),
                             icon: const Icon(Icons.copy),
                             label: Text(l.desktopCopy),
@@ -110,23 +108,20 @@ class _DesktopPageState extends State<DesktopPage> {
                           ),
                         ],
                       ),
-                    ],
                     if (!fullyEnabled)
                       FilledButton.icon(
                         key: const Key('desktop-share'),
-                        onPressed:
-                            store.busy || store.capabilities.displays.isEmpty
+                        onPressed: host.enabling || host.displays.isEmpty
                             ? null
                             : () => store.enableHost(
-                                background?.service ??
-                                    store.trust.saved?.service ??
-                                    _service.text.trim(),
-                                _display ??
-                                    store.snapshot.host?.display?.id ??
-                                    store.trust.saved?.displayId ??
-                                    store.capabilities.displays.first.id,
+                                displayId:
+                                    _display ??
+                                    host.displayId ??
+                                    host.displays.first.id,
+                                allowControl: true,
+                                service: host.service ?? _service.text.trim(),
                               ),
-                        icon: store.busy
+                        icon: host.enabling
                             ? const SizedBox.square(
                                 dimension: 18,
                                 child: CircularProgressIndicator(
@@ -143,7 +138,7 @@ class _DesktopPageState extends State<DesktopPage> {
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                   const SizedBox(height: 12),
-                  if (store.connected)
+                  if (session.target != null)
                     Wrap(
                       spacing: 8,
                       children: [
@@ -172,19 +167,21 @@ class _DesktopPageState extends State<DesktopPage> {
                     const SizedBox(height: 12),
                     FilledButton.icon(
                       key: const Key('desktop-connect'),
-                      onPressed: store.busy || _invitation.text.trim().isEmpty
+                      onPressed: _invitation.text.trim().isEmpty
                           ? null
-                          : () async {
-                              final serial = _viewerOpenSerial;
-                              await store.connect(
-                                _invitation.text.trim(),
-                                _relayOnly,
+                          : () {
+                              // The viewer holds the session's demand from
+                              // the start, so it never pauses in between.
+                              unawaited(
+                                store.connect(
+                                  DesktopTarget(
+                                    invitation: _invitation.text.trim(),
+                                    name: l.desktopTitle,
+                                    relayOnly: _relayOnly,
+                                  ),
+                                ),
                               );
-                              if (context.mounted &&
-                                  store.connected &&
-                                  serial == _viewerOpenSerial) {
-                                _viewer(context);
-                              }
+                              _viewer(context);
                             },
                       icon: const Icon(Icons.desktop_windows_outlined),
                       label: Text(l.desktopConnect),
@@ -196,85 +193,12 @@ class _DesktopPageState extends State<DesktopPage> {
                     tilePadding: EdgeInsets.zero,
                     title: Text(l.desktopAdvanced),
                     children: [
-                      if (store.capabilities.host) ...[
-                        if (!store.sharing) ...[
-                          TextField(
-                            controller: _service,
-                            decoration: InputDecoration(
-                              labelText: l.desktopService,
-                            ),
-                          ),
-                          DropdownButtonFormField<int>(
-                            isExpanded: true,
-                            initialValue:
-                                _display ??
-                                store.capabilities.displays.firstOrNull?.id,
-                            decoration: InputDecoration(
-                              labelText: l.desktopDisplay,
-                            ),
-                            items: [
-                              for (final d in store.capabilities.displays)
-                                DropdownMenuItem(
-                                  value: d.id,
-                                  child: Text(
-                                    '${d.name} · ${d.width} × ${d.height}',
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                            ],
-                            onChanged: (id) => setState(() => _display = id),
-                          ),
-                        ],
-                        if (store.sharing)
-                          SwitchListTile(
-                            contentPadding: EdgeInsets.zero,
-                            title: Text(l.desktopAllowControl),
-                            value: store.snapshot.host?.controlAllowed == true,
-                            onChanged: store.allowControl,
-                          ),
-                        Text(l.desktopStopHelp),
-                        if (background?.configured == true ||
-                            store.trust.saved != null)
-                          TextButton(
-                            onPressed: store.busy ? null : store.revokeTrust,
-                            child: Text(l.desktopTrustRevoke),
-                          ),
-                        if (helper != null)
-                          Wrap(
-                            spacing: 8,
-                            children: [
-                              TextButton(
-                                onPressed: store.busy
-                                    ? null
-                                    : () => store.helperAction('install'),
-                                child: Text(l.desktopHelperInstall),
-                              ),
-                              if (helper.installed) ...[
-                                TextButton(
-                                  key: const Key('desktop-helper-disable'),
-                                  onPressed: store.busy
-                                      ? null
-                                      : () => store.helperAction('disable'),
-                                  child: Text(l.desktopHelperDisable),
-                                ),
-                                TextButton(
-                                  key: const Key('desktop-helper-uninstall'),
-                                  onPressed: store.busy
-                                      ? null
-                                      : () => store.helperAction('uninstall'),
-                                  child: Text(l.desktopHelperUninstall),
-                                ),
-                              ],
-                            ],
-                          ),
-                      ],
+                      if (host.supported) ..._advanced(context, host),
                       SwitchListTile(
                         contentPadding: EdgeInsets.zero,
                         title: Text(l.desktopRelayOnly),
                         value: _relayOnly,
-                        onChanged: store.busy
-                            ? null
-                            : (v) => setState(() => _relayOnly = v),
+                        onChanged: (v) => setState(() => _relayOnly = v),
                       ),
                     ],
                   ),
@@ -286,10 +210,79 @@ class _DesktopPageState extends State<DesktopPage> {
       );
     },
   );
+
+  List<Widget> _advanced(BuildContext context, DesktopHostView host) {
+    final store = widget.store;
+    final l = context.l10n;
+    return [
+      if (!host.sharing) ...[
+        TextField(
+          controller: _service,
+          decoration: InputDecoration(labelText: l.desktopService),
+        ),
+        DropdownButtonFormField<int>(
+          isExpanded: true,
+          initialValue: _display ?? host.displays.firstOrNull?.id,
+          decoration: InputDecoration(labelText: l.desktopDisplay),
+          items: [
+            for (final d in host.displays)
+              DropdownMenuItem(
+                value: d.id,
+                child: Text(
+                  '${d.name} · ${d.width} × ${d.height}',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+          onChanged: (id) => setState(() => _display = id),
+        ),
+      ],
+      if (host.sharing)
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(l.desktopAllowControl),
+          value: host.controlAllowed,
+          onChanged: store.allowControl,
+        ),
+      Text(l.desktopStopHelp),
+      if (host.configured || host.sharing)
+        TextButton(
+          onPressed: host.enabling ? null : store.revokeTrust,
+          child: Text(l.desktopTrustRevoke),
+        ),
+      Wrap(
+        spacing: 8,
+        children: [
+          TextButton(
+            onPressed: host.enabling
+                ? null
+                : () => store.helperAction('install'),
+            child: Text(l.desktopHelperInstall),
+          ),
+          if (host.helper != DesktopHelperState.none) ...[
+            TextButton(
+              key: const Key('desktop-helper-disable'),
+              onPressed: host.enabling
+                  ? null
+                  : () => store.helperAction('disable'),
+              child: Text(l.desktopHelperDisable),
+            ),
+            TextButton(
+              key: const Key('desktop-helper-uninstall'),
+              onPressed: host.enabling
+                  ? null
+                  : () => store.helperAction('uninstall'),
+              child: Text(l.desktopHelperUninstall),
+            ),
+          ],
+        ],
+      ),
+    ];
+  }
+
   Future<void> _viewer(BuildContext context) async {
     if (_viewerOpen) return;
     _viewerOpen = true;
-    _viewerOpenSerial++;
     final route = MaterialPageRoute<void>(
       builder: (_) => DesktopViewer(store: widget.store),
     );
@@ -307,9 +300,9 @@ class DesktopSharingBanner extends StatelessWidget {
   const DesktopSharingBanner({super.key, required this.store});
   final DesktopStore store;
   @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: store,
-    builder: (context, _) => store.sharing
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: store.hostView,
+    builder: (context, host, _) => host.sharing
         ? Material(
             color: Theme.of(context).colorScheme.secondaryContainer,
             child: SafeArea(

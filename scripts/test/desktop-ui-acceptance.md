@@ -1,98 +1,231 @@
-# Native desktop UI performance acceptance
+# Desktop viewer acceptance
 
-This uses the normal `DesktopApi`, `DesktopStore`, viewer widget and native
-decoder with a separate test entry. Like the product UI, it automatically
-requests control after a fresh presentation when the host permits it; the entry
-does not itself generate pointer or keyboard actions. The host defaults to
-view-only. Use `--control` only for a separate input check against a benign owned
-target. The host uses the real Windows GPU capture/encoder and an existing
-deployed pb-mapper service. A display with at least 90 Hz and moving content is needed to assess
-the 1080p direct-viewing target. A 60 Hz Android VM is useful for compatibility,
-but cannot establish 90 presented FPS.
+The acceptance entry `ui/tool/desktop_viewer_acceptance.dart` runs the normal
+`DesktopApi`, `DesktopStore`, viewer widget and native decoder against a
+dedicated test host. Like the product UI, it requests control after a fresh
+presentation when the host permits it; the entry itself generates no pointer or
+keyboard input. It records about one sample per second for the requested
+number of seconds, disconnects, and sends its report back to the loopback
+bootstrap. The report holds counters and status, never images, invitations or
+relay credentials.
 
-Run commands from the repository root unless indicated. Build the Windows FFI
-and helper with `scripts/build/pb-mapper-ffi-windows.ps1`, using the existing
-permitted script environment. Build the probes:
+The host defaults to view-only. Pass `--control` only against a benign target
+you own. Never run the entry as the packaged application.
+
+## Host setup
+
+On the Windows host, from the repository root, in three terminals:
 
 ```powershell
 cargo build --release -p pb-mapper-desktop --example deployed --example video_bench
+target/release/examples/deployed.exe APP_CONFIG_PATH target/desktop-acceptance serve 600 --tcp --control --feedback-log
+node scripts/test/desktop-bootstrap.cjs target/desktop-acceptance        # after "host_ready"
+target/release/examples/video_bench.exe 600 60 --pattern-only            # moving content
 ```
 
-In `ui/`, compile the explicit test entry. Replace `ABSOLUTE_REPORT_PATH` with
-an absolute path under a dedicated local test directory, using forward slashes.
-The defines contain no invitation or credential. `relayOnly=false` uses the
-product's normal direct-first selection; it does not prove the chosen path.
+- `APP_CONFIG_PATH` is an existing local app configuration that may issue a
+  dedicated expiring relay scope. Do not paste or log its contents. Only the
+  generated temporary scope enters `controller.json`, and the host revokes it
+  when it exits. Use a new output directory without a stale `stop` file.
+- `--tcp` is a test override of the carrier and leaves the configuration
+  unchanged. For a QUIC run, restart `deployed` **without** `--tcp`: it then
+  uses the carrier of `APP_CONFIG_PATH`, which must be QUIC, so check that
+  before the run. `controller.json` hands the carrier to the viewer.
+- `--feedback-log` installs its own filter over the desktop crate's diagnostic
+  targets, which carry no secret, and deliberately ignores `RUST_LOG`. Setting
+  `RUST_LOG` has no effect.
+- `video_bench --pattern-only` keeps its animation window topmost so the
+  viewer cannot cover the source. It injects no input. A static desktop's
+  liveness repeats are not unique desktop updates.
+
+The bootstrap listens on `127.0.0.1:18747` only:
+
+- `GET /controller.json` returns the host's setup to the viewer.
+- `PUT /report` takes the viewer's report: at most 8 MiB, and it must parse as
+  JSON. The bootstrap picks the name, writes `report-<n>.json` into the
+  directory it serves, and prints `report_saved <path>`.
+
+## Phone viewer
+
+From `ui/`:
+
+```powershell
+flutter build apk --release --target tool/desktop_viewer_acceptance.dart `
+  --dart-define=setupUrl=http://127.0.0.1:18747/controller.json --dart-define=seconds=120 `
+  --dart-define=quality=balanced
+adb install -r build\app\outputs\flutter-apk\app-release.apk
+adb reverse tcp:18747 tcp:18747
+```
+
+Then start the installed app.
+
+- Relay-only runs add `--dart-define=relayOnly=true`. `deployed` writes no
+  `relay_only` into `controller.json`, so the define decides. A local
+  `controller.json` may still override `relay_only` and `seconds` (15..1800)
+  without a rebuild.
+- `quality` is a report schema 2 define; the schema 1 tool ignores it.
+- At the end of the run the tool sends its report with
+  `PUT http://127.0.0.1:18747/report` through the same `adb reverse`. Nothing
+  is read from the app's private storage, so a release APK, which is not
+  debuggable and cannot use `run-as`, works.
+- The release build needs the pinned signing key
+  (`ui/android/app/build.gradle.kts`). If it does not resolve, restore it (the
+  build forbids generating a replacement), or build the acceptance APK with
+  `--profile`. If that APK's signature differs from the installed product's,
+  `adb install -r` fails: run `adb uninstall com.pb_mapper.ui` first, which
+  also deletes the phone's app data.
+
+Never install the tool as the product entry. Reinstall the product APK
+afterwards.
+
+## Windows viewer
+
+Build the FFI library and helper with `scripts/build/pb-mapper-ffi-windows.ps1`,
+then from `ui/`:
 
 ```powershell
 flutter build windows --release --target tool/desktop_viewer_acceptance.dart `
-  --dart-define=setupUrl=http://127.0.0.1:18747/controller.json `
-  --dart-define=reportPath=ABSOLUTE_REPORT_PATH `
-  --dart-define=seconds=30 --dart-define=relayOnly=false
+  --dart-define=setupUrl=http://127.0.0.1:18747/controller.json --dart-define=seconds=120
 ```
 
-Start the host in a separate terminal. `APP_CONFIG_PATH` is an existing local
-app configuration with permission to issue a dedicated expiring relay scope;
-do not paste or log its contents. Only the generated temporary scope enters the
-controller setup. TCP is an explicit test override and does not modify the app
-configuration. Use a new dedicated output directory without a stale `stop` file.
+Launch it from its build directory. The report reaches the bootstrap directly
+over loopback. Restore the normal entry before producing any product artifact:
+`flutter build windows --release --target lib/main.dart`.
 
-```powershell
-target/release/examples/deployed.exe APP_CONFIG_PATH target/desktop-acceptance serve 600 --tcp
-```
+## After a run
 
-Once it prints `host_ready`, start the loopback bootstrap in another terminal:
+Create `target/desktop-acceptance/stop` and let the host exit normally. It
+revokes its scope and removes `controller.json`. Stop the bootstrap and close
+the viewer. Keep each `report-<n>.json` with the host `feedback` log of its
+case. Never publish the bootstrap directory or a controller setup alongside
+the reports.
 
-```powershell
-node scripts/test/desktop-bootstrap.cjs target/desktop-acceptance
-```
+Record with every case the build, quality preset, both refresh rates, the host
+GPU, the phone, its decoder, temperature and the network.
 
-Run `target/release/examples/video_bench.exe 60 90 --pattern-only` to supply
-moving content, then launch the newly built UI from its build directory. The
-pattern program keeps its own animation window topmost so the viewer cannot
-occlude the source; it does not inject input. Avoid
-other builds and system changes during the measurement. The viewer records
-the requested number of approximately one-second samples and disconnects. The
-report contains counters and status, not images, invitations or relay credentials.
+## Stages
 
-Check **every** steady-state sample for `state=streaming`, `path=direct`, H.264,
-1920×1080, no error, and the SDK/native drop counts. `native_presented_fps` uses
-the native texture-consumption counter delta and monotonic elapsed time after
-the five-second warmup. The UI's sampled `present_fps` is also retained. Neither
-decoder submissions nor encoded/received frames count as actual presentation.
-Record source/receiver display refresh rates, machine/GPU, build revision and
-both unique capture/receive rates alongside the result; a static image's
-liveness repeats are not 90 unique desktop updates. Same-machine direct tests
-do not establish independent-network or phone performance.
+Stage 1 uses the report schema 1 tool; Stages 2 and 3 use the schema 2 tool
+that replaces it.
 
-The local controller setup may override `relay_only` and `seconds` (15..1800)
-without rebuilding. Preserve its private invitation and temporary credential,
-restart the viewer, and save each report separately. Add `--control` to the
-dedicated host only when testing against a benign owned input target; it defaults
-to view-only. Reports also include decoder resets, recovery reasons, texture
-identity, input grant state, last native-presented and transmitted-ACK frame IDs,
-ACK/keyframe errors, native receive-to-presentation timings and Flutter frame
-timings. Compare SDK compressed-frame drops separately from intentional native
-decoded-picture skips; an unchanged timestamp/repaint is not a new presentation.
+### Stage 1: the old pipeline on the new core
 
-To exercise the relay separately, use `relay_only=true`. A lower adaptive frame
-rate is allowed on that path; do not merge
-its results with the direct samples. For an Android VM, the corresponding
-explicit APK entry can use ADB's loopback bootstrap forwarding, subject to the
-device's existing installation/debugging authorization. A blocked installation
-is not a performance result.
+The phone runs the old app pipeline, with the schema 1 tool, against the
+rewritten Rust core.
 
-Afterward create `target/desktop-acceptance/stop` and allow the host to exit
-normally. It revokes its scope and removes `controller.json`. Stop the bootstrap
-and close the test UI. Do not publish the bootstrap directory or its contents.
-Finally restore the normal package entry before producing any product artifact:
+- Case A: direct Wi-Fi, 60 Hz phone.
+- Case B: relay only (`relayOnly=true`), over TCP (`deployed --tcp`), then over
+  QUIC (`deployed` restarted without `--tcp`).
 
-```powershell
-# From ui/
-flutter build windows --release --target lib/main.dart
-```
+Look for: no "burst, stall, burst" (no gaps over 250 ms while the RTT is
+stable), skipped capture ticks without a pause, and a resolution that never
+changes. This stage is evidence, not pass or fail.
 
-These results cover ordinary-desktop video only. Secure-desktop/UAC acceptance
-is a separate matrix in [windows-helper-acceptance.md](windows-helper-acceptance.md).
+### Stage 2: smoke on both viewers
+
+On the phone and on a Windows viewer:
+
+- connect;
+- take control, and move, click and type;
+- background or minimise for 10 s, then resume: a picture within 1 s and no
+  reconnect. On Windows also hide to the tray with the close button and
+  restore;
+- on the phone, background for 60 s and for 5 min and note whether Android
+  froze the app (it then reconnects once on resume);
+- toggle Wi-Fi: it reconnects, and the last picture stays grey under the
+  reconnect pill;
+- disconnect while `video_bench` animates: the thumbnail file is written on
+  both platforms.
+
+Also confirm that the native single-instance tokens match in the debug log.
+
+### Stage 3: full acceptance
+
+The pass criteria are proposals; the owner decides, and the merge-block
+statements stay until the owner accepts fluidity.
+
+1. Performance:
+   - A: direct Wi-Fi, Balanced, 60 Hz: presented fps p50 ≥ 55, interval p95
+     ≤ 25 ms and p99 ≤ 50 ms, no gap over 250 ms, latency p50 ≤ 80 ms, plus
+     one camera check (20 readings against the host's "Unique desktop
+     presentation N").
+   - B: relay over TCP and over QUIC: ≥ 30 fps, no burst-stall.
+   - C: cellular.
+   - D: Smooth and Quality, and a Windows viewer at the display refresh.
+   - E: background 10 s, then resume, five times, then once each for 60 s and
+     5 min. Without a freeze: a picture within 1 s and no reconnect. After a
+     freeze: one immediate reconnect and a picture within 3 s. Always at most
+     two IDRs per resume, and no input replay.
+   - F: decoder hints on versus off.
+   - G: UAC prompt, lock screen and Win+L through the helper.
+   - H: RustDesk side by side.
+   - I: `video_bench --pace 60,30,15,5` and `video_bench 60 60` on each host
+     GPU.
+2. Windows chrome: at 100, 125 and 150 % scaling, maximised and restored, the
+   hovered close button sits at least 16 px inside the sheet edge and the
+   glyphs are crisp; the icons look right on every page.
+3. Navigation: six rail entries; five bar entries on the phone; Logs is
+   reachable from Settings, and its back button returns.
+4. Host (Windows):
+   - enable remote control, through UAC and the helper;
+   - view only versus view and control;
+   - copy the invite; the QR shows and hides, and hides when you leave the
+     page;
+   - Make view-only takes effect live;
+   - the sharing capsule (Disconnect viewer, Stop sharing) appears while
+     viewed and stays reachable over a dialog and in a full-screen viewer;
+     the tray offers both;
+   - hide the window to the tray and connect from the phone: the tray shows
+     the active icon and "Someone is viewing this computer", and the window
+     comes back without taking focus, showing the capsule;
+   - while the phone is on "Back to list", the capsule, tray and host card say
+     "Connected · paused"; after 10 min the phone ends the session and a
+     second viewer can connect;
+   - with the background host configured, the display picker and rename are
+     disabled with "Stop background sharing to change this";
+   - an outdated helper offers "Update".
+5. Add a computer:
+   - phone: scan the QR; deny the camera once (paste still works);
+   - desktop: paste; a setup string is rejected with its message;
+   - Remember is on; connect, disconnect (the thumbnail is written), restart
+     the app: the computer is still listed with its online dot and thumbnail,
+     on Android and on Windows;
+   - Forget removes it and its thumbnail;
+   - Android backup excludes the secrets: with the local transport
+     (`adb shell bmgr transport com.android.localtransport/.LocalTransport`),
+     `adb shell bmgr backupnow com.pb_mapper.ui`, then uninstall, reinstall and
+     restore (`adb shell bmgr restore`): the restored app has no relay
+     credential, no tunnels and no remembered computers.
+6. Desktop viewer:
+   - the toolbar pins, and unpinned it collapses 2 s after the pointer leaves;
+   - Display: fit or original, quality presets live, no reconnect;
+   - Shortcuts: Win+D, Alt+Tab, Ctrl+Shift+Esc, Win; Win+L locks;
+     Ctrl+Alt+Del is shown as unsupported;
+   - the six overlays: Wi-Fi off gives reconnecting; a host lock gives the
+     secure desktop;
+   - a German keyboard layout keeps AltGr characters; Ctrl+S, Alt+F and Win+E
+     work;
+   - with a Russian host layout, Ctrl+C, Ctrl+V and Win+E still work and type
+     no stray letters; the same for a latched Ctrl+C from the phone's
+     modifier bar.
+7. Mobile viewer:
+   - landscape lock; gutters;
+   - trackpad mode by default: a tap clicks at once; a long press
+     right-clicks; double-tap-and-hold drags (an Explorer icon moves, it does
+     not open); three fingers scroll; two fingers pinch and pan locally;
+   - modifier bar: Ctrl one-shot, lock and release; the latches clear when the
+     app goes to the background;
+   - the soft keyboard keeps zoom and offset;
+   - the minimap shows; the virtual mouse works in direct mode; the gesture
+     sheet shows once;
+   - the IME works on Samsung and Gboard; deleting a long word or a selection,
+     and pasting a paragraph, keep control.
+8. Compatibility (ALPN `pb-mapper/desktop/2`): the new viewer against a PR #51
+   host ends on the "update pb-mapper" message; a PR #51 viewer against the
+   new host fails at the TLS handshake, never mid-session.
+
+Secure-desktop and UAC acceptance of the helper is a separate matrix in
+[windows-helper-acceptance.md](windows-helper-acceptance.md).
 
 ## Recorded evidence and its limits
 
@@ -120,5 +253,4 @@ Android VM touch and trackpad gestures reached an owned Windows input target;
 text and scrolling also passed. OS reboot, standalone SCM restart, physical-phone and
 secure-desktop/UAC control remain unverified. See
 [the current evidence summary](../../docs/remote-desktop.md#measurements-and-remaining-acceptance)
-for the environment, provenance and remaining acceptance boundaries. Never
-publish the private controller setup alongside these diagnostic reports.
+for the environment, provenance and remaining acceptance boundaries.
