@@ -35,8 +35,8 @@ enum RelayState {
 ///
 /// Freshness comes from the Rust change stream (a tunnel's state moving, a
 /// terminal command, a config edit), a slow relay check, since nothing on this
-/// side is told when another computer registers a key, and a periodic read of
-/// this computer's tunnels, without which the stream would go quiet (see
+/// side is told when another computer registers a key, and, while one of this
+/// computer's tunnels runs, a periodic read of what its events leave out (see
 /// [tunnelInterval]).
 class AppStore extends ChangeNotifier {
   DesktopStore? _desktop;
@@ -74,10 +74,12 @@ class AppStore extends ChangeNotifier {
   /// How often the relay is asked what it holds while nothing else asks.
   final Duration relayInterval;
 
-  /// How often this computer's tunnels are read again. The Rust side probes a
-  /// tunnel's health only when its cached status is read and has gone stale,
-  /// and only a probe that sees a transition sends a change event; with no
-  /// reads, a tunnel that fails after it settled would stay drawn as running.
+  /// How often this computer's tunnels are read again while one runs. Their
+  /// change events say when a tunnel's state or the paths its sessions take
+  /// change, but not its session counts or the message a failing one
+  /// carries; this read keeps those fresh. A stopped tunnel's read never
+  /// changes, and starting one is always announced, so with none running
+  /// nothing is read.
   final Duration tunnelInterval;
 
   ConfigStatus config = const ConfigStatus(
@@ -229,7 +231,9 @@ class AppStore extends ChangeNotifier {
       StateChangeKind.config,
     }, _onChange);
     _relayTimer = Timer.periodic(relayInterval, (_) => checkRelay());
-    _tunnelTimer = Timer.periodic(tunnelInterval, (_) => _loadTunnels());
+    _tunnelTimer = Timer.periodic(tunnelInterval, (_) {
+      if (tunnels.any((t) => t.isLive)) unawaited(_loadTunnels());
+    });
     unawaited(computers.load());
     await refresh(force: true);
     if (!_disposed) unawaited(desktop.restoreOnStartup());

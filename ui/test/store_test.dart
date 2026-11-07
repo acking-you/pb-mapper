@@ -21,6 +21,16 @@ Future<AppStore> _started(
   return store;
 }
 
+class _CountingApi extends FakePbMapperApi {
+  int serviceReads = 0;
+
+  @override
+  Future<List<ServiceConfigInfo>> getServiceConfigs() {
+    serviceReads++;
+    return super.getServiceConfigs();
+  }
+}
+
 void main() {
   test(
     'what there is to connect to leaves out what this computer shares',
@@ -271,9 +281,9 @@ void main() {
   });
 
   test(
-    'a tunnel that fails after it settled is seen without an event',
+    'a running tunnel is read again without an event, a stopped one is not',
     () async {
-      final api = FakePbMapperApi(services: [fakeService(serviceKey: 'web')]);
+      final api = _CountingApi()..services = [fakeService(serviceKey: 'web')];
       final store = AppStore(
         api: api,
         changes: const Stream.empty(),
@@ -281,12 +291,20 @@ void main() {
       );
       addTearDown(store.dispose);
       await store.start();
-      expect(store.shares.single.health, TunnelHealth.running);
 
-      // What the Rust side reports once a read has made it probe again.
-      api.services = [fakeService(serviceKey: 'web', status: 'failed')];
+      // A session count, which no change event carries.
+      api.services = [
+        fakeService(serviceKey: 'web', path: const TunnelPath(activeDirect: 2)),
+      ];
       await Future<void>.delayed(const Duration(milliseconds: 120));
-      expect(store.shares.single.health, TunnelHealth.failed);
+      expect(store.shares.single.path?.activeDirect, 2);
+
+      api.services = [fakeService(serviceKey: 'web', status: 'stopped')];
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      expect(store.shares.single.health, TunnelHealth.stopped);
+      final reads = api.serviceReads;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(api.serviceReads, reads);
     },
   );
 
