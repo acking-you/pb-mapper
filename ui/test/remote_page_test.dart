@@ -465,7 +465,8 @@ void main() {
   );
 
   testWidgets(
-    'Scan opens the camera wherever the compact Remote tab offers it',
+    'Scan opens the camera wherever the compact Remote tab offers it, and a '
+    'code it rejects does not end scanning',
     (tester) async {
       InviteScanner.debugSupportedOverride = true;
       final camera = _Camera();
@@ -487,6 +488,19 @@ void main() {
       await settle(tester);
       expect(find.byType(InviteScanner), findsOneWidget);
       expect(camera.starts, 1);
+
+      // The wrong code is refused, once however long it stays in view, and
+      // the camera keeps looking for the right one.
+      camera.show('pbmt1_a-setup-string');
+      await settle(tester);
+      expect(find.textContaining('pb-mapper setup string'), findsOneWidget);
+      camera.show('pbmt1_a-setup-string');
+      await settle(tester);
+      expect(api.desktop.argsOf('inspect_invitation'), hasLength(1));
+      expect(camera.stops, 0);
+      camera.show('pbd1.office-pc.SECRET-TOKEN-0123');
+      await settle(tester);
+      expect(_key('add-recognised'), findsOneWidget);
       await finish(tester);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
