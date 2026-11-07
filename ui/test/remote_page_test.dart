@@ -611,4 +611,46 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
+
+  testWidgets(
+    "a phone's featured computer can be removed from its More",
+    (tester) async {
+      const id = '0123456789abcdef0123456789abcdef';
+      final vault = FakeRemoteComputerVault()
+        ..records.add(
+          const RemoteComputer(
+            id: id,
+            name: 'Lab',
+            service: 'desktop:lab',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            relay: 'localhost:7666',
+            namespace: 0,
+          ),
+        );
+      // A phone is not controlled, so its computers lead the page.
+      final api = FakePbMapperApi();
+      api.desktop.available = const DesktopCapabilities(
+        host: false,
+        displays: [],
+      );
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.remote,
+        size: const Size(390, 844),
+        vault: vault,
+      );
+      // A phone's only computer is the featured one, never a row.
+      expect(_key('computer-featured'), findsOneWidget);
+      await _tapIn(tester, _key('computer-featured-more'));
+      await settle(tester);
+      await tester.tap(_key('computer-remove-$id'));
+      await settle(tester);
+      await tester.tap(_key('confirm-destructive'));
+      await settle(tester);
+      expect(vault.records, isEmpty);
+      await finish(tester);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
 }

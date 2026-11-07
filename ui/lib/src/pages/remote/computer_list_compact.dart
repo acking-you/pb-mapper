@@ -115,7 +115,8 @@ class CompactComputerList extends StatelessWidget {
 }
 
 /// The computer that leads the phone list: its last picture, how it was
-/// last reached, and one wide Open or Back to picture.
+/// last reached, and one wide Open or Back to picture; More renames or
+/// removes it, or remembers an unremembered session.
 class FeaturedComputerCard extends StatelessWidget {
   const FeaturedComputerCard({super.key, required this.entry});
   final RemoteEntry entry;
@@ -177,6 +178,13 @@ class FeaturedComputerCard extends StatelessWidget {
                       ),
                     ),
                     if (pill != null) ...[const SizedBox(width: 10), pill],
+                    const SizedBox(width: 4),
+                    IconButton(
+                      key: const Key('computer-featured-more'),
+                      tooltip: l10n.more,
+                      onPressed: () => unawaited(_showActions(context, entry)),
+                      icon: const Icon(AppIcons.more, size: AppIconSize.button),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -290,7 +298,7 @@ class CompactComputerRow extends StatelessWidget {
     return InkWell(
       key: Key('computer-${entry.id}'),
       onTap: () => unawaited(openEntry(context, entry)),
-      onLongPress: () => unawaited(_menu(context)),
+      onLongPress: () => unawaited(_showActions(context, entry)),
       child: SizedBox(
         height: 64,
         child: Padding(
@@ -328,49 +336,52 @@ class CompactComputerRow extends StatelessWidget {
       ),
     );
   }
+}
 
-  Future<void> _menu(BuildContext context) => showModalBottomSheet<void>(
-    context: context,
-    useSafeArea: true,
-    builder: (sheet) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-        child: Material(
-          type: MaterialType.transparency,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final a in computerActions(context, entry))
-                ListTile(
-                  key: a.key,
-                  leading: Icon(
-                    a.icon,
-                    color: a.destructive
-                        ? Theme.of(sheet).colorScheme.error
-                        : null,
-                  ),
-                  title: Text(
-                    a.label,
-                    style: a.destructive
-                        ? TextStyle(color: Theme.of(sheet).colorScheme.error)
-                        : null,
-                  ),
-                  enabled: a.onPressed != null,
-                  onTap: switch (a.onPressed) {
-                    final onPressed? => () {
-                      Navigator.of(sheet).pop();
-                      onPressed();
+/// Offers what [computerActions] does for [entry], as a sheet: a row's long
+/// press and the featured card's More.
+Future<void> _showActions(BuildContext context, RemoteEntry entry) =>
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      builder: (sheet) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          child: Material(
+            type: MaterialType.transparency,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final a in computerActions(context, entry))
+                  ListTile(
+                    key: a.key,
+                    leading: Icon(
+                      a.icon,
+                      color: a.destructive
+                          ? Theme.of(sheet).colorScheme.error
+                          : null,
+                    ),
+                    title: Text(
+                      a.label,
+                      style: a.destructive
+                          ? TextStyle(color: Theme.of(sheet).colorScheme.error)
+                          : null,
+                    ),
+                    enabled: a.onPressed != null,
+                    onTap: switch (a.onPressed) {
+                      final onPressed? => () {
+                        Navigator.of(sheet).pop();
+                        onPressed();
+                      },
+                      null => null,
                     },
-                    null => null,
-                  },
-                ),
-            ],
+                  ),
+              ],
+            ),
           ),
         ),
       ),
-    ),
-  );
-}
+    );
 
 /// The ways to add a computer: scan and paste side by side where there is a
 /// camera, else the dashed tile.
