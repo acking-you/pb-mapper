@@ -120,10 +120,6 @@ impl Registry {
 static REGISTRY: LazyLock<parking_lot::Mutex<Registry>> = LazyLock::new(Default::default);
 
 /// Publishes a sink to native consumers under a new id.
-#[cfg_attr(
-    not(any(test, feature = "desktop-test-source")),
-    allow(dead_code, reason = "no viewer registers its sink yet")
-)]
 pub(crate) fn add_source(sink: Arc<VideoSink>) -> u64 {
     let mut registry = REGISTRY.lock();
     let id = registry.id();
@@ -134,10 +130,6 @@ pub(crate) fn add_source(sink: Arc<VideoSink>) -> u64 {
 /// Retires a source and closes its sink: a `next` blocked on it returns
 /// [`CLOSED`] at once, and so does every later call naming the source or one
 /// of its consumers. Unknown ids are ignored.
-#[cfg_attr(
-    not(any(test, feature = "desktop-test-source")),
-    allow(dead_code, reason = "no viewer registers its sink yet")
-)]
 pub(crate) fn remove_source(id: u64) {
     let (sink, consumers) = {
         let mut registry = REGISTRY.lock();
@@ -358,8 +350,9 @@ pub extern "C" fn pb_mapper_desktop_instance_token_v1() -> u64 {
 /// stopped: generation 1, frame ids 1, 2, 3 …, a keyframe wherever a unit
 /// holds an IDR slice, the size from the latest SPS. The clip's first unit
 /// must be a keyframe with its SPS; every loop, and every resume, restarts at
-/// it as a discontinuity. Returns the source id, or 0 for a bad path, clip or
-/// `fps`.
+/// it. The sink marks discontinuities as it does in a session, so the first
+/// unit after a resume carries one. Returns the source id, or 0 for a bad
+/// path, clip or `fps`.
 ///
 /// # Safety
 /// `path_utf8` must be null or a NUL-terminated string.
@@ -510,9 +503,9 @@ mod test_source {
                     height: unit.height,
                     keyframe: unit.keyframe,
                     duplicate: false,
-                    // The first IDR, again after a loop or a pause, as after
-                    // a drop.
-                    discontinuity: position == 0,
+                    // The sink marks a discontinuity, as in a session: after
+                    // a drop, a generation change or a resume.
+                    discontinuity: false,
                     pts_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
                     bytes: unit.bytes.clone(),
                     received_at: Instant::now(),
@@ -928,14 +921,17 @@ mod tests {
             assert_eq!((meta.generation, meta.frame_id), (1, index as u64 + 1));
             assert_eq!((meta.width, meta.height), (1920, 1080));
         }
-        // The loop restarts at the first IDR, as a discontinuity.
+        // The loop restarts at the first IDR; nothing was dropped meanwhile.
         let keyframes: Vec<_> = pulled.iter().map(|(_, meta)| meta.flags).collect();
         let both = FLAG_KEYFRAME | FLAG_DISCONTINUITY;
-        assert_eq!(keyframes, [both, 0, both]);
+        assert_eq!(keyframes, [both, 0, FLAG_KEYFRAME]);
 
         assert_eq!(pb_mapper_desktop_video_test_source_pause_v1(source, 1), 0);
         assert_eq!(pull(20).0, PAUSED);
         assert_eq!(pb_mapper_desktop_video_test_source_pause_v1(source, 0), 0);
+        // A resume restarts at the IDR, as a discontinuity.
+        let (code, resumed) = pull(1000);
+        assert_eq!((code, resumed.flags), (UNIT, both));
         pb_mapper_desktop_video_test_source_stop_v1(source);
         pb_mapper_desktop_video_test_source_stop_v1(source);
         assert_eq!(pull(0).0, CLOSED);

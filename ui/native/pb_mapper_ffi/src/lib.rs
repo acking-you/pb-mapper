@@ -36,8 +36,8 @@ pub use config::{
     pb_mapper_get_config_json, pb_mapper_reveal_isolated_admin_key, pb_mapper_update_config,
 };
 pub use desktop::{
-    pb_mapper_desktop_call_json, pb_mapper_desktop_frame, pb_mapper_desktop_free_frame,
-    pb_mapper_desktop_wait_frame,
+    PbDesktopViewV1, pb_mapper_desktop_call_json, pb_mapper_desktop_view_v1,
+    pb_mapper_desktop_viewer_call_json,
 };
 #[cfg(target_os = "android")]
 pub use desktop_jni::{

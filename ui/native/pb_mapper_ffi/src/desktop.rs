@@ -1,25 +1,38 @@
-//! JSON control plus explicitly owned binary frames. Both are called on Dart
-//! workers. Temporary endpoints belong to the app runtime, never a page widget;
-//! explicitly configured background hosts belong to the Windows service.
+//! The desktop over FFI. Lifecycle JSON (`pb_mapper_desktop_call_json`) runs
+//! on Dart worker isolates under `block_on`. The viewer's hot ops
+//! (`pb_mapper_desktop_viewer_call_json`) and its per-frame view leaf
+//! (`pb_mapper_desktop_view_v1`) are synchronous and safe on the UI isolate:
+//! they never enter the runtime or take a tokio lock. Video reaches native
+//! consumers through `desktop_video.rs`, never through Dart. Temporary
+//! endpoints belong to the app runtime, never a page widget; explicitly
+//! configured background hosts belong to the Windows service.
 use crate::{
-    error::CtlError,
+    desktop_video,
+    error::{CtlError, ErrorCode},
     handle::PbMapperHandle,
     response::{err_ctl, err_null_handle, ok_data, parse_c_string},
 };
 use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
-    desktop::{self, Host, HostOptions, Invitation, Viewer},
+    desktop::{
+        self, ConnectError, ConnectStage, DesktopView, Host, HostOptions, InputError, Invitation,
+        InvitationError, InvitationFormat, KeyframeReason, QualityPreset, VideoCodec, VideoLimits,
+        Viewer, ViewerConfig,
+    },
 };
-use pb_mapper_core::checksum::get_process_credential;
+use pb_mapper_core::checksum::{Credential, get_process_credential};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::ffi::c_char;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 #[path = "desktop_trust.rs"]
 pub(crate) mod trust;
+
+/// The longest hot request: a batch of 16 inputs, text included.
+const MAX_VIEWER_REQUEST: usize = 64 * 1024;
 
 #[derive(Default)]
 struct BackgroundCache {
@@ -52,39 +65,68 @@ impl BackgroundCache {
     }
 }
 
+/// The connected viewer, published once its host accepted.
+struct Live {
+    viewer: Arc<Viewer>,
+    /// Its video source in the registry.
+    source: u64,
+    /// The invitation that passed the certificate pin: what remembering this
+    /// computer stores.
+    invitation: Invitation,
+}
+
+/// A connect between its registration and its outcome.
+struct PendingConnect {
+    epoch: u64,
+    cancel: CancellationToken,
+    /// The last stage the attempt passed, as `stage_code` writes it.
+    stage: Arc<AtomicU8>,
+    /// The app hid the viewer meanwhile, so the session starts paused.
+    paused: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct DesktopState {
     // Outbound connection setup must never hold the local host's stop/revoke
     // lock. Each endpoint owns its lifecycle independently.
     host: tokio::sync::Mutex<Option<Host>>,
-    viewer: tokio::sync::Mutex<Option<Viewer>>,
-    connecting: parking_lot::Mutex<Option<(u64, CancellationToken)>>,
+    /// Hot ops read it on the UI isolate, so it is never held across an
+    /// await. Where both are taken, `connecting` comes first.
+    viewer: parking_lot::RwLock<Option<Live>>,
+    connecting: parking_lot::Mutex<Option<PendingConnect>>,
     viewer_epoch: AtomicU64,
     // Guarded by the host lifecycle lock. Retain even an ephemeral local key
     // while its host lives so ownership can move to the service unchanged.
     host_identity: tokio::sync::Mutex<Option<LocalIdentity>>,
     background: Arc<parking_lot::Mutex<BackgroundCache>>,
-    /// The invitation of the viewer in `viewer`, which passed its certificate
-    /// pin: what remembering this computer stores. Written only under the
-    /// viewer lock, so a disconnect always clears the one it replaces.
-    current: parking_lot::Mutex<Option<Invitation>>,
 }
+/// The running local host's identity and settings: what a restart on another
+/// display or under another service, and the background handoff, start from.
 #[derive(Clone)]
 struct LocalIdentity {
     scope: trust::Scope,
-    #[cfg(windows)]
     identity: desktop::HostIdentity,
+    settings: trust::Settings,
     remembered: bool,
+}
+impl Drop for DesktopState {
+    /// Destroying the handle closes the viewer's video source, so native
+    /// consumers exit even when Dart never disconnected.
+    fn drop(&mut self) {
+        if let Some(live) = self.viewer.get_mut().take() {
+            desktop_video::remove_source(live.source);
+        }
+    }
 }
 impl DesktopState {
     fn cache_background(&self, snapshot: Value) -> Value {
         self.background.lock().store(snapshot)
     }
 
-    fn background_status(&self) -> Option<Value> {
+    fn background_status(&self, runtime: &tokio::runtime::Handle) -> Option<Value> {
         let mut cache = self.background.lock();
         let snapshot = cache.snapshot.clone();
-        // Discovery is explicit. An unused helper adds no IPC to viewer polls.
+        // Discovery is explicit. An unused helper adds no IPC to status polls.
         if snapshot.as_ref().is_some_and(background_configured)
             && !cache.refreshing
             && cache
@@ -94,7 +136,7 @@ impl DesktopState {
             cache.refreshing = true;
             let revision = cache.revision;
             let shared = self.background.clone();
-            tokio::spawn(async move {
+            runtime.spawn(async move {
                 let result = query_background().await;
                 let mut cache = shared.lock();
                 cache.refreshing = false;
@@ -111,93 +153,159 @@ impl DesktopState {
     }
 
     pub(crate) fn current_invitation(&self) -> Option<Invitation> {
-        self.current.lock().clone()
+        self.viewer
+            .read()
+            .as_ref()
+            .map(|live| live.invitation.clone())
     }
 
-    async fn connect_viewer(
+    fn viewer(&self) -> Option<Arc<Viewer>> {
+        self.viewer.read().as_ref().map(|live| live.viewer.clone())
+    }
+
+    /// Registers before any await, so a disconnect cancels the attempt even
+    /// before network work starts. `connect` gets the stage cell its progress
+    /// writes. The viewer is published with its video source unless a
+    /// disconnect came first.
+    async fn connect_viewer<F>(
         &self,
-        connect: impl std::future::Future<Output = Result<(Viewer, Invitation), CtlError>>,
-    ) -> Result<(), CtlError> {
-        // Register before any await, including the viewer/configuration locks:
-        // a disconnect must invalidate setup even before network work starts.
+        connect: impl FnOnce(Arc<AtomicU8>) -> F,
+    ) -> Result<(Arc<Viewer>, u64), CtlError>
+    where
+        F: std::future::Future<Output = Result<(Viewer, Invitation), CtlError>>,
+    {
         let cancel = CancellationToken::new();
+        let stage = Arc::new(AtomicU8::new(STAGE_NONE));
         let epoch = {
             let mut pending = self.connecting.lock();
             if pending.is_some() {
                 return Err(err("desktop connection is already pending"));
             }
             let epoch = self.viewer_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-            *pending = Some((epoch, cancel.clone()));
+            *pending = Some(PendingConnect {
+                epoch,
+                cancel: cancel.clone(),
+                stage: stage.clone(),
+                paused: false,
+            });
             epoch
         };
         let result = tokio::select! {
             biased;
-            () = cancel.cancelled() => Err(err("desktop connection cancelled")),
+            () = cancel.cancelled() => Err(connect_error(ConnectError::Cancelled)),
             result = async {
-                if self.viewer.lock().await.is_some() {
+                if self.viewer.read().is_some() {
                     return Err(err("disconnect the current desktop first"));
                 }
-                connect.await
+                connect(stage).await
             } => result,
         };
-        {
+        // Settle under both locks, so a hot op sees either the attempt or the
+        // published viewer, and a pause in between is not lost.
+        let refused = {
             let mut pending = self.connecting.lock();
-            if pending.as_ref().is_some_and(|(id, _)| *id == epoch) {
-                pending.take();
+            let paused = if pending
+                .as_ref()
+                .is_some_and(|attempt| attempt.epoch == epoch)
+            {
+                pending.take().is_some_and(|attempt| attempt.paused)
+            } else {
+                false
+            };
+            let (viewer, invitation) = result?;
+            let mut slot = self.viewer.write();
+            if cancel.is_cancelled()
+                || self.viewer_epoch.load(Ordering::Acquire) != epoch
+                || slot.is_some()
+            {
+                viewer
+            } else {
+                if paused {
+                    viewer.pause();
+                }
+                let viewer = Arc::new(viewer);
+                let source = desktop_video::add_source(viewer.video_sink());
+                *slot = Some(Live {
+                    viewer: viewer.clone(),
+                    source,
+                    invitation,
+                });
+                return Ok((viewer, source));
             }
-        }
-        let (viewer, invitation) = result?;
-        let mut slot = self.viewer.lock().await;
-        if cancel.is_cancelled()
-            || self.viewer_epoch.load(Ordering::Acquire) != epoch
-            || slot.is_some()
-        {
-            drop(slot);
-            viewer.stop().await.map_err(err)?;
-            return Err(err("desktop connection cancelled"));
-        }
-        *slot = Some(viewer);
-        *self.current.lock() = Some(invitation);
-        Ok(())
+        };
+        refused.stop().await.map_err(err)?;
+        Err(connect_error(ConnectError::Cancelled))
     }
+
+    /// Cancels a pending connect, then unpublishes the viewer and closes its
+    /// video source, and only then stops it, with no lock held: hot ops and
+    /// native consumers never wait for a slow stop.
     async fn disconnect_viewer(&self) -> Result<(), CtlError> {
         {
             let mut pending = self.connecting.lock();
             self.viewer_epoch.fetch_add(1, Ordering::AcqRel);
-            if let Some((_, token)) = pending.take() {
-                token.cancel();
+            if let Some(attempt) = pending.take() {
+                attempt.cancel.cancel();
             }
         }
-        let mut slot = self.viewer.lock().await;
-        self.current.lock().take();
-        if let Some(viewer) = slot.take() {
-            viewer.stop().await.map_err(err)?;
+        let live = self.viewer.write().take();
+        if let Some(live) = live {
+            desktop_video::remove_source(live.source);
+            live.viewer.stop().await.map_err(err)?;
         }
         Ok(())
     }
-    async fn wait_frame(&self) -> Option<desktop::Frame> {
-        let (mut changes, epoch) = {
-            let slot = self.viewer.lock().await;
-            let viewer = slot.as_ref()?;
-            let mut changes = viewer.frames();
-            changes.borrow_and_update();
-            if let Some(frame) = viewer.next_frame() {
-                return Some(frame);
-            }
-            (changes, self.viewer_epoch.load(Ordering::Acquire))
+
+    fn viewer_status(&self) -> Result<Value, CtlError> {
+        // In the connect's order, so it sees the attempt or the viewer.
+        let (viewer, stage) = {
+            let pending = self.connecting.lock();
+            let stage = pending
+                .as_ref()
+                .map(|attempt| stage_of(attempt.stage.load(Ordering::Acquire)));
+            (self.viewer(), stage)
         };
-        // Release the viewer lock while waiting: disconnect and input must not
-        // queue behind an idle renderer. Bound the wait so the Dart worker can
-        // service cancellation and feedback even on a static desktop.
-        tokio::time::timeout(std::time::Duration::from_millis(16), changes.changed())
-            .await
-            .ok()?
-            .ok()?;
-        let slot = self.viewer.lock().await;
-        if self.viewer_epoch.load(Ordering::Acquire) != epoch {
-            return None;
+        if let Some(viewer) = viewer {
+            return serde_json::to_value(viewer.status())
+                .map_err(|failure| CtlError::internal(failure.to_string()));
         }
-        slot.as_ref()?.next_frame()
+        Ok(match stage {
+            Some(stage) => json!({"state": "connecting", "stage": stage}),
+            None => Value::Null,
+        })
+    }
+
+    /// Pauses or resumes the viewer. A pending attempt remembers the choice
+    /// for the viewer it publishes.
+    fn set_paused(&self, paused: bool) {
+        let mut pending = self.connecting.lock();
+        match self.viewer() {
+            Some(viewer) if paused => viewer.pause(),
+            Some(viewer) => viewer.resume(),
+            None => {
+                if let Some(attempt) = pending.as_mut() {
+                    attempt.paused = paused;
+                }
+            }
+        }
+    }
+}
+
+/// `ConnectStage` in the pending attempt's cell; 0 until the first stage.
+const STAGE_NONE: u8 = 0;
+fn stage_code(stage: ConnectStage) -> u8 {
+    match stage {
+        ConnectStage::Path => 1,
+        ConnectStage::Identity => 2,
+        ConnectStage::Authorizing => 3,
+    }
+}
+fn stage_of(code: u8) -> Option<ConnectStage> {
+    match code {
+        1 => Some(ConnectStage::Path),
+        2 => Some(ConnectStage::Identity),
+        3 => Some(ConnectStage::Authorizing),
+        _ => None,
     }
 }
 
@@ -205,13 +313,14 @@ impl DesktopState {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Capabilities,
-    Status,
+    HostStatus,
     TrustStatus,
     TrustRevoke,
     HostRestore,
     HostEnable {
         service: String,
         display_id: u32,
+        allow_control: bool,
     },
     HelperAction {
         action: String,
@@ -241,6 +350,16 @@ enum Request {
     HostPermission {
         allow_control: bool,
     },
+    HostEndSession,
+    HostSetDisplay {
+        display_id: u32,
+    },
+    HostRename {
+        service: String,
+    },
+    InspectInvitation {
+        invitation: String,
+    },
     /// Exactly one of `invitation` and `computer_id`, a remembered computer.
     Connect {
         #[serde(default)]
@@ -250,26 +369,101 @@ enum Request {
         #[serde(default)]
         relay_only: bool,
         #[serde(default)]
-        native_video: bool,
-        #[serde(default)]
-        video: Option<desktop::VideoPreferences>,
+        quality: QualityPreset,
+        refresh_hz: f64,
     },
     Disconnect,
+}
+
+/// The hot export's closed op set.
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum ViewerRequest {
+    ViewerStatus,
     Control {
         enabled: bool,
     },
     Release,
-    Keyframe,
-    Presented {
-        generation: u64,
-        frame_id: u64,
-    },
     Input {
-        event: desktop::InputEvent,
+        generation: u64,
+        inputs: Vec<desktop::Input>,
     },
+    Keyframe,
+    Quality {
+        preset: QualityPreset,
+    },
+    Pause,
+    Resume,
 }
+
 fn err(e: impl std::fmt::Display) -> CtlError {
     CtlError::io(e.to_string())
+}
+
+fn disconnected() -> CtlError {
+    err("desktop is disconnected")
+}
+
+/// Each typed failure has its code; nothing is matched on text.
+fn connect_error(failure: ConnectError) -> CtlError {
+    let code = match &failure {
+        ConnectError::IdentityChanged => ErrorCode::IdentityChanged,
+        ConnectError::VersionMismatch => ErrorCode::VersionMismatch,
+        ConnectError::Busy => ErrorCode::HostBusy,
+        ConnectError::Denied => ErrorCode::AccessDenied,
+        ConnectError::InvalidRequest => ErrorCode::InvalidArgument,
+        ConnectError::Protocol(_) => ErrorCode::Protocol,
+        ConnectError::Cancelled | ConnectError::Transport(_) => ErrorCode::Io,
+    };
+    CtlError::new(code, failure.to_string())
+}
+
+fn input_error(failure: InputError) -> CtlError {
+    let code = match &failure {
+        InputError::NotFresh => ErrorCode::NotFresh,
+        InputError::NotControlling => ErrorCode::NotControlling,
+        InputError::Congestion => ErrorCode::InputCongestion,
+        InputError::Invalid(_) => ErrorCode::InvalidArgument,
+        InputError::Closed => ErrorCode::Io,
+    };
+    CtlError::new(code, failure.to_string())
+}
+
+fn invitation_error(failure: InvitationError) -> CtlError {
+    let code = match failure {
+        InvitationError::SetupString => ErrorCode::SetupString,
+        _ => ErrorCode::InvalidInvitation,
+    };
+    CtlError::new(code, failure.to_string())
+}
+
+/// What `inspect_invitation` shows of an invitation: never its token.
+fn inspection(invitation: &Invitation) -> Value {
+    let service = &invitation.service;
+    json!({
+        "service": service,
+        "name": service.strip_prefix("desktop:").unwrap_or(service),
+        "fingerprint": invitation.short_fingerprint(),
+        "format": match invitation.format() {
+            InvitationFormat::Pbd1 => "pbd1",
+            InvitationFormat::JsonV1 => "json_v1",
+        },
+    })
+}
+
+/// A client of the configured relay.
+fn relay_client(
+    config: &crate::state::AppConfig,
+    credential: Credential,
+) -> Result<Client, CtlError> {
+    Client::from_credential(
+        &config.server_address,
+        credential,
+        config.keep_alive_enabled,
+        None,
+    )
+    .with_relay_transport(config.relay_transport)
+    .map_err(err)
 }
 
 fn background_configured(snapshot: &Value) -> bool {
@@ -296,25 +490,6 @@ fn failed_background(previous: Option<&Value>, error: CtlError) -> Value {
     // service state becomes unknown. Fresh queries still fail closed.
     snapshot["service_disabled"] = json!(false);
     snapshot
-}
-
-fn background_host(snapshot: &Value) -> Option<Value> {
-    if !background_enabled(snapshot) {
-        return None;
-    }
-    if !snapshot["host"].is_null() {
-        return Some(snapshot["host"].clone());
-    }
-    // The service may be waiting for a console session or retrying the relay.
-    // It still owns an enabled grant, so the global Stop action must stay live.
-    Some(json!(desktop::SessionStatus {
-        state: "waiting".into(),
-        message: snapshot["message"].as_str().unwrap_or_default().into(),
-        control_allowed: snapshot["settings"]["allow_control"]
-            .as_bool()
-            .unwrap_or(false),
-        ..Default::default()
-    }))
 }
 
 async fn query_background() -> Result<Value, CtlError> {
@@ -654,21 +829,18 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         Request::TrustRevoke => {
             revoke_trust_with_background(handle, revoke_background(handle)).await?;
         }
-        Request::Status => {
-            let background = state.background_status();
+        Request::HostStatus => {
+            let background = state.background_status(handle.runtime.handle());
             // A slow helper management call holds the host lifecycle lock, but
-            // must never delay the independent remote viewer's status.
-            let host = state
-                .host
-                .try_lock()
-                .ok()
-                .and_then(|slot| {
-                    slot.as_ref()
-                        .map(|host| json!(desktop::legacy_host_status(&host.status())))
+            // must never delay a status poll. The invitation stays beside the
+            // status, so nothing that serialises a status carries the secret.
+            let host = state.host.try_lock().ok().and_then(|slot| {
+                slot.as_ref().map(|host| {
+                    let invitation = host.invitation();
+                    json!({"status": host.status(), "service": invitation.service, "invitation": invitation.encode()})
                 })
-                .or_else(|| background.as_ref().and_then(background_host));
-            let viewer = state.viewer.lock().await.as_ref().map(Viewer::status);
-            return Ok(json!({"host": host, "viewer": viewer, "background": background}));
+            });
+            return Ok(json!({"host": host, "background": background}));
         }
         Request::BackgroundAction { action } => {
             return background_action(handle, &action).await;
@@ -676,8 +848,9 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         Request::HostEnable {
             service,
             display_id,
+            allow_control,
         } => {
-            return enable_host(handle, service, display_id, true).await;
+            return enable_host(handle, service, display_id, allow_control, true).await;
         }
         Request::HostRestore => {
             let directory = handle.state.lock().await.desktop_config_dir();
@@ -689,6 +862,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     handle,
                     saved.settings.service,
                     saved.settings.display_id,
+                    saved.settings.allow_control,
                     false,
                 )
                 .await;
@@ -761,24 +935,48 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             }
             host.set_control_allowed(allow_control);
         }
+        Request::HostEndSession => {
+            if let Some(host) = state.host.lock().await.as_ref() {
+                host.end_session();
+                return Ok(json!({}));
+            }
+            // The background pipe gains `EndSession` with the helper's IPC v2.
+            let background = state
+                .background
+                .lock()
+                .snapshot
+                .as_ref()
+                .is_some_and(background_enabled);
+            return Err(err(if background {
+                "the background service cannot end a session yet; stop background sharing instead"
+            } else {
+                "desktop is not shared"
+            }));
+        }
+        Request::HostSetDisplay { display_id } => {
+            return restart_host(handle, |settings| settings.display_id = display_id).await;
+        }
+        Request::HostRename { service } => {
+            return restart_host(handle, |settings| settings.service = service).await;
+        }
+        Request::InspectInvitation { invitation } => {
+            return Ok(inspection(
+                &Invitation::decode(&invitation).map_err(invitation_error)?,
+            ));
+        }
         Request::Connect {
             invitation,
             computer_id,
             relay_only,
-            native_video,
-            video,
+            quality,
+            refresh_hz,
         } => {
-            enum Target {
-                Invitation(Invitation),
-                Remembered(String),
-            }
             // A pasted invitation is checked before anything waits; a
             // remembered one is read inside the cancellable attempt.
             let target = match (invitation, computer_id) {
-                (Some(text), None) => Target::Invitation(
-                    Invitation::decode(&text)
-                        .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?,
-                ),
+                (Some(text), None) => {
+                    Target::Invitation(Invitation::decode(&text).map_err(invitation_error)?)
+                }
                 (None, Some(id)) => Target::Remembered(id),
                 _ => {
                     return Err(CtlError::invalid_argument(
@@ -786,110 +984,77 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     ));
                 }
             };
-            state
-                .connect_viewer(async {
-                    let invitation = match target {
-                        Target::Invitation(invitation) => invitation,
-                        Target::Remembered(id) => {
-                            crate::desktop_computers::invitation_for(handle, &id)
-                                .await?
-                                .ok_or_else(|| {
-                                    CtlError::not_found("remembered computer not found")
-                                })?
-                        }
-                    };
-                    let session = invitation.clone();
-                    // Configuration can wait behind other app operations. Keep
-                    // that wait inside the registered, cancellable attempt.
-                    let config = handle.state.lock().await.get_config_status().await;
-                    let client = Client::from_credential(
-                        &config.server_address,
-                        get_process_credential().map_err(err)?,
-                        config.keep_alive_enabled,
-                        None,
-                    )
-                    .with_relay_transport(config.relay_transport)
-                    .map_err(err)?;
-                    let options = ConnectOptions {
-                        path: if relay_only {
-                            PathPolicy::RelayOnly
-                        } else {
-                            PathPolicy::Auto
-                        },
-                        ..Default::default()
-                    };
-                    let preferences = video.unwrap_or_default();
-                    if native_video {
-                        Viewer::connect_with_presentation_feedback(
-                            &client,
-                            invitation,
-                            options,
-                            vec![desktop::VideoCodec::H264, desktop::VideoCodec::Jpeg],
-                            preferences,
-                        )
-                        .await
-                    } else {
-                        Viewer::connect_with_video_preferences(
-                            &client,
-                            invitation,
-                            options,
-                            vec![desktop::VideoCodec::Jpeg],
-                            preferences,
-                        )
-                        .await
-                    }
-                    .map(|viewer| (viewer, session))
-                    .map_err(err)
-                })
-                .await?;
+            // Android and Windows decode H.264 natively; elsewhere Dart
+            // decodes JPEG.
+            let codecs = if cfg!(any(windows, target_os = "android")) {
+                vec![VideoCodec::H264]
+            } else {
+                vec![VideoCodec::Jpeg]
+            };
+            let (viewer, source) = connect(handle, target, relay_only, |progress| ViewerConfig {
+                codecs,
+                limits: VideoLimits::for_viewer(refresh_hz),
+                quality,
+                progress: Some(progress),
+            })
+            .await?;
+            return Ok(json!({"video_source": source, "codec": viewer.status().stats.codec}));
         }
         Request::Disconnect => {
             state.disconnect_viewer().await?;
         }
-        Request::Control { enabled } => state
-            .viewer
-            .lock()
-            .await
-            .as_ref()
-            .ok_or_else(|| err("desktop is disconnected"))?
-            .request_control(enabled)
-            .map_err(err)?,
-        Request::Release => state
-            .viewer
-            .lock()
-            .await
-            .as_ref()
-            .ok_or_else(|| err("desktop is disconnected"))?
-            .release_input()
-            .map_err(err)?,
-        Request::Keyframe => state
-            .viewer
-            .lock()
-            .await
-            .as_ref()
-            .ok_or_else(|| err("desktop is disconnected"))?
-            .request_keyframe(),
-        Request::Input { event } => state
-            .viewer
-            .lock()
-            .await
-            .as_ref()
-            .ok_or_else(|| err("desktop is disconnected"))?
-            .input(event)
-            .map_err(err)?,
-        Request::Presented {
-            generation,
-            frame_id,
-        } => state
-            .viewer
-            .lock()
-            .await
-            .as_ref()
-            .ok_or_else(|| err("desktop is disconnected"))?
-            .presented(generation, frame_id),
         Request::Capabilities | Request::HelperAction { .. } => unreachable!(),
     }
     Ok(json!({}))
+}
+
+/// Whom `connect` reaches.
+enum Target {
+    Invitation(Invitation),
+    /// A remembered computer's id, resolved in Rust: its token never
+    /// reaches Dart.
+    Remembered(String),
+}
+
+/// Resolves the target and the relay inside the registered, cancellable
+/// attempt, then connects with `config`, whose progress callback reports the
+/// stage to `viewer_status`.
+async fn connect(
+    handle: &PbMapperHandle,
+    target: Target,
+    relay_only: bool,
+    config: impl FnOnce(Arc<dyn Fn(ConnectStage) + Send + Sync>) -> ViewerConfig,
+) -> Result<(Arc<Viewer>, u64), CtlError> {
+    handle
+        .desktop
+        .connect_viewer(|stage| async move {
+            let invitation = match target {
+                Target::Invitation(invitation) => invitation,
+                Target::Remembered(id) => crate::desktop_computers::invitation_for(handle, &id)
+                    .await?
+                    .ok_or_else(|| CtlError::not_found("remembered computer not found"))?,
+            };
+            // Configuration can wait behind other app operations. Keep that
+            // wait inside the registered, cancellable attempt.
+            let relay = handle.state.lock().await.get_config_status().await;
+            let client = relay_client(&relay, get_process_credential().map_err(err)?)?;
+            let options = ConnectOptions {
+                path: if relay_only {
+                    PathPolicy::RelayOnly
+                } else {
+                    PathPolicy::Auto
+                },
+                ..Default::default()
+            };
+            let progress = Arc::new(move |next: ConnectStage| {
+                stage.store(stage_code(next), Ordering::Release);
+            });
+            let viewer = Viewer::connect(&client, &invitation, options, config(progress))
+                .await
+                .map_err(connect_error)?;
+            Ok((viewer, invitation))
+        })
+        .await
 }
 
 async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {
@@ -1004,14 +1169,7 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
         relay: config.server_address.clone(),
         namespace: credential.key_id(),
     };
-    let client = Client::from_credential(
-        &config.server_address,
-        credential,
-        config.keep_alive_enabled,
-        None,
-    )
-    .with_relay_transport(config.relay_transport)
-    .map_err(err)?;
+    let client = relay_client(&config, credential)?;
     let saved = if matches!(
         request,
         Request::HostRestore | Request::HostStart { remember: true, .. }
@@ -1077,45 +1235,16 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
     } else {
         desktop::HostIdentity::generate().map_err(err)?
     };
-    let display_id = settings.display_id;
-    let options = HostOptions {
-        service: settings.service.clone(),
-        display_id,
-        allow_control: settings.allow_control,
-        allow_direct: !settings.relay_only,
-    };
     let persisted = remember
         .then(|| trust::Saved::new(&scope, settings.clone(), &identity))
         .transpose()?;
     let local_identity = LocalIdentity {
         scope,
-        #[cfg(windows)]
         identity: identity.clone(),
+        settings,
         remembered: remember,
     };
-    let host = if settings.privileged {
-        #[cfg(windows)]
-        {
-            desktop::helper::status().ensure_ready().map_err(err)?;
-            Host::start_with_backend_and_identity(
-                &client,
-                options,
-                std::sync::Arc::new(move || desktop::helper::backend(display_id)),
-                None,
-                identity,
-            )
-            .await
-            .map_err(err)?
-        }
-        #[cfg(not(windows))]
-        {
-            return Err(err("the helper requires Windows"));
-        }
-    } else {
-        Host::start_with_identity(&client, options, identity)
-            .await
-            .map_err(err)?
-    };
+    let host = launch(&client, &local_identity.settings, identity).await?;
     if let Some(saved) = persisted {
         let directory = local_identity.scope.directory.clone();
         let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
@@ -1132,6 +1261,103 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
     Ok(json!({"invitation": invitation}))
 }
 
+/// A local host for `settings` under `identity`, through the helper when
+/// privileged.
+async fn launch(
+    client: &Client,
+    settings: &trust::Settings,
+    identity: desktop::HostIdentity,
+) -> Result<Host, CtlError> {
+    let display_id = settings.display_id;
+    let options = HostOptions {
+        service: settings.service.clone(),
+        display_id,
+        allow_control: settings.allow_control,
+        allow_direct: !settings.relay_only,
+    };
+    if settings.privileged {
+        #[cfg(windows)]
+        {
+            desktop::helper::status().ensure_ready().map_err(err)?;
+            return Host::start_with_backend_and_identity(
+                client,
+                options,
+                Arc::new(move || desktop::helper::backend(display_id)),
+                None,
+                identity,
+            )
+            .await
+            .map_err(err);
+        }
+        #[cfg(not(windows))]
+        return Err(err("the helper requires Windows"));
+    }
+    Host::start_with_identity(client, options, identity)
+        .await
+        .map_err(err)
+}
+
+/// `host_set_display` and `host_rename`: the running local host again, with
+/// its identity, on another display or under another service. Its viewer's
+/// session ends, and the viewer reconnects with the new invitation.
+async fn restart_host(
+    handle: &PbMapperHandle,
+    change: impl FnOnce(&mut trust::Settings),
+) -> Result<Value, CtlError> {
+    let state = &handle.desktop;
+    let mut slot = state.host.lock().await;
+    // The service has no display switch or rename: a background host is
+    // stopped and enabled again instead.
+    if background_configured(&state.cache_background(query_background().await?)) {
+        return Err(CtlError::invalid_argument("stop the background host first"));
+    }
+    let local = state.host_identity.lock().await.clone();
+    let (Some(host), Some(local)) = (slot.as_ref(), local) else {
+        return Err(err("desktop is not shared"));
+    };
+    let mut settings = local.settings.clone();
+    // The live policy, which "make view-only" may have changed since.
+    settings.allow_control = host.status().control_allowed;
+    change(&mut settings);
+    // Check the new service before the running host goes.
+    local
+        .identity
+        .invitation(settings.service.clone())
+        .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?;
+    let config = handle.state.lock().await.get_config_status().await;
+    let credential = get_process_credential().map_err(err)?;
+    if config.server_address != local.scope.relay || credential.key_id() != local.scope.namespace {
+        return Err(err(
+            "the relay settings changed since sharing started; stop sharing and share again",
+        ));
+    }
+    let client = relay_client(&config, credential)?;
+    let persisted = local
+        .remembered
+        .then(|| trust::Saved::new(&local.scope, settings.clone(), &local.identity))
+        .transpose()?;
+    // One owner at a time: the old registration goes before the new one.
+    if let Some(host) = slot.take() {
+        host.stop().await.map_err(err)?;
+    }
+    *state.host_identity.lock().await = None;
+    let host = launch(&client, &settings, local.identity.clone()).await?;
+    if let Some(saved) = persisted {
+        let directory = local.scope.directory.clone();
+        let stored = tokio::task::spawn_blocking(move || trust::save(&directory, &saved))
+            .await
+            .map_err(err)?;
+        if let Err(failure) = stored {
+            let _ = host.stop().await;
+            return Err(failure);
+        }
+    }
+    let invitation = host.invitation().encode();
+    *slot = Some(host);
+    *state.host_identity.lock().await = Some(LocalIdentity { settings, ..local });
+    Ok(json!({"invitation": invitation}))
+}
+
 /// The product has one durable host owner. Setup intent and any existing local
 /// identity survive the installed application's restart; only the service owns
 /// registration after the handoff. Internal SDK/local-host APIs remain separate.
@@ -1140,6 +1366,7 @@ async fn enable_host(
     handle: &PbMapperHandle,
     service: String,
     display_id: u32,
+    allow_control: bool,
     allow_install: bool,
 ) -> Result<Value, CtlError> {
     let mut slot = handle.desktop.host.lock().await;
@@ -1182,6 +1409,7 @@ async fn enable_host(
         &scope,
         service.clone(),
         display_id,
+        allow_control,
         previous.as_ref(),
         local.as_ref().map(|local| &local.identity),
     )?;
@@ -1258,7 +1486,7 @@ async fn enable_host(
             settings: desktop::helper::background::Settings {
                 service,
                 display_id,
-                allow_control: true,
+                allow_control,
                 allow_direct: true,
                 auto_start: true,
             },
@@ -1279,103 +1507,176 @@ async fn enable_host(
 }
 
 #[cfg(not(windows))]
-async fn enable_host(_: &PbMapperHandle, _: String, _: u32, _: bool) -> Result<Value, CtlError> {
+async fn enable_host(
+    _: &PbMapperHandle,
+    _: String,
+    _: u32,
+    _: bool,
+    _: bool,
+) -> Result<Value, CtlError> {
     Err(err("persistent desktop hosting currently requires Windows"))
 }
 
-/// One allocation containing u32 little-endian metadata length, UTF-8 status,
-/// and encoded video bytes. Media is never encoded as JSON/base64. A null
-/// pointer means no newer frame; free every non-null returned pointer.
-#[repr(C)]
-pub struct DesktopBuffer {
-    pub data: *const u8,
-    pub len: usize,
-}
-
+/// The viewer's hot ops. Synchronous: never `block_on`, never a tokio lock,
+/// never an await, so safe on the Dart UI isolate. A closed op set; anything
+/// else is `INVALID_ARGUMENT`. Free the reply with `pb_mapper_free_string`.
+///
+/// # Safety
+/// `handle` must be null or a live handle, and `request` null or a
+/// NUL-terminated string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pb_mapper_desktop_frame(
+pub unsafe extern "C" fn pb_mapper_desktop_viewer_call_json(
     handle: *mut PbMapperHandle,
-    _after: u64,
-    _generation: u64,
-) -> *mut DesktopBuffer {
+    request: *const c_char,
+) -> *mut c_char {
     if handle.is_null() {
-        return std::ptr::null_mut();
+        return err_null_handle();
     }
     let handle = unsafe { &*handle };
-    let frame = handle.runtime.block_on(async {
-        handle
-            .desktop
-            .viewer
-            .lock()
-            .await
-            .as_ref()
-            .and_then(Viewer::next_frame)
+    let failed = || CtlError::internal("desktop viewer call failed");
+    let result = desktop_video::guard(Err(failed()), || {
+        let text = parse_c_string(request, "request")?;
+        if text.len() > MAX_VIEWER_REQUEST {
+            return Err(CtlError::invalid_argument(
+                "desktop viewer request too large",
+            ));
+        }
+        let request = serde_json::from_str(&text)
+            .map_err(|_| CtlError::invalid_argument("invalid desktop viewer request"))?;
+        viewer_call(&handle.desktop, request)
     });
-    export_frame(frame)
+    match result {
+        Ok(value) => ok_data(value),
+        Err(e) => err_ctl(&e),
+    }
 }
 
-/// Bounded wait variant for a dedicated media worker. The buffer ownership is
-/// identical to `pb_mapper_desktop_frame`; never call this on the UI thread.
+/// Without a viewer, giving up control, releasing, pausing and choosing a
+/// preset have nothing to do; asking for control or sending input fail.
+fn viewer_call(state: &DesktopState, request: ViewerRequest) -> Result<Value, CtlError> {
+    let viewer = state.viewer();
+    match request {
+        ViewerRequest::ViewerStatus => return state.viewer_status(),
+        ViewerRequest::Control { enabled } => match viewer {
+            Some(viewer) => viewer.request_control(enabled).map_err(err)?,
+            None if enabled => return Err(disconnected()),
+            None => {}
+        },
+        ViewerRequest::Release => {
+            if let Some(viewer) = viewer {
+                viewer.release_input().map_err(err)?;
+            }
+        }
+        ViewerRequest::Input { generation, inputs } => viewer
+            .ok_or_else(disconnected)?
+            .input(generation, &inputs)
+            .map_err(input_error)?,
+        ViewerRequest::Keyframe => {
+            let requested =
+                viewer.is_some_and(|viewer| viewer.request_keyframe(KeyframeReason::User));
+            return Ok(json!({"requested": requested}));
+        }
+        ViewerRequest::Quality { preset } => {
+            if let Some(viewer) = viewer {
+                viewer.set_quality(preset);
+            }
+        }
+        ViewerRequest::Pause => state.set_paused(true),
+        ViewerRequest::Resume => state.set_paused(false),
+    }
+    Ok(json!({}))
+}
+
+/// What the UI isolate reads every frame: `DesktopView` in a fixed layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PbDesktopViewV1 {
+    pub generation: u64,
+    /// 0 = none.
+    pub presented_frame_id: u64,
+    /// Advances with every new cursor position.
+    pub cursor_seq: u64,
+    /// `u32::MAX` = none.
+    pub presented_age_ms: u32,
+    /// Physical pixels of `generation`: the input space.
+    pub display_width: u32,
+    pub display_height: u32,
+    /// The encoded size.
+    pub video_width: u32,
+    pub video_height: u32,
+    /// Physical pixels relative to the display.
+    pub cursor_x: i32,
+    pub cursor_y: i32,
+    /// 0 none, 1 connecting, 2 streaming, 3 capture_unavailable, 4 paused,
+    /// 5 stopped.
+    pub state: u8,
+    /// Bit 0 cursor_visible, 1 controlling, 2 control_allowed,
+    /// 3 secure_desktop, 4 fresh, 5 paused.
+    pub flags: u8,
+    pub reserved: [u8; 2],
+}
+const _: () = assert!(
+    std::mem::size_of::<PbDesktopViewV1>() == 56 && std::mem::align_of::<PbDesktopViewV1>() == 8
+);
+
+impl From<DesktopView> for PbDesktopViewV1 {
+    /// The state and flag codes are `DesktopView`'s own.
+    fn from(view: DesktopView) -> Self {
+        Self {
+            generation: view.generation,
+            presented_frame_id: view.presented_frame_id,
+            cursor_seq: view.cursor_seq,
+            presented_age_ms: view.presented_age_ms,
+            display_width: view.display_width,
+            display_height: view.display_height,
+            video_width: view.video_width,
+            video_height: view.video_height,
+            cursor_x: view.cursor_x,
+            cursor_y: view.cursor_y,
+            state: view.state,
+            flags: view.flags,
+            reserved: [0; 2],
+        }
+    }
+}
+
+/// 1 with a viewer, 0 without one (`out` zeroed), -1 for a null pointer or a
+/// panic. A leaf: no allocation, no tokio, `parking_lot` locks only. Call it
+/// on the isolate that also destroys the handle.
+///
+/// # Safety
+/// `handle` must be null or a live handle, and `out` null or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pb_mapper_desktop_wait_frame(
+pub unsafe extern "C" fn pb_mapper_desktop_view_v1(
     handle: *mut PbMapperHandle,
-    _after: u64,
-    _generation: u64,
-) -> *mut DesktopBuffer {
-    if handle.is_null() {
-        return std::ptr::null_mut();
+    out: *mut PbDesktopViewV1,
+) -> i32 {
+    if handle.is_null() || out.is_null() {
+        return -1;
     }
-    let handle = unsafe { &*handle };
-    export_frame(handle.runtime.block_on(handle.desktop.wait_frame()))
-}
-
-fn export_frame(frame: Option<desktop::Frame>) -> *mut DesktopBuffer {
-    // next_frame consumes an event exactly once. Cursor/status events can share
-    // the next picture's frame id; filtering by the caller's last id would lose
-    // observations or a predictive access unit and corrupt its reference chain.
-    // Retain the legacy arguments in the C ABI, but let the queue own delivery.
-    let Some(frame) = frame else {
-        return std::ptr::null_mut();
-    };
-    let Ok(metadata) = serde_json::to_vec(&frame.status) else {
-        return std::ptr::null_mut();
-    };
-    let mut data = Vec::with_capacity(4 + metadata.len() + frame.bytes.len());
-    data.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
-    data.extend_from_slice(&metadata);
-    data.extend_from_slice(&frame.bytes);
-    let data = data.into_boxed_slice();
-    let buffer = DesktopBuffer {
-        len: data.len(),
-        data: Box::into_raw(data).cast::<u8>(),
-    };
-    Box::into_raw(Box::new(buffer))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pb_mapper_desktop_free_frame(buffer: *mut DesktopBuffer) {
-    if buffer.is_null() {
-        return;
-    }
-    let buffer = unsafe { Box::from_raw(buffer) };
-    unsafe {
-        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-            buffer.data.cast_mut(),
-            buffer.len,
-        )));
-    }
+    desktop_video::guard(-1, || {
+        let handle = unsafe { &*handle };
+        let (code, view) = match handle.desktop.viewer() {
+            Some(viewer) => (1, viewer.view().into()),
+            None => (0, PbDesktopViewV1::default()),
+        };
+        // SAFETY: checked non-null; the caller provides a writable struct.
+        unsafe { out.write(view) };
+        code
+    })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use std::{
         ffi::{CStr, CString},
         future::Future,
-        sync::Arc,
         task::{Context, Waker},
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     fn test_handle(name: &str) -> PbMapperHandle {
         let root = std::env::temp_dir().join(format!("pb-desktop-{name}-{}", std::process::id()));
@@ -1390,33 +1691,283 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_and_video_with_the_same_id_both_cross_the_binary_boundary() {
-        let status = desktop::SessionStatus {
-            state: "streaming".into(),
-            generation: 3,
-            frame_id: 9,
-            cursor: Some(desktop::CursorPosition {
-                x: 4,
-                y: 5,
-                visible: true,
-            }),
+    fn reply(text: *mut c_char) -> Value {
+        let value = serde_json::from_slice(unsafe { CStr::from_ptr(text) }.to_bytes()).unwrap();
+        unsafe { crate::logging::pb_mapper_free_string(text) };
+        value
+    }
+
+    /// The lifecycle export, as a Dart worker calls it.
+    fn call_json(handle: &PbMapperHandle, request: Value) -> Value {
+        let request = CString::new(request.to_string()).unwrap();
+        reply(unsafe {
+            pb_mapper_desktop_call_json(std::ptr::from_ref(handle).cast_mut(), request.as_ptr())
+        })
+    }
+
+    /// The hot export, as the UI isolate calls it.
+    fn hot(handle: &PbMapperHandle, request: Value) -> Value {
+        let request = CString::new(request.to_string()).unwrap();
+        reply(unsafe {
+            pb_mapper_desktop_viewer_call_json(
+                std::ptr::from_ref(handle).cast_mut(),
+                request.as_ptr(),
+            )
+        })
+    }
+
+    fn view(handle: &PbMapperHandle) -> (i32, PbDesktopViewV1) {
+        let mut view = PbDesktopViewV1 {
+            generation: 9,
             ..Default::default()
         };
-        for payload in [vec![], vec![1, 2, 3]] {
-            let buffer = export_frame(Some(desktop::Frame {
-                status: status.clone(),
-                bytes: payload.clone().into(),
-            }));
-            assert!(!buffer.is_null());
-            let bytes = unsafe { std::slice::from_raw_parts((*buffer).data, (*buffer).len) };
-            let length = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-            let metadata: Value = serde_json::from_slice(&bytes[4..4 + length]).unwrap();
-            assert_eq!(metadata["cursor"]["x"], 4);
-            assert_eq!(&bytes[4 + length..], payload);
-            unsafe { pb_mapper_desktop_free_frame(buffer) };
+        let code =
+            unsafe { pb_mapper_desktop_view_v1(std::ptr::from_ref(handle).cast_mut(), &mut view) };
+        (code, view)
+    }
+
+    fn invitation() -> Invitation {
+        desktop::HostIdentity::generate()
+            .unwrap()
+            .invitation("desktop:test".into())
+            .unwrap()
+    }
+
+    /// One host record: a `u32` big-endian length, then JSON.
+    async fn send(host: &mut DuplexStream, message: Value) {
+        let bytes = serde_json::to_vec(&message).unwrap();
+        host.write_u32(bytes.len() as u32).await.unwrap();
+        host.write_all(&bytes).await.unwrap();
+    }
+
+    /// A viewer whose scripted host accepted at once and streams the first
+    /// generation. The host side stays open and silent, so `stop()` waits out
+    /// the viewer's close grace, seconds long: a held stop.
+    async fn scripted_viewer() -> (Viewer, DuplexStream) {
+        let (stream, mut host) = tokio::io::duplex(1 << 20);
+        let connecting = tokio::spawn(Viewer::over_stream_for_test(
+            stream,
+            "t".repeat(43),
+            ViewerConfig {
+                codecs: vec![VideoCodec::H264],
+                limits: VideoLimits::for_viewer(60.0),
+                quality: QualityPreset::Balanced,
+                progress: None,
+            },
+        ));
+        let authenticate = host.read_u32().await.unwrap();
+        host.read_exact(&mut vec![0; authenticate as usize])
+            .await
+            .unwrap();
+        send(
+            &mut host,
+            json!({"t": "accepted", "codec": "h264", "nominal_fps": 60, "quality": "balanced",
+                "limits": {"max_width": 1920, "max_height": 1080, "max_fps": 60}, "capabilities": []}),
+        )
+        .await;
+        send(
+            &mut host,
+            json!({"t": "state", "state": "streaming", "message": "", "control_allowed": true,
+                "controlling": false, "generation": 1, "desktop": "ordinary",
+                "display": {"id": 1, "name": "scripted", "x": 0, "y": 0, "width": 1920, "height": 1080},
+                "video": {"width": 1920, "height": 1080}}),
+        )
+        .await;
+        (connecting.await.unwrap().unwrap(), host)
+    }
+
+    fn eventually(mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !condition() {
+            assert!(Instant::now() < deadline, "condition not reached");
+            std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(export_frame(None).is_null());
+    }
+
+    #[test]
+    fn hot_ops_never_wait_for_a_slow_disconnect() {
+        let handle = test_handle("hot-ops");
+        let handle = &handle;
+        let _host = handle.runtime.block_on(async {
+            let (viewer, host) = scripted_viewer().await;
+            let (open, opened) = tokio::sync::oneshot::channel::<()>();
+            let connecting = handle.desktop.connect_viewer(|_| async {
+                opened.await.unwrap();
+                Ok((viewer, invitation()))
+            });
+            // Hidden while connecting: the session starts paused.
+            let hiding = async {
+                let status = hot(handle, json!({"op": "viewer_status"}));
+                assert_eq!(
+                    status["data"],
+                    json!({"state": "connecting", "stage": null})
+                );
+                assert_eq!(hot(handle, json!({"op": "pause"}))["success"], true);
+                open.send(()).unwrap();
+            };
+            let (connected, ()) = tokio::join!(connecting, hiding);
+            connected.unwrap();
+            host
+        });
+        assert_eq!(view(handle).1.state, DesktopView::STATE_PAUSED);
+        assert_eq!(hot(handle, json!({"op": "resume"}))["success"], true);
+
+        // Live: every op reaches the viewer.
+        eventually(|| view(handle).1.state == DesktopView::STATE_STREAMING);
+        let (code, live) = view(handle);
+        assert_eq!(code, 1);
+        assert_eq!(
+            (live.generation, live.display_width, live.video_height),
+            (1, 1920, 1080)
+        );
+        assert_eq!(
+            hot(handle, json!({"op": "viewer_status"}))["data"]["state"],
+            "streaming"
+        );
+        let input =
+            json!({"op": "input", "generation": 1, "inputs": [{"kind": "move", "x": 1, "y": 1}]});
+        assert_eq!(hot(handle, input.clone())["code"], "NOT_FRESH");
+        for request in [
+            json!({"op": "control", "enabled": true}),
+            json!({"op": "keyframe"}),
+            json!({"op": "quality", "preset": "smooth"}),
+            json!({"op": "pause"}),
+            json!({"op": "resume"}),
+            json!({"op": "release"}),
+            json!({"op": "control", "enabled": false}),
+        ] {
+            assert_eq!(hot(handle, request.clone())["success"], true, "{request}");
+        }
+        assert_eq!(
+            hot(
+                handle,
+                json!({"op": "presented", "generation": 1, "frame_id": 1})
+            )["code"],
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(
+            unsafe { pb_mapper_desktop_view_v1(std::ptr::null_mut(), &mut Default::default()) },
+            -1
+        );
+        assert_eq!(
+            unsafe {
+                pb_mapper_desktop_view_v1(
+                    std::ptr::from_ref(handle).cast_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            -1
+        );
+
+        let source = handle.desktop.viewer.read().as_ref().unwrap().source;
+        let consumer = desktop_video::attach(source);
+        assert!(consumer > 0);
+        std::thread::scope(|scope| {
+            let pulling = scope.spawn(move || {
+                let mut meta = desktop_video::PbDesktopVideoMetaV1::default();
+                let mut buffer = [0u8; 16];
+                let code = unsafe {
+                    desktop_video::pb_mapper_desktop_video_next_v1(
+                        consumer as u64,
+                        1000,
+                        buffer.as_mut_ptr(),
+                        16,
+                        &mut meta,
+                    )
+                };
+                (code, Instant::now())
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            let disconnected_at = Instant::now();
+            let disconnecting = scope.spawn(|| call_json(handle, json!({"op": "disconnect"})));
+            // The source closes before the viewer's stop starts.
+            let (code, returned) = pulling.join().unwrap();
+            assert_eq!(code, desktop_video::CLOSED);
+            assert!(
+                returned.saturating_duration_since(disconnected_at) < Duration::from_millis(100)
+            );
+
+            // Inside the runtime, where entering it again would panic.
+            handle.runtime.block_on(async {
+                for (request, expected) in [
+                    (
+                        json!({"op": "viewer_status"}),
+                        json!({"success": true, "data": null}),
+                    ),
+                    (
+                        json!({"op": "control", "enabled": false}),
+                        json!({"success": true, "data": {}}),
+                    ),
+                    (
+                        json!({"op": "release"}),
+                        json!({"success": true, "data": {}}),
+                    ),
+                    (
+                        json!({"op": "keyframe"}),
+                        json!({"success": true, "data": {"requested": false}}),
+                    ),
+                    (
+                        json!({"op": "quality", "preset": "quality"}),
+                        json!({"success": true, "data": {}}),
+                    ),
+                    (json!({"op": "pause"}), json!({"success": true, "data": {}})),
+                    (
+                        json!({"op": "resume"}),
+                        json!({"success": true, "data": {}}),
+                    ),
+                ] {
+                    let started = Instant::now();
+                    assert_eq!(hot(handle, request.clone()), expected, "{request}");
+                    assert!(started.elapsed() < Duration::from_millis(10), "{request}");
+                }
+                for request in [json!({"op": "control", "enabled": true}), input] {
+                    let started = Instant::now();
+                    assert_eq!(hot(handle, request.clone())["code"], "IO", "{request}");
+                    assert!(started.elapsed() < Duration::from_millis(10), "{request}");
+                }
+                let started = Instant::now();
+                assert_eq!(view(handle), (0, PbDesktopViewV1::default()));
+                assert!(started.elapsed() < Duration::from_millis(10));
+            });
+            assert!(
+                !disconnecting.is_finished(),
+                "the viewer's stop was meant to be still running"
+            );
+            assert_eq!(disconnecting.join().unwrap()["success"], true);
+        });
+    }
+
+    #[test]
+    fn inspect_invitation_classifies_without_network() {
+        // Nothing listens on the default relay, so any network use would fail.
+        let handle = test_handle("inspect");
+        let inspect = |text: &str| {
+            call_json(
+                &handle,
+                json!({"op": "inspect_invitation", "invitation": text}),
+            )
+        };
+        let invitation = desktop::HostIdentity::generate()
+            .unwrap()
+            .invitation("desktop:study-pc".into())
+            .unwrap();
+        assert_eq!(
+            inspect(&invitation.encode())["data"],
+            json!({"service": "desktop:study-pc", "name": "study-pc",
+                "fingerprint": invitation.short_fingerprint(), "format": "pbd1"})
+        );
+        let base64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let v1 = json!({"version": 1, "service": "desktop:study-pc",
+            "certificate": base64url.encode(b"certificate"), "token": base64url.encode([7u8; 32])});
+        let v1 = inspect(&v1.to_string());
+        assert_eq!(
+            (&v1["data"]["name"], &v1["data"]["format"]),
+            (&json!("study-pc"), &json!("json_v1"))
+        );
+        let setup = base64::engine::general_purpose::STANDARD
+            .encode(json!({"serverAddress": "relay:7666", "msgHeaderKey": "key"}).to_string());
+        assert_eq!(inspect(&setup)["code"], "SETUP_STRING");
+        assert_eq!(inspect("not an invitation")["code"], "INVALID_INVITATION");
     }
 
     #[test]
@@ -1442,21 +1993,21 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap_err();
-                assert_eq!(failure.code(), crate::error::ErrorCode::InvalidArgument);
+                assert_eq!(failure.code(), ErrorCode::InvalidArgument);
             }
 
             let mut snapshot = unavailable_background("waiting for an interactive session");
             snapshot["configured"] = json!(true);
             snapshot["enabled"] = json!(true);
             handle.desktop.cache_background(snapshot.clone());
-            // A blocked service mutation cannot hold up remote viewer status;
-            // the pending background grant still exposes the global Stop state.
+            // A blocked service mutation cannot hold up host status, which
+            // still shows the pending background grant.
             let status =
-                tokio::time::timeout(Duration::from_secs(1), call(&handle, Request::Status))
+                tokio::time::timeout(Duration::from_secs(1), call(&handle, Request::HostStatus))
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!(status["host"]["state"], "waiting");
+            assert!(status["host"].is_null());
             assert_eq!(status["background"]["enabled"], true);
             drop(lifecycle);
 
@@ -1511,7 +2062,7 @@ mod tests {
                 namespace: 1,
             };
             let pending =
-                trust::Saved::for_background(&scope, "desktop:handoff".into(), 1, None, None)
+                trust::Saved::for_background(&scope, "desktop:handoff".into(), 1, true, None, None)
                     .unwrap();
             trust::save(&directory, &pending).unwrap();
             let lifecycle = handle.desktop.host.lock().await;
@@ -1655,58 +2206,39 @@ mod tests {
             // must be cancelled while the lock is still held, before loading
             // credentials or contacting a relay.
             let config = handle.state.lock().await;
-            let invalid = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
+            let connect = |invitation: String| {
                 call(
                     &handle,
                     Request::Connect {
-                        invitation: Some(String::new()),
+                        invitation: Some(invitation),
                         computer_id: None,
                         relay_only: false,
-                        native_video: false,
-                        video: None,
-                    },
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap_err();
-            assert_eq!(invalid.code(), crate::error::ErrorCode::InvalidArgument);
-            assert!(handle.desktop.connecting.lock().is_none());
-            let invitation = desktop::HostIdentity::generate()
-                .unwrap()
-                .invitation("desktop:test".into())
-                .unwrap()
-                .encode();
-            let connect = || {
-                call(
-                    &handle,
-                    Request::Connect {
-                        invitation: Some(invitation.clone()),
-                        computer_id: None,
-                        relay_only: false,
-                        native_video: false,
-                        video: None,
+                        quality: QualityPreset::Balanced,
+                        refresh_hz: 60.0,
                     },
                 )
             };
-            let mut first = std::pin::pin!(connect());
+            let invalid = tokio::time::timeout(Duration::from_secs(1), connect(String::new()))
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(invalid.code(), ErrorCode::InvalidInvitation);
+            assert!(handle.desktop.connecting.lock().is_none());
+            let invitation = invitation().encode();
+            let mut first = std::pin::pin!(connect(invitation.clone()));
             let mut context = Context::from_waker(Waker::noop());
             assert!(first.as_mut().poll(&mut context).is_pending());
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                call(&handle, Request::Disconnect),
-            )
-            .await
-            .unwrap()
-            .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), call(&handle, Request::Disconnect))
+                .await
+                .unwrap()
+                .unwrap();
 
             // A new attempt can start before the cancelled call resumes.
             // Finishing the old call must not unregister the new token.
-            let mut second = std::pin::pin!(connect());
+            let mut second = std::pin::pin!(connect(invitation));
             assert!(second.as_mut().poll(&mut context).is_pending());
             assert!(
-                tokio::time::timeout(std::time::Duration::from_secs(1), first)
+                tokio::time::timeout(Duration::from_secs(1), first)
                     .await
                     .unwrap()
                     .is_err()
@@ -1714,37 +2246,69 @@ mod tests {
             assert!(handle.desktop.connecting.lock().is_some());
             call(&handle, Request::Disconnect).await.unwrap();
             assert!(
-                tokio::time::timeout(std::time::Duration::from_secs(1), second)
+                tokio::time::timeout(Duration::from_secs(1), second)
                     .await
                     .unwrap()
                     .is_err()
             );
             drop(config);
-            assert!(handle.desktop.viewer.lock().await.is_none());
+            assert!(handle.desktop.viewer.read().is_none());
             assert!(handle.desktop.connecting.lock().is_none());
         });
     }
 
     #[tokio::test]
-    async fn disconnect_cancels_setup_waiting_for_viewer_lock() {
-        let state = DesktopState::default();
-        let viewer = state.viewer.lock().await;
-        let mut attempt = std::pin::pin!(
-            state.connect_viewer(std::future::pending::<Result<(Viewer, Invitation), CtlError>>())
-        );
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(attempt.as_mut().poll(&mut context).is_pending());
-        let mut disconnect = std::pin::pin!(state.disconnect_viewer());
-        assert!(disconnect.as_mut().poll(&mut context).is_pending());
+    async fn disconnect_cancels_setup_while_the_last_viewer_stops() {
+        let state = Arc::new(DesktopState::default());
+        let (viewer, _host) = scripted_viewer().await;
+        state
+            .connect_viewer(|_| async { Ok((viewer, invitation())) })
+            .await
+            .unwrap();
+        // The last viewer's stop is held: its host never closes.
+        let stopping = tokio::spawn({
+            let state = state.clone();
+            async move { state.disconnect_viewer().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.viewer.read().is_some() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // A new attempt registers at once, and the next disconnect cancels it
+        // without waiting for that stop.
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let attempt = tokio::spawn({
+            let state = state.clone();
+            async move {
+                state
+                    .connect_viewer(|_| async {
+                        let _ = entered.send(());
+                        std::future::pending::<Result<(Viewer, Invitation), CtlError>>().await
+                    })
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), started)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), state.disconnect_viewer())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), attempt)
+            tokio::time::timeout(Duration::from_secs(1), attempt)
                 .await
+                .unwrap()
                 .unwrap()
                 .is_err()
         );
-        drop(viewer);
-        disconnect.await.unwrap();
-        assert!(state.viewer.lock().await.is_none());
+        assert!(!stopping.is_finished());
+        stopping.await.unwrap().unwrap();
+        assert!(state.viewer.read().is_none());
         assert!(state.connecting.lock().is_none());
     }
 
@@ -1755,133 +2319,32 @@ mod tests {
         let connecting = state.clone();
         let attempt = tokio::spawn(async move {
             connecting
-                .connect_viewer(async {
+                .connect_viewer(|stage| async move {
+                    stage.store(stage_code(ConnectStage::Identity), Ordering::Release);
                     let _ = entered.send(());
                     std::future::pending::<Result<(Viewer, Invitation), CtlError>>().await
                 })
                 .await
         });
         started.await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), state.disconnect_viewer())
+        // The attempt reports how far it got.
+        assert_eq!(
+            state.viewer_status().unwrap(),
+            json!({"state": "connecting", "stage": "identity"})
+        );
+        tokio::time::timeout(Duration::from_secs(1), state.disconnect_viewer())
             .await
             .unwrap()
             .unwrap();
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), attempt)
+            tokio::time::timeout(Duration::from_secs(1), attempt)
                 .await
                 .unwrap()
                 .unwrap()
                 .is_err()
         );
-        assert!(state.viewer.lock().await.is_none());
+        assert!(state.viewer.read().is_none());
         assert!(state.connecting.lock().is_none());
-    }
-    struct TestDesktop;
-    impl desktop::Backend for TestDesktop {
-        fn display(&mut self) -> desktop::Result<desktop::Display> {
-            Ok(desktop::Display {
-                id: 1,
-                name: "FFI fixture".into(),
-                x: 0,
-                y: 0,
-                width: 10,
-                height: 10,
-            })
-        }
-        fn capture(&mut self) -> desktop::Result<Vec<u8>> {
-            Ok(vec![1, 2, 3, 4])
-        }
-        fn input(&mut self, _: &desktop::Input) -> desktop::Result<()> {
-            Ok(())
-        }
-        fn release(&mut self) {}
-    }
-    #[test]
-    fn binary_frame_is_owned_until_explicit_release_after_disconnect() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _credential =
-            runtime.block_on(pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.lock());
-        let root = std::env::temp_dir().join(format!("pb-desktop-ffi-{}", std::process::id()));
-        let mut handle = PbMapperHandle {
-            desktop: Default::default(),
-            tunnel_events: Default::default(),
-            state: Arc::new(tokio::sync::Mutex::new(crate::state::PbMapperState::new(
-                Some(root.display().to_string()),
-            ))),
-            control_shutdown: Default::default(),
-            runtime,
-        };
-        let relay = handle.runtime.block_on(async {
-            let relay = pb_mapper_testkit::Relay::start("desktop-ffi").await;
-            let client = Client::from_credential(
-                relay.addr().to_string(),
-                pb_mapper_testkit::admin_credential(),
-                true,
-                None,
-            );
-            let host = Host::start_with_backend(
-                &client,
-                HostOptions {
-                    service: "desktop:ffi".into(),
-                    display_id: 1,
-                    allow_control: false,
-                    allow_direct: false,
-                },
-                Arc::new(|| Ok(Box::new(TestDesktop))),
-            )
-            .await
-            .unwrap();
-            let viewer = Viewer::connect(
-                &client,
-                host.invitation().clone(),
-                ConnectOptions {
-                    path: PathPolicy::RelayOnly,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-            let mut frames = viewer.frames();
-            tokio::time::timeout(std::time::Duration::from_secs(5), frames.changed())
-                .await
-                .unwrap()
-                .unwrap();
-            *handle.desktop.host.lock().await = Some(host);
-            *handle.desktop.viewer.lock().await = Some(viewer);
-            relay
-        });
-        let buffer = unsafe { pb_mapper_desktop_wait_frame(&mut handle, 0, 0) };
-        assert!(!buffer.is_null());
-        let disconnect = CString::new(r#"{"op":"disconnect"}"#).unwrap();
-        let reply = unsafe { pb_mapper_desktop_call_json(&mut handle, disconnect.as_ptr()) };
-        let response: Value =
-            serde_json::from_slice(unsafe { CStr::from_ptr(reply) }.to_bytes()).unwrap();
-        unsafe {
-            crate::logging::pb_mapper_free_string(reply);
-        }
-        assert_eq!(response["success"], true);
-        assert!(unsafe { pb_mapper_desktop_wait_frame(&mut handle, 0, 0) }.is_null());
-        let bytes = unsafe { std::slice::from_raw_parts((*buffer).data, (*buffer).len) };
-        let length = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        let metadata: Value = serde_json::from_slice(&bytes[4..4 + length]).unwrap();
-        assert_eq!(metadata["display"]["width"], 10);
-        assert_eq!(&bytes[4 + length..], &[1, 2, 3, 4]);
-        unsafe {
-            pb_mapper_desktop_free_frame(buffer);
-        }
-        handle.runtime.block_on(async {
-            // An outbound operation may hold its viewer slot while waiting
-            // for a network peer. Local stop must remain available meanwhile.
-            let _outbound = handle.desktop.viewer.lock().await;
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                call(&handle, Request::HostStop { on_exit: true }),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert!(handle.desktop.host.lock().await.is_none());
-            drop(relay);
-        });
+        assert_eq!(state.viewer_status().unwrap(), Value::Null);
     }
 }

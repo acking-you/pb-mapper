@@ -53,6 +53,7 @@ impl Saved {
         scope: &Scope,
         service: String,
         display_id: u32,
+        allow_control: bool,
         previous: Option<&Self>,
         live_identity: Option<&HostIdentity>,
     ) -> Result<Self, CtlError> {
@@ -79,7 +80,7 @@ impl Saved {
             Settings {
                 service,
                 display_id,
-                allow_control: true,
+                allow_control,
                 relay_only: false,
                 privileged: true,
                 auto_start: true,
@@ -325,9 +326,15 @@ mod tests {
             namespace: 1,
         };
         let identity = HostIdentity::generate().unwrap();
-        let pending =
-            Saved::for_background(&scope, "desktop:handoff".into(), 1, None, Some(&identity))
-                .unwrap();
+        let pending = Saved::for_background(
+            &scope,
+            "desktop:handoff".into(),
+            1,
+            true,
+            None,
+            Some(&identity),
+        )
+        .unwrap();
         // The same DPAPI representation used between portable and installed
         // processes carries the identity, owner scope and the one pending action.
         let encrypted = protect(
@@ -353,9 +360,17 @@ mod tests {
         assert!(restored.settings.background && restored.settings.auto_start);
         assert!(restored.settings.allow_control && restored.settings.privileged);
         assert!(!restored.settings.relay_only);
-        let resumed =
-            Saved::for_background(&scope, "desktop:handoff".into(), 2, Some(&restored), None)
-                .unwrap();
+        // Enabling again view-only keeps the identity and records the choice.
+        let resumed = Saved::for_background(
+            &scope,
+            "desktop:handoff".into(),
+            2,
+            false,
+            Some(&restored),
+            None,
+        )
+        .unwrap();
+        assert!(!resumed.settings.allow_control);
         assert_eq!(
             resumed.identity().unwrap().encode_secret().unwrap(),
             identity.encode_secret().unwrap()
@@ -367,6 +382,7 @@ mod tests {
             },
             "desktop:handoff".into(),
             1,
+            true,
             Some(&restored),
             None,
         )
