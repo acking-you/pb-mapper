@@ -28,10 +28,9 @@ pub use status::{
 };
 
 use crate::{
-    Display, Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, VideoLimits,
-    error,
+    Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, VideoLimits, error,
     protocol::{
-        DesktopKind, HostMessage, NoticeCode, RejectReason, Route, SessionState, StateReason,
+        DesktopKind, HostMessage, NoticeCode, RejectReason, Route, SessionState, StateRecord,
         VideoSize, ViewerMessage, valid_capabilities,
     },
     security, valid_service,
@@ -168,25 +167,13 @@ impl std::fmt::Display for InputError {
 }
 impl std::error::Error for InputError {}
 
-/// The last host `State`.
-struct LastState {
-    state: SessionState,
-    reason: Option<StateReason>,
-    message: String,
-    control_allowed: bool,
-    controlling: bool,
-    generation: u64,
-    display: Option<Display>,
-    desktop: DesktopKind,
-    video: Option<VideoSize>,
-}
-
 /// The session as both tasks and the API see it.
 pub(crate) struct ViewerStateSlot {
     codec: VideoCodec,
     capabilities: Vec<String>,
     quality: QualityPreset,
-    host: Option<LastState>,
+    /// The last host `State`.
+    host: Option<StateRecord>,
     route: Option<Route>,
     paused: bool,
     /// The app asked for control and has not revoked it since. The host's
@@ -914,43 +901,23 @@ impl Reader<'_> {
                 });
             }
             HostMessage::Probe { nonce } => self.shared.outbound.probe(nonce),
-            HostMessage::State {
-                state,
-                reason,
-                message,
-                control_allowed,
-                controlling,
-                generation,
-                display,
-                desktop,
-                video,
-            } => {
-                if display.as_ref().is_some_and(|display| {
+            HostMessage::State(host) => {
+                if host.display.as_ref().is_some_and(|display| {
                     !(1..=MAX_DISPLAY).contains(&display.width)
                         || !(1..=MAX_DISPLAY).contains(&display.height)
                 }) {
                     return Err(Ended::protocol("invalid display geometry"));
                 }
-                self.generation = generation;
+                self.generation = host.generation;
                 // The sink first, so nothing of an old generation is accepted
                 // once the state names the new one. The host pauses only for
                 // this viewer, whose own pause covers that.
                 self.sink.on_state(
-                    generation,
-                    matches!(state, SessionState::Streaming | SessionState::Paused),
+                    host.generation,
+                    matches!(host.state, SessionState::Streaming | SessionState::Paused),
                 );
                 self.shared.state.lock().update(Instant::now(), |slot| {
-                    slot.host = Some(LastState {
-                        state,
-                        reason,
-                        message,
-                        control_allowed,
-                        controlling,
-                        generation,
-                        display,
-                        desktop,
-                        video,
-                    });
+                    slot.host = Some(host);
                 });
             }
             HostMessage::Cursor {
@@ -1119,7 +1086,7 @@ fn route(diagnostics: &TunnelDiagnostics) -> Route {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::{Key, protocol::StopReason, video_sink::Pull};
+    use crate::{Display, Key, protocol::StopReason, video_sink::Pull};
     use tokio::io::DuplexStream;
 
     const TOKEN: &str = "0123456789012345678901234567890123456789012";
@@ -1165,7 +1132,7 @@ mod tests {
     }
 
     fn state(generation: u64, controlling: bool) -> HostMessage {
-        HostMessage::State {
+        HostMessage::State(StateRecord {
             state: SessionState::Streaming,
             reason: None,
             message: String::new(),
@@ -1185,7 +1152,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
             }),
-        }
+        })
     }
 
     fn video(seq: u64, generation: u64, frame_id: u64, keyframe: bool) -> HostMessage {
@@ -1387,11 +1354,14 @@ mod tests {
             assert!(status.last_video_age_ms.unwrap() <= millis(due.elapsed()));
         };
 
-        let mut unavailable = state(1, false);
-        if let HostMessage::State { state, .. } = &mut unavailable {
-            *state = SessionState::CaptureUnavailable;
-        }
-        send(&mut host, unavailable, None).await;
+        let HostMessage::State(streaming) = state(1, false) else {
+            unreachable!()
+        };
+        let unavailable = StateRecord {
+            state: SessionState::CaptureUnavailable,
+            ..streaming
+        };
+        send(&mut host, HostMessage::State(unavailable), None).await;
         eventually(|| viewer.status().state == ViewerState::CaptureUnavailable).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         let due = Instant::now();

@@ -5,12 +5,11 @@
 //! network task's credit and QoS locks at once; never hold any of them across
 //! an `.await` or a backend call; keep each critical section O(1) or O(256).
 use crate::{
-    Display,
     auth::AuthLedger,
     idr::IdrPolicy,
     lane::InputLane,
     outgoing::Outgoing,
-    protocol::{DesktopKind, NoticeCode, SessionState, StateReason, VideoSize},
+    protocol::{DesktopKind, NoticeCode, SessionState, StateRecord},
     scheduler::Wake,
 };
 use std::{
@@ -104,19 +103,12 @@ impl Targets {
     }
 }
 
-/// C's published engine state. B-send writes a `State` when its visible subset
-/// changes and each notice serial once.
+/// C's published engine state. B-send writes a `State` when `record` changes,
+/// and each notice serial once.
 #[derive(Clone, PartialEq)]
 pub(crate) struct EngineState {
-    pub state: SessionState,
-    pub reason: Option<StateReason>,
-    pub message: String,
-    pub control_allowed: bool,
-    pub controlling: bool,
-    pub generation: u64,
-    pub display: Option<Display>,
-    pub desktop: DesktopKind,
-    pub video: Option<VideoSize>,
+    /// What `State` carries.
+    pub record: StateRecord,
     pub capture_fps: f32,
     pub skipped_ticks: u64,
     pub dropped_frames: u64,
@@ -132,15 +124,17 @@ impl EngineState {
 
     pub fn connecting(control_allowed: bool) -> Self {
         Self {
-            state: SessionState::Connecting,
-            reason: None,
-            message: String::new(),
-            control_allowed,
-            controlling: false,
-            generation: Self::FIRST_GENERATION,
-            display: None,
-            desktop: DesktopKind::Ordinary,
-            video: None,
+            record: StateRecord {
+                state: SessionState::Connecting,
+                reason: None,
+                message: String::new(),
+                control_allowed,
+                controlling: false,
+                generation: Self::FIRST_GENERATION,
+                display: None,
+                desktop: DesktopKind::Ordinary,
+                video: None,
+            },
             capture_fps: 0.0,
             skipped_ticks: 0,
             dropped_frames: 0,

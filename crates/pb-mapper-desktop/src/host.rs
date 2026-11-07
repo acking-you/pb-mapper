@@ -205,30 +205,30 @@ impl Host {
                 capabilities,
             };
         };
-        let engine = session.shared.state.borrow().clone();
+        let record = session.shared.state.borrow().record.clone();
         let paused = session.paused();
         HostStatus {
-            state: match engine.state {
+            state: match record.state {
                 _ if paused => HostState::Paused,
                 SessionState::Connecting => HostState::Connecting,
                 SessionState::Streaming => HostState::Streaming,
                 SessionState::Paused => HostState::Paused,
                 SessionState::CaptureUnavailable => HostState::CaptureUnavailable,
             },
-            reason: engine.reason,
-            message: engine.message,
+            reason: record.reason,
+            message: record.message,
             control_allowed,
             viewer: Some(HostViewer {
                 since_ms: u64::try_from(session.shared.epoch.elapsed().as_millis())
                     .unwrap_or(u64::MAX),
                 started_unix_ms: session.started_unix_ms,
                 path: self.path(),
-                controlling: control_allowed && engine.controlling,
+                controlling: control_allowed && record.controlling,
                 paused,
                 quality: session.quality(),
             }),
-            display: engine.display,
-            desktop: engine.desktop,
+            display: record.display,
+            desktop: record.desktop,
             capabilities,
         }
     }
@@ -463,7 +463,7 @@ impl Acceptor {
 #[allow(clippy::unwrap_used)]
 mod trust_tests {
     use super::*;
-    use crate::security;
+    use crate::{protocol::StateRecord, security};
     use pb_mapper_client::sdk::{ConnectOptions, Connection, PathPolicy};
     use std::sync::atomic::AtomicU32;
     use tokio_rustls::client::TlsStream as ClientStream;
@@ -633,7 +633,7 @@ mod trust_tests {
         // The first viewer's session is unaffected.
         assert!(matches!(
             next(&mut first).await,
-            Some(HostMessage::State { .. })
+            Some(HostMessage::State(_))
         ));
         drop(first);
         host.stop().await.unwrap();
@@ -777,10 +777,10 @@ mod trust_tests {
         assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
         assert!(matches!(
             next(&mut viewer).await,
-            Some(HostMessage::State {
+            Some(HostMessage::State(StateRecord {
                 control_allowed: false,
                 ..
-            })
+            }))
         ));
         drop(viewer);
         resumed.stop().await.unwrap();

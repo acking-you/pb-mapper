@@ -6,14 +6,12 @@
 //! B-send writes the final `Stopped` when the session ends for a reason the
 //! viewer should hear.
 use crate::{
-    Display, Input, QualityPreset, VideoCodec, VideoLimits,
+    Input, QualityPreset, VideoCodec, VideoLimits,
     credit::CreditLedger,
     idr::IdrReason,
     lane::LaneCommand,
     outgoing::OUTGOING_MAX_AGE,
-    protocol::{
-        DesktopKind, HostMessage, SessionState, StateReason, StopReason, VideoSize, ViewerMessage,
-    },
+    protocol::{HostMessage, StateReason, StateRecord, StopReason, ViewerMessage},
     qos::{QOS_TICK, Qos, TargetValues},
     shared::{CursorUpdate, EngineState, Policy, SessionShared, Targets},
     wire::{self, MAX_PAYLOAD},
@@ -402,56 +400,6 @@ impl CursorGate {
     }
 }
 
-/// The part of the engine state a `State` message carries.
-#[derive(Clone, PartialEq)]
-struct StateView {
-    state: SessionState,
-    reason: Option<StateReason>,
-    message: String,
-    control_allowed: bool,
-    controlling: bool,
-    generation: u64,
-    display: Option<Display>,
-    desktop: DesktopKind,
-    video: Option<VideoSize>,
-}
-impl StateView {
-    fn of(engine: &EngineState) -> Self {
-        Self {
-            state: engine.state,
-            reason: engine.reason,
-            message: engine.message.clone(),
-            control_allowed: engine.control_allowed,
-            controlling: engine.controlling,
-            generation: engine.generation,
-            display: engine.display.clone(),
-            desktop: engine.desktop,
-            video: engine.video,
-        }
-    }
-
-    /// The message; a refused control request shows as its reason until the
-    /// engine state changes.
-    fn message(&self, denied: bool) -> HostMessage {
-        let (reason, message) = if denied {
-            (Some(StateReason::ControlDenied), CONTROL_DENIED.into())
-        } else {
-            (self.reason, self.message.clone())
-        };
-        HostMessage::State {
-            state: self.state,
-            reason,
-            message,
-            control_allowed: self.control_allowed,
-            controlling: self.controlling,
-            generation: self.generation,
-            display: self.display.clone(),
-            desktop: self.desktop,
-            video: self.video,
-        }
-    }
-}
-
 /// A write could not finish: the transport failed, or the stop budget ran out.
 struct Abandoned;
 
@@ -500,7 +448,7 @@ struct Sender<'a, W> {
     state: watch::Receiver<EngineState>,
     cursor: watch::Receiver<Option<CursorUpdate>>,
     /// The engine state last written as `State`.
-    written: Option<StateView>,
+    written: Option<StateRecord>,
     notice_serial: u64,
     gate: CursorGate,
     next_tick: Instant,
@@ -630,24 +578,29 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         }
     }
 
-    /// Write `State` when its visible part changed, or to report a refused
-    /// control request.
+    /// Write `State` when the engine's record changed, or to report a refused
+    /// control request: that shows as its reason until the engine state
+    /// changes.
     async fn write_state(&mut self, engine: &EngineState) -> Result<(), Abandoned> {
-        let view = StateView::of(engine);
+        let record = &engine.record;
         let denied = self.session.control_denied.swap(false, Ordering::AcqRel);
-        if !denied && self.written.as_ref() == Some(&view) {
+        if !denied && self.written.as_ref() == Some(record) {
             return Ok(());
         }
-        if let Some(video) = view.video
+        if let Some(video) = record.video
             && self.written.as_ref().and_then(|written| written.video) != Some(video)
         {
             self.session.update_qos(Instant::now(), |qos| {
                 qos.set_video_size(video.width, video.height);
             });
         }
-        let state = view.message(denied);
-        self.written = Some(view);
-        self.send(&state, None).await
+        self.written = Some(record.clone());
+        let mut sent = record.clone();
+        if denied {
+            sent.reason = Some(StateReason::ControlDenied);
+            sent.message = CONTROL_DENIED.into();
+        }
+        self.send(&HostMessage::State(sent), None).await
     }
 
     async fn probe(&mut self, now: Instant) -> Result<(), Abandoned> {
@@ -673,9 +626,9 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             .written
             .as_ref()
             .map_or(0, |written| written.generation);
-        let (cursor, recheck) = self
-            .gate
-            .poll(latest, stated, engine.controlling, input_at, now);
+        let (cursor, recheck) =
+            self.gate
+                .poll(latest, stated, engine.record.controlling, input_at, now);
         if let Some(cursor) = cursor {
             let message = HostMessage::Cursor {
                 generation: cursor.generation,
@@ -721,7 +674,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             }
             if head.generation > stated {
                 let engine = self.state.borrow_and_update().clone();
-                if engine.generation < head.generation {
+                if engine.record.generation < head.generation {
                     // C publishes the new generation's state after the unit;
                     // that change wakes B-send again.
                     return Ok(false);
@@ -880,7 +833,11 @@ fn micros(duration: Duration) -> u64 {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::outgoing::HostUnit;
+    use crate::{
+        Display,
+        outgoing::HostUnit,
+        protocol::{SessionState, VideoSize},
+    };
     use tokio::io::{AsyncReadExt, DuplexStream, ReadHalf, WriteHalf};
 
     #[test]
@@ -935,7 +892,8 @@ mod tests {
     }
 
     fn streaming(generation: u64) -> EngineState {
-        EngineState {
+        let mut engine = EngineState::connecting(true);
+        engine.record = StateRecord {
             state: SessionState::Streaming,
             generation,
             display: Some(Display {
@@ -950,8 +908,9 @@ mod tests {
                 width: 64,
                 height: 64,
             }),
-            ..EngineState::connecting(true)
-        }
+            ..engine.record
+        };
+        engine
     }
 
     fn unit(generation: u64, frame_id: u64, keyframe: bool) -> HostUnit {
@@ -1032,7 +991,7 @@ mod tests {
 
     fn state_generation(message: &HostMessage) -> u64 {
         match message {
-            HostMessage::State { generation, .. } => *generation,
+            HostMessage::State(record) => record.generation,
             other => panic!("expected state, got {other:?}"),
         }
     }

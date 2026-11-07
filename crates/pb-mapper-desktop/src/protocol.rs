@@ -1,9 +1,10 @@
 //! Desktop protocol v2 (ALPN `pb-mapper/desktop/2`): one JSON record per
 //! message; only `HostMessage::Video` is followed by one payload record
 //! (`wire.rs`). Every message and struct rejects unknown fields, and every enum
-//! variant is a struct variant, because serde ignores extra fields on an
-//! internally tagged unit variant. A v2.x peer sends a new message, field or
-//! value only after the other side listed the matching capability.
+//! variant is a struct variant or wraps one strict struct (`State`), because
+//! serde ignores extra fields on an internally tagged unit variant. A v2.x
+//! peer sends a new message, field or value only after the other side listed
+//! the matching capability.
 use crate::{Display, InputEvent, KeyframeReason, QualityPreset, VideoCodec, VideoLimits};
 use serde::{Deserialize, Serialize};
 
@@ -112,23 +113,7 @@ pub(crate) enum HostMessage {
     Rejected {
         reason: RejectReason,
     },
-    State {
-        state: SessionState,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<StateReason>,
-        /// Human text; a UI keys off `reason`.
-        message: String,
-        control_allowed: bool,
-        controlling: bool,
-        generation: u64,
-        /// Physical pixels: the input space.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display: Option<Display>,
-        desktop: DesktopKind,
-        /// The encoded size of this generation.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        video: Option<VideoSize>,
-    },
+    State(StateRecord),
     /// Followed by exactly one payload record (an Annex B access unit or a JPEG).
     Video {
         /// 1, 2, 3 … per session, assigned at admission.
@@ -191,6 +176,27 @@ pub(crate) enum HostMessage {
         reason: StopReason,
         message: String,
     },
+}
+
+/// What a `State` message carries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StateRecord {
+    pub state: SessionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<StateReason>,
+    /// Human text; a UI keys off `reason`.
+    pub message: String,
+    pub control_allowed: bool,
+    pub controlling: bool,
+    pub generation: u64,
+    /// Physical pixels: the input space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<Display>,
+    pub desktop: DesktopKind,
+    /// The encoded size of this generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoSize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,7 +365,7 @@ mod tests {
             HostMessage::Rejected {
                 reason: RejectReason::Busy,
             },
-            HostMessage::State {
+            HostMessage::State(StateRecord {
                 state: SessionState::CaptureUnavailable,
                 reason: Some(StateReason::SecureDesktop),
                 message: "secure desktop".into(),
@@ -379,7 +385,7 @@ mod tests {
                     width: 1280,
                     height: 720,
                 }),
-            },
+            }),
             HostMessage::Video {
                 seq: 1,
                 generation: 4,
