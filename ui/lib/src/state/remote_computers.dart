@@ -147,7 +147,13 @@ class RemoteComputerStore extends ChangeNotifier {
   RememberSupport _support = const RememberSupport.unavailable('loading');
   List<RemoteComputer> _computers = const [];
   Directory? _thumbnails;
+
+  /// Bumped whenever a computer's last picture is rewritten.
   final _versions = <String, int>{};
+
+  /// The last picture each computer was shown with, dropped from the image
+  /// cache once it is rewritten or forgotten.
+  final _shown = <String, ImageProvider>{};
   Future<void>? _loading;
   bool _disposed = false;
 
@@ -357,8 +363,8 @@ class RemoteComputerStore extends ChangeNotifier {
       } catch (error) {
         debugPrint('The last picture could not be deleted: $error');
       }
-      _evict(file);
     }
+    _evict(id);
     _versions.remove(id);
     if (_disposed) return;
     _computers = [
@@ -378,26 +384,52 @@ class RemoteComputerStore extends ChangeNotifier {
     return File('${dir.path}/$id.thumb');
   }
 
-  /// Changes whenever [id]'s last picture is rewritten; image keys use it.
-  int thumbnailVersion(String id) => _versions[id] ?? 0;
+  /// [id]'s last picture, decoded [width] pixels wide; null without a
+  /// private directory. Its image-cache key carries the picture's version,
+  /// so a rewritten file is decoded afresh: nothing cached from the old
+  /// file, or from a load that ran before the file was written, is served
+  /// for it.
+  ImageProvider? thumbnailImage(String id, {required int width}) {
+    final file = thumbnailFile(id);
+    if (file == null) return null;
+    return _shown[id] = ResizeImage(
+      _ThumbnailImage(file, _versions[id] ?? 0),
+      width: width,
+    );
+  }
 
   /// A new last picture for [id] was written.
   void thumbnailWritten(String id) {
-    final file = thumbnailFile(id);
-    if (file == null || _disposed) return;
-    _evict(file);
-    _versions[id] = thumbnailVersion(id) + 1;
+    if (thumbnailFile(id) == null || _disposed) return;
+    _evict(id);
+    _versions[id] = (_versions[id] ?? 0) + 1;
     notifyListeners();
   }
 
-  static void _evict(File file) =>
-      PaintingBinding.instance.imageCache.evict(FileImage(file));
+  void _evict(String id) => unawaited(_shown.remove(id)?.evict());
 
   @override
   void dispose() {
     _disposed = true;
     super.dispose();
   }
+}
+
+/// One version of a last picture: the file is rewritten in place, so its
+/// version is part of the cache key, and each rewrite is a new image.
+@immutable
+class _ThumbnailImage extends FileImage {
+  const _ThumbnailImage(super.file, this.version);
+  final int version;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _ThumbnailImage &&
+      other.file.path == file.path &&
+      other.version == version;
+
+  @override
+  int get hashCode => Object.hash(file.path, version);
 }
 
 /// How a remembered computer stands, for its row (D22).

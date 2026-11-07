@@ -228,51 +228,55 @@ class _Thumbnail extends StatelessWidget {
       ),
     );
     final c = computer;
+    if (c == null) return placeholder;
     final computers = AppScope.of(context).store.computers;
-    final file = c == null ? null : computers.thumbnailFile(c.id);
-    final at = c?.lastConnectedAt;
-    if (c == null || file == null) return placeholder;
+    final at = c.lastConnectedAt;
     return LayoutBuilder(
-      builder: (context, box) => Image.file(
-        file,
-        key: ValueKey(computers.thumbnailVersion(c.id)),
-        fit: BoxFit.cover,
-        cacheWidth: (box.maxWidth * MediaQuery.devicePixelRatioOf(context))
-            .round(),
-        gaplessPlayback: true,
-        errorBuilder: (_, _, _) => placeholder,
-        frameBuilder: (context, child, frame, _) => frame == null
-            ? placeholder
-            : Stack(
-                fit: StackFit.expand,
-                children: [
-                  child,
-                  if (at != null)
-                    Positioned(
-                      left: 10,
-                      top: 10,
-                      child: Container(
-                        height: 24,
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: const Color(0xB3141416),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          context.l10n.remoteLastPicture(
-                            formatLastSeen(context, at, DateTime.now()),
+      builder: (context, box) {
+        final image = computers.thumbnailImage(
+          c.id,
+          width: (box.maxWidth * MediaQuery.devicePixelRatioOf(context))
+              .round(),
+        );
+        if (image == null) return placeholder;
+        return Image(
+          image: image,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, _, _) => placeholder,
+          frameBuilder: (context, child, frame, _) => frame == null
+              ? placeholder
+              : Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    child,
+                    if (at != null)
+                      Positioned(
+                        left: 10,
+                        top: 10,
+                        child: Container(
+                          height: 24,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: const Color(0xB3141416),
+                            borderRadius: BorderRadius.circular(12),
                           ),
-                          style: const TextStyle(
-                            fontSize: 11.5,
-                            color: Colors.white,
+                          child: Text(
+                            context.l10n.remoteLastPicture(
+                              formatLastSeen(context, at, DateTime.now()),
+                            ),
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              color: Colors.white,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                ],
-              ),
-      ),
+                  ],
+                ),
+        );
+      },
     );
   }
 }
