@@ -1379,6 +1379,28 @@ async fn restart_host(
     Ok(json!({"invitation": invitation}))
 }
 
+/// Stops the running local host before the service takes over. Its viewer
+/// reconnects by itself (`restarting`) only when the service resumes this
+/// host's invitation at once: the same identity and service, and a helper that
+/// needs no installation, which the owner may cancel. Otherwise it hears
+/// `host_stopped`, rather than retrying a host that may never come.
+#[cfg(windows)]
+async fn stop_for_handoff(
+    slot: &mut Option<Host>,
+    same_invitation: bool,
+    helper: &desktop::helper::Status,
+) -> Result<(), CtlError> {
+    let Some(host) = slot.take() else {
+        return Ok(());
+    };
+    let reason = if same_invitation && helper.ensure_ready().is_ok() {
+        StopReason::Restarting
+    } else {
+        StopReason::HostStopped
+    };
+    host.stop_with(reason).await.map_err(err)
+}
+
 /// The product has one durable host owner. Setup intent and any existing local
 /// identity survive the installed application's restart; only the service owns
 /// registration after the handoff. Internal SDK/local-host APIs remain separate.
@@ -1435,21 +1457,27 @@ async fn enable_host(
         local.as_ref().map(|local| &local.identity),
     )?;
     let identity = pending.identity()?;
+    // Fails before anything changes, never after the running host has gone.
+    let credential = match credential {
+        pb_mapper_core::checksum::Credential::Admin(key) => String::from_utf8(key.to_vec())
+            .map_err(|_| err("invalid administrator credential encoding"))?,
+        pb_mapper_core::checksum::Credential::Temporary { key_id, key } => {
+            pb_mapper_core::checksum::encode_temporary_credential(key_id, &key)
+        }
+    };
     tokio::task::spawn_blocking({
         let directory = directory.clone();
         move || trust::save(&directory, &pending)
     })
     .await
     .map_err(err)??;
-    // Stop the old registration before enabling a service that could already
-    // hold an automatic grant. No two owners may publish the same desktop.
-    if let Some(host) = slot.take() {
-        host.stop().await.map_err(err)?;
-    }
-    *handle.desktop.host_identity.lock().await = None;
     let helper = tokio::task::spawn_blocking(desktop::helper::status)
         .await
         .map_err(err)?;
+    // Stop the old registration before enabling a service that could already
+    // hold an automatic grant. No two owners may publish the same desktop.
+    stop_for_handoff(&mut slot, local.is_some(), &helper).await?;
+    *handle.desktop.host_identity.lock().await = None;
     if helper.ensure_ready().is_err() {
         if !allow_install {
             return Err(err(
@@ -1485,13 +1513,6 @@ async fn enable_host(
             return Ok(json!({"restart": true}));
         }
     }
-    let credential = match credential {
-        pb_mapper_core::checksum::Credential::Admin(key) => String::from_utf8(key.to_vec())
-            .map_err(|_| err("invalid administrator credential encoding"))?,
-        pb_mapper_core::checksum::Credential::Temporary { key_id, key } => {
-            pb_mapper_core::checksum::encode_temporary_credential(key_id, &key)
-        }
-    };
     let snapshot = desktop::helper::background::configure_with_identity(
         desktop::helper::background::Options {
             server: config.server_address,
@@ -1711,6 +1732,10 @@ mod tests {
 
     fn test_handle(name: &str) -> PbMapperHandle {
         let root = std::env::temp_dir().join(format!("pb-desktop-{name}-{}", std::process::id()));
+        // A new state writes the process credential, which a live relay's
+        // framing reads, so it is made under the lock such tests hold.
+        let _credential_guard =
+            pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
         PbMapperHandle {
             desktop: Default::default(),
             tunnel_events: Default::default(),
@@ -2135,6 +2160,119 @@ mod tests {
             assert!(trust::load(&directory).unwrap().is_none());
             std::fs::remove_dir(&directory).unwrap();
         });
+    }
+
+    /// Poll `condition` for up to 5 s.
+    #[cfg(windows)]
+    async fn until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A one-pixel desktop, enough to hold a viewer's session open.
+    #[cfg(windows)]
+    struct Pixel;
+    #[cfg(windows)]
+    impl desktop::Backend for Pixel {
+        fn display(&mut self) -> desktop::Result<desktop::Display> {
+            Ok(desktop::Display {
+                id: 1,
+                name: "handoff".into(),
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            })
+        }
+        fn capture(&mut self) -> desktop::Result<Vec<u8>> {
+            Ok(vec![1])
+        }
+        fn input(&mut self, _: &desktop::Input) -> desktop::Result<()> {
+            Ok(())
+        }
+        fn release(&mut self) {}
+    }
+
+    /// Turning on remote control hands the running local host to the service.
+    /// Its viewer reconnects by itself only when the service resumes the same
+    /// invitation at once. A cancelled installation or another invitation
+    /// would leave it retrying a host that never comes, so it ends instead.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn handoff_lets_the_viewer_reconnect_only_to_the_same_invitation() {
+        use desktop::{ViewerReason, ViewerState, helper::Status};
+        // The tunnel's framing and codec read the process credential, which
+        // other tests change.
+        let _credential_guard = pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK
+            .lock()
+            .await;
+        pb_mapper_core::checksum::set_process_msg_header_key(Some(
+            pb_mapper_testkit::TEST_ADMIN_KEY,
+        ))
+        .unwrap();
+        let relay = pb_mapper_testkit::Relay::start("ffi-handoff").await;
+        let client = Client::from_credential(
+            relay.addr().to_string(),
+            pb_mapper_testkit::admin_credential(),
+            true,
+            None,
+        );
+        let ready = || Status {
+            installed: true,
+            running: true,
+            authorized_application: true,
+            identity_verified: true,
+            ..Default::default()
+        };
+        for (same_invitation, helper, heard) in [
+            (true, ready(), ViewerReason::Restarting),
+            (true, Status::default(), ViewerReason::HostStopped),
+            (false, ready(), ViewerReason::HostStopped),
+        ] {
+            let host = Host::start_with_backend(
+                &client,
+                HostOptions {
+                    service: "desktop:handoff".into(),
+                    display_id: 1,
+                    allow_control: false,
+                    allow_direct: false,
+                },
+                Arc::new(|| Ok(Box::new(Pixel))),
+            )
+            .await
+            .unwrap();
+            let viewer = Viewer::connect(
+                &client,
+                host.invitation(),
+                ConnectOptions {
+                    path: PathPolicy::RelayOnly,
+                    ..Default::default()
+                },
+                ViewerConfig {
+                    codecs: vec![VideoCodec::Jpeg],
+                    limits: VideoLimits::for_viewer(60.0),
+                    quality: QualityPreset::Balanced,
+                    progress: None,
+                },
+            )
+            .await
+            .unwrap();
+            // `Accepted` reaches the viewer before the host holds the session.
+            until(|| host.status().viewer.is_some()).await;
+            let mut slot = Some(host);
+            stop_for_handoff(&mut slot, same_invitation, &helper)
+                .await
+                .unwrap();
+            assert!(slot.is_none());
+            until(|| viewer.status().state == ViewerState::Stopped).await;
+            let status = viewer.status();
+            assert_eq!(status.reason, Some(heard), "{}", status.message);
+        }
     }
 
     #[cfg(windows)]

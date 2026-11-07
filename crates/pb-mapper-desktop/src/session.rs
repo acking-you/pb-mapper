@@ -40,8 +40,8 @@ use tokio_util::sync::CancellationToken;
 /// dead transport.
 pub(crate) const HOST_READ_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) const STATS_INTERVAL: Duration = Duration::from_secs(1);
-/// After a session is cancelled, the message in flight and the final
-/// `Stopped` share this.
+/// After a session is cancelled, the message in flight, the final `Stopped`
+/// and the wait for the viewer to close share this.
 pub(crate) const STOP_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The controller's own pointer input is not echoed back within this.
 pub(crate) const CURSOR_ECHO_SUPPRESS: Duration = Duration::from_millis(300);
@@ -295,33 +295,48 @@ pub(crate) async fn run<S>(
 ) where
     S: AsyncRead + AsyncWrite,
 {
-    let (reader, writer) = tokio::io::split(stream);
-    let receive = receive(&session, reader);
+    let (mut reader, writer) = tokio::io::split(stream);
     let send = Sender::new(&session, writer).run();
-    tokio::pin!(receive, send, worker);
-    let mut sent = false;
+    tokio::pin!(send, worker);
+    let mut sent = None;
     let mut exited = false;
-    tokio::select! {
-        violation = &mut receive => match violation {
-            Some(violation) => session.end(StopReason::ProtocolError, violation),
-            None => session.close(),
-        },
-        () = &mut send => sent = true,
-        exit = &mut worker => {
-            exited = true;
-            match exit {
-                WorkerExit::CaptureFailed(failure) => session.end(StopReason::CaptureFailed, failure),
-                WorkerExit::Cancelled => session.close(),
+    {
+        let receive = receive(&session, &mut reader);
+        tokio::pin!(receive);
+        tokio::select! {
+            violation = &mut receive => match violation {
+                Some(violation) => session.end(StopReason::ProtocolError, violation),
+                None => session.close(),
+            },
+            stopped = &mut send => sent = Some(stopped),
+            exit = &mut worker => {
+                exited = true;
+                match exit {
+                    WorkerExit::CaptureFailed(failure) => session.end(StopReason::CaptureFailed, failure),
+                    WorkerExit::Cancelled => session.close(),
+                }
             }
         }
     }
     // B-send ended on its own only when the transport failed.
     session.close();
-    if !sent {
-        send.await;
-    }
+    let stopped = match sent {
+        Some(stopped) => stopped,
+        None => send.await,
+    };
     if !exited {
         worker.await;
+    }
+    // The viewer closes once it has read `Stopped`; until then, within the
+    // stop budget, its input is read and dropped. Closing with input unread
+    // resets the connection, and a reset can discard the `Stopped` still on
+    // its way through the tunnel.
+    if let Some(deadline) = stopped {
+        let _ = tokio::time::timeout_at(
+            deadline.into(),
+            tokio::io::copy(&mut reader, &mut tokio::io::sink()),
+        )
+        .await;
     }
 }
 
@@ -513,19 +528,20 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         }
     }
 
-    async fn run(mut self) {
+    /// Returns the stop budget's deadline when the final `Stopped` went out.
+    async fn run(mut self) -> Option<Instant> {
         // The first probe goes out before anything is captured, so the
         // baseline starts clean.
         if self.probe(Instant::now()).await.is_err() {
-            return;
+            return None;
         }
         while !self.session.shared.cancel.is_cancelled() {
             match self.pass().await {
                 Ok(wake_at) => self.wait(wake_at).await,
-                Err(Abandoned) => return,
+                Err(Abandoned) => return None,
             }
         }
-        self.stop().await;
+        self.stop().await
     }
 
     async fn send<T: Serialize>(
@@ -544,20 +560,21 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     }
 
     /// The final `Stopped`, then a TLS close, within what is left of the stop
-    /// budget.
-    async fn stop(mut self) {
-        let Some((reason, message)) = self.session.outcome() else {
-            return;
-        };
+    /// budget. Returns that budget's deadline once both went out.
+    async fn stop(mut self) -> Option<Instant> {
+        let (reason, message) = self.session.outcome()?;
         let deadline = *self
             .stop_at
             .get_or_insert_with(|| Instant::now() + STOP_WRITE_TIMEOUT);
         let stopped = HostMessage::Stopped { reason, message };
-        let _ = tokio::time::timeout_at(deadline.into(), async {
+        tokio::time::timeout_at(deadline.into(), async {
             wire::write_message(&mut self.writer, &stopped, None).await?;
             self.writer.shutdown().await
         })
-        .await;
+        .await
+        .ok()?
+        .ok()?;
+        Some(deadline)
     }
 
     /// One pass. Returns when to look again if nothing wakes B-send first.
@@ -1086,6 +1103,49 @@ mod tests {
         let mut rest = vec![];
         viewer.read.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
+        drop(viewer);
+        running.await.unwrap();
+    }
+
+    /// A viewer still writing when the host stops it hears why. Input that
+    /// reaches a closed socket resets the connection, and the reset discards
+    /// a `Stopped` the viewer has not read yet; so the host reads on until the
+    /// viewer closes.
+    #[tokio::test]
+    async fn stopped_survives_input_sent_after_the_stop() {
+        use tokio::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut viewer = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (host, _) = listener.accept().await.unwrap();
+        let session = Session::new(
+            Arc::new(Policy::new(false)),
+            CancellationToken::new(),
+            VideoCodec::Jpeg,
+            VideoLimits::for_viewer(60.0),
+            QualityPreset::Balanced,
+        );
+        let cancel = session.shared.cancel.clone();
+        let running = tokio::spawn(run(session.clone(), host, async move {
+            cancel.cancelled().await;
+            WorkerExit::Cancelled
+        }));
+        session.end(StopReason::Revoked, stop_message(StopReason::Revoked));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = wire::write_message(&mut viewer, &ViewerMessage::Ping {}, None).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        loop {
+            match wire::read_header(&mut viewer, Duration::from_secs(1)).await {
+                Ok(Some(HostMessage::Stopped { reason, .. })) => {
+                    assert_eq!(reason, StopReason::Revoked);
+                    break;
+                }
+                Ok(Some(_)) => {}
+                other => panic!("closed without Stopped: {other:?}"),
+            }
+        }
+        drop(viewer);
         running.await.unwrap();
     }
 }
