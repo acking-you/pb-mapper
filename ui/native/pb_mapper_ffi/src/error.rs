@@ -41,6 +41,27 @@ pub enum ErrorCode {
     Protocol,
     /// Reading or writing local configuration failed.
     Io,
+    /// The remote computer speaks another remote desktop protocol: update
+    /// pb-mapper on both computers.
+    VersionMismatch,
+    /// The remote computer's certificate is not the one its invitation pins.
+    IdentityChanged,
+    /// The remote computer is already serving another viewer.
+    HostBusy,
+    /// The remote computer refused the invitation.
+    AccessDenied,
+    /// A pb-mapper setup string was given where a desktop invitation belongs.
+    SetupString,
+    /// The text is not a desktop invitation.
+    InvalidInvitation,
+    /// Input needs a freshly presented picture of the current desktop.
+    NotFresh,
+    /// Input was sent without control of the remote computer.
+    NotControlling,
+    /// Control was revoked because input backed up on the remote computer.
+    InputCongestion,
+    /// The remembered computers are locked or cannot be read.
+    VaultUnavailable,
     /// Anything with no more specific answer.
     ///
     /// Also where a code this build does not recognise lands, so an older CLI
@@ -95,6 +116,7 @@ constructors! {
     timeout => Timeout,
     protocol => Protocol,
     io => Io,
+    vault_unavailable => VaultUnavailable,
     internal => Internal,
 }
 

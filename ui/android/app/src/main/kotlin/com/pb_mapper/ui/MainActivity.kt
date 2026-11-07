@@ -12,6 +12,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         updates = UpdateInstaller(this, flutterEngine.dartExecutor.binaryMessenger)
         desktopVideo = DesktopVideo(flutterEngine.dartExecutor.binaryMessenger, flutterEngine.renderer)
+        ComputerKeystore.register(flutterEngine.dartExecutor.binaryMessenger)
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {

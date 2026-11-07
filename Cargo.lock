@@ -3151,9 +3151,12 @@ dependencies = [
 name = "pb-mapper-ffi"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "better_mimalloc_rs",
+ "bytes",
  "clap",
  "dirs",
+ "jni 0.21.1",
  "parking_lot",
  "pb-mapper",
  "pb-mapper-auth",

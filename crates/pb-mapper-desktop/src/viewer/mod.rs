@@ -339,6 +339,20 @@ impl Viewer {
         .await
     }
 
+    /// A session over a stream whose other end plays the host from
+    /// `Authenticate` on: for embedders' tests, which have no host to reach.
+    #[doc(hidden)]
+    pub async fn over_stream_for_test<S>(
+        stream: S,
+        token: String,
+        config: ViewerConfig,
+    ) -> std::result::Result<Self, ConnectError>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
+        Self::start(stream, token, config, None).await
+    }
+
     /// Authenticate over an established stream, then run the session on it.
     pub(crate) async fn start<S>(
         mut stream: S,

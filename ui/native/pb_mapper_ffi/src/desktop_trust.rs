@@ -1,6 +1,7 @@
 //! One explicitly remembered host grant per application profile. Both the TLS
 //! private key and bearer capability use current-user Windows DPAPI; relay
-//! credentials are never copied into this store.
+//! credentials are never copied into this store. The remembered computers
+//! (`desktop_computers.rs`) share its DPAPI call and its private file writes.
 use super::err;
 use crate::error::CtlError;
 use pb_mapper::desktop::HostIdentity;
@@ -9,6 +10,12 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 const LIMIT: u64 = 64 * 1024;
+/// Every stored trust file was protected with these; they never change.
+const ENTROPY: &[u8] = b"pb-mapper/desktop-trust/v1";
+const DESCRIPTION: &str = "pb-mapper desktop trust";
+/// The most DPAPI may hand back; each caller also bounds its own data.
+#[cfg(windows)]
+const PROTECTED_LIMIT: u64 = 1024 * 1024;
 pub(super) fn supported() -> bool {
     cfg!(windows)
 }
@@ -46,6 +53,7 @@ impl Saved {
         scope: &Scope,
         service: String,
         display_id: u32,
+        allow_control: bool,
         previous: Option<&Self>,
         live_identity: Option<&HostIdentity>,
     ) -> Result<Self, CtlError> {
@@ -72,7 +80,7 @@ impl Saved {
             Settings {
                 service,
                 display_id,
-                allow_control: true,
+                allow_control,
                 relay_only: false,
                 privileged: true,
                 auto_start: true,
@@ -101,11 +109,13 @@ impl Saved {
     pub fn identity(&self) -> Result<HostIdentity, CtlError> {
         HostIdentity::decode_secret(&self.identity).map_err(err)
     }
-    pub fn metadata(&self) -> Value {
+    /// `invitation` is the saved identity's own, offered only for the
+    /// current relay and namespace.
+    pub fn metadata(&self, invitation: Option<String>) -> Value {
         json!({"relay": self.relay, "service": self.settings.service, "display_id": self.settings.display_id,
             "allow_control": self.settings.allow_control, "relay_only": self.settings.relay_only,
             "privileged": self.settings.privileged, "auto_start": self.settings.auto_start,
-            "background": self.settings.background})
+            "background": self.settings.background, "invitation": invitation})
     }
 }
 fn path(directory: &Path) -> PathBuf {
@@ -122,7 +132,9 @@ pub(super) fn load(directory: &Path) -> Result<Option<Saved>, CtlError> {
         return Err(err("stored desktop trust exceeds its size limit"));
     }
     let cipher = std::fs::read(path).map_err(err)?;
-    let plain = protect(&cipher, false)?;
+    let plain = protect(&cipher, false, ENTROPY, DESCRIPTION).map_err(|_| {
+        err("Windows could not unlock desktop trust for this user; revoke it and authorize a new invitation")
+    })?;
     if plain.len() as u64 > LIMIT {
         return Err(err("stored desktop trust exceeds its size limit"));
     }
@@ -143,7 +155,17 @@ pub(super) fn save(directory: &Path, saved: &Saved) -> Result<(), CtlError> {
     if plain.len() as u64 > LIMIT {
         return Err(err("desktop trust exceeds its size limit"));
     }
-    let cipher = protect(&plain, true)?;
+    let cipher = protect(&plain, true, ENTROPY, DESCRIPTION)?;
+    write_private(&path(directory), &cipher)
+}
+/// Replaces `path` with `bytes` all at once: a fresh temporary file beside
+/// it, synced, then renamed over it and the directory synced, so a crash
+/// leaves the old file or the new one, never a torn one.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), CtlError> {
+    use pb_mapper_core::durable_file::{replace_file, sync_parent_directory};
+    let (Some(directory), Some(stem)) = (path.parent(), path.file_stem()) else {
+        return Err(err("invalid private file path"));
+    };
     std::fs::create_dir_all(directory).map_err(err)?;
     let mut nonce = [0u8; 16];
     use ring::rand::SecureRandom;
@@ -151,7 +173,7 @@ pub(super) fn save(directory: &Path, saved: &Saved) -> Result<(), CtlError> {
         .fill(&mut nonce)
         .map_err(err)?;
     let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
-    let temporary = directory.join(format!("desktop-trust-{nonce}.tmp"));
+    let temporary = directory.join(format!("{}-{nonce}.tmp", stem.to_string_lossy()));
     let result = (|| {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
@@ -159,10 +181,11 @@ pub(super) fn save(directory: &Path, saved: &Saved) -> Result<(), CtlError> {
             .create_new(true)
             .open(&temporary)
             .map_err(err)?;
-        file.write_all(&cipher).map_err(err)?;
+        file.write_all(bytes).map_err(err)?;
         file.sync_all().map_err(err)?;
         drop(file);
-        replace(&temporary, &path(directory))
+        replace_file(&temporary, path).map_err(err)?;
+        sync_parent_directory(path).map_err(err)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
@@ -176,34 +199,59 @@ pub(super) fn revoke(directory: &Path) -> Result<(), CtlError> {
         Err(e) => Err(err(e)),
     }
 }
+/// Current-user DPAPI. `entropy` and `description` belong to the data: the
+/// same entropy must be given to decrypt it again.
 #[cfg(windows)]
-fn protect(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, CtlError> {
+pub(crate) fn protect(
+    bytes: &[u8],
+    encrypt: bool,
+    entropy: &[u8],
+    description: &str,
+) -> Result<Vec<u8>, CtlError> {
     use windows::{
         Win32::{
             Foundation::{HLOCAL, LocalFree},
             Security::Cryptography::*,
         },
-        core::w,
+        core::PCWSTR,
     };
+    let too_large = || err("data exceeds the Windows protection limit");
     let input = CRYPT_INTEGER_BLOB {
-        cbData: bytes.len() as u32,
+        cbData: u32::try_from(bytes.len()).map_err(|_| too_large())?,
         pbData: bytes.as_ptr().cast_mut(),
     };
-    let entropy = b"pb-mapper/desktop-trust/v1";
     let entropy = CRYPT_INTEGER_BLOB {
-        cbData: entropy.len() as u32,
+        cbData: u32::try_from(entropy.len()).map_err(|_| too_large())?,
         pbData: entropy.as_ptr().cast_mut(),
     };
+    let description: Vec<u16> = description.encode_utf16().chain(Some(0)).collect();
     let mut output = CRYPT_INTEGER_BLOB::default();
     unsafe {
         if encrypt {
-            CryptProtectData(&input, w!("pb-mapper desktop trust"), Some(&entropy), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+            CryptProtectData(
+                &input,
+                PCWSTR(description.as_ptr()),
+                Some(&entropy),
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
         } else {
-            CryptUnprotectData(&input, None, Some(&entropy), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+            CryptUnprotectData(
+                &input,
+                None,
+                Some(&entropy),
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
         }
-    }.map_err(|_| err("Windows could not unlock desktop trust for this user; revoke it and authorize a new invitation"))?;
-    let result = if output.cbData as u64 > LIMIT || output.pbData.is_null() {
-        Err(err("Windows returned invalid desktop trust data"))
+    }
+    .map_err(|_| err("Windows could not protect or unlock this data for the current user"))?;
+    let result = if output.cbData as u64 > PROTECTED_LIMIT || output.pbData.is_null() {
+        Err(err("Windows returned invalid protected data"))
     } else {
         Ok(unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec())
     };
@@ -213,33 +261,8 @@ fn protect(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, CtlError> {
     result
 }
 #[cfg(not(windows))]
-fn protect(_: &[u8], _: bool) -> Result<Vec<u8>, CtlError> {
-    Err(err(
-        "remembered desktop hosting currently requires Windows DPAPI",
-    ))
-}
-#[cfg(windows)]
-fn replace(source: &Path, destination: &Path) -> Result<(), CtlError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::{Win32::Storage::FileSystem::*, core::PCWSTR};
-    let wide = |path: &Path| {
-        path.as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>()
-    };
-    unsafe {
-        MoveFileExW(
-            PCWSTR(wide(source).as_ptr()),
-            PCWSTR(wide(destination).as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(err)
-}
-#[cfg(not(windows))]
-fn replace(_: &Path, _: &Path) -> Result<(), CtlError> {
-    Err(err("remembered desktop hosting currently requires Windows"))
+pub(crate) fn protect(_: &[u8], _: bool, _: &[u8], _: &str) -> Result<Vec<u8>, CtlError> {
+    Err(err("Windows DPAPI is not available on this platform"))
 }
 
 #[cfg(all(test, windows))]
@@ -303,19 +326,51 @@ mod tests {
             namespace: 1,
         };
         let identity = HostIdentity::generate().unwrap();
-        let pending =
-            Saved::for_background(&scope, "desktop:handoff".into(), 1, None, Some(&identity))
-                .unwrap();
+        let pending = Saved::for_background(
+            &scope,
+            "desktop:handoff".into(),
+            1,
+            true,
+            None,
+            Some(&identity),
+        )
+        .unwrap();
         // The same DPAPI representation used between portable and installed
         // processes carries the identity, owner scope and the one pending action.
-        let encrypted = protect(&serde_json::to_vec(&pending).unwrap(), true).unwrap();
-        let restored: Saved = serde_json::from_slice(&protect(&encrypted, false).unwrap()).unwrap();
+        let encrypted = protect(
+            &serde_json::to_vec(&pending).unwrap(),
+            true,
+            ENTROPY,
+            DESCRIPTION,
+        )
+        .unwrap();
+        // Data protected for another purpose never decrypts as trust.
+        assert!(
+            protect(
+                &encrypted,
+                false,
+                b"pb-mapper remembered computers",
+                DESCRIPTION
+            )
+            .is_err()
+        );
+        let restored: Saved =
+            serde_json::from_slice(&protect(&encrypted, false, ENTROPY, DESCRIPTION).unwrap())
+                .unwrap();
         assert!(restored.settings.background && restored.settings.auto_start);
         assert!(restored.settings.allow_control && restored.settings.privileged);
         assert!(!restored.settings.relay_only);
-        let resumed =
-            Saved::for_background(&scope, "desktop:handoff".into(), 2, Some(&restored), None)
-                .unwrap();
+        // Enabling again view-only keeps the identity and records the choice.
+        let resumed = Saved::for_background(
+            &scope,
+            "desktop:handoff".into(),
+            2,
+            false,
+            Some(&restored),
+            None,
+        )
+        .unwrap();
+        assert!(!resumed.settings.allow_control);
         assert_eq!(
             resumed.identity().unwrap().encode_secret().unwrap(),
             identity.encode_secret().unwrap()
@@ -327,6 +382,7 @@ mod tests {
             },
             "desktop:handoff".into(),
             1,
+            true,
             Some(&restored),
             None,
         )
