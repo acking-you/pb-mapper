@@ -3,6 +3,9 @@
 //! --relay-config PATH uses a deployed relay with a new expiring test scope;
 //! --tcp overrides its carrier and --consumer-server HOST:PORT selects an
 //! already-configured consumer route (for example an existing SSH forward).
+//! Through a v2 viewer that presents what it receives, it checks Unicode text,
+//! a click, a drag-start press on that spot that Windows must not merge into a
+//! double click, and the release of that press when the viewer disconnects.
 //! Run: cargo run -p pb-mapper-desktop --example input_acceptance -- --run-owned-window
 //! Do not interact with the desktop during the short run. Foreground/geometry
 //! changes permanently abort new input. Cleanup still releases held input.
@@ -23,8 +26,9 @@ fn main() {
 mod windows_test {
     use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
     use pb_mapper_desktop::{
-        Backend, Button, DesktopContext, Display, Host, HostOptions, Input, Pull, QualityPreset,
-        Result, VideoLimits, Viewer, ViewerConfig,
+        Backend, Button, CursorPosition, DesktopContext, DesktopView, Display, DoubleClickGuard,
+        EncodedFrame, Host, HostOptions, Input, Pull, QualityPreset, Result, VideoCodec,
+        VideoLimits, VideoRate, Viewer, ViewerConfig,
     };
     use pb_mapper_testkit::Relay;
     use std::{
@@ -45,6 +49,10 @@ mod windows_test {
         core::w,
     };
     const TEXT: &str = "远控验证 ✓ 🙂";
+    /// The host holds a drag-start press until the double-click time after
+    /// the last click plus 20 ms, but never 600 ms past its arrival
+    /// (`DRAG_GUARD_*` in the worker): it always waits out up to this much.
+    const DRAG_HOLD_COVERS_MS: u32 = 580;
     #[derive(serde::Deserialize)]
     struct Configuration {
         server_address: String,
@@ -84,6 +92,11 @@ mod windows_test {
         rect: parking_lot::Mutex<RECT>,
         downs: AtomicU32,
         ups: AtomicU32,
+        /// Presses Windows merged with the previous click into a double click.
+        double_clicks: AtomicU32,
+        /// The message time of the last press, and the gap to the one before.
+        last_down_ms: AtomicU32,
+        press_gap_ms: AtomicU32,
         held: AtomicBool,
         applied: AtomicU32,
         capture_ms: AtomicU32,
@@ -199,16 +212,29 @@ mod windows_test {
             String::from_utf16_lossy(&text[..count.max(0) as usize])
         }
     }
+    /// The product's backend behind the window guard. Every `Backend` method
+    /// is forwarded, because a default left in place would quietly change the
+    /// session: no encoder drain, no cursor, no drag-start hold.
     struct Guarded {
         inner: Box<dyn Backend>,
         state: Arc<State>,
     }
+    impl Guarded {
+        /// One capture-side call between two guard checks, timed for the
+        /// diagnostics.
+        fn timed<T>(&mut self, call: impl FnOnce(&mut dyn Backend) -> Result<T>) -> Result<T> {
+            self.state.check()?;
+            let started = Instant::now();
+            let value = call(self.inner.as_mut())?;
+            self.state
+                .capture_ms
+                .store(started.elapsed().as_millis() as u32, Ordering::Release);
+            self.state.check()?;
+            Ok(value)
+        }
+    }
     impl Backend for Guarded {
-        fn configure_video(
-            &mut self,
-            limits: pb_mapper_desktop::VideoLimits,
-            nominal_fps: u32,
-        ) -> Result<()> {
+        fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
             self.inner.configure_video(limits, nominal_fps)
         }
         fn display(&mut self) -> Result<Display> {
@@ -220,30 +246,29 @@ mod windows_test {
             self.inner.context()
         }
         fn capture(&mut self) -> Result<Vec<u8>> {
-            self.state.check()?;
-            let started = Instant::now();
-            let image = self.inner.capture()?;
-            self.state
-                .capture_ms
-                .store(started.elapsed().as_millis() as u32, Ordering::Release);
-            self.state.check()?;
-            Ok(image)
+            self.timed(|inner| inner.capture())
+        }
+        fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<CursorPosition>> {
+            self.inner.cursor(expected)
         }
         fn capture_video(
             &mut self,
             expected: &DesktopContext,
-            codec: pb_mapper_desktop::VideoCodec,
+            codec: VideoCodec,
             keyframe: bool,
-            rate: pb_mapper_desktop::VideoRate,
-        ) -> Result<Option<pb_mapper_desktop::EncodedFrame>> {
-            self.state.check()?;
-            let started = Instant::now();
-            let frame = self.inner.capture_video(expected, codec, keyframe, rate)?;
-            self.state
-                .capture_ms
-                .store(started.elapsed().as_millis() as u32, Ordering::Release);
-            self.state.check()?;
-            Ok(frame)
+            rate: VideoRate,
+        ) -> Result<Option<EncodedFrame>> {
+            self.timed(|inner| inner.capture_video(expected, codec, keyframe, rate))
+        }
+        fn drain_video(
+            &mut self,
+            expected: &DesktopContext,
+            wait: Duration,
+        ) -> Result<Option<EncodedFrame>> {
+            self.timed(|inner| inner.drain_video(expected, wait))
+        }
+        fn pending_video(&self) -> usize {
+            self.inner.pending_video()
         }
         fn input(&mut self, input: &Input) -> Result<()> {
             let context = self.context()?;
@@ -257,8 +282,14 @@ mod windows_test {
             self.state.applied.fetch_add(1, Ordering::Release);
             Ok(())
         }
+        fn presented(&mut self, expected: &DesktopContext) -> Result<()> {
+            self.inner.presented(expected)
+        }
         fn release(&mut self) {
             self.inner.release();
+        }
+        fn double_click_guard(&mut self) -> Option<DoubleClickGuard> {
+            self.inner.double_click_guard()
         }
     }
     struct Fixture {
@@ -324,8 +355,19 @@ mod windows_test {
                             let _ = SetFocus(Some(state.edit()));
                         }
                     }
-                    WM_LBUTTONDOWN => {
-                        state.downs.fetch_add(1, Ordering::Release);
+                    WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+                        // The class has CS_DBLCLKS: a press Windows merges
+                        // with the click before it arrives as a double click.
+                        if message == WM_LBUTTONDBLCLK {
+                            state.double_clicks.fetch_add(1, Ordering::Release);
+                        }
+                        let at = GetMessageTime() as u32;
+                        let last = state.last_down_ms.swap(at, Ordering::AcqRel);
+                        if state.downs.fetch_add(1, Ordering::AcqRel) > 0 {
+                            state
+                                .press_gap_ms
+                                .store(at.wrapping_sub(last), Ordering::Release);
+                        }
                         state.held.store(true, Ordering::Release);
                         return LRESULT(0);
                     }
@@ -364,6 +406,7 @@ mod windows_test {
         unsafe {
             let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let class = WNDCLASSW {
+                style: CS_DBLCLKS,
                 lpfnWndProc: Some(window_proc),
                 lpszClassName: w!("PbMapperOwnedInputAcceptance"),
                 hbrBackground: HBRUSH(GetStockObject(WHITE_BRUSH).0),
@@ -456,28 +499,136 @@ mod windows_test {
         }
         state.check()
     }
-    async fn send(viewer: &Viewer, state: &State, input: Input) -> Result<()> {
+    /// As the app's input core sends: with the generation of the view it
+    /// drew. The viewer refuses it unless that generation's newest frame was
+    /// presented recently and control is granted, and stamps that frame and
+    /// the sequence itself.
+    fn send(viewer: &Viewer, state: &State, input: Input) -> Result<()> {
         state.check()?;
-        // The viewer stamps the presented frame and the sequence.
         viewer
-            .input(viewer.status().generation, &[input])
+            .input(viewer.view().generation, &[input])
             .map_err(failure)
     }
-    /// The native renderer's part: present every unit at once, until the
-    /// session's video ends.
-    fn present(viewer: &Viewer) -> Result<()> {
+    /// The view's input gate: control, and a fresh presented frame.
+    fn live(viewer: &Viewer) -> bool {
+        const LIVE: u8 = DesktopView::FLAG_CONTROLLING | DesktopView::FLAG_FRESH;
+        viewer.view().flags & LIVE == LIVE
+    }
+    /// The native renderer's part: present each unit as it arrives, like a
+    /// decoder that never falls behind, until the session's video ends. Only
+    /// these presentations authorise input.
+    fn present(viewer: &Viewer) -> Result<JoinHandle<()>> {
         let consumer = viewer.video_sink().attach().map_err(failure)?;
-        std::thread::spawn(move || {
+        Ok(std::thread::spawn(move || {
+            let mut capacity = 1 << 20;
             loop {
-                match consumer.next(Duration::from_millis(100), 4 << 20) {
+                match consumer.next(Duration::from_millis(100), capacity) {
                     Pull::Unit(unit) => {
                         consumer.presented(unit.generation, unit.frame_id);
                     }
+                    Pull::NeedCapacity(needed) => capacity = needed,
+                    Pull::Timeout | Pull::Paused => {}
                     Pull::Closed => break,
-                    _ => {}
                 }
             }
-        });
+        }))
+    }
+    /// Text, a click and a drag-start press on the owned window, then the
+    /// release of that press when the viewer disconnects.
+    async fn exercise(
+        viewer: &Viewer,
+        host: &Host,
+        state: &State,
+        display: &Display,
+        topology: &str,
+    ) -> Result<()> {
+        wait_for(state, "first presented frame", || {
+            viewer.view().presented_frame_id != 0
+        })
+        .await?;
+        viewer.request_control(true)?;
+        // A grant starts a new generation: input waits for its first
+        // presented frame.
+        wait_for(state, "control with a fresh presented frame", || {
+            live(viewer)
+        })
+        .await?;
+        send(viewer, state, Input::Text { text: TEXT.into() })?;
+        if let Err(e) = wait_for(state, "Unicode text in owned EDIT", || state.text() == TEXT).await
+        {
+            eprintln!(
+                "native input diagnostics: last_capture_ms={} viewer_state={:?} host_state={:?}",
+                state.capture_ms.load(Ordering::Acquire),
+                viewer.status(),
+                host.status()
+            );
+            return Err(e);
+        }
+        let point = state.client_point(320, 220)?;
+        if point.x < display.x
+            || point.y < display.y
+            || point.x >= display.x + display.width as i32
+            || point.y >= display.y + display.height as i32
+        {
+            return Err(failure("owned target outside selected physical monitor"));
+        }
+        let applied = state.applied.load(Ordering::Acquire);
+        let (x, y) = ((point.x - display.x) as u32, (point.y - display.y) as u32);
+        send(viewer, state, Input::Move { x, y })?;
+        wait_for(state, "native pointer move", || {
+            state.applied.load(Ordering::Acquire) > applied
+        })
+        .await?;
+        let left = |down, drag_start| Input::Button {
+            button: Button::Left,
+            down,
+            drag_start,
+        };
+        send(viewer, state, left(true, false))?;
+        wait_for(state, "native button down", || {
+            state.downs.load(Ordering::Acquire) == 1 && state.held.load(Ordering::Acquire)
+        })
+        .await?;
+        send(viewer, state, left(false, false))?;
+        wait_for(state, "native button up", || {
+            state.ups.load(Ordering::Acquire) == 1 && !state.held.load(Ordering::Acquire)
+        })
+        .await?;
+        // A drag starting where the click just was: the host holds the press
+        // past the double-click time, so Windows sees a new press rather than
+        // a double click.
+        send(viewer, state, left(true, true))?;
+        wait_for(state, "held drag-start press before disconnect", || {
+            state.downs.load(Ordering::Acquire) == 2 && state.held.load(Ordering::Acquire)
+        })
+        .await?;
+        let double_click_ms = unsafe { GetDoubleClickTime() };
+        let (double_clicks, press_gap_ms) = (
+            state.double_clicks.load(Ordering::Acquire),
+            state.press_gap_ms.load(Ordering::Acquire),
+        );
+        if double_clicks > 0 && double_click_ms <= DRAG_HOLD_COVERS_MS {
+            return Err(failure(format!(
+                "the drag-start press merged into a double click: press_gap_ms={press_gap_ms} double_click_ms={double_click_ms}"
+            )));
+        }
+        let at = Instant::now();
+        viewer.stop().await?;
+        wait_for(state, "disconnect release", || {
+            state.ups.load(Ordering::Acquire) == 2 && !state.held.load(Ordering::Acquire)
+        })
+        .await?;
+        if unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) } < 0 {
+            return Err(failure("native left button remains held after disconnect"));
+        }
+        println!(
+            "native_input_acceptance path={topology} unicode_verified=true button_down={} button_up={} drag_press_gap_ms={press_gap_ms} double_click_ms={double_click_ms} double_clicks={double_clicks} disconnect_release_ms={:.3} physical_display={}x{}",
+            state.downs.load(Ordering::Acquire),
+            state.ups.load(Ordering::Acquire),
+            at.elapsed().as_secs_f64() * 1000.0,
+            display.width,
+            display.height
+        );
         Ok(())
     }
     pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -496,74 +647,145 @@ mod windows_test {
             .build()?;
         runtime.block_on(async {
             let args: Vec<_> = std::env::args().collect();
-            let value = |name| args.windows(2).find(|pair| pair[0] == name).map(|pair| pair[1].as_str());
+            let value = |name| {
+                args.windows(2)
+                    .find(|pair| pair[0] == name)
+                    .map(|pair| pair[1].as_str())
+            };
             for option in ["--relay-config", "--consumer-server"] {
                 if args.iter().any(|arg| arg == option) && value(option).is_none() {
                     return Err(failure(format!("{option} requires a value")));
                 }
             }
-            let local_relay = if value("--relay-config").is_none() { Some(Relay::start("desktop-owned-native-input").await) } else { None };
+            let local_relay = if value("--relay-config").is_none() {
+                Some(Relay::start("desktop-owned-native-input").await)
+            } else {
+                None
+            };
             let (server, transport, admin_client) = if let Some(relay) = &local_relay {
                 let server = relay.addr().to_string();
-                let client = Client::from_credential(server.clone(), pb_mapper_testkit::admin_credential(), true, None);
+                let client = Client::from_credential(
+                    server.clone(),
+                    pb_mapper_testkit::admin_credential(),
+                    true,
+                    None,
+                );
                 (server, RelayTransport::Tcp, client)
             } else {
-                let config = serde_json::from_slice::<Configuration>(&std::fs::read(value("--relay-config").ok_or_else(|| failure("relay config required"))?)?).map_err(failure)?;
-                let transport = if args.iter().any(|arg| arg == "--tcp") { RelayTransport::Tcp } else { config.relay_transport };
-                let client = Client::new(ClientConfig { server: config.server_address.clone(), credential: config.msg_header_key, keep_alive: true, namespace: None }).map_err(failure)?.with_relay_transport(transport).map_err(failure)?;
+                let config = serde_json::from_slice::<Configuration>(&std::fs::read(
+                    value("--relay-config").ok_or_else(|| failure("relay config required"))?,
+                )?)
+                .map_err(failure)?;
+                let transport = if args.iter().any(|arg| arg == "--tcp") {
+                    RelayTransport::Tcp
+                } else {
+                    config.relay_transport
+                };
+                let client = Client::new(ClientConfig {
+                    server: config.server_address.clone(),
+                    credential: config.msg_header_key,
+                    keep_alive: true,
+                    namespace: None,
+                })
+                .map_err(failure)?
+                .with_relay_transport(transport)
+                .map_err(failure)?;
                 (config.server_address, transport, client)
             };
             let admin = admin_client.admin().map_err(failure)?;
-            let issued = admin.issue_key(Duration::from_secs(120), Some("owned-native-input".into())).await.map_err(failure)?;
+            let issued = admin
+                .issue_key(Duration::from_secs(120), Some("owned-native-input".into()))
+                .await
+                .map_err(failure)?;
             let result = async {
-            let client = Client::new(ClientConfig { server: server.clone(), credential: issued.credential.clone(), keep_alive: true, namespace: None }).map_err(failure)?.with_relay_transport(transport).map_err(failure)?;
-            let consumer = Client::new(ClientConfig { server: value("--consumer-server").unwrap_or(&server).to_string(), credential: issued.credential.clone(), keep_alive: true, namespace: None }).map_err(failure)?.with_relay_transport(transport).map_err(failure)?;
-            let topology = if value("--consumer-server").is_some() { "configured_separate_relay_entries" } else if local_relay.is_some() { "local_tcp_relay" } else { "deployed_relay_same_machine_endpoints" };
-            let backend_state = state.clone();
-            let id = display.id;
-            let host = Host::start_with_backend(&client, HostOptions { service: "desktop:owned-input-acceptance".into(), display_id: id, allow_control: true, allow_direct: false },
-                Arc::new(move || Ok(Box::new(Guarded { inner: pb_mapper_desktop::native_backend(id)?, state: backend_state.clone() })))).await?;
-            // Use the product's native GPU path with a small input-acceptance
-            // workload. Debug JPEG resizing can block the input worker for a
-            // second per frame and deliberately trips the stale-input guard.
-            let connected = Viewer::connect(&consumer, host.invitation(), ConnectOptions { path: PathPolicy::RelayOnly, ..Default::default() }, ViewerConfig { codecs: vec![pb_mapper_desktop::VideoCodec::H264], limits: VideoLimits { max_width: 1280, max_height: 720, max_fps: 30 }, quality: QualityPreset::Balanced, progress: None }).await;
-            let viewer = match connected {
-                Ok(viewer) => viewer,
-                Err(error) => { let _ = host.stop().await; return Err(failure(error)); }
-            };
-            let result = async {
-                present(&viewer)?;
-                wait_for(&state, "first native frame", || viewer.status().presented.is_some()).await?;
-                viewer.request_control(true)?;
-                wait_for(&state, "authorized current control frame", || { let status = viewer.status(); status.controlling && status.fresh }).await?;
-                send(&viewer, &state, Input::Text { text: TEXT.into() }).await?;
-                if let Err(e) = wait_for(&state, "Unicode text in owned EDIT", || state.text() == TEXT).await {
-                    eprintln!("native input diagnostics: last_capture_ms={} viewer_state={:?} host_state={:?}", state.capture_ms.load(Ordering::Acquire), viewer.status(), host.status());
-                    return Err(e);
+                let client = Client::new(ClientConfig {
+                    server: server.clone(),
+                    credential: issued.credential.clone(),
+                    keep_alive: true,
+                    namespace: None,
+                })
+                .map_err(failure)?
+                .with_relay_transport(transport)
+                .map_err(failure)?;
+                let consumer = Client::new(ClientConfig {
+                    server: value("--consumer-server").unwrap_or(&server).to_string(),
+                    credential: issued.credential.clone(),
+                    keep_alive: true,
+                    namespace: None,
+                })
+                .map_err(failure)?
+                .with_relay_transport(transport)
+                .map_err(failure)?;
+                let topology = if value("--consumer-server").is_some() {
+                    "configured_separate_relay_entries"
+                } else if local_relay.is_some() {
+                    "local_tcp_relay"
+                } else {
+                    "deployed_relay_same_machine_endpoints"
+                };
+                let backend_state = state.clone();
+                let id = display.id;
+                let host = Host::start_with_backend(
+                    &client,
+                    HostOptions {
+                        service: "desktop:owned-input-acceptance".into(),
+                        display_id: id,
+                        allow_control: true,
+                        allow_direct: false,
+                    },
+                    Arc::new(move || {
+                        Ok(Box::new(Guarded {
+                            inner: pb_mapper_desktop::native_backend(id)?,
+                            state: backend_state.clone(),
+                        }))
+                    }),
+                )
+                .await?;
+                // Use the product's native GPU path with a small input-acceptance
+                // workload. Debug JPEG resizing can hold the capture thread for a
+                // second per frame, and input waits behind it.
+                let config = ViewerConfig {
+                    codecs: vec![VideoCodec::H264],
+                    limits: VideoLimits {
+                        max_width: 1280,
+                        max_height: 720,
+                        max_fps: 30,
+                    },
+                    quality: QualityPreset::Balanced,
+                    progress: None,
+                };
+                let connected = Viewer::connect(
+                    &consumer,
+                    host.invitation(),
+                    ConnectOptions {
+                        path: PathPolicy::RelayOnly,
+                        ..Default::default()
+                    },
+                    config,
+                )
+                .await;
+                let viewer = match connected {
+                    Ok(viewer) => viewer,
+                    Err(error) => {
+                        let _ = host.stop().await;
+                        return Err(failure(error));
+                    }
+                };
+                let presenter = present(&viewer);
+                let result = match &presenter {
+                    Ok(_) => exercise(&viewer, &host, &state, &display, topology).await,
+                    Err(error) => Err(failure(error)),
+                };
+                let _ = viewer.stop().await;
+                // The stop closed the video sink, which ends the presenting thread.
+                if let Ok(presenter) = presenter {
+                    let _ = presenter.join();
                 }
-                let point = state.client_point(320, 220)?;
-                if point.x < display.x || point.y < display.y || point.x >= display.x + display.width as i32 || point.y >= display.y + display.height as i32 { return Err(failure("owned target outside selected physical monitor")); }
-                let applied = state.applied.load(Ordering::Acquire);
-                send(&viewer, &state, Input::Move { x: (point.x - display.x) as u32, y: (point.y - display.y) as u32 }).await?;
-                wait_for(&state, "native pointer move", || state.applied.load(Ordering::Acquire) > applied).await?;
-                send(&viewer, &state, Input::Button { button: Button::Left, down: true, drag_start: false }).await?;
-                wait_for(&state, "native button down", || state.downs.load(Ordering::Acquire) == 1 && state.held.load(Ordering::Acquire)).await?;
-                send(&viewer, &state, Input::Button { button: Button::Left, down: false, drag_start: false }).await?;
-                wait_for(&state, "native button up", || state.ups.load(Ordering::Acquire) == 1 && !state.held.load(Ordering::Acquire)).await?;
-                send(&viewer, &state, Input::Button { button: Button::Left, down: true, drag_start: false }).await?;
-                wait_for(&state, "held button before disconnect", || state.downs.load(Ordering::Acquire) == 2 && state.held.load(Ordering::Acquire)).await?;
-                let at = Instant::now();
-                viewer.stop().await?;
-                wait_for(&state, "disconnect release", || state.ups.load(Ordering::Acquire) == 2 && !state.held.load(Ordering::Acquire)).await?;
-                if unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON.0)) } < 0 { return Err(failure("native left button remains held after disconnect")); }
-                println!("native_input_acceptance path={topology} unicode_verified=true button_down={} button_up={} disconnect_release_ms={:.3} physical_display={}x{}", state.downs.load(Ordering::Acquire), state.ups.load(Ordering::Acquire), at.elapsed().as_secs_f64()*1000.0, display.width, display.height);
-                Ok::<_, std::io::Error>(())
-            }.await;
-            let _ = viewer.stop().await;
-            let stopped = host.stop().await;
-            result?;
-            stopped
-            }.await;
+                let stopped = host.stop().await;
+                result?;
+                stopped
+            }
+            .await;
             let revoked = admin.revoke_key(issued.key_id).await;
             result?;
             revoked.map(|_| ()).map_err(failure)
