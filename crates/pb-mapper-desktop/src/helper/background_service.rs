@@ -274,7 +274,7 @@ impl Supervisor {
                 self.persist_restriction(root).await?;
                 self.message.clear();
             }
-            Command::Revoke {} | Command::RevokeScope { .. } => {
+            Command::RevokeScope { .. } => {
                 self.enabled = false;
                 // Its viewer's access is withdrawn, so it does not reconnect.
                 self.deactivate_with(StopReason::Revoked).await;
@@ -754,9 +754,13 @@ mod tests {
         configured.credential = pb_mapper_testkit::TEST_ADMIN_KEY.into();
         let saved = Saved::prepare(configured, "owner-one", None, None).unwrap();
         let client = client(&saved.options).unwrap();
+        let revoke = Command::RevokeScope {
+            server: saved.options.server.clone(),
+            namespace: Some(namespace(&saved.options).unwrap()),
+        };
         for (command, heard) in [
             (Command::Stop {}, ViewerReason::HostStopped),
-            (Command::Revoke {}, ViewerReason::Revoked),
+            (revoke, ViewerReason::Revoked),
         ] {
             let host = Host::start_with_backend_and_identity(
                 &client,

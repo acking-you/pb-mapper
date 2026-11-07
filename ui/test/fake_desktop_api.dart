@@ -389,19 +389,14 @@ class FakeDesktopApi implements DesktopApiClient {
   @override
   Future<DesktopBackground> backgroundAction(String action) async {
     _log('background_action', {'action': action});
-    switch (action) {
-      case 'start':
-        _set(
-          background: () => _backgroundWith(
-            enabled: true,
-            autoStart: true,
-            host: DesktopHostStatus(controlAllowed: _background.allowControl),
-          ),
-        );
-      case 'stop':
-        await stopHost();
-      case 'revoke':
-        hostSnapshot = const DesktopHostSnapshot();
+    if (action == 'start') {
+      _set(
+        background: () => _backgroundWith(
+          enabled: true,
+          autoStart: true,
+          host: DesktopHostStatus(controlAllowed: _background.allowControl),
+        ),
+      );
     }
     return _background;
   }
