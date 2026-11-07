@@ -107,7 +107,9 @@ const double _inactiveAlpha = 0.36;
 /// [height] tall, the title bar on screen keeping [kCaptionButtonsWidth]
 /// clear at its end. Their hover fills run to both edges and the close red
 /// into the corner, which Windows rounds itself; a maximised window's close
-/// is where the pointer stops at the screen's corner.
+/// is where the pointer stops at the screen's corner. A menu that opens from
+/// a title bar goes in the root overlay, above them, as Windows draws its
+/// menus over its own (`MenuAnchor.useRootOverlay`).
 ///
 /// It owns the window state they show: maximised (the middle glyph),
 /// focused (idle glyphs go grey, as Windows' do) and full screen, where it

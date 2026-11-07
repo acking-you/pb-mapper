@@ -38,10 +38,13 @@ Future<void> _pump(
   double dpr = 1,
   bool needsSetup = false,
   bool reducedMotion = true,
+  bool viewed = false,
 }) async {
+  final api = FakePbMapperApi();
+  if (viewed) api.desktop.hostSnapshot = viewedHost(controlling: true);
   await pumpApp(
     tester,
-    FakePbMapperApi(),
+    api,
     page: AppPage.tunnels,
     needsSetup: needsSetup,
     size: size,
@@ -191,6 +194,23 @@ void main() {
       await settle(tester);
       expect(find.byType(AlertDialog), findsOneWidget);
       expect(_reaches(tester, tester.getCenter(_close), _close), isTrue);
+      await finish(tester);
+    });
+  });
+
+  testWidgets("the title bar's menu opens over the caption buttons", (
+    tester,
+  ) async {
+    await _onWindows(() async {
+      _maximized(tester, false);
+      // The narrowest window: the capsule is a dot, and its menu reaches
+      // under the caption buttons.
+      await _pump(tester, size: const Size(720, 560), viewed: true);
+      await tester.tap(find.byKey(const Key('sharing-indicator')));
+      await settle(tester);
+      final item = find.byKey(const Key('sharing-indicator-disconnect'));
+      final corner = tester.getRect(item).topRight.translate(-1, 1);
+      expect(_reaches(tester, corner, item), isTrue);
       await finish(tester);
     });
   });

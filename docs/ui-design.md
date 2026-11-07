@@ -344,10 +344,12 @@ the rail, 54 on a compact window, 36 over the viewer, Windows' 32 while
 loading and on the setup screen — so their glyphs sit on the title's row.
 They are one set for the app's whole life (`WindowControls`, drawn in
 `app.dart` above the navigator): a page switch neither moves nor fades them,
-and a dialog's barrier dims the rest of the title bar but never them. Each
-plate is a whole number of device pixels, so the hover fills reach both edges
-without a fringe at 125 % and 150 %; the close button's red runs into the
-corner, which Windows rounds itself, and a maximised window's close sits
+and a dialog's barrier dims the rest of the title bar but never them. A menu
+that opens from the title bar, the sharing capsule's on a narrow window,
+opens over them in the root overlay, as Windows' menus open over its own.
+Each plate is a whole number of device pixels, so the hover fills reach both
+edges without a fringe at 125 % and 150 %; the close button's red runs into
+the corner, which Windows rounds itself, and a maximised window's close sits
 where the pointer stops at the screen's corner. While the window is not the
 active one their glyphs dim, as Windows' do. The page's actions keep 16 px
 clear of them. Their glyphs are drawn, not icons: 10 px, a one-pixel stroke,
@@ -484,8 +486,8 @@ CPU and memory without starting tunnels or reading settings.
   corner and as tall as the bar on screen, on a sheet that reaches it,
   restored at 125 % and maximised; the top edge that resizes a restored
   window; the compact layout, the viewer and the setup screen; a dialog's
-  barrier leaving them uncovered and a page switch leaving them still;
-  macOS's inset sheet.
+  barrier leaving them uncovered, the capsule's menu opening over them, and
+  a page switch leaving them still; macOS's inset sheet.
 - Remote desktop, against `FakeDesktopApi` and an in-memory vault:
   `remote_page_test.dart` (the add flow never shows an invitation, enabling
   and stopping a share, the QR hiding), `sharing_test.dart` (the capsule and

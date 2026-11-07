@@ -111,19 +111,25 @@ merged code does:
   left side; the drag strip above the sheet goes with the inset. macOS and a
   wide tablet keep the inset sheet.
 - §4.6: on Windows and Linux the sheet is 8 px wider, 508 at the narrowest
-  rail window and 968 in the default one, so the room budget's title keeps
-  8 px more; the caption buttons sit over the bar's end padding. A dialog's
-  barrier covers the capsule and the title but never the caption buttons.
-  The fallback layer is now inside the builder's overlay; it still has no
-  tooltips or menus.
+  rail window and 968 in the default one, and the bar's end room is
+  `kCaptionButtonsWidth + 16` = 154 instead of 16 + 138 + 16 = 170, so the
+  room budget's title keeps 24 px more; the caption buttons sit over the
+  bar's end padding. A dialog's barrier covers the capsule and the title but
+  never the caption buttons. The dot's `MenuAnchor` sets
+  `useRootOverlay: true`, so its menu, which reaches under the caption
+  buttons on a narrow window, opens above them, as Windows draws its menus
+  over its own. The fallback layer is now inside the builder's overlay; it
+  still has no tooltips or menus.
 - §14.1 (T6): `T/title_bar_test.dart` — on Windows, `caption-close` flush
   in the window's corner and as tall as the bar within a device pixel,
   restored at 1.25 and maximised at 1.0, then compact, in the viewer and on
   the setup screen; the window's corner pixel closes a maximised window and
   resizes a restored one, which closes just below the band, where the bar
   still drags beside the buttons; with `confirmDestructive` open a click on
-  the close still reaches it; mid-way through a rail switch with motion on,
-  it is in the corner with no fading ancestor; macOS keeps the inset sheet.
+  the close still reaches it; at 720 × 560 while viewed, a click at the top
+  right of the capsule menu's Disconnect viewer reaches it; mid-way through a
+  rail switch with motion on, it is in the corner with no fading ancestor;
+  macOS keeps the inset sheet.
 
 Base: `design/ui-interaction.md` (the winner of both judgements). Grafts come
 from `design/ui-structure.md`. Every must-fix raised by both judges is

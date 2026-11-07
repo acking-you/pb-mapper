@@ -315,6 +315,10 @@ class _SharingIndicatorState extends State<SharingIndicator> {
     final l10n = context.l10n;
     final scheme = Theme.of(context).colorScheme;
     return MenuAnchor(
+      // Over the caption buttons, as Windows draws its menus over its own:
+      // they sit above the navigator's overlay, and on a narrow window the
+      // dot is near enough to them that its menu reaches under them.
+      useRootOverlay: true,
       menuChildren: [
         MenuItemButton(
           key: const Key('sharing-indicator-disconnect'),
