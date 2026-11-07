@@ -551,13 +551,15 @@ void main() {
       expect(paste, findsOneWidget);
 
       // The new invitation connects as that computer, by its id, and
-      // replaces its record at the first picture.
+      // replaces its record only at the first picture (D20): until then the
+      // record still names the old identity.
       await tester.tap(paste);
       await settle(tester);
       const invitation = 'pbd1.lab.NEW-TOKEN-0123';
       await connect(invitation);
       expect(api.desktop.argsOf('connect').last['invitation'], invitation);
       expect(remote.desktop.session.value.target?.computerId, id);
+      expect(vault.records.single.fingerprint, 'AB12-CD34-EF56-7890');
       await firstPicture();
       expect(vault.records.map((c) => (c.id, c.fingerprint)), [
         (id, 'FFFF-0000-FFFF-0000'),
