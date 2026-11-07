@@ -1,386 +1,158 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
+
 import 'fake_desktop_api.dart';
 
-class _RecoveryApi extends FakeDesktopApi {
-  final connections = <(String, bool)>[];
-  final controls = <bool>[];
-  final sources = <StreamController<DesktopFrame>>[];
-  final connectionEvents = StreamController<void>.broadcast(sync: true);
-  final disconnectEvents = StreamController<void>.broadcast(sync: true);
-  Completer<void>? connectGate, disconnectGate;
-  Object? nextFailure;
-  int keyframes = 0, serial = 0;
-
-  @override
-  Future<void> connect(String invitation, {required bool relayOnly}) async {
-    connections.add((invitation, relayOnly));
-    connectionEvents.add(null);
-    final current = ++serial;
-    final gate = connectGate;
-    connectGate = null;
-    await gate?.future;
-    if (current != serial) return;
-    if (nextFailure case final failure?) {
-      nextFailure = null;
-      throw failure;
-    }
-    sources.add(StreamController<DesktopFrame>(sync: true));
-    viewer = const DesktopStatus(state: 'connecting');
-  }
-
-  @override
-  Stream<DesktopFrame> frames() => sources.last.stream;
-
-  @override
-  Future<void> disconnect() async {
-    serial++;
-    viewer = null;
-    final gate = disconnectGate;
-    disconnectGate = null;
-    disconnectEvents.add(null);
-    await gate?.future;
-  }
-
-  @override
-  Future<void> control(bool enabled) async {
-    controls.add(enabled);
-    await super.control(enabled);
-  }
-
-  @override
-  Future<void> keyframe() async => keyframes++;
-
-  void emit({
-    bool controlling = false,
-    bool unavailable = false,
-    String message = '',
-  }) {
-    viewer = DesktopStatus(
-      state: unavailable ? 'capture_unavailable' : 'streaming',
-      controlling: controlling,
-      controlAllowed: true,
-      message: message,
-      generation: connections.length,
-      frameId: 1,
-    );
-    image = DesktopFrame(viewer!, Uint8List.fromList(unavailable ? [] : [1]));
-    sources.last.add(image!);
-  }
-
-  Future<void> close() async {
-    for (final source in sources) {
-      await source.close();
-    }
-    await connectionEvents.close();
-    await disconnectEvents.close();
-  }
-}
-
-Future<void> _until(DesktopStore store, bool Function() ready) async {
-  if (ready()) return;
-  final completed = Completer<void>();
-  void changed() {
-    if (!completed.isCompleted && ready()) completed.complete();
-  }
-
-  store.addListener(changed);
-  try {
-    await completed.future.timeout(const Duration(seconds: 5));
-  } finally {
-    store.removeListener(changed);
-  }
-}
-
-Future<void> _noConnectionFor(_RecoveryApi api, Duration duration) =>
-    expectLater(
-      api.connectionEvents.stream.timeout(duration).first,
-      throwsA(isA<TimeoutException>()),
-    );
-
 void main() {
-  test('host input failure does not automatically regain control', () async {
-    final api = _RecoveryApi();
-    final store = DesktopStore(api);
-    addTearDown(() async {
-      await store.disconnect();
-      store.dispose();
-      await api.close();
-    });
-    await store.connect('private invitation', false);
-    api.emit();
-    await _until(store, () => api.controls.contains(true));
-    api.emit(message: 'input_failed: Windows rejected remote input');
-    await _until(
-      store,
-      () => store.snapshot.viewer?.message.startsWith('input_failed:') == true,
-    );
-    await store.poll();
-    await store.poll();
-    expect(api.controls, [true]);
-    expect(store.controlling, isFalse);
-    await store.control(true);
-    api.emit(controlling: true);
-    await _until(store, () => store.controlling);
-    expect(api.controls, [true, true]);
-  });
-
-  test(
-    'invalid invitation returns to input without automatic retries',
-    () async {
-      final api = _RecoveryApi()
-        ..nextFailure = const DesktopCallException(
-          'INVALID_ARGUMENT',
-          'invalid desktop invitation',
-        );
-      final store = DesktopStore(api);
-      addTearDown(() async {
-        await store.disconnect();
-        store.dispose();
-        await api.close();
-      });
-      await store.connect('malformed invitation', false);
-      expect(store.connected, isFalse);
-      expect(store.error, isNotNull);
-      expect(store.reconnectAttempt, 0);
-      await _noConnectionFor(api, const Duration(milliseconds: 1100));
-      expect(api.connections.length, 1);
-      await store.connect('corrected invitation', false);
-      expect(store.connected, isTrue);
-      expect(api.connections.last.$1, 'corrected invitation');
-    },
-  );
-
-  test(
-    'a failed stream retries the same target and path, restores only fresh control, and manual stop cancels retries',
-    () async {
-      final api = _RecoveryApi();
-      var now = DateTime.utc(2026);
-      final store = DesktopStore(api, now: () => now);
-      addTearDown(() async {
-        await store.disconnect();
-        store.dispose();
-        await api.close();
-      });
-      await store.connect('private invitation', true);
-      await store.poll();
-      expect(api.controls, isEmpty);
-      api.emit();
-      await _until(store, () => store.fresh);
-      await store.poll();
-      expect(api.controls, [true]);
-      api.emit(controlling: true);
-      await _until(store, () => store.controlling);
-      expect(store.controlling, isTrue);
-      api.nextFailure = StateError('test transport unavailable');
-      api.sources.last.addError(StateError('connection reset'));
-      await _until(
-        store,
-        () => store.connectionPhase == DesktopConnectionPhase.retryWaiting,
-      );
-      expect(store.controlling, isFalse);
-      expect(store.retryIn, const Duration(seconds: 1));
-      await _until(store, () => store.reconnectAttempt == 2);
-      expect(api.connections.length, 2);
-      expect(store.retryIn, const Duration(seconds: 2));
-      await _until(
-        store,
-        () =>
-            api.connections.length == 3 &&
-            store.connectionPhase == DesktopConnectionPhase.recoveringVideo,
-      );
-      expect(api.connections, List.filled(3, ('private invitation', true)));
-      expect(api.controls.where((enabled) => enabled).length, 1);
-      api.emit();
-      await _until(
-        store,
-        () => api.controls.where((enabled) => enabled).length == 2,
-      );
-      expect(api.controls.where((enabled) => enabled).length, 2);
-      expect(
-        api.inputs,
-        isEmpty,
-        reason: 'recovery never replays old gestures',
-      );
-      now = now.add(const Duration(seconds: 3));
-      api.emit(controlling: true);
-      await _until(store, () => store.reconnectAttempt == 0);
-      api.sources.last.addError(StateError('connection reset'));
-      await _until(
-        store,
-        () => store.connectionPhase == DesktopConnectionPhase.retryWaiting,
-      );
-      final retryDeadline = store.retryIn + const Duration(milliseconds: 100);
-      final remainsStopped = _noConnectionFor(api, retryDeadline);
-      await store.disconnect();
-      await remainsStopped;
-      expect(api.connections.length, 3);
-      expect(store.connectionPhase, DesktopConnectionPhase.idle);
-    },
-  );
-
-  test('identity failure keeps the pin and stops automatic retries', () async {
-    final api = _RecoveryApi();
-    final store = DesktopStore(api);
-    addTearDown(() async {
-      await store.disconnect();
-      store.dispose();
-      await api.close();
-    });
-    await store.connect('pinned invitation', false);
-    api.sources.last.addError(StateError('desktop identity changed'));
-    await _until(
-      store,
-      () => store.connectionPhase == DesktopConnectionPhase.identityMismatch,
-    );
-    await _noConnectionFor(api, const Duration(milliseconds: 1100));
-    expect(api.connections, [('pinned invitation', false)]);
-    expect(store.controlling, isFalse);
-    await store.connect('deliberately replaced invitation', false);
-    expect(api.connections.last.$1, 'deliberately replaced invitation');
-    expect(
-      store.connectionPhase,
-      isNot(DesktopConnectionPhase.identityMismatch),
-    );
-  });
-
-  test(
-    'stalls request an IDR before reconnect, while desktop transitions and backgrounding do not churn connections',
-    () async {
-      final api = _RecoveryApi();
-      var now = DateTime.utc(2026);
-      final store = DesktopStore(api, now: () => now);
-      addTearDown(() async {
-        await store.disconnect();
-        store.dispose();
-        await api.close();
-      });
-      await store.connect('target', false);
-      now = now.add(const Duration(milliseconds: 750));
-      await store.poll();
-      expect(api.keyframes, 1);
-      api.emit(unavailable: true);
-      await _until(
-        store,
-        () => store.connectionPhase == DesktopConnectionPhase.waitingForDesktop,
-      );
-      now = now.add(const Duration(seconds: 6));
-      await store.poll();
-      expect(store.connectionPhase, DesktopConnectionPhase.waitingForDesktop);
-      expect(api.connections.length, 1);
-      expect(api.keyframes, 1);
-      api.emit();
-      await _until(store, () => store.fresh);
-      expect(store.connectionPhase, DesktopConnectionPhase.live);
-      store.setViewerForeground(false);
-      api.sources.last.addError(StateError('connection reset'));
-      await _until(store, () => store.error != null && !store.fresh);
-      now = now.add(const Duration(seconds: 20));
-      await _noConnectionFor(api, const Duration(milliseconds: 1100));
-      expect(api.connections.length, 1);
-      store.setViewerForeground(true);
-      await _until(
-        store,
-        () =>
-            api.connections.length == 2 &&
-            store.connectionPhase == DesktopConnectionPhase.recoveringVideo,
-      );
-      expect(api.connections.length, 2);
-      expect(api.controls, [false]);
-
-      // Foreground can change while a retry is disposing the previous session,
-      // before it actually starts the replacement network connection.
-      final cleanupEntered = api.disconnectEvents.stream.first;
-      final cleanupGate = Completer<void>();
-      api.disconnectGate = cleanupGate;
-      api.sources.last.addError(StateError('second connection reset'));
-      await cleanupEntered.timeout(const Duration(seconds: 5));
-      store.setViewerForeground(false);
-      final staysInBackground = _noConnectionFor(
-        api,
-        const Duration(milliseconds: 1100),
-      );
-      cleanupGate.complete();
-      await staysInBackground;
-      expect(api.connections.length, 2);
-      store.setViewerForeground(true);
-      await _until(
-        store,
-        () =>
-            api.connections.length == 3 &&
-            store.connectionPhase == DesktopConnectionPhase.recoveringVideo,
-      );
-      expect(api.connections.length, 3);
-      expect(api.controls.every((enabled) => !enabled), isTrue);
-    },
-  );
-
-  test(
-    'cancelled connection completion cannot replace a newer session',
-    () async {
-      final api = _RecoveryApi();
-      final now = DateTime.utc(2026);
-      final store = DesktopStore(api, now: () => now);
-      addTearDown(() async {
-        await store.disconnect();
-        store.dispose();
-        await api.close();
-      });
-      final gate = Completer<void>();
-      api.connectGate = gate;
-      final entered = api.connectionEvents.stream.first;
-      final first = store.connect('old target', false);
-      await entered;
-      await store.disconnect();
-      await store.connect('new target', false);
-      api.emit();
-      await _until(store, () => store.fresh);
-      final epoch = store.mediaEpoch;
-      gate.complete();
-      await first;
-      expect(store.fresh, isTrue);
-      expect(store.mediaEpoch, epoch);
-      expect(api.connections, [('old target', false), ('new target', false)]);
-    },
-  );
-
-  test('pointer motion coalesces without crossing click barriers', () async {
+  testWidgets('an invalid invitation ends where it stopped, without retries', (
+    tester,
+  ) async {
     final api = FakeDesktopApi();
     final store = DesktopStore(api);
-    const status = DesktopStatus(
-      state: 'streaming',
-      controlling: true,
-      generation: 1,
-      frameId: 1,
+    final viewer = store.demand(DesktopDemand.viewer);
+
+    // Rust had verified the path and was checking the identity.
+    api.failNext('connect', 'INVALID_INVITATION');
+    final gate = Completer<void>();
+    api.connectGate = gate;
+    final connecting = store.connect(
+      const DesktopTarget(invitation: 'malformed', name: 'Typo'),
     );
-    api.viewer = status;
-    api.image = DesktopFrame(status, Uint8List.fromList([1]));
-    await store.poll();
-    api.inputGate = Completer<void>();
-    final first = store.send(status, {'kind': 'move', 'x': 0});
-    await Future<void>.delayed(Duration.zero);
-    final work = [first];
-    for (var x = 1; x <= 1000; x++) {
-      work.add(store.send(status, {'kind': 'move', 'x': x}));
-    }
-    work.add(store.send(status, {'kind': 'button', 'down': true}));
-    work.add(store.send(status, {'kind': 'button', 'down': false}));
-    work.add(store.send(status, {'kind': 'move', 'x': 1001}));
-    api.inputGate!.complete();
-    await Future.wait(work);
-    expect(api.inputs, [
-      {'kind': 'move', 'x': 0},
-      {'kind': 'move', 'x': 1000},
-      {'kind': 'button', 'down': true},
-      {'kind': 'button', 'down': false},
-      {'kind': 'move', 'x': 1001},
-    ]);
-    expect(api.sequences, [1, 2, 3, 4, 5]);
-    expect(store.controlling, isTrue);
+    api.viewerStatusValue = const DesktopViewerStatus(stage: 'identity');
+    await tester.pump(const Duration(milliseconds: 500));
+    gate.complete();
+    await connecting;
+    var session = store.session.value;
+    expect(session.phase, DesktopPhase.ended);
+    expect(session.end, DesktopEndReason.invalidInvitation);
+    expect(session.setup, DesktopSetupStep.verifying);
+    expect(session.reconnectAttempt, 0);
+    await tester.pump(const Duration(seconds: 20));
+    expect(api.argsOf('connect'), hasLength(1));
+
+    await store.connect(
+      const DesktopTarget(invitation: 'corrected', name: 'Typo'),
+    );
+    api.viewerStatusValue = liveStatus();
+    await tester.pump(const Duration(milliseconds: 500));
+    session = store.session.value;
+    expect(session.phase, DesktopPhase.live);
+    expect(session.setup, isNull);
+    expect(api.argsOf('connect').last['invitation'], 'corrected');
+
+    viewer.dispose();
     store.dispose();
   });
+
+  testWidgets(
+    'a lost stream retries the same target, restores only fresh control, and disconnect cancels the retry',
+    (tester) async {
+      const target = DesktopTarget(
+        invitation: 'private invitation',
+        name: 'Office',
+        relayOnly: true,
+      );
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final viewer = store.demand(DesktopDemand.viewer);
+      List<Object?> controls() => [
+        for (final args in api.argsOf('control')) args['enabled'],
+      ];
+
+      // Control is wanted from the start, and asked for on a fresh picture.
+      await store.connect(target);
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(controls(), [true]);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.session.value.controlling, isTrue);
+
+      api.viewerStatusValue = stoppedStatus('transport');
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.session.value.controlling, isFalse);
+      expect(store.session.value.phase, DesktopPhase.reconnecting);
+      await tester.pump(const Duration(seconds: 1));
+      expect(api.argsOf('connect'), hasLength(2));
+      for (final args in api.argsOf('connect')) {
+        expect(args['invitation'], target.invitation);
+        expect(args['relay_only'], isTrue);
+      }
+
+      // Not until the reconnected picture is fresh, and nothing is replayed.
+      api.viewerStatusValue = liveStatus(fresh: false);
+      await tester.pump(const Duration(seconds: 2));
+      expect(controls(), [true]);
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(controls(), [true, true]);
+      expect(api.inputs, isEmpty);
+
+      // The host's input failed: control is not won back by itself.
+      api.viewerStatusValue = DesktopViewerStatus(
+        state: 'streaming',
+        reason: 'input_failed',
+        controlAllowed: true,
+        fresh: true,
+        generation: 1,
+        display: const DesktopDisplay(1, 'Display 1', 1920, 1080),
+        presentedFrameId: 1,
+        lastVideoAgeMs: 16,
+      );
+      await tester.pump(const Duration(seconds: 3));
+      expect(controls(), [true, true]);
+      expect(store.session.value.controlWanted, isFalse);
+
+      // A disconnect during the backoff cancels the retry.
+      api.viewerStatusValue = stoppedStatus('transport');
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.session.value.retryAt, isNotNull);
+      await store.disconnect();
+      await tester.pump(const Duration(seconds: 20));
+      expect(api.argsOf('connect'), hasLength(2));
+      expect(store.session.value.phase, DesktopPhase.idle);
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    'a cancelled connection completion cannot replace a newer session',
+    (tester) async {
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final viewer = store.demand(DesktopDemand.viewer);
+      final gate = Completer<void>();
+      api.connectGate = gate;
+      final first = store.connect(
+        const DesktopTarget(invitation: 'old target', name: 'Old'),
+      );
+      await tester.pump();
+      await store.disconnect();
+      await store.connect(
+        const DesktopTarget(invitation: 'new target', name: 'New'),
+      );
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      final geometry = store.geometry.value;
+      expect(store.session.value.fresh, isTrue);
+
+      gate.complete();
+      await first;
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.session.value.target?.invitation, 'new target');
+      expect(store.session.value.fresh, isTrue);
+      expect(store.geometry.value, geometry);
+      expect(
+        [for (final a in api.argsOf('connect')) a['invitation']],
+        ['old target', 'new target'],
+      );
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
 }

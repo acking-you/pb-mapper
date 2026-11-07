@@ -1,27 +1,52 @@
+import 'dart:async';
+import 'dart:ffi';
 import 'dart:typed_data';
-import 'dart:io';
-import 'dart:ui' as ui;
+
+import 'package:ffi/ffi.dart';
+
+import '../state/desktop_models.dart';
+import 'pb_mapper_ffi.dart';
 import 'pb_mapper_service.dart';
 
+export '../state/desktop_models.dart';
+
+/// A refused desktop call. [code] is the FFI `ErrorCode`, for example
+/// `HOST_BUSY`, `IDENTITY_CHANGED` or `NOT_FRESH`; never match [message].
 class DesktopCallException implements Exception {
-  const DesktopCallException(this.code, this.message);
+  const DesktopCallException(this.code, [this.message = '']);
   final String code, message;
   @override
-  String toString() => message;
+  String toString() => message.isEmpty ? code : message;
 }
 
-class DesktopDisplay {
-  const DesktopDisplay(this.id, this.name, this.width, this.height);
-  factory DesktopDisplay.fromJson(Map<String, dynamic> json) => DesktopDisplay(
-    json['id'] as int,
-    json['name'] as String,
-    json['width'] as int,
-    json['height'] as int,
+enum DesktopInvitationFormat { pbd1, jsonV1 }
+
+class DesktopHelper {
+  const DesktopHelper({
+    this.installed = false,
+    this.running = false,
+    this.authorized = false,
+    this.identityVerified = false,
+    this.protocol = 0,
+    this.updateRequired = false,
+    this.message = '',
+  });
+  factory DesktopHelper.fromJson(Map<String, dynamic> data) => DesktopHelper(
+    installed: data['installed'] == true,
+    running: data['running'] == true,
+    authorized: data['authorized_application'] == true,
+    identityVerified: data['identity_verified'] == true,
+    protocol: data['protocol'] as int? ?? 0,
+    updateRequired: data['update_required'] == true,
+    message: data['message'] as String? ?? '',
   );
-  final int id;
-  final String name;
-  final int width;
-  final int height;
+  final bool installed, running, authorized, identityVerified;
+
+  /// The installed helper's IPC protocol; [updateRequired] when it is not
+  /// this app's, so the helper must be reinstalled (D2).
+  final int protocol;
+  final bool updateRequired;
+  final String message;
 }
 
 class DesktopCapabilities {
@@ -37,127 +62,81 @@ class DesktopCapabilities {
   final DesktopHelper? helper;
 }
 
-class DesktopHelper {
-  const DesktopHelper({
-    this.installed = false,
-    this.running = false,
-    this.authorized = false,
-    this.identityVerified = false,
+/// A host's `HostStatus`. The local host's also carries its [service] and
+/// [invitation], which `HostStatus` itself never holds.
+class DesktopHostStatus {
+  const DesktopHostStatus({
+    this.state = 'waiting',
+    this.reason,
     this.message = '',
-  });
-  final bool installed, running, authorized, identityVerified;
-  final String message;
-  factory DesktopHelper.fromJson(Map<String, dynamic> data) => DesktopHelper(
-    installed: data['installed'] == true,
-    running: data['running'] == true,
-    authorized: data['authorized_application'] == true,
-    identityVerified: data['identity_verified'] == true,
-    message: data['message'] as String? ?? '',
-  );
-}
-
-class DesktopStatus {
-  const DesktopStatus({
-    this.state = 'stopped',
-    this.message = '',
-    this.controlling = false,
     this.controlAllowed = false,
-    this.generation = 0,
-    this.frameId = 0,
+    this.viewer,
     this.display,
-    this.path = '',
-    this.frames = 0,
-    this.bytes = 0,
     this.desktop = 'ordinary',
-    this.codec = 'jpeg',
-    this.videoWidth = 0,
-    this.videoHeight = 0,
-    this.keyframe = true,
-    this.ptsUs = 0,
-    this.captureFps = 0,
-    this.receiveFps = 0,
-    this.droppedFrames = 0,
-    this.bitrate = 0,
-    this.cursor,
-    this.frameAckMs = 0,
-    this.directStage,
-    this.directFailure,
+    this.capabilities = const [],
+    this.service,
+    this.invitation,
   });
-  factory DesktopStatus.fromJson(Map<String, dynamic> json) => DesktopStatus(
-    state: json['state'] as String? ?? 'stopped',
-    message: json['message'] as String? ?? '',
-    controlling: json['controlling'] == true,
-    controlAllowed: json['control_allowed'] == true,
-    generation: json['generation'] as int? ?? 0,
-    frameId: json['frame_id'] as int? ?? 0,
-    display: json['display'] == null
-        ? null
-        : DesktopDisplay.fromJson(
-            Map<String, dynamic>.from(json['display'] as Map),
-          ),
-    path: json['path'] as String? ?? '',
-    frames: json['frames'] as int? ?? 0,
-    bytes: json['bytes'] as int? ?? 0,
-    desktop: json['desktop'] as String? ?? 'ordinary',
-    codec: (json['video'] as Map?)?['codec'] as String? ?? 'jpeg',
-    videoWidth: (json['video'] as Map?)?['width'] as int? ?? 0,
-    videoHeight: (json['video'] as Map?)?['height'] as int? ?? 0,
-    keyframe: (json['video'] as Map?)?['keyframe'] != false,
-    ptsUs: (json['video'] as Map?)?['pts_us'] as int? ?? 0,
-    captureFps: (json['capture_fps'] as num?)?.toDouble() ?? 0,
-    receiveFps: (json['receive_fps'] as num?)?.toDouble() ?? 0,
-    droppedFrames: json['dropped_frames'] as int? ?? 0,
-    bitrate: json['bitrate'] as int? ?? 0,
-    cursor: json['cursor'] is Map
-        ? DesktopCursor.fromJson(
-            Map<String, dynamic>.from(json['cursor'] as Map),
+  factory DesktopHostStatus.fromJson(
+    Map<String, dynamic> status, {
+    String? service,
+    String? invitation,
+  }) => DesktopHostStatus(
+    state: status['state'] as String? ?? 'waiting',
+    reason: status['reason'] as String?,
+    message: status['message'] as String? ?? '',
+    controlAllowed: status['control_allowed'] == true,
+    viewer: status['viewer'] is Map
+        ? DesktopHostViewer.fromJson(
+            Map<String, dynamic>.from(status['viewer'] as Map),
           )
         : null,
-    frameAckMs: (json['frame_ack_ms'] as num?)?.toDouble() ?? 0,
-    directStage: json['direct_stage'] as String?,
-    directFailure: json['direct_failure'] as String?,
+    display: status['display'] is Map
+        ? DesktopDisplay.fromJson(
+            Map<String, dynamic>.from(status['display'] as Map),
+          )
+        : null,
+    desktop: status['desktop'] as String? ?? 'ordinary',
+    capabilities: [
+      for (final c in status['capabilities'] as List? ?? const []) c as String,
+    ],
+    service: service,
+    invitation: invitation,
   );
-  final String state, message, path, desktop;
-  final String? directStage, directFailure;
-  final bool controlling, controlAllowed;
-  final int generation, frameId, frames, bytes;
+
+  /// `waiting`, `connecting`, `streaming`, `paused`, `capture_unavailable`
+  /// or `stopped`.
+  final String state;
+  final String? reason;
+  final String message;
+  final bool controlAllowed;
+  final DesktopHostViewer? viewer;
   final DesktopDisplay? display;
-  final String codec;
-  final int videoWidth, videoHeight, ptsUs, droppedFrames, bitrate;
-  final bool keyframe;
-  final double captureFps, receiveFps;
-  final DesktopCursor? cursor;
-  final double frameAckMs;
-  bool get streaming => state == 'streaming';
-}
+  final String desktop;
+  final List<String> capabilities;
+  final String? service, invitation;
 
-class DesktopCursor {
-  const DesktopCursor({
-    required this.x,
-    required this.y,
-    required this.visible,
-  });
-  final int x, y;
-  final bool visible;
-  factory DesktopCursor.fromJson(Map<String, dynamic> json) => DesktopCursor(
-    x: json['x'] as int,
-    y: json['y'] as int,
-    visible: json['visible'] == true,
+  DesktopHostStatus copyWith({
+    bool? controlAllowed,
+    DesktopHostViewer? Function()? viewer,
+    DesktopDisplay? display,
+    String? service,
+    String? invitation,
+  }) => DesktopHostStatus(
+    state: state,
+    reason: reason,
+    message: message,
+    controlAllowed: controlAllowed ?? this.controlAllowed,
+    viewer: viewer == null ? this.viewer : viewer(),
+    display: display ?? this.display,
+    desktop: desktop,
+    capabilities: capabilities,
+    service: service ?? this.service,
+    invitation: invitation ?? this.invitation,
   );
 }
 
-class DesktopSnapshot {
-  const DesktopSnapshot({this.host, this.viewer, this.background});
-  final DesktopStatus? host, viewer;
-  final DesktopBackground? background;
-  DesktopSnapshot withViewer(DesktopStatus? value) =>
-      DesktopSnapshot(host: host, viewer: value, background: background);
-  DesktopSnapshot withHost(DesktopStatus? value) =>
-      DesktopSnapshot(host: value, viewer: viewer, background: background);
-  DesktopSnapshot withBackground(DesktopBackground value) =>
-      DesktopSnapshot(host: host, viewer: viewer, background: value);
-}
-
+/// The Windows background service's hosting, as it last reported it.
 class DesktopBackground {
   const DesktopBackground({
     this.configured = false,
@@ -166,21 +145,44 @@ class DesktopBackground {
     this.server,
     this.invitation,
     this.autoStart = false,
+    this.displayId,
+    this.allowControl = false,
+    this.host,
     this.message = '',
   });
-  factory DesktopBackground.fromJson(Map<String, dynamic> data) =>
-      DesktopBackground(
-        configured: data['configured'] == true,
-        enabled: data['enabled'] == true,
-        service: (data['settings'] as Map?)?['service'] as String?,
-        server: data['server'] as String?,
-        invitation: data['invitation'] as String?,
-        autoStart: (data['settings'] as Map?)?['auto_start'] == true,
-        message: data['message'] as String? ?? '',
-      );
-  final bool configured, enabled, autoStart;
+  factory DesktopBackground.fromJson(Map<String, dynamic> data) {
+    final settings = data['settings'] is Map
+        ? Map<String, dynamic>.from(data['settings'] as Map)
+        : const <String, dynamic>{};
+    return DesktopBackground(
+      configured: data['configured'] == true,
+      enabled: data['enabled'] == true,
+      service: settings['service'] as String?,
+      server: data['server'] as String?,
+      invitation: data['invitation'] as String?,
+      autoStart: settings['auto_start'] == true,
+      displayId: settings['display_id'] as int?,
+      allowControl: settings['allow_control'] == true,
+      host: data['host'] is Map
+          ? DesktopHostStatus.fromJson(
+              Map<String, dynamic>.from(data['host'] as Map),
+            )
+          : null,
+      message: data['message'] as String? ?? '',
+    );
+  }
+  final bool configured, enabled, autoStart, allowControl;
   final String? service, server, invitation;
+  final int? displayId;
+  final DesktopHostStatus? host;
   final String message;
+}
+
+/// `host_status`: the local host, if one runs, and the background service.
+class DesktopHostSnapshot {
+  const DesktopHostSnapshot({this.host, this.background});
+  final DesktopHostStatus? host;
+  final DesktopBackground? background;
 }
 
 class DesktopTrustedHost {
@@ -193,10 +195,8 @@ class DesktopTrustedHost {
     this.privileged = false,
     this.autoStart = false,
     this.background = false,
+    this.invitation,
   });
-  final String relay, service;
-  final int displayId;
-  final bool allowControl, relayOnly, privileged, autoStart, background;
   factory DesktopTrustedHost.fromJson(Map<String, dynamic> data) =>
       DesktopTrustedHost(
         relay: data['relay'] as String,
@@ -207,7 +207,25 @@ class DesktopTrustedHost {
         privileged: data['privileged'] == true,
         autoStart: data['auto_start'] == true,
         background: data['background'] == true,
+        invitation: data['invitation'] as String?,
       );
+  final String relay, service;
+  final int displayId;
+  final bool allowControl, relayOnly, privileged, autoStart, background;
+
+  /// The remembered identity's invitation; null unless it matches the
+  /// current relay and namespace.
+  final String? invitation;
+}
+
+class DesktopTrust {
+  const DesktopTrust({
+    this.supported = false,
+    this.saved,
+    this.matchesRelay = false,
+  });
+  final bool supported, matchesRelay;
+  final DesktopTrustedHost? saved;
 }
 
 class DesktopHostEnable {
@@ -221,41 +239,209 @@ class DesktopHostEnable {
   final DesktopBackground? background;
 }
 
-class DesktopTrust {
-  const DesktopTrust({
-    this.supported = false,
-    this.saved,
-    this.matchesRelay = false,
-  });
-  final bool supported, matchesRelay;
-  final DesktopTrustedHost? saved;
+/// A connected viewer: where its video arrives, and in which codec.
+class DesktopSession {
+  const DesktopSession({required this.videoSource, required this.codec});
+  final int videoSource;
+
+  /// `h264` (a native consumer attaches) or `jpeg` ([DesktopApiClient.jpegFrames]).
+  final String codec;
 }
 
-class DesktopFrame {
-  const DesktopFrame(this.status, this.bytes);
-  final DesktopStatus status;
+/// What an invitation names, read without connecting.
+class DesktopInvitationInfo {
+  const DesktopInvitationInfo({
+    required this.service,
+    required this.name,
+    required this.fingerprint,
+    required this.format,
+  });
+  final String service, name;
+
+  /// The short form, `AB12-CD34-EF56-7890`.
+  final String fingerprint;
+  final DesktopInvitationFormat format;
+}
+
+/// One encoded JPEG picture, with the consumer that must receipt it.
+class DesktopJpegFrame {
+  const DesktopJpegFrame({
+    required this.consumer,
+    required this.generation,
+    required this.frameId,
+    required this.bytes,
+  });
+  final int consumer, generation, frameId;
   final Uint8List bytes;
 }
 
-abstract interface class DesktopApiClient {
-  Future<DesktopHostEnable> enableHost(String service, int displayId);
-  Future<DesktopBackground> backgroundAction(String action);
-  Future<DesktopTrust> trustStatus();
-  Future<String> restoreHost();
-  Future<void> revokeTrust();
-  Stream<DesktopFrame> frames();
-  Future<void> keyframe();
+/// The viewer's `ViewerStatus`: polled at most every 500 ms, never per frame.
+class DesktopViewerStatus {
+  const DesktopViewerStatus({
+    this.state = 'connecting',
+    this.stage,
+    this.reason,
+    this.message = '',
+    this.controlAllowed = false,
+    this.controlling = false,
+    this.fresh = false,
+    this.paused = false,
+    this.generation = 0,
+    this.display,
+    this.secureDesktop = false,
+    this.codec,
+    this.videoWidth = 0,
+    this.videoHeight = 0,
+    this.presentedFrameId,
+    this.lastVideoAgeMs,
+    this.quality = DesktopQuality.balanced,
+    this.capabilities = const [],
+    this.notice,
+    this.decoderState = 'ok',
+    this.stats = DesktopStats.none,
+  });
 
-  /// True only after installation and an unelevated restart handoff are ready.
-  Future<bool> helperAction(String action);
-  Future<void> presented(int generation, int frameId);
+  factory DesktopViewerStatus.fromJson(Map<String, dynamic> json) {
+    Map<String, dynamic> map(Object? value) => value is Map
+        ? Map<String, dynamic>.from(value)
+        : const <String, dynamic>{};
+    final video = map(json['video']);
+    final presented = map(json['presented']);
+    final notice = map(json['notice']);
+    final decoder = map(json['decoder']);
+    final paused = json['paused'] == true;
+    final noticeCode = switch (notice['code']) {
+      'locked' => DesktopNoticeCode.locked,
+      'lock_failed' => DesktopNoticeCode.lockFailed,
+      _ => null,
+    };
+    return DesktopViewerStatus(
+      state: json['state'] as String? ?? 'connecting',
+      stage: json['stage'] as String?,
+      reason: json['reason'] as String?,
+      message: json['message'] as String? ?? '',
+      controlAllowed: json['control_allowed'] == true,
+      controlling: json['controlling'] == true,
+      fresh: json['fresh'] == true,
+      paused: paused,
+      generation: json['generation'] as int? ?? 0,
+      display: json['display'] is Map
+          ? DesktopDisplay.fromJson(map(json['display']))
+          : null,
+      secureDesktop: json['desktop'] == 'secure',
+      codec: video['codec'] as String?,
+      videoWidth: video['width'] as int? ?? 0,
+      videoHeight: video['height'] as int? ?? 0,
+      presentedFrameId: presented.isEmpty
+          ? null
+          : presented['frame_id'] as int?,
+      lastVideoAgeMs: json['last_video_age_ms'] as int?,
+      quality: desktopQualityFromWire(json['quality']),
+      capabilities: [
+        for (final c in json['capabilities'] as List? ?? const []) c as String,
+      ],
+      notice:
+          noticeCode != null && (notice['age_ms'] as int? ?? 0) < noticeTtlMs
+          ? DesktopNotice(noticeCode, notice['message'] as String? ?? '')
+          : null,
+      decoderState: decoder['state'] as String? ?? 'ok',
+      stats: DesktopStats.fromJson(
+        map(json['stats']),
+        decoder: decoder,
+        paused: paused,
+      ),
+    );
+  }
+
+  /// How long a host notice stays on screen (`NOTICE_TTL`).
+  static const noticeTtlMs = 5000;
+
+  /// `connecting`, `streaming`, `paused`, `capture_unavailable` or `stopped`.
+  final String state;
+
+  /// While connecting: `path`, `identity` or `authorizing`.
+  final String? stage;
+
+  /// The `ViewerReason`, such as `transport`, `host_stopped` or
+  /// `secure_desktop`.
+  final String? reason;
+  final String message;
+  final bool controlAllowed, controlling, fresh, paused;
+  final int generation;
+  final DesktopDisplay? display;
+  final bool secureDesktop;
+  final String? codec;
+  final int videoWidth, videoHeight;
+
+  /// The last frame a consumer presented; null before the first.
+  final int? presentedFrameId;
+
+  /// Since the last video record of any generation.
+  final int? lastVideoAgeMs;
+  final DesktopQuality quality;
+  final List<String> capabilities;
+  final DesktopNotice? notice;
+
+  /// `ok`, `recovering` or `failed`.
+  final String decoderState;
+  final DesktopStats stats;
+
+  DesktopViewerStatus copyWith({
+    String? state,
+    String? Function()? reason,
+    bool? controlAllowed,
+    bool? controlling,
+    bool? fresh,
+    bool? paused,
+    int? generation,
+    int? Function()? presentedFrameId,
+    int? Function()? lastVideoAgeMs,
+    DesktopQuality? quality,
+    String? decoderState,
+    DesktopStats? stats,
+  }) => DesktopViewerStatus(
+    state: state ?? this.state,
+    stage: stage,
+    reason: reason == null ? this.reason : reason(),
+    message: message,
+    controlAllowed: controlAllowed ?? this.controlAllowed,
+    controlling: controlling ?? this.controlling,
+    fresh: fresh ?? this.fresh,
+    paused: paused ?? this.paused,
+    generation: generation ?? this.generation,
+    display: display,
+    secureDesktop: secureDesktop,
+    codec: codec,
+    videoWidth: videoWidth,
+    videoHeight: videoHeight,
+    presentedFrameId: presentedFrameId == null
+        ? this.presentedFrameId
+        : presentedFrameId(),
+    lastVideoAgeMs: lastVideoAgeMs == null
+        ? this.lastVideoAgeMs
+        : lastVideoAgeMs(),
+    quality: quality ?? this.quality,
+    capabilities: capabilities,
+    notice: notice,
+    decoderState: decoderState ?? this.decoderState,
+    stats: stats ?? this.stats,
+  );
+}
+
+abstract interface class DesktopApiClient {
+  // ---- lifecycle export: async, on the service's worker isolate
   Future<DesktopCapabilities> capabilities();
-  Future<DesktopSnapshot> status();
+  Future<DesktopHostSnapshot> hostStatus();
+  Future<DesktopHostEnable> enableHost(
+    String service,
+    int displayId, {
+    required bool allowControl,
+  });
   Future<String> startHost({
     required String service,
     required int displayId,
     required bool allowControl,
-    required bool relayOnly,
+    bool relayOnly = false,
     bool privileged = false,
     bool remember = false,
     bool autoStart = false,
@@ -263,86 +449,60 @@ abstract interface class DesktopApiClient {
   });
   Future<void> stopHost({bool onExit = false});
   Future<void> allowControl(bool allow);
-  Future<void> connect(String invitation, {required bool relayOnly});
-  Future<void> disconnect();
-  Future<void> control(bool enabled);
-  Future<void> release();
-  Future<void> input({
-    required int generation,
-    required int frameId,
-    required int sequence,
-    required Map<String, Object?> input,
+
+  /// Ends the current viewer's session; hosting continues (D15).
+  Future<void> endViewerSession();
+
+  /// Restarts the host on another display; returns the new invitation.
+  Future<String> setHostDisplay(int displayId);
+
+  /// Restarts the host under another service name; returns the new
+  /// invitation.
+  Future<String> renameHostService(String service);
+  Future<DesktopTrust> trustStatus();
+  Future<String?> restoreHost();
+  Future<void> revokeTrust();
+
+  /// True only after installation and an unelevated restart hand-off are
+  /// ready.
+  Future<bool> helperAction(String action);
+  Future<DesktopBackground> backgroundAction(String action);
+
+  /// Throws [DesktopCallException] `SETUP_STRING` or `INVALID_INVITATION`.
+  Future<DesktopInvitationInfo> inspectInvitation(String text);
+
+  /// Sends exactly one of `invitation` and `computer_id`: the invitation
+  /// when both are given.
+  Future<DesktopSession> connect(
+    String? invitation, {
+    String? computerId,
+    required bool relayOnly,
+    required DesktopQuality quality,
+    required double refreshHz,
   });
-  Future<DesktopFrame?> frame(int after, int generation);
+  Future<void> disconnect();
+
+  // ---- hot export and view leaf: synchronous, UI isolate only, never block
+  DesktopViewerStatus? viewerStatus();
+  DesktopView? view();
+  void control(bool enabled);
+  void release();
+
+  /// Throws [DesktopCallException] `NOT_FRESH`, `NOT_CONTROLLING` or
+  /// `INPUT_CONGESTION`; Rust stamps frame id and sequence.
+  void input(int generation, List<Map<String, Object?>> inputs);
+  bool requestKeyframe();
+  void setQuality(DesktopQuality quality);
+  void pause();
+  void resume();
+  int instanceToken();
+
+  // ---- JPEG consumer (platforms without a native decoder)
+  Stream<DesktopJpegFrame> jpegFrames(int videoSource);
+  bool presentedJpeg(int consumer, int generation, int frameId);
 }
 
 class DesktopApi implements DesktopApiClient {
-  @override
-  Future<DesktopHostEnable> enableHost(String service, int displayId) async {
-    final data = await _call('host_enable', {
-      'service': service,
-      'display_id': displayId,
-    });
-    return DesktopHostEnable(
-      restart: data['restart'] == true,
-      invitation: data['invitation'] as String?,
-      background: data['background'] is Map
-          ? DesktopBackground.fromJson(
-              Map<String, dynamic>.from(data['background'] as Map),
-            )
-          : null,
-    );
-  }
-
-  @override
-  Future<DesktopBackground> backgroundAction(String action) async =>
-      DesktopBackground.fromJson(
-        await _call('background_action', {'action': action}),
-      );
-
-  @override
-  Future<DesktopTrust> trustStatus() async {
-    final data = await _call('trust_status');
-    return DesktopTrust(
-      supported: data['supported'] == true,
-      matchesRelay: data['matches_relay'] == true,
-      saved: data['saved'] is Map
-          ? DesktopTrustedHost.fromJson(
-              Map<String, dynamic>.from(data['saved'] as Map),
-            )
-          : null,
-    );
-  }
-
-  @override
-  Future<String> restoreHost() async =>
-      (await _call('host_restore'))['invitation'] as String;
-  @override
-  Future<void> revokeTrust() async {
-    await _call('trust_revoke');
-  }
-
-  @override
-  Stream<DesktopFrame> frames() => PbMapperService().desktopFrames().map(
-    (data) => DesktopFrame(
-      DesktopStatus.fromJson(data['status'] as Map<String, dynamic>),
-      data['bytes'] as Uint8List,
-    ),
-  );
-  @override
-  Future<void> keyframe() async {
-    await _call('keyframe');
-  }
-
-  @override
-  Future<bool> helperAction(String action) async =>
-      (await _call('helper_action', {'action': action}))['restart'] == true;
-
-  @override
-  Future<void> presented(int generation, int frameId) async {
-    await _call('presented', {'generation': generation, 'frame_id': frameId});
-  }
-
   Future<Map<String, dynamic>> _call(
     String op, [
     Map<String, Object?> args = const {},
@@ -357,11 +517,15 @@ class DesktopApi implements DesktopApiClient {
     return Map<String, dynamic>.from(result['data'] as Map? ?? {});
   }
 
+  DesktopBackground? _background(Object? value) => value is Map
+      ? DesktopBackground.fromJson(Map<String, dynamic>.from(value))
+      : null;
+
   @override
   Future<DesktopCapabilities> capabilities() async {
     final data = await _call('capabilities');
     return DesktopCapabilities(
-      host: (data['capabilities'] as Map)['host'] == true,
+      host: (data['capabilities'] as Map?)?['host'] == true,
       displays: [
         for (final d in data['displays'] as List? ?? [])
           DesktopDisplay.fromJson(Map<String, dynamic>.from(d as Map)),
@@ -376,19 +540,38 @@ class DesktopApi implements DesktopApiClient {
   }
 
   @override
-  Future<DesktopSnapshot> status() async {
-    final data = await _call('status');
-    DesktopStatus? parse(String name) => data[name] == null
-        ? null
-        : DesktopStatus.fromJson(Map<String, dynamic>.from(data[name] as Map));
-    return DesktopSnapshot(
-      host: parse('host'),
-      viewer: parse('viewer'),
-      background: data['background'] is Map
-          ? DesktopBackground.fromJson(
-              Map<String, dynamic>.from(data['background'] as Map),
-            )
-          : null,
+  Future<DesktopHostSnapshot> hostStatus() async {
+    final data = await _call('host_status');
+    final host = data['host'] is Map
+        ? Map<String, dynamic>.from(data['host'] as Map)
+        : null;
+    return DesktopHostSnapshot(
+      host: host == null
+          ? null
+          : DesktopHostStatus.fromJson(
+              Map<String, dynamic>.from(host['status'] as Map),
+              service: host['service'] as String?,
+              invitation: host['invitation'] as String?,
+            ),
+      background: _background(data['background']),
+    );
+  }
+
+  @override
+  Future<DesktopHostEnable> enableHost(
+    String service,
+    int displayId, {
+    required bool allowControl,
+  }) async {
+    final data = await _call('host_enable', {
+      'service': service,
+      'display_id': displayId,
+      'allow_control': allowControl,
+    });
+    return DesktopHostEnable(
+      restart: data['restart'] == true,
+      invitation: data['invitation'] as String?,
+      background: _background(data['background']),
     );
   }
 
@@ -397,7 +580,7 @@ class DesktopApi implements DesktopApiClient {
     required String service,
     required int displayId,
     required bool allowControl,
-    required bool relayOnly,
+    bool relayOnly = false,
     bool privileged = false,
     bool remember = false,
     bool autoStart = false,
@@ -414,6 +597,7 @@ class DesktopApi implements DesktopApiClient {
             'background': background,
           }))['invitation']
           as String;
+
   @override
   Future<void> stopHost({bool onExit = false}) async {
     await _call('host_stop', {'on_exit': onExit});
@@ -425,68 +609,194 @@ class DesktopApi implements DesktopApiClient {
   }
 
   @override
-  Future<void> connect(String invitation, {required bool relayOnly}) async {
-    final views = ui.PlatformDispatcher.instance.views;
-    final refreshRate = views.isEmpty ? 60.0 : views.first.display.refreshRate;
-    // A phone's display is a hard presentation ceiling. Avoid spending decoder
-    // and network capacity on frames that its compositor cannot present.
-    final fps = Platform.isAndroid && refreshRate.isFinite && refreshRate > 0
-        ? refreshRate.round().clamp(30, 90)
-        : 90;
-    await _call('connect', {
-      'invitation': invitation,
+  Future<void> endViewerSession() async {
+    await _call('host_end_session');
+  }
+
+  @override
+  Future<String> setHostDisplay(int displayId) async =>
+      (await _call('host_set_display', {'display_id': displayId}))['invitation']
+          as String;
+
+  @override
+  Future<String> renameHostService(String service) async =>
+      (await _call('host_rename', {'service': service}))['invitation']
+          as String;
+
+  @override
+  Future<DesktopTrust> trustStatus() async {
+    final data = await _call('trust_status');
+    return DesktopTrust(
+      supported: data['supported'] == true,
+      matchesRelay: data['matches_relay'] == true,
+      saved: data['saved'] is Map
+          ? DesktopTrustedHost.fromJson(
+              Map<String, dynamic>.from(data['saved'] as Map),
+            )
+          : null,
+    );
+  }
+
+  @override
+  Future<String?> restoreHost() async =>
+      (await _call('host_restore'))['invitation'] as String?;
+
+  @override
+  Future<void> revokeTrust() async {
+    await _call('trust_revoke');
+  }
+
+  @override
+  Future<bool> helperAction(String action) async =>
+      (await _call('helper_action', {'action': action}))['restart'] == true;
+
+  @override
+  Future<DesktopBackground> backgroundAction(String action) async =>
+      _background(await _call('background_action', {'action': action})) ??
+      const DesktopBackground();
+
+  @override
+  Future<DesktopInvitationInfo> inspectInvitation(String text) async {
+    final data = await _call('inspect_invitation', {'invitation': text});
+    return DesktopInvitationInfo(
+      service: data['service'] as String,
+      name: data['name'] as String,
+      fingerprint: data['fingerprint'] as String,
+      format: data['format'] == 'json_v1'
+          ? DesktopInvitationFormat.jsonV1
+          : DesktopInvitationFormat.pbd1,
+    );
+  }
+
+  @override
+  Future<DesktopSession> connect(
+    String? invitation, {
+    String? computerId,
+    required bool relayOnly,
+    required DesktopQuality quality,
+    required double refreshHz,
+  }) async {
+    if (invitation == null && computerId == null) {
+      throw const DesktopCallException(
+        'INVALID_ARGUMENT',
+        'an invitation or a remembered computer is required',
+      );
+    }
+    final data = await _call('connect', {
+      if (invitation != null)
+        'invitation': invitation
+      else
+        'computer_id': computerId,
       'relay_only': relayOnly,
-      'native_video': Platform.isWindows || Platform.isAndroid,
-      'video': {
-        'max_width': 1920,
-        'max_height': 1080,
-        'max_fps': fps,
-        'bitrate': 12000000,
-      },
+      'quality': quality.name,
+      'refresh_hz': refreshHz,
     });
+    return DesktopSession(
+      videoSource: data['video_source'] as int,
+      codec: data['codec'] as String? ?? 'h264',
+    );
   }
 
   @override
   Future<void> disconnect() async {
-    PbMapperService().stopDesktopFrames();
     await _call('disconnect');
   }
 
+  // ---- the hot export, the view leaf and the video exports: synchronous
+
+  /// A hot op, on this (the UI) isolate.
+  Object? _hot(String op, [Map<String, Object?> args = const {}]) {
+    final result = PbMapperService().desktopViewerCallSync({'op': op, ...args});
+    if (result['success'] != true) {
+      throw DesktopCallException(
+        result['code'] as String? ?? 'INTERNAL',
+        result['message'] as String? ?? 'Desktop viewer operation failed',
+      );
+    }
+    return result['data'];
+  }
+
+  /// The view leaf's one struct: it is read on the UI isolate only, and
+  /// copied out before the call returns.
+  static final _view = calloc<PbDesktopViewV1>();
+
   @override
-  Future<void> control(bool enabled) async {
-    await _call('control', {'enabled': enabled});
+  DesktopViewerStatus? viewerStatus() {
+    final data = _hot('viewer_status');
+    return data is Map
+        ? DesktopViewerStatus.fromJson(Map<String, dynamic>.from(data))
+        : null;
   }
 
   @override
-  Future<void> release() async {
-    await _call('release');
-  }
+  DesktopView? view() => PbMapperService().desktopView(_view) == 1
+      ? desktopViewFromLeaf(_view.ref)
+      : null;
 
   @override
-  Future<void> input({
-    required int generation,
-    required int frameId,
-    required int sequence,
-    required Map<String, Object?> input,
-  }) async {
-    await _call('input', {
-      'event': {
-        'generation': generation,
-        'frame_id': frameId,
-        'sequence': sequence,
-        'input': input,
-      },
-    });
-  }
+  void control(bool enabled) => _hot('control', {'enabled': enabled});
 
   @override
-  Future<DesktopFrame?> frame(int after, int generation) async {
-    final data = await PbMapperService().desktopFrame(after, generation);
-    return data == null
-        ? null
-        : DesktopFrame(
-            DesktopStatus.fromJson(data['status'] as Map<String, dynamic>),
-            data['bytes'] as Uint8List,
-          );
-  }
+  void release() => _hot('release');
+
+  @override
+  void input(int generation, List<Map<String, Object?>> inputs) =>
+      _hot('input', {'generation': generation, 'inputs': inputs});
+
+  @override
+  bool requestKeyframe() => (_hot('keyframe') as Map?)?['requested'] == true;
+
+  @override
+  void setQuality(DesktopQuality quality) =>
+      _hot('quality', {'preset': quality.name});
+
+  @override
+  void pause() => _hot('pause');
+
+  @override
+  void resume() => _hot('resume');
+
+  @override
+  int instanceToken() => PbMapperService().instanceToken();
+
+  @override
+  Stream<DesktopJpegFrame> jpegFrames(int videoSource) => PbMapperService()
+      .desktopJpegUnits(videoSource)
+      .map(
+        (unit) => DesktopJpegFrame(
+          consumer: unit.consumer,
+          generation: unit.generation,
+          frameId: unit.frameId,
+          bytes: unit.bytes,
+        ),
+      );
+
+  @override
+  bool presentedJpeg(int consumer, int generation, int frameId) =>
+      PbMapperService().desktopVideoPresented(consumer, generation, frameId);
+}
+
+/// Copies the view leaf's struct into a [DesktopView].
+DesktopView desktopViewFromLeaf(PbDesktopViewV1 leaf) {
+  final flags = leaf.flags;
+  bool flag(int bit) => flags & (1 << bit) != 0;
+  return DesktopView(
+    generation: leaf.generation,
+    presentedFrameId: leaf.presentedFrameId,
+    presentedAgeMs: leaf.presentedAgeMs,
+    cursorSeq: leaf.cursorSeq,
+    displayWidth: leaf.displayWidth,
+    displayHeight: leaf.displayHeight,
+    videoWidth: leaf.videoWidth,
+    videoHeight: leaf.videoHeight,
+    cursorX: leaf.cursorX,
+    cursorY: leaf.cursorY,
+    state: leaf.state,
+    cursorVisible: flag(0),
+    controlling: flag(1),
+    controlAllowed: flag(2),
+    secureDesktop: flag(3),
+    fresh: flag(4),
+    paused: flag(5),
+  );
 }
