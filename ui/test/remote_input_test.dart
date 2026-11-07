@@ -25,6 +25,8 @@ KeyEvent _up(LogicalKeyboardKey logical, PhysicalKeyboardKey physical) =>
       timeStamp: Duration.zero,
     );
 
+Duration _ms(int value) => Duration(milliseconds: value);
+
 void main() {
   testWidgets('latched modifiers wrap one action and never stay held', (
     tester,
@@ -93,6 +95,53 @@ void main() {
 
     h.dispose();
   });
+
+  testWidgets(
+    'a trackpad drag presses at the double tap and takes the host to where the finger slid while the press waited',
+    (tester) async {
+      final h = await ViewerHarness.live(tester);
+      // The picture is 1920 px wide: a finger's pixel is a display pixel.
+      h.viewport.layout(const Size(1920, 1200));
+      final machine = h.machine;
+      const at = Offset(200, 150);
+      h.sent();
+
+      // The second touch slides 120 px before the press is due at 580 ms.
+      machine.down(1, at, _ms(0));
+      machine.up(1, at, _ms(60));
+      machine.down(2, at, _ms(160));
+      machine.move(2, at + const Offset(30, 0), _ms(200));
+      machine.move(2, at + const Offset(120, 0), _ms(300));
+      expect(h.sent(), [
+        ['move 960,540', 'left↓', 'left↑'],
+      ]);
+      machine.timeout(_ms(580));
+      machine.up(2, at + const Offset(120, 0), _ms(700));
+      expect(h.sent(), [
+        ['move 960,540', 'left↓ drag'],
+        ['move 1080,540'],
+        ['left↑'],
+      ]);
+
+      // Lifted before the press is due, the drag still goes whole. (The
+      // pump reopens the store's move gate, so the move goes on its own.)
+      await tester.pump(const Duration(milliseconds: 100));
+      machine.down(3, at, _ms(2000));
+      machine.up(3, at, _ms(2060));
+      machine.down(4, at, _ms(2160));
+      machine.move(4, at + const Offset(30, 0), _ms(2200));
+      machine.move(4, at + const Offset(120, 0), _ms(2300));
+      machine.up(4, at + const Offset(120, 0), _ms(2400));
+      expect(h.sent(), [
+        ['move 1080,540', 'left↓', 'left↑'],
+        ['move 1080,540', 'left↓ drag'],
+        ['move 1200,540'],
+        ['left↑'],
+      ]);
+
+      h.dispose();
+    },
+  );
 
   test('held Ctrl sends bare letter keys and AltGr characters stay text', () {
     // Ctrl+B: the bare key, never a chord that would release the Ctrl the
