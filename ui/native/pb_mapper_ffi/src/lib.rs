@@ -39,10 +39,6 @@ pub use desktop::{
     PbDesktopViewV1, pb_mapper_desktop_call_json, pb_mapper_desktop_view_v1,
     pb_mapper_desktop_viewer_call_json,
 };
-// G1 only: the unchanged app's frames, deleted with the shim at G2.
-pub use desktop::shim::{
-    pb_mapper_desktop_frame, pb_mapper_desktop_free_frame, pb_mapper_desktop_wait_frame,
-};
 #[cfg(target_os = "android")]
 pub use desktop_jni::{
     Java_com_pb_1mapper_ui_DesktopVideoNative_attach,

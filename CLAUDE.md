@@ -217,16 +217,61 @@ The design and its rules are in `docs/ui-design.md`.
   - `pb_mapper_api.dart`: `PbMapperApiClient`, the interface the views take,
     and `PbMapperApi`, the real implementation over the FFI
   - `relay_models.dart`: What the relay calls return, and `RelayCallException`
+  - `desktop_api.dart`: `DesktopApiClient`, the remote desktop's interface,
+    and `DesktopApi` over the FFI: lifecycle calls on a background isolate,
+    the hot ops and the per-frame view on the UI isolate. Its failures carry
+    the FFI `ErrorCode`; never match their text
+  - `desktop_video.dart`: The native H.264 decoder's Flutter texture, over
+    the `pb_mapper/desktop_video` channel. Dart binds it to a video source;
+    the decoder pulls the video from Rust itself
 
 - **`native/pb_mapper_ffi/`**: The Rust C ABI crate (a workspace member)
   - Every call returns a JSON envelope: `{"success": bool, "message": …, "data": …}`
-    — except three small calls that return a plain integer:
-    `pb_mapper_galaxy_frame_v1`, made once per frame, and
-    `pb_mapper_ed25519_verify_v1`, the update manifest's signature check,
-    both leaf calls over caller-owned buffers; and
-    `pb_mapper_spawn_hidden_powershell_v1`, which starts the Windows
-    update's hand-off so that it outlives the app (a detached Dart child
-    cannot: PowerShell without a console exits at once)
+    — except the calls that return a plain integer:
+    - `pb_mapper_galaxy_frame_v1`, made once per frame, and
+      `pb_mapper_ed25519_verify_v1`, the update manifest's signature check,
+      both leaf calls over caller-owned buffers;
+    - `pb_mapper_spawn_hidden_powershell_v1`, which starts the Windows
+      update's hand-off so that it outlives the app (a detached Dart child
+      cannot: PowerShell without a console exits at once);
+    - `pb_mapper_desktop_view_v1`, the remote desktop's per-frame view leaf:
+      it fills a caller-owned 56-byte `PbDesktopViewV1` (mirrored in
+      `pb_mapper_ffi.dart`; a `size_of` assert guards it) and returns 1, 0
+      without a viewer, or -1;
+    - the desktop video exports and their JNI twins, below
+  - `desktop.rs`: The remote desktop. `pb_mapper_desktop_call_json` takes
+    the lifecycle ops (sharing, the helper and background host, trust,
+    `inspect_invitation`, `connect`, `disconnect`) under `block_on`, so only
+    a background isolate calls it. `pb_mapper_desktop_viewer_call_json`
+    takes the viewer's closed set of hot ops (`viewer_status`, `control`,
+    `release`, `input`, `keyframe`, `quality`, `pause`, `resume`): it never
+    enters the runtime, awaits or takes a tokio lock, so the UI isolate
+    calls it, as it calls the view leaf. Errors are typed `ErrorCode`s
+    (`error.rs`), never text to match
+  - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
+    its consumer. On Windows and Android that is the native decoder (the
+    runner's decoder thread in `windows/runner/desktop_video.cpp`, the
+    Android feeder), so H.264 never passes through Dart; elsewhere it is
+    Dart's JPEG isolate. `connect` returns a `video_source`; a consumer
+    attaches to it and pulls with
+    `pb_mapper_desktop_video_{attach,next,presented,keyframe,report,detach}_v1`.
+    Ids, never pointers, cross; no id is reused, so a stale one reads as
+    closed. The return codes are one space (`PbVideo` in Dart). Only `next`
+    blocks, never on a UI thread. `pb_mapper_desktop_instance_token_v1`
+    proves a native consumer loaded the library Dart loaded. The
+    `desktop-test-source` feature adds a clip player for device runs; no
+    release enables it
+  - `desktop_jni.rs` (Android): The same exports as the static natives of
+    `DesktopVideoNative.kt`, through which `VideoFeeder.kt` feeds
+    `MediaCodec`. A JNI failure returns a code, never a throw
+  - `desktop_computers.rs`: Remembered computers, the `computers_*` ops of
+    `pb_mapper_desktop_call_json`. One vault per profile: DPAPI on Windows;
+    on Android AES-256-GCM under a data key that an Android Keystore key
+    wraps, which Dart unwraps through the `pb_mapper/keystore` channel
+    (`ComputerKeystore.kt`) to unlock the vault once per process.
+    Invitations never return to Dart: a computer is remembered from the
+    live, pinned session, and `connect` takes its `computer_id`.
+    `desktop_trust.rs` keeps the sharing side's remembered identity
   - `relay.rs`: `pb_mapper_relay_call_json`, one export for every question
     and administrator request to the relay, dispatched on the request's
     `"op"` and answered with the SDK's `Client`/`Admin`. A new relay

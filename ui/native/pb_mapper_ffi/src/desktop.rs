@@ -16,8 +16,8 @@ use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
     desktop::{
         self, ConnectError, ConnectStage, DesktopView, Host, HostOptions, InputError, Invitation,
-        InvitationError, InvitationFormat, KeyframeReason, QualityPreset, VideoCodec, VideoLimits,
-        Viewer, ViewerConfig,
+        InvitationError, InvitationFormat, KeyframeReason, QualityPreset, StopReason, VideoCodec,
+        VideoLimits, Viewer, ViewerConfig,
     },
 };
 use pb_mapper_core::checksum::{Credential, get_process_credential};
@@ -28,9 +28,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-/// G1 only: the unchanged app on the new core. Deleted at G2.
-#[path = "desktop_shim.rs"]
-pub(crate) mod shim;
 #[path = "desktop_trust.rs"]
 pub(crate) mod trust;
 
@@ -102,8 +99,6 @@ pub(crate) struct DesktopState {
     // while its host lives so ownership can move to the service unchanged.
     host_identity: tokio::sync::Mutex<Option<LocalIdentity>>,
     background: Arc<parking_lot::Mutex<BackgroundCache>>,
-    /// The old app's frames (G1 only; deleted with the shim at G2).
-    shim: parking_lot::Mutex<Option<shim::Frames>>,
 }
 /// The running local host's identity and settings: what a restart on another
 /// display or under another service, and the background handoff, start from.
@@ -475,6 +470,7 @@ fn background_configured(snapshot: &Value) -> bool {
     snapshot["configured"].as_bool().unwrap_or(false)
 }
 
+#[cfg(windows)]
 fn background_enabled(snapshot: &Value) -> bool {
     snapshot["enabled"].as_bool().unwrap_or(false)
 }
@@ -691,8 +687,9 @@ async fn revoke_trust_with_background(
             .map(|snapshot| state.cache_background(snapshot)),
         Err(failure) => Err(failure),
     };
+    // Its viewer hears that access was withdrawn, and does not reconnect.
     let stopped = if let Some(host) = slot.take() {
-        host.stop().await.map_err(err)
+        host.stop_with(StopReason::Revoked).await.map_err(err)
     } else {
         Ok(())
     };
@@ -729,8 +726,6 @@ pub unsafe extern "C" fn pb_mapper_desktop_call_json(
         handle
             .runtime
             .block_on(crate::desktop_computers::call(handle, request))
-    } else if shim::routes(&request) {
-        shim::call(handle, request)
     } else {
         match serde_json::from_value::<Request>(request) {
             Ok(request) => handle.runtime.block_on(call(handle, request)),
@@ -943,28 +938,42 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             host.set_control_allowed(allow_control);
         }
         Request::HostEndSession => {
-            if let Some(host) = state.host.lock().await.as_ref() {
+            let slot = state.host.lock().await;
+            if let Some(host) = slot.as_ref() {
                 host.end_session();
                 return Ok(json!({}));
             }
-            // The background pipe gains `EndSession` with the helper's IPC v2.
-            let background = state
+            // The background host the UI shows: the service ends its session
+            // and keeps sharing.
+            #[cfg(windows)]
+            if state
                 .background
                 .lock()
                 .snapshot
                 .as_ref()
-                .is_some_and(background_enabled);
-            return Err(err(if background {
-                "the background service cannot end a session yet; stop background sharing instead"
-            } else {
-                "desktop is not shared"
-            }));
+                .is_some_and(background_enabled)
+            {
+                let snapshot = desktop::helper::background::end_session()
+                    .await
+                    .map_err(err)?;
+                state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+                return Ok(json!({}));
+            }
+            return Err(err("desktop is not shared"));
         }
+        // A display switch resumes at once with the same invitation, so the
+        // viewer reconnects; a renamed service is no longer what it reaches.
         Request::HostSetDisplay { display_id } => {
-            return restart_host(handle, |settings| settings.display_id = display_id).await;
+            return restart_host(handle, StopReason::Restarting, |settings| {
+                settings.display_id = display_id;
+            })
+            .await;
         }
         Request::HostRename { service } => {
-            return restart_host(handle, |settings| settings.service = service).await;
+            return restart_host(handle, StopReason::HostStopped, |settings| {
+                settings.service = service;
+            })
+            .await;
         }
         Request::InspectInvitation { invitation } => {
             return Ok(inspection(
@@ -1306,9 +1315,10 @@ async fn launch(
 
 /// `host_set_display` and `host_rename`: the running local host again, with
 /// its identity, on another display or under another service. Its viewer's
-/// session ends, and the viewer reconnects with the new invitation.
+/// session ends with `reason`.
 async fn restart_host(
     handle: &PbMapperHandle,
+    reason: StopReason,
     change: impl FnOnce(&mut trust::Settings),
 ) -> Result<Value, CtlError> {
     let state = &handle.desktop;
@@ -1345,7 +1355,7 @@ async fn restart_host(
         .transpose()?;
     // One owner at a time: the old registration goes before the new one.
     if let Some(host) = slot.take() {
-        host.stop().await.map_err(err)?;
+        host.stop_with(reason).await.map_err(err)?;
     }
     *state.host_identity.lock().await = None;
     let host = launch(&client, &settings, local.identity.clone()).await?;
@@ -1685,7 +1695,7 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-    pub(super) fn test_handle(name: &str) -> PbMapperHandle {
+    fn test_handle(name: &str) -> PbMapperHandle {
         let root = std::env::temp_dir().join(format!("pb-desktop-{name}-{}", std::process::id()));
         PbMapperHandle {
             desktop: Default::default(),
@@ -1705,7 +1715,7 @@ mod tests {
     }
 
     /// The lifecycle export, as a Dart worker calls it.
-    pub(super) fn call_json(handle: &PbMapperHandle, request: Value) -> Value {
+    fn call_json(handle: &PbMapperHandle, request: Value) -> Value {
         let request = CString::new(request.to_string()).unwrap();
         reply(unsafe {
             pb_mapper_desktop_call_json(std::ptr::from_ref(handle).cast_mut(), request.as_ptr())
@@ -1733,7 +1743,7 @@ mod tests {
         (code, view)
     }
 
-    pub(super) fn invitation() -> Invitation {
+    fn invitation() -> Invitation {
         desktop::HostIdentity::generate()
             .unwrap()
             .invitation("desktop:test".into())
@@ -1741,7 +1751,7 @@ mod tests {
     }
 
     /// One host record: a `u32` big-endian length, then JSON.
-    pub(super) async fn send(host: &mut DuplexStream, message: Value) {
+    async fn send(host: &mut DuplexStream, message: Value) {
         let bytes = serde_json::to_vec(&message).unwrap();
         host.write_u32(bytes.len() as u32).await.unwrap();
         host.write_all(&bytes).await.unwrap();
@@ -1750,7 +1760,7 @@ mod tests {
     /// A viewer whose scripted host accepted at once and streams the first
     /// generation. The host side stays open and silent, so `stop()` waits out
     /// the viewer's close grace, seconds long: a held stop.
-    pub(super) async fn scripted_viewer() -> (Viewer, DuplexStream) {
+    async fn scripted_viewer() -> (Viewer, DuplexStream) {
         let (stream, mut host) = tokio::io::duplex(1 << 20);
         let connecting = tokio::spawn(Viewer::over_stream_for_test(
             stream,
