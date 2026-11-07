@@ -155,23 +155,6 @@ struct Desktop {
     video_limits: crate::VideoLimits,
 }
 impl Desktop {
-    fn finish_video(
-        &mut self,
-        expected: &DesktopContext,
-        image: Result<Option<crate::video::windows::Encoded>>,
-    ) -> Result<Option<crate::EncodedFrame>> {
-        if &self.context()? != expected {
-            self.encoder = None;
-            return Err(error("desktop changed during video capture"));
-        }
-        match image {
-            Ok(image) => Ok(image.map(Into::into)),
-            Err(e) => {
-                self.encoder = None;
-                Err(e)
-            }
-        }
-    }
     fn prepare(&mut self) -> Result<()> {
         let Some(secure) = &mut self.secure else {
             return available().inspect_err(|_| {
@@ -320,26 +303,33 @@ impl Backend for Desktop {
             .set_rate(rate)
             .and_then(|()| encoder.drain())
             .and_then(|image| encoder.submit(keyframe).map(|_| image));
-        self.finish_video(expected, image)
+        if &self.context()? != expected {
+            self.encoder = None;
+            return Err(error("desktop changed during video capture"));
+        }
+        image
+            .map(|image| image.map(Into::into))
+            .inspect_err(|_| self.encoder = None)
     }
-    /// Never blocks: the wait bounds only the helper's long-poll.
+    /// Never blocks: the wait bounds only the helper's long-poll. A drain
+    /// checks no desktop: it only collects output of submits `capture_video`
+    /// checked, and the next submit or the worker's context check catches a
+    /// switch (on the helper, `serve` checks before and after each request).
     fn drain_video(
         &mut self,
         expected: &DesktopContext,
         _wait: std::time::Duration,
     ) -> Result<Option<crate::EncodedFrame>> {
-        let _dpi = DpiScope::enter();
-        if &self.context()? != expected {
-            return Err(error("desktop changed before video drain"));
-        }
         let Some((context, encoder)) = &mut self.encoder else {
             return Ok(None);
         };
         if context != expected {
             return Ok(None);
         }
-        let image = encoder.drain();
-        self.finish_video(expected, image)
+        encoder
+            .drain()
+            .map(|image| image.map(Into::into))
+            .inspect_err(|_| self.encoder = None)
     }
     fn pending_video(&self) -> usize {
         self.encoder
