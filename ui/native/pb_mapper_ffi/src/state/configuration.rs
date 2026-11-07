@@ -42,7 +42,7 @@ impl PbMapperState {
             server_port: None,
             server_quic_port: None,
             relay_client: SyncMutex::new(None),
-            quic_offer: SyncMutex::new(None),
+            quic_offer: None,
             registered_services: Arc::new(RwLock::new(HashMap::new())),
             active_connections: Arc::new(RwLock::new(HashMap::new())),
             service_runtime: HashMap::new(),
