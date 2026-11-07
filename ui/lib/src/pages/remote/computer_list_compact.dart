@@ -105,10 +105,7 @@ class CompactComputerList extends StatelessWidget {
             const AddComputerButtons(),
             if (cannotRemember(store.computers.support)) ...[
               const SizedBox(height: 10),
-              Text(
-                l10n.addRememberUnavailable,
-                style: TextStyle(fontSize: 12, color: quietText(scheme)),
-              ),
+              RememberNote(support: store.computers.support, fontSize: 12),
             ],
           ],
         );

@@ -89,6 +89,31 @@ Future<void> removeComputer(BuildContext context, RemoteComputer c) async {
 /// The longest name the vault keeps.
 const kComputerNameMax = 128;
 
+/// The saved computers are there but cannot be opened: the list offers to
+/// clear them.
+bool vaultUnreadable(RememberSupport support) =>
+    support is RememberUnavailable && support.reason == 'unreadable';
+
+/// Why nothing can be remembered, in the page's words.
+String cannotRememberText(BuildContext context, RememberSupport support) =>
+    vaultUnreadable(support)
+    ? context.l10n.remoteVaultUnreadable
+    : context.l10n.addRememberUnavailable;
+
+/// Clears saved computers that cannot be opened, with their last pictures,
+/// after asking.
+Future<void> resetComputers(BuildContext context) async {
+  final computers = AppScope.of(context).store.computers;
+  final l10n = context.l10n;
+  final yes = await confirmDestructive(
+    context,
+    title: l10n.remoteVaultResetTitle,
+    body: l10n.remoteVaultResetBody,
+    action: l10n.remoteVaultResetAction,
+  );
+  if (yes) await computers.reset();
+}
+
 class _RenameDialog extends StatefulWidget {
   const _RenameDialog({required this.initial});
   final String initial;

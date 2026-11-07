@@ -69,9 +69,11 @@ enum Request {
         key: String,
         #[serde(default)]
         wrapped: Option<String>,
-        #[serde(default)]
-        reset: bool,
     },
+    /// Deletes every remembered computer: the way out of a vault that can
+    /// no longer be read, on every platform that keeps one.
+    #[serde(rename = "computers_reset")]
+    Reset {},
     #[serde(rename = "computers_list")]
     List {},
     #[serde(rename = "computers_remember")]
@@ -400,6 +402,26 @@ fn support(platform: Platform) -> Value {
     }
 }
 
+/// Deletes the vault file, and with it every remembered computer. What was
+/// read of it is dropped first, so the next op reads the file again whether
+/// or not it is gone; on Android the data key stays installed.
+fn reset(slot: &mut Option<Vault>, directory: &Path, platform: Platform) -> Result<(), CtlError> {
+    let file = match platform {
+        Platform::Dpapi => DPAPI_FILE,
+        Platform::Keystore => SEALED_FILE,
+        Platform::Unsupported => return Err(CtlError::invalid_argument(UNSUPPORTED)),
+    };
+    if let Some(vault) = slot.as_mut() {
+        vault.computers = None;
+    }
+    match std::fs::remove_file(directory.join(file)) {
+        Ok(()) => tracing::warn!("remembered computers were reset"),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+        Err(failure) => return Err(CtlError::io(failure.to_string())),
+    }
+    Ok(())
+}
+
 /// The vault for `directory`, opening it if this platform needs no unlock.
 fn open<'a>(
     slot: &'a mut Option<Vault>,
@@ -423,14 +445,8 @@ fn open<'a>(
 }
 
 /// Installs the data key Dart unwrapped. A new key comes with its wrapped
-/// form, which is kept beside the vault; `reset` first deletes a vault the
-/// lost Keystore key can no longer open.
-fn unlock(
-    directory: &Path,
-    key: &str,
-    wrapped: Option<&str>,
-    reset: bool,
-) -> Result<Vault, CtlError> {
+/// form, which is kept beside the vault.
+fn unlock(directory: &Path, key: &str, wrapped: Option<&str>) -> Result<Vault, CtlError> {
     let key = STANDARD
         .decode(key)
         .ok()
@@ -446,15 +462,6 @@ fn unlock(
                 .ok_or_else(|| CtlError::invalid_argument("invalid wrapped vault key"))
         })
         .transpose()?;
-    if reset {
-        match std::fs::remove_file(directory.join(SEALED_FILE)) {
-            Ok(()) => tracing::warn!(
-                "remembered computers were reset: the Keystore key that opened them is gone"
-            ),
-            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
-            Err(failure) => return Err(CtlError::io(failure.to_string())),
-        }
-    }
     if let Some(wrapped) = wrapped {
         write_private(&directory.join(KEY_FILE), &wrapped)?;
     }
@@ -483,13 +490,13 @@ fn apply(
             let wrapped = read_limited(&directory.join(KEY_FILE), KEY_LIMIT)?;
             Ok(json!({"wrapped": wrapped.map(|bytes| STANDARD.encode(bytes))}))
         }
-        Request::Unlock {
-            key,
-            wrapped,
-            reset,
-        } => {
+        Request::Unlock { key, wrapped } => {
             keystore()?;
-            *slot = Some(unlock(directory, &key, wrapped.as_deref(), reset)?);
+            *slot = Some(unlock(directory, &key, wrapped.as_deref())?);
+            Ok(json!({}))
+        }
+        Request::Reset {} => {
+            reset(slot, directory, platform)?;
             Ok(json!({}))
         }
         Request::List {} => open(slot, directory, platform)?.list(),
@@ -613,10 +620,10 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("pb-desktop-computers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
-        let unlock = |reset: bool| {
+        let unlock = || {
             request(
                 json!({"op": "computers_unlock", "key": STANDARD.encode(KEY),
-                "wrapped": STANDARD.encode(b"wrapped by the keystore"), "reset": reset}),
+                "wrapped": STANDARD.encode(b"wrapped by the keystore")}),
             )
         };
         let platform = Platform::Keystore;
@@ -640,7 +647,7 @@ mod tests {
                 .code(),
             ErrorCode::VaultUnavailable
         );
-        run(&mut slot, None, unlock(false)).unwrap();
+        run(&mut slot, None, unlock()).unwrap();
         let wrapped = run(&mut slot, None, request(json!({"op": "computers_key"}))).unwrap();
         assert_eq!(
             wrapped["wrapped"],
@@ -680,7 +687,7 @@ mod tests {
 
         // A new process unlocks with the same key and finds the invitation.
         let mut reopened = None;
-        run(&mut reopened, None, unlock(false)).unwrap();
+        run(&mut reopened, None, unlock()).unwrap();
         let found = lookup(&mut reopened, &directory, platform, id)
             .unwrap()
             .unwrap();
@@ -697,7 +704,7 @@ mod tests {
         tampered[last] ^= 1;
         std::fs::write(directory.join(SEALED_FILE), tampered).unwrap();
         let mut reopened = None;
-        run(&mut reopened, None, unlock(false)).unwrap();
+        run(&mut reopened, None, unlock()).unwrap();
         let failed = run(
             &mut reopened,
             None,
@@ -711,11 +718,50 @@ mod tests {
             ErrorCode::VaultUnavailable
         );
 
-        // A lost Keystore key resets the vault instead of locking it for good.
-        let mut reset = None;
-        run(&mut reset, None, unlock(true)).unwrap();
-        let listed = run(&mut reset, None, request(json!({"op": "computers_list"}))).unwrap();
+        // A reset starts it empty instead of locking it for good.
+        run(
+            &mut reopened,
+            None,
+            request(json!({"op": "computers_reset"})),
+        )
+        .unwrap();
+        let listed = run(
+            &mut reopened,
+            None,
+            request(json!({"op": "computers_list"})),
+        )
+        .unwrap();
         assert_eq!(listed, json!([]));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// DPAPI that can no longer open the file, as after a restored profile
+    /// or a password reset, is a vault no op can read; only a reset leaves.
+    #[test]
+    fn an_unreadable_dpapi_vault_can_be_reset() {
+        let directory =
+            std::env::temp_dir().join(format!("pb-desktop-computers-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(DPAPI_FILE), b"sealed for someone else").unwrap();
+        let mut slot = None;
+        let mut run = |op: &str| {
+            apply(
+                &mut slot,
+                &directory,
+                Platform::Dpapi,
+                None,
+                request(json!({"op": op})),
+            )
+        };
+
+        assert_eq!(
+            run("computers_list").unwrap_err().code(),
+            ErrorCode::Protocol
+        );
+        run("computers_reset").unwrap();
+        assert_eq!(run("computers_list").unwrap(), json!([]));
+        assert!(!directory.join(DPAPI_FILE).exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

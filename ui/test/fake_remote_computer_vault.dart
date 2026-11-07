@@ -2,9 +2,9 @@ import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
 import 'package:pb_mapper_ui/src/state/desktop_models.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
 
-/// An in-memory vault. It can be unavailable, and it refuses as Rust does:
-/// at most [capacity] computers, and (when [live] is set) only the computer
-/// the live session is.
+/// An in-memory vault. It can be unavailable or [unreadable], and it
+/// refuses as Rust does: at most [capacity] computers, and (when [live] is
+/// set) only the computer the live session is.
 class FakeRemoteComputerVault implements RemoteComputerVault {
   FakeRemoteComputerVault({
     this.support = const RememberSupport.available(),
@@ -14,6 +14,9 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   RememberSupport support;
   final int capacity;
   final records = <RemoteComputer>[];
+
+  /// The file is there but cannot be opened: [list] fails until [reset].
+  bool unreadable = false;
 
   /// The live session's service and short fingerprint, as Rust's
   /// `current_invitation()`; null accepts any.
@@ -34,6 +37,7 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   @override
   Future<List<RemoteComputer>> list() async {
     calls.add(('list', const {}));
+    if (unreadable) throw const RemoteComputerVaultException('PROTOCOL');
     return [...records];
   }
 
@@ -116,5 +120,12 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   Future<void> forget(String id) async {
     calls.add(('forget', {'id': id}));
     records.removeWhere((c) => c.id == id);
+  }
+
+  @override
+  Future<void> reset() async {
+    calls.add(('reset', const {}));
+    records.clear();
+    unreadable = false;
   }
 }

@@ -99,8 +99,11 @@ class AddComputerController extends ChangeNotifier {
   /// The invitation as it may be shown.
   String get masked => maskInvitation(_raw);
 
-  /// The vault can keep it at all (D20).
-  bool get canRemember => _computers.support.available;
+  /// Whether the vault can keep anything, and why not (D20).
+  RememberSupport get support => _computers.support;
+
+  /// The vault can keep it at all.
+  bool get canRemember => support.available;
 
   /// Already remembered with this identity: Connect opens it.
   RemoteComputer? get duplicate =>
@@ -827,7 +830,7 @@ class _OptionsState extends State<_Options> {
               title: Text(l10n.addRemember),
               subtitle: Text(
                 !add.canRemember
-                    ? l10n.addRememberUnavailable
+                    ? cannotRememberText(context, add.support)
                     : mobile
                     ? l10n.addRememberHelpMobile
                     : l10n.addRememberHelp,

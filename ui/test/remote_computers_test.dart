@@ -19,6 +19,29 @@ const _office = DesktopInvitationInfo(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('saved computers that cannot be opened are cleared on request, with '
+      'their last pictures', () async {
+    final dir = await Directory.systemTemp.createTemp('pbm-remote-');
+    addTearDown(() => dir.delete(recursive: true));
+    final vault = FakeRemoteComputerVault()..unreadable = true;
+    final store = RemoteComputerStore(vault, thumbnailDir: () async => dir);
+    addTearDown(store.dispose);
+    final picture = File('${dir.path}/${'a' * 32}.thumb');
+    await picture.writeAsBytes(const [1]);
+
+    await store.load();
+    expect(
+      store.support,
+      isA<RememberUnavailable>().having((s) => s.reason, 'reason', 'unreadable'),
+    );
+    // Whose pictures these are cannot be told yet.
+    expect(await picture.exists(), isTrue);
+
+    await store.reset();
+    expect(store.support.available, isTrue);
+    expect(await picture.exists(), isFalse);
+  });
+
   test('forgetting a computer deletes its thumbnail, and a changed identity is '
       'a conflict, not a duplicate', () async {
     final dir = await Directory.systemTemp.createTemp('pbm-remote-');

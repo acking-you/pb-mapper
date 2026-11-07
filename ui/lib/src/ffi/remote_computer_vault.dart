@@ -42,6 +42,10 @@ abstract interface class RemoteComputerVault {
 
   /// Idempotent.
   Future<void> forget(String id);
+
+  /// Deletes every remembered computer: the way out of a vault that can no
+  /// longer be read.
+  Future<void> reset();
 }
 
 /// A refused vault call. [code] is the FFI `ErrorCode`: `INVALID_ARGUMENT`
@@ -95,6 +99,8 @@ final class UnavailableRemoteComputerVault implements RemoteComputerVault {
   }) => Future.error(_refused);
   @override
   Future<void> forget(String id) async {}
+  @override
+  Future<void> reset() async {}
 }
 
 /// The vault in Rust (`desktop_computers.rs`), sealed with DPAPI on Windows
@@ -165,14 +171,15 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
           base64Decode(wrapped),
         );
       } on PlatformException catch (error) {
-        // The Keystore key is gone, as after a device restore: what it
-        // sealed can never be read again, so the vault starts empty.
         debugPrint('Remembered computers reset: ${error.message}');
       }
       if (key != null) {
         await _call('computers_unlock', {'key': base64Encode(key)});
         return;
       }
+      // The Keystore key is gone, as after a device restore: what it
+      // sealed can never be read again, so the vault starts empty.
+      await reset();
     }
     final key = Uint8List.fromList([
       for (var i = 0; i < 32; i++) _random.nextInt(256),
@@ -187,7 +194,6 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
     await _call('computers_unlock', {
       'key': base64Encode(key),
       'wrapped': base64Encode(sealed),
-      if (wrapped != null) 'reset': true,
     });
   }
 
@@ -241,4 +247,7 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
 
   @override
   Future<void> forget(String id) => _call('computers_forget', {'id': id});
+
+  @override
+  Future<void> reset() => _call('computers_reset');
 }
