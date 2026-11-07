@@ -5,13 +5,17 @@
 //! The native Windows backend captures the ordinary desktop. An explicitly
 //! installed, authorized helper handles UAC/Winlogon on its bound desktop.
 
-// The protocol v2 modules are wired into the host and viewer at G1; until then
-// the v1 pipeline runs and only their own tests use them. `not(test)` marks the
-// modules whose tests use all of them; the plain allows cover plumbing no G0
-// test drives. The G1 cleanup removes these allows.
+// The host runs protocol v2; the viewer and thread C join it at G1. Until then
+// the v1 viewer runs, the v1 worker and its presentation-credit pipeline
+// (`congestion`) are reached only by their own tests, and the v2 plumbing that
+// thread C will drive is reached only by tests. `not(test)` marks the modules
+// whose tests use all of them; the plain allows cover plumbing no test drives.
+// The G1 cleanup removes these allows.
 #[cfg_attr(not(test), allow(dead_code))]
 mod auth;
+#[allow(dead_code)]
 mod congestion;
+mod credit;
 #[cfg(windows)]
 pub mod helper;
 mod host;
@@ -27,8 +31,10 @@ mod pacer;
 mod platform;
 #[cfg_attr(not(test), allow(dead_code))]
 mod protocol;
+mod qos;
 mod scheduler;
 mod security;
+mod session;
 #[allow(dead_code)]
 mod shared;
 #[cfg(test)]
@@ -39,6 +45,7 @@ mod tests;
 mod video_sink;
 mod viewer;
 mod wire;
+#[allow(dead_code)]
 mod worker;
 #[cfg(windows)]
 pub mod video {

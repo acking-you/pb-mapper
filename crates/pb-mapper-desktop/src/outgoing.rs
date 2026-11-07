@@ -41,6 +41,7 @@ pub(crate) enum Push {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct UnitMeta {
     pub generation: u64,
+    pub frame_id: u64,
     pub keyframe: bool,
     pub len: usize,
     pub ready_at: Instant,
@@ -116,6 +117,7 @@ impl Outgoing {
     pub fn peek_meta(&self) -> Option<UnitMeta> {
         self.q.lock().front().map(|unit| UnitMeta {
             generation: unit.generation,
+            frame_id: unit.frame_id,
             keyframe: unit.keyframe,
             len: unit.bytes.len(),
             ready_at: unit.ready_at,
@@ -124,6 +126,17 @@ impl Outgoing {
 
     pub fn pop(&self) -> Option<HostUnit> {
         self.q.lock().pop_front()
+    }
+
+    /// Pop the head only if it is still the unit `peek_meta` described: C may
+    /// clear or retain the queue between the peek and the pop.
+    pub fn pop_if(&self, frame_id: u64) -> Option<HostUnit> {
+        let mut q = self.q.lock();
+        if q.front()?.frame_id == frame_id {
+            q.pop_front()
+        } else {
+            None
+        }
     }
 
     /// Includes the head B-send is evaluating.
