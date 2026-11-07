@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
 import 'package:pb_mapper_ui/src/theme/metrics.dart';
@@ -397,6 +398,7 @@ ThemeData _base(ColorScheme scheme) {
     iconButtonTheme: IconButtonThemeData(
       style: IconButton.styleFrom(
         minimumSize: const Size(44, 44),
+        iconSize: AppIconSize.button,
         foregroundColor: scheme.onSurfaceVariant,
         shape: const CircleBorder(),
       ),
@@ -611,7 +613,6 @@ ThemeData desktopize(ThemeData base) {
     iconButtonTheme: IconButtonThemeData(
       style: IconButton.styleFrom(
         minimumSize: const Size(34, 34),
-        iconSize: 18,
       ).copyWith(mouseCursor: clickable).merge(base.iconButtonTheme.style),
     ),
     listTileTheme: base.listTileTheme.copyWith(mouseCursor: clickable),

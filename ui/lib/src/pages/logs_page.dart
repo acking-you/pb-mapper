@@ -151,11 +151,11 @@ class _LogsPageState extends State<LogsPage> {
       onChanged: _onSearch,
       decoration: InputDecoration(
         hintText: l10n.logsFilter,
-        prefixIcon: const Icon(AppIcons.search, size: 17),
+        prefixIcon: const Icon(AppIcons.search, size: AppIconSize.inline),
         suffixIcon: _keyword.isEmpty
             ? null
             : IconButton(
-                icon: const Icon(AppIcons.close, size: 15),
+                icon: const Icon(AppIcons.close, size: AppIconSize.inline),
                 onPressed: () {
                   _search.clear();
                   _keyword = '';

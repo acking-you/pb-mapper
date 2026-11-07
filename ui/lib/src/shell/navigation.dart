@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
+import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
 import 'package:pb_mapper_ui/src/theme/metrics.dart';
@@ -144,7 +145,7 @@ class _RailRow extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 14),
           child: Row(
             children: [
-              Icon(page.icon, size: 18, color: ink),
+              Icon(page.icon, size: AppIconSize.nav, color: ink),
               const SizedBox(width: 11),
               Expanded(
                 child: Text(
@@ -293,7 +294,7 @@ class _BarItem extends StatelessWidget {
                       : Colors.transparent,
                   borderRadius: BorderRadius.circular(999),
                 ),
-                child: Icon(page.icon, size: 20, color: ink),
+                child: Icon(page.icon, size: AppIconSize.nav, color: ink),
               ),
               const SizedBox(height: 3),
               Text(

@@ -209,7 +209,7 @@ class _RoutingTableState extends State<_RoutingTable> {
               ),
               icon: Icon(
                 _open ? AppIcons.chevronDown : AppIcons.chevronRight,
-                size: 15,
+                size: AppIconSize.inline,
               ),
               label: Text(l10n.relayRoutingHint),
             ),

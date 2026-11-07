@@ -23,6 +23,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
+import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/widgets/brand_mark.dart';
 
@@ -108,11 +109,11 @@ const _english = _Copy(
       'The app draws this computer, the relay and every tunnel between '
       'them. Click a planet to start, stop, edit or connect it.',
   chips: [
-    (LucideIcons.zap300, 'Direct over QUIC'),
-    (LucideIcons.radioTower300, 'Relay fallback'),
-    (LucideIcons.arrowLeftRight300, 'TCP & UDP'),
-    (LucideIcons.keyRound300, 'Revocable keys'),
-    (LucideIcons.code300, 'Rust & Node SDKs'),
+    (AppIcons.direct, 'Direct over QUIC'),
+    (AppIcons.relay, 'Relay fallback'),
+    (LucideIcons.arrowLeftRight400, 'TCP & UDP'),
+    (AppIcons.key, 'Revocable keys'),
+    (LucideIcons.code400, 'Rust & Node SDKs'),
   ],
   output: '../docs/assets/poster.png',
 );
@@ -133,11 +134,11 @@ const _chinese = _Copy(
       '都画成一片星系。点一颗行星，\n'
       '就能启动、停止、编辑或连接它。',
   chips: [
-    (LucideIcons.zap300, 'QUIC 直连'),
-    (LucideIcons.radioTower300, '中继兜底'),
-    (LucideIcons.arrowLeftRight300, 'TCP 与 UDP'),
-    (LucideIcons.keyRound300, '可吊销密钥'),
-    (LucideIcons.code300, 'Rust 与 Node SDK'),
+    (AppIcons.direct, 'QUIC 直连'),
+    (AppIcons.relay, '中继兜底'),
+    (LucideIcons.arrowLeftRight400, 'TCP 与 UDP'),
+    (AppIcons.key, '可吊销密钥'),
+    (LucideIcons.code400, 'Rust 与 Node SDK'),
   ],
   output: '../docs/assets/poster.zh-CN.png',
 );
@@ -408,7 +409,7 @@ class _Chip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 16, color: _signal),
+          Icon(icon, size: AppIconSize.inline, color: _signal),
           const SizedBox(width: 7),
           Text(label, style: _style(14, weight: FontWeight.w500, height: 1)),
         ],

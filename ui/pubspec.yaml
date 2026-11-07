@@ -38,9 +38,6 @@ dependencies:
     sdk: flutter
   intl: any
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
   # Native buffers for the galaxy's per-frame call into pb_mapper_galaxy_frame_v1.
   ffi: ^2.1.0
   # The app's one icon family (Lucide, ISC), mapped in lib/src/theme/app_icons.dart.

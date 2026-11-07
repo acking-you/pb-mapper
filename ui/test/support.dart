@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -81,8 +80,9 @@ Future<void> finish(WidgetTester tester) async {
 }
 
 /// Load the app's real typefaces, which `flutter test` otherwise draws as
-/// boxes, for the tests that render images meant to be looked at. Material's
-/// own icon font comes from the SDK, when `FLUTTER_ROOT` says where it is.
+/// boxes, for the tests that render images meant to be looked at: both of
+/// Lucide's strokes the app uses. Material's icon font is not loaded, so a
+/// stray Material glyph shows as a box.
 Future<void> loadRealFonts() async {
   Future<void> family(String name, List<String> assets) async {
     final loader = FontLoader(name);
@@ -108,18 +108,10 @@ Future<void> loadRealFonts() async {
     'assets/fonts/NotoSansSC-Medium.subset.ttf',
     'assets/fonts/NotoSansSC-SemiBold.subset.ttf',
   ]);
+  await family('packages/lucide_icons_flutter/Lucide400', [
+    'packages/lucide_icons_flutter/assets/build_font/LucideVariable-w400.ttf',
+  ]);
   await family('packages/lucide_icons_flutter/Lucide300', [
     'packages/lucide_icons_flutter/assets/build_font/LucideVariable-w300.ttf',
   ]);
-  final flutterRoot = Platform.environment['FLUTTER_ROOT'];
-  if (flutterRoot != null) {
-    final icons = File(
-      '$flutterRoot/bin/cache/artifacts/material_fonts/materialicons-regular.otf',
-    );
-    if (icons.existsSync()) {
-      final loader = FontLoader('MaterialIcons')
-        ..addFont(Future.value(ByteData.sublistView(icons.readAsBytesSync())));
-      await loader.load();
-    }
-  }
 }

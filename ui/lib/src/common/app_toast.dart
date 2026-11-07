@@ -113,7 +113,7 @@ class _Toast extends StatelessWidget {
               IconButton(
                 onPressed: onClose,
                 visualDensity: VisualDensity.compact,
-                iconSize: 15,
+                iconSize: AppIconSize.inline,
                 icon: const Icon(AppIcons.close),
               ),
             ],

@@ -220,7 +220,7 @@ class EmptyNote extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(icon, size: 20, color: onSurfaceMuted(scheme)),
+          Icon(icon, size: AppIconSize.button, color: onSurfaceMuted(scheme)),
           const SizedBox(width: 14),
           Expanded(
             child: Text(

@@ -268,7 +268,7 @@ class _ServiceRowState extends State<_ServiceRow> {
                       ),
                       icon: Icon(
                         _open ? AppIcons.chevronDown : AppIcons.chevronRight,
-                        size: 15,
+                        size: AppIconSize.inline,
                       ),
                       label: Text(l10n.connectionsHeld(held.length)),
                     ),
@@ -338,7 +338,7 @@ class _ServiceMenu extends StatelessWidget {
           value: _ServiceAction.copyKey,
           child: Row(
             children: [
-              const Icon(AppIcons.copy, size: 17),
+              const Icon(AppIcons.copy, size: AppIconSize.button),
               const SizedBox(width: 10),
               Text(l10n.copyKey),
             ],
@@ -350,7 +350,11 @@ class _ServiceMenu extends StatelessWidget {
             value: _ServiceAction.retire,
             child: Row(
               children: [
-                Icon(AppIcons.unlink, size: 17, color: scheme.error),
+                Icon(
+                  AppIcons.unlink,
+                  size: AppIconSize.button,
+                  color: scheme.error,
+                ),
                 const SizedBox(width: 10),
                 Text(
                   l10n.relayRetireAll,

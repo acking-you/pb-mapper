@@ -208,7 +208,15 @@ breakpoint.
 Type is Google Sans Flex for prose (Segoe UI on Windows) and Geist Mono for
 keys, addresses and logs; Chinese falls back to the bundled Noto Sans SC subset
 on Windows and Linux and to PingFang SC on Apple platforms
-(`theme/fonts.dart`). Icons are Lucide at its 300 stroke (`theme/app_icons.dart`).
+(`theme/fonts.dart`).
+
+Icons are Lucide only, through `theme/app_icons.dart`, named for what each
+means here; no Material `Icons.*`. Four sizes (`AppIconSize`): 16 beside a
+label or inline, 18 in buttons and menus, 20 in the rail and the bottom bar,
+24 for empty states and tiles. Weight follows size: the 400 stroke up to
+20 px, where the 300 stroke thins to grey, and the 300 stroke (the `…Large`
+constants) from 24 px. An icon takes the colour of its text; status is told
+by coloured dots, and blue stays for this computer and live traffic.
 
 ## The galaxy
 
