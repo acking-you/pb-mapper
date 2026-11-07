@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:pb_mapper_ui/src/pages/remote/add_computer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
@@ -67,9 +68,25 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
     );
   }
 
+  /// Asks for the host's new invitation, which replaces the remembered
+  /// computer's own: the only path that touches a computer whose identity
+  /// changed. The add flow keeps its name.
+  void _pasteNewInvite() {
+    final remote = _remote;
+    final id = remote?.desktop.session.value.target?.computerId;
+    final computer = id == null ? null : remote?.computers.byId(id);
+    if (computer == null) return;
+    unawaited(showAddComputer(context, replacing: computer));
+  }
+
   @override
   Widget build(BuildContext context) {
     final remote = AppScope.of(context).remote;
+    final id = remote.desktop.session.value.target?.computerId;
+    // Only a remembered computer has an invitation to replace.
+    final paste = id != null && remote.computers.byId(id) != null
+        ? _pasteNewInvite
+        : null;
     return PopScope(
       canPop: false,
       // Back returns to the list with the session alive (paused).
@@ -94,6 +111,7 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
                     onQuality: (quality) =>
                         unawaited(remote.setQuality(quality)),
                     onReconnect: () => unawaited(remote.reconnect()),
+                    onPasteNewInvite: paste,
                   )
                 : DesktopViewer(
                     desktop: remote.desktop,
@@ -104,6 +122,7 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
                     onQuality: (quality) =>
                         unawaited(remote.setQuality(quality)),
                     onReconnect: () => unawaited(remote.reconnect()),
+                    onPasteNewInvite: paste,
                   ),
           ),
         ),

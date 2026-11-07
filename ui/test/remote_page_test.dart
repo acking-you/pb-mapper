@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
 import 'package:pb_mapper_ui/src/pages/remote/remote_page.dart';
@@ -272,6 +273,55 @@ void main() {
       await tester.drag(page, const Offset(0, 600));
       await settle(tester);
       expect(_key('sharing-fallback'), findsNothing);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    "a remembered computer whose identity changed takes the host's new "
+    'invitation from the viewer, keeping its record',
+    (tester) async {
+      const id = '0123456789abcdef0123456789abcdef';
+      final api = FakePbMapperApi(serverServices: ['desktop:lab']);
+      final vault = FakeRemoteComputerVault()
+        ..records.add(
+          const RemoteComputer(
+            id: id,
+            name: 'Lab',
+            service: 'desktop:lab',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            relay: 'lb7666.top:7666',
+            namespace: 0,
+          ),
+        );
+      await pumpApp(tester, api, page: AppPage.remote, vault: vault);
+      api.desktop.failNext('connect', 'IDENTITY_CHANGED');
+      await _tapIn(tester, _key('computer-open-$id'));
+      await settle(tester);
+      expect(_key('viewer-overlay-identityChanged'), findsOneWidget);
+
+      final l10n = lookupAppLocalizations(const Locale('en'));
+      await tester.tap(find.text(l10n.viewerPasteNewInvite));
+      await settle(tester);
+      const invitation = 'pbd1.lab.NEW-TOKEN-0123';
+      await tester.enterText(_key('add-invite'), invitation);
+      await tester.pump(const Duration(milliseconds: 300));
+      await settle(tester);
+      await tester.tap(_key('add-connect'));
+      // The viewer's Connecting spinner never settles.
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      // The new invitation connects as the same computer, kept by name; its
+      // record is replaced only at the first picture.
+      expect(api.desktop.argsOf('connect').last['invitation'], invitation);
+      final remote = AppScope.of(
+        tester.element(find.byType(RemoteViewerScreen)),
+      ).remote;
+      expect(remote.desktop.session.value.target?.computerId, id);
+      expect(remote.title, 'Lab');
+      expect(vault.ops, isNot(contains('remember')));
       await finish(tester);
     },
   );
