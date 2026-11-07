@@ -8,13 +8,32 @@ separate view/control permissions. The helper's real UAC acceptance and the
 60+ FPS end-to-end UI target are still unverified. See the
 [setup, measurements and support matrix](../../docs/remote-desktop.md).
 
+A host's `invitation()` encodes as a `pbd1.` string (`Invitation::encode`,
+`Invitation::decode`) that names the service, pins the host certificate's
+fingerprint and carries a bearer token. `Viewer::connect(&client, &invitation,
+options, ViewerConfig { codecs, limits, quality, progress })` returns once the
+host accepted, or fails with a typed `ConnectError`: identity changed, version
+mismatch, busy, denied and so on. Both ends speak desktop protocol v2, and an
+older peer fails at the handshake. `VideoLimits::for_viewer(refresh_hz)`
+bounds the encoded size and frame rate independently of the physical display
+geometry used for input; `set_quality` switches the `QualityPreset` live.
+
+Video goes to exactly one consumer: `viewer.video_sink().attach()` returns a
+`VideoConsumer` whose `next` blocks on the caller's thread, never on tokio. The
+sink keeps only the newest decodable frames: when the consumer falls behind it
+drops to the next IDR and caps the host's frame rate to what the consumer
+presents. The consumer reports each frame it actually showed with `presented`
+and asks for an IDR with `keyframe`. Requests are rate-limited, and a decoder
+that keeps failing ends the session with `decoder_failed`. Input is authorised
+only by a recent, validated presentation: `Viewer::input(generation, &inputs)`
+stamps the frame and sequence itself and fails with a typed `InputError`;
+transport receipts never grant input. `status()`, and per frame the
+allocation-free `view()`, report the session; `pause` and `resume` stop and
+restart video while the viewer is hidden.
+
 Desktop backends are constructed and retained on their capture/input worker;
 `Backend` need not be `Send`. Embedders coordinate other input writers with a
-`ControlAdmission` lease, acquired only for an explicit control request. Use
-`Viewer::next_frame` to consume H.264 units in order and acknowledge actual
-rendering with `presented`; latest-frame polling can lose predictive references.
-`VideoPreferences` bounds encoded size, frame rate and bitrate independently of
-the physical display geometry used for input.
+`ControlAdmission` lease, acquired only for an explicit control request.
 `HostIdentity` permits an explicitly authorized restart, but its serialized form
 contains private keys and a bearer grant: storage and revocation belong to the
 embedding application. The UI uses Windows DPAPI. Ordinary SDK consumers incur
