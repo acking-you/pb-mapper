@@ -930,7 +930,7 @@ running:
 | Fixed 350 ms RTT | Pace 60 (the ceiling); bitrate 4.91 Mbit/s from a 4.0 start; 59 presented and 60 received FPS; one keyframe; one size (1920×1080); the encoder configured once |
 | 1 Mbit/s for 8 s after 6 s unlimited | Window clamped at the first trace interval after the limit (990 ms; 1001–1016 ms in three other runs); lowest pace 3; lowest expected bitrate 194 kbit/s; back to at least 3.2 Mbit/s 8.05 s after the limit lifted (8.0–11.1 s over eight later runs: recovery moves in whole trace intervals) |
 | Decoder taking 67 ms a frame | Host pace held at a mean 12.5 FPS (14.3 in another run) by the viewer's fps cap, while the delay controller stayed at 60 FPS and the encoder bitrate at 8 Mbit/s: presentation lag never reaches congestion control |
-| 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (498 skipped ticks) instead of queueing; control 61 ms, release 47 ms, revoke 15.7 ms, host stop under 1 ms (252 and 266 ms in two later runs, since a stop now waits for the viewer to read `Stopped`, at most 1 s) |
+| 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (498 skipped ticks) instead of queueing; control 61 ms, release 47 ms, revoke 15.7 ms, host stop under 1 ms (252 and 266 ms in two later runs, probably because a stop now waits for the viewer to read `Stopped`, at most 1 s; not measured separately) |
 
 Proposed phone criteria, which the owner decides: on a 60 Hz phone over direct
 Wi-Fi with Balanced, presented FPS p50 ≥ 55; present interval p95 ≤ 25 ms and
