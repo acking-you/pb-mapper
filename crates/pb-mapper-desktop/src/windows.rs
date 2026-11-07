@@ -131,7 +131,7 @@ pub(super) fn create(id: u32) -> Result<Box<dyn Backend>> {
         keys: HashSet::new(),
         secure: None,
         encoder: None,
-        video_preferences: crate::VideoPreferences::default(),
+        video_limits: crate::VideoPreferences::default().limits(),
     }))
 }
 struct Desktop {
@@ -142,7 +142,7 @@ struct Desktop {
     keys: HashSet<Key>,
     secure: Option<crate::helper::worker::DesktopBinding>,
     encoder: Option<(DesktopContext, crate::video::windows::Encoder)>,
-    video_preferences: crate::VideoPreferences,
+    video_limits: crate::VideoLimits,
 }
 impl Desktop {
     fn finish_video(
@@ -190,11 +190,11 @@ impl Desktop {
     }
 }
 impl Backend for Desktop {
-    fn configure_video(&mut self, preferences: crate::VideoPreferences) -> Result<()> {
-        preferences.validate()?;
-        if self.video_preferences != preferences {
+    fn configure_video(&mut self, limits: crate::VideoLimits, _nominal_fps: u32) -> Result<()> {
+        limits.validate()?;
+        if self.video_limits != limits {
             self.encoder = None;
-            self.video_preferences = preferences;
+            self.video_limits = limits;
         }
         Ok(())
     }
@@ -262,7 +262,7 @@ impl Backend for Desktop {
         expected: &DesktopContext,
         codec: crate::VideoCodec,
         keyframe: bool,
-        bitrate: u32,
+        rate: crate::VideoRate,
     ) -> Result<Option<crate::EncodedFrame>> {
         if codec == crate::VideoCodec::Jpeg {
             return Ok(Some(crate::EncodedFrame {
@@ -273,6 +273,7 @@ impl Backend for Desktop {
                     height: expected.display.height,
                     pts_us: 0,
                     duplicate: false,
+                    encode_us: 0,
                 },
                 bytes: self.capture_consistent(expected)?,
             }));
@@ -291,10 +292,10 @@ impl Backend for Desktop {
                 expected.clone(),
                 crate::video::windows::Encoder::new_with_size(
                     &expected.display,
-                    self.video_preferences.max_fps,
-                    bitrate.min(self.video_preferences.bitrate),
-                    self.video_preferences.max_width,
-                    self.video_preferences.max_height,
+                    self.video_limits.max_fps,
+                    rate.bitrate,
+                    self.video_limits.max_width,
+                    self.video_limits.max_height,
                 )?,
             ));
         }
@@ -303,11 +304,15 @@ impl Backend for Desktop {
             .as_mut()
             .ok_or_else(|| error("video encoder unavailable"))?
             .1;
-        encoder.set_bitrate(bitrate.min(self.video_preferences.bitrate))?;
+        encoder.set_bitrate(rate.bitrate)?;
         let image = encoder.next_frame(keyframe);
         self.finish_video(expected, image)
     }
-    fn drain_video(&mut self, expected: &DesktopContext) -> Result<Option<crate::EncodedFrame>> {
+    fn drain_video(
+        &mut self,
+        expected: &DesktopContext,
+        _wait: std::time::Duration,
+    ) -> Result<Option<crate::EncodedFrame>> {
         let _dpi = DpiScope::enter();
         if &self.context()? != expected {
             return Err(error("desktop changed before video drain"));
@@ -343,7 +348,7 @@ impl Backend for Desktop {
                 unsafe { SetCursorPos(d.x + *x as i32, d.y + *y as i32) }
                     .map_err(native_input_error)?;
             }
-            Input::Button { button, down } => {
+            Input::Button { button, down, .. } => {
                 apply_held(&mut self.buttons, *button, *down, |direction| {
                     self.input
                         .button(button_code(*button), direction)
@@ -373,6 +378,8 @@ impl Backend for Desktop {
                 })?;
             }
             Input::Text { text } => self.input.text(text).map_err(native_input_error)?,
+            // LockWorkStation arrives with the v2 worker.
+            Input::Lock {} => return Err(error("this host cannot lock the workstation yet")),
         }
         Ok(())
     }
@@ -518,7 +525,7 @@ pub(crate) fn create_privileged(
         keys: HashSet::new(),
         secure: Some(binding),
         encoder: None,
-        video_preferences: crate::VideoPreferences::default(),
+        video_limits: crate::VideoPreferences::default().limits(),
     }))
 }
 impl Drop for Desktop {
@@ -535,30 +542,138 @@ fn button_code(button: Button) -> enigo::Button {
         Button::Middle => enigo::Button::Middle,
     }
 }
+/// Letters and digits are virtual keys, never `enigo::Key::Unicode`: on a host
+/// layout that cannot produce the character, enigo falls back to Unicode text
+/// with its own down and up, so Ctrl+C or Win+E would type a stray letter.
 fn key_code(key: Key) -> enigo::Key {
+    use enigo::Key as K;
     match key {
-        Key::Shift => enigo::Key::Shift,
-        Key::Control => enigo::Key::Control,
-        Key::Alt => enigo::Key::Alt,
-        Key::Meta => enigo::Key::Meta,
-        Key::Enter => enigo::Key::Return,
-        Key::Escape => enigo::Key::Escape,
-        Key::Tab => enigo::Key::Tab,
-        Key::Backspace => enigo::Key::Backspace,
-        Key::Delete => enigo::Key::Delete,
-        Key::Left => enigo::Key::LeftArrow,
-        Key::Right => enigo::Key::RightArrow,
-        Key::Up => enigo::Key::UpArrow,
-        Key::Down => enigo::Key::DownArrow,
-        Key::Home => enigo::Key::Home,
-        Key::End => enigo::Key::End,
-        Key::PageUp => enigo::Key::PageUp,
-        Key::PageDown => enigo::Key::PageDown,
-        Key::A => enigo::Key::Unicode('a'),
-        Key::C => enigo::Key::Unicode('c'),
-        Key::V => enigo::Key::Unicode('v'),
-        Key::X => enigo::Key::Unicode('x'),
-        Key::Z => enigo::Key::Unicode('z'),
+        Key::Shift => K::Shift,
+        Key::Control => K::Control,
+        Key::Alt => K::Alt,
+        Key::Meta => K::Meta,
+        Key::Enter => K::Return,
+        Key::Escape => K::Escape,
+        Key::Tab => K::Tab,
+        Key::Backspace => K::Backspace,
+        Key::Delete => K::Delete,
+        Key::Left => K::LeftArrow,
+        Key::Right => K::RightArrow,
+        Key::Up => K::UpArrow,
+        Key::Down => K::DownArrow,
+        Key::Home => K::Home,
+        Key::End => K::End,
+        Key::PageUp => K::PageUp,
+        Key::PageDown => K::PageDown,
+        Key::Insert => K::Insert,
+        Key::Space => K::Space,
+        Key::A => K::A,
+        Key::B => K::B,
+        Key::C => K::C,
+        Key::D => K::D,
+        Key::E => K::E,
+        Key::F => K::F,
+        Key::G => K::G,
+        Key::H => K::H,
+        Key::I => K::I,
+        Key::J => K::J,
+        Key::K => K::K,
+        Key::L => K::L,
+        Key::M => K::M,
+        Key::N => K::N,
+        Key::O => K::O,
+        Key::P => K::P,
+        Key::Q => K::Q,
+        Key::R => K::R,
+        Key::S => K::S,
+        Key::T => K::T,
+        Key::U => K::U,
+        Key::V => K::V,
+        Key::W => K::W,
+        Key::X => K::X,
+        Key::Y => K::Y,
+        Key::Z => K::Z,
+        Key::Digit0 => K::Num0,
+        Key::Digit1 => K::Num1,
+        Key::Digit2 => K::Num2,
+        Key::Digit3 => K::Num3,
+        Key::Digit4 => K::Num4,
+        Key::Digit5 => K::Num5,
+        Key::Digit6 => K::Num6,
+        Key::Digit7 => K::Num7,
+        Key::Digit8 => K::Num8,
+        Key::Digit9 => K::Num9,
+        Key::F1 => K::F1,
+        Key::F2 => K::F2,
+        Key::F3 => K::F3,
+        Key::F4 => K::F4,
+        Key::F5 => K::F5,
+        Key::F6 => K::F6,
+        Key::F7 => K::F7,
+        Key::F8 => K::F8,
+        Key::F9 => K::F9,
+        Key::F10 => K::F10,
+        Key::F11 => K::F11,
+        Key::F12 => K::F12,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn key_code_uses_virtual_keys_for_letters_and_digits() {
+        let named = [
+            "shift",
+            "control",
+            "alt",
+            "meta",
+            "enter",
+            "escape",
+            "tab",
+            "backspace",
+            "delete",
+            "left",
+            "right",
+            "up",
+            "down",
+            "home",
+            "end",
+            "page_up",
+            "page_down",
+            "insert",
+            "space",
+        ]
+        .map(String::from);
+        let letters = ('a'..='z').map(String::from);
+        let digits = (0..=9).map(|digit| format!("digit{digit}"));
+        let functions = (1..=12).map(|n| format!("f{n}"));
+        let codes: Vec<_> = named
+            .into_iter()
+            .chain(letters)
+            .chain(digits)
+            .chain(functions)
+            .map(|name| key_code(serde_json::from_value(serde_json::json!(name)).unwrap()))
+            .collect();
+        assert_eq!(codes.len(), 19 + 26 + 10 + 12);
+        assert!(
+            codes
+                .iter()
+                .all(|code| !matches!(code, enigo::Key::Unicode(_)))
+        );
+        // Distinct: no two keys of the vocabulary press the same host key.
+        assert!(
+            codes
+                .iter()
+                .enumerate()
+                .all(|(i, code)| !codes[..i].contains(code))
+        );
+        assert_eq!(key_code(Key::A), enigo::Key::A);
+        assert_eq!(key_code(Key::Z), enigo::Key::Z);
+        assert_eq!(key_code(Key::Digit0), enigo::Key::Num0);
+        assert_eq!(key_code(Key::Digit9), enigo::Key::Num9);
     }
 }
 

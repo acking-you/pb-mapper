@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used)]
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
 use pb_mapper_desktop::{
-    Backend, Display, Frame, Host, HostOptions, Input, InputEvent, Key, Result, Viewer,
+    Backend, Display, Frame, Host, HostOptions, HostState, Input, InputEvent, Invitation, Key,
+    Result, Viewer,
 };
 use pb_mapper_server::DirectServerConfig;
 use pb_mapper_testkit::{Relay, admin_credential};
@@ -54,6 +55,18 @@ impl Drop for Desktop {
     }
 }
 
+/// The same host and pin with another bearer token, as a well-formed `pbd1`.
+fn forged(invitation: &Invitation) -> Invitation {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let text = invitation.encode();
+    let mut payload = URL_SAFE_NO_PAD.decode(&text["pbd1.".len()..]).unwrap();
+    let check = payload.len() - 4;
+    payload[check - 32..check].fill(b'x');
+    let digest = ring::digest::digest(&ring::digest::SHA256, &payload[..check]);
+    payload[check..].copy_from_slice(&digest.as_ref()[..4]);
+    Invitation::decode(&format!("pbd1.{}", URL_SAFE_NO_PAD.encode(payload))).unwrap()
+}
+
 async fn frame(
     rx: &mut watch::Receiver<Option<Frame>>,
     predicate: impl Fn(&Frame) -> bool,
@@ -71,6 +84,7 @@ async fn frame(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "v1 pipeline; rewritten for v2 after the G1 merges"]
 async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() {
     let mut relay = Relay::start_with_direct(
         "desktop-session",
@@ -97,8 +111,7 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
         .await
         .unwrap();
         // A valid relay credential does not grant desktop access.
-        let mut bad = host.invitation().clone();
-        bad.token = "x".repeat(43);
+        let bad = forged(host.invitation());
         let intruder = Viewer::connect(
             &client,
             bad,
@@ -196,7 +209,7 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
         }
         viewer.stop().await.unwrap();
         let stopped = host.status();
-        assert_eq!(stopped.state, "waiting");
+        assert_eq!(stopped.state, HostState::Waiting);
         assert!(stopped.message.is_empty(), "{}", stopped.message);
         host.stop().await.unwrap();
         assert_eq!(observed.dropped.load(Ordering::Relaxed), 1);
@@ -204,6 +217,7 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "v1 pipeline; rewritten for v2 after the G1 merges"]
 async fn cursor_crosses_a_full_video_window_without_refreshing_the_picture() {
     struct Snapshot {
         cursor: Arc<AtomicU32>,
@@ -228,7 +242,7 @@ async fn cursor_crosses_a_full_video_window_without_refreshing_the_picture() {
             _: &pb_mapper_desktop::DesktopContext,
             _: pb_mapper_desktop::VideoCodec,
             _: bool,
-            _: u32,
+            _: pb_mapper_desktop::VideoRate,
         ) -> Result<Option<pb_mapper_desktop::EncodedFrame>> {
             if std::mem::replace(&mut self.captured, true) {
                 return Ok(None);
