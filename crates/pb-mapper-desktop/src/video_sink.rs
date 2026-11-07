@@ -119,7 +119,9 @@ impl VideoSink {
     }
 
     /// Drop everything queued and wake a blocked consumer, which then exits.
-    pub(crate) fn close(&self) {
+    /// Public because the FFI closes a source the moment its session is torn
+    /// down, before the session's own stop has finished.
+    pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.state.lock().queue.clear();
         self.ready.notify_all();
@@ -135,6 +137,13 @@ impl VideoSink {
     #[doc(hidden)]
     pub fn push_for_test(&self, unit: VideoUnit) {
         self.push(unit);
+    }
+
+    /// Pause or resume a detached sink, so a native consumer's `Paused`
+    /// handling can run against the FFI's synthetic source.
+    #[doc(hidden)]
+    pub fn set_paused_for_test(&self, paused: bool) {
+        if paused { self.pause() } else { self.resume() }
     }
 }
 
@@ -196,14 +205,24 @@ impl VideoConsumer {
         let name = decoder.chars().take(64).collect();
         self.sink.state.lock().decoder = Some((name, hardware));
     }
-}
-impl Drop for VideoConsumer {
-    fn drop(&mut self) {
+
+    /// Detach now, even while another thread is blocked in `next`: that call
+    /// returns `Closed`, and the sink takes a new consumer at once. Idempotent;
+    /// dropping the consumer does the same.
+    pub fn detach(&self) {
         let _ =
             self.sink
                 .attached
                 .compare_exchange(self.token, 0, Ordering::AcqRel, Ordering::Acquire);
+        // A `next` holds the lock from its check until it waits, so taking it
+        // here means the notification cannot fall between the two.
+        drop(self.sink.state.lock());
         self.sink.ready.notify_all();
+    }
+}
+impl Drop for VideoConsumer {
+    fn drop(&mut self) {
+        self.detach();
     }
 }
 

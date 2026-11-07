@@ -10,6 +10,12 @@ crate-type = ["cdylib", "staticlib"]
 [lints]
 workspace = true
 
+[features]
+# `pb_mapper_desktop_video_test_source_v1`: plays a `video_bench --dump` clip
+# into a video source, so native consumers run on a device without a session.
+# A debugging aid; no release script enables it.
+desktop-test-source = ["dep:bytes"]
+
 [dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0"
@@ -37,10 +43,15 @@ uni-stream.workspace = true
 parking_lot.workspace = true
 # The update manifest's Ed25519 signature; see src/update.rs.
 ring.workspace = true
+bytes = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Storage_FileSystem"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
+
 [dev-dependencies]
 # A live relay for the Relay page's calls; see src/relay.rs.
 pb-mapper-testkit.workspace = true
+bytes.workspace = true

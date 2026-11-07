@@ -3152,8 +3152,10 @@ name = "pb-mapper-ffi"
 version = "0.1.0"
 dependencies = [
  "better_mimalloc_rs",
+ "bytes",
  "clap",
  "dirs",
+ "jni 0.21.1",
  "parking_lot",
  "pb-mapper",
  "pb-mapper-auth",
