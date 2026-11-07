@@ -28,15 +28,19 @@ typedef DesktopTextureFactory =
 /// (Windows without Media Foundation takes JPEG).
 bool get nativeDesktopVideo => Platform.isAndroid || Platform.isWindows;
 
-/// The channel-backed texture (`pb_mapper/desktop_video` v2).
+/// The channel-backed texture (`pb_mapper/desktop_video` v2). [decoderHints]
+/// false configures Android's decoder without its low-latency hint; only the
+/// acceptance tool's case F sends it.
 Future<DesktopVideoTexture> createDesktopVideoTexture({
   required int instanceToken,
+  bool decoderHints = true,
 }) async {
   if (!nativeDesktopVideo) {
     throw UnsupportedError('Native desktop video unavailable');
   }
   final id = await _ChannelVideoTexture._channel.invokeMethod<int>('create', {
     'instance': instanceToken,
+    'decoderHints': decoderHints,
   });
   if (id == null || id < 0) {
     throw StateError('Native texture creation failed');

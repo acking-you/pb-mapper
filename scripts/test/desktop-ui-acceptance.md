@@ -117,8 +117,8 @@ sensor), read it before and after the run with
 
 One JSON object:
 
-- `schema` (2), `case`, `quality`, `relay_only`, `transport`, `seconds`,
-  `warmup_seconds` (5).
+- `schema` (2), `case`, `quality`, `relay_only`, `decoder_hints`,
+  `transport`, `seconds`, `warmup_seconds` (5).
 - `build`: the app version, build number and mode (`release`, `profile` or
   `debug`).
 - `device`: the OS and its version, processors, the display refresh rate
@@ -213,7 +213,10 @@ statements stay until the owner accepts fluidity.
      5 min. Without a freeze: a picture within 1 s and no reconnect. After a
      freeze: one immediate reconnect and a picture within 3 s. Always at most
      two IDRs per resume, and no input replay.
-   - F: decoder hints on versus off.
+   - F: decoder hints on versus off: A, then A again with `deployed … serve
+     --no-decoder-hints`, which writes `decoder_hints: false` into
+     `controller.json`; no rebuild. The report's `decoder_hints` is the arm
+     asked for and each sample's `native.lowLatency` the one that ran.
    - G: UAC prompt, lock screen and Win+L through the helper.
    - H: RustDesk side by side.
    - I: `video_bench --pace 60,30,15,5` and `video_bench 60 60` on each host

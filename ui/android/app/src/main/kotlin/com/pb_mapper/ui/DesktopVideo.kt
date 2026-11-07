@@ -42,7 +42,11 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                 if (call.method == "create") {
                     checkInstance(call.argument<Number>("instance")?.toLong() ?: error("Missing video library instance"))
                     check(viewers.size < 2) { "Desktop texture limit reached" }
-                    val viewer = Viewer(textures.createSurfaceTexture(), DesktopVideoNative.api)
+                    val viewer = Viewer(
+                        textures.createSurfaceTexture(),
+                        DesktopVideoNative.api,
+                        call.argument<Boolean>("decoderHints") != false,
+                    )
                     viewers[viewer.id] = viewer
                     result.success(viewer.id)
                 } else {
@@ -145,6 +149,7 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
     private inner class Viewer(
         private val entry: TextureRegistry.SurfaceTextureEntry,
         private val api: VideoSourceApi,
+        decoderHints: Boolean,
     ) : FeedTarget {
         val id = entry.id()
         val submitted = AtomicLong()
@@ -175,6 +180,10 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
         private var waitingOutputs = 0
         private var lastProgress = 0L
         private var codec: MediaCodec? = null
+        // KEY_LOW_LATENCY goes into configure while this holds. On AOSP's OMX
+        // path a decoder that rejects it fails configure (ACodec::setLowLatency),
+        // so configure retries the same decoder without it and keeps it off.
+        private var lowLatency = decoderHints && Build.VERSION.SDK_INT >= 30
         private var active: FrameSize? = null
         // The size of the picture last released to the surface, which is what
         // a snapshot reads. It outlives the codec that drew it.
@@ -308,7 +317,7 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                     "lastPresentedGeneration" to lastPresentedGeneration,
                     "lastPresentedFrameId" to lastPresentedFrameId,
                     "dropped" to dropped.get() + feed.dropped.get(), "decoder" to decoderName,
-                    "configurations" to configurations.get(),
+                    "configurations" to configurations.get(), "lowLatency" to lowLatency,
                     "recoveries" to recoveries.get(), "lastRecovery" to lastRecovery,
                     "queued" to feed.size,
                     "decoding" to waitingOutputs, "outputs" to outputs.size,
@@ -416,61 +425,82 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             // codec identity without ever returning an obsolete buffer.
             releaseCodec()
             entry.surfaceTexture().setDefaultBufferSize(unit.width, unit.height)
+            var next = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            decoderName = next.name
+            try {
+                start(next, unit, parameterSets, lowLatency)
+            } catch (e: Exception) {
+                try { next.release() } catch (_: Exception) {}
+                if (!lowLatency) throw e
+                Log.w(TAG, "$decoderName rejected the low-latency hint", e)
+                next = MediaCodec.createByCodecName(decoderName)
+                try {
+                    start(next, unit, parameterSets, false)
+                } catch (retry: Exception) {
+                    try { next.release() } catch (_: Exception) {}
+                    throw retry
+                }
+                lowLatency = false
+            }
+            // Callbacks reach this worker only after configure returns.
+            codec = next
+            active = FrameSize(unit.width, unit.height)
+            configurations.incrementAndGet()
+            api.report(consumer, next.name, hardware(next))
+        }
+
+        private fun start(c: MediaCodec, unit: FeedUnit, parameterSets: Map<Int, ByteArray>, hinted: Boolean) {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, unit.width, unit.height)
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_BYTES)
             format.setInteger(MediaFormat.KEY_MAX_WIDTH, unit.width)
             format.setInteger(MediaFormat.KEY_MAX_HEIGHT, unit.height)
-            if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            if (hinted) format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             // We own dropping before the surface and keep exactly one released
             // frame in flight. A driver silently dropping that sole frame would
             // strand the consumption credit and look like a frozen renderer.
             if (Build.VERSION.SDK_INT >= 29) format.setInteger(MediaFormat.KEY_ALLOW_FRAME_DROP, 0)
             parameterSets.forEach { (type, bytes) -> format.setByteBuffer(if (type == 7) "csd-0" else "csd-1", ByteBuffer.wrap(bytes)) }
-            val next = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            codec = next
-            active = FrameSize(unit.width, unit.height)
-            decoderName = next.name
-            next.setCallback(object : MediaCodec.Callback() {
-                override fun onInputBufferAvailable(c: MediaCodec, index: Int) {
-                    if (closed || c !== codec) return
-                    inputs.addLast(index)
-                    pump()
-                }
+            c.setCallback(callback, worker)
+            c.configure(format, surface, null, 0)
+            c.start()
+        }
 
-                override fun onOutputBufferAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                    if (closed || c !== codec) return
-                    try {
-                        val frame = pending[info.presentationTimeUs]
-                        lastProgress = SystemClock.elapsedRealtime()
-                        if (frame != null) waitingOutputs = (waitingOutputs - 1).coerceAtLeast(0)
-                        if (frame != null && frame.revision == feed.revision && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
-                            diagnostics?.let { metrics ->
-                                frame.decodedNs = System.nanoTime()
-                                if (frame.queuedNs != 0L) metrics.decodeCallback.add(frame.decodedNs - frame.queuedNs)
-                                metrics.peakOutputs = maxOf(metrics.peakOutputs, outputs.size + 1)
-                            }
-                            outputs.enqueue(index, info.presentationTimeUs, frame.revision, frame.frameId, System.nanoTime())
-                            decoded.incrementAndGet()
-                        } else {
-                            c.releaseOutputBuffer(index, false)
-                            pending.remove(info.presentationTimeUs)
+        private val callback = object : MediaCodec.Callback() {
+            override fun onInputBufferAvailable(c: MediaCodec, index: Int) {
+                if (closed || c !== codec) return
+                inputs.addLast(index)
+                pump()
+            }
+
+            override fun onOutputBufferAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                if (closed || c !== codec) return
+                try {
+                    val frame = pending[info.presentationTimeUs]
+                    lastProgress = SystemClock.elapsedRealtime()
+                    if (frame != null) waitingOutputs = (waitingOutputs - 1).coerceAtLeast(0)
+                    if (frame != null && frame.revision == feed.revision && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+                        diagnostics?.let { metrics ->
+                            frame.decodedNs = System.nanoTime()
+                            if (frame.queuedNs != 0L) metrics.decodeCallback.add(frame.decodedNs - frame.queuedNs)
+                            metrics.peakOutputs = maxOf(metrics.peakOutputs, outputs.size + 1)
                         }
-                        pump()
-                    } catch (error: Exception) {
-                        codecFailed(error)
+                        outputs.enqueue(index, info.presentationTimeUs, frame.revision, frame.frameId, System.nanoTime())
+                        decoded.incrementAndGet()
+                    } else {
+                        c.releaseOutputBuffer(index, false)
+                        pending.remove(info.presentationTimeUs)
                     }
+                    pump()
+                } catch (error: Exception) {
+                    codecFailed(error)
                 }
+            }
 
-                override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) {}
+            override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) {}
 
-                override fun onError(c: MediaCodec, error: MediaCodec.CodecException) {
-                    if (!closed && c === codec) codecFailed(error)
-                }
-            }, worker)
-            next.configure(format, surface, null, 0)
-            next.start()
-            configurations.incrementAndGet()
-            api.report(consumer, next.name, hardware(next))
+            override fun onError(c: MediaCodec, error: MediaCodec.CodecException) {
+                if (!closed && c === codec) codecFailed(error)
+            }
         }
 
         private fun schedulePump(delay: Long) {

@@ -14,6 +14,8 @@
 // Defines: setupUrl (a loopback controller.json), seconds (15..1800),
 // relayOnly, quality (quality | balanced | smooth), case (a label for the
 // run) and host (the host's GPU and refresh rate, which a viewer cannot see).
+// controller.json may override seconds and relay_only, and its decoder_hints
+// false (case F) configures the decoder without its low-latency hint.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -58,6 +60,7 @@ Future<void> main() async {
   final config = await _fetchSetup(setup);
   final seconds = (config['seconds'] as int? ?? defaultSeconds).clamp(15, 1800);
   final relayOnly = config['relay_only'] as bool? ?? defaultRelayOnly;
+  final decoderHints = config['decoder_hints'] as bool? ?? true;
 
   final service = PbMapperService();
   service.ensureInitialized();
@@ -72,7 +75,10 @@ Future<void> main() async {
   final store = DesktopStore(
     api,
     textures: ({required instanceToken}) async =>
-        texture = await createDesktopVideoTexture(instanceToken: instanceToken),
+        texture = await createDesktopVideoTexture(
+          instanceToken: instanceToken,
+          decoderHints: decoderHints,
+        ),
   );
   final run = _Run(api, store);
   // What the app's viewer host holds while a viewer is on screen.
@@ -125,6 +131,7 @@ Future<void> main() async {
       'case': const String.fromEnvironment('case'),
       'quality': quality.name,
       'relay_only': relayOnly,
+      'decoder_hints': decoderHints,
       'transport': config['transport'],
       'seconds': seconds,
       'warmup_seconds': _warmup.inSeconds,
