@@ -34,8 +34,8 @@ merged just before it (helper GOP, background stops and the hand-off, Paste
 new invitation). These sections now say what the merged code does:
 
 - 3 (Dart polls): host polling stops after the first load where this device
-  cannot host; the tunnel timer runs only while a tunnel is live; the cursor
-  timer is 16 ms.
+  cannot host; the 6 s tunnel read runs only while a tunnel is live; the
+  cursor timer is 16 ms.
 - 4.4: `HostMessage::State(StateRecord)` is the one internally tagged newtype
   variant, with `deny_unknown_fields` on `StateRecord` (JSON unchanged). This
   exception to the inline-struct rule awaits the owner's confirmation;
