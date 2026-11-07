@@ -314,7 +314,8 @@ impl Backend for Desktop {
     /// Never blocks: the wait bounds only the helper's long-poll. A drain
     /// checks no desktop: it only collects output of submits `capture_video`
     /// checked, and the next submit or the worker's context check catches a
-    /// switch (on the helper, `serve` checks before and after each request).
+    /// switch (on the helper, `serve` checks before and after each video
+    /// request).
     fn drain_video(
         &mut self,
         expected: &DesktopContext,

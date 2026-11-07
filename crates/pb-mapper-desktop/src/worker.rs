@@ -453,7 +453,12 @@ impl Engine {
             return;
         }
         self.sequence = event.sequence;
-        if !self.geometry(now) || !self.allowed() || !self.state.controlling {
+        // The injection boundary checks the desktop for every input; this
+        // checks it only when a check is due.
+        if (self.check_due(now) && !self.geometry(now))
+            || !self.allowed()
+            || !self.state.controlling
+        {
             return;
         }
         if !self.live()
@@ -482,6 +487,14 @@ impl Engine {
             Err(failure) => {
                 if failure.kind() == io::ErrorKind::NotConnected {
                     self.fatal = Some(failure.to_string());
+                } else {
+                    // The boundary may have seen a desktop change this engine
+                    // has not checked yet: the new generation admits nothing
+                    // stale, so drop the event and keep control.
+                    let generation = self.state.generation;
+                    if !self.geometry(now) || self.state.generation != generation {
+                        return;
+                    }
                 }
                 if lock {
                     // Nothing was held down, so control stays.
@@ -546,6 +559,12 @@ impl Engine {
         self.shared.auth.lock().on_invalidate(generation);
         self.state.dropped_frames += self.shared.outgoing.retain_generation(generation) as u64;
         self.shared.idr.lock().force(IdrReason::Generation);
+    }
+
+    /// A context check is due: there is no context yet, capture is
+    /// unavailable, or `context_due` has passed.
+    fn check_due(&self, now: Instant) -> bool {
+        self.context.is_none() || self.unavailable.is_some() || now >= self.context_due
     }
 
     /// Check the desktop identity. A new context or a recovery rebuilds the
@@ -640,7 +659,7 @@ impl Engine {
         if retry && now < self.context_due {
             return;
         }
-        if (self.context.is_none() || now >= self.context_due) && !self.geometry(now) {
+        if self.check_due(now) && !self.geometry(now) {
             return;
         }
         let Some(context) = self.context.clone() else {

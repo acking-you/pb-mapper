@@ -441,8 +441,8 @@ impl Response {
 }
 
 /// One request on the worker's desktop-bound thread. The host's thread C
-/// paces and authorises; this checks the desktop generation and the input
-/// sequence again at the injection boundary.
+/// paces and authorises; this checks the input sequence again, and the
+/// backend the whole desktop the host expects, at the injection boundary.
 #[cfg(feature = "windows-helper")]
 fn serve(
     backend: &mut dyn Backend,
@@ -462,6 +462,26 @@ fn serve(
         backend.release();
         return Ok((response, vec![]));
     }
+    if let Request::Input {
+        expected,
+        sequence: next,
+        input,
+    } = request
+    {
+        if next <= *sequence {
+            backend.release();
+            return Err(error("repeated helper input"));
+        }
+        *sequence = next;
+        // Binds this thread to the input desktop, and fails unless it is
+        // still `expected`.
+        backend.input_in_context(&expected, &input)?;
+        *last_input = std::time::Instant::now();
+        // The host keeps the desktop each answer reports: this is the one the
+        // input reached.
+        response.context = Some(expected);
+        return Ok((response, vec![]));
+    }
     let context = backend.context()?;
     // Context checks observe the pointer too, so it follows while capture is
     // idle. The backend checks this desktop identity; observing it never
@@ -477,7 +497,9 @@ fn serve(
             response.double_click = backend.double_click_guard();
             vec![]
         }
-        Request::Context {} | Request::Release {} | Request::Close {} => vec![],
+        Request::Context {} | Request::Release {} | Request::Close {} | Request::Input { .. } => {
+            vec![]
+        }
         Request::Attach { .. } => return Err(error("worker is already attached")),
         Request::ConfigureVideo {
             limits,
@@ -527,20 +549,6 @@ fn serve(
             if generation != context.generation {
                 return Err(error("stale helper presentation"));
             }
-            *last_input = std::time::Instant::now();
-            vec![]
-        }
-        Request::Input {
-            generation,
-            sequence: next,
-            input,
-        } => {
-            if generation != context.generation || next <= *sequence {
-                backend.release();
-                return Err(error("stale or repeated helper input"));
-            }
-            *sequence = next;
-            backend.input_in_context(&context, &input)?;
             *last_input = std::time::Instant::now();
             vec![]
         }
@@ -714,6 +722,64 @@ mod tests {
         // A forced check replaces the answer, and a failure is never kept.
         assert!(memo.fresh(2, later, || Err(error("logged off"))).is_err());
         assert_eq!(memo.get(2, later, || Ok(Locked)).unwrap(), Locked);
+    }
+
+    #[test]
+    fn input_reaches_only_the_desktop_the_host_expected() {
+        /// The bound desktop, which the test changes under the host.
+        struct Bound {
+            context: DesktopContext,
+            injected: u32,
+        }
+        impl Backend for Bound {
+            fn display(&mut self) -> Result<crate::Display> {
+                Ok(self.context.display.clone())
+            }
+            fn context(&mut self) -> Result<DesktopContext> {
+                Ok(self.context.clone())
+            }
+            fn capture(&mut self) -> Result<Vec<u8>> {
+                Ok(vec![])
+            }
+            fn input(&mut self, _: &Input) -> Result<()> {
+                self.injected += 1;
+                Ok(())
+            }
+            fn release(&mut self) {}
+        }
+        let expected = DesktopContext {
+            display: crate::Display {
+                id: 1,
+                name: "bound".into(),
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+            generation: 1,
+            desktop: "ordinary".into(),
+        };
+        let mut backend = Bound {
+            context: expected.clone(),
+            injected: 0,
+        };
+        let (mut sequence, mut last_input) = (0, std::time::Instant::now());
+        let mut send = |backend: &mut Bound, next| {
+            let request = Request::Input {
+                expected: expected.clone(),
+                sequence: next,
+                input: Input::Move { x: 1, y: 1 },
+            };
+            serve(backend, request, &mut sequence, &mut last_input).map(|(response, _)| response)
+        };
+        // The host keeps the desktop an answer reports, for its pointer.
+        let response = send(&mut backend, 1).unwrap();
+        assert_eq!(response.context, Some(expected.clone()));
+        assert!(send(&mut backend, 1).is_err(), "a repeated sequence");
+        // The same generation on a resized display is another desktop.
+        backend.context.display.width = 32;
+        assert!(send(&mut backend, 2).is_err());
+        assert_eq!(backend.injected, 1);
     }
 
     #[tokio::test(start_paused = true)]

@@ -24,6 +24,8 @@ struct Log {
     captures: Vec<(Instant, Instant, bool, VideoRate)>,
     inputs: Vec<(Instant, Input)>,
     releases: u32,
+    /// Desktop reads, by context checks, the cursor and the injection boundary.
+    contexts: u32,
 }
 
 #[derive(Clone)]
@@ -81,6 +83,7 @@ impl Backend for Fake {
         limits.validate()
     }
     fn display(&mut self) -> Result<Display> {
+        self.log.lock().contexts += 1;
         Ok(Display {
             id: 1,
             name: "fake".into(),
@@ -576,6 +579,12 @@ fn input_requires_control_current_geometry_and_unique_sequence() {
     h.input(MOVE);
     h.step();
     assert_eq!(h.inputs(), 1);
+    // Between context checks, only the injection boundary reads the desktop.
+    let reads = h.fake.log.lock().contexts;
+    h.input(MOVE);
+    h.step();
+    assert_eq!(h.inputs(), 2);
+    assert_eq!(h.fake.log.lock().contexts, reads + 1);
     // A repeated sequence, and a frame newer than the presented one.
     h.sequence -= 1;
     h.input(MOVE);
@@ -583,15 +592,20 @@ fn input_requires_control_current_geometry_and_unique_sequence() {
     h.input(MOVE);
     h.presented.1 -= 1;
     h.step();
-    assert_eq!(h.inputs(), 1);
+    assert_eq!(h.inputs(), 2);
 
-    // A different desktop at the same position invalidates input too.
+    // A different desktop at the same position invalidates input too. The
+    // boundary sees it before any check is due: the event is dropped, a new
+    // generation starts, and control stays.
     h.fake.width.store(11, Ordering::SeqCst);
     let releases = h.fake.log.lock().releases;
+    let generation = h.state().generation;
     h.input(MOVE);
     h.step();
-    assert_eq!(h.inputs(), 1);
+    assert_eq!(h.inputs(), 2);
     assert!(h.fake.log.lock().releases > releases);
+    assert!(h.state().generation > generation);
+    assert!(h.state().controlling);
 
     // View-only: the host's revoke ends control at once.
     h.present();
@@ -600,7 +614,7 @@ fn input_requires_control_current_geometry_and_unique_sequence() {
     h.step();
     assert!(!h.state().controlling);
     assert!(!h.state().control_allowed);
-    assert_eq!(h.inputs(), 1);
+    assert_eq!(h.inputs(), 2);
 }
 
 #[test]
