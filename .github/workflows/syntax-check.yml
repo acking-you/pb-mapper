@@ -225,6 +225,22 @@ jobs:
       - name: Get Flutter dependencies
         run: flutter pub get
 
+      # gen-l10n falls back to English for a key app_zh.arb lacks and still
+      # exits 0; the untranslated file it writes is the only trace.
+      - name: Refuse untranslated UI strings
+        run: |
+          flutter gen-l10n
+          if [ "$(tr -d '[:space:]' < l10n_untranslated.json)" != '{}' ]; then
+            cat l10n_untranslated.json
+            echo "::error::UI strings without a translation; see l10n_untranslated.json"
+            exit 1
+          fi
+
+      # After gen-l10n, so the generated app_localizations*.dart are checked
+      # too. packages/ holds a vendored plugin, kept as upstream wrote it.
+      - name: Check Dart formatting
+        run: dart format --output=none --set-exit-if-changed lib test tool
+
       - name: Run Flutter analyzer
         run: flutter analyze --no-fatal-infos
 

@@ -46,33 +46,40 @@ TunnelEventsUpdate tunnelEvent(
 });
 
 void main() {
-  test('cancelling a reader closes it in Rust, waking a pending read', () async {
-    final reading = Completer<void>();
-    final pending = Completer<Map<String, dynamic>>();
-    final requests = <String>[];
-    Map<String, dynamic> ok(Map<String, dynamic> data) => {
-      'success': true,
-      'data': data,
-    };
-    final stream = tunnelEventStream((request) async {
-      requests.add(request['op'] as String);
-      switch (request['op']) {
-        case 'subscribe':
-          return ok({'id': 1, 'diagnostics': tunnelDiagnostics()});
-        case 'next':
-          reading.complete();
-          return pending.future;
-        case 'close':
-          pending.complete(ok({'type': 'closed'}));
-          return ok({'type': 'closed'});
-      }
-      throw StateError('unexpected ${request['op']}');
-    }, serviceKey: 'web', share: true);
-    final subscription = stream.listen((_) {});
-    await reading.future;
-    await subscription.cancel().timeout(const Duration(seconds: 1));
-    expect(requests, ['subscribe', 'next', 'close']);
-  });
+  test(
+    'cancelling a reader closes it in Rust, waking a pending read',
+    () async {
+      final reading = Completer<void>();
+      final pending = Completer<Map<String, dynamic>>();
+      final requests = <String>[];
+      Map<String, dynamic> ok(Map<String, dynamic> data) => {
+        'success': true,
+        'data': data,
+      };
+      final stream = tunnelEventStream(
+        (request) async {
+          requests.add(request['op'] as String);
+          switch (request['op']) {
+            case 'subscribe':
+              return ok({'id': 1, 'diagnostics': tunnelDiagnostics()});
+            case 'next':
+              reading.complete();
+              return pending.future;
+            case 'close':
+              pending.complete(ok({'type': 'closed'}));
+              return ok({'type': 'closed'});
+          }
+          throw StateError('unexpected ${request['op']}');
+        },
+        serviceKey: 'web',
+        share: true,
+      );
+      final subscription = stream.listen((_) {});
+      await reading.future;
+      await subscription.cancel().timeout(const Duration(seconds: 1));
+      expect(requests, ['subscribe', 'next', 'close']);
+    },
+  );
 
   testWidgets(
     'diagnostics follow a running tunnel live and are not offered for a stopped one',
@@ -115,11 +122,10 @@ void main() {
         ..add(tunnelEvent(1, {'kind': 'relay_ready', 'latency_ms': 42}))
         ..add(tunnelEvent(2, {'kind': 'session_opened', 'path': 'direct'}))
         ..add(
-          tunnelEvent(
-            3,
-            {'kind': 'port_mapping_changed', 'mapping': mappingStatus('active')},
-            diagnostics: tunnelDiagnostics(mapping: mappingStatus('active')),
-          ),
+          tunnelEvent(3, {
+            'kind': 'port_mapping_changed',
+            'mapping': mappingStatus('active'),
+          }, diagnostics: tunnelDiagnostics(mapping: mappingStatus('active'))),
         );
       await tester.tap(find.byKey(const Key('menu-share:web')));
       await settle(tester);
@@ -133,10 +139,7 @@ void main() {
         tester.widget<Text>(find.byKey(const Key('port-mapping-stage'))).data,
         'Mapped',
       );
-      expect(
-        find.text(':52183 → 203.0.113.7:52183'),
-        findsOneWidget,
-      );
+      expect(find.text(':52183 → 203.0.113.7:52183'), findsOneWidget);
       expect(tester.takeException(), isNull);
 
       await tester.tap(find.byTooltip('Close').last);
