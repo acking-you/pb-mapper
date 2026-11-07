@@ -377,7 +377,9 @@ pub trait Backend: 'static {
         Ok(None)
     }
     /// Drain finished output, then (encoder backends) submit at most one
-    /// capture. The default captures one JPEG picture.
+    /// capture. The default captures one JPEG picture. A `keyframe` is asked
+    /// for once: an encoder backend keeps it until a picture it submits
+    /// carries it, and replaces output it discards with an IDR.
     fn capture_video(
         &mut self,
         expected: &DesktopContext,

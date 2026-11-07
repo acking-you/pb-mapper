@@ -188,7 +188,8 @@ struct Engine {
     paused: bool,
     sequence: u64,
     frame_id: u64,
-    /// The next submit must be an IDR (new encoder, pause).
+    /// The next submit must be an IDR (new encoder, pause); the submit that
+    /// carries it clears it.
     keyframe: bool,
     pacer: Pacer,
     pace_fps: u32,
@@ -653,6 +654,12 @@ impl Engine {
                 let result = self
                     .backend
                     .capture_video(&context, self.codec, keyframe, rate);
+                if keyframe {
+                    // Handed over: an IDR still in the encoder at the next
+                    // tick must not be asked for again.
+                    self.keyframe = false;
+                    self.shared.idr.lock().answered(now);
+                }
                 let done = (self.clock)();
                 self.drain_due = done + DRAIN_POLL;
                 self.produced(result, done);
@@ -692,8 +699,7 @@ impl Engine {
         };
         let format = frame.format;
         if format.keyframe {
-            self.shared.idr.lock().on_emitted(at);
-            self.keyframe = false;
+            self.shared.idr.lock().answered(at);
             // A new encoder's first unit is an IDR: its GOP is known by then.
             self.state.gop = self.backend.video_gop().unwrap_or(0);
         }
