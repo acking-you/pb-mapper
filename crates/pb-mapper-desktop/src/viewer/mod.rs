@@ -12,6 +12,12 @@
 //! Input is authorised only by a presentation the sink validated, stamped by
 //! Rust and preceded on the wire by that presentation. Receipts, probes,
 //! cursor and input traffic never grant or renew anything.
+//!
+//! The sink keeps only the newest decodable frames (`video_sink`), recovery
+//! asks for IDRs on a limited backoff (`recovery`), and when the consumer
+//! falls behind the host is capped to what it presents (`fps_cap`). A decoder
+//! that cannot recover ends the session with `decoder_failed`.
+pub(crate) mod fps_cap;
 mod outbound;
 pub(crate) mod recovery;
 pub(crate) mod status;
@@ -59,6 +65,8 @@ const VIEWER_TICK: Duration = Duration::from_millis(250);
 const TICKS_PER_SECOND: u64 = 4;
 /// Display and JPEG geometry stays within this many pixels.
 const MAX_DISPLAY: u32 = 32768;
+/// Why a session whose decoder failed for good ended.
+const DECODER_FAILED: &str = "the remote picture could not be decoded";
 
 /// How a viewer connects.
 pub struct ViewerConfig {
@@ -360,7 +368,7 @@ impl Viewer {
             cursor: Mutex::new(CursorSlot::default()),
             outbound: Outbound::new(),
         });
-        let sink = VideoSink::for_session(Arc::downgrade(&shared));
+        let sink = VideoSink::for_session(Arc::downgrade(&shared), config.limits.max_fps);
         let cancel = CancellationToken::new();
         let join = tokio::spawn(run(
             stream,
@@ -699,8 +707,9 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// How a session ended.
 enum Ended {
-    /// `Viewer::stop`.
-    Local,
+    /// This end closed it: `Viewer::stop`, or with a reason, a decoder that
+    /// cannot recover.
+    Local(Option<(ViewerReason, String)>),
     Stopped(ViewerReason, String),
 }
 impl Ended {
@@ -762,7 +771,12 @@ async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, session: Ses
         ended = reader.run(&mut read) => ended,
     };
     let (reason, message) = match ended {
-        Ended::Local => {
+        Ended::Local(failure) => {
+            // A failure shows at once; the drain below may take a while.
+            if let Some((reason, message)) = failure {
+                sink.close();
+                shared.mark_stopped(Some(reason), message);
+            }
             // Keep the tunnel until the host consumes our close_notify and
             // closes its side, or the grace expires; discard remaining video.
             let _ = tokio::time::timeout(
@@ -891,12 +905,14 @@ impl Reader<'_> {
                 }) {
                     return Err(Ended::protocol("invalid display geometry"));
                 }
-                if generation != self.generation {
-                    self.generation = generation;
-                    // The sink first, so nothing of the old generation is
-                    // accepted once the state names the new one.
-                    self.sink.set_generation(generation);
-                }
+                self.generation = generation;
+                // The sink first, so nothing of an old generation is accepted
+                // once the state names the new one. The host pauses only for
+                // this viewer, whose own pause covers that.
+                self.sink.on_state(
+                    generation,
+                    matches!(state, SessionState::Streaming | SessionState::Paused),
+                );
                 self.shared.state.lock().host = Some(LastState {
                     state,
                     reason,
@@ -987,16 +1003,19 @@ impl Writer<'_> {
         let mut last_write = Instant::now();
         let mut next_tick = last_write;
         loop {
-            if cancel.is_cancelled() {
+            let now = Instant::now();
+            let mut failure = None;
+            if now >= next_tick {
+                if self.tick(now) {
+                    failure = Some((ViewerReason::DecoderFailed, DECODER_FAILED.into()));
+                }
+                next_tick = now + VIEWER_TICK;
+            }
+            if cancel.is_cancelled() || failure.is_some() {
                 // Never cut a message short: close TLS between messages so a
                 // deliberate disconnect does not look truncated to the host.
                 let _ = tokio::time::timeout(wire::IO_TIMEOUT, write.shutdown()).await;
-                return Ended::Local;
-            }
-            let now = Instant::now();
-            if now >= next_tick {
-                self.tick(now);
-                next_tick = now + VIEWER_TICK;
+                return Ended::Local(failure);
             }
             match self.shared.outbound.next(now, last_write) {
                 Next::Send(message) => {
@@ -1018,9 +1037,10 @@ impl Writer<'_> {
         }
     }
 
-    /// Every `VIEWER_TICK`: the fps cap; once a second also the path and the
-    /// stats roll-up.
-    fn tick(&mut self, now: Instant) {
+    /// Every `VIEWER_TICK`: the fps cap, keyframe retries and the stall
+    /// watchdog; once a second also the path and the stats roll-up. True when
+    /// the decoder failed for good.
+    fn tick(&mut self, now: Instant) -> bool {
         let second = self.ticks.is_multiple_of(TICKS_PER_SECOND);
         self.ticks += 1;
         if second && let Some(connection) = self.connection {
@@ -1030,11 +1050,15 @@ impl Writer<'_> {
                 self.shared.outbound.route(route);
             }
         }
-        let (direct, streaming) = {
+        let (direct, streaming, quality) = {
             let state = self.shared.state.lock();
-            (state.route == Some(Route::Direct), state.streaming())
+            (
+                state.route == Some(Route::Direct),
+                state.streaming(),
+                state.quality,
+            )
         };
-        if let Some(cap) = self.sink.tick(now, direct) {
+        if let Some(cap) = self.sink.tick(now, streaming, direct, quality) {
             self.shared.outbound.fps_cap(cap);
         }
         if second {
@@ -1044,6 +1068,7 @@ impl Writer<'_> {
                 .lock()
                 .roll(now, streaming, sink.presented_fps, sink.viewer_ms);
         }
+        self.sink.decoder_failed()
     }
 }
 
@@ -1173,6 +1198,16 @@ mod tests {
         .unwrap();
     }
 
+    fn accepted() -> HostMessage {
+        HostMessage::Accepted {
+            codec: VideoCodec::H264,
+            limits: VideoLimits::for_viewer(60.0),
+            nominal_fps: 60,
+            quality: QualityPreset::Balanced,
+            capabilities: vec!["lock".into()],
+        }
+    }
+
     /// Connect over a duplex stream; the host side answers `answer`.
     async fn connect(
         answer: HostMessage,
@@ -1199,14 +1234,7 @@ mod tests {
             assert_eq!(format!("{:?}", result.err().unwrap()), rejected);
         }
 
-        let (viewer, mut host, authenticate) = connect(HostMessage::Accepted {
-            codec: VideoCodec::H264,
-            limits: VideoLimits::for_viewer(60.0),
-            nominal_fps: 60,
-            quality: QualityPreset::Balanced,
-            capabilities: vec!["lock".into()],
-        })
-        .await;
+        let (viewer, mut host, authenticate) = connect(accepted()).await;
         let viewer = viewer.unwrap();
         let ViewerMessage::Authenticate {
             token,
@@ -1309,6 +1337,34 @@ mod tests {
             Pull::Closed
         ));
         assert!(matches!(viewer.input(2, &shift), Err(InputError::Closed)));
+        viewer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_decoder_that_cannot_recover_ends_the_session() {
+        let (viewer, mut host, _) = connect(accepted()).await;
+        let viewer = viewer.unwrap();
+        send(&mut host, state(1, false), None).await;
+        send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+        let consumer = viewer.video_sink().attach().unwrap();
+        pull(&consumer).await;
+        assert!(consumer.presented(1, 1));
+
+        // The first error asks for an IDR; the fifth with no picture since
+        // gives up, and the app is told why.
+        assert!(consumer.keyframe(KeyframeReason::DecoderError));
+        for _ in 0..4 {
+            assert!(!consumer.keyframe(KeyframeReason::DecoderError));
+        }
+        eventually(|| viewer.status().state == ViewerState::Stopped).await;
+        let status = viewer.status();
+        assert_eq!(status.reason, Some(ViewerReason::DecoderFailed));
+        assert_eq!(status.decoder.state, DecoderState::Failed);
+        assert!(matches!(
+            consumer.next(Duration::ZERO, 1 << 20),
+            Pull::Closed
+        ));
+        drop(host);
         viewer.stop().await.unwrap();
     }
 }
