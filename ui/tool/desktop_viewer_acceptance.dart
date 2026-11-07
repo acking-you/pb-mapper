@@ -1,6 +1,8 @@
 // Explicit native UI acceptance entry, never the packaged application entry.
 // Build with --target tool/desktop_viewer_acceptance.dart and the defines below.
-// The bootstrap contains only a dedicated expiring test scope from `deployed`.
+// The bootstrap contains only a dedicated expiring test scope from `deployed`,
+// and takes the report back with PUT /report (scripts/test/desktop-bootstrap.cjs),
+// so a release build, whose private storage cannot be read, works too.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -17,17 +19,13 @@ import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final setup = Uri.parse(const String.fromEnvironment('setupUrl'));
-  const reportPath = String.fromEnvironment('reportPath');
   const defaultSeconds = int.fromEnvironment('seconds', defaultValue: 30);
   const defaultRelayOnly = bool.fromEnvironment('relayOnly');
   if (setup.scheme != 'http' ||
       !['127.0.0.1', 'localhost', '::1'].contains(setup.host) ||
-      reportPath.isEmpty ||
       defaultSeconds < 15 ||
       defaultSeconds > 1800) {
-    throw ArgumentError(
-      'Set a loopback setupUrl, reportPath and seconds 15..1800',
-    );
+    throw ArgumentError('Set a loopback setupUrl and seconds 15..1800');
   }
   final http = HttpClient()..connectionTimeout = const Duration(seconds: 5);
   late final Map<String, dynamic> config;
@@ -139,19 +137,33 @@ Future<void> main() async {
           : (lastPresented - firstPresented) * 1000000 / durationUs,
       'samples': samples,
     };
-    final file = File(reportPath);
-    await file.parent.create(recursive: true);
-    await file.writeAsString(
-      const JsonEncoder.withIndent('  ').convert(report),
-    );
+    await _upload(setup.resolve('/report'), report);
     debugPrint(
-      'DESKTOP_ACCEPTANCE report saved; credentials and images excluded',
+      'DESKTOP_ACCEPTANCE report uploaded; credentials and images excluded',
     );
   } finally {
     WidgetsBinding.instance.removeTimingsCallback(rendering.add);
     await store.disconnect();
     store.dispose();
     service.dispose();
+  }
+}
+
+// The bootstrap names and keeps the file. It refuses more than 8 MiB, so the
+// report goes compact.
+Future<void> _upload(Uri target, Map<String, Object?> report) async {
+  final http = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+  try {
+    final request = await http.putUrl(target);
+    request.headers.contentType = ContentType.json;
+    request.add(utf8.encode(jsonEncode(report)));
+    final response = await request.close();
+    await response.drain<void>();
+    if (response.statusCode != HttpStatus.created) {
+      throw StateError('Report upload refused: HTTP ${response.statusCode}');
+    }
+  } finally {
+    http.close(force: true);
   }
 }
 
