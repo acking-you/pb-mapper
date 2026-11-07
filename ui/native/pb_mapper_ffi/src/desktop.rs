@@ -1452,14 +1452,7 @@ async fn enable_host(
                 "desktop setup is waiting for the installed background service",
             ));
         }
-        let action = if !helper.installed
-            || !helper.authorized_application
-            || (helper.running && !helper.identity_verified)
-        {
-            "install"
-        } else {
-            "enable"
-        };
+        let action = helper_setup_action(&helper);
         let installed =
             tokio::task::spawn_blocking(move || desktop::helper::request_installation(action))
                 .await
@@ -1521,6 +1514,21 @@ async fn enable_host(
         .await
         .map_err(err)??;
     Ok(json!({"restart": false, "invitation": snapshot["invitation"], "background": snapshot}))
+}
+
+/// What setup asks of Windows for a helper that is not ready. Installing again
+/// also updates an outdated helper in place (D2); enabling leaves it outdated.
+#[cfg(windows)]
+fn helper_setup_action(helper: &desktop::helper::Status) -> &'static str {
+    if !helper.installed
+        || helper.update_required
+        || !helper.authorized_application
+        || (helper.running && !helper.identity_verified)
+    {
+        "install"
+    } else {
+        "enable"
+    }
 }
 
 #[cfg(not(windows))]
@@ -2213,6 +2221,30 @@ mod tests {
         let observed = discover_background(&state, async { disconnected }).await;
         assert!(background_configured(&observed));
         assert!(background_enabled(&observed));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn setup_installs_an_outdated_helper_again() {
+        // Running, verified and this application's, but of an older protocol:
+        // enabling it again would still refuse to capture.
+        let outdated = desktop::helper::Status {
+            installed: true,
+            running: true,
+            authorized_application: true,
+            identity_verified: true,
+            protocol: 2,
+            update_required: true,
+            ..Default::default()
+        };
+        assert_eq!(helper_setup_action(&outdated), "install");
+        let stopped = desktop::helper::Status {
+            running: false,
+            protocol: desktop::helper::HELPER_PROTOCOL,
+            update_required: false,
+            ..outdated
+        };
+        assert_eq!(helper_setup_action(&stopped), "enable");
     }
 
     #[test]
