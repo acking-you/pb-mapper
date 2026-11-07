@@ -132,6 +132,35 @@ void main() {
   );
 
   testWidgets(
+    'a failed read of the remembered grant is retried, not taken for one '
+    'that cannot be read',
+    (tester) async {
+      final api = FakeDesktopApi()
+        ..trust = const DesktopTrust(
+          supported: true,
+          matchesRelay: true,
+          saved: DesktopTrustedHost(
+            relay: 'test',
+            service: 'desktop:here',
+            displayId: 1,
+            autoStart: true,
+            invitation: 'pbd1.here',
+          ),
+        )
+        ..failNext('trust_status', 'IO');
+      final store = DesktopStore(api);
+      await store.restoreOnStartup();
+      expect(store.hostView.value.trustUnreadable, isFalse);
+      expect(api.argsOf('host_restore'), isEmpty);
+      await tester.pump(const Duration(seconds: 1));
+      expect(api.argsOf('host_restore'), hasLength(1));
+      expect(store.hostView.value.sharing, isTrue);
+      store.dispose();
+      await tester.pump();
+    },
+  );
+
+  testWidgets(
     'restart waits for a successful handoff and cancellation keeps UI alive',
     (tester) async {
       final api = _HostProbe()..enableResult = Completer<DesktopHostEnable>();

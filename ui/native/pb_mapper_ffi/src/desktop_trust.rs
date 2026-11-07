@@ -121,7 +121,13 @@ impl Saved {
 fn path(directory: &Path) -> PathBuf {
     directory.join("desktop-trust.dpapi")
 }
+/// `None` when nothing is remembered. A grant that cannot be read as one,
+/// because Windows cannot unlock it or it is invalid, fails with `PROTOCOL`:
+/// reading it again does not mend it, only revoking does. Any other failure
+/// is `IO`, the file system refusing for now.
 pub(super) fn load(directory: &Path) -> Result<Option<Saved>, CtlError> {
+    let too_large = || CtlError::protocol("stored desktop trust exceeds its size limit");
+    let invalid = || CtlError::protocol("invalid saved desktop trust");
     let path = path(directory);
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) => metadata,
@@ -129,25 +135,24 @@ pub(super) fn load(directory: &Path) -> Result<Option<Saved>, CtlError> {
         Err(e) => return Err(err(e)),
     };
     if metadata.len() > LIMIT {
-        return Err(err("stored desktop trust exceeds its size limit"));
+        return Err(too_large());
     }
     let cipher = std::fs::read(path).map_err(err)?;
     let plain = protect(&cipher, false, ENTROPY, DESCRIPTION).map_err(|_| {
-        err("Windows could not unlock desktop trust for this user; revoke it and authorize a new invitation")
+        CtlError::protocol("Windows could not unlock desktop trust for this user; revoke it and authorize a new invitation")
     })?;
     if plain.len() as u64 > LIMIT {
-        return Err(err("stored desktop trust exceeds its size limit"));
+        return Err(too_large());
     }
-    let saved: Saved =
-        serde_json::from_slice(&plain).map_err(|_| err("invalid saved desktop trust"))?;
+    let saved: Saved = serde_json::from_slice(&plain).map_err(|_| invalid())?;
     if saved.schema != 1
         || saved.relay.len() > 1024
         || saved.settings.service.len() > 128
         || !saved.settings.service.starts_with("desktop:")
     {
-        return Err(err("invalid saved desktop trust"));
+        return Err(invalid());
     }
-    saved.identity()?;
+    saved.identity().map_err(|_| invalid())?;
     Ok(Some(saved))
 }
 pub(super) fn save(directory: &Path, saved: &Saved) -> Result<(), CtlError> {
@@ -269,6 +274,7 @@ pub(crate) fn protect(_: &[u8], _: bool, _: &[u8], _: &str) -> Result<Vec<u8>, C
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::error::ErrorCode;
     #[test]
     fn dpapi_round_trip_tampering_and_revocation() {
         let root = std::env::temp_dir().join(format!("pb-desktop-trust-{}", std::process::id()));
@@ -312,10 +318,26 @@ mod tests {
         let last = encrypted.len() - 1;
         encrypted[last] ^= 1;
         std::fs::write(path(&root), encrypted).unwrap();
-        assert!(load(&root).is_err());
+        assert_eq!(
+            load(&root).err().map(|failure| failure.code()),
+            Some(ErrorCode::Protocol)
+        );
         revoke(&root).unwrap();
         assert!(load(&root).unwrap().is_none());
         std::fs::remove_dir(root).unwrap();
+    }
+
+    /// A grant the file system will not hand over yet is not an unreadable
+    /// one: the app retries it rather than offering to revoke it.
+    #[test]
+    fn a_file_that_cannot_be_opened_is_io_not_unreadable() {
+        let root = std::env::temp_dir().join(format!("pb-desktop-trust-io-{}", std::process::id()));
+        std::fs::create_dir_all(path(&root)).unwrap();
+        assert_eq!(
+            load(&root).err().map(|failure| failure.code()),
+            Some(ErrorCode::Io)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

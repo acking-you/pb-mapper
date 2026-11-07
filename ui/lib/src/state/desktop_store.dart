@@ -318,16 +318,18 @@ class DesktopStore {
     }
   }();
 
-  /// Reads the remembered grant; null when it cannot be read. That failure
-  /// is kept, not thrown: it is local (Windows cannot unlock the grant, or
-  /// it is invalid), retrying does not mend it, and the card must still
-  /// load to offer the Revoke its message asks for.
+  /// Reads the remembered grant; null when it cannot be read as one.
+  /// Only `PROTOCOL` says that (Windows cannot unlock the grant, or it is
+  /// invalid), and it is kept, not thrown: reading again does not mend it,
+  /// and the card must still load to offer the Revoke its message asks
+  /// for. Any other failure is thrown, for the caller to retry.
   Future<DesktopTrust?> _readTrust(int serial) async {
     DesktopTrust? trust;
     String? error;
     try {
       trust = await _api.trustStatus();
-    } catch (e) {
+    } on DesktopCallException catch (e) {
+      if (e.code != 'PROTOCOL') rethrow;
       error = e.toString();
     }
     if (_hostCurrent(serial)) {
@@ -473,8 +475,9 @@ class DesktopStore {
     try {
       // A restarting helper must not prevent discovering the durable
       // hand-off that asks us to retry it. Read the local intent before
-      // service IPC. A grant that cannot be read restores nothing, and is
-      // not retried: the card offers Revoke instead.
+      // service IPC. A grant that cannot be read as one restores nothing
+      // and is not retried in the background: the card offers Revoke, and
+      // each page visit reads it again. A failed read is retried.
       final trust = await _readTrust(serial) ?? const DesktopTrust();
       if (!_hostCurrent(serial)) return;
       if (trust.saved?.background == true &&

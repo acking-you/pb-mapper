@@ -37,7 +37,9 @@ pub enum ErrorCode {
     AddressInUse,
     /// The server did not answer in time.
     Timeout,
-    /// The server answered with something this version did not expect.
+    /// The server answered with something this version did not expect, or
+    /// stored data cannot be read as what it should be: the remembered
+    /// computers, or the remembered sharing grant.
     Protocol,
     /// Reading or writing local configuration failed.
     Io,

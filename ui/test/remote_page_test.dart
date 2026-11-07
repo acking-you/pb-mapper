@@ -36,8 +36,8 @@ class _Api extends FakePbMapperApi {
   _HostDesktop get desktop => _host;
 }
 
-/// A remembered grant Windows cannot unlock: every read of it fails, as
-/// `trust_status` does, until it is revoked.
+/// A remembered grant Windows cannot unlock: every read of it fails with
+/// `PROTOCOL`, as `trust_status` does, until it is revoked.
 class _UnreadableTrust extends FakeDesktopApi {
   bool unreadable = true;
 
@@ -46,7 +46,7 @@ class _UnreadableTrust extends FakeDesktopApi {
     if (!unreadable) return super.trustStatus();
     calls.add(('trust_status', const {}));
     throw const DesktopCallException(
-      'IO',
+      'PROTOCOL',
       'Windows could not unlock desktop trust for this user; revoke it and '
           'authorize a new invitation',
     );

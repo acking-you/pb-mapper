@@ -10,9 +10,11 @@ member is renamed or re-invented here.
 Amended after the adversarial review (2026-11-07). These sections now say
 what the merged code does:
 
-- §2.2 (R-UI-1) and §6.2: `DesktopHostView.trustUnreadable`; a failed trust
-  read counts as loaded, shows its error with Revoke the saved invitation,
-  and is never retried on a timer. Rename is offered only while sharing.
+- §2.2 (R-UI-1) and §6.2: `DesktopHostView.trustUnreadable`; a trust read
+  that fails with `PROTOCOL` (the grant cannot be unlocked, or is invalid)
+  counts as loaded, shows its error with Revoke the saved invitation, and is
+  never retried on a timer. Any other failed read is retried as before.
+  Rename is offered only while sharing.
 - §5.2 and §5.3: the vault's `computers_reset` op and `reset()` on the
   vault and the store; `unreadable` (only on `PROTOCOL`) versus `failed`;
   stray last pictures deleted on load; Android resets only on `KEY_GONE`,
@@ -235,12 +237,15 @@ specific UI behaviour. The UI packages that depend on a request say so (§17).
 class DesktopHostView {
   // … perf §9.4 fields unchanged …
   /// False until the first capabilities + host_status round trip completed;
-  /// a trust_status read that failed also counts as loaded.
+  /// a trust_status read that failed with `PROTOCOL` also counts as loaded.
   final bool loaded;
-  /// The remembered grant could not be read (DPAPI cannot unlock it, or it
-  /// is invalid). `error` falls back to that read's error. It is re-read on
-  /// a page visit (`_loadHost`), never on a timer, and `restoreOnStartup`
-  /// treats it as nothing to restore rather than retrying it.
+  /// The remembered grant could not be read: trust_status failed with
+  /// `PROTOCOL`, because DPAPI cannot unlock it or it is invalid. `error`
+  /// falls back to that read's error. It is re-read on a page visit
+  /// (`_loadHost`), never on a timer, and `restoreOnStartup` treats it as
+  /// nothing to restore rather than retrying it. Any other failed read
+  /// (`IO`) is thrown: the page reads again on its next visit, and the
+  /// startup restore retries with backoff.
   final bool trustUnreadable;
   /// A remembered grant **for the current relay and namespace**, or a
   /// configured background host, exists, so sharing can resume without setup:

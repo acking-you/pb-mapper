@@ -285,8 +285,11 @@ mismatch stops automatic retries and never replaces the pinned identity.
 Legacy app-owned grants and a pending installation handoff use current-user
 DPAPI in `desktop-trust.dpapi` beneath the existing configuration directory.
 A copy Windows cannot unlock (after a password reset, or a profile moved to
-another machine) or that is invalid is not retried: the Remote desktop card
-says why and offers **Revoke the saved invitation**, which deletes it.
+another machine) or that is invalid is not retried in the background, only
+read again on each visit to the page: the Remote desktop card says why and
+offers **Revoke the saved invitation**, which deletes it. Any other failure to
+read it, such as a file locked for a moment, is retried: at startup with
+bounded backoff, and by the page at its next visit.
 Successful service transfer removes the legacy copy. A pending handoff retries
 temporary IPC failures with bounded backoff; it never installs a helper without
 the explicit Enable action. Stop or Revoke cancels the pending restoration.
