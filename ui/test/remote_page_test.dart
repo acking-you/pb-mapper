@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
+import 'package:pb_mapper_ui/src/ffi/relay_models.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
 import 'package:pb_mapper_ui/src/pages/remote/remote_page.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_screen.dart';
@@ -573,7 +574,7 @@ void main() {
 
   testWidgets(
     "a viewer retrying a computer the relay stops listing says it isn't "
-    'sharing',
+    'sharing, and says nothing under another credential',
     (tester) async {
       final api = FakePbMapperApi(serverServices: ['desktop:lab']);
       const lab = RemoteComputer(
@@ -609,6 +610,12 @@ void main() {
       await store.checkRelay(force: true);
       await tester.pump();
       expect(_key('viewer-retry-not-sharing'), findsOneWidget);
+
+      // Under another credential, this relay's list says nothing of it.
+      api.identity = const RelayIdentity(role: RelayRole.temporary, keyId: 7);
+      await store.checkRelay(force: true);
+      await tester.pump();
+      expect(_key('viewer-retry-not-sharing'), findsNothing);
       await finish(tester);
     },
   );

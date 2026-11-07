@@ -6,8 +6,9 @@ import 'package:flutter/material.dart';
 import '../../../../l10n/app_localizations.dart';
 import '../../../common/l10n_extension.dart';
 import '../../../shell/app_scope.dart';
-import '../../../state/app_store.dart' show RelayState;
 import '../../../state/desktop_store.dart';
+import '../../../state/remote_computers.dart'
+    show ComputerPresence, listedPresence;
 import '../../../theme/app_icons.dart';
 import '../../../theme/fonts.dart';
 import '../../../theme/motion.dart';
@@ -603,6 +604,13 @@ class ViewerOverlayLayer extends StatelessWidget {
       );
     }
 
+    // A retry pill's second line, the same while waiting and while trying.
+    String retryReason(bool notSharing) => busy
+        ? l10n.viewerBusy
+        : notSharing
+        ? l10n.remoteOfflineToast(title)
+        : l10n.viewerInputPaused;
+
     switch (kind) {
       case ViewerOverlayKind.none:
         return const [];
@@ -664,11 +672,7 @@ class ViewerOverlayLayer extends StatelessWidget {
                   tint: ViewerPalette.panel,
                   leading: const ViewerSpinner(size: 16),
                   text: line,
-                  secondary: busy
-                      ? l10n.viewerBusy
-                      : notSharing
-                      ? l10n.remoteOfflineToast(title)
-                      : l10n.viewerInputPaused,
+                  secondary: retryReason(notSharing),
                   trailing: ViewerButton(
                     label: l10n.viewerRetryNow,
                     filled: true,
@@ -683,12 +687,14 @@ class ViewerOverlayLayer extends StatelessWidget {
         return [
           IgnorePointer(
             child: centred(
-              ViewerPill(
-                height: 48,
-                tint: ViewerPalette.panel,
-                leading: const ViewerSpinner(size: 16),
-                text: l10n.viewerReconnecting(s.reconnectAttempt),
-                secondary: l10n.viewerInputPaused,
+              presence(
+                (notSharing) => ViewerPill(
+                  height: 48,
+                  tint: ViewerPalette.panel,
+                  leading: const ViewerSpinner(size: 16),
+                  text: l10n.viewerReconnecting(s.reconnectAttempt),
+                  secondary: retryReason(notSharing),
+                ),
               ),
             ),
           ),
@@ -772,13 +778,24 @@ class ViewerOverlayLayer extends StatelessWidget {
     }
   }
 
-  /// The relay answers and does not list the service the computer shares
-  /// under: it is not sharing, as `presenceOf` decides (D22).
+  /// The relay answers and does not list the service the open computer
+  /// shares under: it is not sharing, as `presenceOf` decides (D22). Of a
+  /// computer opened through another relay or credential than this
+  /// computer's now, that relay's list says nothing.
   static bool _notSharing(AppScope scope) {
-    final service = scope.remote.service;
-    return service != null &&
-        scope.store.relayState == RelayState.online &&
-        !scope.store.desktopServiceNames.contains(service);
+    final open = scope.remote.sharing;
+    final store = scope.store;
+    return open != null &&
+        listedPresence(
+              service: open.service,
+              relay: open.relay,
+              namespace: open.namespace,
+              relayState: store.relayState,
+              relayAddress: store.relayAddress,
+              credentialKeyId: store.credentialKeyId,
+              desktopServices: store.desktopServiceNames,
+            ) ==
+            ComputerPresence.notSharing;
   }
 
   Widget _ended(BuildContext context, DesktopSessionView s, bool notSharing) {

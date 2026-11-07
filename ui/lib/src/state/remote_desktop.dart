@@ -92,11 +92,17 @@ class _Target {
     required this.name,
     required this.service,
     required this.fingerprint,
+    required this.relay,
+    required this.namespace,
     required this.relayOnly,
     this.replaceId,
     this.onRememberFailed,
   });
   final String id, name, service, fingerprint;
+
+  /// The relay and credential it was opened through.
+  final String relay;
+  final int namespace;
   final bool relayOnly;
   final String? replaceId;
   final ValueChanged<RememberFailure>? onRememberFailed;
@@ -155,9 +161,17 @@ class RemoteDesktop {
     return rememberedComputer?.name ?? target.name;
   }
 
-  /// The service the open or opening computer shares under, for the
-  /// viewer's presence line (D22).
-  String? get service => _current?.service;
+  /// Where the open or opening computer shares, for the viewer's presence
+  /// line (D22): under which service, on which relay, for which credential.
+  ({String service, String relay, int namespace})? get sharing =>
+      switch (_current) {
+        final current? => (
+          service: current.service,
+          relay: current.relay,
+          namespace: current.namespace,
+        ),
+        null => null,
+      };
 
   /// The remembered computer the session is, as the list stands now: one
   /// added with Remember on is from its first picture. A session connected
@@ -197,6 +211,8 @@ class RemoteDesktop {
       name: c.name,
       service: c.service,
       fingerprint: c.fingerprint,
+      relay: c.relay,
+      namespace: c.namespace,
       relayOnly: c.relayOnly,
     );
     _rememberPending = false;
@@ -233,6 +249,8 @@ class RemoteDesktop {
       name: result.name,
       service: result.info.service,
       fingerprint: result.info.fingerprint,
+      relay: _relayAddress(),
+      namespace: _credentialKeyId(),
       relayOnly: result.relayOnly,
       replaceId: result.replaceId,
       onRememberFailed: onRememberFailed,
