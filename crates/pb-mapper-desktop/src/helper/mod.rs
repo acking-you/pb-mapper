@@ -31,33 +31,67 @@ pub(crate) fn record_input_failure(detail: &str) {
     os::record_service_event("input_failed", detail);
 }
 
+/// The helper IPC this build speaks. A helper installed by an older build
+/// listens on other pipes, so it is offered an update instead of being used.
+pub const HELPER_PROTOCOL: u32 = 2;
+
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v1";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v2";
 const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// The longest a helper drain may wait for encoder output.
+const DRAIN_WAIT_MAX_MS: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {
+    /// 1: written by protocol 1 helpers, which record no protocol. 2: records
+    /// the protocol.
     schema: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    protocol: Option<u32>,
     owner_sid: String,
     ui_executable: PathBuf,
     helper_executable: PathBuf,
 }
+impl Configuration {
+    #[cfg(feature = "windows-helper")]
+    fn current(owner_sid: String, ui_executable: PathBuf, helper_executable: PathBuf) -> Self {
+        Self {
+            schema: 2,
+            protocol: Some(HELPER_PROTOCOL),
+            owner_sid,
+            ui_executable,
+            helper_executable,
+        }
+    }
+    fn protocol(&self) -> u32 {
+        self.protocol.unwrap_or(1)
+    }
+    fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() > 8192 {
+            return Err(error("invalid helper installation"));
+        }
+        let config: Self = serde_json::from_slice(data).map_err(error)?;
+        match (config.schema, config.protocol) {
+            (1, None) | (2, Some(_)) => Ok(config),
+            _ => Err(error("unsupported helper installation")),
+        }
+    }
+}
 fn configuration() -> Result<Configuration> {
     let path = os::install_root()?.join("installation.json");
     os::protected_file(&path)?;
-    let data = std::fs::read(path)?;
-    if data.len() > 8192 {
-        return Err(error("invalid helper installation"));
-    }
-    let config: Configuration = serde_json::from_slice(&data).map_err(error)?;
-    if config.schema != 1 {
-        return Err(error("unsupported helper installation"));
-    }
+    let config = Configuration::parse(&std::fs::read(path)?)?;
     os::protected_file(&config.helper_executable)?;
     os::protected_file(&config.ui_executable)?;
     Ok(config)
+}
+
+/// An installed helper must be updated before use when it speaks another
+/// protocol, or when it runs without the pipe of this one.
+fn update_required(protocol: u32, running: bool, pipe_present: impl FnOnce() -> bool) -> bool {
+    protocol != HELPER_PROTOCOL || (running && !pipe_present())
 }
 
 #[derive(Default, Serialize)]
@@ -71,12 +105,22 @@ pub struct Status {
     /// The live SCM process can be queried and matches the protected helper.
     pub identity_verified: bool,
     pub installed_application: Option<PathBuf>,
+    /// The installed helper's IPC protocol; 0 when none can be read.
+    pub protocol: u32,
+    /// The installed helper is older than this build: installing again
+    /// updates it in place, keeping its background hosting grant.
+    pub update_required: bool,
     pub message: String,
 }
 impl Status {
     /// Validate the existing local authorization; this never installs, starts
     /// or elevates the helper on the caller's behalf.
     pub fn ensure_ready(&self) -> Result<()> {
+        if self.update_required {
+            return Err(error(
+                "Update the Windows desktop service to use remote desktop",
+            ));
+        }
         if !self.installed {
             return Err(error(
                 "Install the Windows desktop service on the host before sharing UAC or the lock screen",
@@ -117,6 +161,7 @@ pub fn status() -> Status {
             } else {
                 Err(error("Windows desktop service is not running"))
             };
+            let protocol = config.protocol();
             Status {
                 installed: true,
                 running,
@@ -126,6 +171,8 @@ pub fn status() -> Status {
                         .is_ok_and(|path| os::same_path(&path, &config.ui_executable)),
                 identity_verified: identity.is_ok(),
                 installed_application: Some(config.ui_executable),
+                protocol,
+                update_required: update_required(protocol, running, || ipc::exists(PIPE)),
                 message: identity.err().map_or_else(
                     || {
                         "Helper requires the installed application; the UI stays unprivileged"
@@ -155,30 +202,37 @@ enum Request {
         display_id: u32,
         session: os::SessionIdentity,
     },
-    Context,
-    Capture,
+    // Struct variants throughout: serde ignores extra fields on an internally
+    // tagged unit variant, which would undo `deny_unknown_fields`.
+    Context {},
+    Capture {},
     ConfigureVideo {
-        preferences: crate::VideoPreferences,
+        limits: crate::VideoLimits,
+        nominal_fps: u32,
     },
-    CaptureVideo {
+    /// Drain finished output, then submit one capture when `submit` is set.
+    /// A drain alone may wait up to `wait_ms` (at most 4) for encoder output
+    /// while units are pending. The helper never paces.
+    Video {
         expected: DesktopContext,
         codec: crate::VideoCodec,
+        submit: bool,
         keyframe: bool,
-        bitrate: u32,
-    },
-    DrainVideo {
-        expected: DesktopContext,
+        rate: crate::VideoRate,
+        wait_ms: u32,
     },
     Presented {
         generation: u64,
     },
+    /// Includes `Input::Lock`. A `drag_start` press is held by the host's
+    /// thread C before it gets here; the helper ignores the flag.
     Input {
         generation: u64,
         sequence: u64,
         input: Input,
     },
-    Release,
-    Close,
+    Release {},
+    Close {},
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -189,6 +243,12 @@ struct Response {
     video: Option<crate::VideoFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cursor: Option<crate::CursorPosition>,
+    /// Units the worker's encoder holds, for the host's submit gate.
+    pending: u32,
+    /// In the `Start` response: the double-click time and box of the
+    /// interactive session, read by the worker, which runs in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    double_click: Option<crate::DoubleClickGuard>,
 }
 
 /// Entry point of the dedicated helper executable, never the Flutter process.
@@ -212,8 +272,56 @@ pub fn run() -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod readiness_tests {
-    use super::Status;
+    use super::{Configuration, HELPER_PROTOCOL, Status, update_required};
+
+    #[test]
+    fn readiness_requires_protocol_2() {
+        let installation = |extra: &str| {
+            Configuration::parse(
+                format!(
+                    r#"{{{extra}"owner_sid":"S-1-5-21-1","ui_executable":"ui.exe","helper_executable":"helper.exe"}}"#
+                )
+                .as_bytes(),
+            )
+        };
+        // A PR #51 installation is protocol 1, and survives a rollback intact.
+        let old = installation(r#""schema":1,"#).unwrap();
+        assert_eq!(old.protocol(), 1);
+        assert!(!serde_json::to_string(&old).unwrap().contains("protocol"));
+        assert!(update_required(old.protocol(), true, || true));
+        assert!(update_required(old.protocol(), false, || false));
+        let current = installation(r#""schema":2,"protocol":2,"#).unwrap();
+        assert_eq!(current.protocol(), HELPER_PROTOCOL);
+        assert!(!update_required(current.protocol(), true, || true));
+        assert!(!update_required(current.protocol(), false, || false));
+        // Running, but serving another protocol's pipe.
+        assert!(update_required(current.protocol(), true, || false));
+        assert!(update_required(3, true, || true));
+        for invalid in [
+            r#""schema":1,"protocol":1,"#,
+            r#""schema":2,"#,
+            r#""schema":3,"protocol":3,"#,
+        ] {
+            assert!(installation(invalid).is_err());
+        }
+
+        // An outdated helper is never used, however ready it is otherwise.
+        let mut status = Status {
+            installed: true,
+            running: true,
+            authorized_application: true,
+            identity_verified: true,
+            protocol: 1,
+            update_required: true,
+            ..Status::default()
+        };
+        assert!(status.ensure_ready().is_err());
+        status.protocol = HELPER_PROTOCOL;
+        status.update_required = false;
+        assert!(status.ensure_ready().is_ok());
+    }
 
     #[test]
     fn capture_requires_installed_running_service_and_approved_caller() {

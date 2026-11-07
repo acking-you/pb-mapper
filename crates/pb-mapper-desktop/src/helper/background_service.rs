@@ -168,10 +168,7 @@ impl Supervisor {
         Snapshot {
             configured: saved.is_some(),
             enabled: self.enabled,
-            host: self
-                .host
-                .as_ref()
-                .map(|host| crate::legacy_host_status(&host.status())),
+            host: self.host.as_ref().map(Host::status),
             invitation: saved.and_then(|saved| {
                 saved
                     .identity
@@ -218,7 +215,12 @@ impl Supervisor {
             ));
         }
         match command {
-            Command::Status => {}
+            Command::Status {} => {}
+            Command::EndSession {} => {
+                if let Some(host) = &self.host {
+                    host.end_session();
+                }
+            }
             Command::Configure { options, identity } => {
                 let saved = Saved::prepare(options, owner_sid, self.saved.as_ref(), identity)?;
                 // Persist before replacing either live state or the identity.
@@ -238,7 +240,7 @@ impl Supervisor {
                 }
                 self.persistence_failed = false;
             }
-            Command::Start => {
+            Command::Start {} => {
                 if self.persistence_failed {
                     return Err(error(
                         "Background authorization could not be persisted; configure it again before starting",
@@ -254,7 +256,7 @@ impl Supervisor {
                 self.enabled = true;
                 self.retry_at = Instant::now();
             }
-            Command::Stop => {
+            Command::Stop {} => {
                 self.enabled = false;
                 self.deactivate().await;
                 if let Some(saved) = self.saved.as_mut() {
@@ -263,7 +265,7 @@ impl Supervisor {
                 self.persist_restriction(root).await?;
                 self.message.clear();
             }
-            Command::Revoke | Command::RevokeScope { .. } => {
+            Command::Revoke {} | Command::RevokeScope { .. } => {
                 self.enabled = false;
                 self.deactivate().await;
                 self.saved = None;
@@ -997,7 +999,7 @@ mod tests {
         );
         assert!(
             supervisor
-                .command(Command::Start, &outside, "owner-one")
+                .command(Command::Start {}, &outside, "owner-one")
                 .await
                 .is_err()
         );

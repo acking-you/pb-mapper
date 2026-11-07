@@ -541,12 +541,11 @@ fn install_bundle(
             &mut 0,
             &mut 0,
         )?;
-        let config = Configuration {
-            schema: 1,
-            owner_sid: sid.into(),
-            ui_executable: release.join("pb_mapper_ui.exe"),
-            helper_executable: release.join(EXECUTABLE),
-        };
+        let config = Configuration::current(
+            sid.into(),
+            release.join("pb_mapper_ui.exe"),
+            release.join(EXECUTABLE),
+        );
         os::protected_file(&config.ui_executable)?;
         os::protected_file(&config.helper_executable)?;
         let access = ServiceAccess::QUERY_STATUS
