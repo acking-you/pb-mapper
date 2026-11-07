@@ -12,6 +12,7 @@ import '../../../theme/glass.dart';
 import '../../../theme/metrics.dart';
 import '../../../theme/motion.dart';
 import '../../../theme/viewer_palette.dart';
+import '../remote_format.dart';
 import 'viewer_menus.dart';
 import 'viewer_overlays.dart';
 
@@ -454,15 +455,14 @@ class ToolbarStatusChip extends StatelessWidget {
       final l10n = context.l10n;
       final s = session.value;
       final st = stats.value;
-      final live = s.phase == DesktopPhase.live;
-      final degraded = live && st.degraded;
-      final path = viewerPathLabel(l10n, s.path);
-      final dot = !live
-          ? ViewerPalette.textQuiet
-          : degraded
-          ? ViewerPalette.caution
-          : ViewerPalette.success;
-      final label = degraded ? l10n.viewerSlow(path) : path;
+      final (:degraded, :dot) = viewerLink(s, st);
+      final path = pathLabel(context, s.path);
+      // No word while the path is unknown, only its figures' dashes.
+      final label = degraded
+          ? l10n.viewerSlow(path)
+          : s.path == null
+          ? null
+          : path;
       // Each figure right-aligned in fixed mono cells: the bar is centred, so
       // a figure gaining a digit would shift every button.
       String cell(Object? figure, int width) =>
@@ -486,7 +486,7 @@ class ToolbarStatusChip extends StatelessWidget {
                 decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
               ),
               const SizedBox(width: 8),
-              if (label.isNotEmpty) ...[
+              if (label != null) ...[
                 Text(
                   label,
                   style: const TextStyle(

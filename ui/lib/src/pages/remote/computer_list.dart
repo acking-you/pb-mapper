@@ -47,12 +47,9 @@ remoteEntries(AppStore store) {
   final session = store.desktop.session.value;
   final computers = store.computers;
   final target = session.target;
-  final live =
-      target != null &&
-      session.phase != DesktopPhase.idle &&
-      session.phase != DesktopPhase.ended;
   final transient =
-      live &&
+      target != null &&
+          session.open &&
           (target.computerId == null ||
               computers.byId(target.computerId!) == null)
       ? RemoteEntry(

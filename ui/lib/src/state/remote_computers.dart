@@ -514,10 +514,7 @@ ComputerPresence presenceOf(
   required String relayAddress,
   required int? credentialKeyId,
   required Set<String> desktopServices,
-}) =>
-    session.target?.computerId == c.id &&
-        session.phase != DesktopPhase.idle &&
-        session.phase != DesktopPhase.ended
+}) => session.target?.computerId == c.id && session.open
     ? ComputerPresence.viewing
     : credentialKeyId == null
     ? ComputerPresence.unknown

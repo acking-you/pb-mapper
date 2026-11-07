@@ -6,7 +6,7 @@ import '../../../state/desktop_store.dart';
 import '../../../theme/app_icons.dart';
 import '../../../theme/fonts.dart';
 import '../../../theme/viewer_palette.dart';
-import 'viewer_overlays.dart';
+import '../remote_format.dart';
 
 /// The connection's figures, refreshed with the store's stats (at most
 /// once a second, and sampled only while something like this listens);
@@ -34,15 +34,13 @@ class QualityPanel extends StatelessWidget {
       final l10n = context.l10n;
       final s = session.value;
       final st = s.connected ? stats.value : DesktopStats.none;
-      final path = viewerPathLabel(l10n, s.path);
+      final path = pathLabel(context, s.path);
       final transport = st.relayTransport;
       final codec = _codec(st.codec);
       final rows = <(String, String, bool, Color?)>[
         (
           l10n.qualityPath,
-          path.isEmpty
-              ? '—'
-              : s.path == 'relay' && transport != null && transport.isNotEmpty
+          s.path == 'relay' && transport != null && transport.isNotEmpty
               ? '$path · ${transport.toUpperCase()}'
               : path,
           false,

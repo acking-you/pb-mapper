@@ -143,11 +143,6 @@ class RemoteDesktop {
   static String? _key(DesktopTarget? target) =>
       target?.computerId ?? target?.invitation;
 
-  static bool _open(DesktopSessionView session) =>
-      session.target != null &&
-      session.phase != DesktopPhase.idle &&
-      session.phase != DesktopPhase.ended;
-
   /// The title the viewer shows: the remembered name, else the target's.
   String get title {
     final target = desktop.session.value.target;
@@ -168,7 +163,7 @@ class RemoteDesktop {
   /// host's identity changed has nothing left to lose.
   bool get hasOpenSession {
     final session = desktop.session.value;
-    return _open(session) && session.phase != DesktopPhase.identityChanged;
+    return session.open && session.phase != DesktopPhase.identityChanged;
   }
 
   /// Whether opening [c] would end another open session (a switch to
@@ -181,7 +176,7 @@ class RemoteDesktop {
   Future<void> open(RemoteComputer c) async {
     _cancelPausedTimer();
     final session = desktop.session.value;
-    if (session.target?.computerId == c.id && _open(session)) {
+    if (session.target?.computerId == c.id && session.open) {
       viewer.open();
       return;
     }

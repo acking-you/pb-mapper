@@ -8,6 +8,7 @@ import '../../../state/desktop_store.dart';
 import '../../../theme/app_icons.dart';
 import '../../../theme/fonts.dart';
 import '../../../theme/viewer_palette.dart';
+import '../remote_format.dart';
 import 'viewer_overlays.dart';
 
 /// Where a phone's controls go around the picture (ui §9.2).
@@ -233,22 +234,16 @@ class QualityGutterButton extends StatelessWidget {
       final l10n = context.l10n;
       final s = session.value;
       final st = stats.value;
-      final live = s.phase == DesktopPhase.live;
-      final degraded = live && st.degraded;
-      final path = viewerPathLabel(l10n, s.path);
+      final (:degraded, :dot) = viewerLink(s, st);
+      final path = pathLabel(context, s.path);
       final fps = s.connected ? st.presentedFps.round() : null;
-      final dot = !live
-          ? ViewerPalette.textQuiet
-          : degraded
-          ? ViewerPalette.caution
-          : ViewerPalette.success;
       return MergeSemantics(
         child: Semantics(
           button: true,
           selected: selected,
           label: fps == null
               ? l10n.viewerQuality
-              : l10n.touchQualityA11y(path.isEmpty ? '—' : path, fps),
+              : l10n.touchQualityA11y(path, fps),
           child: Material(
             type: MaterialType.transparency,
             child: InkWell(
@@ -279,7 +274,7 @@ class QualityGutterButton extends StatelessWidget {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        path.isEmpty ? '—' : path,
+                        path,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
