@@ -209,7 +209,14 @@ class RemoteComputerStore extends ChangeNotifier {
         computers = await _vault.list();
       } catch (error) {
         debugPrint('Remembered computers could not be read: $error');
-        support = const RememberSupport.unavailable('unreadable');
+        // Only a file that was read and cannot be opened is offered for
+        // clearing; any other failure may pass, and the next load tries
+        // again.
+        support = RememberSupport.unavailable(
+          error is RemoteComputerVaultException && error.code == 'PROTOCOL'
+              ? 'unreadable'
+              : 'failed',
+        );
       }
     }
     if (support.available) _deleteStrayPictures(computers);

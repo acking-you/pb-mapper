@@ -80,12 +80,20 @@ void main() {
       'their last pictures', () async {
     final dir = await Directory.systemTemp.createTemp('pbm-remote-');
     addTearDown(() => dir.delete(recursive: true));
-    final vault = FakeRemoteComputerVault()..unreadable = true;
+    final vault = FakeRemoteComputerVault()..listFails = 'IO';
     final store = RemoteComputerStore(vault, thumbnailDir: () async => dir);
     addTearDown(store.dispose);
     final picture = File('${dir.path}/${'a' * 32}.thumb');
     await picture.writeAsBytes(const [1]);
 
+    // A read that failed may pass: nothing is offered for clearing.
+    await store.load();
+    expect(
+      store.support,
+      isA<RememberUnavailable>().having((s) => s.reason, 'reason', 'failed'),
+    );
+
+    vault.listFails = 'PROTOCOL';
     await store.load();
     expect(
       store.support,

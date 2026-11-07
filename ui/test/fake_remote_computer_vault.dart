@@ -2,7 +2,7 @@ import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
 import 'package:pb_mapper_ui/src/state/desktop_models.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
 
-/// An in-memory vault. It can be unavailable or [unreadable], and it
+/// An in-memory vault. It can be unavailable or fail to [list], and it
 /// refuses as Rust does: at most [capacity] computers, names of at most 128
 /// Unicode scalar values, and (when [live] is set) only the computer the
 /// live session is.
@@ -16,8 +16,9 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   final int capacity;
   final records = <RemoteComputer>[];
 
-  /// The file is there but cannot be opened: [list] fails until [reset].
-  bool unreadable = false;
+  /// The code [list] fails with until [reset]: `PROTOCOL` is a file that is
+  /// there but cannot be opened, `IO` a read that failed.
+  String? listFails;
 
   /// The live session's service and short fingerprint, as Rust's
   /// `current_invitation()`; null accepts any.
@@ -38,7 +39,7 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   @override
   Future<List<RemoteComputer>> list() async {
     calls.add(('list', const {}));
-    if (unreadable) throw const RemoteComputerVaultException('PROTOCOL');
+    if (listFails case final code?) throw RemoteComputerVaultException(code);
     return [...records];
   }
 
@@ -128,7 +129,7 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   Future<void> reset() async {
     calls.add(('reset', const {}));
     records.clear();
-    unreadable = false;
+    listFails = null;
   }
 
   /// Rust's `Record::check`, which counts `chars()`.
