@@ -239,17 +239,15 @@ class RemoteComputerStore extends ChangeNotifier {
   void _deleteStrayPictures(List<RemoteComputer> computers) {
     final dir = _thumbnails;
     if (dir == null) return;
-    final kept = {for (final c in computers) '${c.id}.thumb'};
+    final kept = {for (final c in computers) c.id};
     try {
       for (final entry in dir.listSync()) {
         final name = entry.uri.pathSegments.last;
-        if (entry is! File || !name.endsWith('.thumb') || kept.contains(name)) {
-          continue;
-        }
+        if (entry is! File || !name.endsWith(_pictureSuffix)) continue;
+        final id = name.substring(0, name.length - _pictureSuffix.length);
+        if (kept.contains(id)) continue;
         entry.deleteSync();
-        final id = name.substring(0, name.length - '.thumb'.length);
-        _evict(id);
-        _versions.remove(id);
+        _forgetPicture(id);
       }
     } catch (error) {
       debugPrint('Old last pictures could not be deleted: $error');
@@ -430,8 +428,10 @@ class RemoteComputerStore extends ChangeNotifier {
   File? thumbnailFile(String id) {
     final dir = _thumbnails;
     if (dir == null || !_validId.hasMatch(id)) return null;
-    return File('${dir.path}/$id.thumb');
+    return File('${dir.path}/$id$_pictureSuffix');
   }
+
+  static const _pictureSuffix = '.thumb';
 
   /// [id]'s last picture, decoded [width] pixels wide; null without a
   /// private directory. Its image-cache key carries the picture's version,
@@ -457,6 +457,13 @@ class RemoteComputerStore extends ChangeNotifier {
 
   void _evict(String id) => unawaited(_shown.remove(id)?.evict());
 
+  /// Forgets the shown image and the version of [id]'s last picture, whose
+  /// file is gone.
+  void _forgetPicture(String id) {
+    _evict(id);
+    _versions.remove(id);
+  }
+
   /// Deletes the last picture of [id], whose record is gone (D23).
   Future<void> _deleteThumbnail(String id) async {
     final file = thumbnailFile(id);
@@ -467,8 +474,7 @@ class RemoteComputerStore extends ChangeNotifier {
         debugPrint('The last picture could not be deleted: $error');
       }
     }
-    _evict(id);
-    _versions.remove(id);
+    _forgetPicture(id);
   }
 
   @override
