@@ -196,8 +196,19 @@ pub(crate) struct ViewerStateSlot {
     local_reason: Option<ViewerReason>,
     notice: Option<(NoticeCode, String, Instant)>,
     stopped: Option<(Option<ViewerReason>, String)>,
+    /// When the session last became streaming: video is due only from then,
+    /// so a pause or unavailable capture never counts as time without it.
+    entered_streaming: Instant,
 }
 impl ViewerStateSlot {
+    /// Make a change, noting when it starts the session streaming.
+    fn update(&mut self, now: Instant, change: impl FnOnce(&mut Self)) {
+        let streaming = self.streaming();
+        change(self);
+        if !streaming && self.streaming() {
+            self.entered_streaming = now;
+        }
+    }
     fn viewer_state(&self) -> ViewerState {
         if self.stopped.is_some() {
             return ViewerState::Stopped;
@@ -377,6 +388,7 @@ impl Viewer {
                 local_reason: None,
                 notice: None,
                 stopped: None,
+                entered_streaming: now,
             }),
             stats: Mutex::new(ViewerStatsAcc::new(now)),
             cursor: Mutex::new(CursorSlot::default()),
@@ -468,7 +480,7 @@ impl Viewer {
             }),
             last_video_age_ms: last_video
                 .0
-                .map(|at| millis(now.saturating_duration_since(at))),
+                .map(|at| millis(now.saturating_duration_since(at.max(state.entered_streaming)))),
             quality: state.quality,
             capabilities: state.capabilities.clone(),
             notice: state.notice.as_ref().map(|(code, message, at)| NoticeInfo {
@@ -633,7 +645,7 @@ impl Viewer {
             if !state.paused || state.stopped.is_some() {
                 return;
             }
-            state.paused = false;
+            state.update(Instant::now(), |slot| slot.paused = false);
         }
         self.shared.outbound.lifecycle(Lifecycle::Resume);
         self.sink.resume();
@@ -927,16 +939,18 @@ impl Reader<'_> {
                     generation,
                     matches!(state, SessionState::Streaming | SessionState::Paused),
                 );
-                self.shared.state.lock().host = Some(LastState {
-                    state,
-                    reason,
-                    message,
-                    control_allowed,
-                    controlling,
-                    generation,
-                    display,
-                    desktop,
-                    video,
+                self.shared.state.lock().update(Instant::now(), |slot| {
+                    slot.host = Some(LastState {
+                        state,
+                        reason,
+                        message,
+                        control_allowed,
+                        controlling,
+                        generation,
+                        display,
+                        desktop,
+                        video,
+                    });
                 });
             }
             HostMessage::Cursor {
@@ -1351,6 +1365,46 @@ mod tests {
             Pull::Closed
         ));
         assert!(matches!(viewer.input(2, &shift), Err(InputError::Closed)));
+        viewer.stop().await.unwrap();
+    }
+
+    /// Dart reconnects after 5 s without video while streaming: neither
+    /// unavailable capture nor a pause may count, however long, before the
+    /// host's IDR arrives.
+    #[tokio::test]
+    async fn time_without_video_counts_only_while_streaming() {
+        let (viewer, mut host, _) = connect(accepted()).await;
+        let viewer = viewer.unwrap();
+        send(&mut host, state(1, false), None).await;
+        send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+        until(&mut host, |m| {
+            matches!(m, ViewerMessage::Received { seq: 1 })
+        })
+        .await;
+        let age_within = |due: Instant| {
+            let status = viewer.status();
+            assert_eq!(status.state, ViewerState::Streaming);
+            assert!(status.last_video_age_ms.unwrap() <= millis(due.elapsed()));
+        };
+
+        let mut unavailable = state(1, false);
+        if let HostMessage::State { state, .. } = &mut unavailable {
+            *state = SessionState::CaptureUnavailable;
+        }
+        send(&mut host, unavailable, None).await;
+        eventually(|| viewer.status().state == ViewerState::CaptureUnavailable).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let due = Instant::now();
+        send(&mut host, state(2, false), None).await;
+        eventually(|| viewer.status().state == ViewerState::Streaming).await;
+        age_within(due);
+
+        viewer.pause();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let due = Instant::now();
+        viewer.resume();
+        age_within(due);
+        drop(host);
         viewer.stop().await.unwrap();
     }
 
