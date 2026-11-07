@@ -369,8 +369,9 @@ class RemoteDesktop {
   void _onSession() {
     final session = desktop.session.value;
     // However it was left, a paused session holds the host's only slot. The
-    // timer is not restarted while the session stays paused.
-    if (_open(session) && session.paused) {
+    // timer is not restarted while the session stays paused. One whose
+    // host's identity changed holds none, and keeps its card for the user.
+    if (hasOpenSession && session.paused) {
       _pausedTimer ??= Timer(kPausedSessionTimeout, () {
         _pausedTimer = null;
         unawaited(disconnect());

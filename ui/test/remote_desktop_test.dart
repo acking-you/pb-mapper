@@ -27,7 +27,7 @@ void main() {
     'picture releases the viewer demand and Back to picture takes it again; '
     'an identity change never touches the saved computer, nor does its new '
     'invitation unless remembered; a session left paused, by Back or a '
-    'hidden window, is ended',
+    'hidden window, is ended, unless its identity changed',
     (tester) async {
       final api = FakeDesktopApi();
       final desktop = DesktopStore(api);
@@ -112,6 +112,15 @@ void main() {
       await tester.pump();
       expect(api.argsOf('connect').last, containsPair('computer_id', id));
       expect(desktop.session.value.phase, DesktopPhase.identityChanged);
+      // Hidden, it holds no slot to give up: its card waits for the user.
+      api.calls.clear();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await tester.pump(kPausedSessionTimeout);
+      expect(api.ops, isNot(contains('disconnect')));
+      expect(viewer.showing, isTrue);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await remote.disconnect();
       await tester.pump();
       expect(vaultOps(), isEmpty);
