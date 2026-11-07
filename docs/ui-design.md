@@ -302,9 +302,10 @@ sharing are always within reach (`shell/sharing_indicator.dart`):
 
 - **A capsule** in the title bar of every page and of the viewer — Being
   viewed or Being controlled, then the two actions. It fits its bar's width:
-  label and buttons from a 960 px bar (the default window's sheet), buttons
-  alone from 640 px, below that a dot with a menu. The Remote page's host
-  card carries the same two actions instead.
+  label and buttons from a 960 px bar (the default window's sheet is 968 px
+  on Windows and Linux, 960 on macOS), buttons alone from 640 px, below that
+  a dot with a menu. The Remote page's host card carries the same two
+  actions instead.
 - **A pill above every route**, where no capsule can be reached: first-run
   setup, the full-screen viewer, and any dialog whose barrier covers the
   title bar; the capsule under it steps aside, so one set shows.
@@ -324,20 +325,47 @@ The window is layered as in POCOX (`theme/glass.dart`):
 1. `AppBackdrop` — the window's ground, lit softly from above;
 2. the rail (`shell/navigation.dart`), straight on the backdrop, its selection
    a pane of glass that glides between rows;
-3. `ContentSheet` — the rounded page; grouped grey for pages of cards;
+3. `ContentSheet` — the page; grouped grey for pages of cards. On macOS
+   (and a wide tablet) it floats 8 px inside the window, rounded all round;
+   on Windows and Linux it runs to the window's top, right and bottom edges,
+   rounded and edged only where it leaves the backdrop, down its left side
+   from the top-left corner;
 4. `Glass` — translucent panels over the page: the galaxy's summary, its
    details panel, toasts.
 
 The native title bar is hidden on desktop. The page's own title bar is window
-chrome: its empty space drags, and on Windows and Linux it carries the caption
-buttons (`shell/window_chrome.dart`). macOS keeps its traffic lights.
+chrome: its empty space drags, and on Windows and Linux the caption buttons
+sit over its end (`shell/window_chrome.dart`). macOS keeps its traffic lights.
 
-The caption buttons are 46×32 with a 6 px radius, centred in the 58 px bar,
-16 px after the page's last action and 16 px inside the sheet's edge, so the
-close button's red never reaches the sheet's rounded corner; the setup screen
-keeps them 16 px from the window's edge. Their glyphs are drawn, not icons:
-10 px, a one-pixel stroke, snapped to device pixels so they stay sharp at
-125 % and 150 %.
+The caption buttons are where Windows puts its own and look like them: 46 px
+wide, square-cornered, flush in the window's top-right corner, on the page's surface
+rather than inside a card on the backdrop. Like Windows' in a tall title bar
+that holds controls, they are as tall as the bar under them — 58 px beside
+the rail, 54 on a compact window, 36 over the viewer, Windows' 32 while
+loading and on the setup screen — so their glyphs sit on the title's row.
+They are one set for the app's whole life (`WindowControls`, drawn in
+`app.dart` above the navigator): a page switch neither moves nor fades them,
+a new bar's height is theirs in the next frame rather than grown into, and a
+dialog's barrier dims the rest of the title bar but never them. A menu that
+opens from the title bar, the sharing capsule's on a narrow window, opens
+over them in the root overlay, as Windows' menus open over its own. Each
+plate is a whole number of device pixels, so the hover fills reach both edges
+without a fringe at 125 % and 150 %; the close button's red runs into the
+corner, which Windows rounds itself, and a maximised window's close sits
+where the pointer stops at the screen's corner. Their glyphs are the primary
+ink, as Windows' are, and dim while the window is not the active one, laid on
+as one layer so the close's crossing does not darken. The page's actions keep 16 px
+clear of them. Their glyphs are drawn, not icons: 10 px, a one-pixel stroke,
+snapped to device pixels so they stay sharp at 125 % and 150 %.
+
+On Windows a restored window resizes from a 4 px band along its top edge,
+over the caption buttons too, as native windows do: the hidden title bar
+leaves Windows next to none of its own there. Its other edges are Windows'.
+A known gap: hovering Maximize does not offer Snap Layouts, which Windows
+shows only over a button it hit-tests natively; buttons Flutter draws would
+need that hit-testing added to the runner. Win+Z, which Windows handles for
+any window with a maximise box, should still open them; the acceptance
+procedure checks it.
 
 Below 720 px (900 px on a touch screen) the rail becomes a bottom bar and the
 page fills the window. Cards reflow by the width they get, not by a global
@@ -347,8 +375,8 @@ The viewer is dark whatever the app's theme, so a remote picture is never
 framed in white (`theme/viewer_palette.dart`). Its chrome is translucent
 graphite over the picture rather than the app's glass, since a blur over a
 live video would be redrawn every frame; `viewerTheme` gives its menus,
-dialogs and tooltips the same palette. Its title bar's caption buttons keep
-the app's geometry in a dark tone.
+dialogs and tooltips the same palette. Over its title bar the caption buttons
+take its dark tone and its 36 px height; in full screen they hide with it.
 
 Type is Google Sans Flex for prose (Segoe UI on Windows) and Geist Mono for
 keys, addresses and logs; Chinese falls back to the bundled Noto Sans SC subset
@@ -459,8 +487,13 @@ CPU and memory without starting tunnels or reading settings.
 - `test/planet_atlas_test.dart`, `test/galaxy_lines_test.dart` and
   `test/galaxy_render_lifecycle_test.dart`: cached/vector image parity, line
   clipping, resource bounds, backgrounding, interaction and reduced motion.
-- `test/title_bar_test.dart`: the caption buttons' room at 100, 125 and
-  150 %, maximised and restored.
+- `test/title_bar_test.dart`: the caption buttons flush in the window's
+  corner and as tall as the bar on screen, the sheet's colour in the corner
+  pixel, restored at 125 % and maximised; the top edge that resizes a
+  restored window; the compact layout, a widened one taking the taller bar
+  at once, the viewer and the setup screen; a dialog's barrier leaving them
+  uncovered, the capsule's menu opening over them, and a page switch leaving
+  them still; macOS's inset sheet.
 - Remote desktop, against `FakeDesktopApi` and an in-memory vault:
   `remote_page_test.dart` (the add flow never shows an invitation, enabling
   and stopping a share, the QR hiding), `sharing_test.dart` (the capsule and

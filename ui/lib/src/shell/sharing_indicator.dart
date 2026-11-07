@@ -315,6 +315,10 @@ class _SharingIndicatorState extends State<SharingIndicator> {
     final l10n = context.l10n;
     final scheme = Theme.of(context).colorScheme;
     return MenuAnchor(
+      // Over the caption buttons, as Windows draws its menus over its own:
+      // they sit above the navigator's overlay, and on a narrow window the
+      // dot is near enough to them that its menu reaches under them.
+      useRootOverlay: true,
       menuChildren: [
         MenuItemButton(
           key: const Key('sharing-indicator-disconnect'),
@@ -352,8 +356,8 @@ class _SharingIndicatorState extends State<SharingIndicator> {
 
 /// The D15 controls wherever no capsule is reachable: the setup flow and
 /// the viewer, which have no title-bar capsule, and under any dialog's
-/// barrier. It sits above the navigator, so above every route; for the same
-/// reason it has no overlay, and so no tooltips or menus.
+/// barrier. It sits above the navigator, so above every route; its buttons
+/// say what they do, so it needs no tooltips or menus.
 class SharingFallbackLayer extends StatefulWidget {
   const SharingFallbackLayer({
     super.key,

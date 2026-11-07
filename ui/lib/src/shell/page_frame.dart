@@ -35,9 +35,16 @@ class PrimaryAction {
   final VoidCallback onPressed;
 }
 
+/// A page's title bar in the sheet beside the rail, and across the top of a
+/// compact window (below any top padding). The window's caption buttons take
+/// the same height (`app.dart`), so the two cannot drift apart.
+const double kPageBarHeight = 58;
+const double kCompactPageBarHeight = 54;
+
 /// A page: its title bar and its body. The bar is window chrome too — its
-/// empty space drags the window, and on Windows and Linux it carries the
-/// caption buttons.
+/// empty space drags the window, and on Windows and Linux it keeps room at
+/// its end for the caption buttons, which the app draws above every page
+/// ([WindowControls]).
 class PageFrame extends StatelessWidget {
   const PageFrame({
     super.key,
@@ -71,8 +78,9 @@ class PageFrame extends StatelessWidget {
   final bool sharingIndicator;
 
   /// The bar's height, for a body that lays things out beneath it.
-  static double barHeight(BuildContext context) =>
-      ShellLayout.wideOf(context) ? 58 : 54 + MediaQuery.paddingOf(context).top;
+  static double barHeight(BuildContext context) => ShellLayout.wideOf(context)
+      ? kPageBarHeight
+      : kCompactPageBarHeight + MediaQuery.paddingOf(context).top;
 
   @override
   Widget build(BuildContext context) {
@@ -127,7 +135,7 @@ class _TitleBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final height = inSheet ? 58.0 : 54.0;
+    final height = inSheet ? kPageBarHeight : kCompactPageBarHeight;
     final onBack = this.onBack;
     // Across the top of the window the traffic lights sit at its corner;
     // inside the sheet the rail has already made room for them. A back
@@ -150,10 +158,13 @@ class _TitleBar extends StatelessWidget {
           // no room for both the label and the capsule.
           LayoutBuilder(
             builder: (context, box) => Padding(
-              // The caption buttons keep clear of the sheet's rounded corner.
+              // The caption buttons are drawn over the bar's end, in the
+              // window's corner, which is the bar's in every layout that
+              // draws them: the sheet runs to the window's edges, and a
+              // compact page fills it.
               padding: EdgeInsetsDirectional.only(
                 start: lead,
-                end: drawsCaptionButtons ? 16 : 8,
+                end: drawsCaptionButtons ? kCaptionButtonsWidth + 16 : 8,
               ),
               child: Row(
                 children: [
@@ -212,10 +223,6 @@ class _TitleBar extends StatelessWidget {
                         ),
                         icon: Icon(primary.icon),
                       ),
-                  ],
-                  if (drawsCaptionButtons) ...[
-                    const SizedBox(width: 16),
-                    const CaptionButtons(),
                   ],
                 ],
               ),

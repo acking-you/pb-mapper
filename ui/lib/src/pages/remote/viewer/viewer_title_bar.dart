@@ -7,10 +7,15 @@ import '../../../theme/app_icons.dart';
 import '../../../theme/metrics.dart';
 import '../../../theme/viewer_palette.dart';
 
+/// The viewer's title bar's height. The window's caption buttons take the
+/// same height while the viewer shows (`app.dart`).
+const double kViewerTitleBarHeight = 36;
+
 /// The desktop viewer's own title bar (Viewer:17-27): the computer's name,
-/// the sharing capsule while this computer is viewed too (D15), and the
-/// caption buttons in their dark variant (D25). The window drags from
-/// anywhere that is not a control. Hidden in full screen.
+/// the sharing capsule while this computer is viewed too (D15), and room
+/// for the caption buttons, which the app draws over its end in their dark
+/// tone (D25, [WindowControls]). The window drags from anywhere that is not
+/// a control. Hidden in full screen.
 class ViewerTitleBar extends StatelessWidget {
   const ViewerTitleBar({super.key, required this.title, this.onBack});
 
@@ -21,7 +26,7 @@ class ViewerTitleBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    height: 36,
+    height: kViewerTitleBarHeight,
     child: Stack(
       children: [
         const Positioned.fill(child: WindowDragArea()),
@@ -31,7 +36,7 @@ class ViewerTitleBar extends StatelessWidget {
           builder: (context, box) => Padding(
             padding: EdgeInsetsDirectional.only(
               start: trafficLightInset + (onBack == null ? 16 : 8),
-              end: drawsCaptionButtons ? 4 : 12,
+              end: drawsCaptionButtons ? 0 : 12,
             ),
             child: Row(
               children: [
@@ -82,8 +87,9 @@ class ViewerTitleBar extends StatelessWidget {
                   tone: CaptionTone.viewer,
                 ),
                 const SizedBox(width: 12),
+                // The caption buttons' place, in the window's corner.
                 if (drawsCaptionButtons)
-                  const CaptionButtons(tone: CaptionTone.viewer),
+                  const SizedBox(width: kCaptionButtonsWidth),
               ],
             ),
           ),

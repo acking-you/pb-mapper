@@ -70,10 +70,21 @@ enum CaptionTone { surface, viewer }
 /// The four marks a caption button draws.
 enum CaptionGlyph { minimize, maximize, restore, close }
 
-/// One caption button: Windows' own width, but shorter than its title bar,
-/// so it sits centred in the page's bar with room above and below.
-const Size kCaptionButtonSize = Size(46, 32);
-const double kCaptionButtonRadius = 6;
+/// One caption button is Windows' own 46 px wide. It is as tall as the title
+/// bar it sits over, as Windows' are in a tall title bar that holds
+/// controls: a page's or the viewer's. Where there is no bar (loading and
+/// first-run setup) it is Windows' standard 32.
+const double kCaptionButtonWidth = 46;
+const double kCaptionButtonHeight = 32;
+
+/// The three together: what a title bar keeps clear at its end.
+const double kCaptionButtonsWidth = 3 * kCaptionButtonWidth;
+
+/// The band along a restored window's top edge that resizes it on Windows,
+/// over the caption buttons too, as a native window's top edge does. The
+/// hidden title bar (window_manager 0.5.1) leaves Windows at most one
+/// physical pixel there; the other edges are Windows' own.
+const double kTopResizeBand = 4;
 
 /// The glyph's box, in logical pixels.
 const double kCaptionGlyphExtent = 10;
@@ -81,19 +92,47 @@ const double kCaptionGlyphExtent = 10;
 /// Windows' close red.
 const Color _closeRed = Color(0xFFC42B1C);
 
-/// Minimize, maximize-or-restore and close, drawn for Windows and Linux,
-/// which lose theirs with the native title bar.
-class CaptionButtons extends StatefulWidget {
-  const CaptionButtons({super.key, this.tone = CaptionTone.surface});
+/// Windows' TextFillColorDisabled: caption glyphs in a window that is not
+/// the active one.
+const double _inactiveAlpha = 0.36;
 
+/// The window's own controls on Windows and Linux, which lose theirs with
+/// the native title bar: minimize, maximize-or-restore and close, and on
+/// Windows the top edge that resizes a restored window. One for the app's
+/// whole life, above the navigator (`app.dart`), so no page transition moves
+/// or fades the buttons and no dialog's barrier dims them, as none touches
+/// Windows' own.
+///
+/// Fill the window with it: the buttons sit flush in its top-right corner,
+/// [height] tall, the title bar on screen keeping [kCaptionButtonsWidth]
+/// clear at its end. Their hover fills run to both edges and the close red
+/// into the corner, which Windows rounds itself; a maximised window's close
+/// is where the pointer stops at the screen's corner. A menu that opens from
+/// a title bar goes in the root overlay, above them, as Windows draws its
+/// menus over its own (`MenuAnchor.useRootOverlay`).
+///
+/// It owns the window state they show: maximised (the middle glyph),
+/// focused (idle glyphs go grey, as Windows' do) and full screen, where it
+/// hides.
+class WindowControls extends StatefulWidget {
+  const WindowControls({
+    super.key,
+    required this.height,
+    this.tone = CaptionTone.surface,
+  });
+
+  /// The title bar's height, or [kCaptionButtonHeight] where there is none.
+  final double height;
   final CaptionTone tone;
 
   @override
-  State<CaptionButtons> createState() => _CaptionButtonsState();
+  State<WindowControls> createState() => _WindowControlsState();
 }
 
-class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
+class _WindowControlsState extends State<WindowControls> with WindowListener {
   bool _maximized = false;
+  bool _fullScreen = false;
+  bool _focused = true;
 
   @override
   void initState() {
@@ -109,12 +148,26 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
   }
 
   Future<void> _sync() async {
-    try {
-      final maximized = await windowManager.isMaximized();
-      if (mounted && maximized != _maximized) {
-        setState(() => _maximized = maximized);
+    Future<bool> ask(Future<bool> Function() question, bool known) async {
+      try {
+        return await question();
+      } catch (_) {
+        // No window to ask (a test) or a platform that refuses.
+        return known;
       }
-    } catch (_) {}
+    }
+
+    final (maximized, fullScreen, focused) = await (
+      ask(windowManager.isMaximized, _maximized),
+      ask(windowManager.isFullScreen, _fullScreen),
+      ask(windowManager.isFocused, _focused),
+    ).wait;
+    if (!mounted) return;
+    setState(() {
+      _maximized = maximized;
+      _fullScreen = fullScreen;
+      _focused = focused;
+    });
   }
 
   @override
@@ -128,14 +181,87 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
   void onWindowRestore() => _sync();
 
   @override
-  void onWindowEnterFullScreen() => _sync();
+  void onWindowEnterFullScreen() {
+    setState(() => _fullScreen = true);
+    _sync();
+  }
 
   @override
-  void onWindowLeaveFullScreen() => _sync();
+  void onWindowLeaveFullScreen() {
+    setState(() => _fullScreen = false);
+    _sync();
+  }
+
+  @override
+  void onWindowFocus() => setState(() => _focused = true);
+
+  @override
+  void onWindowBlur() => setState(() => _focused = false);
+
+  @override
+  Widget build(BuildContext context) {
+    if (_fullScreen) return const SizedBox.shrink();
+    final buttons = _CaptionButtons(
+      tone: widget.tone,
+      height: widget.height,
+      maximized: _maximized,
+      active: _focused,
+    );
+    return Stack(
+      children: [
+        Positioned(
+          top: 0,
+          right: 0,
+          // Over the viewer, its tooltips wear the viewer's palette.
+          child: widget.tone == CaptionTone.viewer
+              ? Theme(data: viewerTheme(context), child: buttons)
+              : buttons,
+        ),
+        if (defaultTargetPlatform == TargetPlatform.windows && !_maximized)
+          const Positioned(
+            key: Key('window-resize-top'),
+            top: 0,
+            left: 0,
+            right: 0,
+            height: kTopResizeBand,
+            child: DragToResizeArea(
+              resizeEdgeSize: kTopResizeBand,
+              enableResizeEdges: [
+                ResizeEdge.topLeft,
+                ResizeEdge.top,
+                ResizeEdge.topRight,
+              ],
+              child: SizedBox.expand(),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _CaptionButtons extends StatelessWidget {
+  const _CaptionButtons({
+    required this.tone,
+    required this.height,
+    required this.maximized,
+    required this.active,
+  });
+
+  final CaptionTone tone;
+  final double height;
+  final bool maximized, active;
 
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
+    // Whole device pixels, so every plate's edges land on the pixel grid at
+    // 125 % and 150 % and the close red has no fringe. The group still ends
+    // at the window's right edge, which is a whole device pixel too.
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final size = Size(
+      (kCaptionButtonWidth * dpr).roundToDouble() / dpr,
+      (height * dpr).roundToDouble() / dpr,
+    );
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -143,14 +269,18 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
           key: const Key('caption-minimize'),
           glyph: CaptionGlyph.minimize,
           tooltip: l10n.windowMinimize,
-          tone: widget.tone,
+          tone: tone,
+          size: size,
+          active: active,
           onTap: () => windowManager.minimize(),
         ),
         _CaptionButton(
           key: const Key('caption-maximize'),
-          glyph: _maximized ? CaptionGlyph.restore : CaptionGlyph.maximize,
-          tooltip: _maximized ? l10n.windowRestore : l10n.windowMaximize,
-          tone: widget.tone,
+          glyph: maximized ? CaptionGlyph.restore : CaptionGlyph.maximize,
+          tooltip: maximized ? l10n.windowRestore : l10n.windowMaximize,
+          tone: tone,
+          size: size,
+          active: active,
           onTap: _toggleMaximize,
         ),
         // Closing hides to the tray: main.dart owns that through
@@ -159,7 +289,9 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
           key: const Key('caption-close'),
           glyph: CaptionGlyph.close,
           tooltip: l10n.windowClose,
-          tone: widget.tone,
+          tone: tone,
+          size: size,
+          active: active,
           close: true,
           onTap: () => windowManager.close(),
         ),
@@ -175,6 +307,8 @@ class _CaptionButton extends StatefulWidget {
     required this.tooltip,
     required this.onTap,
     required this.tone,
+    required this.size,
+    required this.active,
     this.close = false,
   });
 
@@ -182,6 +316,10 @@ class _CaptionButton extends StatefulWidget {
   final String tooltip;
   final VoidCallback onTap;
   final CaptionTone tone;
+  final Size size;
+
+  /// Whether the window is the active one; if not, the idle glyph greys.
+  final bool active;
   final bool close;
 
   @override
@@ -197,10 +335,12 @@ class _CaptionButtonState extends State<_CaptionButton> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    // Idle and lit ink, and the washes under hover and press, per tone.
+    // Idle and lit ink, and the washes under hover and press, per tone. On
+    // the app's surfaces the glyphs are the primary ink, as Windows' are, so
+    // they still read over a dialog's scrim.
     final (idle, lit, hover, pressed) = switch (widget.tone) {
       CaptionTone.surface => (
-        scheme.onSurfaceVariant,
+        scheme.onSurface,
         scheme.onSurface,
         scheme.onSurface.withValues(alpha: 0.08),
         scheme.onSurface.withValues(alpha: 0.12),
@@ -228,11 +368,13 @@ class _CaptionButtonState extends State<_CaptionButton> {
       fg = lit;
     } else {
       bg = Colors.transparent;
-      fg = idle;
+      fg = widget.active ? idle : lit.withValues(alpha: _inactiveAlpha);
     }
     return Tooltip(
       message: widget.tooltip,
       excludeFromSemantics: true,
+      // Below the plate, however tall its bar, not over its lower edge.
+      verticalOffset: widget.size.height / 2 + 6,
       child: Semantics(
         button: true,
         label: widget.tooltip,
@@ -245,16 +387,16 @@ class _CaptionButtonState extends State<_CaptionButton> {
             onTapUp: (_) => _press(false),
             onTapCancel: () => _press(false),
             onTap: widget.onTap,
-            child: AnimatedContainer(
-              duration: Motion.of(context, const Duration(milliseconds: 90)),
-              width: kCaptionButtonSize.width,
-              height: kCaptionButtonSize.height,
-              decoration: BoxDecoration(
+            // A new bar's height or a new scale is taken at once; only the
+            // hover and press washes ease.
+            child: SizedBox.fromSize(
+              size: widget.size,
+              child: AnimatedContainer(
+                duration: Motion.of(context, const Duration(milliseconds: 90)),
                 color: bg,
-                borderRadius: BorderRadius.circular(kCaptionButtonRadius),
-              ),
-              child: Center(
-                child: CaptionGlyphIcon(glyph: widget.glyph, color: fg),
+                child: Center(
+                  child: CaptionGlyphIcon(glyph: widget.glyph, color: fg),
+                ),
               ),
             ),
           ),
@@ -350,8 +492,12 @@ class RenderCaptionGlyph extends RenderBox {
     final h = s / 2;
     final r = Radius.circular(math.max(1, dpr.round()).toDouble());
     final o = (2 * dpr).roundToDouble();
+    // Strokes that meet (the close's X, the restore's joins) would add their
+    // alpha there, leaving a darker dot; a translucent ink is laid on as one
+    // layer instead.
+    final translucent = _color.a < 1;
     final paint = Paint()
-      ..color = _color
+      ..color = _color.withValues(alpha: 1)
       ..style = PaintingStyle.stroke
       ..strokeWidth = s.toDouble()
       ..strokeCap = StrokeCap.butt
@@ -361,6 +507,12 @@ class RenderCaptionGlyph extends RenderBox {
       ..save()
       ..translate(offset.dx + snap.dx, offset.dy + snap.dy)
       ..scale(1 / dpr);
+    if (translucent) {
+      canvas.saveLayer(
+        Rect.fromLTWH(-h, -h, b + s, b + s),
+        Paint()..color = Color.fromRGBO(0, 0, 0, _color.a),
+      );
+    }
     switch (_glyph) {
       case CaptionGlyph.minimize:
         final y = (b / 2).floorToDouble() + (s.isOdd ? 0.5 : 0);
@@ -387,6 +539,7 @@ class RenderCaptionGlyph extends RenderBox {
           ..drawLine(Offset(h, h), Offset(b - h, b - h), paint)
           ..drawLine(Offset(b - h, h), Offset(h, b - h), paint);
     }
+    if (translucent) canvas.restore();
     canvas.restore();
   }
 }

@@ -193,9 +193,6 @@ class _SetupFlowState extends State<SetupFlow> {
                 height: 44,
                 child: WindowDragArea(),
               ),
-            // Centred in the drag strip, as far from the edge as in the shell.
-            if (drawsCaptionButtons)
-              const Positioned(top: 6, right: 16, child: CaptionButtons()),
           ],
         ),
       ),

@@ -247,8 +247,18 @@ statements stay until the owner accepts fluidity.
    - I: `video_bench --pace 60,30,15,5` and `video_bench 60 60` on each host
      GPU.
 2. Windows chrome: at 100, 125 and 150 % scaling, maximised and restored, the
-   hovered close button sits at least 16 px inside the sheet edge and the
-   glyphs are crisp; the icons look right on every page.
+   close button sits flush in the window's top-right corner, as tall as the
+   page's title bar; its hover red reaches both edges with no fringe, no
+   backdrop shows around the three buttons, and the glyphs are crisp. With a
+   dialog open the buttons stay undimmed and still respond; switching pages
+   never moves or fades them, and neither does finishing first-run setup or
+   moving the window to a monitor of another scale; their glyphs dim while
+   another window is active. At the narrowest window (720 px) while viewed,
+   the capsule's dot menu opens over the buttons, no hover grey paints over
+   it, and Disconnect viewer responds right up to its top edge. A restored
+   window resizes from its top edge, over the buttons too, and still drags
+   just below it. Win+Z opens Snap Layouts for the window (hovering Maximize
+   does not; that is a known gap). The icons look right on every page.
 3. Navigation: six rail entries; five bar entries on the phone; Logs is
    reachable from Settings, and its back button returns.
 4. Host (Windows):
@@ -283,6 +293,14 @@ statements stay until the owner accepts fluidity.
      credential, no tunnels and no remembered computers.
 6. Desktop viewer:
    - the toolbar pins, and unpinned it collapses 2 s after the pointer leaves;
+   - full screen, entered from a restored window and from a maximised one:
+     the viewer's title bar and the caption buttons hide together, and come
+     back together on leaving it. `window_manager` 0.5.1 on Windows reports
+     entering full screen only from a maximised window (`WM_SIZE` with
+     `SIZE_MAXIMIZED`), so from a restored one both may stay over the
+     picture; if they do, record it, and the fix is one full-screen state
+     that the viewer sets after `setFullScreen` and the title bar, the
+     caption buttons and the fallback layer all read;
    - Display: fit or original, quality presets live, no reconnect;
    - Shortcuts: Win+D, Alt+Tab, Ctrl+Shift+Esc, Win; Win+L locks;
      Ctrl+Alt+Del is shown as unsupported;
