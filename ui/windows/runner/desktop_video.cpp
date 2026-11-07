@@ -108,6 +108,16 @@ std::shared_ptr<const VideoLibrary> LoadVideoLibrary() {
   return library;
 }
 
+// mfplat.dll is delay-loaded (CMakeLists.txt): Windows N/KN without the Media
+// Feature Pack, and Windows Server without the feature, lack it, and there the
+// first Media Foundation call would raise. Loaded from System32 and kept, the
+// delay-load binds to this copy.
+bool MediaFoundationInstalled() {
+  static const bool installed =
+      LoadLibraryExW(L"mfplat.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32) != nullptr;
+  return installed;
+}
+
 void Check(HRESULT hr, const char* operation) {
   if (FAILED(hr)) throw std::runtime_error(std::string(operation) + " (" + std::to_string(static_cast<unsigned long>(hr)) + ")");
 }
@@ -707,7 +717,9 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
   // Decoder thread, one per attached source. `next` is the only blocking call.
   void Run(uint64_t consumer) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    mf_ = SUCCEEDED(com) ? MFStartup(MF_VERSION, MFSTARTUP_LITE) : com;
+    mf_ = FAILED(com) ? com
+          : MediaFoundationInstalled() ? MFStartup(MF_VERSION, MFSTARTUP_LITE)
+                                       : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
     std::unique_ptr<Decoder> decoder;
     std::vector<uint8_t> buf(1 << 20);
     PbDesktopVideoMetaV1 meta{};

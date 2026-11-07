@@ -24,7 +24,8 @@ abstract interface class DesktopVideoTexture {
 typedef DesktopTextureFactory =
     Future<DesktopVideoTexture> Function({required int instanceToken});
 
-/// Android and Windows decode H.264 natively; elsewhere video is JPEG.
+/// Android and Windows can decode H.264 natively; the session's codec decides
+/// (Windows without Media Foundation takes JPEG).
 bool get nativeDesktopVideo => Platform.isAndroid || Platform.isWindows;
 
 /// The channel-backed texture (`pb_mapper/desktop_video` v2).

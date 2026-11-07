@@ -35,7 +35,10 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app flutter_wrapper_plugin)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
-target_link_libraries(${BINARY_NAME} PRIVATE d3d11 dxgi mfplat mf mfuuid wmcodecdspuuid ole32 oleaut32 windowscodecs)
+target_link_libraries(${BINARY_NAME} PRIVATE d3d11 mfplat mfuuid wmcodecdspuuid ole32 oleaut32 windowscodecs delayimp)
+# Windows N/KN and Server can lack Media Foundation, and the app must still
+# start there: desktop_video.cpp checks for it before its first call.
+target_link_options(${BINARY_NAME} PRIVATE "/DELAYLOAD:mfplat.dll")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

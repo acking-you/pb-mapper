@@ -1004,9 +1004,9 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     ));
                 }
             };
-            // Android and Windows decode H.264 natively; elsewhere Dart
-            // decodes JPEG.
-            let codecs = if cfg!(any(windows, target_os = "android")) {
+            // Android, and Windows where Media Foundation is installed,
+            // decode H.264 natively; elsewhere Dart decodes JPEG.
+            let codecs = if cfg!(target_os = "android") || desktop::media_foundation() {
                 vec![VideoCodec::H264]
             } else {
                 vec![VideoCodec::Jpeg]
