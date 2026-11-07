@@ -24,6 +24,8 @@ pub(crate) const BYTE_WINDOW_CLAMP_MIN: usize = 32 * 1024;
 pub(crate) const ACK_QUEUE_LIMIT: Duration = Duration::from_millis(100);
 /// Receipt delays considered for the ack queue.
 pub(crate) const ACK_SAMPLE_WINDOW: Duration = Duration::from_millis(250);
+/// The ack queue is judged on at least this many receipts.
+const ACK_SAMPLES_MIN: usize = 3;
 /// Delivered bytes considered for the delivery rate.
 pub(crate) const DELIVERY_WINDOW: Duration = Duration::from_millis(500);
 pub(crate) const DELIVERY_FACTOR: f64 = 1.25;
@@ -191,10 +193,11 @@ impl CreditLedger {
         self.delivery_since.get_or_insert(now);
         self.acked = seq;
         self.last_receipt = now;
-        while self
-            .ack_samples
-            .front()
-            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > ACK_SAMPLE_WINDOW)
+        while self.ack_samples.len() > ACK_SAMPLES_MIN
+            && self
+                .ack_samples
+                .front()
+                .is_some_and(|(at, _)| now.saturating_duration_since(*at) > ACK_SAMPLE_WINDOW)
         {
             self.ack_samples.pop_front();
         }
@@ -224,18 +227,27 @@ impl CreditLedger {
         }
     }
 
-    /// The median receipt delay over the last `ACK_SAMPLE_WINDOW` above the
-    /// baseline RTT; zero with fewer than three samples.
+    /// The median receipt delay above the baseline RTT, over the last
+    /// `ACK_SAMPLE_WINDOW`, or over the newest three receipts when fewer came
+    /// in it: a slow link receipts seldom, and its queue must not vanish
+    /// between two receipts. Zero before three receipts.
     pub fn ack_queue(&self, base_rtt: Duration, now: Instant) -> Duration {
-        let mut delays: Vec<Duration> = self
+        if self.ack_samples.len() < ACK_SAMPLES_MIN {
+            return Duration::ZERO;
+        }
+        let recent = self
             .ack_samples
             .iter()
             .filter(|(at, _)| now.saturating_duration_since(*at) <= ACK_SAMPLE_WINDOW)
+            .count()
+            .max(ACK_SAMPLES_MIN);
+        let mut delays: Vec<Duration> = self
+            .ack_samples
+            .iter()
+            .rev()
+            .take(recent)
             .map(|(_, delay)| *delay)
             .collect();
-        if delays.len() < 3 {
-            return Duration::ZERO;
-        }
         delays.sort_unstable();
         delays[delays.len() / 2].saturating_sub(base_rtt)
     }
@@ -329,6 +341,15 @@ mod tests {
         let fast = credit.window(VideoCodec::H264, 60, 4_000_000, base, ms(49 * 20 + 25));
         assert_eq!(fast, window);
         assert_eq!(seq, 50);
+        // A slow link receipts seldom: between two receipts fewer than three
+        // lie in the sample window, and the clamp still holds.
+        let mut credit = CreditLedger::new(t0);
+        for n in 0..10 {
+            let seq = credit.book(9 * KIB, false, ms(n * 100));
+            credit.on_receipt(seq, ms(n * 100 + 400)).unwrap();
+        }
+        let between = credit.window(VideoCodec::H264, 60, 4_000_000, base, ms(9 * 100 + 460));
+        assert!(between.clamped, "{between:?}");
 
         // A JPEG session has a fixed window.
         let jpeg = CreditLedger::new(t0).window(VideoCodec::Jpeg, 8, 0, None, t0);
