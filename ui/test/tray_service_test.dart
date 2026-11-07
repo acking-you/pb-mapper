@@ -3,12 +3,14 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/common/tray/tray_service.dart';
+import 'package:pb_mapper_ui/src/state/desktop_models.dart';
 
-TrayStatus status(int connections) => TrayStatus(
+TrayStatus status(int connections, {DesktopHostView? host}) => TrayStatus(
   serverAvailable: true,
   activeConnections: connections,
   registeredServices: 0,
   connectedClients: 0,
+  host: host,
 );
 
 TrayStrings strings([String language = 'en']) => TrayStrings(
@@ -19,6 +21,12 @@ TrayStrings strings([String language = 'en']) => TrayStrings(
   open: '$language open',
   refresh: '$language refresh',
   quit: '$language quit',
+  hostSharing: '$language sharing',
+  hostViewed: '$language viewed',
+  hostControlled: '$language controlled',
+  hostPaused: '$language paused',
+  disconnectViewer: '$language disconnect viewer',
+  stopSharing: '$language stop sharing',
 );
 
 void main() {
@@ -61,6 +69,8 @@ void main() {
       statusProvider: () async => current,
       showApp: () => opened++,
       quitApp: () {},
+      onDisconnectViewer: () {},
+      onStopSharing: () {},
       strings: strings(),
     );
     await service.refreshStatus();
@@ -125,6 +135,8 @@ void main() {
         statusProvider: () => read(),
         showApp: () {},
         quitApp: () {},
+        onDisconnectViewer: () {},
+        onStopSharing: () {},
         strings: strings(),
       );
       await service.refreshStatus();
@@ -165,6 +177,65 @@ void main() {
       afterDispose.complete(status(0));
       await pending;
       expect(calls, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'a viewed computer offers Disconnect viewer and Stop sharing with stable '
+    'ids and shows the active icon',
+    (tester) async {
+      final watched = DesktopHostView(
+        sharing: true,
+        viewer: DesktopHostViewer(controlling: true, since: DateTime(2026)),
+      );
+      var current = status(0, host: watched);
+      final actions = <String>[];
+      await service.initialize(
+        statusProvider: () async => current,
+        showApp: () {},
+        quitApp: () {},
+        onDisconnectViewer: () => actions.add('disconnect'),
+        onStopSharing: () => actions.add('stop'),
+        strings: strings(),
+      );
+      await service.refreshStatus();
+      List<Map> items() => [
+        for (final item in menu!['items'] as List) item as Map,
+      ];
+      Map item(String label) => items().firstWhere((i) => i['label'] == label);
+      expect([for (final i in items()) i['label']].take(4), [
+        'en idle',
+        'en controlled',
+        'en disconnect viewer',
+        'en stop sharing',
+      ]);
+      final stop = item('en stop sharing')['id'];
+      expect(
+        calls.lastWhere((c) => c.method == 'setIcon').arguments['iconPath'],
+        contains('tray_active'),
+      );
+      expect(
+        calls.lastWhere((c) => c.method == 'setToolTip').arguments['toolTip'],
+        'en controlled · en idle',
+      );
+
+      // The viewer leaves: no Disconnect viewer, and Stop keeps its id.
+      current = status(0, host: const DesktopHostView(sharing: true));
+      await service.refreshStatus();
+      expect(
+        items().map((i) => i['label']),
+        isNot(contains('en disconnect viewer')),
+      );
+      expect(item('en stop sharing')['id'], stop);
+      await binding.defaultBinaryMessenger.handlePlatformMessage(
+        'tray_manager',
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall('onTrayMenuItemClick', {'id': stop}),
+        ),
+        (_) {},
+      );
+      expect(actions, ['stop']);
+      service.dispose();
     },
   );
 }

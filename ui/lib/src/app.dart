@@ -3,7 +3,6 @@ import 'dart:io' show exit;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
-import 'pages/desktop_page.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
@@ -14,19 +13,25 @@ import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/common/tray/tray_service.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
 import 'package:pb_mapper_ui/src/galaxy/galaxy_view.dart';
 import 'package:pb_mapper_ui/src/pages/logs_page.dart';
 import 'package:pb_mapper_ui/src/pages/overview_page.dart';
 import 'package:pb_mapper_ui/src/pages/relay_page.dart';
+import 'package:pb_mapper_ui/src/pages/remote/remote_page.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_screen.dart';
 import 'package:pb_mapper_ui/src/pages/settings_page.dart';
 import 'package:pb_mapper_ui/src/pages/setup_flow.dart';
 import 'package:pb_mapper_ui/src/pages/tunnels_page.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/app_shell.dart';
+import 'package:pb_mapper_ui/src/shell/sharing_indicator.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/relay_store.dart';
+import 'package:pb_mapper_ui/src/state/remote_desktop.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
 import 'package:pb_mapper_ui/src/updates/update_controller.dart';
@@ -34,20 +39,22 @@ import 'package:pb_mapper_ui/src/updates/update_schedule.dart';
 import 'package:toastification/toastification.dart' show ToastificationWrapper;
 import 'package:window_manager/window_manager.dart';
 
-/// The app. Owns the data store, the preferences and the galaxy's state, and
-/// decides between first-run setup and the four pages.
+/// The app. Owns the data store, the preferences, the galaxy's state and the
+/// remote desktop, and decides between first-run setup, the six pages and
+/// the viewer.
 class PbMapperApp extends StatefulWidget {
   const PbMapperApp({
     super.key,
     required this.api,
     this.changes,
     this.prefs,
+    this.viewerPrefs,
+    this.vault,
     this.needsSetup,
     this.initialPage,
     this.desktop = false,
     this.updates,
     this.checkForUpdates = false,
-    this.openDesktopOnStartup = false,
   });
 
   final PbMapperApiClient api;
@@ -55,11 +62,16 @@ class PbMapperApp extends StatefulWidget {
   /// Defaults to the Rust change stream; tests pass their own.
   final Stream<StateChange>? changes;
   final AppPrefs? prefs;
+  final ViewerPrefs? viewerPrefs;
+
+  /// Where remembered computers are kept; tests pass their own.
+  final RemoteComputerVault? vault;
 
   /// Null asks the API whether this install was ever set up.
   final bool? needsSetup;
 
-  /// The page to open on, over the one remembered from last time.
+  /// The page to open on, over the one remembered from last time: Remote
+  /// desktop after the helper's restart hand-off (`--desktop`).
   final AppPage? initialPage;
 
   /// Run the window's desktop life: the tray, and closing to it.
@@ -71,7 +83,6 @@ class PbMapperApp extends StatefulWidget {
   /// Look for a newer release in the background, while the user lets it.
   /// Off in tests, which must not reach GitHub.
   final bool checkForUpdates;
-  final bool openDesktopOnStartup;
 
   @override
   State<PbMapperApp> createState() => _PbMapperAppState();
@@ -82,9 +93,21 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     api: widget.api,
     changes: widget.changes,
     onRestartReady: () async => _quit(),
+    vault: widget.vault,
   );
   late final RelayStore _relay = RelayStore(app: _store);
   late final AppPrefs _prefs = widget.prefs ?? AppPrefs();
+  late final ViewerPrefs _viewerPrefs = widget.viewerPrefs ?? ViewerPrefs();
+  late final ViewerHost _viewer = ViewerHost(_store.desktop);
+  late final RemoteDesktop _remote = RemoteDesktop(
+    desktop: _store.desktop,
+    computers: _store.computers,
+    viewer: _viewer,
+    prefs: _viewerPrefs,
+    relayAddress: () => _store.relayAddress,
+    credentialKeyId: () => _store.credentialKeyId ?? 0,
+  );
+  final SharingChrome _sharing = SharingChrome();
   late final UpdateController _updates =
       widget.updates ?? UpdateController(quit: () async => _quit());
   UpdateSchedule? _updateSchedule;
@@ -95,18 +118,21 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   /// Null while deciding, so a returning user never sees setup flash by.
   bool? _setup;
   bool _allowExit = false;
-  final _navigator = GlobalKey<NavigatorState>();
+
+  /// The viewer session the window was last brought back for.
+  DateTime? _shownForViewer;
 
   @override
   void initState() {
     super.initState();
     _prefs.addListener(_onPrefs);
+    _viewer.addListener(_onViewer);
     unawaited(_boot());
     if (widget.desktop) _startDesktop();
   }
 
   Future<void> _boot() async {
-    await _prefs.load();
+    await Future.wait([_prefs.load(), _viewerPrefs.load()]);
     final started = _store.start();
     // Setup seeds its fields from the store once, so the saved config has to
     // be in it first: shown any earlier, setup would offer a blank credential
@@ -121,18 +147,6 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       }
     });
     await started;
-    if (widget.openDesktopOnStartup && mounted) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _navigator.currentState?.push(
-            MaterialPageRoute<void>(
-              builder: (_) => DesktopPage(store: _store.desktop),
-            ),
-          );
-        }
-      });
-      WidgetsBinding.instance.ensureVisualUpdate();
-    }
     if (widget.checkForUpdates && updatesSupported && mounted) {
       unawaited(_reportUpdate());
       _updateSchedule = UpdateSchedule(
@@ -186,6 +200,10 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     }
   }
 
+  void _onViewer() {
+    if (mounted) setState(() {});
+  }
+
   void _go(AppPage page) {
     if (page == _page) return;
     setState(() => _page = page);
@@ -212,9 +230,10 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     );
     windowManager.addListener(this);
     unawaited(_startTray());
-    // The tray reads the store rather than asking the Rust side on a timer of
-    // its own, so it changes the moment the pages do.
+    // The tray reads the stores rather than asking the Rust side on a timer
+    // of its own, so it changes the moment the pages do.
     _store.addListener(_refreshTray);
+    _store.desktop.hostView.addListener(_onHostView);
   }
 
   Future<void> _startTray() async {
@@ -224,6 +243,8 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
         statusProvider: () async => _trayStatus(),
         showApp: TrayService.instance.showFromTray,
         quitApp: _quit,
+        onDisconnectViewer: () => unawaited(_store.desktop.endViewerSession()),
+        onStopSharing: () => unawaited(_store.desktop.stopHost()),
         strings: _trayStrings(),
       );
     } catch (e) {
@@ -233,8 +254,33 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
 
   void _refreshTray() => unawaited(TrayService.instance.refreshStatus());
 
+  /// A sharing computer's window usually waits hidden in the tray, where the
+  /// title bar's controls are out of sight. When a viewer arrives, the window
+  /// comes back without taking the focus, once per viewer: closing it again
+  /// is respected (D15, owner decision OD-1).
+  void _onHostView() {
+    _refreshTray();
+    final viewer = _store.desktop.hostView.value.viewer;
+    if (viewer == null || viewer.since == _shownForViewer) return;
+    _shownForViewer = viewer.since;
+    unawaited(_showForViewer());
+  }
+
+  Future<void> _showForViewer() async {
+    try {
+      if (await windowManager.isVisible() &&
+          !await windowManager.isMinimized()) {
+        return;
+      }
+      await windowManager.show(inactive: true);
+    } catch (error) {
+      debugPrint('Could not show the window for a viewer: $error');
+    }
+  }
+
   TrayStatus _trayStatus() {
     final online = _store.relayState == RelayState.online;
+    final host = _store.desktop.hostView.value;
     int running(List<Tunnel> tunnels) =>
         tunnels.where((t) => t.health == TunnelHealth.running).length;
     return TrayStatus(
@@ -244,6 +290,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
           ? _store.relayServices.length
           : running(_store.shares),
       connectedClients: running(_store.connections),
+      host: host.sharing ? host : null,
     );
   }
 
@@ -258,6 +305,12 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       open: l10n.trayOpen,
       refresh: l10n.trayRefresh,
       quit: l10n.trayQuit,
+      hostSharing: l10n.trayHostSharing,
+      hostViewed: l10n.trayHostViewed,
+      hostControlled: l10n.trayHostControlled,
+      hostPaused: l10n.trayHostPaused,
+      disconnectViewer: l10n.hostDisconnectViewer,
+      stopSharing: l10n.hostStop,
     );
   }
 
@@ -281,14 +334,19 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   @override
   void dispose() {
     _prefs.removeListener(_onPrefs);
+    _viewer.removeListener(_onViewer);
     _store.removeListener(_refreshTray);
     if (widget.desktop) {
+      _store.desktop.hostView.removeListener(_onHostView);
       windowManager.removeListener(this);
       TrayService.instance.dispose();
     }
     _lifecycle?.dispose();
     _updateSchedule?.dispose();
     if (widget.updates == null) _updates.dispose();
+    _remote.dispose();
+    _viewer.dispose();
+    _sharing.dispose();
     _relay.dispose();
     _store.dispose();
     _galaxy.dispose();
@@ -298,7 +356,6 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      navigatorKey: _navigator,
       onGenerateTitle: (context) => AppLocalizations.of(context)!.appTitle,
       debugShowCheckedModeBanner: false,
       locale: _prefs.locale,
@@ -316,15 +373,17 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       // not repaint the whole window in one frame.
       themeAnimationDuration: const Duration(milliseconds: 320),
       themeAnimationCurve: Curves.easeInOutCubic,
+      // A dialog's barrier hides the title bar's capsule: the observer tells
+      // the fallback layer to step in.
+      navigatorObservers: [_sharing.observer],
       // Inside MaterialApp, so a toast raised without a context still wears
-      // the theme and speaks the language.
+      // the theme and speaks the language. The fallback layer sits above the
+      // navigator, so above every route, dialog and the viewer (D15).
       builder: (context, child) => ToastificationWrapper(
-        child: Column(
+        child: Stack(
           children: [
-            // It listens to the host alone: desktop changes no longer
-            // reach the app store (D14).
-            DesktopSharingBanner(store: _store.desktop),
-            Expanded(child: child ?? const SizedBox.shrink()),
+            Positioned.fill(child: child ?? const SizedBox.shrink()),
+            SharingFallbackLayer(desktop: _store.desktop, chrome: _sharing),
           ],
         ),
       ),
@@ -346,19 +405,26 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       prefs: _prefs,
       updates: _updates,
       galaxy: _galaxy,
+      remote: _remote,
+      sharing: _sharing,
       page: _page,
       go: _go,
-      child: AppShell(
-        page: _page,
-        onSelect: _go,
-        child: switch (_page) {
-          AppPage.overview => const OverviewPage(),
-          AppPage.tunnels => const TunnelsPage(),
-          AppPage.relay => const RelayPage(),
-          AppPage.logs => const LogsPage(),
-          AppPage.settings => const SettingsPage(),
-        },
-      ),
+      // The viewer is a mode of the app, not a route: while it shows, the
+      // shell is not built at all, so there is only ever one viewer.
+      child: _viewer.showing
+          ? const RemoteViewerScreen()
+          : AppShell(
+              page: _page,
+              onSelect: _go,
+              child: switch (_page) {
+                AppPage.overview => const OverviewPage(),
+                AppPage.tunnels => const TunnelsPage(),
+                AppPage.remote => const RemotePage(),
+                AppPage.relay => const RelayPage(),
+                AppPage.logs => const LogsPage(),
+                AppPage.settings => const SettingsPage(),
+              },
+            ),
     );
   }
 }

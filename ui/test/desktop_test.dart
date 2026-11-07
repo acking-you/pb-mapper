@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
+import 'package:pb_mapper_ui/src/widgets/status.dart';
 import 'fake_desktop_api.dart';
 import 'fake_pb_mapper_api.dart';
 import 'support.dart';
@@ -30,7 +31,7 @@ void main() {
       );
       api.desktop.trust = const DesktopTrust(supported: true);
       await pumpApp(tester, api, page: AppPage.tunnels);
-      await tester.tap(find.byKey(const Key('open-desktop')));
+      await tester.tap(find.byKey(const Key('nav-remote')));
       await settle(tester);
       await tester.scrollUntilVisible(
         find.byKey(const Key('desktop-share')),
@@ -63,7 +64,7 @@ void main() {
         ),
       );
       await pumpApp(tester, api, page: AppPage.tunnels);
-      await tester.tap(find.byKey(const Key('open-desktop')));
+      await tester.tap(find.byKey(const Key('nav-remote')));
       await settle(tester);
       final maintenance = find.byKey(const Key('desktop-helper-maintenance'));
       await Scrollable.ensureVisible(tester.element(maintenance));
@@ -86,9 +87,10 @@ void main() {
       expect(api.desktop.argsOf('helper_action'), [
         {'action': 'disable'},
       ]);
-      await tester.pageBack();
+      final stop = find.byKey(const Key('desktop-stop'));
+      await Scrollable.ensureVisible(tester.element(stop), alignment: 0.5);
       await settle(tester);
-      await tester.tap(find.text('Stop sharing'));
+      await tester.tap(stop);
       await settle(tester);
       background = api.desktop.hostSnapshot.background;
       expect(api.desktop.hostSnapshot.host, isNull);
@@ -230,7 +232,7 @@ void main() {
   );
 
   testWidgets(
-    'compact host flow enables control and exposes a persistent stop',
+    'compact host flow enables control, shows sharing on the bar and stops',
     (tester) async {
       final api = FakePbMapperApi();
       await pumpApp(
@@ -239,19 +241,28 @@ void main() {
         page: AppPage.tunnels,
         size: const Size(390, 844),
       );
-      await tester.tap(find.byKey(const Key('open-desktop')));
+      final sharingDot = find.descendant(
+        of: find.byKey(const Key('nav-remote')),
+        matching: find.byType(StatusDot),
+      );
+      expect(sharingDot, findsNothing);
+      await tester.tap(find.byKey(const Key('nav-remote')));
       await settle(tester);
       await tester.tap(find.byKey(const Key('desktop-share')));
       await settle(tester);
       expect(api.desktop.hostSnapshot.background?.host?.controlAllowed, isTrue);
       expect(find.byKey(const Key('desktop-stop')), findsOneWidget);
       expect(tester.takeException(), isNull);
-      await tester.pageBack();
+      // Sharing shows on Remote desktop's entry from every page.
+      await tester.tap(find.byKey(const Key('nav-tunnels')));
       await settle(tester);
-      expect(find.text('This desktop is being shared'), findsOneWidget);
-      await tester.tap(find.text('Stop sharing'));
+      expect(sharingDot, findsOneWidget);
+      await tester.tap(find.byKey(const Key('nav-remote')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('desktop-stop')));
       await settle(tester);
       expect(api.desktop.hostSnapshot.background?.enabled, isFalse);
+      expect(sharingDot, findsNothing);
       await finish(tester);
     },
   );

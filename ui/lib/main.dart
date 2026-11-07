@@ -10,6 +10,7 @@ import 'package:pb_mapper_ui/src/common/log_manager.dart';
 import 'package:pb_mapper_ui/src/ffi/cli_entry.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:window_manager/window_manager.dart';
 
 /// The bundled faces are under the SIL Open Font License, which asks that the
@@ -82,7 +83,8 @@ Future<void> main(List<String> args) async {
       api: PbMapperApi(),
       desktop: _isDesktop,
       checkForUpdates: true,
-      openDesktopOnStartup: openDesktop,
+      // The helper's restart hand-off returns to Remote desktop.
+      initialPage: openDesktop ? AppPage.remote : null,
     ),
   );
 }

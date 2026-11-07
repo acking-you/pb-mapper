@@ -39,7 +39,6 @@ enum RelayState {
 /// [tunnelInterval]).
 class AppStore extends ChangeNotifier {
   DesktopStore? _desktop;
-  DesktopStore? get activeDesktop => _desktop;
   DesktopStore get desktop =>
       _desktop ??= DesktopStore(api.desktop, onRestartReady: onRestartReady);
   AppStore({
