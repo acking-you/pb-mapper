@@ -123,4 +123,45 @@ void main() {
       h.dispose();
     },
   );
+
+  testWidgets(
+    'a Return is one Enter whether the IME sends the newline action, inserts a newline, or both in either order',
+    (tester) async {
+      final h = await ViewerHarness.live(tester);
+      final ime = RemoteTextInput(input: h.input)..show();
+      void insertNewline() {
+        final text = ime.currentTextEditingValue!.text;
+        ime.updateEditingValueWithDeltas([
+          TextEditingDeltaInsertion(
+            oldText: text,
+            textInserted: '\n',
+            insertionOffset: text.length,
+            selection: _caret(text.length + 1),
+            composing: _none,
+          ),
+        ]);
+      }
+
+      const enter = ['enter↓', 'enter↑'];
+      h.sent();
+
+      // iOS: the action, then the newline it inserts.
+      ime.performAction(TextInputAction.newline);
+      insertNewline();
+      expect(h.sent(), [enter]);
+
+      // The other order.
+      insertNewline();
+      ime.performAction(TextInputAction.newline);
+      expect(h.sent(), [enter]);
+
+      // An Android IME that only sends the action: each is a Return.
+      ime.performAction(TextInputAction.newline);
+      ime.performAction(TextInputAction.newline);
+      expect(h.sent(), [enter, enter]);
+
+      ime.dispose();
+      h.dispose();
+    },
+  );
 }

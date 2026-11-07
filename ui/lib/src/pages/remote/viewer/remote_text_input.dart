@@ -43,6 +43,9 @@ final class RemoteTextInput with TextInputClient, DeltaTextInputClient {
   final _attached = ValueNotifier(false);
   final _composing = ValueNotifier('');
 
+  /// How this IME event sent an Enter, and how the one before it did.
+  _ReturnBy? _enterBy, _lastEnterBy;
+
   /// A connection exists and was not closed: the keyboard may be up.
   ValueListenable<bool> get attached => _attached;
 
@@ -89,10 +92,14 @@ final class RemoteTextInput with TextInputClient, DeltaTextInputClient {
   AutofillScope? get currentAutofillScope => null;
 
   @override
-  void updateEditingValue(TextEditingValue value) => _apply(value);
+  void updateEditingValue(TextEditingValue value) {
+    _nextEvent();
+    _apply(value);
+  }
 
   @override
   void updateEditingValueWithDeltas(List<TextEditingDelta> textEditingDeltas) {
+    _nextEvent();
     for (final delta in textEditingDeltas) {
       TextEditingValue? next;
       if (delta.oldText == _value.text) {
@@ -122,7 +129,7 @@ final class RemoteTextInput with TextInputClient, DeltaTextInputClient {
       final (deleted, inserted) = _edit(before, after);
       if (deleted.isNotEmpty) _input.backspace(deleted.runes.length);
       if (inserted == '\n') {
-        _input.tapKey(RemoteKey.enter);
+        _enter(_ReturnBy.text);
       } else if (inserted.isNotEmpty) {
         _input.typeText(inserted);
       }
@@ -188,7 +195,27 @@ final class RemoteTextInput with TextInputClient, DeltaTextInputClient {
 
   @override
   void performAction(TextInputAction action) {
-    if (action == TextInputAction.newline) _input.tapKey(RemoteKey.enter);
+    _nextEvent();
+    if (action == TextInputAction.newline) _enter(_ReturnBy.action);
+  }
+
+  /// One Return is one Enter. It arrives as the newline action, as an
+  /// inserted '\n', or as both in either order: iOS sends the action and
+  /// then inserts the '\n'; an Android IME may send either. Whichever comes
+  /// second, as the IME's very next event, is the same Return.
+  void _enter(_ReturnBy by) {
+    final last = _lastEnterBy;
+    if (last != null && last != by) {
+      _lastEnterBy = null;
+      return;
+    }
+    _enterBy = by;
+    _input.tapKey(RemoteKey.enter);
+  }
+
+  void _nextEvent() {
+    _lastEnterBy = _enterBy;
+    _enterBy = null;
   }
 
   @override
@@ -203,3 +230,7 @@ final class RemoteTextInput with TextInputClient, DeltaTextInputClient {
   @override
   void showAutocorrectionPromptRect(int start, int end) {}
 }
+
+/// How a Return reached the client: the IME's newline action, or a '\n' it
+/// inserted.
+enum _ReturnBy { action, text }
