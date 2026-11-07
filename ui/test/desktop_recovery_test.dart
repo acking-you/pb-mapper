@@ -155,4 +155,57 @@ void main() {
       store.dispose();
     },
   );
+
+  testWidgets(
+    'retries end after two minutes of failures, counted from the last '
+    'picture and not while hidden',
+    (tester) async {
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api, now: () => tester.binding.clock.now());
+      var viewer = store.demand(DesktopDemand.viewer);
+      DesktopSessionView session() => store.session.value;
+      await store.connect(
+        const DesktopTarget(invitation: 'pbd1.office', name: 'Office'),
+      );
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(session().phase, DesktopPhase.live);
+
+      // The host hands the session over (`restarting`), slowly. Shown again
+      // after five minutes hidden, the viewer tries again, and the hand-off
+      // completes.
+      api
+        ..failConnects = 'IO'
+        ..viewerStatusValue = stoppedStatus('restarting');
+      await tester.pump(const Duration(seconds: 100));
+      viewer.dispose();
+      await tester.pump(const Duration(minutes: 5));
+      viewer = store.demand(DesktopDemand.viewer);
+      await tester.pump(const Duration(seconds: 1));
+      expect(session().phase, DesktopPhase.reconnecting);
+      api.failConnects = null;
+      await tester.pump(const Duration(seconds: 15));
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(session().phase, DesktopPhase.live);
+
+      // The next one never completes: retried for two minutes from that
+      // stop, then ended, and nothing retries by itself afterwards.
+      api
+        ..failConnects = 'IO'
+        ..viewerStatusValue = stoppedStatus('restarting');
+      await tester.pump(const Duration(seconds: 110));
+      expect(session().phase, DesktopPhase.reconnecting);
+      await tester.pump(const Duration(seconds: 15));
+      expect(session().phase, DesktopPhase.ended);
+      expect(session().end, DesktopEndReason.unreachable);
+      expect(session().failure?.code, 'IO');
+      final tried = api.argsOf('connect').length;
+      await tester.pump(const Duration(minutes: 1));
+      expect(api.argsOf('connect'), hasLength(tried));
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
 }

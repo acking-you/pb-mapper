@@ -466,6 +466,8 @@
   "viewerEndedRevoked": "对方已撤销这条邀请，请向对方要一条新的邀请。",
   "viewerEndedVersion": "对方的 pb-mapper 版本不同，请两边都更新到最新版本。",
   "viewerEndedDecoder": "这台设备无法解码画面。",
+  "viewerEndedUnreachable": "无法连接到对方，它可能已休眠或离线。",
+  "viewerEndedBusy": "对方仍在被另一台设备查看。",
   "viewerEndedFailed": "连接失败。",
   "viewerVaultUnavailable": "无法在本机读取这台电脑保存的邀请，请移除后重新添加。",
   "viewerDenied": "邀请已失效，请向对方要一条新的邀请。",

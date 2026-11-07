@@ -36,6 +36,9 @@ enum DesktopEndReason {
   denied,
   invalidInvitation,
   decoderFailed,
+
+  /// Attempts kept failing for two minutes; the last failure says how.
+  unreachable,
   failed,
 }
 

@@ -155,6 +155,10 @@ class RemoteDesktop {
     return rememberedComputer?.name ?? target.name;
   }
 
+  /// The service the open or opening computer shares under, for the
+  /// viewer's presence line (D22).
+  String? get service => _current?.service;
+
   /// The remembered computer the session is, as the list stands now: one
   /// added with Remember on is from its first picture. A session connected
   /// without remembering runs under an id of its own, so it is never a

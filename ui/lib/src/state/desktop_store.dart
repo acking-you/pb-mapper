@@ -20,6 +20,16 @@ export 'desktop_models.dart';
 const kSequenceMax = 16;
 
 const _backoffSeconds = [1, 2, 4, 8, 15];
+
+/// How long a run of failed attempts goes on before the session ends as
+/// [DesktopEndReason.unreachable]: a host that is off or not sharing, a
+/// hand-off (`restarting`) that never completes, a host that stays busy.
+/// What comes back by itself does so well inside it: a host that lost the
+/// relay tries to register again at least every 2 s, and a refused
+/// registration after at most 80 s
+/// (`PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX`), so with one 15 s backoff
+/// step and an attempt's setup budget it is found again in under two minutes.
+const _retryWindow = Duration(minutes: 2);
 const _protocolRetryLimit = 3;
 const _noVideoReconnectMs = 5000;
 const _statusVisible = Duration(milliseconds: 500);
@@ -758,6 +768,9 @@ class DesktopStore {
   Timer? _retryTimer;
   DateTime? _retryAt;
 
+  /// When the current run of failed attempts began; null between runs.
+  DateTime? _failingSince;
+
   /// Running for a second after control was asked for; no second request
   /// goes out meanwhile.
   Timer? _controlCooldown;
@@ -782,8 +795,7 @@ class DesktopStore {
         previous.computerId == target.computerId;
     _cancelRetry();
     _target = target;
-    _reconnectAttempt = 0;
-    _protocolStops = 0;
+    _resetRetries();
     _end = null;
     _failure = null;
     _identityChanged = false;
@@ -917,6 +929,13 @@ class DesktopStore {
       _publishSession();
       return;
     }
+    final now = _now();
+    if (now.difference(_failingSince ??= now) >= _retryWindow) {
+      // Nothing came back by itself: say why, and leave the next try to
+      // the user.
+      _endSession(DesktopEndReason.unreachable, failure);
+      return;
+    }
     _reconnectAttempt++;
     final serial = _serial;
     if (immediate) {
@@ -926,7 +945,7 @@ class DesktopStore {
     final delay = Duration(
       seconds: _backoffSeconds[math.min(_reconnectAttempt - 1, 4)],
     );
-    _retryAt = _now().add(delay);
+    _retryAt = now.add(delay);
     _retryTimer = Timer(delay, () {
       _retryTimer = null;
       _retryAt = null;
@@ -940,6 +959,14 @@ class DesktopStore {
     _retryTimer?.cancel();
     _retryTimer = null;
     _retryAt = null;
+  }
+
+  /// A new run: on a connect, a live picture, a disconnect, or a retry after
+  /// the end.
+  void _resetRetries() {
+    _reconnectAttempt = 0;
+    _protocolStops = 0;
+    _failingSince = null;
   }
 
   void _handleStop(String code, String message, {bool resumed = false}) {
@@ -1007,8 +1034,7 @@ class DesktopStore {
           _controlWanted = false;
         }
         if (_phase() == DesktopPhase.live) {
-          _reconnectAttempt = 0;
-          _protocolStops = 0;
+          _resetRetries();
           _failure = null;
           _setup = null;
         }
@@ -1241,6 +1267,9 @@ class DesktopStore {
       _cancelRetry();
       _stoppedWhileHidden = _failure?.code ?? 'transport';
     }
+    // Nothing retries while hidden: a run's window starts again when the
+    // viewer shows.
+    _failingSince = null;
   }
 
   void _onVisible() {
@@ -1437,8 +1466,7 @@ class DesktopStore {
     _identityChanged = false;
     _hasPicture = false;
     _stopHandled = false;
-    _reconnectAttempt = 0;
-    _protocolStops = 0;
+    _resetRetries();
     _controlWanted = false;
     _controlSuppressed = false;
     _cancelControlCooldown();
@@ -1529,8 +1557,7 @@ class DesktopStore {
     } else if (_end != null) {
       _end = null;
       _failure = null;
-      _reconnectAttempt = 0;
-      _protocolStops = 0;
+      _resetRetries();
       unawaited(_attempt(_serial));
     }
   }

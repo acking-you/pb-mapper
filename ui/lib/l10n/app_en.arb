@@ -531,6 +531,8 @@
   "viewerEndedRevoked": "The other computer revoked this invitation. Ask for a new one.",
   "viewerEndedVersion": "The other computer runs a different pb-mapper version. Update both to the latest.",
   "viewerEndedDecoder": "This device couldn't decode the picture.",
+  "viewerEndedUnreachable": "The other computer couldn't be reached. It may be asleep or offline.",
+  "viewerEndedBusy": "Another device is still viewing that computer.",
   "viewerEndedFailed": "The connection failed.",
   "viewerVaultUnavailable": "This computer's saved invitation can't be read on this device. Remove it and add it again.",
   "viewerDenied": "The invitation is no longer valid. Ask for a new one.",
