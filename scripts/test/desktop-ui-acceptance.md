@@ -4,10 +4,10 @@ The acceptance entry `ui/tool/desktop_viewer_acceptance.dart` runs the normal
 `DesktopApi`, `DesktopStore`, viewer widget and native decoder against a
 dedicated test host. Like the product UI, it requests control after a fresh
 presentation when the host permits it; the entry itself generates no pointer or
-keyboard input. It records about one sample per second for the requested
-number of seconds, disconnects, and sends its report back to the loopback
-bootstrap. The report holds counters and status, never images, invitations or
-relay credentials.
+keyboard input. It records one sample per second for the requested number of
+seconds, disconnects with a thumbnail, and sends its report (schema 2, below)
+back to the loopback bootstrap. The report holds counters and status, never
+images, invitations or relay credentials.
 
 The host defaults to view-only. Pass `--control` only against a benign target
 you own. Never run the entry as the packaged application.
@@ -63,7 +63,12 @@ Then start the installed app.
   `relay_only` into `controller.json`, so the define decides. A local
   `controller.json` may still override `relay_only` and `seconds` (15..1800)
   without a rebuild.
-- `quality` is a report schema 2 define; the schema 1 tool ignores it.
+- `quality` (`quality`, `balanced` or `smooth`) is a report schema 2 define;
+  the schema 1 tool ignores it.
+- Two optional schema 2 defines label the report: `case` (for example
+  `--dart-define=case=A`) and `host`, the host's GPU and display refresh,
+  which a viewer cannot see (for example
+  `--dart-define="host=RTX 5070 Ti, 60 Hz"`).
 - At the end of the run the tool sends its report with
   `PUT http://127.0.0.1:18747/report` through the same `adb reverse`. Nothing
   is read from the app's private storage, so a release APK, which is not
@@ -85,7 +90,8 @@ then from `ui/`:
 
 ```powershell
 flutter build windows --release --target tool/desktop_viewer_acceptance.dart `
-  --dart-define=setupUrl=http://127.0.0.1:18747/controller.json --dart-define=seconds=120
+  --dart-define=setupUrl=http://127.0.0.1:18747/controller.json --dart-define=seconds=120 `
+  --dart-define=quality=balanced
 ```
 
 Launch it from its build directory. The report reaches the bootstrap directly
@@ -101,7 +107,58 @@ case. Never publish the bootstrap directory or a controller setup alongside
 the reports.
 
 Record with every case the build, quality preset, both refresh rates, the host
-GPU, the phone, its decoder, temperature and the network.
+GPU, the phone, its decoder, temperature and the network. A schema 2 report
+carries all of them but the host's, which the `host` define supplies. Where
+the report's battery temperature is null (Android may refuse an app the
+sensor), read it before and after the run with
+`adb shell dumpsys battery` (`temperature` is in tenths of a degree).
+
+## Report schema 2
+
+One JSON object:
+
+- `schema` (2), `case`, `quality`, `relay_only`, `transport`, `seconds`,
+  `warmup_seconds` (5).
+- `build`: the app version, build number and mode (`release`, `profile` or
+  `debug`).
+- `device`: the OS and its version, processors, the display refresh rate
+  and, on Android, the manufacturer, model and SDK level.
+- `network`: the interface names (never addresses) and `type`, the first of
+  `wifi`, `ethernet` and `cellular` among them.
+- `host`: the `host` define, plus the `rate_model` (and `gop` when the
+  viewer status carries it) from the last sample. The host's
+  `desktop_feedback_interval` log has `gop` and stays the authority for
+  host-side values.
+- `decoder`: the viewer status's decoder (`name`, `hardware`, `state`) at
+  the end.
+- `battery_celsius`: `start` and `end`, or null.
+- `connect_ms`: from the connect to the first live picture.
+- `disconnect`: whether the picture was `fresh`, `disconnect_ms` (the
+  thumbnail and the disconnect together), and whether the thumbnail was
+  written and its size (D23: at most 300 ms, never blocking).
+- `samples`, one per second: `elapsed_us`, the store's `phase`,
+  `reconnect_attempt`, `failure`, the app `lifecycle`, `status` (the
+  `viewer_status` exactly as Rust reported it: state, `stats` with
+  `presented_fps`, `received_fps`, `picture_latency_ms`, `rtt_ms`,
+  `adaptation`, `rate_model`, `fps_cap`, `keyframes`, `keyframes_requested`,
+  `backlog_drops`, `present_interval` with its p50/p95/p99/max and the session
+  totals `gaps_100`/`gaps_250`, and `decoder`), `native` (the native
+  decoder's own counters, where there is one) and `flutter`: the frame
+  timings Flutter reported in that second (it batches them about once a
+  second), with the frames whose build or raster took longer than one
+  refresh interval as `over_budget`.
+- `events`: each phase change (with its failure code), each app lifecycle
+  change, and after each return from the background `resume_picture_ms`, the
+  time to the first new presented picture read from the view leaf (null
+  when none came within 10 s): case E.
+- `summary`: the perf 11.4 measures over the samples after the warm-up, with
+  no verdict. Presented and received fps, latency and RTT as p50/min/max over
+  live seconds; the worst `present_interval` percentiles; the rise of
+  `gaps_100` (also per minute), `gaps_250`, `keyframes`,
+  `keyframes_requested`, `backlog_drops` and `dropped_frames` (counted across
+  reconnects); the seconds in each `adaptation` and `fps_cap`, and degraded;
+  the resolutions seen; reconnects; the resume times; and the Flutter frame
+  totals.
 
 ## Stages
 

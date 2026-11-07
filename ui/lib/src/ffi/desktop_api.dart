@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:ffi';
 import 'dart:typed_data';
 
+import 'package:ffi/ffi.dart';
+
 import '../state/desktop_models.dart';
+import 'pb_mapper_ffi.dart';
 import 'pb_mapper_service.dart';
 
 export '../state/desktop_models.dart';
@@ -698,38 +702,101 @@ class DesktopApi implements DesktopApiClient {
     await _call('disconnect');
   }
 
-  // The hot export (`pb_mapper_desktop_viewer_call_json`), the view leaf and
-  // the video exports are bound in the next step; until then a viewer cannot
-  // run against this library.
-  static const _unbound = DesktopCallException(
-    'UNAVAILABLE',
-    'the desktop viewer export is not bound yet',
-  );
+  // ---- the hot export, the view leaf and the video exports: synchronous
+
+  /// A hot op, on this (the UI) isolate.
+  Object? _hot(String op, [Map<String, Object?> args = const {}]) {
+    final result = PbMapperService().desktopViewerCallSync({'op': op, ...args});
+    if (result['success'] != true) {
+      throw DesktopCallException(
+        result['code'] as String? ?? 'INTERNAL',
+        result['message'] as String? ?? 'Desktop viewer operation failed',
+      );
+    }
+    return result['data'];
+  }
+
+  /// The view leaf's one struct: it is read on the UI isolate only, and
+  /// copied out before the call returns.
+  static final _view = calloc<PbDesktopViewV1>();
 
   @override
-  DesktopViewerStatus? viewerStatus() => null;
+  DesktopViewerStatus? viewerStatus() {
+    final data = _hot('viewer_status');
+    return data is Map
+        ? DesktopViewerStatus.fromJson(Map<String, dynamic>.from(data))
+        : null;
+  }
+
   @override
-  DesktopView? view() => null;
+  DesktopView? view() => PbMapperService().desktopView(_view) == 1
+      ? desktopViewFromLeaf(_view.ref)
+      : null;
+
   @override
-  void control(bool enabled) => throw _unbound;
+  void control(bool enabled) => _hot('control', {'enabled': enabled});
+
   @override
-  void release() => throw _unbound;
+  void release() => _hot('release');
+
   @override
   void input(int generation, List<Map<String, Object?>> inputs) =>
-      throw _unbound;
+      _hot('input', {'generation': generation, 'inputs': inputs});
+
   @override
-  bool requestKeyframe() => false;
+  bool requestKeyframe() => (_hot('keyframe') as Map?)?['requested'] == true;
+
   @override
-  void setQuality(DesktopQuality quality) => throw _unbound;
+  void setQuality(DesktopQuality quality) =>
+      _hot('quality', {'preset': quality.name});
+
   @override
-  void pause() => throw _unbound;
+  void pause() => _hot('pause');
+
   @override
-  void resume() => throw _unbound;
+  void resume() => _hot('resume');
+
   @override
-  int instanceToken() => 0;
+  int instanceToken() => PbMapperService().instanceToken();
+
   @override
-  Stream<DesktopJpegFrame> jpegFrames(int videoSource) =>
-      Stream.error(_unbound);
+  Stream<DesktopJpegFrame> jpegFrames(int videoSource) => PbMapperService()
+      .desktopJpegUnits(videoSource)
+      .map(
+        (unit) => DesktopJpegFrame(
+          consumer: unit.consumer,
+          generation: unit.generation,
+          frameId: unit.frameId,
+          bytes: unit.bytes,
+        ),
+      );
+
   @override
-  bool presentedJpeg(int consumer, int generation, int frameId) => false;
+  bool presentedJpeg(int consumer, int generation, int frameId) =>
+      PbMapperService().desktopVideoPresented(consumer, generation, frameId);
+}
+
+/// Copies the view leaf's struct into a [DesktopView].
+DesktopView desktopViewFromLeaf(PbDesktopViewV1 leaf) {
+  final flags = leaf.flags;
+  bool flag(int bit) => flags & (1 << bit) != 0;
+  return DesktopView(
+    generation: leaf.generation,
+    presentedFrameId: leaf.presentedFrameId,
+    presentedAgeMs: leaf.presentedAgeMs,
+    cursorSeq: leaf.cursorSeq,
+    displayWidth: leaf.displayWidth,
+    displayHeight: leaf.displayHeight,
+    videoWidth: leaf.videoWidth,
+    videoHeight: leaf.videoHeight,
+    cursorX: leaf.cursorX,
+    cursorY: leaf.cursorY,
+    state: leaf.state,
+    cursorVisible: flag(0),
+    controlling: flag(1),
+    controlAllowed: flag(2),
+    secureDesktop: flag(3),
+    fresh: flag(4),
+    paused: flag(5),
+  );
 }
