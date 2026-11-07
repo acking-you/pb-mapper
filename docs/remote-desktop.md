@@ -1091,7 +1091,12 @@ it is not loaded as a privileged entry point into the Flutter process.
 For Android, rebuild the FFI for the intended ABI before Flutter: ARM64 for a
 matching phone, or x86_64 for the development VM. For example,
 `cargo ndk -o ui/native/android -t x86_64 build -p pb-mapper-ffi --release`, then
-`flutter build apk --release --target-platform android-x64` from `ui/`.
+`flutter build apk --release --split-per-abi --target-platform android-x64` from
+`ui/`; a phone takes `-t arm64-v8a` and `android-arm64`. Build split per ABI, as
+the release does: a split APK's versionCode is the build number plus 4000 on
+x86_64 or 2000 on ARM64, as the product's is, while a universal build carries
+the bare build number, which `adb install -r` refuses over the product as a
+downgrade.
 Local build artifacts do not constitute a published release. The
 `capture_probe`, `video_bench` and `deployed` examples provide bounded development
 probes; the deployed probe revokes its dedicated temporary credential on normal

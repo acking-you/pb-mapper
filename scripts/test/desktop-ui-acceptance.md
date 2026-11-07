@@ -47,7 +47,17 @@ The bootstrap listens on `127.0.0.1:18747` only:
 
 ## Phone viewer
 
-From `ui/`:
+First build the Android FFI for the phone's ABI, from the repository root
+([prerequisites](../../docs/ui-updates.md#local-android-build-and-recovery)).
+`ui/native/android` is git-ignored and the APK packages whatever it holds: in a
+fresh checkout the tool would ship without the library, and in an older one
+with a stale library.
+
+```powershell
+cargo ndk -o ui/native/android -t arm64-v8a build -p pb-mapper-ffi --release
+```
+
+From `ui/`, build and install the tool:
 
 ```powershell
 flutter build apk --release --split-per-abi --target-platform android-arm64 `
@@ -60,8 +70,8 @@ adb reverse tcp:18747 tcp:18747
 
 Then start the installed app.
 
-- The x86_64 emulator takes `--target-platform android-x64` and installs
-  `app-x86_64-release.apk`.
+- The x86_64 emulator builds the FFI with `-t x86_64`, takes
+  `--target-platform android-x64` and installs `app-x86_64-release.apk`.
 - Build split per ABI, as the release does: a split APK's versionCode is the
   build number plus 2000 on arm64 or 4000 on x86_64 (2925 or 4925 at `+925`),
   as the product's is. A universal build carries the bare build number, and
@@ -172,10 +182,10 @@ One JSON object:
 ## Stages
 
 Stage 1 needs the report schema 1 tool and the old app pipeline, which exist
-only at tag `ovh-g1`. Build its tool from a checkout of that tag with the
-split commands above; the tag's build number is also 925, so it installs with
-`-r` over a product of build 925. Stages 2 and 3 use this tree's schema 2
-tool, which replaces it.
+only at tag `ovh-g1`. Build its tool in a checkout of that tag with the
+commands above, the FFI build first, so the APK carries that tag's library;
+the tag's build number is also 925, so it installs with `-r` over a product of
+build 925. Stages 2 and 3 use this tree's schema 2 tool, which replaces it.
 
 ### Stage 1: the old pipeline on the new core
 
