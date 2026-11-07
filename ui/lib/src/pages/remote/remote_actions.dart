@@ -92,14 +92,14 @@ Future<void> removeComputer(BuildContext context, RemoteComputer c) async {
 /// unit the vault counts, cutting only between characters. Flutter's own
 /// [LengthLimitingTextInputFormatter] counts characters, and an emoji or an
 /// accented letter can be several scalar values: it lets through names the
-/// vault refuses. Otherwise this behaves as it does: a full name refuses a
-/// keystroke rather than losing its end, and an input method's composition
-/// is cut with the text rather than dropped.
+/// vault refuses. Otherwise this behaves as its enforced mode, the default on
+/// Android and Windows, does: a full name refuses a keystroke rather than
+/// losing its end, even while a keyboard composes the word under the cursor,
+/// and an input method's composition is cut with the text rather than
+/// dropped.
 final computerNameLimit = TextInputFormatter.withFunction((old, value) {
   if (value.text.runes.length <= kComputerNameMax) return value;
-  if (old.text.runes.length == kComputerNameMax &&
-      old.selection.isCollapsed &&
-      !old.composing.isValid) {
+  if (old.text.runes.length == kComputerNameMax && old.selection.isCollapsed) {
     return old;
   }
   var runes = 0;

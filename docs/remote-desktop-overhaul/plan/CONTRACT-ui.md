@@ -830,13 +830,11 @@ class RemoteComputerStore extends ChangeNotifier {
 - `kComputerNameMax` (128) lives here. The name fields use
   `computerNameLimit` (`R/remote_actions.dart`), which counts runes (Unicode
   scalar values) as Rust's `chars()` does and cuts only between characters.
-  It keeps the old value when that value is already at the limit, has a
-  collapsed selection and no valid composing range: that is
-  `LengthLimitingTextInputFormatter`'s enforced collapsed check combined
-  with `truncateAfterCompositionEnds`' composing check, not Flutter's exact
-  behaviour on Android and Windows (whose enforced mode has no composing
-  condition). When it truncates, it keeps the composing range clipped to the
-  kept text, as Flutter's `truncate()` does.
+  It keeps the old value when that value is already at the limit and has a
+  collapsed selection, whether or not a keyboard is composing there: that is
+  `LengthLimitingTextInputFormatter`'s enforced mode, Flutter's default on
+  Android and Windows. When it truncates, it keeps the composing range
+  clipped to the kept text, as Flutter's `truncate()` does.
 - Owned by `AppStore` as `late final RemoteComputerStore computers`, loaded
   in `start()`. Tests inject `FakeRemoteComputerVault`
   (`T/fake_remote_computer_vault.dart`).

@@ -149,15 +149,18 @@ void main() {
   test('a full name refuses a keystroke rather than losing its end, and a '
       'composition is cut with the name', () {
     const max = kComputerNameMax;
+    // Gboard composes the word under the cursor even for Latin letters.
     final full = TextEditingValue(
       text: 'a' * max,
       selection: const TextSelection.collapsed(offset: 1),
+      composing: const TextRange(start: 0, end: 1),
     );
     final typed = computerNameLimit.formatEditUpdate(
       full,
       TextEditingValue(
         text: 'ab${'a' * (max - 1)}',
         selection: const TextSelection.collapsed(offset: 2),
+        composing: const TextRange(start: 0, end: 2),
       ),
     );
     expect(typed, full);
@@ -165,14 +168,16 @@ void main() {
     // Pinyin composing "ni" across the limit.
     final composed = computerNameLimit.formatEditUpdate(
       TextEditingValue(
-        text: '${'a' * (max - 1)}n',
-        composing: const TextRange(start: max - 1, end: max),
+        text: 'a' * (max - 1),
+        selection: const TextSelection.collapsed(offset: max - 1),
       ),
       TextEditingValue(
         text: '${'a' * (max - 1)}ni',
+        selection: const TextSelection.collapsed(offset: max + 1),
         composing: const TextRange(start: max - 1, end: max + 1),
       ),
     );
+    expect(composed.text, '${'a' * (max - 1)}n');
     expect(composed.composing, const TextRange(start: max - 1, end: max));
   });
 
