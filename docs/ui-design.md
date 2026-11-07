@@ -223,7 +223,8 @@ still works, over JPEG.
   remembers it, above the others, and offers Scan to add and Paste
   invitation; with none yet, it first says where an invitation comes from.
   A wide list shows a row's More on hover, and also while focus is within
-  the row, so the keyboard and screen readers reach it.
+  the row, so the keyboard and screen readers reach it; on a touch screen,
+  which has no hover, it is always shown.
 - **Adding** (`add_computer.dart`) recognises an invitation before
   connecting: it shows the host's service and the fingerprint the
   connection will be held to, never the token; a name refuses an invitation

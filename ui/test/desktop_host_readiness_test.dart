@@ -161,6 +161,24 @@ void main() {
   );
 
   testWidgets(
+    'a computer that cannot share restores no remembered grant and retries '
+    'nothing',
+    (tester) async {
+      // Windows without Media Foundation, with a background grant saved
+      // while it had it.
+      final api = _PendingHostProbe()..available = const DesktopCapabilities();
+      final store = DesktopStore(api);
+      await store.restoreOnStartup();
+      await tester.pump(const Duration(seconds: 60));
+      expect(api.argsOf('host_restore'), isEmpty);
+      expect(api.argsOf('host_enable'), isEmpty);
+      expect(store.hostView.value.sharing, isFalse);
+      store.dispose();
+      await tester.pump();
+    },
+  );
+
+  testWidgets(
     'restart waits for a successful handoff and cancellation keeps UI alive',
     (tester) async {
       final api = _HostProbe()..enableResult = Completer<DesktopHostEnable>();

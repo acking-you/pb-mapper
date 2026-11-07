@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -769,9 +770,17 @@ void main() {
       Element inside(String key, Type type) => tester.element(
         find.descendant(of: _key(key), matching: find.byType(type)),
       );
+      final shown = find.ancestor(
+        of: _key('computer-more-$id'),
+        matching: find.byType(Opacity),
+      );
 
-      // Nothing hovers or focuses the row, and a screen reader still finds
-      // its menu button.
+      // Nothing hovers or focuses the row: a touch screen, which has no
+      // hover, shows More; a desktop hides it until the pointer or focus
+      // comes, and a screen reader still finds it.
+      final touch =
+          debugDefaultTargetPlatformOverride == TargetPlatform.android;
+      expect(tester.widget<Opacity>(shown.first).opacity, touch ? 1 : 0);
       expect(
         tester.getSemantics(
           find.descendant(
@@ -794,10 +803,6 @@ void main() {
         Focus.of(inside('computer-more-$id', Icon)).hasPrimaryFocus,
         isTrue,
       );
-      final shown = find.ancestor(
-        of: _key('computer-more-$id'),
-        matching: find.byType(Opacity),
-      );
       expect(tester.widget<Opacity>(shown.first).opacity, 1);
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await settle(tester);
@@ -805,5 +810,9 @@ void main() {
       semantics.dispose();
       await finish(tester);
     },
+    variant: TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.windows,
+    }),
   );
 }

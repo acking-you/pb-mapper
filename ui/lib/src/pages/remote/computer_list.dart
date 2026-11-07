@@ -513,7 +513,13 @@ class _ComputerRowState extends State<ComputerRow> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    // Nothing hovers on a touch screen (a wide tablet gets these rows), so
+    // there More is always shown.
+    final touch =
+        theme.platform == TargetPlatform.android ||
+        theme.platform == TargetPlatform.iOS;
     final entry = widget.entry;
     final c = entry.computer;
     final service = Text(
@@ -611,7 +617,9 @@ class _ComputerRowState extends State<ComputerRow> {
                         width: 36,
                         // Hidden, never removed: semantics and Tab keep it.
                         child: Opacity(
-                          opacity: _hover || _focused || _menu.isOpen ? 1 : 0,
+                          opacity: touch || _hover || _focused || _menu.isOpen
+                              ? 1
+                              : 0,
                           alwaysIncludeSemantics: true,
                           child: IconButton(
                             key: Key('computer-more-${entry.id}'),
