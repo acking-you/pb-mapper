@@ -30,6 +30,8 @@ what the merged code does:
   touch; the scanner reports each distinct code once and keeps running.
 - §10.2 and §10.5.2: the delayed drag press reads the cursor before the
   press; one Enter per Return.
+- §13.2: the seven strings these amendments add (`remoteVaultUnreadable`, the
+  four `remoteVaultReset*`, `hostRenameStartFirst`, `hostRevokeUnreadable`).
 - §14.1: T4c added, T5 gains the Return test.
 - §18 (K5): the reset runs only on `KEY_GONE`.
 
@@ -882,8 +884,10 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
 }
 ```
 
-The `unavailable` reason is a localisation key resolved by the widgets
-(`addRememberUnavailable`); the Rust `reason` text is only logged.
+The `unavailable` reason is resolved by the widgets through
+`cannotRememberText`: `remoteVaultUnreadable` for `unreadable` (§5.2),
+`addRememberUnavailable` for any other reason. The Rust `reason` text is
+only logged.
 
 `FfiRemoteComputerVault.open()`:
 
@@ -1395,8 +1399,9 @@ class AddComputerController extends ChangeNotifier {
   `SwitchListTile(Key('add-replace'), addReplaceConfirm)`.
 - Name `TextField(Key('add-name'), addName)`;
   `SwitchListTile(Key('add-remember'), addRemember, addRememberHelp | addRememberHelpMobile (Android/iOS))`,
-  disabled with `addRememberUnavailable` when the vault is unavailable
-  (D20); disclosure `Key('add-more')` `addMoreOptions` →
+  disabled with `cannotRememberText(support)` as its subtitle when the vault
+  is unavailable (D20): `remoteVaultUnreadable` when it is `unreadable`,
+  else `addRememberUnavailable`; disclosure `Key('add-more')` `addMoreOptions` →
   `SwitchListTile(Key('add-relay-only'), remoteRelayOnly)`.
 - Footer (dialog): `TextButton(cancel)`,
   `FilledButton(Key('add-connect'), connect)` enabled iff `result() != null`.
@@ -2873,6 +2878,11 @@ Remote page and list
 | `remoteRemoveConfirmBody` | Its saved invitation and last picture are deleted from this device. | 保存在本机的邀请和上次画面会被删除。 |
 | `remoteRemoveAction` | Remove | 移除 |
 | `remoteRememberFull` | You can remember up to 50 computers. Remove one first. | 最多可以记住 50 台电脑，请先移除一台。 |
+| `remoteVaultUnreadable` | The computers saved on this device couldn't be opened. Clear them to remember computers again. | 无法打开本机保存的电脑。清除它们后才能再记住电脑。 |
+| `remoteVaultReset` | Clear saved computers | 清除已保存的电脑 |
+| `remoteVaultResetTitle` | Clear saved computers? | 清除已保存的电脑？ |
+| `remoteVaultResetBody` | Every saved computer is deleted from this device, with its invitation and last picture. To view one again, add it with a new invitation. | 本机保存的每台电脑及其邀请和上次画面都会被删除。要再次查看某台电脑，请用新的邀请重新添加。 |
+| `remoteVaultResetAction` | Clear | 清除 |
 | `remoteOfflineToast` | “{name}” isn't sharing right now | “{name}”当前未在共享 |
 | `remoteSwitchTitle` | Disconnect “{name}”? | 断开“{name}”？ |
 | `remoteSwitchBody` | Only one remote computer can be open at a time. | 一次只能打开一台远程电脑。 |
@@ -2961,10 +2971,12 @@ Host card and setup
 | `hostStopNote` | The invitation is kept and works again when you start sharing | 停止后邀请保留，下次开启继续可用 |
 | `hostServiceName` | Desktop service name… | 桌面服务名称… |
 | `hostServiceRenameBody` | Computers that saved the old invitation will need a new one. | 已保存旧邀请的电脑需要新的邀请。 |
+| `hostRenameStartFirst` | Start sharing to change this | 请先开启共享再修改 |
 | `hostRevoke` | Revoke invitation and stop sharing | 撤销邀请并停止共享 |
 | `hostRevokeConfirmTitle` | Revoke the invitation? | 撤销邀请？ |
 | `hostRevokeConfirmBody` | Everyone holding the current invitation loses access. A new invitation is created the next time you turn sharing on. | 持有当前邀请的人都会失去访问权限。下次开启共享时会生成新的邀请。 |
 | `hostRevokeAction` | Revoke and stop sharing | 撤销并停止共享 |
+| `hostRevokeUnreadable` | Revoke the saved invitation | 撤销已保存的邀请 |
 | `hostAllowControl` | Allow remote mouse and keyboard | 允许远程操作鼠标和键盘 |
 | `hostEnable` | Turn on remote control | 开启远程控制 |
 | `hostEnabling` | Turning on… | 正在开启… |
