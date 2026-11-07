@@ -48,9 +48,6 @@ ring.workspace = true
 base64.workspace = true
 bytes = { workspace = true, optional = true }
 
-[target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Security_Cryptography", "Win32_System_Memory"] }
-
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true
 

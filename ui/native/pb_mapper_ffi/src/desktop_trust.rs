@@ -13,7 +13,7 @@ const LIMIT: u64 = 64 * 1024;
 /// Every stored trust file was protected with these; they never change.
 const ENTROPY: &[u8] = b"pb-mapper/desktop-trust/v1";
 const DESCRIPTION: &str = "pb-mapper desktop trust";
-/// The most DPAPI may hand back; each caller also bounds its own data.
+/// The most DPAPI may take or hand back; each caller also bounds its own data.
 #[cfg(windows)]
 const PROTECTED_LIMIT: u64 = 1024 * 1024;
 pub(super) fn supported() -> bool {
@@ -213,57 +213,16 @@ pub(crate) fn protect(
     entropy: &[u8],
     description: &str,
 ) -> Result<Vec<u8>, CtlError> {
-    use windows::{
-        Win32::{
-            Foundation::{HLOCAL, LocalFree},
-            Security::Cryptography::*,
-        },
-        core::PCWSTR,
-    };
-    let too_large = || err("data exceeds the Windows protection limit");
-    let input = CRYPT_INTEGER_BLOB {
-        cbData: u32::try_from(bytes.len()).map_err(|_| too_large())?,
-        pbData: bytes.as_ptr().cast_mut(),
-    };
-    let entropy = CRYPT_INTEGER_BLOB {
-        cbData: u32::try_from(entropy.len()).map_err(|_| too_large())?,
-        pbData: entropy.as_ptr().cast_mut(),
-    };
-    let description: Vec<u16> = description.encode_utf16().chain(Some(0)).collect();
-    let mut output = CRYPT_INTEGER_BLOB::default();
-    unsafe {
-        if encrypt {
-            CryptProtectData(
-                &input,
-                PCWSTR(description.as_ptr()),
-                Some(&entropy),
-                None,
-                None,
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        } else {
-            CryptUnprotectData(
-                &input,
-                None,
-                Some(&entropy),
-                None,
-                None,
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        }
-    }
-    .map_err(|_| err("Windows could not protect or unlock this data for the current user"))?;
-    let result = if output.cbData as u64 > PROTECTED_LIMIT || output.pbData.is_null() {
-        Err(err("Windows returned invalid protected data"))
-    } else {
-        Ok(unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec())
-    };
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
-    }
-    result
+    use pb_mapper::desktop::dpapi;
+    dpapi::protect(
+        bytes,
+        encrypt,
+        dpapi::Scope::CurrentUser,
+        entropy,
+        description,
+        PROTECTED_LIMIT,
+    )
+    .map_err(err)
 }
 #[cfg(not(windows))]
 pub(crate) fn protect(_: &[u8], _: bool, _: &[u8], _: &str) -> Result<Vec<u8>, CtlError> {

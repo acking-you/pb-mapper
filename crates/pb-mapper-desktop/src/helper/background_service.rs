@@ -10,6 +10,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const STORAGE_LIMIT: u64 = 32 * 1024;
+/// Every stored grant was protected with these, for this machine; they
+/// never change.
+const ENTROPY: &[u8] = b"pb-mapper/background-host/v1";
+const DESCRIPTION: &str = "pb-mapper background host";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -570,131 +574,27 @@ pub(crate) fn revoke_installation(root: &Path) -> Result<()> {
 }
 
 fn protect(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>> {
-    use windows::{
-        Win32::{
-            Foundation::{HLOCAL, LocalFree},
-            Security::Cryptography::*,
-        },
-        core::w,
-    };
-    if bytes.len() as u64 > STORAGE_LIMIT {
-        return Err(error("Background authorization exceeds its size limit"));
-    }
-    let input = CRYPT_INTEGER_BLOB {
-        cbData: bytes.len() as u32,
-        pbData: bytes.as_ptr().cast_mut(),
-    };
-    let entropy = b"pb-mapper/background-host/v1";
-    let entropy = CRYPT_INTEGER_BLOB {
-        cbData: entropy.len() as u32,
-        pbData: entropy.as_ptr().cast_mut(),
-    };
-    let mut output = CRYPT_INTEGER_BLOB::default();
-    unsafe {
-        if encrypt {
-            CryptProtectData(
-                &input,
-                w!("pb-mapper background host"),
-                Some(&entropy),
-                None,
-                None,
-                CRYPTPROTECT_UI_FORBIDDEN | CRYPTPROTECT_LOCAL_MACHINE,
-                &mut output,
-            )
-        } else {
-            CryptUnprotectData(
-                &input,
-                None,
-                Some(&entropy),
-                None,
-                None,
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        }
-    }
-    .map_err(|_| error("Windows could not protect background authorization"))?;
-    let result = if output.pbData.is_null() || output.cbData as u64 > STORAGE_LIMIT {
-        Err(error("Windows returned invalid background authorization"))
-    } else {
-        Ok(unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec())
-    };
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
-    }
-    result
+    crate::dpapi::protect(
+        bytes,
+        encrypt,
+        crate::dpapi::Scope::Machine,
+        ENTROPY,
+        DESCRIPTION,
+        STORAGE_LIMIT,
+    )
 }
 
+/// Not only unwritable, as every installation file is: nobody but SYSTEM
+/// and administrators may even read a grant.
 fn private_file(path: &Path) -> Result<()> {
-    use windows::{
-        Win32::{
-            Foundation::{HLOCAL, LocalFree},
-            Security::{Authorization::*, *},
-        },
-        core::PCWSTR,
-    };
     os::protected_file(path)?;
-    let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    let mut owner = PSID::default();
-    let mut acl = std::ptr::null_mut();
-    unsafe {
-        GetNamedSecurityInfoW(
-            PCWSTR(os::wide(path).as_ptr()),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            Some(&mut owner),
-            None,
-            Some(&mut acl),
-            None,
-            &mut descriptor,
-        )
-    }
-    .ok()
-    .map_err(error)?;
-    let result = private_acl(owner, acl);
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
-    }
-    result
-}
-fn private_acl(
-    owner: windows::Win32::Security::PSID,
-    acl: *const windows::Win32::Security::ACL,
-) -> Result<()> {
-    use windows::Win32::Security::*;
-    let trusted = |sid| unsafe {
-        IsWellKnownSid(sid, WinLocalSystemSid).as_bool()
-            || IsWellKnownSid(sid, WinBuiltinAdministratorsSid).as_bool()
-    };
-    if !trusted(owner) || acl.is_null() {
-        return Err(error(
-            "Background authorization has an unsafe owner or DACL",
-        ));
-    }
-    for index in 0..unsafe { (*acl).AceCount } {
-        let mut ace = std::ptr::null_mut();
-        unsafe { GetAce(acl, u32::from(index), &mut ace) }.map_err(error)?;
-        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-        if header.AceType == 0 {
-            let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
-            let sid = PSID((&allowed.SidStart as *const u32).cast_mut().cast());
-            if !trusted(sid) {
-                return Err(error(
-                    "Background authorization is readable by another identity",
-                ));
-            }
-        } else if header.AceType != 1 {
-            return Err(error("Unsupported background authorization ACL"));
-        }
-    }
-    Ok(())
+    os::check_acl(path, u32::MAX)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use windows::Win32::Security::*;
     fn options() -> Options {
         Options {
             server: "127.0.0.1:7666".into(),
@@ -723,31 +623,9 @@ mod tests {
             persistence_failed: false,
         }
     }
-    fn descriptor(sddl: &str) -> Result<()> {
-        let value = os::Descriptor::new(sddl)?;
-        let security = unsafe { (*value.attributes()).lpSecurityDescriptor };
-        let mut owner = PSID::default();
-        let mut acl = std::ptr::null_mut();
-        let mut defaulted = windows::core::BOOL(0);
-        let mut present = windows::core::BOOL(0);
-        unsafe {
-            GetSecurityDescriptorOwner(PSECURITY_DESCRIPTOR(security), &mut owner, &mut defaulted)
-                .map_err(error)?;
-            GetSecurityDescriptorDacl(
-                PSECURITY_DESCRIPTOR(security),
-                &mut present,
-                &mut acl,
-                &mut defaulted,
-            )
-            .map_err(error)?;
-        }
-        private_acl(owner, acl)
-    }
 
     #[test]
-    fn machine_storage_rejects_readable_grants_and_preserves_namespace_identity() {
-        assert!(descriptor("O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)").is_ok());
-        assert!(descriptor("O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;BU)").is_err());
+    fn machine_storage_protects_grants_and_preserves_namespace_identity() {
         let original = Saved::prepare(options(), "owner-one", None, None).unwrap();
         let original_secret = original.identity.encode_secret().unwrap();
         let plaintext = serde_json::to_vec(&original).unwrap();

@@ -3176,7 +3176,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uni-stream",
- "windows 0.62.2",
 ]
 
 [[package]]
