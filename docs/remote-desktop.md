@@ -282,7 +282,7 @@ mismatch stops automatic retries and never replaces the pinned identity.
 
 | Action | Result |
 | --- | --- |
-| Turn on remote control | Starts the service-owned host with input and automatic restoration enabled; reuses its invitation; a viewer of the app's own sharing reconnects by itself when the service is already installed and running, and otherwise ends with sharing stopped |
+| Turn on remote control | Starts the service-owned host with input and automatic restoration enabled; reuses its invitation; a viewer of the app's own sharing reconnects by itself when the service is ready (installed, running, current and verified for this installed app, so nothing needs installing or updating) and takes over the same invitation (the same relay, namespace and service); otherwise it ends with sharing stopped |
 | Stop sharing | Closes sessions and disables automatic sharing; the same invitation resumes on the next explicit Start sharing |
 | Close the app | Stops its viewer; service-owned sharing continues |
 | Upgrade legacy app-owned sharing | Transfers the saved identity if no same-scope service identity exists; an existing service identity remains authoritative |
