@@ -20,6 +20,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       flutter: ${{ steps.filter.outputs.flutter }}
       node: ${{ steps.filter.outputs.node }}
+      android: ${{ steps.filter.outputs.android }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,6 +49,7 @@ jobs:
             echo "rust=true" >> "$GITHUB_OUTPUT"
             echo "flutter=true" >> "$GITHUB_OUTPUT"
             echo "node=true" >> "$GITHUB_OUTPUT"
+            echo "android=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -58,12 +60,17 @@ jobs:
           rust=false
           flutter=false
           node=false
+          android=false
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
               # pb-mapper-ffi lives under ui/ but is a workspace member, so it
-              # belongs to the Rust side and must be matched before ui/*.
+              # belongs to the Rust side and must be matched before ui/*. Its
+              # JNI layer compiles only for Android.
+              ui/native/pb_mapper_ffi/*) rust=true; android=true ;;
               ui/native/*) rust=true ;;
+              # The plugin set is part of the Gradle build.
+              ui/android/*|ui/pubspec.yaml|ui/pubspec.lock) flutter=true; android=true ;;
               ui/*) flutter=true ;;
               js/*) node=true ;;
               # The Node-API addon is a workspace crate; SDK changes must also
@@ -74,27 +81,31 @@ jobs:
               # while every Rust check still passes.
               crates/pb-mapper-node/*|crates/pb-mapper-client/*|crates/pb-mapper/*) rust=true; node=true ;;
               crates/pb-mapper-core/*|crates/pb-mapper-auth/*|crates/pb-mapper-protocol/*|crates/pb-mapper-server/*) rust=true; node=true ;;
+              # The JNI layer pulls its video units from this crate.
+              crates/pb-mapper-desktop/*) rust=true; android=true ;;
               crates/*|src/*|tests/*|examples/*) rust=true ;;
               # The addon is built from this workspace, and `bun run
               # build:release` consumes the root `release-node` profile — a
               # profile or lockfile change that pushes it past the size limit
               # has to be caught here, not after release.
-              Cargo.toml|Cargo.lock|rust-toolchain.toml|deps/*|.gitmodules) rust=true; node=true ;;
+              Cargo.toml|Cargo.lock|rust-toolchain.toml|deps/*|.gitmodules) rust=true; node=true; android=true ;;
               rustfmt.toml) rust=true ;;
               # Per-crate manifests. `case` patterns match the whole path, so
               # the unanchored entry above only ever catches the root manifest.
               */Cargo.toml|*/Cargo.lock) rust=true ;;
               # A change to this workflow has to prove itself on every job.
-              .github/workflows/syntax-check.yml) rust=true; flutter=true; node=true ;;
+              .github/workflows/syntax-check.yml) rust=true; flutter=true; node=true; android=true ;;
             esac
           done <<< "$changed"
 
           echo "rust=$rust"
           echo "flutter=$flutter"
           echo "node=$node"
+          echo "android=$android"
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "flutter=$flutter" >> "$GITHUB_OUTPUT"
           echo "node=$node" >> "$GITHUB_OUTPUT"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
 
   rust-syntax-check:
     needs: changes
@@ -298,6 +309,80 @@ jobs:
 
       - name: Run widget tests
         run: flutter test
+
+  # The Android half of the native video path: the Kotlin feeder and keystore
+  # with their JVM unit tests, and pb-mapper-ffi's JNI layer, which compiles
+  # only for Android. release-ui's build-android is the only other place
+  # either one compiles, at a tag, and it never runs the unit tests.
+  android-check:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The NDK release-ui pins. Naming a package also keeps the action off
+      # its default, the retired "tools".
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'ndk;28.2.13676358'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: clippy
+          targets: aarch64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-android-
+
+      # Clippy, not check: the workspace's unwrap/expect denial is a lint, and
+      # no other job lints this Android-only code.
+      - name: Lint the Android JNI layer
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          cargo install cargo-ndk --version 4.1.2 --locked
+          cargo ndk -t arm64-v8a clippy -p pb-mapper-ffi --locked -- -D warnings
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.9
+          channel: "stable"
+          cache: true
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # --config-only writes the git-ignored gradlew, wrapper jar and
+      # local.properties without building anything.
+      - name: Generate the Gradle wrapper
+        working-directory: ui
+        run: |
+          flutter pub get
+          flutter build apk --config-only
+
+      - name: Run the Android unit tests
+        working-directory: ui/android
+        run: ./gradlew :app:testDebugUnitTest
 
   release-package-check:
     runs-on: ubuntu-latest
