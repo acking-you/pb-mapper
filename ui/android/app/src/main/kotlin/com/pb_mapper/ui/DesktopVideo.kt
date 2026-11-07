@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
@@ -14,38 +15,42 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
-/** Only compressed access units cross the channel; decoding stays off the UI thread. */
+/**
+ * Native H.264 into a Flutter texture. Access units come from Rust on a
+ * feeder thread and never cross Dart; presentation receipts and keyframe
+ * requests go straight back to Rust. The channel only creates, binds and
+ * tears down textures.
+ */
 @Suppress("DEPRECATION")
 class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegistry) {
     private val main = Handler(Looper.getMainLooper())
     private val channel = MethodChannel(messenger, "pb_mapper/desktop_video")
-    private val viewers = mutableMapOf<Long, Viewer>()
+    private val viewers = ConcurrentHashMap<Long, Viewer>()
 
     init {
         channel.setMethodCallHandler { call, result ->
             try {
                 if (call.method == "create") {
+                    checkInstance(call.argument<Number>("instance")?.toLong() ?: error("Missing video library instance"))
                     check(viewers.size < 2) { "Desktop texture limit reached" }
-                    val viewer = Viewer(textures.createSurfaceTexture())
+                    val viewer = Viewer(textures.createSurfaceTexture(), DesktopVideoNative.api)
                     viewers[viewer.id] = viewer
                     result.success(viewer.id)
                 } else {
-                    val id = call.argument<Number>("textureId")?.toLong()
+                    val id = call.argument<Number>("textureId")?.toLong() ?: error("Missing desktop texture")
                     val viewer = viewers[id] ?: error("Unknown desktop texture")
                     when (call.method) {
-                        "submit" -> {
-                            val bytes = call.argument<ByteArray>("bytes") ?: error("Missing video")
-                            val width = call.argument<Number>("width")?.toInt() ?: 0
-                            val height = call.argument<Number>("height")?.toInt() ?: 0
-                            require(bytes.isNotEmpty() && bytes.size <= MAX_BYTES && width in 2..7680 && height in 2..4320 && width.toLong() * height <= 16_777_216) { "Invalid video bounds" }
-                            viewer.submit(Packet(bytes, call.argument<Number>("generation")!!.toLong(), call.argument<Number>("frameId")!!.toLong(), width, height, call.argument<Boolean>("keyframe") == true, viewer.revision.get()), result)
+                        "attach" -> {
+                            viewer.attach(call.argument<Number>("source")?.toLong() ?: error("Missing video source"))
+                            result.success(null)
                         }
-                        "reset" -> viewer.reset(result)
-                        "dispose" -> { viewers.remove(id); viewer.dispose(); result.success(null) }
+                        "detach" -> { viewer.detach(); result.success(null) }
                         "stats" -> viewer.stats(result, call.argument<Boolean>("timings") != false)
+                        "dispose" -> { viewers.remove(id); viewer.dispose(); result.success(null) }
                         else -> result.notImplemented()
                     }
                 }
@@ -61,13 +66,27 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
         viewers.clear()
     }
 
-    private data class Packet(val bytes: ByteArray, val generation: Long, val frameId: Long, val width: Int, val height: Int, val keyframe: Boolean, val revision: Long)
-    private data class PendingFrame(val packet: Packet, val receivedNs: Long, val queuedNs: Long, var decodedNs: Long = 0, var releasedNs: Long = 0)
-    private inner class Submission(val packet: Packet, private val reply: MethodChannel.Result, val receivedNs: Long) {
-        private val completed = AtomicBoolean()
-        fun complete() {
-            if (completed.compareAndSet(false, true)) main.post { reply.success(null) }
+    // D9: Dart's dlopen and this System.loadLibrary must reach one library,
+    // or the feeder would pull from a registry Dart never filled. Fails closed.
+    private fun checkInstance(dart: Long) {
+        val kotlin = try {
+            DesktopVideoNative.instanceToken()
+        } catch (e: LinkageError) {
+            error("pb_mapper_ffi is not loaded: ${e.message}")
         }
+        Log.d(TAG, "Video library instance: Dart 0x${java.lang.Long.toHexString(dart)}, Kotlin 0x${java.lang.Long.toHexString(kotlin)}")
+        check(kotlin == dart) { "native video library loaded twice" }
+    }
+
+    private class PendingFrame(
+        val generation: Long,
+        val frameId: Long,
+        val revision: Long,
+        val receivedNs: Long,
+        val queuedNs: Long,
+    ) {
+        var decodedNs = 0L
+        var releasedNs = 0L
     }
 
     // Allocated only by an explicit stats request. Worker-owned accumulators
@@ -112,9 +131,11 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
         )
     }
 
-    private inner class Viewer(private val entry: TextureRegistry.SurfaceTextureEntry) {
+    private inner class Viewer(
+        private val entry: TextureRegistry.SurfaceTextureEntry,
+        private val api: VideoSourceApi,
+    ) : FeedTarget {
         val id = entry.id()
-        val revision = AtomicLong(1)
         val submitted = AtomicLong()
         val submittedKeyframes = AtomicLong()
         val decoded = AtomicLong()
@@ -124,11 +145,17 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
         val recoveries = AtomicLong()
         @Volatile private var lastRecovery = ""
         @Volatile var decoderName = ""
-        private val thread = HandlerThread("pb-desktop-video").apply { start() }
+        private val pool = BufferPool()
+        private val feed = FeedQueue(pool)
+        // Main thread only; the feeder of the attached source.
+        private var feeder: VideoFeeder? = null
+        @Volatile private var consumer = 0L
+        @Volatile private var paused = false
+        @Volatile private var resumedAtMs = 0L
+        private val thread = HandlerThread("pb-desktop-video", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
         private val worker = Handler(thread.looper)
         private val surface = Surface(entry.surfaceTexture())
         private val lock = Any()
-        private val queue = ArrayDeque<Submission>()
         private val pending = linkedMapOf<Long, PendingFrame>()
         private val inputs = ArrayDeque<Int>()
         private val outputs = VideoPresentationQueue()
@@ -137,11 +164,10 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
         private var waitingOutputs = 0
         private var lastProgress = 0L
         private var codec: MediaCodec? = null
-        private var active: Packet? = null
+        private var active: FrameSize? = null
         private var lastPresentedGeneration = -1L
         private var lastPresentedFrameId = 0L
         private var pts = 0L
-        private var awaitingKey = true
         private var pumpPosted = false
         private var pumpDueMs = 0L
         private val pumpTask = Runnable {
@@ -151,14 +177,10 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             }
             pump()
         }
-        private var lastAccepted = 0L
-        private var acceptedGeneration = -1L
         private val consumedTimestamp = AtomicLong()
         private val consumedAtNs = AtomicLong()
         private val consumePosted = AtomicBoolean()
         private val consumeTask = Runnable { consumeSurface() }
-        private val pendingEvents = mutableMapOf<Boolean, Pair<Packet, String>>()
-        private var eventPosted = false
         @Volatile private var closed = false
         @Volatile private var diagnostics: Diagnostics? = null
 
@@ -177,6 +199,53 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             }
         }
 
+        /** Binds a new source. The texture and its last picture stay until the new session's IDR replaces them. */
+        fun attach(source: Long) {
+            stopFeeder()
+            feed.reset()
+            paused = false
+            resumedAtMs = SystemClock.elapsedRealtime()
+            val next = api.attach(source)
+            check(next > 0) { "Video source unavailable ($next)" }
+            consumer = next
+            feeder = VideoFeeder(api, next, this, pool).apply { start() }
+        }
+
+        fun detach() = stopFeeder()
+
+        private fun stopFeeder() {
+            feeder?.close()
+            feeder = null
+        }
+
+        // FeedTarget, on the feeder thread.
+        override fun awaitRoom(timeoutMs: Long) = feed.awaitRoom(timeoutMs)
+
+        override fun offer(unit: FeedUnit) {
+            when (feed.offer(unit)) {
+                FeedQueue.Admission.ENQUEUED -> {
+                    submitted.incrementAndGet()
+                    if (unit.keyframe) submittedKeyframes.incrementAndGet()
+                    schedulePump(0)
+                }
+                FeedQueue.Admission.GAP -> api.keyframe(consumer, DesktopVideoNative.REASON_GAP)
+                FeedQueue.Admission.DROPPED -> Unit
+            }
+        }
+
+        override fun setPaused(paused: Boolean) {
+            if (this.paused == paused) return
+            // A hidden texture is not consumed and a paused source sends
+            // nothing: the stall clocks restart when the video does.
+            if (!paused) resumedAtMs = SystemClock.elapsedRealtime()
+            this.paused = paused
+        }
+
+        override fun failed(message: String) {
+            Log.w(TAG, message)
+            lastRecovery = message
+        }
+
         private fun consumeSurface() {
             while (!closed) {
                 val timestamp = consumedTimestamp.get()
@@ -185,20 +254,21 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                 if (timestamp == surfacePtsUs) {
                     surfacePtsUs = null
                     val frame = pending.remove(timestamp)
-                    val packet = frame?.packet
-                    if (packet != null && packet.revision == revision.get() && !closed) {
+                    if (frame != null && frame.revision == feed.revision && !closed) {
                         diagnostics?.let { metrics ->
                             val consumedNs = consumedAtNs.get()
                             if (consumedNs != 0L) {
                                 metrics.consumeDispatch.add(System.nanoTime() - consumedNs)
                                 if (frame.releasedNs != 0L) metrics.surfaceConsume.add(consumedNs - frame.releasedNs)
-                                if (frame.receivedNs != 0L) metrics.receiveToPresent.add(consumedNs - frame.receivedNs)
+                                metrics.receiveToPresent.add(consumedNs - frame.receivedNs)
                             }
                         }
-                        lastPresentedGeneration = packet.generation
-                        lastPresentedFrameId = packet.frameId
+                        lastPresentedGeneration = frame.generation
+                        lastPresentedFrameId = frame.frameId
                         presented.incrementAndGet()
-                        event(packet, true, false)
+                        // Consumed by the compositor: the receipt Rust validates
+                        // and forwards for input authorisation.
+                        api.presented(consumer, frame.generation, frame.frameId)
                     }
                 }
                 // Clear the scheduled flag only after processing the snapshot,
@@ -214,43 +284,6 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             consumePosted.set(false)
         }
 
-        fun submit(packet: Packet, reply: MethodChannel.Result) {
-            var retry = false
-            var queued = false
-            synchronized(lock) {
-                if (closed || packet.generation < acceptedGeneration) { reply.success(null); return }
-                if (packet.generation != acceptedGeneration) {
-                    revision.incrementAndGet()
-                    clearQueue()
-                    acceptedGeneration = packet.generation
-                    lastAccepted = 0
-                    awaitingKey = true
-                }
-                if (packet.frameId <= lastAccepted) { reply.success(null); return }
-                lastAccepted = packet.frameId
-                if (queue.size >= 4) {
-                    dropped.addAndGet(queue.size.toLong())
-                    clearQueue()
-                    revision.incrementAndGet()
-                    awaitingKey = true
-                    retry = true
-                }
-                if (awaitingKey && !packet.keyframe) {
-                    dropped.incrementAndGet()
-                    retry = true
-                } else {
-                    awaitingKey = false
-                    queue.addLast(Submission(packet.copy(revision = revision.get()), reply, if (diagnostics != null) System.nanoTime() else 0))
-                    queued = true
-                    submitted.incrementAndGet()
-                    if (packet.keyframe) submittedKeyframes.incrementAndGet()
-                }
-                schedulePump(0)
-            }
-            if (!queued) reply.success(null)
-            if (retry) event(packet.copy(revision = revision.get()), false, true)
-        }
-
         fun stats(reply: MethodChannel.Result, timings: Boolean) {
             worker.post {
                 if (timings && diagnostics == null) diagnostics = Diagnostics()
@@ -260,10 +293,10 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                     "decoded" to decoded.get(), "presented" to presented.get(),
                     "lastPresentedGeneration" to lastPresentedGeneration,
                     "lastPresentedFrameId" to lastPresentedFrameId,
-                    "dropped" to dropped.get(), "decoder" to decoderName,
+                    "dropped" to dropped.get() + feed.dropped.get(), "decoder" to decoderName,
                     "configurations" to configurations.get(),
                     "recoveries" to recoveries.get(), "lastRecovery" to lastRecovery,
-                    "queued" to synchronized(lock) { queue.size },
+                    "queued" to feed.size,
                     "decoding" to waitingOutputs, "outputs" to outputs.size,
                     "surfacePending" to (surfacePtsUs != null),
                     "timings" to diagnostics?.snapshot(),
@@ -272,66 +305,16 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             }
         }
 
-        // Caller holds lock. Each retired input returns its producer credit.
-        private fun clearQueue() {
-            queue.forEach { it.complete() }
-            queue.clear()
-        }
-
-        fun reset(reply: MethodChannel.Result) {
-            val resetRevision = synchronized(lock) {
-                val next = revision.incrementAndGet()
-                clearQueue()
-                awaitingKey = true
-                acceptedGeneration = -1
-                lastAccepted = 0
-                next
-            }
-            worker.post {
-                // A pump already posted before reset can consume the next
-                // generation before this cleanup runs. Never close that newer
-                // codec: its first IDR may already have returned input credit,
-                // leaving no queued packet that could restart the decoder.
-                if (active?.revision?.let { it < resetRevision } != false) {
-                    releaseCodec()
-                }
-                pump()
-                // Dart awaits this barrier before submitting the next IDR.
-                main.post { reply.success(null) }
-            }
-        }
-
         fun dispose() {
+            stopFeeder()
             closed = true
-            revision.incrementAndGet()
-            synchronized(lock) { clearQueue() }
+            feed.close()
             entry.setOnFrameConsumedListener(null)
             worker.post {
                 releaseCodec()
                 surface.release()
                 main.post { entry.release() }
                 thread.quitSafely()
-            }
-        }
-
-        private fun event(packet: Packet, consumed: Boolean, key: Boolean, message: String = "") {
-            check(consumed != key)
-            synchronized(lock) {
-                pendingEvents[key] = Pair(packet.copy(bytes = ByteArray(0)), message)
-                if (eventPosted) return
-                eventPosted = true
-            }
-            main.post {
-                val ready = synchronized(lock) {
-                    val values = pendingEvents.toMap()
-                    pendingEvents.clear()
-                    eventPosted = false
-                    values
-                }
-                ready.forEach { (needsKey, value) ->
-                    val frame = value.first
-                    if (!closed && frame.revision == revision.get()) channel.invokeMethod("event", mapOf("textureId" to id, "generation" to frame.generation, "frameId" to frame.frameId, "width" to frame.width, "height" to frame.height, "presented" to !needsKey, "needKeyframe" to needsKey, "message" to value.second))
-                }
             }
         }
 
@@ -348,39 +331,37 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             try { old?.release() } catch (_: Exception) {}
         }
 
-        private fun fail(packet: Packet, reason: String) {
+        private fun fail(reason: Int, message: String) {
             releaseCodec()
-            synchronized(lock) {
-                if (closed || packet.revision != revision.get()) return
-                recoveries.incrementAndGet()
-                lastRecovery = reason
-                clearQueue()
-                awaitingKey = true
-                revision.incrementAndGet()
-            }
-            event(packet.copy(revision = revision.get()), false, true, reason)
+            if (closed) return
+            // The next keyframe configures a new codec in a new revision.
+            feed.discard()
+            recoveries.incrementAndGet()
+            lastRecovery = message
+            // Rust rate-limits requests. A paused source asks for nothing:
+            // its resume already starts with an IDR.
+            if (!paused) api.keyframe(consumer, reason)
         }
 
-        private fun configure(packet: Packet) {
+        private fun configure(unit: FeedUnit, parameterSets: Map<Int, ByteArray>) {
             // Async flush leaves callbacks carrying invalid buffer indices.
-            // Recreate on revision/size changes so old callbacks can be rejected
-            // by codec identity without ever returning an obsolete buffer.
+            // Recreate on a size change so old callbacks can be rejected by
+            // codec identity without ever returning an obsolete buffer.
             releaseCodec()
-            check(packet.keyframe) { "Decoder requires a key frame" }
-            entry.surfaceTexture().setDefaultBufferSize(packet.width, packet.height)
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, packet.width, packet.height)
+            entry.surfaceTexture().setDefaultBufferSize(unit.width, unit.height)
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, unit.width, unit.height)
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_BYTES)
-            format.setInteger(MediaFormat.KEY_MAX_WIDTH, packet.width)
-            format.setInteger(MediaFormat.KEY_MAX_HEIGHT, packet.height)
+            format.setInteger(MediaFormat.KEY_MAX_WIDTH, unit.width)
+            format.setInteger(MediaFormat.KEY_MAX_HEIGHT, unit.height)
             if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             // We own dropping before the surface and keep exactly one released
             // frame in flight. A driver silently dropping that sole frame would
             // strand the consumption credit and look like a frozen renderer.
             if (Build.VERSION.SDK_INT >= 29) format.setInteger(MediaFormat.KEY_ALLOW_FRAME_DROP, 0)
-            parameterSets(packet.bytes).forEach { (type, bytes) -> format.setByteBuffer(if (type == 7) "csd-0" else "csd-1", ByteBuffer.wrap(bytes)) }
+            parameterSets.forEach { (type, bytes) -> format.setByteBuffer(if (type == 7) "csd-0" else "csd-1", ByteBuffer.wrap(bytes)) }
             val next = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             codec = next
-            active = packet
+            active = FrameSize(unit.width, unit.height)
             decoderName = next.name
             next.setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(c: MediaCodec, index: Int) {
@@ -393,17 +374,15 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                     if (closed || c !== codec) return
                     try {
                         val frame = pending[info.presentationTimeUs]
-                        val render = frame != null && frame.packet.revision == revision.get() && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0
                         lastProgress = SystemClock.elapsedRealtime()
                         if (frame != null) waitingOutputs = (waitingOutputs - 1).coerceAtLeast(0)
-                        if (render) {
-                            val packet = frame!!.packet
+                        if (frame != null && frame.revision == feed.revision && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
                             diagnostics?.let { metrics ->
                                 frame.decodedNs = System.nanoTime()
                                 if (frame.queuedNs != 0L) metrics.decodeCallback.add(frame.decodedNs - frame.queuedNs)
                                 metrics.peakOutputs = maxOf(metrics.peakOutputs, outputs.size + 1)
                             }
-                            outputs.enqueue(index, info.presentationTimeUs, packet.revision, packet.frameId, System.nanoTime())
+                            outputs.enqueue(index, info.presentationTimeUs, frame.revision, frame.frameId, System.nanoTime())
                             decoded.incrementAndGet()
                         } else {
                             c.releaseOutputBuffer(index, false)
@@ -424,6 +403,7 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             next.configure(format, surface, null, 0)
             next.start()
             configurations.incrementAndGet()
+            api.report(consumer, next.name, hardware(next))
         }
 
         private fun schedulePump(delay: Long) {
@@ -440,12 +420,12 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
 
         private fun renderLatest(c: MediaCodec) {
             while (true) {
-                val output = outputs.take(revision.get(), surfacePtsUs != null) ?: return
+                val output = outputs.take(feed.revision, surfacePtsUs != null) ?: return
                 val frame = pending[output.ptsUs]
                 // Release the newest decoded picture as soon as the surface is
                 // available. The unique decoder timestamp still identifies its
                 // actual Flutter consumption receipt; queuing is not display.
-                if (output.render && frame != null && frame.packet.revision == revision.get()) {
+                if (output.render && frame != null && frame.revision == feed.revision) {
                     surfacePtsUs = output.ptsUs
                     surfaceReleasedAtMs = SystemClock.elapsedRealtime()
                     diagnostics?.let { metrics ->
@@ -462,29 +442,29 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
         }
 
         private fun codecFailed(error: Exception) {
-            Log.w("PbDesktopVideo", "Native H.264 decoder failed", error)
-            active?.let { fail(it, "Native H.264 decoding unavailable") }
+            Log.w(TAG, "Native H.264 decoder failed", error)
+            fail(DesktopVideoNative.REASON_DECODER_ERROR, "Native H.264 decoding unavailable")
         }
 
         private fun pump() {
             if (closed) return
             val metrics = diagnostics
             val startedNs = if (metrics != null) System.nanoTime() else 0
-            var processing: Packet? = active
             try {
                 codec?.let { renderLatest(it) }
                 for (attempt in 0 until 4) {
-                    val input = synchronized(lock) { queue.peekFirst() } ?: break
-                    val packet = input.packet
-                    processing = packet
-                    if (packet.revision != revision.get()) {
-                        synchronized(lock) { if (queue.peekFirst() === input) queue.pollFirst() }
-                        input.complete()
-                        continue
-                    }
-                    val current = active
-                    if (current == null || current.revision != packet.revision || current.width != packet.width || current.height != packet.height) {
-                        configure(packet)
+                    val unit = feed.head() ?: break
+                    when (DecoderRules.step(unit, feed.revision, active)) {
+                        DecoderRules.Step.DISCARD -> {
+                            if (feed.poll(unit)) feed.release(unit)
+                            continue
+                        }
+                        DecoderRules.Step.CONFIGURE -> {
+                            check(unit.keyframe) { "Decoder requires a key frame" }
+                            val sets = feed.read(unit) { parameterSets(it.buffer, it.len) } ?: continue
+                            configure(unit, sets)
+                        }
+                        DecoderRules.Step.FEED -> Unit
                     }
                     // Every queued access unit can yield an asynchronous output.
                     // Reserve one of the four output slots before submitting it,
@@ -492,54 +472,53 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                     if (pending.size >= 16 || waitingOutputs + outputs.size >= 4) break
                     val c = codec ?: return
                     val index = inputs.peekFirst() ?: break
-                    val taken = synchronized(lock) {
-                        if (queue.peekFirst() === input && packet.revision == revision.get()) {
-                            queue.pollFirst()
-                            true
-                        } else false
-                    }
-                    if (!taken) { input.complete(); continue }
+                    if (!feed.poll(unit)) continue
                     inputs.removeFirst()
                     try {
                         val buffer = c.getInputBuffer(index) ?: error("Decoder input unavailable")
-                        require(buffer.capacity() >= packet.bytes.size) { "Decoder input is too small" }
-                        buffer.clear()
-                        buffer.put(packet.bytes)
+                        require(buffer.capacity() >= unit.len) { "Decoder input is too small" }
+                        buffer.span(0, buffer.capacity())
+                        unit.buffer.span(0, unit.len)
+                        buffer.put(unit.buffer)
                         pts += 16667 // Unique decoder timestamp; never replay a network timestamp.
                         val queuedNs = if (metrics != null) System.nanoTime() else 0
-                        pending[pts] = PendingFrame(packet.copy(bytes = ByteArray(0)), input.receivedNs, queuedNs)
-                        c.queueInputBuffer(index, 0, packet.bytes.size, pts, 0)
+                        pending[pts] = PendingFrame(unit.generation, unit.frameId, unit.revision, unit.receivedNs, queuedNs)
+                        c.queueInputBuffer(index, 0, unit.len, pts, 0)
                         metrics?.let {
-                            if (input.receivedNs != 0L) it.inputWait.add(queuedNs - input.receivedNs)
+                            it.inputWait.add(queuedNs - unit.receivedNs)
                             it.peakPending = maxOf(it.peakPending, pending.size)
                         }
                         if (waitingOutputs == 0) lastProgress = SystemClock.elapsedRealtime()
                         waitingOutputs++
                     } finally {
-                        // Return producer credit only once MediaCodec accepted
-                        // this input (or the failed input has been retired).
-                        input.complete()
+                        // The pooled buffer returns once MediaCodec copied it,
+                        // and the feeder may pull the next unit.
+                        feed.release(unit)
                     }
                 }
+                // A paused source sends nothing and its texture is hidden, so
+                // neither clock means a stall; both restart on resume.
+                if (paused) return
                 val nowMs = SystemClock.elapsedRealtime()
-                if (surfacePtsUs != null && nowMs - surfaceReleasedAtMs > 2000) {
-                    processing?.let { fail(it, "Native video texture was not consumed") }
+                val resumed = resumedAtMs
+                if (surfacePtsUs != null && nowMs - maxOf(surfaceReleasedAtMs, resumed) > 2000) {
+                    fail(DesktopVideoNative.REASON_STALL, "Native video texture was not consumed")
                     return
                 }
-                if (waitingOutputs > 0 && nowMs - lastProgress > 2000) {
-                    processing?.let { fail(it, "Native video decoder stalled") }
+                if (waitingOutputs > 0 && nowMs - maxOf(lastProgress, resumed) > 2000) {
+                    fail(DesktopVideoNative.REASON_STALL, "Native video decoder stalled")
                     return
                 }
                 // Input/output/consumption callbacks wake us as work arrives.
                 // Timers detect stalls only. The renderer never schedules old
                 // pictures for later playback or polls an idle decoder.
                 var delayMs = Long.MAX_VALUE
-                if (surfacePtsUs != null) delayMs = minOf(delayMs, 2001 - (nowMs - surfaceReleasedAtMs))
-                if (waitingOutputs > 0) delayMs = minOf(delayMs, 2001 - (nowMs - lastProgress))
+                if (surfacePtsUs != null) delayMs = minOf(delayMs, 2001 - (nowMs - maxOf(surfaceReleasedAtMs, resumed)))
+                if (waitingOutputs > 0) delayMs = minOf(delayMs, 2001 - (nowMs - maxOf(lastProgress, resumed)))
                 if (delayMs != Long.MAX_VALUE) schedulePump(delayMs.coerceAtLeast(1))
             } catch (error: Exception) {
-                Log.w("PbDesktopVideo", "Native H.264 decoder failed", error)
-                processing?.let { fail(it, "Native H.264 decoding unavailable") }
+                Log.w(TAG, "Native H.264 decoder failed", error)
+                fail(DesktopVideoNative.REASON_DECODER_ERROR, "Native H.264 decoding unavailable")
             } finally {
                 metrics?.pumpWork?.add(System.nanoTime() - startedNs)
             }
@@ -547,28 +526,70 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
     }
 
     companion object {
+        private const val TAG = "PbDesktopVideo"
         private const val MAX_BYTES = 4 * 1024 * 1024
 
-        // Parameter sets remain owned by the decoder for its lifetime.
-        private fun parameterSets(bytes: ByteArray): Map<Int, ByteArray> {
-            val starts = mutableListOf<Pair<Int, Int>>()
-            var i = 0
-            while (i + 3 < bytes.size) {
-                val count = if (bytes[i] == 0.toByte() && bytes[i + 1] == 0.toByte() && bytes[i + 2] == 1.toByte()) 3 else if (bytes[i] == 0.toByte() && bytes[i + 1] == 0.toByte() && bytes[i + 2] == 0.toByte() && bytes[i + 3] == 1.toByte()) 4 else 0
-                if (count > 0) { starts.add(Pair(i, count)); i += count } else i++
+        private fun hardware(codec: MediaCodec): Boolean =
+            if (Build.VERSION.SDK_INT >= 29) {
+                !codec.codecInfo.isSoftwareOnly
+            } else {
+                // Before API 29, the platform's software decoders are named.
+                !codec.name.startsWith("OMX.google.") && !codec.name.startsWith("c2.android.")
+            }
+
+        // A key frame leads with its SPS (7) and PPS (8); the scan stops once
+        // both are found. They stay owned by the decoder for its lifetime.
+        private fun parameterSets(buffer: ByteBuffer, len: Int): Map<Int, ByteArray> {
+            fun zero(at: Int) = buffer.get(at) == 0.toByte()
+            fun startCode(at: Int) = when {
+                zero(at) && zero(at + 1) && buffer.get(at + 2) == 1.toByte() -> 3
+                at + 3 < len && zero(at) && zero(at + 1) && zero(at + 2) && buffer.get(at + 3) == 1.toByte() -> 4
+                else -> 0
             }
             val result = mutableMapOf<Int, ByteArray>()
-            starts.forEachIndexed { index, (start, count) ->
-                if (start + count < bytes.size) {
-                    val type = bytes[start + count].toInt() and 31
-                    if (type == 7 || type == 8) {
-                        val end = if (index + 1 < starts.size) starts[index + 1].first else bytes.size
-                        result[type] = byteArrayOf(0, 0, 0, 1) + bytes.copyOfRange(start + count, end)
-                    }
-                }
+            var nal = -1
+            fun finish(end: Int) {
+                if (nal < 0 || nal >= end) return
+                val type = buffer.get(nal).toInt() and 31
+                if (type != 7 && type != 8) return
+                val bytes = ByteArray(4 + end - nal)
+                bytes[3] = 1
+                val view = buffer.duplicate()
+                view.span(nal, end)
+                view.get(bytes, 4, end - nal)
+                result[type] = bytes
             }
+            var i = 0
+            while (i + 3 < len && result.size < 2) {
+                val count = startCode(i)
+                if (count == 0) { i++; continue }
+                finish(i)
+                i += count
+                nal = i
+            }
+            if (result.size < 2) finish(len)
             require(result.size == 2) { "Key frame must include H.264 SPS and PPS" }
             return result
         }
+    }
+}
+
+internal data class FrameSize(val width: Int, val height: Int)
+
+/** The codec thread's decisions about the head unit, pure so the JVM tests hold them. */
+internal object DecoderRules {
+    enum class Step { DISCARD, CONFIGURE, FEED }
+
+    /**
+     * A unit of an older revision is discarded. Otherwise a codec is configured
+     * only when there is none ([configured] null, also after a failure released
+     * it) or the size changed. A discontinuity bumps the revision but keeps the
+     * size: its IDR goes to the running codec, whose in-band SPS/PPS resets the
+     * references (R18).
+     */
+    fun step(unit: FeedUnit, revision: Long, configured: FrameSize?): Step = when {
+        unit.revision != revision -> Step.DISCARD
+        configured == null || configured.width != unit.width || configured.height != unit.height -> Step.CONFIGURE
+        else -> Step.FEED
     }
 }
