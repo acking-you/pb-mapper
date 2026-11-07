@@ -29,9 +29,10 @@ String modifierCap(RemoteKey modifier) => switch (modifier) {
 };
 
 /// What a soft keyboard lacks (ui §9.4): latched modifiers, fixed at the
-/// leading edge; Esc, Tab, Fn, arrows, navigation and editing keys in a
-/// strip that scrolls; and the key that hides the keyboard, fixed at the
-/// trailing edge. With Fn on, the strip offers F1 to F12 instead.
+/// leading edge; Esc, Tab, Fn, arrows, Delete, Ctrl+C and Ctrl+V, then
+/// navigation and Insert, in a strip that scrolls; and the key that hides
+/// the keyboard, fixed at the trailing edge. With Fn on, the strip offers
+/// F1 to F12 instead.
 class ModifierBar extends StatefulWidget {
   const ModifierBar({
     super.key = const Key('modifier-bar'),
@@ -121,13 +122,6 @@ class _ModifierBarState extends State<ModifierBar> {
                 ),
             ],
             [
-              _repeat('Home', RemoteKey.home),
-              _repeat('End', RemoteKey.end),
-              _repeat('PgUp', RemoteKey.pageUp),
-              _repeat('PgDn', RemoteKey.pageDown),
-            ],
-            [
-              _tap('Ins', RemoteKey.insert),
               _tap('Del', RemoteKey.delete),
               KeyCap(
                 label: 'Ctrl+C',
@@ -143,6 +137,13 @@ class _ModifierBarState extends State<ModifierBar> {
                   extra: const {RemoteKey.control},
                 ),
               ),
+            ],
+            [
+              _repeat('Home', RemoteKey.home),
+              _repeat('End', RemoteKey.end),
+              _repeat('PgUp', RemoteKey.pageUp),
+              _repeat('PgDn', RemoteKey.pageDown),
+              _tap('Ins', RemoteKey.insert),
             ],
           ];
     return Semantics(
