@@ -544,14 +544,21 @@ and in the tray.
 - **Toolchain**: rust-toolchain.toml for reproducible builds
 - **Testing**: Unit tests live beside the code; integration tests are in
   `crates/pb-mapper-cli/tests/`, which is the crate that depends on every layer
-  they exercise. The remote desktop is the exception: the CLI does not depend on
-  `pb-mapper-desktop`, so its end to end test is that crate's own
-  `tests/session.rs`. The e2e scaffolding is `pb-mapper-testkit`, so a new test
-  file stands up its own full `server` + `register` + `connect` flow instead of
-  everything accumulating in one file.
+  they exercise. Two crates keep their own: the CLI does not depend on
+  `pb-mapper-desktop`, so the remote desktop's end to end test is that crate's
+  `tests/session.rs`; and `pb-mapper-core`'s `tests/process_environment.rs` is a
+  single-threaded, harness-free binary, because environment writes must not
+  share a process with reader threads. The e2e scaffolding is
+  `pb-mapper-testkit`, so a new test file stands up its own full `server` +
+  `register` + `connect` flow instead of everything accumulating in one file.
 
 ### UI Development Guidelines
 - **Framework**: Flutter 3.44.9, Material 3. CI pins the same version.
+- **CI gates**: From `ui/`, CI runs `flutter gen-l10n` and fails unless
+  `l10n_untranslated.json` is `{}` (it lists each key `app_zh.arb` lacks), then
+  `dart format --output=none --set-exit-if-changed lib test tool`, `flutter
+  analyze --no-fatal-infos`, the `Icons.*` grep and `flutter test`. Run `dart
+  format lib test tool` before committing Dart.
 - **State Management**: Plain `StatefulWidget` state; no state-management package
 - **Architecture**: `AppShell` owns navigation; every page reads one `AppStore`,
   which takes its `PbMapperApiClient` as a parameter so tests can pass a fake.
