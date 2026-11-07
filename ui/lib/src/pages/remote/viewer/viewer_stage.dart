@@ -23,6 +23,9 @@ import 'viewer_overlays.dart';
 /// `ValueNotifier`s. The picture element stays the same across zoom, pan,
 /// overlays, reconnects and the soft keyboard; nothing that changes at
 /// media or state rate rebuilds above the `Texture`.
+///
+/// It is its own layer, as are the cursor and the touch ring inside it: a
+/// stroke, a pan or a zoom repaints no gutter, bar or title.
 class ViewerStage extends StatelessWidget {
   const ViewerStage({
     super.key,
@@ -31,7 +34,7 @@ class ViewerStage extends StatelessWidget {
     required this.picture,
     required this.jpegImage,
     required this.stats,
-    required this.readView,
+    required this.hostCursor,
     required this.viewport,
     required this.input,
     required this.machine,
@@ -61,7 +64,7 @@ class ViewerStage extends StatelessWidget {
     picture: desktop.picture,
     jpegImage: desktop.jpegImage,
     stats: desktop.stats,
-    readView: desktop.readView,
+    hostCursor: desktop.hostCursor,
     viewport: viewport,
     input: input,
     machine: machine,
@@ -77,7 +80,7 @@ class ViewerStage extends StatelessWidget {
   final ValueListenable<DesktopPicture?> picture;
   final ValueListenable<ui.Image?> jpegImage;
   final ValueListenable<DesktopStats> stats;
-  final DesktopView? Function() readView;
+  final ValueListenable<Offset?> hostCursor;
   final RemoteViewport viewport;
   final RemoteInput input;
   final TouchGestureMachine machine;
@@ -92,7 +95,9 @@ class ViewerStage extends StatelessWidget {
   final ValueListenable<double>? toolbarInset;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => RepaintBoundary(child: _stack(context));
+
+  Widget _stack(BuildContext context) {
     final l10n = context.l10n;
     return Stack(
       fit: StackFit.expand,
@@ -135,8 +140,7 @@ class ViewerStage extends StatelessWidget {
         ),
         GreyStill(session: session, viewport: viewport),
         RemoteCursorLayer(
-          readView: readView,
-          geometry: geometry,
+          hostCursor: hostCursor,
           viewport: viewport,
           input: input,
         ),

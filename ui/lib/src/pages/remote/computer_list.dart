@@ -47,12 +47,9 @@ remoteEntries(AppStore store) {
   final session = store.desktop.session.value;
   final computers = store.computers;
   final target = session.target;
-  final live =
-      target != null &&
-      session.phase != DesktopPhase.idle &&
-      session.phase != DesktopPhase.ended;
   final transient =
-      live &&
+      target != null &&
+          session.open &&
           (target.computerId == null ||
               computers.byId(target.computerId!) == null)
       ? RemoteEntry(
@@ -657,10 +654,7 @@ class _Meta extends StatelessWidget {
         valueListenable: desktop.stats,
         builder: (context, stats, _) {
           final session = desktop.session.value;
-          final path = pathLabel(
-            context,
-            stats.path.isEmpty ? session.path : stats.path,
-          );
+          final path = pathLabel(context, session.path);
           if (session.paused) return text(l10n.remotePicturePaused(path));
           final rtt = stats.rttMs;
           if (rtt == null || !session.hasPicture) return text(path);

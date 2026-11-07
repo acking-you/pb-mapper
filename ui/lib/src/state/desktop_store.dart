@@ -36,7 +36,7 @@ const _statusVisible = Duration(milliseconds: 500);
 const _statusHidden = Duration(seconds: 1);
 const _hostWithPage = Duration(seconds: 1);
 const _hostWhileSharing = Duration(seconds: 2);
-const _viewTick = Duration(milliseconds: 33);
+const _viewTick = Duration(milliseconds: 16);
 const _moveInterval = Duration(milliseconds: 4);
 const _snapshotBound = Duration(milliseconds: 300);
 const _controlRetry = Duration(seconds: 1);
@@ -103,7 +103,9 @@ class DesktopStore {
     void Function()? onRestartReady,
   }) : _textures = textures ?? createDesktopVideoTexture,
        _now = now ?? DateTime.now,
-       _onRestartReady = onRestartReady;
+       _onRestartReady = onRestartReady {
+    _geometry.addListener(_publishCursor);
+  }
 
   final DesktopApiClient _api;
   final DesktopTextureFactory _textures;
@@ -121,6 +123,7 @@ class DesktopStore {
   final _jpegImage = ValueNotifier<ui.Image?>(null);
   late final _stats = _SampledNotifier(DesktopStats.none, _schedulePolling);
   final _quality = ValueNotifier(DesktopQuality.balanced);
+  final _hostCursor = ValueNotifier<Offset?>(null);
 
   ValueListenable<DesktopHostView> get hostView => _hostView;
   ValueListenable<DesktopSessionView> get session => _session;
@@ -138,8 +141,10 @@ class DesktopStore {
   ValueListenable<DesktopStats> get stats => _stats;
   ValueListenable<DesktopQuality> get quality => _quality;
 
-  /// The per-frame leaf (cursor, freshness, flags), as last read.
-  DesktopView? readView() => _view;
+  /// The host's cursor, normalised to its display; null while hidden,
+  /// unknown or of another generation than [geometry]. The view leaf
+  /// publishes it, read every rendered frame and every 16 ms (D11).
+  ValueListenable<Offset?> get hostCursor => _hostCursor;
 
   // ---------------------------------------------------------------- demand
 
@@ -1170,12 +1175,20 @@ class DesktopStore {
     }
   }
 
-  /// The leaf runs every rendered frame, and from a 33 ms timer that asks
-  /// for a frame only when something a frame shows has changed. A change of
-  /// generation, state or flags re-reads the status, which publishes it.
+  /// The leaf runs every rendered frame, and from a timer at the rate the
+  /// host samples its cursor. A cursor change publishes [hostCursor], whose
+  /// repaint asks for the frame that draws it. A change of generation,
+  /// state or flags re-reads the status, which publishes it.
   void _acceptView(DesktopView? view, {required bool inFrame}) {
     final previous = _view;
     _view = view;
+    final shown = _hostCursor.value;
+    _publishCursor();
+    // After paint a repaint asks for no frame: ask for the one that draws
+    // the new cursor.
+    if (inFrame && _hostCursor.value != shown) {
+      SchedulerBinding.instance.scheduleFrame();
+    }
     if (view == null) return;
     final structural =
         previous == null ||
@@ -1198,12 +1211,24 @@ class DesktopStore {
         _pollStatus();
       }
     }
-    if (!inFrame &&
-        (structural ||
-            previous.cursorSeq != view.cursorSeq ||
-            previous.cursorVisible != view.cursorVisible)) {
-      SchedulerBinding.instance.scheduleFrame();
-    }
+  }
+
+  /// Normalises the last leaf read against [geometry]: the one place the
+  /// host's cursor meets the display it moves on.
+  void _publishCursor() {
+    final view = _view, g = _geometry.value;
+    _hostCursor.value =
+        view == null ||
+            g == null ||
+            !view.cursorVisible ||
+            view.generation != g.generation ||
+            g.displayWidth <= 0 ||
+            g.displayHeight <= 0
+        ? null
+        : Offset(
+            (view.cursorX / g.displayWidth).clamp(0.0, 1.0),
+            (view.cursorY / g.displayHeight).clamp(0.0, 1.0),
+          );
   }
 
   int _geometryEpoch = 0;
@@ -1796,5 +1821,6 @@ class DesktopStore {
     _jpegImage.dispose();
     _stats.dispose();
     _quality.dispose();
+    _hostCursor.dispose();
   }
 }

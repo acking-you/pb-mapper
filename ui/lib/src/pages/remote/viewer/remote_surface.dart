@@ -284,7 +284,8 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
 }
 
 /// Where the finger is in trackpad mode: a 44 px ring that fades when the
-/// last finger lifts.
+/// last finger lifts. Its own layer, like the cursor's: it moves with every
+/// stroke and repaints nothing around it.
 class TouchIndicator extends StatelessWidget {
   const TouchIndicator({super.key, required this.machine});
 
@@ -293,36 +294,38 @@ class TouchIndicator extends StatelessWidget {
   static const _size = 44.0;
 
   @override
-  Widget build(BuildContext context) => IgnorePointer(
-    child: _LastPoint(
-      point: machine.indicatorPoint,
-      builder: (context, at, visible) => Stack(
-        children: [
-          Positioned(
-            left: at.dx - _size / 2,
-            top: at.dy - _size / 2,
-            width: _size,
-            height: _size,
-            child: AnimatedOpacity(
-              opacity: visible ? 1 : 0,
-              duration: visible
-                  ? Duration.zero
-                  : Motion.of(context, kTouchIndicatorFade),
-              child: const DecoratedBox(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Color.fromRGBO(255, 255, 255, 0.22),
-                  border: Border.fromBorderSide(
-                    BorderSide(
-                      color: Color.fromRGBO(255, 255, 255, 0.8),
-                      width: 1.5,
+  Widget build(BuildContext context) => RepaintBoundary(
+    child: IgnorePointer(
+      child: _LastPoint(
+        point: machine.indicatorPoint,
+        builder: (context, at, visible) => Stack(
+          children: [
+            Positioned(
+              left: at.dx - _size / 2,
+              top: at.dy - _size / 2,
+              width: _size,
+              height: _size,
+              child: AnimatedOpacity(
+                opacity: visible ? 1 : 0,
+                duration: visible
+                    ? Duration.zero
+                    : Motion.of(context, kTouchIndicatorFade),
+                child: const DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Color.fromRGBO(255, 255, 255, 0.22),
+                    border: Border.fromBorderSide(
+                      BorderSide(
+                        color: Color.fromRGBO(255, 255, 255, 0.8),
+                        width: 1.5,
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     ),
   );

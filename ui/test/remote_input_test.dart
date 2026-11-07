@@ -2,9 +2,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_cursor_layer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_keys.dart';
-import 'package:pb_mapper_ui/src/state/desktop_input.dart';
+import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 
+import 'fake_desktop_api.dart';
 import 'remote_viewer_harness.dart';
 
 KeyEvent _down(
@@ -138,6 +140,77 @@ void main() {
         ['move 1200,540'],
         ['left↑'],
       ]);
+
+      h.dispose();
+    },
+  );
+
+  testWidgets(
+    'a host cursor sample is drawn in one frame, none left scheduled',
+    (tester) async {
+      final h = await ViewerHarness.live(tester);
+      h.viewport.layout(const Size(800, 450));
+      DesktopView view(int seq, int x, int y, {int generation = 1}) =>
+          DesktopView(
+            generation: generation,
+            presentedFrameId: 1,
+            cursorSeq: seq,
+            displayWidth: 1920,
+            displayHeight: 1080,
+            videoWidth: 1920,
+            videoHeight: 1080,
+            cursorX: x,
+            cursorY: y,
+            state: 2,
+            cursorVisible: true,
+            controlling: true,
+            controlAllowed: true,
+            fresh: true,
+          );
+      // A point inside the arrow, whose tip is at the cursor.
+      PaintPattern arrowAt(Offset n) =>
+          paints..path(includes: [h.viewport.toLocal(n) + const Offset(2, 6)]);
+      final layer = find.byType(RemoteCursorLayer);
+
+      h.api.viewValue = view(1, 480, 270);
+      await tester.pumpWidget(
+        RemoteCursorLayer(
+          hostCursor: h.store.hostCursor,
+          viewport: h.viewport,
+          input: h.input,
+        ),
+      );
+      await tester.pump();
+      expect(layer, arrowAt(const Offset(0.25, 0.25)));
+      expect(tester.binding.hasScheduledFrame, isFalse);
+
+      // Read by the view timer, at the host's 16 ms: the repaint asks for one
+      // frame, which draws it.
+      h.api.viewValue = view(2, 960, 540);
+      await tester.binding.delayed(const Duration(milliseconds: 16));
+      expect(tester.binding.hasScheduledFrame, isTrue);
+      await tester.pump();
+      expect(layer, arrowAt(const Offset(0.5, 0.5)));
+      expect(tester.binding.hasScheduledFrame, isFalse);
+
+      // Read in a frame, after its paint: the next frame draws it.
+      h.api.viewValue = view(3, 1440, 810);
+      tester.binding.scheduleFrame();
+      await tester.pump();
+      expect(tester.binding.hasScheduledFrame, isTrue);
+      await tester.pump();
+      expect(layer, arrowAt(const Offset(0.75, 0.75)));
+      expect(tester.binding.hasScheduledFrame, isFalse);
+
+      // A new generation's cursor, read before its geometry, is drawn once
+      // the geometry is.
+      h.api.viewValue = view(1, 480, 270, generation: 2);
+      h.api.viewerStatusValue = liveStatus(generation: 2, controlling: true);
+      tester.binding.scheduleFrame();
+      await tester.pump();
+      await tester.pump();
+      expect(layer, arrowAt(const Offset(0.25, 0.25)));
+      expect(tester.binding.hasScheduledFrame, isFalse);
 
       h.dispose();
     },

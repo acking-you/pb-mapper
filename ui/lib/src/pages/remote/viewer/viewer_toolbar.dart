@@ -12,6 +12,7 @@ import '../../../theme/glass.dart';
 import '../../../theme/metrics.dart';
 import '../../../theme/motion.dart';
 import '../../../theme/viewer_palette.dart';
+import '../remote_format.dart';
 import 'viewer_menus.dart';
 import 'viewer_overlays.dart';
 
@@ -432,8 +433,9 @@ class _ModeControl extends StatelessWidget {
   );
 }
 
-/// The path, round trip and frame rate; when the picture lags, its delay.
-/// A tap opens or closes the quality panel.
+/// The path, round trip and frame rate, dashes while the connection is not
+/// up; when the picture lags, its delay. A tap opens or closes the quality
+/// panel.
 class ToolbarStatusChip extends StatelessWidget {
   const ToolbarStatusChip({
     super.key,
@@ -453,18 +455,23 @@ class ToolbarStatusChip extends StatelessWidget {
       final l10n = context.l10n;
       final s = session.value;
       final st = stats.value;
-      final live = s.phase == DesktopPhase.live;
-      final degraded = live && st.degraded;
-      final path = viewerPathLabel(l10n, st.path.isEmpty ? s.path : st.path);
-      final dot = !live
-          ? ViewerPalette.textQuiet
-          : degraded
-          ? ViewerPalette.caution
-          : ViewerPalette.success;
-      final label = degraded ? l10n.viewerSlow(path) : path;
+      final (:degraded, :dot) = viewerLink(s, st);
+      final path = pathLabel(context, s.path);
+      // No word while the path is unknown, only its figures' dashes.
+      final label = degraded
+          ? l10n.viewerSlow(path)
+          : s.path == null
+          ? null
+          : path;
+      // Each figure right-aligned in fixed mono cells: the bar is centred, so
+      // a figure gaining a digit would shift every button.
+      String cell(Object? figure, int width) =>
+          '${figure ?? '—'}'.padLeft(width);
       final figures = degraded
-          ? '${st.pictureLatencyMs ?? '—'} ms'
-          : '${st.rttMs ?? '—'} ms · ${st.presentedFps.round()} fps';
+          ? '${cell(st.pictureLatencyMs, 4)} ms'
+          : s.connected
+          ? '${cell(st.rttMs, 3)} ms · ${cell(st.presentedFps.round(), 3)} fps'
+          : '${cell(null, 3)} ms · ${cell(null, 3)} fps';
       return _Pressable(
         onTap: onTap,
         tooltip: l10n.viewerQuality,
@@ -479,7 +486,7 @@ class ToolbarStatusChip extends StatelessWidget {
                 decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
               ),
               const SizedBox(width: 8),
-              if (label.isNotEmpty) ...[
+              if (label != null) ...[
                 Text(
                   label,
                   style: const TextStyle(

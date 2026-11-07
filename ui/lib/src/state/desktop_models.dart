@@ -216,6 +216,21 @@ class DesktopSessionView {
 
   bool get inputLive => fresh && controlling;
 
+  /// A target is set and the session has not ended: opening another
+  /// computer would end it.
+  bool get open =>
+      target != null &&
+      phase != DesktopPhase.idle &&
+      phase != DesktopPhase.ended;
+
+  /// The connection is up: live, recovering a stalled picture, or waiting
+  /// for the host's desktop. Only then are its figures and a view-only
+  /// grant current.
+  bool get connected =>
+      phase == DesktopPhase.live ||
+      phase == DesktopPhase.recovering ||
+      phase == DesktopPhase.waitingForDesktop;
+
   @override
   bool operator ==(Object other) =>
       other is DesktopSessionView &&

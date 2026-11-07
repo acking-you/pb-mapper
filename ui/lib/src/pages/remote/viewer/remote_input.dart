@@ -112,7 +112,7 @@ final class RemoteInput implements RemotePointerSink {
   set strokeActive(bool active) {
     if (active == _strokeActive) return;
     // A stroke starts from where the cursor is shown.
-    if (active && !predicting) _cursor = _remoteCursor() ?? _cursor;
+    if (active && !predicting) _cursor = _desktop.hostCursor.value ?? _cursor;
     _strokeActive = active;
     _cursorChanges.notify();
   }
@@ -126,7 +126,8 @@ final class RemoteInput implements RemotePointerSink {
   }
 
   @override
-  Offset get cursor => predicting ? _cursor : (_remoteCursor() ?? _cursor);
+  Offset get cursor =>
+      predicting ? _cursor : (_desktop.hostCursor.value ?? _cursor);
 
   @override
   set cursor(Offset normalized) {
@@ -521,23 +522,6 @@ final class RemoteInput implements RemotePointerSink {
     for (final m in ModifierLatch.order.reversed)
       if (mods.contains(m)) DesktopInput.key(m, false),
   ];
-
-  Offset? _remoteCursor() {
-    final view = _desktop.readView();
-    final g = _desktop.geometry.value;
-    if (view == null ||
-        g == null ||
-        !view.cursorVisible ||
-        view.generation != g.generation ||
-        g.displayWidth <= 0 ||
-        g.displayHeight <= 0) {
-      return null;
-    }
-    return Offset(
-      (view.cursorX / g.displayWidth).clamp(0.0, 1.0),
-      (view.cursorY / g.displayHeight).clamp(0.0, 1.0),
-    );
-  }
 
   static Set<RemoteKey> _physicalModifiers() {
     final keyboard = HardwareKeyboard.instance;

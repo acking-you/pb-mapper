@@ -2,18 +2,24 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/minimap.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/quality_panel.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_cursor_layer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_input.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_surface.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_viewport.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_gestures.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_menus.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_overlays.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_stage.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_toolbar.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 import 'package:pb_mapper_ui/src/theme/motion.dart';
@@ -183,7 +189,7 @@ void main() {
           picture: picture,
           jpegImage: ValueNotifier(null),
           stats: ValueNotifier(DesktopStats.none),
-          readView: () => null,
+          hostCursor: ValueNotifier(null),
           viewport: viewport,
           input: input,
           machine: machine,
@@ -287,6 +293,87 @@ void main() {
     viewport.dispose();
     latch.dispose();
     store.dispose();
+  });
+
+  testWidgets('the chip and the quality panel show no figures while the '
+      'connection is down', (tester) async {
+    _size(tester, const Size(1280, 800));
+    // The store keeps its last sample through a reconnect.
+    final session = ValueNotifier(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.reconnecting,
+      ),
+    );
+    final stats = ValueNotifier(
+      const DesktopStats(
+        path: 'direct',
+        rttMs: 18,
+        presentedFps: 60,
+        receivedBitrateBps: 8000000,
+        width: 1920,
+        height: 1080,
+        codec: 'h264',
+      ),
+    );
+    await tester.pumpWidget(
+      _app(
+        Column(
+          children: [
+            ToolbarStatusChip(session: session, stats: stats, onTap: () {}),
+            QualityPanel(session: session, stats: stats),
+          ],
+        ),
+      ),
+    );
+    // Neither the last sample nor zeros.
+    expect(find.textContaining(RegExp(r'\d (ms|fps|Mbps)')), findsNothing);
+    expect(find.textContaining(RegExp(r'— ms · +— fps')), findsOneWidget);
+
+    session.value = const DesktopSessionView(
+      target: _target,
+      phase: DesktopPhase.live,
+      path: 'direct',
+    );
+    await tester.pump();
+    expect(find.textContaining(RegExp(r'18 ms · +60 fps')), findsOneWidget);
+    expect(find.text('60 fps'), findsOneWidget);
+  });
+
+  testWidgets('the chip keeps its width as the figures change', (tester) async {
+    // The toolbar is centred around the chip: a wider figure would move
+    // every button.
+    final stats = ValueNotifier(
+      const DesktopStats(path: 'direct', rttMs: 8, presentedFps: 4),
+    );
+    await tester.pumpWidget(
+      _app(
+        Center(
+          child: ToolbarStatusChip(
+            key: const Key('viewer-quality-chip'),
+            session: ValueNotifier(
+              const DesktopSessionView(
+                target: _target,
+                phase: DesktopPhase.live,
+                path: 'direct',
+              ),
+            ),
+            stats: stats,
+            onTap: () {},
+          ),
+        ),
+      ),
+    );
+    final chip = find.byKey(const Key('viewer-quality-chip'));
+    final width = tester.getSize(chip).width;
+
+    stats.value = const DesktopStats(
+      path: 'direct',
+      rttMs: 128,
+      presentedFps: 120,
+    );
+    await tester.pump();
+    expect(tester.getSize(chip).width, width);
   });
 
   testWidgets(
@@ -444,6 +531,196 @@ void main() {
       expect(tester.element(scene), same(picture));
       expect(transform(), before);
       expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    'the virtual mouse follows its grip however many moves a frame brings',
+    (tester) async {
+      _size(tester, const Size(844, 390));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await prefs.setTouchMode(TouchMode.direct);
+      await prefs.setVirtualMouse(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump();
+      final pad = find.byKey(const Key('virtual-mouse'));
+      final before = tester.getTopLeft(pad);
+
+      // Two moves on the grip before the next frame: both count.
+      final grip = await tester.startGesture(
+        tester.getBottomLeft(pad) + const Offset(36, -14),
+      );
+      await grip.moveBy(const Offset(-10, -10));
+      await grip.moveBy(const Offset(-10, -10));
+      await tester.pump();
+      expect(tester.getTopLeft(pad), before + const Offset(-20, -20));
+      await grip.up();
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    "a phone's More panel keeps Disconnect in reach without scrolling",
+    (tester) async {
+      _size(tester, const Size(844, 390));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      var disconnected = 0;
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+            onDisconnect: () async => disconnected++,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('touch-more')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final disconnect = find.byKey(const Key('more-disconnect')).hitTestable();
+      expect(disconnect, findsOneWidget);
+      await tester.tap(disconnect);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(disconnected, 1);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    'a trackpad stroke repaints the cursor and the ring alone, and a pan the '
+    'stage and the minimap alone',
+    (tester) async {
+      _size(tester, const Size(844, 390));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump(kHintDuration);
+      final centre = tester.getCenter(
+        find.byKey(const Key('remote-scene-transform')),
+      );
+
+      /// While [moves] run, frame by frame, what paints lies under [owners]
+      /// and nowhere else.
+      Future<void> repaintsOnly(
+        List<Type> owners,
+        Future<void> Function() moves,
+      ) async {
+        var inside = 0;
+        final outside = <String>{};
+        debugOnProfilePaint = (o) {
+          final element = (o.debugCreator! as DebugCreator).element;
+          var owned = owners.contains(element.widget.runtimeType);
+          element.visitAncestorElements((e) {
+            owned |= owners.contains(e.widget.runtimeType);
+            return !owned;
+          });
+          if (owned) {
+            inside++;
+          } else {
+            outside.add('${element.widget.runtimeType}');
+          }
+        };
+        try {
+          await moves();
+        } finally {
+          debugOnProfilePaint = null;
+        }
+        expect(inside, isPositive);
+        expect(outside, isEmpty);
+      }
+
+      // Pinched in: the minimap shows. Two fingers pan on.
+      final a = await tester.startGesture(centre - const Offset(30, 0));
+      final b = await tester.startGesture(centre + const Offset(30, 0));
+      await tester.pump(kNavigateStart);
+      for (var i = 0; i < 5; i++) {
+        await a.moveBy(const Offset(-15, 0));
+        await b.moveBy(const Offset(15, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(find.byKey(const Key('minimap')), findsOneWidget);
+      await repaintsOnly([ViewerStage, Minimap], () async {
+        for (var i = 0; i < 3; i++) {
+          await a.moveBy(const Offset(4, 3));
+          await b.moveBy(const Offset(4, 3));
+          await tester.pump();
+        }
+      });
+      await a.up();
+      await b.up();
+      await tester.pump(const Duration(seconds: 1));
+
+      // One finger strokes the cursor, with the ring under it.
+      final finger = await tester.startGesture(centre);
+      await tester.pump(const Duration(milliseconds: 16));
+      await finger.moveBy(const Offset(20, 0));
+      await tester.pump(const Duration(milliseconds: 16));
+      await repaintsOnly([RemoteCursorLayer, TouchIndicator], () async {
+        for (var i = 0; i < 3; i++) {
+          await finger.moveBy(const Offset(3, 2));
+          await tester.pump();
+        }
+      });
+      await finger.up();
+      await tester.pump(const Duration(seconds: 1));
 
       await tester.pumpWidget(const SizedBox.shrink());
       demand.dispose();

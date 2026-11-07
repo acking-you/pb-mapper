@@ -50,59 +50,76 @@ class _SidePanel extends StatelessWidget {
   final List<ViewerMenuEntry> entries;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: ViewerPalette.panel,
-    child: Container(
-      width: 300,
-      height: double.infinity,
-      decoration: const BoxDecoration(
-        border: BorderDirectional(start: BorderSide(color: ViewerPalette.edge)),
-      ),
-      child: SafeArea(
-        left: false,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsetsDirectional.fromSTEB(20, 8, 8, 4),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Semantics(
-                      header: true,
-                      child: Text(
-                        title,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          color: ViewerPalette.text,
+  Widget build(BuildContext context) {
+    // A trailing danger item ends the session, so it stays in reach below
+    // the scrolling rows (ui §9.3); its hairline stands for the divider.
+    final split =
+        entries.lastIndexWhere((e) => !(e is ViewerMenuItem && e.danger)) + 1;
+    final footer = entries.sublist(split);
+    final rows = entries.take(split).toList();
+    if (footer.isNotEmpty && rows.lastOrNull is ViewerMenuDivider) {
+      rows.removeLast();
+    }
+    return Material(
+      color: ViewerPalette.panel,
+      child: Container(
+        width: 300,
+        height: double.infinity,
+        decoration: const BoxDecoration(
+          border: BorderDirectional(
+            start: BorderSide(color: ViewerPalette.edge),
+          ),
+        ),
+        child: SafeArea(
+          left: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(20, 8, 8, 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          title,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: ViewerPalette.text,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  IconButton(
-                    tooltip: context.l10n.close,
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(
-                      AppIcons.close,
-                      size: AppIconSize.button,
-                      color: ViewerPalette.textSecondary,
+                    IconButton(
+                      tooltip: context.l10n.close,
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(
+                        AppIcons.close,
+                        size: AppIconSize.button,
+                        color: ViewerPalette.textSecondary,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.only(bottom: 12),
-                children: [for (final entry in entries) _row(context, entry)],
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  children: [for (final entry in rows) _row(context, entry)],
+                ),
               ),
-            ),
-          ],
+              if (footer.isNotEmpty) ...[
+                Container(height: 1, color: ViewerPalette.edge),
+                for (final entry in footer) _row(context, entry),
+              ],
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 
   Widget _row(BuildContext context, ViewerMenuEntry entry) => switch (entry) {
     ViewerMenuSection(:final label) => Padding(

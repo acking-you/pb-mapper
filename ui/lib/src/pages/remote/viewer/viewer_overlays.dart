@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import '../../../../l10n/app_localizations.dart';
 import '../../../common/l10n_extension.dart';
 import '../../../shell/app_scope.dart';
 import '../../../state/desktop_store.dart';
@@ -13,6 +12,7 @@ import '../../../theme/app_icons.dart';
 import '../../../theme/fonts.dart';
 import '../../../theme/motion.dart';
 import '../../../theme/viewer_palette.dart';
+import '../remote_format.dart';
 import 'remote_viewport.dart';
 import 'viewer_menus.dart';
 import 'viewer_toolbar.dart' show kToolbarInsetExpanded;
@@ -90,18 +90,22 @@ ViewerOverlay viewerOverlayFor(DesktopSessionView s) => switch (s.phase) {
 
 /// The host shows this viewer its desktop but does not let it control.
 bool showsViewOnly(DesktopSessionView s) =>
-    s.target != null &&
-    !s.controlAllowed &&
-    (s.phase == DesktopPhase.live ||
-        s.phase == DesktopPhase.recovering ||
-        s.phase == DesktopPhase.waitingForDesktop);
+    s.target != null && !s.controlAllowed && s.connected;
 
-/// `direct` or `relay` in words; empty while the path is unknown.
-String viewerPathLabel(AppLocalizations l10n, String? path) => switch (path) {
-  'direct' => l10n.pathDirect,
-  'relay' => l10n.pathRelay,
-  _ => '',
-};
+/// The link as the toolbar's status chip and the touch quality button show
+/// it: slow only while live, and the colour of its dot.
+({bool degraded, Color dot}) viewerLink(DesktopSessionView s, DesktopStats st) {
+  final live = s.phase == DesktopPhase.live;
+  final degraded = live && st.degraded;
+  return (
+    degraded: degraded,
+    dot: !live
+        ? ViewerPalette.textQuiet
+        : degraded
+        ? ViewerPalette.caution
+        : ViewerPalette.success,
+  );
+}
 
 /// A ring that turns, in the viewer's signal blue.
 class ViewerSpinner extends StatelessWidget {
@@ -1003,7 +1007,6 @@ class _DegradedPill extends StatelessWidget {
         valueListenable: stats,
         builder: (context, st, _) {
           if (!st.degraded) return const SizedBox.shrink();
-          final l10n = context.l10n;
           return Positioned(
             left: 0,
             right: 0,
@@ -1014,7 +1017,9 @@ class _DegradedPill extends StatelessWidget {
                   height: 34,
                   tint: ViewerPalette.chrome,
                   leading: _dot(ViewerPalette.caution),
-                  text: l10n.viewerSlow(viewerPathLabel(l10n, st.path)),
+                  text: context.l10n.viewerSlow(
+                    pathLabel(context, session.value.path),
+                  ),
                   trailing: Text(
                     st.pictureLatencyMs == null
                         ? '—'

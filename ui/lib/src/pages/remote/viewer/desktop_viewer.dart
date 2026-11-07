@@ -265,7 +265,10 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
                       : PositionedDirectional(
                           top: _toolbar.inset.value,
                           end: 14,
-                          child: QualityPanel(stats: _desktop.stats),
+                          child: QualityPanel(
+                            session: _desktop.session,
+                            stats: _desktop.stats,
+                          ),
                         ),
                 ),
                 Positioned(
