@@ -125,6 +125,9 @@ abstract final class AppIcons {
   static const IconData quality = LucideIcons.gauge400;
   static const IconData phone = LucideIcons.smartphone400;
 
+  /// Asked for and not granted yet: the viewer's Control while it waits.
+  static const IconData pending = LucideIcons.loaderCircle400;
+
   // The 300 stroke, for 24 px and up.
   static const IconData relayLarge = LucideIcons.radioTower300;
   static const IconData remoteLarge = LucideIcons.monitor300;

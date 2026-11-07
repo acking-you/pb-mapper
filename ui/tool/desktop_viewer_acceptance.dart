@@ -27,8 +27,10 @@ import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_video.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
-import 'package:pb_mapper_ui/src/pages/desktop_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
+import 'package:pb_mapper_ui/src/theme/viewer_palette.dart';
 
 /// Samples before this are startup, not steady state.
 const _warmup = Duration(seconds: 5);
@@ -73,6 +75,8 @@ Future<void> main() async {
         texture = await createDesktopVideoTexture(instanceToken: instanceToken),
   );
   final run = _Run(api, store);
+  // What the app's viewer host holds while a viewer is on screen.
+  final demand = store.demand(DesktopDemand.viewer);
   var outcome = 'DESKTOP_ACCEPTANCE failed';
   try {
     final batteryStart = await _batteryCelsius();
@@ -90,7 +94,16 @@ Future<void> main() async {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: DesktopViewer(store: store),
+        home: Builder(
+          builder: (context) => Theme(
+            data: viewerTheme(context),
+            child: DesktopViewer(
+              desktop: store,
+              prefs: ViewerPrefs(persist: false),
+              title: 'acceptance',
+            ),
+          ),
+        ),
       ),
     );
     run.start();
@@ -149,6 +162,7 @@ Future<void> main() async {
       ),
     );
     await WidgetsBinding.instance.endOfFrame;
+    demand.dispose();
     await store.disconnect();
     store.dispose();
     service.dispose();
