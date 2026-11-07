@@ -152,8 +152,16 @@ class RemoteDesktop {
   String get title {
     final target = desktop.session.value.target;
     if (target == null) return '';
-    final id = target.computerId;
-    return (id == null ? null : computers.byId(id))?.name ?? target.name;
+    return rememberedComputer?.name ?? target.name;
+  }
+
+  /// The remembered computer the session is, as the list stands now: one
+  /// added with Remember on is from its first picture. A session connected
+  /// without remembering runs under an id of its own, so it is never a
+  /// saved computer's.
+  RemoteComputer? get rememberedComputer {
+    final id = desktop.session.value.target?.computerId;
+    return id == null ? null : computers.byId(id);
   }
 
   /// A session is open that opening another computer would end. One whose
@@ -269,7 +277,7 @@ class RemoteDesktop {
   /// list. A session left like this ends after [kPausedSessionTimeout].
   void back() {
     final session = desktop.session.value;
-    final id = _rememberedId(session);
+    final id = rememberedComputer?.id;
     final file = id == null ? null : computers.thumbnailFile(id);
     if (id != null &&
         file != null &&
@@ -312,13 +320,8 @@ class RemoteDesktop {
   /// A live change (D12), kept for a remembered computer.
   Future<void> setQuality(DesktopQuality quality) async {
     desktop.setQuality(quality);
-    final id = _rememberedId(desktop.session.value);
+    final id = rememberedComputer?.id;
     if (id != null) await computers.setQuality(id, quality);
-  }
-
-  String? _rememberedId(DesktopSessionView session) {
-    final id = session.target?.computerId;
-    return id != null && computers.byId(id) != null ? id : null;
   }
 
   /// Disconnects the store at once, before any await, so the picture is
@@ -326,7 +329,7 @@ class RemoteDesktop {
   Future<void> _endSession() async {
     final session = desktop.session.value;
     if (session.target == null) return;
-    final id = _rememberedId(session);
+    final id = rememberedComputer?.id;
     final file = id == null || session.phase == DesktopPhase.identityChanged
         ? null
         : computers.thumbnailFile(id);

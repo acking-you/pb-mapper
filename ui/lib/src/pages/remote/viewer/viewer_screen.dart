@@ -26,6 +26,11 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
   RemoteDesktop? _remote;
   String _title = '';
 
+  /// The session's computer is remembered: only such a computer has an
+  /// invitation to replace. One added with Remember on becomes so at its
+  /// first picture, during this viewing.
+  bool _remembered = false;
+
   /// A phone or a tablet.
   static bool get _touch =>
       defaultTargetPlatform == TargetPlatform.android ||
@@ -36,26 +41,42 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
     super.didChangeDependencies();
     final remote = AppScope.of(context).remote;
     if (identical(remote, _remote)) return;
-    _remote?.desktop.session.removeListener(_retitle);
-    _remote = remote..desktop.session.addListener(_retitle);
+    _unlisten();
+    _remote = remote;
+    remote.desktop.session.addListener(_sync);
+    remote.computers.addListener(_sync);
     _title = remote.title;
+    _remembered = remote.rememberedComputer != null;
     _setWindowTitle();
   }
 
   @override
   void dispose() {
-    _remote?.desktop.session.removeListener(_retitle);
+    _unlisten();
     _title = '';
     _setWindowTitle();
     super.dispose();
   }
 
-  /// The computer's name, which changes only with the session's target.
-  void _retitle() {
-    final title = _remote?.title ?? '';
-    if (title == _title) return;
-    setState(() => _title = title);
-    _setWindowTitle();
+  void _unlisten() {
+    _remote?.desktop.session.removeListener(_sync);
+    _remote?.computers.removeListener(_sync);
+  }
+
+  /// The computer's name, and whether it is remembered: they change with
+  /// the session's target and with the remembered computers.
+  void _sync() {
+    final remote = _remote;
+    if (remote == null) return;
+    final title = remote.title;
+    final remembered = remote.rememberedComputer != null;
+    if (title == _title && remembered == _remembered) return;
+    final retitled = title != _title;
+    setState(() {
+      _title = title;
+      _remembered = remembered;
+    });
+    if (retitled) _setWindowTitle();
   }
 
   void _setWindowTitle() {
@@ -72,9 +93,7 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
   /// computer's own: the only path that touches a computer whose identity
   /// changed. The add flow keeps its name.
   void _pasteNewInvite() {
-    final remote = _remote;
-    final id = remote?.desktop.session.value.target?.computerId;
-    final computer = id == null ? null : remote?.computers.byId(id);
+    final computer = _remote?.rememberedComputer;
     if (computer == null) return;
     unawaited(showAddComputer(context, replacing: computer));
   }
@@ -82,11 +101,7 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
   @override
   Widget build(BuildContext context) {
     final remote = AppScope.of(context).remote;
-    final id = remote.desktop.session.value.target?.computerId;
-    // Only a remembered computer has an invitation to replace.
-    final paste = id != null && remote.computers.byId(id) != null
-        ? _pasteNewInvite
-        : null;
+    final paste = _remembered ? _pasteNewInvite : null;
     return PopScope(
       canPop: false,
       // Back returns to the list with the session alive (paused).
