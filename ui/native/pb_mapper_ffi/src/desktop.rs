@@ -16,8 +16,8 @@ use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
     desktop::{
         self, ConnectError, ConnectStage, DesktopView, Host, HostOptions, InputError, Invitation,
-        InvitationError, InvitationFormat, KeyframeReason, QualityPreset, VideoCodec, VideoLimits,
-        Viewer, ViewerConfig,
+        InvitationError, InvitationFormat, KeyframeReason, QualityPreset, StopReason, VideoCodec,
+        VideoLimits, Viewer, ViewerConfig,
     },
 };
 use pb_mapper_core::checksum::{Credential, get_process_credential};
@@ -691,8 +691,9 @@ async fn revoke_trust_with_background(
             .map(|snapshot| state.cache_background(snapshot)),
         Err(failure) => Err(failure),
     };
+    // Its viewer hears that access was withdrawn, and does not reconnect.
     let stopped = if let Some(host) = slot.take() {
-        host.stop().await.map_err(err)
+        host.stop_with(StopReason::Revoked).await.map_err(err)
     } else {
         Ok(())
     };
@@ -943,28 +944,42 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             host.set_control_allowed(allow_control);
         }
         Request::HostEndSession => {
-            if let Some(host) = state.host.lock().await.as_ref() {
+            let slot = state.host.lock().await;
+            if let Some(host) = slot.as_ref() {
                 host.end_session();
                 return Ok(json!({}));
             }
-            // The background pipe gains `EndSession` with the helper's IPC v2.
-            let background = state
+            // The background host the UI shows: the service ends its session
+            // and keeps sharing.
+            #[cfg(windows)]
+            if state
                 .background
                 .lock()
                 .snapshot
                 .as_ref()
-                .is_some_and(background_enabled);
-            return Err(err(if background {
-                "the background service cannot end a session yet; stop background sharing instead"
-            } else {
-                "desktop is not shared"
-            }));
+                .is_some_and(background_enabled)
+            {
+                let snapshot = desktop::helper::background::end_session()
+                    .await
+                    .map_err(err)?;
+                state.cache_background(serde_json::to_value(snapshot).map_err(err)?);
+                return Ok(json!({}));
+            }
+            return Err(err("desktop is not shared"));
         }
+        // A display switch resumes at once with the same invitation, so the
+        // viewer reconnects; a renamed service is no longer what it reaches.
         Request::HostSetDisplay { display_id } => {
-            return restart_host(handle, |settings| settings.display_id = display_id).await;
+            return restart_host(handle, StopReason::Restarting, |settings| {
+                settings.display_id = display_id;
+            })
+            .await;
         }
         Request::HostRename { service } => {
-            return restart_host(handle, |settings| settings.service = service).await;
+            return restart_host(handle, StopReason::HostStopped, |settings| {
+                settings.service = service;
+            })
+            .await;
         }
         Request::InspectInvitation { invitation } => {
             return Ok(inspection(
@@ -1306,9 +1321,10 @@ async fn launch(
 
 /// `host_set_display` and `host_rename`: the running local host again, with
 /// its identity, on another display or under another service. Its viewer's
-/// session ends, and the viewer reconnects with the new invitation.
+/// session ends with `reason`.
 async fn restart_host(
     handle: &PbMapperHandle,
+    reason: StopReason,
     change: impl FnOnce(&mut trust::Settings),
 ) -> Result<Value, CtlError> {
     let state = &handle.desktop;
@@ -1345,7 +1361,7 @@ async fn restart_host(
         .transpose()?;
     // One owner at a time: the old registration goes before the new one.
     if let Some(host) = slot.take() {
-        host.stop().await.map_err(err)?;
+        host.stop_with(reason).await.map_err(err)?;
     }
     *state.host_identity.lock().await = None;
     let host = launch(&client, &settings, local.identity.clone()).await?;
