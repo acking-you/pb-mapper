@@ -7,27 +7,39 @@
 #include <mftransform.h>
 #include <wmcodecdsp.h>
 #include <codecapi.h>
+#include <wincodec.h>
 #include <wrl/client.h>
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
 #include <flutter/standard_method_codec.h>
 #include <flutter/texture_registrar.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
 using Microsoft::WRL::ComPtr;
 using Value = flutter::EncodableValue;
 using Map = flutter::EncodableMap;
+using Reply = std::unique_ptr<flutter::MethodResult<Value>>;
+using Clock = std::chrono::steady_clock;
+constexpr UINT kWake = WM_APP + 0x413;
 constexpr uint32_t kMaxBytes = 4 * 1024 * 1024;
+constexpr int64_t kSnapshotWidth = 320;
+constexpr float kSnapshotQuality = 0.8f;
+constexpr auto kSnapshotDeadline = std::chrono::milliseconds(300);
 
 // The video C ABI of pb_mapper_ffi.dll (desktop_video.rs). The runner does
 // not link the DLL: it resolves these from the copy Dart already loaded.
@@ -106,6 +118,43 @@ int64_t Number(const Map& map, const char* key) {
   if (const auto* value = std::get_if<int32_t>(&it->second)) return *value;
   throw std::runtime_error("Invalid video field");
 }
+std::wstring Path(const Map& map, const char* key) {
+  const auto it = map.find(Value(key));
+  const auto* utf8 = it == map.end() ? nullptr : std::get_if<std::string>(&it->second);
+  if (!utf8 || utf8->empty()) throw std::runtime_error("Missing snapshot path");
+  const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8->data(), static_cast<int>(utf8->size()), nullptr, 0);
+  if (size <= 0) throw std::runtime_error("Invalid snapshot path");
+  std::wstring path(static_cast<size_t>(size), L'\0');
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8->data(), static_cast<int>(utf8->size()), path.data(), size);
+  return path;
+}
+
+// Snapshot replies, completed on the platform thread: the decoder thread
+// queues them and posts kWake, and DesktopVideo::HandleMessage drains them.
+struct Replies {
+  explicit Replies(HWND value) : window(value) {}
+  std::mutex mutex;
+  HWND window;
+  bool posted = false;
+  std::vector<std::pair<Reply, bool>> ready;
+  void Send(Reply reply, bool ok) {
+    std::lock_guard<std::mutex> lock(mutex);
+    ready.emplace_back(std::move(reply), ok);
+    if (!posted) { posted = true; PostMessage(window, kWake, 0, 0); }
+  }
+  void Drain() {
+    std::vector<std::pair<Reply, bool>> done;
+    { std::lock_guard<std::mutex> lock(mutex); done.swap(ready); posted = false; }
+    for (auto& entry : done) entry.first->Success(Value(entry.second));
+  }
+};
+
+struct SnapshotRequest {
+  std::wstring path;
+  uint32_t max_width = 0;
+  Clock::time_point deadline;
+  Reply reply;
+};
 
 // "Media Foundation DXVA (<adapter>)", cut to the 64 bytes the report takes
 // without splitting a UTF-8 sequence.
@@ -124,6 +173,88 @@ std::string DecoderName(IDXGIAdapter* adapter) {
     name = name.substr(0, end) + ")";
   }
   return name;
+}
+
+// D23: `texture` box-filtered (WIC Fant) to at most max_width and encoded as
+// JPEG q80. It is written beside the path, flushed, then moved over it, but
+// not past the deadline: by then Dart has its answer and the old picture stays.
+bool WriteSnapshot(ID3D11Texture2D* texture, const SnapshotRequest& request) {
+  ComPtr<ID3D11Device> device;
+  texture->GetDevice(&device);
+  ComPtr<ID3D11DeviceContext> context;
+  device->GetImmediateContext(&context);
+  D3D11_TEXTURE2D_DESC desc{};
+  texture->GetDesc(&desc);
+  desc.Usage = D3D11_USAGE_STAGING;
+  desc.BindFlags = 0;
+  desc.MiscFlags = 0;
+  desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  ComPtr<ID3D11Texture2D> staging;
+  Check(device->CreateTexture2D(&desc, nullptr, &staging), "Allocate snapshot");
+  context->CopyResource(staging.Get(), texture);
+  ComPtr<IWICImagingFactory> factory;
+  Check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)), "Create imaging factory");
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  Check(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Read snapshot");
+  // The bitmap copies the pixels, so the staging texture unmaps at once.
+  ComPtr<IWICBitmap> picture;
+  const HRESULT copied = factory->CreateBitmapFromMemory(desc.Width, desc.Height, GUID_WICPixelFormat32bppBGR,
+      mapped.RowPitch, mapped.RowPitch * desc.Height, static_cast<BYTE*>(mapped.pData), &picture);
+  context->Unmap(staging.Get(), 0);
+  Check(copied, "Copy snapshot");
+  const UINT width = std::min<UINT>(request.max_width, desc.Width);
+  const UINT height = std::max<UINT>(1, static_cast<UINT>((static_cast<uint64_t>(desc.Height) * width + desc.Width / 2) / desc.Width));
+  ComPtr<IWICBitmapScaler> scaler;
+  Check(factory->CreateBitmapScaler(&scaler), "Create snapshot scaler");
+  Check(scaler->Initialize(picture.Get(), width, height, WICBitmapInterpolationModeFant), "Scale snapshot");
+  ComPtr<IWICFormatConverter> converter;
+  Check(factory->CreateFormatConverter(&converter), "Create snapshot converter");
+  Check(converter->Initialize(scaler.Get(), GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, nullptr, 0.0,
+      WICBitmapPaletteTypeCustom), "Convert snapshot");
+  ComPtr<IStream> stream;
+  Check(CreateStreamOnHGlobal(nullptr, TRUE, &stream), "Allocate JPEG");
+  ComPtr<IWICBitmapEncoder> encoder;
+  Check(factory->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &encoder), "Create JPEG encoder");
+  Check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache), "Start JPEG");
+  ComPtr<IWICBitmapFrameEncode> frame;
+  ComPtr<IPropertyBag2> options;
+  Check(encoder->CreateNewFrame(&frame, &options), "Create JPEG frame");
+  PROPBAG2 option{};
+  option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+  VARIANT quality;
+  VariantInit(&quality);
+  quality.vt = VT_R4;
+  quality.fltVal = kSnapshotQuality;
+  Check(options->Write(1, &option, &quality), "Set JPEG quality");
+  Check(frame->Initialize(options.Get()), "Start JPEG frame");
+  Check(frame->SetSize(width, height), "Size JPEG");
+  WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+  Check(frame->SetPixelFormat(&format), "Set JPEG format");
+  Check(frame->WriteSource(converter.Get(), nullptr), "Encode JPEG");
+  Check(frame->Commit(), "Finish JPEG frame");
+  Check(encoder->Commit(), "Finish JPEG");
+  HGLOBAL memory = nullptr;
+  Check(GetHGlobalFromStream(stream.Get(), &memory), "Get JPEG");
+  STATSTG stat{};
+  Check(stream->Stat(&stat, STATFLAG_NONAME), "Measure JPEG");
+  const DWORD size = static_cast<DWORD>(stat.cbSize.QuadPart);
+
+  std::error_code ignored;
+  std::filesystem::create_directories(std::filesystem::path(request.path).parent_path(), ignored);
+  const std::wstring temporary = request.path + L".tmp";
+  const HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) throw std::runtime_error("Create snapshot file");
+  const void* bytes = GlobalLock(memory);
+  DWORD written = 0;
+  const bool flushed = bytes && WriteFile(file, bytes, size, &written, nullptr) && written == size && FlushFileBuffers(file);
+  if (bytes) GlobalUnlock(memory);
+  CloseHandle(file);
+  if (!flushed || Clock::now() > request.deadline ||
+      !MoveFileExW(temporary.c_str(), request.path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    DeleteFileW(temporary.c_str());
+    return false;
+  }
+  return true;
 }
 
 struct Frame {
@@ -158,8 +289,10 @@ struct SurfaceLease {
 // units straight from Rust; nothing of the video crosses Dart.
 class Viewer : public std::enable_shared_from_this<Viewer> {
  public:
-  Viewer(flutter::TextureRegistrar* registrar, std::shared_ptr<const VideoLibrary> video, ComPtr<IDXGIAdapter> adapter)
-      : registrar_(registrar), video_(std::move(video)), adapter_(std::move(adapter)), decoder_name_(DecoderName(adapter_.Get())) {}
+  Viewer(flutter::TextureRegistrar* registrar, std::shared_ptr<const VideoLibrary> video, std::shared_ptr<Replies> replies,
+         ComPtr<IDXGIAdapter> adapter)
+      : registrar_(registrar), video_(std::move(video)), replies_(std::move(replies)), adapter_(std::move(adapter)),
+        decoder_name_(DecoderName(adapter_.Get())) {}
   void Start() {
     std::weak_ptr<Viewer> weak = shared_from_this();
     texture_ = std::make_unique<flutter::TextureVariant>(flutter::GpuSurfaceTexture(
@@ -184,6 +317,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     const int64_t consumer = video_->attach(source);
     if (consumer <= 0) throw std::runtime_error("Video source unavailable (" + std::to_string(consumer) + ")");
     consumer_ = static_cast<uint64_t>(consumer);
+    { std::lock_guard<std::mutex> lock(snapshot_mutex_); running_ = true; }
     worker_ = std::thread([this, consumer] { Run(static_cast<uint64_t>(consumer)); });
   }
   // Platform thread. Detaching wakes a blocked pull, so the join is prompt.
@@ -197,6 +331,25 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     Detach();
     auto keep_alive = shared_from_this();
     registrar_->UnregisterTexture(id_, [keep_alive] {});
+  }
+  // Platform thread. A running decoder thread takes the request between two
+  // pulls, and steady video never makes it wait for a timeout. With no
+  // thread, this one writes the picture. One request at a time.
+  void Snapshot(std::wstring path, uint32_t max_width, Reply reply) {
+    SnapshotRequest request{std::move(path), max_width, Clock::now() + kSnapshotDeadline, std::move(reply)};
+    bool busy = false;
+    {
+      std::lock_guard<std::mutex> lock(snapshot_mutex_);
+      if (running_) {
+        busy = snapshot_.has_value();
+        if (!busy) {
+          snapshot_ = std::move(request);
+          snapshot_requested_ = true;
+          return;
+        }
+      }
+    }
+    request.reply->Success(Value(!busy && Capture(request)));
   }
   Map Stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -247,6 +400,32 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       }
     }
     return &lease->descriptor;
+  }
+  // The picture the compositor acquired last, which is the one on screen.
+  bool Capture(const SnapshotRequest& request) {
+    std::shared_ptr<Surface> surface;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (borrowed_) surface = borrowed_->surface;
+    }
+    if (!surface) return false;
+    try {
+      return WriteSnapshot(surface->texture.Get(), request);
+    } catch (const std::exception& e) {
+      OutputDebugStringA((std::string("Desktop video snapshot failed: ") + e.what() + "\n").c_str());
+      return false;
+    }
+  }
+  // Decoder thread, after a pull returned.
+  void ServiceSnapshot() {
+    std::optional<SnapshotRequest> request;
+    {
+      std::lock_guard<std::mutex> lock(snapshot_mutex_);
+      request.swap(snapshot_);
+    }
+    if (!request) return;
+    const bool ok = Capture(*request);
+    replies_->Send(std::move(request->reply), ok);
   }
   // Decoder thread. The next keyframe recreates the decoder in a new revision.
   void Fail(uint64_t consumer, const std::string& reason) {
@@ -544,7 +723,17 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       } else if (r != kVideoTimeout) {
         break;  // Closed, detached or invalid: this consumer is done.
       }
+      // After every return, a unit included: steady video never times out.
+      if (snapshot_requested_.exchange(false)) ServiceSnapshot();
     }
+    // A request that raced the exit is served here; later ones by the
+    // platform thread.
+    {
+      std::lock_guard<std::mutex> lock(snapshot_mutex_);
+      running_ = false;
+    }
+    snapshot_requested_ = false;
+    ServiceSnapshot();
     video_->detach(consumer);
     decoder.reset();
     if (SUCCEEDED(mf_)) MFShutdown();
@@ -553,6 +742,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
 
   flutter::TextureRegistrar* registrar_;
   std::shared_ptr<const VideoLibrary> video_;
+  std::shared_ptr<Replies> replies_;
   ComPtr<IDXGIAdapter> adapter_;
   const std::string decoder_name_;
   std::unique_ptr<flutter::TextureVariant> texture_;
@@ -568,6 +758,13 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
   int64_t consumed_frame_ = 0;
   uint64_t consumed_revision_ = 0;
   std::string last_recovery_;
+  // Set with snapshot_ for the decoder thread, which checks it after each pull.
+  std::atomic<bool> snapshot_requested_{false};
+  std::mutex snapshot_mutex_;
+  // Guarded by snapshot_mutex_: the pending request, and whether a decoder
+  // thread will take it.
+  std::optional<SnapshotRequest> snapshot_;
+  bool running_ = false;
   // The decoder thread's own; reset by Attach while no thread runs.
   int64_t generation_ = -1, last_ = 0;
   bool awaiting_key_ = true, paused_ = false;
@@ -582,8 +779,9 @@ struct DesktopVideo::Impl {
   std::unique_ptr<flutter::MethodChannel<Value>> channel;
   // Resolved by the first create: Dart has loaded the DLL by then.
   std::shared_ptr<const VideoLibrary> video;
+  std::shared_ptr<Replies> replies;
   std::map<int64_t, std::shared_ptr<Viewer>> viewers;
-  explicit Impl(flutter::FlutterEngine* value) : engine(value) {
+  Impl(flutter::FlutterEngine* value, HWND window) : engine(value), replies(std::make_shared<Replies>(window)) {
     registrar = flutter::PluginRegistrarManager::GetInstance()->GetRegistrar<flutter::PluginRegistrarWindows>(engine->GetRegistrarForPlugin("PbMapperDesktopVideo"));
     channel = std::make_unique<flutter::MethodChannel<Value>>(engine->messenger(), "pb_mapper/desktop_video", &flutter::StandardMethodCodec::GetInstance());
     channel->SetMethodCallHandler([this](const auto& call, auto result) {
@@ -595,7 +793,7 @@ struct DesktopVideo::Impl {
           if (viewers.size() >= 2) throw std::runtime_error("Desktop texture limit reached");
           ComPtr<IDXGIAdapter> adapter;
           engine->GetGraphicsAdapter(&adapter);
-          auto viewer = std::make_shared<Viewer>(registrar->texture_registrar(), video, std::move(adapter));
+          auto viewer = std::make_shared<Viewer>(registrar->texture_registrar(), video, replies, std::move(adapter));
           viewer->Start();
           viewers.emplace(viewer->id(), viewer);
           result->Success(Value(viewer->id()));
@@ -609,6 +807,12 @@ struct DesktopVideo::Impl {
           viewer->Attach(static_cast<uint64_t>(Number(*args, "source")));
           result->Success();
         } else if (call.method_name() == "detach") { viewer->Detach(); result->Success(); }
+        else if (call.method_name() == "snapshot") {
+          const int64_t width = args->find(Value("maxWidth")) == args->end() ? kSnapshotWidth : Number(*args, "maxWidth");
+          if (width <= 0) throw std::runtime_error("Invalid snapshot width");
+          auto path = Path(*args, "path");
+          viewer->Snapshot(std::move(path), static_cast<uint32_t>(std::min<int64_t>(width, UINT32_MAX)), std::move(result));
+        }
         else if (call.method_name() == "dispose") { viewers.erase(found); viewer->Close(); result->Success(); }
         else if (call.method_name() == "stats") result->Success(Value(viewer->Stats()));
         else result->NotImplemented();
@@ -619,6 +823,9 @@ struct DesktopVideo::Impl {
     channel->SetMethodCallHandler(nullptr);
     for (auto& entry : viewers) entry.second->Close();
     viewers.clear();
+    // Every decoder thread has stopped. Answer the snapshots they served
+    // while the engine and its messenger still exist.
+    replies->Drain();
   }
   // D9: Dart and this runner must reach one library instance, or the decoder
   // would pull from a registry Dart never filled. Fails closed.
@@ -633,7 +840,10 @@ struct DesktopVideo::Impl {
   }
 };
 
-DesktopVideo::DesktopVideo(flutter::FlutterEngine* engine, HWND) : impl_(std::make_unique<Impl>(engine)) {}
+DesktopVideo::DesktopVideo(flutter::FlutterEngine* engine, HWND window) : impl_(std::make_unique<Impl>(engine, window)) {}
 DesktopVideo::~DesktopVideo() = default;
-// Nothing is posted to the window yet; snapshot replies will be.
-bool DesktopVideo::HandleMessage(UINT) { return false; }
+bool DesktopVideo::HandleMessage(UINT message) {
+  if (message != kWake) return false;
+  impl_->replies->Drain();
+  return true;
+}

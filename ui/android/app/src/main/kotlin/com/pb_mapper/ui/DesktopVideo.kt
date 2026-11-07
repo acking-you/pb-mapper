@@ -1,5 +1,6 @@
 package com.pb_mapper.ui
 
+import android.graphics.Bitmap
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
@@ -9,10 +10,14 @@ import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
+import android.view.PixelCopy
 import android.view.Surface
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
@@ -22,8 +27,8 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Native H.264 into a Flutter texture. Access units come from Rust on a
  * feeder thread and never cross Dart; presentation receipts and keyframe
- * requests go straight back to Rust. The channel only creates, binds and
- * tears down textures.
+ * requests go straight back to Rust. The channel only creates, binds,
+ * snapshots and tears down textures.
  */
 @Suppress("DEPRECATION")
 class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegistry) {
@@ -49,6 +54,12 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                             result.success(null)
                         }
                         "detach" -> { viewer.detach(); result.success(null) }
+                        "snapshot" -> {
+                            val path = call.argument<String>("path")?.takeIf { it.isNotEmpty() } ?: error("Missing snapshot path")
+                            val maxWidth = call.argument<Number>("maxWidth")?.toInt() ?: SNAPSHOT_WIDTH
+                            require(maxWidth > 0) { "Invalid snapshot width" }
+                            viewer.snapshot(path, maxWidth) { result.success(it) }
+                        }
                         "stats" -> viewer.stats(result, call.argument<Boolean>("timings") != false)
                         "dispose" -> { viewers.remove(id); viewer.dispose(); result.success(null) }
                         else -> result.notImplemented()
@@ -165,6 +176,9 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
         private var lastProgress = 0L
         private var codec: MediaCodec? = null
         private var active: FrameSize? = null
+        // The size of the picture last released to the surface, which is what
+        // a snapshot reads. It outlives the codec that drew it.
+        private var lastPicture: FrameSize? = null
         private var lastPresentedGeneration = -1L
         private var lastPresentedFrameId = 0L
         private var pts = 0L
@@ -305,6 +319,56 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             }
         }
 
+        /**
+         * D23: the picture last released to the texture, as a JPEG at most
+         * [maxWidth] wide, written beside [path] and renamed over it. Replies
+         * on the main thread. It replies false with no picture, when PixelCopy
+         * cannot read the surface (R6), or once [SNAPSHOT_TIMEOUT_MS] pass, and
+         * a late picture never replaces [path]. Dispose never waits for it.
+         */
+        fun snapshot(path: String, maxWidth: Int, reply: (Boolean) -> Unit) {
+            val settled = AtomicBoolean()
+            val expire = Runnable { if (settled.compareAndSet(false, true)) reply(false) }
+            fun settle(ok: Boolean) {
+                if (!settled.compareAndSet(false, true)) return
+                main.removeCallbacks(expire)
+                main.post { reply(ok) }
+            }
+            main.postDelayed(expire, SNAPSHOT_TIMEOUT_MS)
+            val posted = worker.post {
+                val size = lastPicture
+                if (closed || size == null) return@post settle(false)
+                val width = minOf(maxWidth, size.width)
+                val height = ((size.height.toLong() * width + size.width / 2) / size.width).toInt().coerceAtLeast(1)
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                val temporary = File("$path.tmp")
+                try {
+                    // Scales the surface's last queued buffer into the bitmap.
+                    PixelCopy.request(surface, bitmap, { copied ->
+                        val written = copied == PixelCopy.SUCCESS && writeJpeg(bitmap, temporary)
+                        bitmap.recycle()
+                        // Claim the reply before the rename: past the deadline
+                        // Dart already has false, and the old picture stays.
+                        if (written && settled.compareAndSet(false, true)) {
+                            main.removeCallbacks(expire)
+                            val moved = temporary.renameTo(File(path))
+                            if (!moved) temporary.delete()
+                            main.post { reply(moved) }
+                        } else {
+                            temporary.delete()
+                            settle(false)
+                        }
+                    }, worker)
+                } catch (e: IllegalArgumentException) {
+                    Log.w(TAG, "Cannot snapshot the desktop video surface", e)
+                    bitmap.recycle()
+                    settle(false)
+                }
+            }
+            // The worker has quit, and the texture is gone with it.
+            if (!posted) settle(false)
+        }
+
         fun dispose() {
             stopFeeder()
             closed = true
@@ -428,6 +492,7 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                 if (output.render && frame != null && frame.revision == feed.revision) {
                     surfacePtsUs = output.ptsUs
                     surfaceReleasedAtMs = SystemClock.elapsedRealtime()
+                    lastPicture = active
                     diagnostics?.let { metrics ->
                         frame.releasedNs = System.nanoTime()
                         metrics.readyToRelease.add(frame.releasedNs - output.readyNs)
@@ -528,6 +593,25 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
     companion object {
         private const val TAG = "PbDesktopVideo"
         private const val MAX_BYTES = 4 * 1024 * 1024
+        private const val SNAPSHOT_WIDTH = 320
+        private const val SNAPSHOT_QUALITY = 80
+        private const val SNAPSHOT_TIMEOUT_MS = 300L
+
+        // JPEG q80, flushed to disk before the caller renames it into place.
+        private fun writeJpeg(bitmap: Bitmap, file: File): Boolean = try {
+            file.parentFile?.mkdirs()
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, SNAPSHOT_QUALITY, out).also { compressed ->
+                    if (compressed) {
+                        out.flush()
+                        out.fd.sync()
+                    }
+                }
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "Cannot write the desktop snapshot", e)
+            false
+        }
 
         private fun hardware(codec: MediaCodec): Boolean =
             if (Build.VERSION.SDK_INT >= 29) {
