@@ -1425,12 +1425,7 @@ async fn enable_host(
         relay: config.server_address.clone(),
         namespace: credential.key_id(),
     };
-    let previous = tokio::task::spawn_blocking({
-        let directory = directory.clone();
-        move || trust::load(&directory)
-    })
-    .await
-    .map_err(err)??;
+    let previous = load_trust(directory.clone()).await?;
     if !allow_install
         && !previous.as_ref().is_some_and(|saved| {
             saved.matches(&scope) && saved.settings.background && saved.settings.auto_start
