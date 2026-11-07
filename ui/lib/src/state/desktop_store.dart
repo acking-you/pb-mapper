@@ -359,7 +359,14 @@ class DesktopStore {
       final snapshot = await _api.hostStatus();
       if (_disposed || read <= _hostApplied) return;
       _hostApplied = read;
-      _host = snapshot;
+      // A lifecycle call holds the host, so it is unknown, not gone: keep
+      // the one this store has until a read that is not busy.
+      _host = snapshot.busy
+          ? DesktopHostSnapshot(
+              host: _host?.host,
+              background: snapshot.background,
+            )
+          : snapshot;
       _hostStatusRead = true;
     } catch (_) {
       // A failed poll keeps the last state; actions report their own errors.

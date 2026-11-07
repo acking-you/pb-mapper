@@ -837,16 +837,22 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         }
         Request::HostStatus => {
             let background = state.background_status(handle.runtime.handle());
-            // A slow helper management call holds the host lifecycle lock, but
-            // must never delay a status poll. The invitation stays beside the
-            // status, so nothing that serialises a status carries the secret.
-            let host = state.host.try_lock().ok().and_then(|slot| {
-                slot.as_ref().map(|host| {
-                    let invitation = host.invitation();
-                    json!({"status": host.status(), "service": invitation.service, "invitation": invitation.encode()})
-                })
-            });
-            return Ok(json!({"host": host, "background": background}));
+            // A lifecycle call (a display switch, a rename, a helper action
+            // waiting on UAC) holds the host lock, but must never delay a
+            // status poll. `busy` says the host is then unknown, not absent.
+            // The invitation stays beside the status, so nothing that
+            // serialises a status carries the secret.
+            let (host, busy) = match state.host.try_lock() {
+                Ok(slot) => (
+                    slot.as_ref().map(|host| {
+                        let invitation = host.invitation();
+                        json!({"status": host.status(), "service": invitation.service, "invitation": invitation.encode()})
+                    }),
+                    false,
+                ),
+                Err(_) => (None, true),
+            };
+            return Ok(json!({"host": host, "busy": busy, "background": background}));
         }
         Request::BackgroundAction { action } => {
             return background_action(handle, &action).await;
@@ -2057,13 +2063,15 @@ mod tests {
             snapshot["enabled"] = json!(true);
             handle.desktop.cache_background(snapshot.clone());
             // A blocked service mutation cannot hold up host status, which
-            // still shows the pending background grant.
+            // reads the held lock as busy and still shows the pending
+            // background grant.
             let status =
                 tokio::time::timeout(Duration::from_secs(1), call(&handle, Request::HostStatus))
                     .await
                     .unwrap()
                     .unwrap();
             assert!(status["host"].is_null());
+            assert_eq!(status["busy"], true);
             assert_eq!(status["background"]["enabled"], true);
             drop(lifecycle);
 

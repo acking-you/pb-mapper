@@ -245,6 +245,12 @@ void main() {
     );
     expect(view().sharing, isTrue);
     expect(view().invitation, FakeDesktopApi.localInvitation);
+    // A poll while a lifecycle call holds the host keeps it; the next read
+    // that is not busy says what became of it.
+    api.hostSnapshot = const DesktopHostSnapshot(busy: true);
+    await tester.pump(const Duration(seconds: 1));
+    expect(view().sharing, isTrue);
+    expect(view().invitation, FakeDesktopApi.localInvitation);
     await store.stopHost();
     expect(view().sharing, isFalse);
     expect(view().configured, isTrue);
