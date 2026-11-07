@@ -37,6 +37,17 @@ void _lifecycle(WidgetTester tester, List<AppLifecycleState> states) {
   }
 }
 
+/// A host whose stop never returns until [wedge] completes.
+class _WedgedStopApi extends FakeDesktopApi {
+  final wedge = Completer<void>();
+
+  @override
+  Future<void> stopHost({bool onExit = false}) async {
+    await super.stopHost(onExit: onExit);
+    await wedge.future;
+  }
+}
+
 void main() {
   testWidgets(
     'input is sent with the geometry generation only and dropped when not live',
@@ -297,6 +308,23 @@ void main() {
       );
       next.dispose();
     }
+  });
+
+  testWidgets('quitting stops only this app\'s host and session, bounded', (
+    tester,
+  ) async {
+    final api = _WedgedStopApi();
+    final store = DesktopStore(api);
+    var done = false;
+    unawaited(store.shutdown().then((_) => done = true));
+    await tester.pump(const Duration(milliseconds: 1500));
+    expect(done, isTrue);
+    expect(api.argsOf('host_stop'), [
+      {'on_exit': true},
+    ]);
+    expect(api.ops, contains('disconnect'));
+    api.wedge.complete();
+    store.dispose();
   });
 
   testWidgets('a second connect during an attempt connects the new target', (

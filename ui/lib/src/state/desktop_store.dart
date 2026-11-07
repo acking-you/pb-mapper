@@ -42,6 +42,9 @@ const _snapshotBound = Duration(milliseconds: 300);
 const _controlRetry = Duration(seconds: 1);
 const _statsInterval = Duration(seconds: 1);
 
+/// The host's 1 s `STOP_WRITE_TIMEOUT`, plus a worker isolate's spawn.
+const _shutdownBound = Duration(milliseconds: 1500);
+
 /// Stop reasons that reconnect with backoff; `protocol` does too, a bounded
 /// number of times in a row.
 const _retryableStops = {
@@ -1741,6 +1744,21 @@ class DesktopStore {
 
   // ------------------------------------------------------------- dispose
 
+  /// Quitting: ends this app's sessions so each far side hears why — a
+  /// viewer of the in-app host is told `host_stopped`, and the host this app
+  /// views sees a clean close. The service's background host is not this
+  /// app's to stop. Bounded, so a wedged native call cannot hold the exit.
+  Future<void> shutdown() async {
+    try {
+      await Future.wait([
+        _disconnectNative(),
+        _api.stopHost(onExit: true).catchError((Object _) {}),
+      ]).timeout(_shutdownBound);
+    } on TimeoutException {
+      // Exit anyway: the far side then sees the transport close.
+    }
+  }
+
   void dispose() {
     if (_disposed) return;
     _cancelHostResume();
@@ -1764,8 +1782,7 @@ class DesktopStore {
       unawaited(texture.dispose().catchError((Object _) {}));
     }
     _jpegImage.value?.dispose();
-    unawaited(_api.disconnect().catchError((Object _) {}));
-    unawaited(_api.stopHost(onExit: true).catchError((Object _) {}));
+    unawaited(shutdown());
     _hostView.dispose();
     _session.dispose();
     _geometry.dispose();

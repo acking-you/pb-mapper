@@ -262,7 +262,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       await TrayService.instance.initialize(
         statusProvider: () async => _trayStatus(),
         showApp: TrayService.instance.showFromTray,
-        quitApp: _quit,
+        quitApp: () => unawaited(_quitFromTray()),
         onDisconnectViewer: () => unawaited(_store.desktop.endViewerSession()),
         onStopSharing: () => unawaited(_store.desktop.stopHost()),
         strings: _trayStrings(),
@@ -349,6 +349,16 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     _allowExit = true;
     _shutdown();
     exit(0);
+  }
+
+  /// Quit from the tray ends sharing and viewing first, so the other
+  /// computer is told why instead of losing the connection. An update's or
+  /// the helper hand-off's quit is a restart and keeps [_quit].
+  Future<void> _quitFromTray() async {
+    if (_allowExit) return;
+    _allowExit = true;
+    await _store.desktop.shutdown();
+    _quit();
   }
 
   @override
