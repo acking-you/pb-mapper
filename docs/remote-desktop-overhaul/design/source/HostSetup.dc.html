@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>首次开启远程控制</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+a{color:#1B6FC8}a:hover{color:#124A8C}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; display: flex; background: #EAEAE8; font-family: Inter, 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif; color: #1D1D1F; overflow: hidden">
+  <div style="width: 232px; height: 900px; flex: none">
+    <dc-import name="AppRail" hint-size="232px,900px"></dc-import>
+  </div>
+  <main style="flex: 1; min-width: 0; margin: 8px 8px 8px 0; border-radius: 18px; background: #F4F4F2; box-shadow: 0 1px 2px rgba(0,0,0,0.05), 0 8px 30px rgba(0,0,0,0.05); display: flex; flex-direction: column; overflow: hidden">
+    <header style="height: 64px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 16px 0 32px">
+      <h1 style="margin: 0; font-size: 20px; font-weight: 600; flex: 1">远程桌面</h1>
+      <div style="display: flex; color: #4A4A4D">
+        <button type="button" aria-label="最小化" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10" stroke="currentColor" stroke-width="1"></path></svg></button>
+        <button type="button" aria-label="最大化" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"></rect></svg></button>
+        <button type="button" aria-label="关闭" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1"></path></svg></button>
+      </div>
+    </header>
+
+    <div style="flex: 1; display: grid; grid-template-columns: 560px minmax(0, 1fr); gap: 20px; padding: 4px 32px 32px; align-items: start">
+
+      <section aria-labelledby="setup-title" style="background: #FFFFFF; border-radius: 20px; padding: 28px; display: flex; flex-direction: column; gap: 24px; box-shadow: 0 1px 2px rgba(0,0,0,0.04)">
+        <div style="display: flex; align-items: center; gap: 14px">
+          <div style="width: 44px; height: 44px; border-radius: 12px; background: #F2F2F0; color: #4A4A4D; display: flex; align-items: center; justify-content: center; flex: none">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="13" rx="2"></rect><path d="M8 21h8M12 17v4"></path></svg>
+          </div>
+          <div style="flex: 1">
+            <h2 id="setup-title" style="margin: 0; font-size: 17px; font-weight: 600">这台电脑</h2>
+            <div style="font-size: 12.5px; color: #6E6E73; margin-top: 2px">尚未开启远程控制</div>
+          </div>
+          <span style="display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 13px; background: #EDEDEB; color: #4A4A4D; font-size: 12.5px; font-weight: 500"><span style="width: 7px; height: 7px; border-radius: 4px; background: #8E8E93"></span>未共享</span>
+        </div>
+
+        <div style="font-size: 22px; font-weight: 600; line-height: 1.35">用手机或另一台电脑，<br>随时看到并操作这台电脑</div>
+
+        <ol style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px">
+          <li style="display: flex; gap: 14px">
+            <span style="width: 26px; height: 26px; border-radius: 13px; background: #1D1D1F; color: #FFFFFF; font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex: none">1</span>
+            <div>
+              <div style="font-size: 14.5px; font-weight: 600">Windows 请求一次管理员批准</div>
+              <div style="font-size: 13px; color: #4A4A4D; margin-top: 3px; line-height: 1.5">安装受保护的辅助服务，远程时也能操作 UAC 提示和锁屏。</div>
+            </div>
+          </li>
+          <li style="display: flex; gap: 14px">
+            <span style="width: 26px; height: 26px; border-radius: 13px; background: #EAEAE8; color: #1D1D1F; font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex: none">2</span>
+            <div>
+              <div style="font-size: 14.5px; font-weight: 600">应用自动重启并回到这里</div>
+              <div style="font-size: 13px; color: #4A4A4D; margin-top: 3px; line-height: 1.5">已有的隧道和配置保持不变。</div>
+            </div>
+          </li>
+          <li style="display: flex; gap: 14px">
+            <span style="width: 26px; height: 26px; border-radius: 13px; background: #EAEAE8; color: #1D1D1F; font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex: none">3</span>
+            <div>
+              <div style="font-size: 14.5px; font-weight: 600">得到一条私密邀请</div>
+              <div style="font-size: 13px; color: #4A4A4D; margin-top: 3px; line-height: 1.5">复制给另一台电脑，或让手机扫码。之后一直有效，直到你撤销。</div>
+            </div>
+          </li>
+        </ol>
+
+        <div style="display: flex; flex-direction: column; border-top: 1px solid #E4E4E2">
+          <label style="display: flex; align-items: center; height: 52px; border-bottom: 1px solid #E4E4E2; font-size: 13.5px; gap: 12px">
+            <span style="flex: 1">允许远程操作鼠标和键盘</span>
+            <input type="checkbox" role="switch" checked aria-label="允许远程操作鼠标和键盘" style="width: 40px; height: 24px; accent-color: #1D1D1F; margin: 0">
+          </label>
+          <div style="display: flex; align-items: center; height: 52px; font-size: 13.5px">
+            <span style="flex: 1">共享的显示器</span>
+            <button type="button" style="border: none; background: transparent; font: inherit; color: #1D1D1F; display: flex; align-items: center; gap: 6px; padding: 0">显示器 1 · 2560 × 1440
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+            </button>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 12px">
+          <button type="button" style="height: 48px; border-radius: 24px; border: none; background: #1D1D1F; color: #FFFFFF; font: inherit; font-size: 15px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path></svg>
+            开启远程控制
+          </button>
+          <div style="display: flex; justify-content: space-between; align-items: center; font-size: 13px">
+            <a href="#">只共享普通桌面（不安装辅助服务）</a>
+            <span style="color: #6E6E73">关闭窗口后仍在后台共享</span>
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="empty-title" style="background: #FFFFFF; border-radius: 20px; padding: 20px 20px 24px; display: flex; flex-direction: column; box-shadow: 0 1px 2px rgba(0,0,0,0.04); min-height: 520px">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 4px 4px 12px">
+          <h2 id="empty-title" style="margin: 0; font-size: 17px; font-weight: 600">远程电脑</h2>
+        </div>
+        <div style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; padding: 40px 24px">
+          <svg width="120" height="84" viewBox="0 0 120 84" fill="none" stroke="#C8C8C6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="8" y="6" width="76" height="50" rx="5"></rect>
+            <path d="M34 72h24M46 56v16"></path>
+            <rect x="88" y="26" width="26" height="50" rx="5" fill="#FFFFFF"></rect>
+            <path d="M98 70h6"></path>
+            <path d="M60 31h20" stroke="#1B6FC8" stroke-dasharray="3 4"></path>
+          </svg>
+          <div style="font-size: 16px; font-weight: 600">还没有远程电脑</div>
+          <div style="font-size: 13.5px; color: #4A4A4D; line-height: 1.6; max-width: 360px">在另一台电脑的 pb-mapper 里开启远程控制，复制它的私密邀请，粘贴到这里。</div>
+          <button type="button" style="margin-top: 6px; height: 40px; padding: 0 18px; border-radius: 20px; border: 1px solid #1D1D1F; background: #FFFFFF; color: #1D1D1F; font: inherit; font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+            添加电脑
+          </button>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

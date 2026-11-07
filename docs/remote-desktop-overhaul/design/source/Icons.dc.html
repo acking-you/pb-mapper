@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>图标系统</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+@font-face{font-family:'Lucide300';src:url('/_blob/e92d3009c6525dabf4975b8b247c6482') format('truetype');font-display:block}
+@font-face{font-family:'Lucide400';src:url('/_blob/a6aeeb5b79025df4b25845f5abacdb51') format('truetype');font-display:block}
+</style>
+</helmet>
+<div style="width: 1440px; height: 2440px; box-sizing: border-box; padding: 40px; background: #F4F4F2; font-family: Inter, 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif; color: #1D1D1F; display: flex; flex-direction: column; gap: 24px">
+  <header>
+    <h1 style="margin: 0; font-size: 26px; font-weight: 700">图标系统</h1>
+    <p style="margin: 6px 0 0; font-size: 14px; color: #4A4A4D">全部来自 Lucide（lucide_icons_flutter 3.1.25），按含义命名在 AppIcons 里。标“新”的是远程桌面新增，标“改”的是换了图形。</p>
+  </header>
+
+  <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px">
+    <div style="background: #FFFFFF; border-radius: 16px; padding: 18px 20px">
+      <div style="font-size: 15px; font-weight: 600">只用一套</div>
+      <div style="font-size: 13px; color: #4A4A4D; line-height: 1.6; margin-top: 6px">页面、菜单、托盘都用 AppIcons。窗口按钮按 Windows 原生样式自绘，不再用 Material Icons。</div>
+    </div>
+    <div style="background: #FFFFFF; border-radius: 16px; padding: 18px 20px">
+      <div style="font-size: 15px; font-weight: 600">粗细跟着尺寸走</div>
+      <div style="font-size: 13px; color: #4A4A4D; line-height: 1.6; margin-top: 6px">20 px 及以下用 400，在 100% 和 125% 缩放下线条不发虚；24 px 及以上用 300，保持轻盈。</div>
+    </div>
+    <div style="background: #FFFFFF; border-radius: 16px; padding: 18px 20px">
+      <div style="font-size: 15px; font-weight: 600">四档尺寸</div>
+      <div style="font-size: 13px; color: #4A4A4D; line-height: 1.6; margin-top: 6px">16 标签与行内 · 18 按钮与菜单 · 20 侧栏与底栏 · 24 空状态与图块。</div>
+    </div>
+    <div style="background: #FFFFFF; border-radius: 16px; padding: 18px 20px">
+      <div style="font-size: 15px; font-weight: 600">颜色跟着文字</div>
+      <div style="font-size: 13px; color: #4A4A4D; line-height: 1.6; margin-top: 6px">图标用所在文字的颜色。状态靠彩色圆点表达，只有“这台电脑”和正在传输的隧道用蓝色。</div>
+    </div>
+  </div>
+
+  <section style="background: #FFFFFF; border-radius: 16px; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px">
+    <div style="display: flex; align-items: baseline; gap: 12px">
+      <h2 style="margin: 0; font-size: 16px; font-weight: 600">300 与 400 对比</h2>
+      <span style="font-size: 13px; color: #4A4A4D">同一组导航图标；20 px 时 300 只有约 1.25 px 线宽，侧栏里看起来发灰</span>
+    </div>
+    <sc-for list="{{ weightRows }}" as="row" hint-placeholder-count="3">
+      <div style="display: grid; grid-template-columns: 80px minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 24px; height: 44px; border-top: 1px solid #EFEFED">
+        <span style="font-family: 'Geist Mono', ui-monospace, monospace; font-size: 13px; color: #4A4A4D">{{ row.label }}</span>
+        <div style="display: flex; align-items: center; gap: 22px">
+          <span style="width: 40px; font-size: 12px; color: #6E6E73">300</span>
+          <sc-for list="{{ navGlyphs }}" as="g" hint-placeholder-count="6"><span aria-hidden="true" style="font-family: Lucide300; line-height: 1; font-size: {{ row.px }}px">{{ g }}</span></sc-for>
+        </div>
+        <div style="display: flex; align-items: center; gap: 22px">
+          <span style="width: 40px; font-size: 12px; color: #6E6E73">400</span>
+          <sc-for list="{{ navGlyphs }}" as="g" hint-placeholder-count="6"><span aria-hidden="true" style="font-family: Lucide400; line-height: 1; font-size: {{ row.px }}px">{{ g }}</span></sc-for>
+        </div>
+      </div>
+    </sc-for>
+  </section>
+
+  <section style="background: #FFFFFF; border-radius: 16px; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px">
+    <div style="display: flex; align-items: baseline; gap: 12px">
+      <h2 style="margin: 0; font-size: 16px; font-weight: 600">窗口按钮（自绘）</h2>
+      <span style="font-size: 13px; color: #4A4A4D">每个 46 × 32，图形 10 px、1 px 线，与 Windows 原生按钮一致；关闭悬停为 #C42B1C</span>
+    </div>
+    <div style="display: flex; gap: 48px; align-items: center">
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <span style="font-size: 12px; color: #6E6E73">常态</span>
+        <div style="display: flex; color: #4A4A4D">
+          <button type="button" aria-label="最小化" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" stroke-width="1"></path></svg></button>
+          <button type="button" aria-label="最大化" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1"></rect></svg></button>
+          <button type="button" aria-label="关闭" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" stroke-width="1"></path></svg></button>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <span style="font-size: 12px; color: #6E6E73">已最大化（还原）</span>
+        <div style="display: flex; color: #4A4A4D">
+          <button type="button" aria-label="最小化" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" stroke-width="1"></path></svg></button>
+          <button type="button" aria-label="还原" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="2.5" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1"></rect><path d="M2.5 2.5V1.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1" fill="none" stroke="currentColor" stroke-width="1"></path></svg></button>
+          <button type="button" aria-label="关闭" style="width: 46px; height: 32px; border: none; background: transparent; color: inherit; display: flex; align-items: center; justify-content: center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" stroke-width="1"></path></svg></button>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <span style="font-size: 12px; color: #6E6E73">悬停</span>
+        <div style="display: flex; gap: 8px; color: #1D1D1F">
+          <button type="button" aria-label="最大化（悬停）" style="width: 46px; height: 32px; border: none; border-radius: 6px; background: rgba(0,0,0,0.06); color: inherit; display: flex; align-items: center; justify-content: center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1"></rect></svg></button>
+          <button type="button" aria-label="关闭（悬停）" style="width: 46px; height: 32px; border: none; border-radius: 6px; background: #C42B1C; color: #FFFFFF; display: flex; align-items: center; justify-content: center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" stroke-width="1"></path></svg></button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <sc-for list="{{ sections }}" as="sec" hint-placeholder-count="6">
+    <section style="display: flex; flex-direction: column; gap: 10px">
+      <div style="display: flex; align-items: baseline; gap: 12px; height: 30px">
+        <h2 style="margin: 0; font-size: 16px; font-weight: 600">{{ sec.title }}</h2>
+        <span style="font-size: 13px; color: #4A4A4D">{{ sec.note }}</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 8px">
+        <sc-for list="{{ sec.items }}" as="item" hint-placeholder-count="10">
+          <div style="position: relative; height: 112px; border-radius: 14px; background: #FFFFFF; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px">
+            <span aria-hidden="true" style="font-family: Lucide300; font-size: 26px; line-height: 1; color: #1D1D1F">{{ item.glyph }}</span>
+            <span style="font-size: 13px; margin-top: 4px">{{ item.label }}</span>
+            <span style="font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11px; color: #6E6E73">{{ item.name }}</span>
+            <sc-if value="{{ item.hasBadge }}" hint-placeholder-val="{{ false }}">
+              <span style="position: absolute; top: 8px; right: 8px; height: 18px; padding: 0 6px; border-radius: 9px; background: #E5EFFA; color: #124A8C; font-size: 11px; display: inline-flex; align-items: center">{{ item.badge }}</span>
+            </sc-if>
+            <sc-if value="{{ item.hasHint }}" hint-placeholder-val="{{ false }}">
+              <span style="position: absolute; top: 9px; left: 10px; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 10.5px; color: #8E8E93; text-decoration: line-through">{{ item.hint }}</span>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+  </sc-for>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":2440}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const g = (cp) => String.fromCodePoint(cp);
+    const raw = [
+      { title: '导航', note: '侧栏与手机底栏，20 px，用 400', items: [
+        ['总览', 'orbit', 58343], ['隧道', 'route', 58686, 'cable'], ['远程桌面', 'monitor', 57629, null, true],
+        ['中继', 'radio-tower', 58372], ['日志', 'scroll-text', 58463], ['设置', 'settings', 57684]] },
+      { title: '隧道与路径', note: '共享、连接与流量走的路', items: [
+        ['共享', 'arrow-up-from-line', 58458], ['连接', 'arrow-down-to-line', 58453], ['直连', 'zap', 57780],
+        ['部分直连', 'split', 58432], ['TCP 载体', 'arrow-right-left', 58391], ['QUIC 载体', 'layers', 58665],
+        ['延迟', 'activity', 57400], ['这台电脑', 'laptop', 57805], ['服务', 'server', 57683], ['路由器', 'router', 58303],
+        ['诊断', 'stethoscope', 58097], ['中继在线', 'cloud', 57480, 'wifi'], ['中继离线', 'cloud-off', 57485, 'wifi-off']] },
+      { title: '远程桌面', note: '全部新增，替换 PR #51 里的 Material Icons', items: [
+        ['开启共享', 'screen-share', 57679, null, true], ['停止共享', 'screen-share-off', 57680, null, true],
+        ['远程电脑', 'monitor-smartphone', 58274, null, true], ['仅查看', 'eye', 57530, null, true],
+        ['控制', 'mouse-pointer-2', 57795, null, true], ['键盘', 'keyboard', 57988, null, true],
+        ['快捷键', 'command', 57498, null, true], ['右键', 'mouse', 57998, null, true],
+        ['触控板', 'touchpad', 58441, null, true], ['直接触摸', 'pointer', 57832, null, true],
+        ['二维码', 'qr-code', 57823, null, true], ['扫码', 'scan-qr-code', 58870, null, true],
+        ['全屏', 'maximize', 57618, null, true], ['固定工具栏', 'pin', 57945, null, true],
+        ['断开', 'power', 57664, null, true], ['辅助服务', 'shield-check', 57855, null, true],
+        ['安全桌面', 'lock-keyhole', 58673, null, true], ['连接质量', 'gauge', 57791, null, true],
+        ['手机', 'smartphone', 57699, null, true]] },
+      { title: '操作', note: '按钮与菜单，18 px，用 400', items: [
+        ['新建', 'plus', 57661], ['关闭', 'x', 57778], ['复制', 'copy', 57502], ['编辑', 'pencil', 57849],
+        ['删除', 'trash-2', 57742], ['启动', 'play', 57660], ['停止', 'square', 57703], ['刷新', 'refresh-cw', 57669],
+        ['搜索', 'search', 57681], ['更多', 'ellipsis', 57526], ['导出', 'file-up', 58154], ['粘贴导入', 'clipboard-paste', 58344],
+        ['打开链接', 'external-link', 57529], ['清空', 'eraser', 57999], ['跟随最新', 'arrow-down', 57410], ['列表', 'list', 57606]] },
+      { title: '状态', note: '与彩色圆点一起出现，图标本身不上色', items: [
+        ['完成', 'check', 57452], ['正常', 'circle-check', 57894], ['提示', 'info', 57593], ['警告', 'triangle-alert', 57747],
+        ['错误', 'circle-alert', 57463], ['加密', 'lock', 57611], ['凭据', 'key-round', 58531], ['关联', 'link', 57602],
+        ['解除关联', 'unlink', 57756], ['显示', 'eye', 57530], ['隐藏', 'eye-off', 57531]] },
+      { title: '设置与方向', note: '主题、语言、更新与翻页', items: [
+        ['跟随系统', 'sun-moon', 58034], ['浅色', 'sun', 57720], ['深色', 'moon', 57630], ['语言', 'languages', 57598],
+        ['收藏', 'star', 57718], ['有更新', 'circle-fading-arrow-up', 58904], ['下载', 'download', 57522],
+        ['展开', 'chevron-down', 57453], ['进入', 'chevron-right', 57455], ['返回', 'arrow-left', 57416], ['前进', 'arrow-right', 57417]] }
+    ];
+    const sections = raw.map((s) => ({
+      title: s.title,
+      note: s.note,
+      items: s.items.map(([label, name, cp, was, isNew]) => ({
+        label, name, glyph: g(cp),
+        hasBadge: Boolean(was || isNew), badge: isNew ? '新' : '改',
+        hasHint: Boolean(was), hint: was || ''
+      }))
+    }));
+    const navGlyphs = [58343, 58686, 57629, 58372, 58463, 57684].map(g);
+    const weightRows = [{ label: '16 px', px: 16 }, { label: '20 px', px: 20 }, { label: '24 px', px: 24 }];
+    return { sections, navGlyphs, weightRows };
+  }
+}
+</script>
+</body>
+</html>

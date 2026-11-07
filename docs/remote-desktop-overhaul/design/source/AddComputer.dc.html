@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>添加远程电脑</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+a{color:#1B6FC8}a:hover{color:#124A8C}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; position: relative; display: flex; background: #EAEAE8; font-family: Inter, 'Noto Sans SC', 'Segoe UI', system-ui, sans-serif; color: #1D1D1F; overflow: hidden">
+  <div style="width: 232px; height: 900px; flex: none">
+    <dc-import name="AppRail" hint-size="232px,900px"></dc-import>
+  </div>
+  <div aria-hidden="true" style="flex: 1; margin: 8px 8px 8px 0; border-radius: 18px; background: #F4F4F2; padding: 84px 32px 32px; display: grid; grid-template-columns: 560px minmax(0, 1fr); gap: 20px; align-items: start">
+    <div style="height: 640px; border-radius: 20px; background: #FFFFFF"></div>
+    <div style="height: 420px; border-radius: 20px; background: #FFFFFF"></div>
+  </div>
+
+  <div style="position: absolute; inset: 0; background: rgba(20,20,22,0.32); display: flex; align-items: center; justify-content: center">
+    <section role="dialog" aria-modal="true" aria-labelledby="add-title" style="width: 560px; box-sizing: border-box; border-radius: 24px; background: #FFFFFF; padding: 24px 28px 28px; display: flex; flex-direction: column; gap: 20px; box-shadow: 0 2px 6px rgba(0,0,0,0.06), 0 24px 60px rgba(0,0,0,0.18)">
+      <div style="display: flex; align-items: center">
+        <h2 id="add-title" style="margin: 0; flex: 1; font-size: 18px; font-weight: 600">添加远程电脑</h2>
+        <button type="button" aria-label="关闭" style="width: 32px; height: 32px; border-radius: 10px; border: none; background: transparent; color: #4A4A4D; display: flex; align-items: center; justify-content: center">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
+        </button>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <label for="invite" style="font-size: 13px; color: #4A4A4D">私密邀请</label>
+        <div style="position: relative">
+          <textarea id="invite" rows="3" readonly style="width: 100%; box-sizing: border-box; resize: none; border-radius: 14px; border: 1.5px solid #1D1D1F; background: #F2F2F0; padding: 12px 88px 12px 14px; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 13px; line-height: 1.6; color: #1D1D1F">pbd1·k7HqT2v9••••••••••••••••••••••••••••••••••••••••Zx2Q</textarea>
+          <button type="button" style="position: absolute; right: 10px; top: 10px; height: 30px; padding: 0 10px; border-radius: 9px; border: 1px solid #E4E4E2; background: #FFFFFF; font: inherit; font-size: 12.5px; color: #1D1D1F; display: flex; align-items: center; gap: 5px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="2" width="8" height="4" rx="1"></rect><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path></svg>
+            粘贴
+          </button>
+        </div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px; background: #F4F8FD">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#1B6FC8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path></svg>
+        <div style="flex: 1; min-width: 0">
+          <div style="font-family: 'Geist Mono', ui-monospace, monospace; font-size: 13px">desktop:office-pc</div>
+          <div style="font-size: 12.5px; color: #4A4A4D; margin-top: 2px">已识别主机身份 · 权限：查看并控制 · 通过当前中继连接</div>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <label for="name" style="font-size: 13px; color: #4A4A4D">名称</label>
+        <input id="name" type="text" value="办公室电脑" style="height: 44px; box-sizing: border-box; border-radius: 14px; border: none; background: #F2F2F0; padding: 0 14px; font: inherit; font-size: 14px; color: #1D1D1F">
+      </div>
+
+      <div style="display: flex; flex-direction: column; border-top: 1px solid #E4E4E2">
+        <label style="display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid #E4E4E2">
+          <span style="flex: 1">
+            <span style="display: block; font-size: 14px">记住此电脑</span>
+            <span style="display: block; font-size: 12.5px; color: #6E6E73; margin-top: 2px">邀请加密保存在本机，可以随时移除</span>
+          </span>
+          <input type="checkbox" role="switch" checked aria-label="记住此电脑" style="width: 40px; height: 24px; accent-color: #1D1D1F; margin: 0">
+        </label>
+        <button type="button" style="display: flex; align-items: center; gap: 6px; height: 44px; border: none; background: transparent; padding: 0; font: inherit; font-size: 13.5px; color: #4A4A4D">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m9 6 6 6-6 6"></path></svg>
+          更多选项（仅使用中继）
+        </button>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px">
+        <button type="button" style="height: 40px; padding: 0 18px; border-radius: 20px; border: none; background: transparent; color: #1D1D1F; font: inherit; font-size: 14px">取消</button>
+        <button type="button" style="height: 40px; padding: 0 22px; border-radius: 20px; border: none; background: #1D1D1F; color: #FFFFFF; font: inherit; font-size: 14px; font-weight: 600">连接</button>
+      </div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
