@@ -68,6 +68,8 @@ pub(crate) struct CreditLedger {
     in_flight_bytes: usize,
     /// The oldest IDR in flight; probes written behind it are tainted.
     idr_inflight: Option<u64>,
+    /// When the last receipt that covered an IDR came in.
+    idr_received: Option<Instant>,
     /// `(receipt time, ack delay)` of the newest unit each receipt covered.
     ack_samples: VecDeque<(Instant, Duration)>,
     /// `(receipt time, bytes)` of every receipted unit.
@@ -84,6 +86,7 @@ impl CreditLedger {
             in_flight: VecDeque::new(),
             in_flight_bytes: 0,
             idr_inflight: None,
+            idr_received: None,
             ack_samples: VecDeque::new(),
             delivered: VecDeque::new(),
             delivery_since: None,
@@ -179,6 +182,9 @@ impl CreditLedger {
             self.in_flight_bytes -= sent.bytes as usize;
             self.delivered.push_back((now, sent.bytes));
             newest = Some(sent.sent_at);
+            if sent.keyframe {
+                self.idr_received = Some(now);
+            }
             self.in_flight.pop_front();
         }
         if let Some(sent_at) = newest {
@@ -213,6 +219,17 @@ impl CreditLedger {
 
     pub fn idr_inflight(&self) -> Option<u64> {
         self.idr_inflight
+    }
+
+    /// When a unit ready at `ready_at` began to age while it waits to be
+    /// written: when it was ready, or when the last IDR was receipted if that
+    /// came later. `None` while an IDR is in flight: waiting behind it is not
+    /// staleness, since that IDR is already the resync.
+    pub fn aging_since(&self, ready_at: Instant) -> Option<Instant> {
+        if self.idr_inflight.is_some() {
+            return None;
+        }
+        Some(self.idr_received.map_or(ready_at, |at| at.max(ready_at)))
     }
 
     pub fn view(&self) -> CreditView {
