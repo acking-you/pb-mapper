@@ -140,9 +140,9 @@ class DesktopStore {
   static final _framed = <DesktopStore>{};
   static bool _frameHooked = false;
 
-  /// [DesktopDemand.page] polls the host every second; [DesktopDemand.viewer]
-  /// is a viewer on screen: the session resumes while it is held and the
-  /// app is visible, and pauses otherwise (D13).
+  /// [DesktopDemand.page] polls the host every second where this device can
+  /// host; [DesktopDemand.viewer] is a viewer on screen: the session resumes
+  /// while it is held and the app is visible, and pauses otherwise (D13).
   ///
   /// Widgets take and give back demand in `initState` and `dispose`, inside
   /// a frame, so the session's change is published after that frame.
@@ -215,7 +215,7 @@ class DesktopStore {
   bool get _viewPolling => _visible && _sessionActive;
 
   void _schedulePolling() {
-    final hostEvery = _disposed || _restarting
+    final hostEvery = _disposed || _restarting || _cannotHost
         ? null
         : _pageDemand > 0
         ? _hostWithPage
@@ -290,7 +290,12 @@ class DesktopStore {
 
   bool _hostCurrent(int serial) => !_disposed && serial == _hostSerial;
 
+  /// The page already says this device cannot host. The capability is
+  /// fixed at build time, so nothing about the host can change.
+  bool get _cannotHost => _hostView.value.loaded && !_hostView.value.supported;
+
   Future<void> _onPageDemand() async {
+    if (_cannotHost) return;
     // An unreadable grant is read again on each visit, never on a timer.
     if (_hostView.value.loaded && _trustError == null) {
       try {

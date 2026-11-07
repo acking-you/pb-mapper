@@ -28,7 +28,8 @@ class RemotePage extends StatefulWidget {
 class _RemotePageState extends State<RemotePage> {
   AppStore? _store;
 
-  /// The store polls the host for this page while it is mounted.
+  /// The store polls the host for this page while it is mounted, where this
+  /// device can host.
   DesktopDemandHandle? _demand;
   bool _hostUnsupported = false, _hasComputers = false;
 

@@ -193,6 +193,24 @@ void main() {
     await tester.pump(const Duration(seconds: 10));
     expect(api.calls, isEmpty);
     store.dispose();
+
+    // A device that cannot host loads once, then polls nothing, on a timer
+    // or on the next visit.
+    final phoneApi = FakeDesktopApi()
+      ..available = const DesktopCapabilities(host: false);
+    final phone = DesktopStore(phoneApi);
+    var phonePage = phone.demand(DesktopDemand.page);
+    await tester.pump();
+    expect(phone.hostView.value.loaded, isTrue);
+    expect(phone.hostView.value.supported, isFalse);
+    phoneApi.calls.clear();
+    await tester.pump(const Duration(seconds: 10));
+    phonePage.dispose();
+    phonePage = phone.demand(DesktopDemand.page);
+    await tester.pump(const Duration(seconds: 2));
+    expect(phoneApi.calls, isEmpty);
+    phonePage.dispose();
+    phone.dispose();
   });
 
   testWidgets('a sharing or configured host always has its invitation', (
