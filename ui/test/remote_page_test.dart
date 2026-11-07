@@ -127,6 +127,12 @@ class _Camera extends MobileScannerPlatform {
 
 Finder _key(String key) => find.byKey(Key(key));
 
+/// The editable text inside the field [field] finds.
+EditableText _editable(WidgetTester tester, Finder field) =>
+    tester.widget<EditableText>(
+      find.descendant(of: field, matching: find.byType(EditableText)),
+    );
+
 /// Scrolls [finder] into view and taps it, without waiting for anything
 /// else to settle.
 Future<void> _tapIn(WidgetTester tester, Finder finder) async {
@@ -140,7 +146,8 @@ void main() {
   tearDown(() => InviteScanner.debugSupportedOverride = null);
 
   testWidgets(
-    'an invitation is recognised before connecting and never shown in full',
+    'an invitation is recognised before connecting, never shown in full, '
+    'and connects from the keyboard',
     (tester) async {
       final api = FakePbMapperApi();
       final vault = FakeRemoteComputerVault()
@@ -159,6 +166,7 @@ void main() {
       await settle(tester);
       await tester.tap(_key('remote-add'));
       await settle(tester);
+      expect(_editable(tester, _key('add-invite')).focusNode.hasFocus, isTrue);
 
       // A setup string is refused for what it is, and nothing connects.
       await tester.enterText(_key('add-invite'), 'pbmt1_not-an-invitation');
@@ -179,7 +187,15 @@ void main() {
       expect(find.textContaining('SECRET-TOKEN'), findsNothing);
       expect(tester.widget<SwitchListTile>(_key('add-remember')).value, isTrue);
 
-      await tester.tap(_key('add-connect'));
+      // Recognition moves to the name, selected so typing replaces it, and
+      // Enter there connects.
+      final name = _editable(tester, _key('add-name'));
+      expect(name.focusNode.hasFocus, isTrue);
+      expect(
+        name.controller.selection,
+        const TextSelection(baseOffset: 0, extentOffset: 'office-pc'.length),
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
       // The viewer's Connecting spinner never settles.
       for (var i = 0; i < 6; i++) {
         await tester.pump(const Duration(milliseconds: 50));

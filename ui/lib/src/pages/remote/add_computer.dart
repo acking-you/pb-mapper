@@ -225,7 +225,11 @@ class AddComputerController extends ChangeNotifier {
             : service);
     final typed = nameField.text.trim();
     if (typed.isEmpty || typed == _defaultName || duplicate != null) {
-      nameField.text = name;
+      // Selected, so a name typed into the focused field replaces it.
+      nameField.value = TextEditingValue(
+        text: name,
+        selection: TextSelection(baseOffset: 0, extentOffset: name.length),
+      );
     }
     _defaultName = name;
   }
@@ -267,8 +271,8 @@ class AddComputerController extends ChangeNotifier {
   }
 }
 
-/// Connect's action: the flow's result as it is when pressed, so it carries
-/// the name in the field then.
+/// Connect's action, and Enter's in the name: the flow's result as it is
+/// when pressed, so it carries the name in the field then.
 VoidCallback? _connect(BuildContext context, AddComputerController add) =>
     add.ready ? () => Navigator.of(context).pop(add.result()) : null;
 
@@ -323,12 +327,12 @@ class _AddComputerDialogState extends State<AddComputerDialog> {
               children: [
                 _Header(title: l10n.addTitle, size: 18),
                 const SizedBox(height: 20),
-                InviteField(controller: _add),
+                InviteField(controller: _add, autofocus: true),
                 if (_add.state == AddState.recognised) ...[
                   const SizedBox(height: 20),
                   RecognisedHostCard(controller: _add),
                   const SizedBox(height: 20),
-                  _NameField(controller: _add),
+                  _NameField(controller: _add, autofocus: true),
                 ],
                 const SizedBox(height: 20),
                 _Options(controller: _add),
@@ -548,8 +552,16 @@ class _Header extends StatelessWidget {
 /// The invitation: a field to paste or type it into, then its masked form
 /// once recognised.
 class InviteField extends StatefulWidget {
-  const InviteField({super.key, required this.controller});
+  const InviteField({
+    super.key,
+    required this.controller,
+    this.autofocus = false,
+  });
   final AddComputerController controller;
+
+  /// The dialog focuses the field at once; the sheet never does, because
+  /// its camera or clipboard comes first.
+  final bool autofocus;
 
   @override
   State<InviteField> createState() => _InviteFieldState();
@@ -623,6 +635,7 @@ class _InviteFieldState extends State<InviteField> {
               TextField(
                 key: const Key('add-invite'),
                 controller: _text,
+                autofocus: widget.autofocus,
                 minLines: 3,
                 maxLines: 3,
                 autocorrect: false,
@@ -775,8 +788,12 @@ class RecognisedHostCard extends StatelessWidget {
 }
 
 class _NameField extends StatelessWidget {
-  const _NameField({required this.controller});
+  const _NameField({required this.controller, this.autofocus = false});
   final AddComputerController controller;
+
+  /// The dialog moves to the name once the invitation is recognised, so
+  /// Enter connects; the sheet raises no keyboard over the host's card.
+  final bool autofocus;
 
   @override
   Widget build(BuildContext context) {
@@ -792,9 +809,11 @@ class _NameField extends StatelessWidget {
         TextField(
           key: const Key('add-name'),
           controller: controller.nameField,
+          autofocus: autofocus,
           enabled: controller.duplicate == null,
           inputFormatters: [computerNameLimit],
           decoration: InputDecoration(fillColor: cardFieldFill(scheme)),
+          onSubmitted: (_) => _connect(context, controller)?.call(),
         ),
       ],
     );
