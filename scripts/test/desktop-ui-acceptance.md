@@ -50,21 +50,28 @@ The bootstrap listens on `127.0.0.1:18747` only:
 From `ui/`:
 
 ```powershell
-flutter build apk --release --target tool/desktop_viewer_acceptance.dart `
+flutter build apk --release --split-per-abi --target-platform android-arm64 `
+  --target tool/desktop_viewer_acceptance.dart `
   --dart-define=setupUrl=http://127.0.0.1:18747/controller.json --dart-define=seconds=120 `
   --dart-define=quality=balanced
-adb install -r build\app\outputs\flutter-apk\app-release.apk
+adb install -r build\app\outputs\flutter-apk\app-arm64-v8a-release.apk
 adb reverse tcp:18747 tcp:18747
 ```
 
 Then start the installed app.
 
+- The x86_64 emulator takes `--target-platform android-x64` and installs
+  `app-x86_64-release.apk`.
+- Build split per ABI, as the release does: a split APK's versionCode is the
+  build number plus 2000 on arm64 or 4000 on x86_64 (2925 or 4925 at `+925`),
+  as the product's is. A universal build carries the bare build number, and
+  `adb install -r` refuses it over the product as a downgrade.
 - Relay-only runs add `--dart-define=relayOnly=true`. `deployed` writes no
   `relay_only` into `controller.json`, so the define decides. A local
   `controller.json` may still override `relay_only` and `seconds` (15..1800)
   without a rebuild.
 - `quality` (`quality`, `balanced` or `smooth`) is a report schema 2 define;
-  the schema 1 tool ignores it.
+  the Stage 1 tool, built from tag `ovh-g1`, ignores it.
 - Two optional schema 2 defines label the report: `case` (for example
   `--dart-define=case=A`) and `host`, the host's GPU and display refresh,
   which a viewer cannot see (for example
@@ -76,9 +83,11 @@ Then start the installed app.
 - The release build needs the pinned signing key
   (`ui/android/app/build.gradle.kts`). If it does not resolve, restore it (the
   build forbids generating a replacement), or build the acceptance APK with
-  `--profile`. If that APK's signature differs from the installed product's,
-  `adb install -r` fails: run `adb uninstall com.pb_mapper.ui` first, which
-  also deletes the phone's app data.
+  `--profile` (`app-arm64-v8a-profile.apk`). Only if that APK's signature
+  differs from the installed product's does `adb install -r` need
+  `adb uninstall com.pb_mapper.ui` first. Never answer any other failed
+  `install -r`, a downgrade above all, with an uninstall: it deletes the
+  phone's app data, and the relay credential and remembered computers with it.
 
 Never install the tool as the product entry. Reinstall the product APK
 afterwards.
@@ -162,8 +171,11 @@ One JSON object:
 
 ## Stages
 
-Stage 1 uses the report schema 1 tool; Stages 2 and 3 use the schema 2 tool
-that replaces it.
+Stage 1 needs the report schema 1 tool and the old app pipeline, which exist
+only at tag `ovh-g1`. Build its tool from a checkout of that tag with the
+split commands above; the tag's build number is also 925, so it installs with
+`-r` over a product of build 925. Stages 2 and 3 use this tree's schema 2
+tool, which replaces it.
 
 ### Stage 1: the old pipeline on the new core
 
