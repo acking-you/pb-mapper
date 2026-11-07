@@ -10,6 +10,7 @@ import 'package:pb_mapper_ui/src/pages/remote/remote_page.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_screen.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 import 'package:pb_mapper_ui/src/widgets/status.dart';
 
 import 'fake_desktop_api.dart';
@@ -64,6 +65,29 @@ class _UnreadableApi extends FakePbMapperApi {
 
   @override
   _UnreadableTrust get desktop => _host;
+}
+
+/// A host that can be re-keyed: its invitations name [fingerprint].
+class _RekeyedHost extends FakeDesktopApi {
+  String fingerprint = 'AB12-CD34-EF56-7890';
+
+  @override
+  Future<DesktopInvitationInfo> inspectInvitation(String text) async {
+    final info = await super.inspectInvitation(text);
+    return DesktopInvitationInfo(
+      service: info.service,
+      name: info.name,
+      fingerprint: fingerprint,
+      format: info.format,
+    );
+  }
+}
+
+class _RekeyedApi extends FakePbMapperApi {
+  final _host = _RekeyedHost();
+
+  @override
+  _RekeyedHost get desktop => _host;
 }
 
 /// The phone's camera, as mobile_scanner's platform sees it: it starts and
@@ -416,52 +440,80 @@ void main() {
   );
 
   testWidgets(
-    "a remembered computer whose identity changed takes the host's new "
-    'invitation from the viewer, keeping its record',
+    'a computer remembered while it is viewed, whose identity then changes, '
+    "takes the host's new invitation from the viewer in place of its record",
     (tester) async {
-      const id = '0123456789abcdef0123456789abcdef';
-      final api = FakePbMapperApi(serverServices: ['desktop:lab']);
-      final vault = FakeRemoteComputerVault()
-        ..records.add(
-          const RemoteComputer(
-            id: id,
-            name: 'Lab',
-            service: 'desktop:lab',
-            fingerprint: 'FFFF-0000-FFFF-0000',
-            relay: 'lb7666.top:7666',
-            namespace: 0,
-          ),
-        );
-      await pumpApp(tester, api, page: AppPage.remote, vault: vault);
-      api.desktop.failNext('connect', 'IDENTITY_CHANGED');
-      await _tapIn(tester, _key('computer-open-$id'));
+      final api = _RekeyedApi();
+      final vault = FakeRemoteComputerVault();
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.remote,
+        vault: vault,
+        viewerPrefs: prefs,
+      );
+      Future<void> connect(String invitation) async {
+        await tester.enterText(_key('add-invite'), invitation);
+        await tester.pump(const Duration(milliseconds: 300));
+        await settle(tester);
+        await tester.tap(_key('add-connect'));
+        // The viewer's Connecting spinner never settles.
+        for (var i = 0; i < 6; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+      }
+
+      Future<void> firstPicture() async {
+        api.desktop.viewerStatusValue = liveStatus();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump();
+      }
+
+      // Added with Remember on: the viewer opens before the computer is
+      // remembered, at its first picture.
+      await _tapIn(tester, _key('remote-add-empty'));
+      await settle(tester);
+      await connect('pbd1.lab.OLD-TOKEN-0123');
+      final remote = AppScope.of(
+        tester.element(find.byType(RemoteViewerScreen)),
+      ).remote;
+      final id = remote.desktop.session.value.target!.computerId!;
+      expect(remote.computers.byId(id), isNull);
+      await firstPicture();
+      expect(remote.computers.byId(id), isNotNull);
+
+      // Re-keyed, the host meets the reconnect with another identity.
+      api.desktop
+        ..fingerprint = 'FFFF-0000-FFFF-0000'
+        ..failNext('connect', 'IDENTITY_CHANGED')
+        ..viewerStatusValue = stoppedStatus('transport');
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(seconds: 1));
       await settle(tester);
       expect(_key('viewer-overlay-identityChanged'), findsOneWidget);
 
+      // The new invitation connects as that computer, by its id, and
+      // replaces its record at the first picture.
       final l10n = lookupAppLocalizations(const Locale('en'));
       await tester.tap(find.text(l10n.viewerPasteNewInvite));
       await settle(tester);
       const invitation = 'pbd1.lab.NEW-TOKEN-0123';
-      await tester.enterText(_key('add-invite'), invitation);
-      await tester.pump(const Duration(milliseconds: 300));
-      await settle(tester);
-      await tester.tap(_key('add-connect'));
-      // The viewer's Connecting spinner never settles.
-      for (var i = 0; i < 6; i++) {
-        await tester.pump(const Duration(milliseconds: 50));
-      }
-
-      // The new invitation connects as the same computer, kept by name; its
-      // record is replaced only at the first picture.
+      await connect(invitation);
       expect(api.desktop.argsOf('connect').last['invitation'], invitation);
-      final remote = AppScope.of(
-        tester.element(find.byType(RemoteViewerScreen)),
-      ).remote;
       expect(remote.desktop.session.value.target?.computerId, id);
-      expect(remote.title, 'Lab');
-      expect(vault.ops, isNot(contains('remember')));
+      await firstPicture();
+      expect(vault.records.map((c) => (c.id, c.fingerprint)), [
+        (id, 'FFFF-0000-FFFF-0000'),
+      ]);
       await finish(tester);
     },
+    // The touch viewer and the desktop viewer.
+    variant: const TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.windows,
+    }),
   );
 
   testWidgets(

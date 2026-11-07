@@ -155,15 +155,22 @@ class _TouchViewerState extends State<TouchViewer> {
   void didUpdateWidget(covariant TouchViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
     assert(identical(oldWidget.desktop, widget.desktop));
-    if (!identical(oldWidget.prefs, widget.prefs)) {
+    final prefs = !identical(oldWidget.prefs, widget.prefs);
+    if (prefs) {
       oldWidget.prefs.removeListener(_prefsChanged);
       widget.prefs.addListener(_prefsChanged);
+    }
+    // What the host offers can change while the viewer is up: Paste new
+    // invitation, once the computer is remembered.
+    if (prefs ||
+        (oldWidget.onPasteNewInvite == null) !=
+            (widget.onPasteNewInvite == null)) {
       _actions = _buildActions();
       _stage = _buildStage();
-      _prefsChanged();
     } else if (oldWidget.title != widget.title) {
       _stage = _buildStage();
     }
+    if (prefs) _prefsChanged();
   }
 
   @override
@@ -211,8 +218,8 @@ class _TouchViewerState extends State<TouchViewer> {
         : () => widget.onPasteNewInvite?.call(),
   );
 
-  /// Built once, and again only for a new title or preferences, so the
-  /// keyboard, the hints and the gutters never rebuild the picture.
+  /// Built once, and again only for a new title, preferences or actions, so
+  /// the keyboard, the hints and the gutters never rebuild the picture.
   Widget _buildStage() => Listener(
     onPointerDown: _touched,
     // A Bluetooth keyboard goes through the picture as on desktop; the

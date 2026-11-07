@@ -152,8 +152,16 @@ class RemoteDesktop {
   String get title {
     final target = desktop.session.value.target;
     if (target == null) return '';
-    final id = target.computerId;
-    return (id == null ? null : computers.byId(id))?.name ?? target.name;
+    return rememberedComputer?.name ?? target.name;
+  }
+
+  /// The remembered computer the session is, as the list stands now: one
+  /// added with Remember on is from its first picture. A session connected
+  /// without remembering runs under an id of its own, so it is never a
+  /// saved computer's.
+  RemoteComputer? get rememberedComputer {
+    final id = desktop.session.value.target?.computerId;
+    return id == null ? null : computers.byId(id);
   }
 
   /// A session is open that opening another computer would end. One whose

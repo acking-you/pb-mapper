@@ -70,6 +70,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   late final TouchGestureMachine _machine;
   late final ToolbarController _toolbar;
   late final AppLifecycleListener _lifecycle;
+  late ViewerActions _actions;
   bool _fullscreen = false, _panelHeld = false;
 
   DesktopStore get _desktop => widget.desktop;
@@ -90,6 +91,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
       haptic: viewerHaptic,
     );
     _toolbar = ToolbarController(pinned: widget.prefs.toolbarPinned)..start();
+    _actions = _buildActions();
     widget.prefs.addListener(_prefsChanged);
     _prefsChanged();
     // Local input only: what is on screen belongs to the viewer's host, and
@@ -113,6 +115,9 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
       widget.prefs.addListener(_prefsChanged);
       _prefsChanged();
     }
+    // What the host offers can change while the viewer is up: Paste new
+    // invitation, once the computer is remembered.
+    _actions = _buildActions();
   }
 
   @override
@@ -190,7 +195,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     if (text != null && text.isNotEmpty) _input.typeText(text);
   }
 
-  late final _actions = ViewerActions(
+  ViewerActions _buildActions() => ViewerActions(
     desktop: _desktop,
     input: _input,
     prefs: widget.prefs,
