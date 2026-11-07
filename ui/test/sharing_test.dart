@@ -81,6 +81,20 @@ void main() {
       );
       await settle(tester);
       expect(find.byKey(const Key('sharing-fallback')), findsOneWidget);
+      // One set of controls: the capsule under the barrier steps aside.
+      expect(
+        tester
+            .widget<Visibility>(
+              find
+                  .ancestor(
+                    of: find.byKey(const Key('sharing-indicator-stop')),
+                    matching: find.byType(Visibility),
+                  )
+                  .first,
+            )
+            .visible,
+        isFalse,
+      );
       await tester.tap(find.byKey(const Key('sharing-fallback-disconnect')));
       await tester.pump();
       expect(api.desktop.ops, contains('host_end_session'));

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/pages/remote/remote_format.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
 import 'package:pb_mapper_ui/src/state/remote_desktop.dart';
@@ -97,7 +98,14 @@ Future<void> removeComputer(BuildContext context, RemoteComputer c) async {
 /// losing its end, even while a keyboard composes the word under the cursor,
 /// and an input method's composition is cut with the text rather than
 /// dropped.
+///
+/// A name is shown in clear, so an edit that brings an invitation into it,
+/// a stray paste, is refused: its token is never shown. A name that
+/// already has one can still be edited.
 final computerNameLimit = TextInputFormatter.withFunction((old, value) {
+  if (carriesInvitation(value.text) && !carriesInvitation(old.text)) {
+    return old;
+  }
   if (value.text.runes.length <= kComputerNameMax) return value;
   if (old.text.runes.length == kComputerNameMax && old.selection.isCollapsed) {
     return old;

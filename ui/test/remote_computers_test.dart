@@ -181,6 +181,33 @@ void main() {
     expect(composed.composing, const TextRange(start: max - 1, end: max));
   });
 
+  test('a name refuses an invitation pasted over it, yet one that already '
+      'has one can still be edited', () {
+    // About 115 characters, as Rust encodes one: it fits a name whole.
+    final invitation = 'pbd1.${'A' * 110}';
+    const name = TextEditingValue(
+      text: 'office-pc',
+      selection: TextSelection(baseOffset: 0, extentOffset: 9),
+    );
+    final pasted = TextEditingValue(
+      text: invitation,
+      selection: TextSelection.collapsed(offset: invitation.length),
+    );
+    expect(computerNameLimit.formatEditUpdate(name, pasted), name);
+
+    // A backspace at its end.
+    final cut = TextEditingValue(
+      text: invitation.substring(0, invitation.length - 1),
+    );
+    expect(
+      computerNameLimit.formatEditUpdate(
+        TextEditingValue(text: invitation),
+        cut,
+      ),
+      cut,
+    );
+  });
+
   test('a changed identity is a conflict, not a duplicate, and a computer '
       'replaced or forgotten takes its thumbnail with it', () async {
     final dir = await Directory.systemTemp.createTemp('pbm-remote-');

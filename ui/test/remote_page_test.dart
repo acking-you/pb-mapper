@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
@@ -128,6 +129,12 @@ class _Camera extends MobileScannerPlatform {
 
 Finder _key(String key) => find.byKey(Key(key));
 
+/// The editable text inside the field [field] finds.
+EditableText _editable(WidgetTester tester, Finder field) =>
+    tester.widget<EditableText>(
+      find.descendant(of: field, matching: find.byType(EditableText)),
+    );
+
 /// Scrolls [finder] into view and taps it, without waiting for anything
 /// else to settle.
 Future<void> _tapIn(WidgetTester tester, Finder finder) async {
@@ -141,7 +148,8 @@ void main() {
   tearDown(() => InviteScanner.debugSupportedOverride = null);
 
   testWidgets(
-    'an invitation is recognised before connecting and never shown in full',
+    'an invitation is recognised before connecting, never shown in full, '
+    'and connects from the keyboard',
     (tester) async {
       final api = FakePbMapperApi();
       final vault = FakeRemoteComputerVault()
@@ -160,6 +168,7 @@ void main() {
       await settle(tester);
       await tester.tap(_key('remote-add'));
       await settle(tester);
+      expect(_editable(tester, _key('add-invite')).focusNode.hasFocus, isTrue);
 
       // A setup string is refused for what it is, and nothing connects.
       await tester.enterText(_key('add-invite'), 'pbmt1_not-an-invitation');
@@ -180,7 +189,15 @@ void main() {
       expect(find.textContaining('SECRET-TOKEN'), findsNothing);
       expect(tester.widget<SwitchListTile>(_key('add-remember')).value, isTrue);
 
-      await tester.tap(_key('add-connect'));
+      // Recognition moves to the name, selected so typing replaces it, and
+      // Enter there connects.
+      final name = _editable(tester, _key('add-name'));
+      expect(name.focusNode.hasFocus, isTrue);
+      expect(
+        name.controller.selection,
+        const TextSelection(baseOffset: 0, extentOffset: 'office-pc'.length),
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
       // The viewer's Connecting spinner never settles.
       for (var i = 0; i < 6; i++) {
         await tester.pump(const Duration(milliseconds: 50));
@@ -195,6 +212,69 @@ void main() {
       expect(find.byType(RemotePage), findsNothing);
       // Nothing is remembered before the first picture.
       expect(vault.ops, isNot(contains('remember')));
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'a name typed after the invitation is recognised is the one remembered',
+    (tester) async {
+      final api = FakePbMapperApi();
+      final vault = FakeRemoteComputerVault();
+      await pumpApp(tester, api, page: AppPage.remote, vault: vault);
+      await _tapIn(tester, _key('remote-add-empty'));
+      await settle(tester);
+      await tester.enterText(_key('add-invite'), 'pbd1.office-pc.TOKEN-0123');
+      await tester.pump(const Duration(milliseconds: 300));
+      await settle(tester);
+      await tester.enterText(_key('add-name'), 'Studio');
+      await tester.tap(_key('add-connect'));
+      // The viewer's Connecting spinner never settles.
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      api.desktop.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      expect(vault.records.single.name, 'Studio');
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    'the add dialog follows the vault as it loads: Remember turns on, and a '
+    'computer it had under the service is replaced only on purpose',
+    (tester) async {
+      final api = FakePbMapperApi();
+      final loading = Completer<void>();
+      final vault = FakeRemoteComputerVault()
+        ..openHeld = loading
+        ..records.add(
+          const RemoteComputer(
+            id: '0123456789abcdef0123456789abcdef',
+            name: 'Office',
+            service: 'desktop:office-pc',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            relay: 'localhost:7666',
+            namespace: 0,
+          ),
+        );
+      await pumpApp(tester, api, page: AppPage.remote, vault: vault);
+      await _tapIn(tester, _key('remote-add-empty'));
+      await settle(tester);
+      await tester.enterText(_key('add-invite'), 'pbd1.office-pc.TOKEN-0123');
+      await tester.pump(const Duration(milliseconds: 300));
+      await settle(tester);
+      FilledButton connect() => tester.widget(_key('add-connect'));
+      expect(connect().onPressed, isNotNull);
+
+      loading.complete();
+      await settle(tester);
+      expect(connect().onPressed, isNull);
+      expect(tester.widget<SwitchListTile>(_key('add-remember')).value, isTrue);
+      await _tapIn(tester, _key('add-replace'));
+      await tester.pump();
+      expect(connect().onPressed, isNotNull);
       await finish(tester);
     },
   );
@@ -510,13 +590,15 @@ void main() {
       expect(paste, findsOneWidget);
 
       // The new invitation connects as that computer, by its id, and
-      // replaces its record at the first picture.
+      // replaces its record only at the first picture (D20): until then the
+      // record still names the old identity.
       await tester.tap(paste);
       await settle(tester);
       const invitation = 'pbd1.lab.NEW-TOKEN-0123';
       await connect(invitation);
       expect(api.desktop.argsOf('connect').last['invitation'], invitation);
       expect(remote.desktop.session.value.target?.computerId, id);
+      expect(vault.records.single.fingerprint, 'AB12-CD34-EF56-7890');
       await firstPicture();
       expect(vault.records.map((c) => (c.id, c.fingerprint)), [
         (id, 'FFFF-0000-FFFF-0000'),
@@ -616,6 +698,111 @@ void main() {
       await store.checkRelay(force: true);
       await tester.pump();
       expect(_key('viewer-retry-not-sharing'), findsNothing);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
+    "a phone's featured computer can be removed from its More",
+    (tester) async {
+      const id = '0123456789abcdef0123456789abcdef';
+      final vault = FakeRemoteComputerVault()
+        ..records.add(
+          const RemoteComputer(
+            id: id,
+            name: 'Lab',
+            service: 'desktop:lab',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            relay: 'localhost:7666',
+            namespace: 0,
+          ),
+        );
+      // A phone is not controlled, so its computers lead the page.
+      final api = FakePbMapperApi();
+      api.desktop.available = const DesktopCapabilities(
+        host: false,
+        displays: [],
+      );
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.remote,
+        size: const Size(390, 844),
+        vault: vault,
+      );
+      // A phone's only computer is the featured one, never a row.
+      expect(_key('computer-featured'), findsOneWidget);
+      await _tapIn(tester, _key('computer-featured-more'));
+      await settle(tester);
+      await tester.tap(_key('computer-remove-$id'));
+      await settle(tester);
+      await tester.tap(_key('confirm-destructive'));
+      await settle(tester);
+      expect(vault.records, isEmpty);
+      await finish(tester);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    "a remembered computer's rename and remove are reachable without a mouse",
+    (tester) async {
+      const id = '0123456789abcdef0123456789abcdef';
+      final semantics = tester.ensureSemantics();
+      final vault = FakeRemoteComputerVault()
+        ..records.add(
+          const RemoteComputer(
+            id: id,
+            name: 'Lab',
+            service: 'desktop:lab',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            relay: 'lb7666.top:7666',
+            namespace: 0,
+          ),
+        );
+      await pumpApp(
+        tester,
+        FakePbMapperApi(serverServices: ['desktop:lab']),
+        page: AppPage.remote,
+        vault: vault,
+      );
+      Element inside(String key, Type type) => tester.element(
+        find.descendant(of: _key(key), matching: find.byType(type)),
+      );
+
+      // Nothing hovers or focuses the row, and a screen reader still finds
+      // its menu button.
+      expect(
+        tester.getSemantics(
+          find.descendant(
+            of: _key('computer-more-$id'),
+            matching: find.byType(InkWell),
+          ),
+        ),
+        isSemantics(isButton: true),
+      );
+
+      // Shift+Tab from Open reaches it, shown while it has focus, and Enter
+      // opens the menu.
+      Focus.of(inside('computer-open-$id', Text)).requestFocus();
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(
+        Focus.of(inside('computer-more-$id', Icon)).hasPrimaryFocus,
+        isTrue,
+      );
+      final shown = find.ancestor(
+        of: _key('computer-more-$id'),
+        matching: find.byType(Opacity),
+      );
+      expect(tester.widget<Opacity>(shown.first).opacity, 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+      expect(_key('computer-remove-$id'), findsOneWidget);
+      semantics.dispose();
       await finish(tester);
     },
   );

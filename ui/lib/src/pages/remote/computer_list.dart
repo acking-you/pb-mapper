@@ -489,8 +489,9 @@ enum _RowLayout { columns, metaUnder, line }
 const double _minName = 116;
 
 /// One computer on a wide list: tile, name and service, how it was last
-/// reached, its state, and Open or Back to picture. Hovering reveals its
-/// menu; a secondary click opens it where the pointer is.
+/// reached, its state, and Open or Back to picture. Hovering, or focus
+/// anywhere in the row, shows its menu button, which Tab and screen readers
+/// always reach; a secondary click opens the menu where the pointer is.
 class ComputerRow extends StatefulWidget {
   const ComputerRow({
     super.key,
@@ -508,7 +509,7 @@ class ComputerRow extends StatefulWidget {
 
 class _ComputerRowState extends State<ComputerRow> {
   final _menu = MenuController();
-  bool _hover = false;
+  bool _hover = false, _focused = false;
 
   @override
   Widget build(BuildContext context) {
@@ -544,88 +545,98 @@ class _ComputerRowState extends State<ComputerRow> {
               _menu.open(position: details.localPosition),
           onLongPressStart: (details) =>
               _menu.open(position: details.localPosition),
-          child: Container(
-            key: Key('computer-${entry.id}'),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: entry.viewing
-                  ? scheme.tertiaryContainer.withValues(alpha: 0.45)
-                  : null,
-              borderRadius: BorderRadius.circular(kRowRadius),
-            ),
-            child: LayoutBuilder(
-              builder: (context, box) {
-                // The name keeps at least _minName: first the meta moves
-                // under the service line (below 600 at the narrowest
-                // columns), then the pill and the meta become one line.
-                final ends = 40 + 14 + 8 + 36 + 6 + widget.actionWidth;
-                final withPill = ends + 14 + widget.pillWidth;
-                final layout = box.maxWidth - withPill - 184 >= _minName
-                    ? _RowLayout.columns
-                    : box.maxWidth - withPill >= _minName
-                    ? _RowLayout.metaUnder
-                    : _RowLayout.line;
-                final meta = _Meta(entry: entry);
-                return Row(
-                  children: [
-                    ComputerTile(presence: entry.presence),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          name,
-                          if (c != null) ...[
-                            const SizedBox(height: 2),
-                            service,
+          child: Focus(
+            canRequestFocus: false,
+            skipTraversal: true,
+            onFocusChange: (focused) {
+              if (mounted) setState(() => _focused = focused);
+            },
+            child: Container(
+              key: Key('computer-${entry.id}'),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: entry.viewing
+                    ? scheme.tertiaryContainer.withValues(alpha: 0.45)
+                    : null,
+                borderRadius: BorderRadius.circular(kRowRadius),
+              ),
+              child: LayoutBuilder(
+                builder: (context, box) {
+                  // The name keeps at least _minName: first the meta moves
+                  // under the service line (below 600 at the narrowest
+                  // columns), then the pill and the meta become one line.
+                  final ends = 40 + 14 + 8 + 36 + 6 + widget.actionWidth;
+                  final withPill = ends + 14 + widget.pillWidth;
+                  final layout = box.maxWidth - withPill - 184 >= _minName
+                      ? _RowLayout.columns
+                      : box.maxWidth - withPill >= _minName
+                      ? _RowLayout.metaUnder
+                      : _RowLayout.line;
+                  final meta = _Meta(entry: entry);
+                  return Row(
+                    children: [
+                      ComputerTile(presence: entry.presence),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            name,
+                            if (c != null) ...[
+                              const SizedBox(height: 2),
+                              service,
+                            ],
+                            if (layout == _RowLayout.metaUnder) ...[
+                              const SizedBox(height: 2),
+                              meta,
+                            ],
+                            if (layout == _RowLayout.line)
+                              PresenceLine(entry: entry),
                           ],
-                          if (layout == _RowLayout.metaUnder) ...[
-                            const SizedBox(height: 2),
-                            meta,
-                          ],
-                          if (layout == _RowLayout.line)
-                            PresenceLine(entry: entry),
-                        ],
+                        ),
                       ),
-                    ),
-                    if (layout == _RowLayout.columns) ...[
-                      const SizedBox(width: 14),
-                      SizedBox(width: 170, child: meta),
-                    ],
-                    if (layout != _RowLayout.line) ...[
-                      const SizedBox(width: 14),
+                      if (layout == _RowLayout.columns) ...[
+                        const SizedBox(width: 14),
+                        SizedBox(width: 170, child: meta),
+                      ],
+                      if (layout != _RowLayout.line) ...[
+                        const SizedBox(width: 14),
+                        SizedBox(
+                          width: widget.pillWidth,
+                          child: Center(child: pill ?? const SizedBox.shrink()),
+                        ),
+                      ],
+                      const SizedBox(width: 8),
                       SizedBox(
-                        width: widget.pillWidth,
-                        child: Center(child: pill ?? const SizedBox.shrink()),
+                        width: 36,
+                        // Hidden, never removed: semantics and Tab keep it.
+                        child: Opacity(
+                          opacity: _hover || _focused || _menu.isOpen ? 1 : 0,
+                          alwaysIncludeSemantics: true,
+                          child: IconButton(
+                            key: Key('computer-more-${entry.id}'),
+                            tooltip: context.l10n.more,
+                            style: IconButton.styleFrom(
+                              minimumSize: const Size(32, 32),
+                            ),
+                            onPressed: () =>
+                                _menu.isOpen ? _menu.close() : _menu.open(),
+                            icon: const Icon(
+                              AppIcons.more,
+                              size: AppIconSize.button,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: widget.actionWidth,
+                        child: _RowAction(entry: entry),
                       ),
                     ],
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 36,
-                      child: _hover || _menu.isOpen
-                          ? IconButton(
-                              key: Key('computer-more-${entry.id}'),
-                              tooltip: context.l10n.more,
-                              style: IconButton.styleFrom(
-                                minimumSize: const Size(32, 32),
-                              ),
-                              onPressed: () =>
-                                  _menu.isOpen ? _menu.close() : _menu.open(),
-                              icon: const Icon(
-                                AppIcons.more,
-                                size: AppIconSize.button,
-                              ),
-                            )
-                          : null,
-                    ),
-                    const SizedBox(width: 6),
-                    SizedBox(
-                      width: widget.actionWidth,
-                      child: _RowAction(entry: entry),
-                    ),
-                  ],
-                );
-              },
+                  );
+                },
+              ),
             ),
           ),
         ),
@@ -819,29 +830,7 @@ class RemoteEmptyCard extends StatelessWidget {
                 ),
                 child: Column(
                   children: [
-                    const RemoteEmptyIllustration(),
-                    const SizedBox(height: 14),
-                    Text(
-                      l10n.remoteEmptyTitle,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 360),
-                      child: Text(
-                        l10n.remoteEmptyBody,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 13.5,
-                          height: 1.6,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
+                    RemoteEmptyMessage(body: l10n.remoteEmptyBody),
                     const SizedBox(height: 20),
                     OutlinedButton.icon(
                       key: const Key('remote-add-empty'),
@@ -871,6 +860,41 @@ class RemoteEmptyCard extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The empty list's picture, title and how to add a computer.
+class RemoteEmptyMessage extends StatelessWidget {
+  const RemoteEmptyMessage({super.key, required this.body});
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        const RemoteEmptyIllustration(),
+        const SizedBox(height: 14),
+        Text(
+          context.l10n.remoteEmptyTitle,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 14),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Text(
+            body,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 13.5,
+              height: 1.6,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

@@ -72,8 +72,9 @@ class AddComputerController extends ChangeNotifier {
     required RemoteComputerStore computers,
     this.replacing,
   }) : _inspect = inspect,
-       _computers = computers,
-       _remember = computers.support.available;
+       _computers = computers {
+    computers.addListener(_computersChanged);
+  }
 
   final Future<DesktopInvitationInfo> Function(String) _inspect;
   final RemoteComputerStore _computers;
@@ -91,7 +92,9 @@ class AddComputerController extends ChangeNotifier {
   int _serial = 0;
   Timer? _debounce;
   String? _defaultName;
-  bool _replaceConfirmed = false, _remember, _relayOnly = false;
+
+  /// Remember is on by default wherever the vault can keep it.
+  bool _replaceConfirmed = false, _remember = true, _relayOnly = false;
   bool _disposed = false;
 
   AddState get state => _state;
@@ -142,6 +145,15 @@ class AddComputerController extends ChangeNotifier {
 
   void _notify() {
     if (!_disposed) notifyListeners();
+  }
+
+  /// What this device remembers can change while the flow is open: the
+  /// vault finishes loading, or a session is remembered at its first
+  /// picture. Duplicate, conflict, Remember and Connect follow it, and a
+  /// duplicate's saved name is shown, as at recognition.
+  void _computersChanged() {
+    if (_info case final info? when duplicate != null) _nameFor(info);
+    _notify();
   }
 
   /// Typed text: inspected once typing pauses.
@@ -225,18 +237,28 @@ class AddComputerController extends ChangeNotifier {
             : service);
     final typed = nameField.text.trim();
     if (typed.isEmpty || typed == _defaultName || duplicate != null) {
-      nameField.text = name;
+      // Selected, so a name typed into the focused field replaces it.
+      nameField.value = TextEditingValue(
+        text: name,
+        selection: TextSelection(baseOffset: 0, extentOffset: name.length),
+      );
     }
     _defaultName = name;
   }
 
-  /// What Connect runs; null until an invitation is recognised and any
-  /// conflicting saved identity is replaced on purpose.
+  /// Connect is offered: an invitation is recognised, and any conflicting
+  /// saved identity is replaced on purpose.
+  bool get ready =>
+      _state == AddState.recognised &&
+      _info != null &&
+      (conflict == null || _replaceConfirmed);
+
+  /// What Connect runs, built as it is pressed: typing a name does not
+  /// notify, so a result built earlier would miss it. Null unless [ready].
   AddComputerResult? result() {
     final info = _info;
-    if (_state != AddState.recognised || info == null) return null;
+    if (!ready || info == null) return null;
     final conflict = this.conflict;
-    if (conflict != null && !_replaceConfirmed) return null;
     final replacing = this.replacing;
     final typed = nameField.text.trim();
     return AddComputerResult(
@@ -256,10 +278,22 @@ class AddComputerController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _debounce?.cancel();
+    _computers.removeListener(_computersChanged);
     nameField.dispose();
     super.dispose();
   }
 }
+
+/// Connect's action, and Enter's in the name: the flow's result as it is
+/// when pressed, so it carries the name in the field then. A press that
+/// lands before a change to the store is drawn finds no result, and closes
+/// nothing.
+VoidCallback? _connect(BuildContext context, AddComputerController add) =>
+    add.ready
+    ? () {
+        if (add.result() case final result?) Navigator.of(context).pop(result);
+      }
+    : null;
 
 Future<String?> _readClipboard() async {
   try {
@@ -305,57 +339,52 @@ class _AddComputerDialogState extends State<AddComputerDialog> {
         ),
         child: ListenableBuilder(
           listenable: _add,
-          builder: (context, _) {
-            final result = _add.result();
-            return SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _Header(title: l10n.addTitle, size: 18),
+          builder: (context, _) => SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(28, 24, 28, 28),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _Header(title: l10n.addTitle, size: 18),
+                const SizedBox(height: 20),
+                InviteField(controller: _add, autofocus: true),
+                if (_add.state == AddState.recognised) ...[
                   const SizedBox(height: 20),
-                  InviteField(controller: _add),
-                  if (_add.state == AddState.recognised) ...[
-                    const SizedBox(height: 20),
-                    RecognisedHostCard(controller: _add),
-                    const SizedBox(height: 20),
-                    _NameField(controller: _add),
-                  ],
+                  RecognisedHostCard(controller: _add),
                   const SizedBox(height: 20),
-                  _Options(controller: _add),
-                  const SizedBox(height: 20),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          minimumSize: const Size(0, 40),
-                        ),
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: Text(l10n.cancel),
-                      ),
-                      const SizedBox(width: 10),
-                      FilledButton(
-                        key: const Key('add-connect'),
-                        style: FilledButton.styleFrom(
-                          minimumSize: const Size(0, 40),
-                          textStyle: buttonLabel(
-                            context,
-                            14,
-                            weight: FontWeight.w600,
-                          ),
-                        ),
-                        onPressed: result == null
-                            ? null
-                            : () => Navigator.of(context).pop(result),
-                        child: Text(l10n.connect),
-                      ),
-                    ],
-                  ),
+                  _NameField(controller: _add, autofocus: true),
                 ],
-              ),
-            );
-          },
+                const SizedBox(height: 20),
+                _Options(controller: _add),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(0, 40),
+                      ),
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: Text(l10n.cancel),
+                    ),
+                    const SizedBox(width: 10),
+                    FilledButton(
+                      key: const Key('add-connect'),
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 40),
+                        textStyle: buttonLabel(
+                          context,
+                          14,
+                          weight: FontWeight.w600,
+                        ),
+                      ),
+                      onPressed: _connect(context, _add),
+                      child: Text(l10n.connect),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -409,7 +438,6 @@ class _AddComputerSheetState extends State<AddComputerSheet> {
       listenable: _add,
       builder: (context, _) {
         final recognised = _add.state == AddState.recognised;
-        final result = _add.result();
         return SingleChildScrollView(
           padding: EdgeInsets.fromLTRB(
             20,
@@ -432,9 +460,7 @@ class _AddComputerSheetState extends State<AddComputerSheet> {
                   style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(48),
                   ),
-                  onPressed: result == null
-                      ? null
-                      : () => Navigator.of(context).pop(result),
+                  onPressed: _connect(context, _add),
                   child: Text(l10n.connect),
                 ),
               ] else if (_scan) ...[
@@ -545,8 +571,16 @@ class _Header extends StatelessWidget {
 /// The invitation: a field to paste or type it into, then its masked form
 /// once recognised.
 class InviteField extends StatefulWidget {
-  const InviteField({super.key, required this.controller});
+  const InviteField({
+    super.key,
+    required this.controller,
+    this.autofocus = false,
+  });
   final AddComputerController controller;
+
+  /// The dialog focuses the field at once; the sheet never does, because
+  /// its camera or clipboard comes first.
+  final bool autofocus;
 
   @override
   State<InviteField> createState() => _InviteFieldState();
@@ -620,6 +654,7 @@ class _InviteFieldState extends State<InviteField> {
               TextField(
                 key: const Key('add-invite'),
                 controller: _text,
+                autofocus: widget.autofocus,
                 minLines: 3,
                 maxLines: 3,
                 autocorrect: false,
@@ -772,8 +807,12 @@ class RecognisedHostCard extends StatelessWidget {
 }
 
 class _NameField extends StatelessWidget {
-  const _NameField({required this.controller});
+  const _NameField({required this.controller, this.autofocus = false});
   final AddComputerController controller;
+
+  /// The dialog moves to the name once the invitation is recognised, so
+  /// Enter connects; the sheet raises no keyboard over the host's card.
+  final bool autofocus;
 
   @override
   Widget build(BuildContext context) {
@@ -789,9 +828,11 @@ class _NameField extends StatelessWidget {
         TextField(
           key: const Key('add-name'),
           controller: controller.nameField,
+          autofocus: autofocus,
           enabled: controller.duplicate == null,
           inputFormatters: [computerNameLimit],
           decoration: InputDecoration(fillColor: cardFieldFill(scheme)),
+          onSubmitted: (_) => _connect(context, controller)?.call(),
         ),
       ],
     );

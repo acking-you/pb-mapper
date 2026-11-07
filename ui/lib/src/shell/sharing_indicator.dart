@@ -21,6 +21,7 @@ final class SharingChrome {
 
   late final NavigatorObserver observer = _PopupObserver(this);
   final _fallbackNeeded = ValueNotifier(true);
+  final _covered = ValueNotifier(false);
   final _reachable = <Object>{};
   int _popups = 0;
   bool _scheduled = false, _disposed = false;
@@ -28,6 +29,10 @@ final class SharingChrome {
   /// True when no capsule is reachable: none is mounted and showing its
   /// controls, or a popup route (dialog, sheet, menu) is on top of it.
   ValueListenable<bool> get fallbackNeeded => _fallbackNeeded;
+
+  /// True while a popup route (dialog, sheet, menu) is on top: its barrier
+  /// covers every title-bar capsule.
+  ValueListenable<bool> get covered => _covered;
 
   /// A capsule or the host card's viewer panel says whether it shows the
   /// controls. Applied after the frame, never during build.
@@ -50,7 +55,9 @@ final class SharingChrome {
       ..addPostFrameCallback((_) {
         _scheduled = false;
         if (_disposed) return;
-        _fallbackNeeded.value = _reachable.isEmpty || _popups > 0;
+        // Together, so the pill and the capsule swap in one frame.
+        _covered.value = _popups > 0;
+        _fallbackNeeded.value = _reachable.isEmpty || _covered.value;
       })
       ..ensureVisualUpdate();
   }
@@ -58,6 +65,7 @@ final class SharingChrome {
   void dispose() {
     _disposed = true;
     _fallbackNeeded.dispose();
+    _covered.dispose();
   }
 }
 
@@ -114,7 +122,8 @@ Widget _viewerDot(DesktopHostViewer viewer, Color color) => viewer.paused
     : PulsingDot(color: color, size: 7);
 
 /// The title-bar capsule while someone views this computer (D15), with
-/// Disconnect viewer and Stop sharing. Nothing at all otherwise.
+/// Disconnect viewer and Stop sharing. Nothing at all otherwise. Under a
+/// popup it steps aside, keeping its place, for the fallback pill.
 class SharingIndicator extends StatefulWidget {
   const SharingIndicator({
     super.key = const Key('sharing-indicator'),
@@ -168,7 +177,7 @@ class _SharingIndicatorState extends State<SharingIndicator> {
         _report(viewer != null);
         if (viewer == null) return const SizedBox.shrink();
         final label = sharingLabel(context, viewer);
-        return Semantics(
+        final capsule = Semantics(
           container: true,
           liveRegion: true,
           label: label,
@@ -176,6 +185,19 @@ class _SharingIndicatorState extends State<SharingIndicator> {
             SharingIndicatorForm.dot => _dot(context, desktop, viewer, label),
             _ => _capsule(context, desktop, viewer, label),
           },
+        );
+        // Under a popup's barrier the fallback pill carries the controls:
+        // one set, never two.
+        return ValueListenableBuilder(
+          valueListenable: scope.sharing.covered,
+          builder: (context, covered, child) => Visibility(
+            visible: !covered,
+            maintainSize: true,
+            maintainAnimation: true,
+            maintainState: true,
+            child: child!,
+          ),
+          child: capsule,
         );
       },
     );
