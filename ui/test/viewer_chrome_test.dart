@@ -183,7 +183,7 @@ void main() {
           picture: picture,
           jpegImage: ValueNotifier(null),
           stats: ValueNotifier(DesktopStats.none),
-          readView: () => null,
+          hostCursor: ValueNotifier(null),
           viewport: viewport,
           input: input,
           machine: machine,
