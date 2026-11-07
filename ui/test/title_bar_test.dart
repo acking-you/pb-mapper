@@ -1,5 +1,4 @@
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +7,7 @@ import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_title_bar.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
+import 'package:pb_mapper_ui/src/theme/metrics.dart';
 
 import 'fake_pb_mapper_api.dart';
 import 'support.dart';
@@ -25,12 +25,11 @@ void _maximized(WidgetTester tester, bool maximized) {
   addTearDown(() => messenger.setMockMethodCallHandler(_window, null));
 }
 
-/// Pump the app at [size] logical pixels and [dpr], and rest the mouse on
-/// the close button, whose red is what must keep clear of the edge.
-Future<Rect> _hoveredClose(
+/// Pump the app at [size] logical pixels and [dpr].
+Future<void> _pump(
   WidgetTester tester, {
   required Size size,
-  required double dpr,
+  double dpr = 1,
   bool needsSetup = false,
 }) async {
   await pumpApp(
@@ -44,17 +43,21 @@ Future<Rect> _hoveredClose(
     ..devicePixelRatio = dpr
     ..physicalSize = size * dpr;
   await settle(tester);
-  final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-  await mouse.addPointer(location: tester.getCenter(find.byKey(_close)));
-  await tester.pump();
-  final rect = tester.getRect(find.byKey(_close));
-  await mouse.removePointer();
-  return rect;
 }
+
+/// Where Windows puts its own close button: the window's top-right corner,
+/// flush with both edges.
+Rect _cornerOf(Size window, {double height = kCaptionButtonHeight}) =>
+    Rect.fromLTWH(
+      window.width - kCaptionButtonWidth,
+      0,
+      kCaptionButtonWidth,
+      height,
+    );
 
 void main() {
   testWidgets(
-    "caption buttons keep 16 px from the sheet edge and the setup screen's edge",
+    "caption buttons sit in the window's corner, on the page's own surface",
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       try {
@@ -66,33 +69,32 @@ void main() {
             final size = maximized
                 ? Size(1920 / dpr, 1032 / dpr)
                 : const Size(1180, 780);
-            final close = await _hoveredClose(tester, size: size, dpr: dpr);
-            final sheet = tester.getRect(find.byType(ContentSheet));
+            await _pump(tester, size: size, dpr: dpr);
             final at = 'dpr $dpr, ${maximized ? 'maximised' : 'restored'}';
-            expect(close.size, kCaptionButtonSize, reason: at);
             expect(
-              close.right,
-              lessThanOrEqualTo(sheet.right - 16),
+              tester.getRect(find.byKey(_close)),
+              _cornerOf(size),
               reason: at,
             );
-            // Centred in the 58 px title bar at the top of the sheet.
-            expect(close.center.dy, closeTo(sheet.top + 29, 0.01), reason: at);
+            // One layer: the sheet runs to the window's top and right edges,
+            // so no backdrop shows around the buttons.
+            final sheet = tester.getRect(find.byType(ContentSheet));
+            expect(sheet.topRight, Offset(size.width, 0), reason: at);
             await finish(tester);
           }
         }
 
+        // A compact window's page fills it, bottom bar and all.
         _maximized(tester, false);
+        const compact = Size(640, 760);
+        await _pump(tester, size: compact);
+        expect(find.byType(ContentSheet), findsNothing);
+        expect(tester.getRect(find.byKey(_close)), _cornerOf(compact));
+        await finish(tester);
+
         const window = Size(1180, 780);
-        final close = await _hoveredClose(
-          tester,
-          size: window,
-          dpr: 1.25,
-          needsSetup: true,
-        );
-        expect(close.size, kCaptionButtonSize);
-        expect(close.right, lessThanOrEqualTo(window.width - 16));
-        // Centred in the setup screen's 44 px drag strip.
-        expect(close.center.dy, closeTo(22, 0.01));
+        await _pump(tester, size: window, dpr: 1.25, needsSetup: true);
+        expect(tester.getRect(find.byKey(_close)), _cornerOf(window));
         await finish(tester);
       } finally {
         debugDefaultTargetPlatformOverride = null;
@@ -100,7 +102,24 @@ void main() {
     },
   );
 
-  testWidgets("the viewer's caption buttons keep the window's right edge", (
+  testWidgets('on macOS the sheet still floats inset on the backdrop', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    try {
+      _maximized(tester, false);
+      const window = Size(1180, 780);
+      await _pump(tester, size: window);
+      expect(find.byKey(_close), findsNothing);
+      final sheet = tester.getRect(find.byType(ContentSheet));
+      expect(sheet.topRight, const Offset(1180 - kSheetInset, kSheetInset));
+      await finish(tester);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets("the viewer's caption buttons fill its bar in the corner", (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -123,8 +142,11 @@ void main() {
         ),
       );
       await tester.pump();
-      // The bar's end inset is 4 px; the title must not hold the free space.
-      expect(tester.getRect(find.byKey(_close)).right, 1440 - 4);
+      // The title must not hold the free space and push them off the edge.
+      expect(
+        tester.getRect(find.byKey(_close)),
+        _cornerOf(const Size(1440, 900), height: 36),
+      );
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

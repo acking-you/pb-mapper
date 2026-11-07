@@ -150,10 +150,9 @@ class _TitleBar extends StatelessWidget {
           // no room for both the label and the capsule.
           LayoutBuilder(
             builder: (context, box) => Padding(
-              // The caption buttons keep clear of the sheet's rounded corner.
               padding: EdgeInsetsDirectional.only(
                 start: lead,
-                end: drawsCaptionButtons ? 16 : 8,
+                end: drawsCaptionButtons ? kCaptionButtonsWidth + 16 : 8,
               ),
               child: Row(
                 children: [
@@ -213,14 +212,15 @@ class _TitleBar extends StatelessWidget {
                         icon: Icon(primary.icon),
                       ),
                   ],
-                  if (drawsCaptionButtons) ...[
-                    const SizedBox(width: 16),
-                    const CaptionButtons(),
-                  ],
                 ],
               ),
             ),
           ),
+          // The bar's top-right corner is the window's in every layout that
+          // draws them: the sheet runs to the window's edges, and a compact
+          // page fills it.
+          if (drawsCaptionButtons)
+            const Positioned(top: 0, right: 0, child: CaptionButtons()),
         ],
       ),
     );

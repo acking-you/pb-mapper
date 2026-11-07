@@ -31,7 +31,7 @@ class ViewerTitleBar extends StatelessWidget {
           builder: (context, box) => Padding(
             padding: EdgeInsetsDirectional.only(
               start: trafficLightInset + (onBack == null ? 16 : 8),
-              end: drawsCaptionButtons ? 4 : 12,
+              end: drawsCaptionButtons ? 0 : 12,
             ),
             child: Row(
               children: [
@@ -82,8 +82,9 @@ class ViewerTitleBar extends StatelessWidget {
                   tone: CaptionTone.viewer,
                 ),
                 const SizedBox(width: 12),
+                // The bar's full height, flush with the window's corner.
                 if (drawsCaptionButtons)
-                  const CaptionButtons(tone: CaptionTone.viewer),
+                  const CaptionButtons(tone: CaptionTone.viewer, height: 36),
               ],
             ),
           ),

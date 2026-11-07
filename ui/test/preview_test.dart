@@ -946,24 +946,36 @@ void main() {
     _preview('title bar on Windows at 125 %', (tester) async {
       await _onWindows(tester, () async {
         const size = Size(1180, 780), dpr = 1.25;
-        await pumpApp(
-          tester,
-          _remoteApi(viewed: true),
-          page: AppPage.tunnels,
-          size: size,
-        );
-        tester.view
-          ..devicePixelRatio = dpr
-          ..physicalSize = size * dpr;
-        await settle(tester);
-        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-        await mouse.addPointer(
-          location: tester.getCenter(find.byKey(const Key('caption-close'))),
-        );
-        await tester.pump();
-        await _capture(tester, 'title_bar_windows_125', pixelRatio: dpr);
-        await mouse.removePointer();
-        await finish(tester);
+        for (final (suffix, theme) in const [
+          ('', ThemeMode.light),
+          ('_dark', ThemeMode.dark),
+        ]) {
+          await pumpApp(
+            tester,
+            _remoteApi(viewed: true),
+            page: AppPage.tunnels,
+            size: size,
+            themeMode: theme,
+          );
+          tester.view
+            ..devicePixelRatio = dpr
+            ..physicalSize = size * dpr;
+          await settle(tester);
+          final mouse = await tester.createGesture(
+            kind: PointerDeviceKind.mouse,
+          );
+          await mouse.addPointer(
+            location: tester.getCenter(find.byKey(const Key('caption-close'))),
+          );
+          await tester.pump();
+          await _capture(
+            tester,
+            'title_bar_windows_125$suffix',
+            pixelRatio: dpr,
+          );
+          await mouse.removePointer();
+          await finish(tester);
+        }
       });
     });
 

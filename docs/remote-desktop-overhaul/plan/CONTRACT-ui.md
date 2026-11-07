@@ -80,6 +80,22 @@ the merged code does:
   `viewerEndedUnreachable`, `viewerEndedBusy`; plainer last-used English
   strings; `computer-featured-more`.
 
+Amended after the owner's review of the title bar (2026-11-08): a caption
+button inside a sheet that floats on the backdrop read as two layers, not as
+Windows' own. These sections now say what the merged code does:
+
+- §0 item 7, §1.2 (D25), §8.2 and §12: the caption buttons are square
+  46×32 (`kCaptionButtonWidth`, `kCaptionButtonHeight`; no radius), flush in
+  the window's top-right corner — `Positioned(top: 0, right: 0)` in the page
+  bar and on the setup screen, the page's actions keeping
+  `kCaptionButtonsWidth + 16` clear. The viewer's fill its 36 px bar
+  (`CaptionButtons(height: 36)`, end padding 0).
+- §12: where the app draws caption buttons, `AppShell` gives the sheet no
+  inset and `ContentSheet(anchored: true)` runs to the window's top, right
+  and bottom edges, rounded and edged only from its top-left corner down its
+  left side; the drag strip above the sheet goes with the inset. macOS and a
+  wide tablet keep the inset sheet.
+
 Base: `design/ui-interaction.md` (the winner of both judgements). Grafts come
 from `design/ui-structure.md`. Every must-fix raised by both judges is
 resolved; §1.3 traces each one.

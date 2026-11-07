@@ -323,7 +323,11 @@ The window is layered as in POCOX (`theme/glass.dart`):
 1. `AppBackdrop` — the window's ground, lit softly from above;
 2. the rail (`shell/navigation.dart`), straight on the backdrop, its selection
    a pane of glass that glides between rows;
-3. `ContentSheet` — the rounded page; grouped grey for pages of cards;
+3. `ContentSheet` — the page; grouped grey for pages of cards. On macOS
+   (and a wide tablet) it floats 8 px inside the window, rounded all round;
+   on Windows and Linux it runs to the window's top, right and bottom edges,
+   rounded and edged only where it leaves the backdrop, down its left side
+   from the top-left corner;
 4. `Glass` — translucent panels over the page: the galaxy's summary, its
    details panel, toasts.
 
@@ -331,12 +335,14 @@ The native title bar is hidden on desktop. The page's own title bar is window
 chrome: its empty space drags, and on Windows and Linux it carries the caption
 buttons (`shell/window_chrome.dart`). macOS keeps its traffic lights.
 
-The caption buttons are 46×32 with a 6 px radius, centred in the 58 px bar,
-16 px after the page's last action and 16 px inside the sheet's edge, so the
-close button's red never reaches the sheet's rounded corner; the setup screen
-keeps them 16 px from the window's edge. Their glyphs are drawn, not icons:
-10 px, a one-pixel stroke, snapped to device pixels so they stay sharp at
-125 % and 150 %.
+The caption buttons are where Windows puts its own and look like them: 46×32,
+square, flush in the window's top-right corner, on the page's surface rather
+than inside a card on the backdrop. Their hover fills reach both edges, the
+close button's red runs into the corner, which Windows rounds itself, and a
+maximised window's close sits where the pointer stops at the screen's corner.
+The page's actions keep 16 px clear of them; the setup screen puts them in
+the same corner. Their glyphs are drawn, not icons: 10 px, a one-pixel
+stroke, snapped to device pixels so they stay sharp at 125 % and 150 %.
 
 Below 720 px (900 px on a touch screen) the rail becomes a bottom bar and the
 page fills the window. Cards reflow by the width they get, not by a global
@@ -346,8 +352,9 @@ The viewer is dark whatever the app's theme, so a remote picture is never
 framed in white (`theme/viewer_palette.dart`). Its chrome is translucent
 graphite over the picture rather than the app's glass, since a blur over a
 live video would be redrawn every frame; `viewerTheme` gives its menus,
-dialogs and tooltips the same palette. Its title bar's caption buttons keep
-the app's geometry in a dark tone.
+dialogs and tooltips the same palette. Its title bar's caption buttons are
+the app's in a dark tone, 46 px wide and filling the 36 px bar in the
+window's corner.
 
 Type is Google Sans Flex for prose (Segoe UI on Windows) and Geist Mono for
 keys, addresses and logs; Chinese falls back to the bundled Noto Sans SC subset
@@ -458,8 +465,9 @@ CPU and memory without starting tunnels or reading settings.
 - `test/planet_atlas_test.dart`, `test/galaxy_lines_test.dart` and
   `test/galaxy_render_lifecycle_test.dart`: cached/vector image parity, line
   clipping, resource bounds, backgrounding, interaction and reduced motion.
-- `test/title_bar_test.dart`: the caption buttons' room at 100, 125 and
-  150 %, maximised and restored.
+- `test/title_bar_test.dart`: the caption buttons in the window's corner, on
+  a sheet that reaches it, at 100, 125 and 150 %, maximised and restored; in
+  the compact layout, the setup screen and the viewer; macOS's inset sheet.
 - Remote desktop, against `FakeDesktopApi` and an in-memory vault:
   `remote_page_test.dart` (the add flow never shows an invitation, enabling
   and stopping a share, the QR hiding), `sharing_test.dart` (the capsule and

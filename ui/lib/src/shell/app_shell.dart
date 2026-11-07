@@ -57,6 +57,10 @@ class AppShell extends StatelessWidget {
         ),
       );
     }
+    // Where the app draws Windows' caption buttons the sheet runs to the
+    // window's edges, so the buttons sit in the window's own corner on the
+    // page's surface rather than inside a card floating on the backdrop.
+    final anchored = drawsCaptionButtons;
     return ShellLayout(
       wide: true,
       child: Scaffold(
@@ -74,14 +78,17 @@ class AppShell extends StatelessWidget {
                     ),
                     Expanded(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(
-                          0,
-                          kSheetInset,
-                          kSheetInset,
-                          kSheetInset,
-                        ),
+                        padding: anchored
+                            ? EdgeInsets.zero
+                            : const EdgeInsets.fromLTRB(
+                                0,
+                                kSheetInset,
+                                kSheetInset,
+                                kSheetInset,
+                              ),
                         child: ContentSheet(
                           grouped: page.grouped,
+                          anchored: anchored,
                           child: content,
                         ),
                       ),
@@ -90,7 +97,7 @@ class AppShell extends StatelessWidget {
                 ),
               ),
               // The strip above the sheet is window chrome too: it drags.
-              if (isFramelessDesktop)
+              if (isFramelessDesktop && !anchored)
                 const Positioned(
                   top: 0,
                   left: kRailWidth,

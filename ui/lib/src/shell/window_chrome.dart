@@ -70,10 +70,15 @@ enum CaptionTone { surface, viewer }
 /// The four marks a caption button draws.
 enum CaptionGlyph { minimize, maximize, restore, close }
 
-/// One caption button: Windows' own width, but shorter than its title bar,
-/// so it sits centred in the page's bar with room above and below.
-const Size kCaptionButtonSize = Size(46, 32);
-const double kCaptionButtonRadius = 6;
+/// One caption button: Windows' own 46 × 32, square-cornered, so the three
+/// sit flush in the window's top-right corner as Windows' own do. A bar
+/// shorter than a page's (the viewer's) has them fill its height instead.
+const double kCaptionButtonWidth = 46;
+const double kCaptionButtonHeight = 32;
+const Size kCaptionButtonSize = Size(kCaptionButtonWidth, kCaptionButtonHeight);
+
+/// The three together: what a title bar keeps clear at its end.
+const double kCaptionButtonsWidth = 3 * kCaptionButtonWidth;
 
 /// The glyph's box, in logical pixels.
 const double kCaptionGlyphExtent = 10;
@@ -82,11 +87,20 @@ const double kCaptionGlyphExtent = 10;
 const Color _closeRed = Color(0xFFC42B1C);
 
 /// Minimize, maximize-or-restore and close, drawn for Windows and Linux,
-/// which lose theirs with the native title bar.
+/// which lose theirs with the native title bar. Place them at the window's
+/// top-right corner, flush with both edges, on the surface of the bar they
+/// belong to: their hover fills run to the edges and the close red into the
+/// corner, which Windows rounds itself, and a maximised window's close sits
+/// where the pointer stops at the screen's corner.
 class CaptionButtons extends StatefulWidget {
-  const CaptionButtons({super.key, this.tone = CaptionTone.surface});
+  const CaptionButtons({
+    super.key,
+    this.tone = CaptionTone.surface,
+    this.height = kCaptionButtonHeight,
+  });
 
   final CaptionTone tone;
+  final double height;
 
   @override
   State<CaptionButtons> createState() => _CaptionButtonsState();
@@ -144,6 +158,7 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
           glyph: CaptionGlyph.minimize,
           tooltip: l10n.windowMinimize,
           tone: widget.tone,
+          height: widget.height,
           onTap: () => windowManager.minimize(),
         ),
         _CaptionButton(
@@ -151,6 +166,7 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
           glyph: _maximized ? CaptionGlyph.restore : CaptionGlyph.maximize,
           tooltip: _maximized ? l10n.windowRestore : l10n.windowMaximize,
           tone: widget.tone,
+          height: widget.height,
           onTap: _toggleMaximize,
         ),
         // Closing hides to the tray: main.dart owns that through
@@ -160,6 +176,7 @@ class _CaptionButtonsState extends State<CaptionButtons> with WindowListener {
           glyph: CaptionGlyph.close,
           tooltip: l10n.windowClose,
           tone: widget.tone,
+          height: widget.height,
           close: true,
           onTap: () => windowManager.close(),
         ),
@@ -175,6 +192,7 @@ class _CaptionButton extends StatefulWidget {
     required this.tooltip,
     required this.onTap,
     required this.tone,
+    required this.height,
     this.close = false,
   });
 
@@ -182,6 +200,7 @@ class _CaptionButton extends StatefulWidget {
   final String tooltip;
   final VoidCallback onTap;
   final CaptionTone tone;
+  final double height;
   final bool close;
 
   @override
@@ -247,12 +266,9 @@ class _CaptionButtonState extends State<_CaptionButton> {
             onTap: widget.onTap,
             child: AnimatedContainer(
               duration: Motion.of(context, const Duration(milliseconds: 90)),
-              width: kCaptionButtonSize.width,
-              height: kCaptionButtonSize.height,
-              decoration: BoxDecoration(
-                color: bg,
-                borderRadius: BorderRadius.circular(kCaptionButtonRadius),
-              ),
+              width: kCaptionButtonWidth,
+              height: widget.height,
+              color: bg,
               child: Center(
                 child: CaptionGlyphIcon(glyph: widget.glyph, color: fg),
               ),

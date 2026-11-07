@@ -398,16 +398,30 @@ class _BackdropPainter extends CustomPainter {
 
 /// The opaque, rounded page content lives on, lifted off the [AppBackdrop].
 /// [grouped] selects the grey ground that white cards sit on.
+///
+/// An [anchored] sheet meets the window's top, right and bottom edges and is
+/// rounded, and edged, only where it leaves the backdrop: down its left side
+/// from the top-left corner. Where the app draws Windows' caption buttons
+/// they then sit in the window's own corner, on this one surface.
 class ContentSheet extends StatelessWidget {
-  const ContentSheet({super.key, required this.child, this.grouped = false});
+  const ContentSheet({
+    super.key,
+    required this.child,
+    this.grouped = false,
+    this.anchored = false,
+  });
 
   final Widget child;
   final bool grouped;
+  final bool anchored;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    const radius = BorderRadius.all(Radius.circular(kSheetRadius));
+    final edge = sheetEdge(scheme);
+    final radius = anchored
+        ? const BorderRadius.only(topLeft: Radius.circular(kSheetRadius))
+        : const BorderRadius.all(Radius.circular(kSheetRadius));
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: radius,
@@ -418,12 +432,47 @@ class ContentSheet extends StatelessWidget {
         clipBehavior: Clip.antiAlias,
         shape: RoundedRectangleBorder(
           borderRadius: radius,
-          side: BorderSide(color: sheetEdge(scheme)),
+          side: anchored ? BorderSide.none : BorderSide(color: edge),
         ),
-        child: child,
+        child: anchored
+            ? CustomPaint(
+                foregroundPainter: _LeadingEdgePainter(edge),
+                child: child,
+              )
+            : child,
       ),
     );
   }
+}
+
+/// An anchored sheet's hairline: round its top-left corner and down its
+/// left side. Its other sides are the window's, which has its own.
+class _LeadingEdgePainter extends CustomPainter {
+  const _LeadingEdgePainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const r = kSheetRadius;
+    canvas.drawPath(
+      Path()
+        ..moveTo(r, 0.5)
+        ..arcToPoint(
+          const Offset(0.5, r),
+          radius: const Radius.circular(r - 0.5),
+          clockwise: false,
+        )
+        ..lineTo(0.5, size.height),
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_LeadingEdgePainter old) => old.color != color;
 }
 
 /// Plays [child] in once when it first mounts: it fades up from a few pixels
