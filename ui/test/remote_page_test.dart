@@ -241,6 +241,44 @@ void main() {
   );
 
   testWidgets(
+    'the add dialog follows the vault as it loads: Remember turns on, and a '
+    'computer it had under the service is replaced only on purpose',
+    (tester) async {
+      final api = FakePbMapperApi();
+      final loading = Completer<void>();
+      final vault = FakeRemoteComputerVault()
+        ..openHeld = loading
+        ..records.add(
+          const RemoteComputer(
+            id: '0123456789abcdef0123456789abcdef',
+            name: 'Office',
+            service: 'desktop:office-pc',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            relay: 'localhost:7666',
+            namespace: 0,
+          ),
+        );
+      await pumpApp(tester, api, page: AppPage.remote, vault: vault);
+      await _tapIn(tester, _key('remote-add-empty'));
+      await settle(tester);
+      await tester.enterText(_key('add-invite'), 'pbd1.office-pc.TOKEN-0123');
+      await tester.pump(const Duration(milliseconds: 300));
+      await settle(tester);
+      FilledButton connect() => tester.widget(_key('add-connect'));
+      expect(connect().onPressed, isNotNull);
+
+      loading.complete();
+      await settle(tester);
+      expect(connect().onPressed, isNull);
+      expect(tester.widget<SwitchListTile>(_key('add-remember')).value, isTrue);
+      await _tapIn(tester, _key('add-replace'));
+      await tester.pump();
+      expect(connect().onPressed, isNotNull);
+      await finish(tester);
+    },
+  );
+
+  testWidgets(
     'enabling shares view-only or with control, Stop works while busy, and '
     'helper maintenance stays reachable',
     (tester) async {

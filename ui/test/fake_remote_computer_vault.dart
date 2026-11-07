@@ -30,6 +30,10 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   /// vault that has remembered but answers late.
   Completer<void>? rememberHeld;
 
+  /// While set, [open] keeps its answer until it completes: a vault still
+  /// loading, as Android's is until the Keystore unlocks it.
+  Completer<void>? openHeld;
+
   /// Every call by op name, with the arguments that change something.
   final List<(String op, Map<String, Object?> args)> calls = [];
   List<String> get ops => [for (final call in calls) call.$1];
@@ -39,6 +43,7 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   @override
   Future<RememberSupport> open() async {
     calls.add(('open', const {}));
+    if (openHeld case final held?) await held.future;
     return support;
   }
 

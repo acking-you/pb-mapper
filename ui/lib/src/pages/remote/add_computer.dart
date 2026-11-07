@@ -72,8 +72,9 @@ class AddComputerController extends ChangeNotifier {
     required RemoteComputerStore computers,
     this.replacing,
   }) : _inspect = inspect,
-       _computers = computers,
-       _remember = computers.support.available;
+       _computers = computers {
+    computers.addListener(_computersChanged);
+  }
 
   final Future<DesktopInvitationInfo> Function(String) _inspect;
   final RemoteComputerStore _computers;
@@ -91,7 +92,9 @@ class AddComputerController extends ChangeNotifier {
   int _serial = 0;
   Timer? _debounce;
   String? _defaultName;
-  bool _replaceConfirmed = false, _remember, _relayOnly = false;
+
+  /// Remember is on by default wherever the vault can keep it.
+  bool _replaceConfirmed = false, _remember = true, _relayOnly = false;
   bool _disposed = false;
 
   AddState get state => _state;
@@ -142,6 +145,15 @@ class AddComputerController extends ChangeNotifier {
 
   void _notify() {
     if (!_disposed) notifyListeners();
+  }
+
+  /// What this device remembers can change while the flow is open: the
+  /// vault finishes loading, or a session is remembered at its first
+  /// picture. Duplicate, conflict, Remember and Connect follow it, and a
+  /// duplicate's saved name is shown, as at recognition.
+  void _computersChanged() {
+    if (_info case final info? when duplicate != null) _nameFor(info);
+    _notify();
   }
 
   /// Typed text: inspected once typing pauses.
@@ -266,15 +278,22 @@ class AddComputerController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _debounce?.cancel();
+    _computers.removeListener(_computersChanged);
     nameField.dispose();
     super.dispose();
   }
 }
 
 /// Connect's action, and Enter's in the name: the flow's result as it is
-/// when pressed, so it carries the name in the field then.
+/// when pressed, so it carries the name in the field then. A press that
+/// lands before a change to the store is drawn finds no result, and closes
+/// nothing.
 VoidCallback? _connect(BuildContext context, AddComputerController add) =>
-    add.ready ? () => Navigator.of(context).pop(add.result()) : null;
+    add.ready
+    ? () {
+        if (add.result() case final result?) Navigator.of(context).pop(result);
+      }
+    : null;
 
 Future<String?> _readClipboard() async {
   try {
