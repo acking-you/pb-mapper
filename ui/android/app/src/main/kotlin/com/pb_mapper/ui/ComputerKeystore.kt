@@ -1,11 +1,13 @@
 package com.pb_mapper.ui
 
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMethodCodec
 import java.security.KeyStore
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -18,7 +20,10 @@ import javax.crypto.spec.GCMParameterSpec
  * invitation in it, stays in Rust.
  *
  * `wrap` and `unwrap` take and return bytes: IV (12) ‖ ciphertext ‖ tag.
- * Any failure, a key lost to a device restore included, is a `KEYSTORE` error.
+ * An `unwrap` that can never succeed, because the Keystore key is gone or no
+ * longer opens the wrapped copy, is a `KEY_GONE` error, and only that one
+ * lets Dart start the vault over. Any other failure, a busy Keystore
+ * included, is a `KEYSTORE` error, and the next load tries again.
  */
 object ComputerKeystore {
     private const val CHANNEL = "pb_mapper/keystore"
@@ -26,6 +31,9 @@ object ComputerKeystore {
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val IV_BYTES = 12
     private const val TAG_BITS = 128
+
+    /** What a wrapped key was sealed with is gone for good. */
+    internal class KeyGone(message: String, cause: Throwable? = null) : Exception(message, cause)
 
     fun register(messenger: BinaryMessenger) {
         // Keystore calls can block on secure hardware, so they run off the
@@ -42,9 +50,11 @@ object ComputerKeystore {
                     ?: throw IllegalArgumentException("expected bytes")
                 when (call.method) {
                     "wrap" -> result.success(wrap(input))
-                    "unwrap" -> result.success(unwrap(input))
+                    "unwrap" -> result.success(open(input, storedKey()))
                     else -> result.notImplemented()
                 }
+            } catch (error: KeyGone) {
+                result.error("KEY_GONE", error.message, null)
             } catch (error: Exception) {
                 result.error("KEYSTORE", error.message ?: error.javaClass.simpleName, null)
             }
@@ -53,22 +63,36 @@ object ComputerKeystore {
 
     private fun wrap(plain: ByteArray): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, key(create = true))
+        cipher.init(Cipher.ENCRYPT_MODE, storedKey() ?: newKey())
         return cipher.iv + cipher.doFinal(plain)
     }
 
-    private fun unwrap(wrapped: ByteArray): ByteArray {
-        require(wrapped.size > IV_BYTES) { "the wrapped key is too short" }
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.DECRYPT_MODE, key(create = false), GCMParameterSpec(TAG_BITS, wrapped, 0, IV_BYTES))
-        return cipher.doFinal(wrapped, IV_BYTES, wrapped.size - IV_BYTES)
+    /**
+     * Opens [wrapped] with [key], the Keystore key or null when it is gone.
+     * Throws [KeyGone] only when no retry could ever open it.
+     */
+    internal fun open(wrapped: ByteArray, key: SecretKey?): ByteArray {
+        if (wrapped.size < IV_BYTES + TAG_BITS / 8) throw KeyGone("the wrapped key is too short")
+        if (key == null) throw KeyGone("the remembered computers key is gone")
+        try {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, wrapped, 0, IV_BYTES))
+            return cipher.doFinal(wrapped, IV_BYTES, wrapped.size - IV_BYTES)
+        } catch (error: KeyPermanentlyInvalidatedException) {
+            throw KeyGone("the remembered computers key was invalidated", error)
+        } catch (error: AEADBadTagException) {
+            throw KeyGone("the remembered computers key does not open its wrapped copy", error)
+        }
     }
 
-    /** The Keystore key, created by the first `wrap`; never extractable. */
-    private fun key(create: Boolean): SecretKey {
+    /** The Keystore key, or null when there is none. */
+    private fun storedKey(): SecretKey? {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (store.getKey(ALIAS, null) as? SecretKey)?.let { return it }
-        check(create) { "the remembered computers key is gone" }
+        return store.getKey(ALIAS, null) as? SecretKey
+    }
+
+    /** Created by the first `wrap`; never extractable. */
+    private fun newKey(): SecretKey {
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         generator.init(
             KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)

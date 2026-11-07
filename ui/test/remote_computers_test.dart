@@ -1,8 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
+import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
 import 'package:pb_mapper_ui/src/pages/remote/remote_actions.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
@@ -17,8 +21,55 @@ const _office = DesktopInvitationInfo(
   format: DesktopInvitationFormat.pbd1,
 );
 
+/// Answers the vault's ops as Rust does on Android, with a wrapped key on
+/// disk.
+class _AndroidVaultService implements PbMapperService {
+  final ops = <String>[];
+
+  @override
+  Future<Map<String, dynamic>> desktopCall(
+    Map<String, Object?> request,
+  ) async {
+    final op = request['op'] as String;
+    ops.add(op);
+    return {
+      'success': true,
+      'data': switch (op) {
+        'computers_support' => {'available': true, 'keystore': true},
+        'computers_key' => {'wrapped': base64Encode(Uint8List(60))},
+        _ => const <String, Object?>{},
+      },
+    };
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('only a Keystore key that is gone starts the vault over; any other '
+      'Keystore failure leaves it for the next load', () async {
+    const keystore = MethodChannel('test/keystore');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    addTearDown(() => messenger.setMockMethodCallHandler(keystore, null));
+    for (final (code, starts) in [('KEYSTORE', false), ('KEY_GONE', true)]) {
+      messenger.setMockMethodCallHandler(keystore, (call) async {
+        if (call.method == 'unwrap') throw PlatformException(code: code);
+        return Uint8List(60);
+      });
+      final service = _AndroidVaultService();
+      final vault = FfiRemoteComputerVault(service, keystore: keystore);
+      expect((await vault.open()).available, starts);
+      expect(service.ops, [
+        'computers_support',
+        'computers_key',
+        if (starts) ...['computers_reset', 'computers_unlock'],
+      ]);
+    }
+  });
 
   test('saved computers that cannot be opened are cleared on request, with '
       'their last pictures', () async {

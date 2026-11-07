@@ -164,22 +164,29 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
     );
     final wrapped = stored['wrapped'] as String?;
     if (wrapped != null) {
-      Uint8List? key;
       try {
-        key = await _keystore.invokeMethod<Uint8List>(
+        final key = await _keystore.invokeMethod<Uint8List>(
           'unwrap',
           base64Decode(wrapped),
         );
-      } on PlatformException catch (error) {
-        debugPrint('Remembered computers reset: ${error.message}');
-      }
-      if (key != null) {
+        if (key == null) {
+          throw const RemoteComputerVaultException(
+            'IO',
+            'the Keystore unwrap failed',
+          );
+        }
         await _call('computers_unlock', {'key': base64Encode(key)});
         return;
+      } on PlatformException catch (error) {
+        // Any other Keystore failure may pass: the vault is left as it is,
+        // and the next load tries again.
+        if (error.code != 'KEY_GONE') rethrow;
+        // The Keystore key is gone, or no longer opens its wrapped copy:
+        // what it sealed can never be read again, so the vault starts
+        // empty under a new key.
+        debugPrint('Remembered computers reset: ${error.message}');
+        await reset();
       }
-      // The Keystore key is gone, as after a device restore: what it
-      // sealed can never be read again, so the vault starts empty.
-      await reset();
     }
     final key = Uint8List.fromList([
       for (var i = 0; i < 32; i++) _random.nextInt(256),
