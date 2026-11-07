@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
@@ -63,6 +64,41 @@ class _UnreadableApi extends FakePbMapperApi {
 
   @override
   _UnreadableTrust get desktop => _host;
+}
+
+/// The phone's camera, as mobile_scanner's platform sees it: it starts and
+/// stops, and reads whatever QR code a test [show]s it.
+class _Camera extends MobileScannerPlatform {
+  final _codes = StreamController<BarcodeCapture?>.broadcast();
+  int starts = 0, stops = 0;
+
+  void show(String text) =>
+      _codes.add(BarcodeCapture(barcodes: [Barcode(rawValue: text)]));
+
+  @override
+  Stream<BarcodeCapture?> get barcodesStream => _codes.stream;
+  @override
+  Stream<TorchState> get torchStateStream => const Stream.empty();
+  @override
+  Stream<double> get zoomScaleStateStream => const Stream.empty();
+  @override
+  Widget buildCameraView() => const ColoredBox(color: Colors.black);
+  @override
+  Future<MobileScannerViewAttributes> start(StartOptions startOptions) async {
+    starts++;
+    return const MobileScannerViewAttributes(
+      cameraDirection: CameraFacing.back,
+      currentTorchMode: TorchState.unavailable,
+      size: Size(1280, 720),
+    );
+  }
+
+  @override
+  Future<void> stop() async => stops++;
+  @override
+  Future<void> updateScanWindow(Rect? window) async {}
+  @override
+  Future<void> dispose() async {}
 }
 
 Finder _key(String key) => find.byKey(Key(key));
@@ -265,7 +301,10 @@ void main() {
       await pumpApp(tester, api, page: AppPage.remote);
       expect(find.textContaining('could not unlock'), findsOneWidget);
       // Enabling would read the same grant and fail the same way.
-      expect(tester.widget<FilledButton>(_key('host-enable')).onPressed, isNull);
+      expect(
+        tester.widget<FilledButton>(_key('host-enable')).onPressed,
+        isNull,
+      );
 
       // Only a visit reads it again, never a timer.
       final reads = api.desktop.argsOf('trust_status').length;
@@ -303,7 +342,10 @@ void main() {
     await pumpApp(tester, api, page: AppPage.remote);
     await _tapIn(tester, _key('host-more'));
     await settle(tester);
-    expect(tester.widget<MenuItemButton>(_key('host-rename')).onPressed, isNull);
+    expect(
+      tester.widget<MenuItemButton>(_key('host-rename')).onPressed,
+      isNull,
+    );
     await tester.tapAt(Offset.zero);
     await settle(tester);
 
@@ -420,5 +462,33 @@ void main() {
       expect(vault.ops, isNot(contains('remember')));
       await finish(tester);
     },
+  );
+
+  testWidgets(
+    'Scan opens the camera wherever the compact Remote tab offers it',
+    (tester) async {
+      InviteScanner.debugSupportedOverride = true;
+      final camera = _Camera();
+      final platform = MobileScannerPlatform.instance;
+      MobileScannerPlatform.instance = camera;
+      addTearDown(() {
+        MobileScannerPlatform.instance = platform;
+        MobileScannerController.resetPlatformSessionOwner();
+      });
+      // A tablet held upright: wider than a dialog, too narrow for the rail.
+      final api = FakePbMapperApi();
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.remote,
+        size: const Size(800, 1280),
+      );
+      await _tapIn(tester, _key('remote-scan'));
+      await settle(tester);
+      expect(find.byType(InviteScanner), findsOneWidget);
+      expect(camera.starts, 1);
+      await finish(tester);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
 }
