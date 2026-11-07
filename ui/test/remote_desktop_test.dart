@@ -24,8 +24,8 @@ void main() {
   testWidgets(
     'a new computer is remembered only after its first picture; leaving the '
     'picture releases the viewer demand and Back to picture takes it again; '
-    'an identity change never touches the saved computer; a session left '
-    'paused is ended',
+    'an identity change never touches the saved computer, nor does its new '
+    'invitation unless remembered; a session left paused is ended',
     (tester) async {
       final api = FakeDesktopApi();
       final desktop = DesktopStore(api);
@@ -114,6 +114,32 @@ void main() {
       expect(vaultOps(), isEmpty);
       expect(computers.byId(id), saved);
       expect(viewer.showing, isFalse);
+
+      // Its new invitation, connected without remembering it, replaces
+      // nothing: the session is not the saved computer's to record.
+      await remote.connectNew(
+        AddComputerResult(
+          invitation: 'pbd1.home-reissued',
+          info: const DesktopInvitationInfo(
+            service: 'desktop:home',
+            name: 'home',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            format: DesktopInvitationFormat.pbd1,
+          ),
+          name: 'home',
+          remember: false,
+          replaceId: id,
+        ),
+      );
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      expect(desktop.session.value.phase, DesktopPhase.live);
+      expect(desktop.session.value.target?.computerId, isNot(id));
+      await remote.disconnect();
+      await tester.pump();
+      expect(vaultOps(), isEmpty);
+      expect(computers.byId(id), saved);
 
       remote.dispose();
       viewer.dispose();

@@ -65,7 +65,8 @@ class AddComputerResult {
   final String name;
   final bool remember, relayOnly;
 
-  /// The remembered computer whose saved invitation this one replaces.
+  /// The remembered computer whose saved invitation this one replaces,
+  /// when it is [remember]ed; otherwise ignored.
   final String? replaceId;
 
   /// Already remembered with this identity: it is opened instead.
@@ -208,7 +209,9 @@ class RemoteDesktop {
   }) async {
     if (result.existing case final existing?) return open(existing);
     _cancelPausedTimer();
-    final replaceId = result.replaceId;
+    // Not remembered, it replaces nothing: a session under the old record's
+    // id would write its picture, path and quality onto that record.
+    final replaceId = result.remember ? result.replaceId : null;
     final id = replaceId ?? computers.newId();
     unawaited(_endSession());
     _current = _Target(
