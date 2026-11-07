@@ -115,8 +115,9 @@ void main() {
       expect(computers.byId(id), saved);
       expect(viewer.showing, isFalse);
 
-      // Its new invitation, connected without remembering it, replaces
-      // nothing: the session is not the saved computer's to record.
+      // Its new invitation, connected without remembering it, is not the
+      // saved computer's to record; remembered later, it replaces that
+      // computer rather than saving the service twice.
       await remote.connectNew(
         AddComputerResult(
           invitation: 'pbd1.home-reissued',
@@ -135,11 +136,19 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       await tester.pump();
       expect(desktop.session.value.phase, DesktopPhase.live);
-      expect(desktop.session.value.target?.computerId, isNot(id));
-      await remote.disconnect();
-      await tester.pump();
+      final reissued = desktop.session.value.target!.computerId!;
+      expect(reissued, isNot(id));
       expect(vaultOps(), isEmpty);
       expect(computers.byId(id), saved);
+      expect(remote.canRememberCurrent, isTrue);
+      expect(await remote.rememberCurrent(), isNull);
+      expect(
+        vault.calls.where((c) => c.$1 == 'remember').single.$2,
+        allOf(containsPair('id', reissued), containsPair('replace_id', id)),
+      );
+      expect(computers.computers.map((c) => c.id), [reissued]);
+      await remote.disconnect();
+      await tester.pump();
 
       remote.dispose();
       viewer.dispose();

@@ -21,8 +21,8 @@ const _office = DesktopInvitationInfo(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('forgetting a computer deletes its thumbnail, and a changed identity is '
-      'a conflict, not a duplicate', () async {
+  test('a changed identity is a conflict, not a duplicate, and a computer '
+      'replaced or forgotten takes its thumbnail with it', () async {
     final dir = await Directory.systemTemp.createTemp('pbm-remote-');
     addTearDown(() => dir.delete(recursive: true));
     final vault = FakeRemoteComputerVault();
@@ -58,10 +58,28 @@ void main() {
     expect(store.sameIdentity(reissued), isNull);
     expect(store.sameServiceOtherIdentity(reissued)?.id, id);
 
-    final thumbnail = store.thumbnailFile(id)!;
+    // Replaced under another id, its last picture goes with its record.
+    final replaced = store.thumbnailFile(id)!;
+    await replaced.writeAsBytes(const [1, 2, 3]);
+    final next = store.newId();
+    await store.rememberSession(
+      id: next,
+      name: 'Office',
+      service: reissued.service,
+      fingerprint: reissued.fingerprint,
+      relay: 'relay.example:7666',
+      namespace: 0,
+      relayOnly: false,
+      quality: DesktopQuality.balanced,
+      replaceId: id,
+    );
+    expect(store.computers.map((c) => c.id), [next]);
+    expect(await replaced.exists(), isFalse);
+
+    final thumbnail = store.thumbnailFile(next)!;
     await thumbnail.writeAsBytes(const [1, 2, 3]);
 
-    await store.forget(id);
+    await store.forget(next);
     expect(await thumbnail.exists(), isFalse);
     expect(store.computers, isEmpty);
     expect(vault.records, isEmpty);

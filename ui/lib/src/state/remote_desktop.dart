@@ -65,8 +65,9 @@ class AddComputerResult {
   final String name;
   final bool remember, relayOnly;
 
-  /// The remembered computer whose saved invitation this one replaces,
-  /// when it is [remember]ed; otherwise ignored.
+  /// The remembered computer whose saved invitation this one replaces once
+  /// it is remembered: at its first picture when [remember]ed, else only if
+  /// its row in the list is remembered later.
   final String? replaceId;
 
   /// Already remembered with this identity: it is opened instead.
@@ -209,10 +210,11 @@ class RemoteDesktop {
   }) async {
     if (result.existing case final existing?) return open(existing);
     _cancelPausedTimer();
-    // Not remembered, it replaces nothing: a session under the old record's
-    // id would write its picture, path and quality onto that record.
-    final replaceId = result.remember ? result.replaceId : null;
-    final id = replaceId ?? computers.newId();
+    // Not remembered, the session is a computer of its own: under the old
+    // record's id it would write its picture, path and quality onto that
+    // record. A later Remember still replaces the record confirmed here.
+    final replaced = result.remember ? result.replaceId : null;
+    final id = replaced ?? computers.newId();
     unawaited(_endSession());
     _current = _Target(
       id: id,
@@ -220,7 +222,7 @@ class RemoteDesktop {
       service: result.info.service,
       fingerprint: result.info.fingerprint,
       relayOnly: result.relayOnly,
-      replaceId: replaceId,
+      replaceId: result.replaceId,
       onRememberFailed: onRememberFailed,
     );
     _rememberPending = result.remember;
@@ -232,7 +234,7 @@ class RemoteDesktop {
           computerId: id,
           relayOnly: result.relayOnly,
           quality:
-              (replaceId == null ? null : computers.byId(replaceId))?.quality ??
+              (replaced == null ? null : computers.byId(replaced))?.quality ??
               DesktopQuality.balanced,
         ),
       ),

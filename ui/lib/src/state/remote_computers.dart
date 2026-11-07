@@ -284,6 +284,11 @@ class RemoteComputerStore extends ChangeNotifier {
         replaceId: replaceId,
       );
       _put(record, replacing: replaceId);
+      // Replaced under another id, the old record's last picture is
+      // nobody's.
+      if (replaceId != null && replaceId != record.id) {
+        await _deleteThumbnail(replaceId);
+      }
       return record;
     } catch (error) {
       if (error is RemoteComputerVaultException &&
@@ -356,16 +361,7 @@ class RemoteComputerStore extends ChangeNotifier {
       _failed(error);
       return;
     }
-    final file = thumbnailFile(id);
-    if (file != null) {
-      try {
-        if (await file.exists()) await file.delete();
-      } catch (error) {
-        debugPrint('The last picture could not be deleted: $error');
-      }
-    }
-    _evict(id);
-    _versions.remove(id);
+    await _deleteThumbnail(id);
     if (_disposed) return;
     _computers = [
       for (final c in _computers)
@@ -407,6 +403,20 @@ class RemoteComputerStore extends ChangeNotifier {
   }
 
   void _evict(String id) => unawaited(_shown.remove(id)?.evict());
+
+  /// Deletes the last picture of [id], whose record is gone (D23).
+  Future<void> _deleteThumbnail(String id) async {
+    final file = thumbnailFile(id);
+    if (file != null) {
+      try {
+        if (await file.exists()) await file.delete();
+      } catch (error) {
+        debugPrint('The last picture could not be deleted: $error');
+      }
+    }
+    _evict(id);
+    _versions.remove(id);
+  }
 
   @override
   void dispose() {
