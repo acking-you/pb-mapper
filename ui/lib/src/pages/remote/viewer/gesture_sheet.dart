@@ -212,7 +212,9 @@ class GestureSheet extends StatelessWidget {
               shape: const StadiumBorder(),
               backgroundColor: ViewerPalette.text,
               foregroundColor: const Color(0xFF1D1D1F),
-              textStyle: const TextStyle(
+              // From the theme's label style: a bare TextStyle here would
+              // replace it and lose the UI typeface.
+              textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
                 fontSize: 15,
                 fontWeight: FontWeight.w600,
               ),

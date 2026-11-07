@@ -1,8 +1,10 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_title_bar.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
@@ -97,4 +99,34 @@ void main() {
       }
     },
   );
+
+  testWidgets("the viewer's caption buttons keep the window's right edge", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      _maximized(tester, false);
+      tester.view
+        ..physicalSize = const Size(1440, 900)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Material(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: ViewerTitleBar(title: 'Office PC'),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      // The bar's end inset is 4 px; the title must not hold the free space.
+      expect(tester.getRect(find.byKey(_close)).right, 1440 - 4);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }

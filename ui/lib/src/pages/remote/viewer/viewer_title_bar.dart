@@ -43,32 +43,38 @@ class ViewerTitleBar extends StatelessWidget {
                   color: ViewerPalette.signal,
                 ),
                 const SizedBox(width: 10),
-                Flexible(
+                // The title takes what it needs of the free space and the
+                // trailing group keeps the right edge: a loose Flexible
+                // beside a Spacer would split it and leave both mid-bar.
+                Expanded(
                   child: IgnorePointer(
-                    child: Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: ViewerPalette.text,
-                      ),
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: ViewerPalette.text,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        const Text(
+                          'pb-mapper',
+                          maxLines: 1,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: ViewerPalette.textQuiet,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
-                const IgnorePointer(
-                  child: Text(
-                    'pb-mapper',
-                    maxLines: 1,
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      color: ViewerPalette.textQuiet,
-                    ),
-                  ),
-                ),
-                const Spacer(),
                 SharingIndicator(
                   form: sharingFormFor(box.maxWidth),
                   tone: CaptionTone.viewer,
