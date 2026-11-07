@@ -292,11 +292,8 @@ class TouchGestureMachine {
         _sink.click(RemoteButton.left, _sink.cursor);
         _lastTap = null;
       case _Phase.dragging:
-        if (!_pressSent) {
-          // The host holds this press past its double-click time (R-UI-3).
-          _sink.press(RemoteButton.left, _pressAt, dragStart: true);
-          _sink.move(_sink.cursor);
-        }
+        // The host holds this press past its double-click time (R-UI-3).
+        if (!_pressSent) _sendDragPress();
         _sink.release(RemoteButton.left);
       case _Phase.scroll:
         if (_wheelStarted) _sink.wheelEnd();
@@ -464,6 +461,16 @@ class TouchGestureMachine {
     if (_pressSent) _sink.move(cursor);
   }
 
+  /// The trackpad drag's delayed press, at the double tap, then a move to
+  /// where the finger took the cursor meanwhile. That point is read first:
+  /// the press puts the prediction back at the double tap.
+  void _sendDragPress() {
+    final to = _sink.cursor;
+    _sink.press(RemoteButton.left, _pressAt, dragStart: true);
+    _sink.move(to);
+    _pressSent = true;
+  }
+
   void _fireDue(Duration t) {
     while (true) {
       final due = nextTimeout;
@@ -496,11 +503,7 @@ class TouchGestureMachine {
         }
       } else if (due == _pressDueAt) {
         _pressDueAt = null;
-        if (_phase == _Phase.dragging && !_pressSent) {
-          _sink.press(RemoteButton.left, _pressAt, dragStart: true);
-          _sink.move(_sink.cursor);
-          _pressSent = true;
-        }
+        if (_phase == _Phase.dragging && !_pressSent) _sendDragPress();
       }
     }
   }
