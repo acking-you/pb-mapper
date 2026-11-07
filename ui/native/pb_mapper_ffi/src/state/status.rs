@@ -11,7 +11,8 @@
 //! change events. Only the embedded relay's figures are cached.
 //!
 //! A question to the relay takes the state lock only for the settings and
-//! client it asks with, and asks without it, as a tunnel's setup does: the
+//! client it asks with, and again, briefly, to keep what it learned about
+//! QUIC; it asks without it, as a tunnel's setup does: the
 //! window checks the relay every few seconds, and a relay that is slow or
 //! silent would otherwise hold every other call for as long as the check
 //! waits.
@@ -299,7 +300,9 @@ impl PbMapperState {
 
     /// Keeps what the relay said about QUIC under `config`, the settings it
     /// was asked under, unless they have changed since: an answer about the
-    /// old settings must not replace what the new ones were told.
+    /// old settings must not replace what the new ones were told. Two checks
+    /// under the same settings may land in either order; both are the same
+    /// relay's answer a moment apart, and the next forced check asks again.
     fn remember_quic_offer(&mut self, config: AppConfig, port: Option<u16>) {
         if config == self.config {
             self.quic_offer = Some((config, port));

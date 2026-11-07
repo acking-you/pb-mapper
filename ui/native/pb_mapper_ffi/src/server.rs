@@ -261,10 +261,12 @@ mod tests {
             scope.spawn(move || read.send(reply(unsafe { pb_mapper_get_config_json(ptr()) })));
             // Well inside the check's own timeout, which is seconds long.
             let config = settings.recv_timeout(Duration::from_secs(1));
+            let overlapped = !checking.is_finished();
             // Either way the relay hangs up now, so the check ends at once
             // rather than at its timeout.
             hang_up.cancel();
             let config = config.expect("reading the settings waited for the relay check");
+            assert!(overlapped, "the check was still waiting on the relay");
             assert_eq!(
                 config["data"]["serverAddress"],
                 address.as_str(),
