@@ -625,6 +625,7 @@ class DesktopHostView {
     this.restarting = false,
     this.background = false,
     this.controlAllowed = false,
+    this.trustUnreadable = false,
     this.service,
     this.invitation,
     this.error,
@@ -654,6 +655,10 @@ class DesktopHostView {
   /// The background service owns hosting; display and name are fixed.
   final bool background;
   final bool controlAllowed;
+
+  /// A grant is remembered but cannot be read: Windows cannot unlock it, or
+  /// it is invalid. Nothing can share until it is revoked; [error] says why.
+  final bool trustUnreadable;
   final String? service, invitation, error;
   final List<DesktopDisplay> displays;
   final int? displayId;
@@ -671,6 +676,7 @@ class DesktopHostView {
       other.restarting == restarting &&
       other.background == background &&
       other.controlAllowed == controlAllowed &&
+      other.trustUnreadable == trustUnreadable &&
       other.service == service &&
       other.invitation == invitation &&
       other.error == error &&
@@ -688,6 +694,7 @@ class DesktopHostView {
     restarting,
     background,
     controlAllowed,
+    trustUnreadable,
     service,
     invitation,
     error,

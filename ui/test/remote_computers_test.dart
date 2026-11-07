@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
+import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
@@ -174,8 +176,8 @@ void main() {
     expect(composed.composing, const TextRange(start: max - 1, end: max));
   });
 
-  test('forgetting a computer deletes its thumbnail, and a changed identity is '
-      'a conflict, not a duplicate', () async {
+  test('a changed identity is a conflict, not a duplicate, and a computer '
+      'replaced or forgotten takes its thumbnail with it', () async {
     final dir = await Directory.systemTemp.createTemp('pbm-remote-');
     addTearDown(() => dir.delete(recursive: true));
     final vault = FakeRemoteComputerVault();
@@ -211,16 +213,83 @@ void main() {
     expect(store.sameIdentity(reissued), isNull);
     expect(store.sameServiceOtherIdentity(reissued)?.id, id);
 
-    final thumbnail = store.thumbnailFile(id)!;
-    await thumbnail.writeAsBytes(const [1, 2, 3]);
-    store.thumbnailWritten(id);
-    expect(store.thumbnailVersion(id), 1);
+    // Replaced under another id, its last picture goes with its record.
+    final replaced = store.thumbnailFile(id)!;
+    await replaced.writeAsBytes(const [1, 2, 3]);
+    final next = store.newId();
+    await store.rememberSession(
+      id: next,
+      name: 'Office',
+      service: reissued.service,
+      fingerprint: reissued.fingerprint,
+      relay: 'relay.example:7666',
+      namespace: 0,
+      relayOnly: false,
+      quality: DesktopQuality.balanced,
+      replaceId: id,
+    );
+    expect(store.computers.map((c) => c.id), [next]);
+    expect(await replaced.exists(), isFalse);
 
-    await store.forget(id);
+    final thumbnail = store.thumbnailFile(next)!;
+    await thumbnail.writeAsBytes(const [1, 2, 3]);
+
+    await store.forget(next);
     expect(await thumbnail.exists(), isFalse);
     expect(store.computers, isEmpty);
     expect(vault.records, isEmpty);
   });
+
+  test(
+    'a rewritten last picture is shown, at every width it was shown at',
+    () async {
+      final dir = await Directory.systemTemp.createTemp('pbm-remote-');
+      addTearDown(() => dir.delete(recursive: true));
+      final store = RemoteComputerStore(
+        FakeRemoteComputerVault(),
+        thumbnailDir: () async => dir,
+      );
+      addTearDown(store.dispose);
+      await store.load();
+      final id = store.newId();
+      final file = store.thumbnailFile(id)!;
+
+      /// Writes a 4 × [height] picture, as a viewer closing does.
+      Future<void> write(int height) async {
+        final recorder = ui.PictureRecorder();
+        Canvas(recorder).drawColor(const Color(0xFF3366FF), BlendMode.src);
+        final image = await recorder.endRecording().toImage(4, height);
+        final png = await image.toByteData(format: ui.ImageByteFormat.png);
+        image.dispose();
+        await file.writeAsBytes(png!.buffer.asUint8List(), flush: true);
+      }
+
+      /// The picture's shape as the card would decode it [width] wide.
+      Future<double> shown(int width) async {
+        final decoded = Completer<ImageInfo>();
+        store
+            .thumbnailImage(id, width: width)!
+            .resolve(ImageConfiguration.empty)
+            .addListener(
+              ImageStreamListener(
+                (info, _) => decoded.complete(info),
+                onError: decoded.completeError,
+              ),
+            );
+        final image = (await decoded.future).image;
+        return image.width / image.height;
+      }
+
+      // Shown portrait and landscape, then rewritten.
+      await write(2);
+      expect(await shown(8), 2);
+      expect(await shown(16), 2);
+      await write(4);
+      store.thumbnailWritten(id);
+      expect(await shown(8), 1);
+      expect(await shown(16), 1);
+    },
+  );
 
   test('presence follows the credential a computer was remembered under, and '
       "the administrator's viewer reaches only its own namespace", () async {

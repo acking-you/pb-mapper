@@ -275,6 +275,10 @@ class DesktopStore {
 
   DesktopCapabilities? _capabilities;
   DesktopTrust? _trust;
+
+  /// Why the remembered grant could not be read. It stays until a read
+  /// succeeds, which for a grant Windows cannot unlock only Revoke brings.
+  String? _trustError;
   DesktopHostSnapshot? _host;
   bool _hostStatusRead = false, _hostBusy = false;
   bool _enabling = false, _restarting = false, _startupRestored = false;
@@ -287,7 +291,8 @@ class DesktopStore {
   bool _hostCurrent(int serial) => !_disposed && serial == _hostSerial;
 
   Future<void> _onPageDemand() async {
-    if (_hostView.value.loaded) {
+    // An unreadable grant is read again on each visit, never on a timer.
+    if (_hostView.value.loaded && _trustError == null) {
       try {
         _capabilities = await _api.capabilities();
       } catch (_) {
@@ -302,7 +307,7 @@ class DesktopStore {
   Future<void> _loadHost() => _hostLoading ??= () async {
     try {
       _capabilities = await _api.capabilities();
-      _trust = await _api.trustStatus();
+      await _readTrust(_hostSerial);
       await _discoverBackground();
       await _readHost();
     } catch (e) {
@@ -312,6 +317,25 @@ class DesktopStore {
       _hostLoading = null;
     }
   }();
+
+  /// Reads the remembered grant; null when it cannot be read. That failure
+  /// is kept, not thrown: it is local (Windows cannot unlock the grant, or
+  /// it is invalid), retrying does not mend it, and the card must still
+  /// load to offer the Revoke its message asks for.
+  Future<DesktopTrust?> _readTrust(int serial) async {
+    DesktopTrust? trust;
+    String? error;
+    try {
+      trust = await _api.trustStatus();
+    } catch (e) {
+      error = e.toString();
+    }
+    if (_hostCurrent(serial)) {
+      _trust = trust;
+      _trustError = error;
+    }
+    return trust;
+  }
 
   /// `host_status` reads the cached background state; this asks the
   /// service itself, which only the startup and explicit actions do.
@@ -337,9 +361,8 @@ class DesktopStore {
   }
 
   Future<void> _readTrustAndHost(int serial) async {
-    final trust = await _api.trustStatus();
+    await _readTrust(serial);
     if (!_hostCurrent(serial)) return;
-    _trust = trust;
     await _readHost();
   }
 
@@ -353,8 +376,12 @@ class DesktopStore {
     final configuredBackground = background?.configured == true;
     final saved = trust?.saved;
     final matches = trust?.matchesRelay == true;
+    final trustError = _trustError;
     _hostView.value = DesktopHostView(
-      loaded: capabilities != null && trust != null && _hostStatusRead,
+      loaded:
+          capabilities != null &&
+          (trust != null || trustError != null) &&
+          _hostStatusRead,
       supported: capabilities?.host == true,
       sharing: host != null || background?.enabled == true,
       configured: (saved != null && matches) || configuredBackground,
@@ -378,7 +405,8 @@ class DesktopStore {
           host?.invitation ??
           (configuredBackground ? background!.invitation : null) ??
           (matches ? saved?.invitation : null),
-      error: _hostError,
+      trustUnreadable: trustError != null,
+      error: _hostError ?? trustError,
       displays: capabilities?.displays ?? const [],
       displayId:
           host?.display?.id ??
@@ -445,10 +473,10 @@ class DesktopStore {
     try {
       // A restarting helper must not prevent discovering the durable
       // hand-off that asks us to retry it. Read the local intent before
-      // service IPC.
-      final trust = await _api.trustStatus();
+      // service IPC. A grant that cannot be read restores nothing, and is
+      // not retried: the card offers Revoke instead.
+      final trust = await _readTrust(serial) ?? const DesktopTrust();
       if (!_hostCurrent(serial)) return;
-      _trust = trust;
       if (trust.saved?.background == true &&
           trust.saved?.autoStart == true &&
           trust.matchesRelay) {
@@ -478,9 +506,8 @@ class DesktopStore {
   Future<void> _resumePendingHost(int serial) async {
     if (!_hostCurrent(serial)) return;
     try {
-      final trust = await _api.trustStatus();
+      final trust = await _readTrust(serial) ?? const DesktopTrust();
       if (!_hostCurrent(serial)) return;
-      _trust = trust;
       if (trust.saved?.background != true ||
           trust.saved?.autoStart != true ||
           !trust.matchesRelay) {

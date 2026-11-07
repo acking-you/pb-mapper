@@ -8,6 +8,7 @@ import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
 import 'package:pb_mapper_ui/src/pages/remote/remote_actions.dart';
 import 'package:pb_mapper_ui/src/pages/remote/remote_format.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
+import 'package:pb_mapper_ui/src/shell/app_shell.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
 import 'package:pb_mapper_ui/src/state/remote_desktop.dart';
@@ -15,14 +16,15 @@ import 'package:pb_mapper_ui/src/theme/app_icons.dart';
 import 'package:pb_mapper_ui/src/theme/app_theme.dart';
 import 'package:pb_mapper_ui/src/theme/fonts.dart';
 import 'package:pb_mapper_ui/src/theme/metrics.dart';
-import 'package:pb_mapper_ui/src/widgets/surfaces.dart';
 
 /// How the add flow opens: the platform's way, the camera first, or the
 /// clipboard at once.
 enum AddMode { auto, scan, paste }
 
 /// Asks for another computer's invitation, then connects to what it names
-/// (§6.6). A dialog on a pointer or a wide window; a sheet on a phone.
+/// (§6.6). A dialog on a pointer, or on a touch screen wide enough for the
+/// rail; otherwise the sheet, which honours [mode]: wherever the compact
+/// layout offers Scan and Paste, they open it.
 /// [replacing] is the remembered computer whose host identity changed: its
 /// name is kept, and an invitation for its service replaces its own.
 Future<void> showAddComputer(
@@ -40,7 +42,7 @@ Future<void> showAddComputer(
     replacing: replacing,
   );
   final AddComputerResult? result;
-  if (!touch || MediaQuery.sizeOf(context).width >= kDialogPanelWidth) {
+  if (!touch || usesRail(context)) {
     result = await showDialog<AddComputerResult>(
       context: context,
       barrierColor: const Color(0x52141416),

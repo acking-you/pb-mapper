@@ -24,8 +24,8 @@ void main() {
   testWidgets(
     'a new computer is remembered only after its first picture; leaving the '
     'picture releases the viewer demand and Back to picture takes it again; '
-    'an identity change never touches the saved computer; a session left '
-    'paused is ended',
+    'an identity change never touches the saved computer, nor does its new '
+    'invitation unless remembered; a session left paused is ended',
     (tester) async {
       final api = FakeDesktopApi();
       final desktop = DesktopStore(api);
@@ -114,6 +114,41 @@ void main() {
       expect(vaultOps(), isEmpty);
       expect(computers.byId(id), saved);
       expect(viewer.showing, isFalse);
+
+      // Its new invitation, connected without remembering it, is not the
+      // saved computer's to record; remembered later, it replaces that
+      // computer rather than saving the service twice.
+      await remote.connectNew(
+        AddComputerResult(
+          invitation: 'pbd1.home-reissued',
+          info: const DesktopInvitationInfo(
+            service: 'desktop:home',
+            name: 'home',
+            fingerprint: 'FFFF-0000-FFFF-0000',
+            format: DesktopInvitationFormat.pbd1,
+          ),
+          name: 'home',
+          remember: false,
+          replaceId: id,
+        ),
+      );
+      api.viewerStatusValue = liveStatus();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      expect(desktop.session.value.phase, DesktopPhase.live);
+      final reissued = desktop.session.value.target!.computerId!;
+      expect(reissued, isNot(id));
+      expect(vaultOps(), isEmpty);
+      expect(computers.byId(id), saved);
+      expect(remote.canRememberCurrent, isTrue);
+      expect(await remote.rememberCurrent(), isNull);
+      expect(
+        vault.calls.where((c) => c.$1 == 'remember').single.$2,
+        allOf(containsPair('id', reissued), containsPair('replace_id', id)),
+      );
+      expect(computers.computers.map((c) => c.id), [reissued]);
+      await remote.disconnect();
+      await tester.pump();
 
       remote.dispose();
       viewer.dispose();

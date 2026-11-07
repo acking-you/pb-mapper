@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
@@ -33,6 +34,71 @@ class _Api extends FakePbMapperApi {
 
   @override
   _HostDesktop get desktop => _host;
+}
+
+/// A remembered grant Windows cannot unlock: every read of it fails, as
+/// `trust_status` does, until it is revoked.
+class _UnreadableTrust extends FakeDesktopApi {
+  bool unreadable = true;
+
+  @override
+  Future<DesktopTrust> trustStatus() async {
+    if (!unreadable) return super.trustStatus();
+    calls.add(('trust_status', const {}));
+    throw const DesktopCallException(
+      'IO',
+      'Windows could not unlock desktop trust for this user; revoke it and '
+          'authorize a new invitation',
+    );
+  }
+
+  @override
+  Future<void> revokeTrust() async {
+    unreadable = false;
+    await super.revokeTrust();
+  }
+}
+
+class _UnreadableApi extends FakePbMapperApi {
+  final _host = _UnreadableTrust();
+
+  @override
+  _UnreadableTrust get desktop => _host;
+}
+
+/// The phone's camera, as mobile_scanner's platform sees it: it starts and
+/// stops, and reads whatever QR code a test [show]s it.
+class _Camera extends MobileScannerPlatform {
+  final _codes = StreamController<BarcodeCapture?>.broadcast();
+  int starts = 0, stops = 0;
+
+  void show(String text) =>
+      _codes.add(BarcodeCapture(barcodes: [Barcode(rawValue: text)]));
+
+  @override
+  Stream<BarcodeCapture?> get barcodesStream => _codes.stream;
+  @override
+  Stream<TorchState> get torchStateStream => const Stream.empty();
+  @override
+  Stream<double> get zoomScaleStateStream => const Stream.empty();
+  @override
+  Widget buildCameraView() => const ColoredBox(color: Colors.black);
+  @override
+  Future<MobileScannerViewAttributes> start(StartOptions startOptions) async {
+    starts++;
+    return const MobileScannerViewAttributes(
+      cameraDirection: CameraFacing.back,
+      currentTorchMode: TorchState.unavailable,
+      size: Size(1280, 720),
+    );
+  }
+
+  @override
+  Future<void> stop() async => stops++;
+  @override
+  Future<void> updateScanWindow(Rect? window) async {}
+  @override
+  Future<void> dispose() async {}
 }
 
 Finder _key(String key) => find.byKey(Key(key));
@@ -228,6 +294,78 @@ void main() {
   );
 
   testWidgets(
+    'a remembered grant Windows cannot unlock says so and offers Revoke, '
+    'without retrying in the background',
+    (tester) async {
+      final api = _UnreadableApi();
+      await pumpApp(tester, api, page: AppPage.remote);
+      expect(find.textContaining('could not unlock'), findsOneWidget);
+      // Enabling would read the same grant and fail the same way.
+      expect(
+        tester.widget<FilledButton>(_key('host-enable')).onPressed,
+        isNull,
+      );
+
+      // Only a visit reads it again, never a timer.
+      final reads = api.desktop.argsOf('trust_status').length;
+      await tester.pump(const Duration(seconds: 30));
+      expect(api.desktop.argsOf('trust_status'), hasLength(reads));
+
+      await _tapIn(tester, _key('host-error-revoke'));
+      await settle(tester);
+      await tester.tap(_key('confirm-destructive'));
+      await settle(tester);
+      expect(api.desktop.ops, contains('trust_revoke'));
+      expect(_key('host-error'), findsNothing);
+      expect(
+        tester.widget<FilledButton>(_key('host-enable')).onPressed,
+        isNotNull,
+      );
+      await finish(tester);
+    },
+  );
+
+  testWidgets('a stopped host is renamed only once it shares again', (
+    tester,
+  ) async {
+    final api = FakePbMapperApi();
+    api.desktop.trust = const DesktopTrust(
+      supported: true,
+      matchesRelay: true,
+      saved: DesktopTrustedHost(
+        relay: 'localhost:7666',
+        service: 'desktop:here',
+        displayId: 1,
+        invitation: FakeDesktopApi.localInvitation,
+      ),
+    );
+    await pumpApp(tester, api, page: AppPage.remote);
+    await _tapIn(tester, _key('host-more'));
+    await settle(tester);
+    expect(
+      tester.widget<MenuItemButton>(_key('host-rename')).onPressed,
+      isNull,
+    );
+    await tester.tapAt(Offset.zero);
+    await settle(tester);
+
+    await _tapIn(tester, _key('host-start'));
+    await settle(tester);
+    await _tapIn(tester, _key('host-more'));
+    await settle(tester);
+    await tester.tap(_key('host-rename'));
+    await settle(tester);
+    await tester.enterText(_key('host-rename-field'), 'den');
+    await tester.tap(_key('host-rename-save'));
+    await settle(tester);
+    expect(api.desktop.argsOf('host_rename'), [
+      {'service': 'desktop:den'},
+    ]);
+    expect(_key('host-error'), findsNothing);
+    await finish(tester);
+  });
+
+  testWidgets(
     'the invitation QR shows only on request and hides when the page is left '
     'or the app goes inactive',
     (tester) async {
@@ -324,5 +462,47 @@ void main() {
       expect(vault.ops, isNot(contains('remember')));
       await finish(tester);
     },
+  );
+
+  testWidgets(
+    'Scan opens the camera wherever the compact Remote tab offers it, and a '
+    'code it rejects does not end scanning',
+    (tester) async {
+      InviteScanner.debugSupportedOverride = true;
+      final camera = _Camera();
+      final platform = MobileScannerPlatform.instance;
+      MobileScannerPlatform.instance = camera;
+      addTearDown(() {
+        MobileScannerPlatform.instance = platform;
+        MobileScannerController.resetPlatformSessionOwner();
+      });
+      // A tablet held upright: wider than a dialog, too narrow for the rail.
+      final api = FakePbMapperApi();
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.remote,
+        size: const Size(800, 1280),
+      );
+      await _tapIn(tester, _key('remote-scan'));
+      await settle(tester);
+      expect(find.byType(InviteScanner), findsOneWidget);
+      expect(camera.starts, 1);
+
+      // The wrong code is refused, once however long it stays in view, and
+      // the camera keeps looking for the right one.
+      camera.show('pbmt1_a-setup-string');
+      await settle(tester);
+      expect(find.textContaining('pb-mapper setup string'), findsOneWidget);
+      camera.show('pbmt1_a-setup-string');
+      await settle(tester);
+      expect(api.desktop.argsOf('inspect_invitation'), hasLength(1));
+      expect(camera.stops, 0);
+      camera.show('pbd1.office-pc.SECRET-TOKEN-0123');
+      await settle(tester);
+      expect(_key('add-recognised'), findsOneWidget);
+      await finish(tester);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
 }

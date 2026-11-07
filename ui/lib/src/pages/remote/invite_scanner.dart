@@ -11,11 +11,13 @@ import 'package:pb_mapper_ui/src/theme/viewer_palette.dart';
 /// Live camera QR reading. Android/iOS only (mobile_scanner 7.5.0, D21):
 /// QR only, no duplicates, `returnImage: false`, so no frame bytes reach
 /// Dart. The camera stops whenever the app leaves the front and starts
-/// again when it returns.
+/// again when it returns; otherwise it runs until the scanner goes, which
+/// the sheet does once an invitation is recognised.
 class InviteScanner extends StatefulWidget {
   const InviteScanner({super.key, required this.onDetect});
 
-  /// The first QR text read; the scanner stops after it.
+  /// Each QR text read, once: a code the sheet rejects does not end
+  /// scanning, and is not reported again while it stays in view.
   final ValueChanged<String> onDetect;
 
   static bool get supported =>
@@ -41,7 +43,11 @@ class _InviteScannerState extends State<InviteScanner> {
   /// The plugin follows the app's lifecycle only for a controller it made
   /// itself; this one is ours, so the camera's running is ours to follow.
   AppLifecycleListener? _lifecycle;
-  bool _detected = false;
+
+  /// The last text reported. The plugin forgets what it read each time the
+  /// camera starts again; this does not, so a rejected code still in view
+  /// is not inspected over and over.
+  String? _reported;
 
   @override
   void initState() {
@@ -63,11 +69,10 @@ class _InviteScannerState extends State<InviteScanner> {
     super.dispose();
   }
 
-  /// Runs the camera only while the app is in front; after a read it stays
-  /// stopped.
+  /// Runs the camera only while the app is in front.
   void _onLifecycle(AppLifecycleState state) {
     final controller = _controller;
-    if (controller == null || _detected) return;
+    if (controller == null) return;
     final change = state == AppLifecycleState.resumed
         ? controller.start()
         : controller.stop();
@@ -78,13 +83,11 @@ class _InviteScannerState extends State<InviteScanner> {
   }
 
   void _onDetect(BarcodeCapture capture) {
-    if (_detected) return;
     final value = capture.barcodes
         .map((b) => b.rawValue)
         .firstWhere((v) => v != null && v.isNotEmpty, orElse: () => null);
-    if (value == null) return;
-    _detected = true;
-    unawaited(_controller?.stop());
+    if (value == null || value == _reported) return;
+    _reported = value;
     widget.onDetect(value);
   }
 
