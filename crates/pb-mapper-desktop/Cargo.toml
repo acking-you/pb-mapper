@@ -42,6 +42,7 @@ path = "src/bin/helper.rs"
 required-features = ["windows-helper"]
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 pb-mapper-client = { workspace = true, features = ["relay-quic"] }
 pb-mapper-testkit.workspace = true
