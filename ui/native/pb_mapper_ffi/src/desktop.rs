@@ -752,23 +752,27 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
     if let Request::HelperAction { action } = request {
         #[cfg(windows)]
         {
+            use desktop::helper::Action;
             // Enabling/reinstalling may resume a saved service grant. Keep it
             // serialized with local starts until the helper process exits.
             // Old callers used `open` to spawn a second UI. Always install the
             // current bundle instead, then replace this UI after a ready ack.
-            let action = if action == "open" {
-                "install".into()
-            } else {
-                action
+            // An update from here keeps a stopped or Disabled service so.
+            let action = match action.as_str() {
+                "install" | "open" => Action::Install { enable: false },
+                "enable" => Action::Enable,
+                "disable" => Action::Disable,
+                "uninstall" => Action::Uninstall,
+                _ => return Err(err("unknown helper action")),
             };
             let local = handle.desktop.host.lock().await;
-            if matches!(action.as_str(), "enable" | "install") && local.is_some() {
+            if matches!(action, Action::Enable | Action::Install { .. }) && local.is_some() {
                 return Err(err(
                     "stop local sharing before enabling the background service",
                 ));
             }
-            let restart = action == "install";
-            tokio::task::spawn_blocking(move || desktop::helper::request_installation(&action))
+            let restart = matches!(action, Action::Install { .. });
+            tokio::task::spawn_blocking(move || desktop::helper::request_installation(action))
                 .await
                 .map_err(err)?
                 .map_err(err)?;
@@ -1452,14 +1456,7 @@ async fn enable_host(
                 "desktop setup is waiting for the installed background service",
             ));
         }
-        let action = if !helper.installed
-            || !helper.authorized_application
-            || (helper.running && !helper.identity_verified)
-        {
-            "install"
-        } else {
-            "enable"
-        };
+        let action = helper_setup_action(&helper);
         let installed =
             tokio::task::spawn_blocking(move || desktop::helper::request_installation(action))
                 .await
@@ -1481,7 +1478,7 @@ async fn enable_host(
             .map_err(err)??;
             return Err(failure);
         }
-        if action == "install" {
+        if matches!(action, desktop::helper::Action::Install { .. }) {
             desktop::helper::prepare_application_restart()
                 .await
                 .map_err(err)?;
@@ -1521,6 +1518,23 @@ async fn enable_host(
         .await
         .map_err(err)??;
     Ok(json!({"restart": false, "invitation": snapshot["invitation"], "background": snapshot}))
+}
+
+/// What setup asks of Windows for a helper that is not ready, in one prompt.
+/// Installing again also updates an outdated helper in place (D2); enabling
+/// leaves it outdated. Setup's install also turns a stopped or Disabled
+/// service on, which an update alone would leave off.
+#[cfg(windows)]
+fn helper_setup_action(helper: &desktop::helper::Status) -> desktop::helper::Action {
+    if !helper.installed
+        || helper.update_required
+        || !helper.authorized_application
+        || (helper.running && !helper.identity_verified)
+    {
+        desktop::helper::Action::Install { enable: true }
+    } else {
+        desktop::helper::Action::Enable
+    }
 }
 
 #[cfg(not(windows))]
@@ -2213,6 +2227,33 @@ mod tests {
         let observed = discover_background(&state, async { disconnected }).await;
         assert!(background_configured(&observed));
         assert!(background_enabled(&observed));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn setup_installs_an_outdated_helper_again_and_turns_it_on() {
+        use desktop::helper::Action;
+        // Of an older protocol: enabling it again would still refuse to
+        // capture, and updating it alone would leave a stopped one off.
+        let outdated = desktop::helper::Status {
+            installed: true,
+            running: false,
+            authorized_application: true,
+            identity_verified: true,
+            protocol: 2,
+            update_required: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            helper_setup_action(&outdated),
+            Action::Install { enable: true }
+        );
+        let current = desktop::helper::Status {
+            protocol: desktop::helper::HELPER_PROTOCOL,
+            update_required: false,
+            ..outdated
+        };
+        assert_eq!(helper_setup_action(&current), Action::Enable);
     }
 
     #[test]

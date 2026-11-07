@@ -485,7 +485,20 @@ fn validate_service(service: &Service, config: &Configuration) -> Result<Service
     }
     Ok(actual.start_type)
 }
-pub fn install(source: &Path, sid: &str) -> Result<()> {
+/// The startup type an installation leaves, and whether it starts the service.
+/// A new service starts automatically. An update keeps the previous startup,
+/// stopped or Disabled included; with `enable` it restores automatic startup
+/// and starts, as `enable()` does, so turning remote control on takes one prompt.
+fn startup(previous: Option<(ServiceStartType, bool)>, enable: bool) -> (ServiceStartType, bool) {
+    match previous {
+        Some((start_type, running)) if !enable => (
+            start_type,
+            start_type != ServiceStartType::Disabled && running,
+        ),
+        _ => (ServiceStartType::AutoStart, true),
+    }
+}
+pub fn install(source: &Path, sid: &str, enable: bool) -> Result<()> {
     let manager = manager()?;
     let executable = std::env::current_exe()?;
     if !sid.starts_with("S-1-")
@@ -507,7 +520,7 @@ pub fn install(source: &Path, sid: &str) -> Result<()> {
         ));
     }
     let installation = Installation::open()?;
-    let result = install_bundle(&installation, &manager, source, sid);
+    let result = install_bundle(&installation, &manager, source, sid, enable);
     installation.log(&result);
     result
 }
@@ -516,6 +529,7 @@ fn install_bundle(
     manager: &ServiceManager,
     source: &Path,
     sid: &str,
+    enable: bool,
 ) -> Result<()> {
     let _source_ancestors = pin_source_ancestors(source)?;
     let previous = if installation.root.join("installation.json").exists() {
@@ -576,17 +590,14 @@ fn install_bundle(
             Err(e) => return Err(error(e)),
         };
         let update = (|| {
-            let start_type =
-                old_state.map_or(ServiceStartType::AutoStart, |(start_type, _)| start_type);
+            let (start_type, run) = startup(old_state, enable);
             service
                 .change_config(&info(&config, start_type))
                 .map_err(error)?;
             installation.configuration(&config)?;
             service.set_description("Authorized desktop capture/input and explicitly configured background hosting. Managed only by the approved installed application.").map_err(error)?;
             configure_recovery(&service)?;
-            if old_state.is_none_or(|(start_type, running)| {
-                start_type != ServiceStartType::Disabled && running
-            }) {
+            if run {
                 start(&service)?;
             }
             Ok::<_, std::io::Error>(())
@@ -790,5 +801,13 @@ mod tests {
         assert!(read_source(&source, false).is_ok());
         std::fs::remove_file(&source).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn an_update_keeps_a_disabled_service_unless_setup_enables_it() {
+        use ServiceStartType::{AutoStart, Disabled};
+        assert_eq!(startup(None, false), (AutoStart, true));
+        assert_eq!(startup(Some((Disabled, false)), false), (Disabled, false));
+        assert_eq!(startup(Some((Disabled, false)), true), (AutoStart, true));
     }
 }

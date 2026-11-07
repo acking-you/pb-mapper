@@ -52,6 +52,8 @@ pub struct Encoded {
     pub pts_us: u64,
     /// Submit to output, in microseconds.
     pub encode_us: u32,
+    /// The encoder's `Statistics::gop`.
+    pub gop: u32,
 }
 
 impl From<Encoded> for crate::EncodedFrame {
@@ -65,6 +67,7 @@ impl From<Encoded> for crate::EncodedFrame {
                 pts_us: image.pts_us,
                 duplicate: image.duplicate,
                 encode_us: image.encode_us,
+                gop: image.gop,
             },
             bytes: image.bytes,
         }
@@ -334,6 +337,7 @@ impl Encoder {
                         duplicate,
                         pts_us,
                         encode_us: u32::try_from(encode_us).unwrap_or(u32::MAX),
+                        gop: self.stats.gop,
                     });
                 }
                 // Some hardware MFTs issue NeedInput only when ProcessOutput

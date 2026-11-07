@@ -284,6 +284,7 @@ impl Backend for Desktop {
                     pts_us: 0,
                     duplicate: false,
                     encode_us: 0,
+                    gop: 0,
                 },
                 bytes: self.capture_consistent(expected)?,
             }));
@@ -344,12 +345,6 @@ impl Backend for Desktop {
         self.encoder
             .as_ref()
             .map_or(0, |(_, encoder)| encoder.pending_len())
-    }
-    fn video_gop(&self) -> Option<u32> {
-        self.encoder
-            .as_ref()
-            .map(|(_, encoder)| encoder.statistics().gop)
-            .filter(|&gop| gop > 0)
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;

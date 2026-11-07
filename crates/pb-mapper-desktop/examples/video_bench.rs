@@ -263,6 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     duplicate: frame.format.duplicate,
                     pts_us: frame.format.pts_us,
                     encode_us: frame.format.encode_us,
+                    gop: frame.format.gop,
                 }));
             }
             for frame in ready {
@@ -276,6 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 backend_stats.encoded += 1;
                 backend_stats.unique_encoded += u64::from(!frame.duplicate);
                 backend_stats.bytes += frame.bytes.len() as u64;
+                backend_stats.gop = frame.gop;
                 if step_start.elapsed() >= settle {
                     measured[step] += frame.bytes.len() as u64;
                 }
@@ -330,14 +332,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if pause_ms != 0 && (!paused || awaiting_recovery) {
         return Err("pause probe did not observe independent recovery".into());
     }
-    // 0: the backend does not report it. A finite GOP under 5 s fails.
+    // 0: the encoder reports none. A finite GOP under 5 s fails.
     if stats.gop != 0 && u64::from(stats.gop) < 5 * u64::from(fps) {
         return Err(format!("encoder GOP is {} frames, under 5 s", stats.gop).into());
     }
     let elapsed = start.elapsed().as_secs_f64();
     if backend_mode {
         println!(
-            "seconds={elapsed:.3} keyframes={keyframes} forced={forced} encoded={} encoded_fps={:.2} unique_encoded_fps={:.2} bitrate_mbps={:.2} polls={} mean_context_ms={:.3} mean_capture_video_ms={:.3} (includes initial encoder startup)",
+            "seconds={elapsed:.3} keyframes={keyframes} forced={forced} gop={} encoded={} encoded_fps={:.2} unique_encoded_fps={:.2} bitrate_mbps={:.2} polls={} mean_context_ms={:.3} mean_capture_video_ms={:.3} (includes initial encoder startup)",
+            stats.gop,
             stats.encoded,
             stats.encoded as f64 / elapsed,
             stats.unique_encoded as f64 / elapsed,

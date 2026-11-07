@@ -120,8 +120,8 @@ pub(crate) struct EngineState {
     pub capture_fps: f32,
     pub skipped_ticks: u64,
     pub dropped_frames: u64,
-    /// `Backend::video_gop` at the last keyframe; 0 when unknown (JPEG, or a
-    /// backend that does not report it).
+    /// The last unit's `VideoFormat::gop`; 0 when unknown (JPEG, or an
+    /// encoder that reports none).
     pub gop: u32,
     /// `(code, message, serial)`; B-send writes each serial once.
     pub notice: Option<(NoticeCode, String, u64)>,

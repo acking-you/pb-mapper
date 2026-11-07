@@ -781,12 +781,23 @@ mod tests {
     }
 }
 
+/// What the elevated installer is asked to do, each behind one consent prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Install this bundle, or update the installed helper in place. An update
+    /// keeps a stopped or Disabled service so, unless `enable` also restores
+    /// automatic startup and starts it, as `Enable` does.
+    Install {
+        enable: bool,
+    },
+    Enable,
+    Disable,
+    Uninstall,
+}
+
 /// Launch a separate installer with the OS consent UI. No password or UAC
 /// policy is handled here. The caller's process never gains administrator rights.
-pub fn request_installation(action: &str) -> Result<()> {
-    if !["install", "enable", "disable", "uninstall"].contains(&action) {
-        return Err(error("unknown helper action"));
-    }
+pub fn request_installation(action: Action) -> Result<()> {
     let executable = std::env::current_exe()?;
     let source = executable
         .parent()
@@ -795,10 +806,16 @@ pub fn request_installation(action: &str) -> Result<()> {
     if !helper.is_file() {
         return Err(error("This build does not include the Windows helper"));
     }
-    let params = if action == "install" {
-        format!("install \"{}\" {}", source.display(), current_sid()?)
-    } else {
-        action.to_owned()
+    let params = match action {
+        Action::Install { enable } => format!(
+            "install \"{}\" {}{}",
+            source.display(),
+            current_sid()?,
+            if enable { " enable" } else { "" }
+        ),
+        Action::Enable => "enable".into(),
+        Action::Disable => "disable".into(),
+        Action::Uninstall => "uninstall".into(),
     };
     let file = wide(&helper);
     let parameters = wide(params);

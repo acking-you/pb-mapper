@@ -23,7 +23,7 @@ use std::path::PathBuf;
 pub use client::backend;
 #[cfg(feature = "windows-helper")]
 pub(crate) use os::SessionIdentity;
-pub use os::request_installation;
+pub use os::{Action, request_installation};
 pub use restart::prepare as prepare_application_restart;
 
 #[cfg(feature = "windows-helper")]
@@ -33,10 +33,12 @@ pub(crate) fn record_input_failure(detail: &str) {
 
 /// The helper IPC this build speaks. A helper installed by an older build
 /// listens on other pipes, so it is offered an update instead of being used.
-pub const HELPER_PROTOCOL: u32 = 2;
+/// Any change to a request or a response bumps it, with both pipe names.
+/// 3: `VideoFormat` carries the encoder's GOP.
+pub const HELPER_PROTOCOL: u32 = 3;
 
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v2";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v3";
 const EXECUTABLE: &str = "pb-mapper-desktop-helper.exe";
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The longest a helper drain may wait for encoder output.
@@ -261,12 +263,17 @@ pub fn run() -> Result<()> {
             worker::run(pipe, parent.parse().map_err(error)?)
         }
         [mode, parent] if mode == "restart-ui" => restart::run(parent.parse().map_err(error)?),
-        [mode, source, sid] if mode == "install" => install::install(&PathBuf::from(source), sid),
+        [mode, source, sid] if mode == "install" => {
+            install::install(&PathBuf::from(source), sid, false)
+        }
+        [mode, source, sid, then] if mode == "install" && then == "enable" => {
+            install::install(&PathBuf::from(source), sid, true)
+        }
         [mode] if mode == "enable" => install::enable(),
         [mode] if mode == "disable" => install::disable(),
         [mode] if mode == "uninstall" => install::uninstall(),
         _ => Err(error(
-            "expected install <UI bundle> <authorized SID>, service, enable, disable or uninstall",
+            "expected install <UI bundle> <authorized SID> [enable], service, enable, disable or uninstall",
         )),
     }
 }
@@ -277,7 +284,7 @@ mod readiness_tests {
     use super::{Configuration, HELPER_PROTOCOL, Status, update_required};
 
     #[test]
-    fn readiness_requires_protocol_2() {
+    fn readiness_requires_the_current_protocol() {
         let installation = |extra: &str| {
             Configuration::parse(
                 format!(
@@ -292,13 +299,17 @@ mod readiness_tests {
         assert!(!serde_json::to_string(&old).unwrap().contains("protocol"));
         assert!(update_required(old.protocol(), true, || true));
         assert!(update_required(old.protocol(), false, || false));
-        let current = installation(r#""schema":2,"protocol":2,"#).unwrap();
+        // Protocol 2 relays no GOP: it is outdated too.
+        let previous = installation(r#""schema":2,"protocol":2,"#).unwrap();
+        assert!(update_required(previous.protocol(), true, || true));
+        let current =
+            installation(&format!(r#""schema":2,"protocol":{HELPER_PROTOCOL},"#)).unwrap();
         assert_eq!(current.protocol(), HELPER_PROTOCOL);
         assert!(!update_required(current.protocol(), true, || true));
         assert!(!update_required(current.protocol(), false, || false));
         // Running, but serving another protocol's pipe.
         assert!(update_required(current.protocol(), true, || false));
-        assert!(update_required(3, true, || true));
+        assert!(update_required(HELPER_PROTOCOL + 1, true, || true));
         for invalid in [
             r#""schema":1,"protocol":1,"#,
             r#""schema":2,"#,

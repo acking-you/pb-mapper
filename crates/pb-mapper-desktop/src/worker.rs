@@ -707,8 +707,6 @@ impl Engine {
         let format = frame.format;
         if format.keyframe {
             self.shared.idr.lock().answered(at);
-            // A new encoder's first unit is an IDR: its GOP is known by then.
-            self.state.gop = self.backend.video_gop().unwrap_or(0);
         }
         self.frame_id += 1;
         self.shared.auth.lock().on_produced(self.frame_id, at);
@@ -719,6 +717,7 @@ impl Engine {
             width: format.width,
             height: format.height,
         });
+        self.state.gop = format.gop;
         self.streaming = true;
         // B-send writes the `State` of a generation before its first unit:
         // publish it before the unit can be taken.

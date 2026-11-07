@@ -257,28 +257,11 @@ mod tests {
     use super::*;
     use tokio::net::windows::named_pipe::ServerOptions;
 
-    #[test]
-    fn a_helper_error_keeps_the_desktop_and_its_pointer() {
-        let desktop = DesktopContext {
-            display: crate::Display {
-                id: 1,
-                name: "helper".into(),
-                x: 0,
-                y: 0,
-                width: 64,
-                height: 64,
-            },
-            generation: 1,
-            desktop: "ordinary".into(),
-        };
-        let pointer = crate::CursorPosition {
-            x: 3,
-            y: 4,
-            visible: true,
-        };
-        // A helper whose LockWorkStation fails: Input gets an error, Release
-        // and Close report no desktop, Presented reports it without looking
-        // at the pointer, and the rest report both.
+    /// A `RemoteBackend` on a private pipe whose helper answers each request
+    /// with `answer` and an empty image, until `Close`.
+    fn remote(
+        answer: impl Fn(&Request) -> Response + Send + 'static,
+    ) -> (RemoteBackend, std::thread::JoinHandle<()>) {
         let name = format!(
             r"\\.\pipe\pb-mapper.desktop-helper-test.{}",
             crate::security::secret().unwrap()
@@ -294,35 +277,18 @@ mod tests {
                 .create(&name)
                 .unwrap()
         };
-        let reported = desktop.clone();
         let helper = std::thread::spawn(move || {
             runtime.block_on(async move {
                 server.connect().await.unwrap();
                 loop {
                     let request: Request = ipc::read_json(&mut server).await.unwrap();
-                    let close = matches!(request, Request::Close {});
-                    let mut response = Response {
-                        context: None,
-                        error: None,
-                        video: None,
-                        cursor: None,
-                        pending: 0,
-                        double_click: None,
-                    };
-                    match request {
-                        Request::Input { .. } => response.error = Some("lock failed".into()),
-                        Request::Release {} | Request::Close {} => {}
-                        Request::Presented { .. } => response.context = Some(reported.clone()),
-                        _ => {
-                            response.context = Some(reported.clone());
-                            response.cursor = Some(pointer);
-                        }
-                    }
-                    ipc::write_json(&mut server, &response).await.unwrap();
+                    ipc::write_json(&mut server, &answer(&request))
+                        .await
+                        .unwrap();
                     ipc::write_bytes(&mut server, &[], ipc::MAX_FRAME)
                         .await
                         .unwrap();
-                    if close {
+                    if matches!(request, Request::Close {}) {
                         return;
                     }
                 }
@@ -336,7 +302,60 @@ mod tests {
             let _entered = runtime.enter();
             ipc::connect(&name).unwrap()
         };
-        let mut backend = RemoteBackend::new(runtime, pipe);
+        (RemoteBackend::new(runtime, pipe), helper)
+    }
+
+    fn empty() -> Response {
+        Response {
+            context: None,
+            error: None,
+            video: None,
+            cursor: None,
+            pending: 0,
+            double_click: None,
+        }
+    }
+
+    fn desktop() -> DesktopContext {
+        DesktopContext {
+            display: crate::Display {
+                id: 1,
+                name: "helper".into(),
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+            generation: 1,
+            desktop: "ordinary".into(),
+        }
+    }
+
+    #[test]
+    fn a_helper_error_keeps_the_desktop_and_its_pointer() {
+        let desktop = desktop();
+        let pointer = crate::CursorPosition {
+            x: 3,
+            y: 4,
+            visible: true,
+        };
+        // A helper whose LockWorkStation fails: Input gets an error, Release
+        // and Close report no desktop, Presented reports it without looking
+        // at the pointer, and the rest report both.
+        let reported = desktop.clone();
+        let (mut backend, helper) = remote(move |request| {
+            let mut response = empty();
+            match request {
+                Request::Input { .. } => response.error = Some("lock failed".into()),
+                Request::Release {} | Request::Close {} => {}
+                Request::Presented { .. } => response.context = Some(reported.clone()),
+                _ => {
+                    response.context = Some(reported.clone());
+                    response.cursor = Some(pointer);
+                }
+            }
+            response
+        });
         assert_eq!(backend.context().unwrap(), desktop);
         assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
         // Neither a failed lock nor a release says the desktop changed, and
@@ -347,6 +366,34 @@ mod tests {
         assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
         backend.presented(&desktop).unwrap();
         assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
+        drop(backend);
+        helper.join().unwrap();
+    }
+
+    #[test]
+    fn a_helper_hosted_unit_carries_the_encoder_gop() {
+        // The worker's encoder read back an endless GOP; thread C reports the
+        // GOP of the units it takes from this backend.
+        let (mut backend, helper) = remote(|request| Response {
+            video: matches!(request, Request::Video { .. }).then(|| crate::VideoFormat {
+                codec: crate::VideoCodec::H264,
+                width: 64,
+                height: 64,
+                keyframe: true,
+                gop: u32::MAX,
+                ..crate::VideoFormat::default()
+            }),
+            ..empty()
+        });
+        let rate = crate::VideoRate {
+            bitrate: 4_000_000,
+            pace_fps: 60,
+        };
+        let unit = backend
+            .capture_video(&desktop(), crate::VideoCodec::H264, true, rate)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unit.format.gop, u32::MAX);
         drop(backend);
         helper.join().unwrap();
     }
