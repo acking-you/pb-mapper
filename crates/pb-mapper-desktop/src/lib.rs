@@ -8,6 +8,8 @@
 mod auth;
 mod credit;
 #[cfg(windows)]
+pub mod dpapi;
+#[cfg(windows)]
 pub mod helper;
 mod host;
 mod idr;

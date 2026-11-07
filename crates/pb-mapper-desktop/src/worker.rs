@@ -139,9 +139,9 @@ fn run(shared: &Arc<SessionShared>, factory: &Factory, config: WorkerConfig) -> 
             // Without a backend this session can never capture. Report why;
             // the viewer reconnects with backoff, which retries the backend.
             shared.state.send_modify(|state| {
-                state.state = SessionState::CaptureUnavailable;
-                state.reason = Some(unavailable_reason(&failure));
-                state.message = failure.to_string();
+                state.record.state = SessionState::CaptureUnavailable;
+                state.record.reason = Some(unavailable_reason(&failure));
+                state.record.message = failure.to_string();
             });
             return WorkerExit::CaptureFailed(failure.to_string());
         }
@@ -269,7 +269,7 @@ impl Engine {
             self.policy = policy;
             self.release_control();
         }
-        self.state.control_allowed = shared.policy.allowed();
+        self.state.record.control_allowed = shared.policy.allowed();
         if shared.lane.take_overflow() {
             drop(shared.lane.drain());
             self.congested();
@@ -371,7 +371,7 @@ impl Engine {
         else {
             return None;
         };
-        if !self.state.controlling
+        if !self.state.record.controlling
             || !self.allowed()
             || !self
                 .shared
@@ -417,10 +417,10 @@ impl Engine {
         let allowed = self.allowed();
         // A request repeated on a delayed link must not reset the desktop
         // generation, the decoder or an active lease.
-        if enabled && allowed && self.state.controlling {
+        if enabled && allowed && self.state.record.controlling {
             return;
         }
-        if !enabled && !self.state.controlling {
+        if !enabled && !self.state.record.controlling {
             self.backend.release();
             return;
         }
@@ -445,7 +445,7 @@ impl Engine {
                 }
             }
         }
-        self.state.controlling = true;
+        self.state.record.controlling = true;
     }
 
     fn input(&mut self, event: InputEvent, now: Instant) {
@@ -453,7 +453,12 @@ impl Engine {
             return;
         }
         self.sequence = event.sequence;
-        if !self.geometry(now) || !self.allowed() || !self.state.controlling {
+        // The injection boundary checks the desktop for every input; this
+        // checks it only when a check is due.
+        if (self.check_due(now) && !self.geometry(now))
+            || !self.allowed()
+            || !self.state.record.controlling
+        {
             return;
         }
         if !self.live()
@@ -482,6 +487,14 @@ impl Engine {
             Err(failure) => {
                 if failure.kind() == io::ErrorKind::NotConnected {
                     self.fatal = Some(failure.to_string());
+                } else {
+                    // The boundary may have seen a desktop change this engine
+                    // has not checked yet: the new generation admits nothing
+                    // stale, so drop the event and keep control.
+                    let generation = self.state.record.generation;
+                    if !self.geometry(now) || self.state.record.generation != generation {
+                        return;
+                    }
                 }
                 if lock {
                     // Nothing was held down, so control stays.
@@ -501,7 +514,7 @@ impl Engine {
     /// Release held input once when the presented frame goes stale. Nothing
     /// is admitted again until a fresh presentation, so one release suffices.
     fn release_if_stale(&mut self, now: Instant) {
-        if self.state.controlling && !self.shared.auth.lock().fresh(now) {
+        if self.state.record.controlling && !self.shared.auth.lock().fresh(now) {
             self.hold.drop_held();
             if !self.stale_released {
                 self.backend.release();
@@ -513,7 +526,7 @@ impl Engine {
     }
 
     fn renew_lease(&mut self, now: Instant) {
-        if !self.state.controlling
+        if !self.state.record.controlling
             || self
                 .last_lease
                 .is_some_and(|at| now.saturating_duration_since(at) < LEASE_RENEW_MIN)
@@ -532,7 +545,7 @@ impl Engine {
 
     fn release_control(&mut self) {
         self.invalidate();
-        self.state.controlling = false;
+        self.state.record.controlling = false;
         self.lease = None;
     }
 
@@ -541,11 +554,17 @@ impl Engine {
     fn invalidate(&mut self) {
         self.backend.release();
         self.hold.drop_held();
-        self.state.generation += 1;
-        let generation = self.state.generation;
+        self.state.record.generation += 1;
+        let generation = self.state.record.generation;
         self.shared.auth.lock().on_invalidate(generation);
         self.state.dropped_frames += self.shared.outgoing.retain_generation(generation) as u64;
         self.shared.idr.lock().force(IdrReason::Generation);
+    }
+
+    /// A context check is due: there is no context yet, capture is
+    /// unavailable, or `context_due` has passed.
+    fn check_due(&self, now: Instant) -> bool {
+        self.context.is_none() || self.unavailable.is_some() || now >= self.context_due
     }
 
     /// Check the desktop identity. A new context or a recovery rebuilds the
@@ -576,8 +595,8 @@ impl Engine {
                 return false;
             }
         }
-        self.state.display = Some(context.display.clone());
-        self.state.desktop = if context.desktop == "secure" {
+        self.state.record.display = Some(context.display.clone());
+        self.state.record.desktop = if context.desktop == "secure" {
             DesktopKind::Secure
         } else {
             DesktopKind::Ordinary
@@ -640,7 +659,7 @@ impl Engine {
         if retry && now < self.context_due {
             return;
         }
-        if (self.context.is_none() || now >= self.context_due) && !self.geometry(now) {
+        if self.check_due(now) && !self.geometry(now) {
             return;
         }
         let Some(context) = self.context.clone() else {
@@ -713,7 +732,7 @@ impl Engine {
         if !format.duplicate {
             self.window.unique += 1;
         }
-        self.state.video = Some(VideoSize {
+        self.state.record.video = Some(VideoSize {
             width: format.width,
             height: format.height,
         });
@@ -723,7 +742,7 @@ impl Engine {
         // publish it before the unit can be taken.
         self.publish();
         let pushed = self.shared.outgoing.push(HostUnit {
-            generation: self.state.generation,
+            generation: self.state.record.generation,
             frame_id: self.frame_id,
             codec: format.codec,
             width: format.width,
@@ -754,7 +773,7 @@ impl Engine {
         match self.backend.cursor(&context) {
             Ok(position) => {
                 let cursor = position.map(|position| CursorUpdate {
-                    generation: self.state.generation,
+                    generation: self.state.record.generation,
                     x: position.x,
                     y: position.y,
                     visible: position.visible,
@@ -769,7 +788,7 @@ impl Engine {
     }
 
     fn publish(&mut self) {
-        self.state.state = if self.paused {
+        self.state.record.state = if self.paused {
             SessionState::Paused
         } else if self.unavailable.is_some() {
             SessionState::CaptureUnavailable
@@ -785,8 +804,8 @@ impl Engine {
             .map_or((None, String::new()), |(reason, message)| {
                 (Some(*reason), message.clone())
             });
-        self.state.reason = reason;
-        self.state.message = message;
+        self.state.record.reason = reason;
+        self.state.record.message = message;
         self.shared.state.send_if_modified(|published| {
             let changed = *published != self.state;
             if changed {

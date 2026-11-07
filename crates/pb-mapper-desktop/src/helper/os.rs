@@ -112,7 +112,7 @@ pub(super) fn protected_path(path: &Path) -> Result<()> {
                 "reparse points are forbidden in the helper installation",
             ));
         }
-        check_acl(current)?;
+        check_acl(current, WRITE_ACCESS)?;
         if current == root {
             break;
         }
@@ -138,7 +138,12 @@ fn trusted_sid(sid: PSID) -> bool {
             || IsWellKnownSid(sid, WinBuiltinAdministratorsSid).as_bool()
     }
 }
-pub(super) fn check_acl(path: &Path) -> Result<()> {
+/// WRITE_DATA, APPEND_DATA, WRITE_EA, DELETE_CHILD, WRITE_ATTRIBUTES, DELETE,
+/// WRITE_DAC, WRITE_OWNER, GENERIC_WRITE and GENERIC_ALL.
+const WRITE_ACCESS: u32 = 0x500d0156;
+/// `path` must be owned by SYSTEM or administrators, and grant nobody else
+/// any of the `forbidden` access bits.
+pub(super) fn check_acl(path: &Path, forbidden: u32) -> Result<()> {
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     let mut owner = PSID::default();
     let mut acl = std::ptr::null_mut();
@@ -156,15 +161,15 @@ pub(super) fn check_acl(path: &Path) -> Result<()> {
     }
     .ok()
     .map_err(error)?;
-    let result = check_descriptor(owner, acl);
+    let result = check_descriptor(owner, acl, forbidden);
     unsafe {
         let _ = LocalFree(Some(HLOCAL(descriptor.0)));
     }
     result
 }
-fn check_descriptor(owner: PSID, acl: *const ACL) -> Result<()> {
+fn check_descriptor(owner: PSID, acl: *const ACL, forbidden: u32) -> Result<()> {
     // Descriptors obtained from Windows are validated before reaching this
-    // routine. Deny entries cannot create write access, so they are harmless.
+    // routine. Deny entries cannot grant access, so they are harmless.
     (|| {
         if !trusted_sid(owner) || acl.is_null() {
             return Err(error("helper installation has an unsafe owner or DACL"));
@@ -176,13 +181,10 @@ fn check_descriptor(owner: PSID, acl: *const ACL) -> Result<()> {
             if header.AceType == 0 {
                 // ACCESS_ALLOWED_ACE_TYPE
                 let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
-                // WRITE_DATA, APPEND_DATA, WRITE_EA, DELETE_CHILD, WRITE_ATTRIBUTES, DELETE,
-                // WRITE_DAC, WRITE_OWNER, GENERIC_WRITE and GENERIC_ALL.
-                let writable = allowed.Mask & 0x500d0156 != 0;
                 let sid = PSID((&allowed.SidStart as *const u32).cast_mut().cast());
-                if writable && !trusted_sid(sid) {
+                if allowed.Mask & forbidden != 0 && !trusted_sid(sid) {
                     return Err(error(
-                        "helper files are writable by an unprivileged identity",
+                        "helper files grant an unprivileged identity forbidden access",
                     ));
                 }
             } else if header.AceType != 1 {
@@ -716,7 +718,7 @@ mod tests {
         assert!(!enabled());
     }
 
-    fn validate(sddl: &str) -> Result<()> {
+    fn validate(sddl: &str, forbidden: u32) -> Result<()> {
         let descriptor = Descriptor::new(sddl)?;
         let mut owner = PSID::default();
         let mut acl = std::ptr::null_mut();
@@ -733,13 +735,23 @@ mod tests {
             )
             .map_err(error)?;
         }
-        check_descriptor(owner, acl)
+        check_descriptor(owner, acl, forbidden)
     }
     #[test]
-    fn protected_acl_rejects_delete_child_and_untrusted_owner() {
-        assert!(validate("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;BU)").is_ok());
-        assert!(validate("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x40;;;BU)").is_err());
-        assert!(validate("O:BUG:BUD:P(A;;GRGX;;;BU)").is_err());
+    fn protected_acl_rejects_forbidden_access_and_untrusted_owner() {
+        let readable = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;BU)";
+        assert!(validate(readable, WRITE_ACCESS).is_ok());
+        assert!(
+            validate(
+                "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x40;;;BU)",
+                WRITE_ACCESS
+            )
+            .is_err()
+        );
+        assert!(validate("O:BUG:BUD:P(A;;GRGX;;;BU)", WRITE_ACCESS).is_err());
+        // A background grant may not even be read by anyone else.
+        assert!(validate("O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)", u32::MAX).is_ok());
+        assert!(validate(readable, u32::MAX).is_err());
         let root = Path::new(r"C:\Program Files\pb-mapper-desktop");
         assert!(contained_path(root, &root.join(r"release-safe\helper.exe")));
         assert!(!contained_path(root, &root.join(r"..\outside.exe")));
@@ -785,8 +797,9 @@ mod tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Install this bundle, or update the installed helper in place. An update
-    /// keeps a stopped or Disabled service so, unless `enable` also restores
-    /// automatic startup and starts it, as `Enable` does.
+    /// keeps the service's startup type and running state, stopped or Disabled
+    /// included, unless `enable` restores automatic startup and starts it, as
+    /// `Enable` does.
     Install {
         enable: bool,
     },

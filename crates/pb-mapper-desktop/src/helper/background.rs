@@ -5,7 +5,7 @@ use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
 
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v3";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v4";
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const FILE_NAME: &str = "background-host.dpapi";
 const REVOKED_MARKER: &str = "background-host.revoked";
@@ -65,7 +65,6 @@ enum Command {
     Status {},
     Start {},
     Stop {},
-    Revoke {},
     /// End the connected viewer's session; hosting continues.
     EndSession {},
     RevokeScope {
@@ -139,10 +138,6 @@ pub async fn end_session() -> Result<Snapshot> {
 /// Stop active hosting and disable automatic startup, retaining the invitation.
 pub async fn stop() -> Result<Snapshot> {
     call(Command::Stop {}).await
-}
-/// Stop active hosting and destroy the stored invitation and relay credential.
-pub async fn revoke() -> Result<Snapshot> {
-    call(Command::Revoke {}).await
 }
 /// Revoke the current application's relay scope, including a just-completed
 /// handoff that its UI has not observed. The service checks the scope atomically.

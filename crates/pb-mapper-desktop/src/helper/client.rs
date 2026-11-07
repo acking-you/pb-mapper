@@ -222,7 +222,7 @@ impl Backend for RemoteBackend {
         input.validate(&expected.display)?;
         self.sequence += 1;
         self.call(Request::Input {
-            generation: expected.generation,
+            expected: expected.clone(),
             sequence: self.sequence,
             input: input.clone(),
         })?;

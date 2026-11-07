@@ -24,6 +24,8 @@ struct Log {
     captures: Vec<(Instant, Instant, bool, VideoRate)>,
     inputs: Vec<(Instant, Input)>,
     releases: u32,
+    /// Desktop reads, by context checks, the cursor and the injection boundary.
+    contexts: u32,
 }
 
 #[derive(Clone)]
@@ -81,6 +83,7 @@ impl Backend for Fake {
         limits.validate()
     }
     fn display(&mut self) -> Result<Display> {
+        self.log.lock().contexts += 1;
         Ok(Display {
             id: 1,
             name: "fake".into(),
@@ -223,7 +226,7 @@ impl Harness {
             Step::Wait(deadline) => deadline,
             Step::Exit(exit) => panic!("thread C exited: {exit:?}"),
         };
-        self.published.push(self.state().state);
+        self.published.push(self.state().record.state);
         deadline
     }
     /// Iterate at every deadline for `span`, with B-send taking every unit when
@@ -253,7 +256,7 @@ impl Harness {
     /// The viewer presents the newest unit of the current generation.
     fn present(&mut self) {
         self.run(Duration::from_millis(50), false);
-        let generation = self.state().generation;
+        let generation = self.state().record.generation;
         let unit = self
             .sent()
             .into_iter()
@@ -335,7 +338,7 @@ async fn input_lane_runs_before_capture_and_never_after_stop() {
         })
     };
     let present = || {
-        let generation = shared.state.borrow().generation;
+        let generation = shared.state.borrow().record.generation;
         wait_for("video", &|| written.lock().0 == generation);
         let (generation, frame_id) = *written.lock();
         assert!(
@@ -361,7 +364,7 @@ async fn input_lane_runs_before_capture_and_never_after_stop() {
         starts.recv_timeout(Duration::from_secs(2)).unwrap();
     };
     control();
-    wait_for("control", &|| shared.state.borrow().controlling);
+    wait_for("control", &|| shared.state.borrow().record.controlling);
     let frame = present();
 
     // Input queued during a 30 ms capture runs right after it, in order, and
@@ -402,12 +405,12 @@ async fn input_lane_runs_before_capture_and_never_after_stop() {
     assert!(!shared.lane.push(LaneCommand::Release));
     wait_for("congestion", &|| {
         let state = shared.state.borrow();
-        !state.controlling && state.reason == Some(StateReason::InputCongestion)
+        !state.record.controlling && state.record.reason == Some(StateReason::InputCongestion)
     });
 
     // Nothing queued before a stop runs.
     control();
-    wait_for("control", &|| shared.state.borrow().controlling);
+    wait_for("control", &|| shared.state.borrow().record.controlling);
     let frame = present();
     next_capture();
     assert!(input(frame, 4));
@@ -454,20 +457,20 @@ fn pacing_is_even_and_skips_ticks_without_bursts() {
     let before = h.captures().len();
     h.run(Duration::from_millis(200), true);
     assert_eq!(h.captures().len(), before);
-    assert_eq!(h.state().state, SessionState::Paused);
+    assert_eq!(h.state().record.state, SessionState::Paused);
     h.shared.targets.paused.store(false, Ordering::Release);
     h.run(Duration::from_millis(50), true);
     let resumed = &h.captures()[before..];
     assert!(resumed[0].1);
     assert!(resumed[1..].iter().all(|(_, keyframe, _)| !keyframe));
-    assert_eq!(h.state().state, SessionState::Streaming);
+    assert_eq!(h.state().record.state, SessionState::Streaming);
 }
 
 #[test]
 fn fps_and_preset_changes_never_reconfigure_the_encoder() {
     let mut h = Harness::new(true, None);
     h.run(Duration::from_millis(100), true);
-    let generation = h.state().generation;
+    let generation = h.state().record.generation;
     // The encoder's read-back GOP reaches the state, and so `Stats`.
     assert_eq!(h.state().gop, u32::MAX);
     // QoS pace and bitrate changes, and a preset switch, are rates only.
@@ -481,7 +484,7 @@ fn fps_and_preset_changes_never_reconfigure_the_encoder() {
         assert!(!keyframe);
     }
     assert_eq!(h.fake.log.lock().configured, 1);
-    assert_eq!(h.state().generation, generation);
+    assert_eq!(h.state().record.generation, generation);
 
     // A display change rebuilds once, with an IDR and a new generation.
     h.fake.width.store(20, Ordering::SeqCst);
@@ -491,8 +494,11 @@ fn fps_and_preset_changes_never_reconfigure_the_encoder() {
     let rebuilt = &h.captures()[before..];
     assert!(rebuilt[0].1);
     assert!(rebuilt[1..].iter().all(|(_, keyframe, _)| !keyframe));
-    assert!(h.state().generation > generation);
-    assert_eq!(h.state().display.map(|display| display.width), Some(20));
+    assert!(h.state().record.generation > generation);
+    assert_eq!(
+        h.state().record.display.map(|display| display.width),
+        Some(20)
+    );
 }
 
 #[test]
@@ -519,7 +525,7 @@ fn an_idr_slower_than_a_tick_is_asked_for_once() {
 fn a_capture_that_keeps_failing_is_retried_every_unavailable_retry() {
     let mut h = Harness::new(true, None);
     h.run(Duration::from_millis(100), true);
-    let generation = h.state().generation;
+    let generation = h.state().record.generation;
     h.fake.fail_capture.store(true, Ordering::SeqCst);
     let before = h.captures().len();
     h.published.clear();
@@ -530,14 +536,14 @@ fn a_capture_that_keeps_failing_is_retried_every_unavailable_retry() {
     // recovered.
     let attempts = h.captures().len() - before;
     assert!((5..=7).contains(&attempts), "{attempts} captures in 1 s");
-    let failing = h.state();
+    let failing = h.state().record;
     assert_eq!(failing.state, SessionState::CaptureUnavailable);
     assert_eq!(failing.generation, generation + 1);
     assert!(!h.published.contains(&SessionState::Connecting));
 
     h.fake.fail_capture.store(false, Ordering::SeqCst);
     h.run(Duration::from_millis(300), true);
-    assert_eq!(h.state().state, SessionState::Streaming);
+    assert_eq!(h.state().record.state, SessionState::Streaming);
 }
 
 #[tokio::test]
@@ -552,7 +558,7 @@ async fn unavailable_backend_reports_failure_and_stops() {
         .await
         .unwrap();
     assert!(matches!(exit, WorkerExit::CaptureFailed(message) if message.contains("locked")));
-    let state = shared.state.borrow().clone();
+    let state = shared.state.borrow().record.clone();
     assert_eq!(state.state, SessionState::CaptureUnavailable);
     assert!(state.message.contains("locked"));
 }
@@ -576,6 +582,12 @@ fn input_requires_control_current_geometry_and_unique_sequence() {
     h.input(MOVE);
     h.step();
     assert_eq!(h.inputs(), 1);
+    // Between context checks, only the injection boundary reads the desktop.
+    let reads = h.fake.log.lock().contexts;
+    h.input(MOVE);
+    h.step();
+    assert_eq!(h.inputs(), 2);
+    assert_eq!(h.fake.log.lock().contexts, reads + 1);
     // A repeated sequence, and a frame newer than the presented one.
     h.sequence -= 1;
     h.input(MOVE);
@@ -583,24 +595,29 @@ fn input_requires_control_current_geometry_and_unique_sequence() {
     h.input(MOVE);
     h.presented.1 -= 1;
     h.step();
-    assert_eq!(h.inputs(), 1);
+    assert_eq!(h.inputs(), 2);
 
-    // A different desktop at the same position invalidates input too.
+    // A different desktop at the same position invalidates input too. The
+    // boundary sees it before any check is due: the event is dropped, a new
+    // generation starts, and control stays.
     h.fake.width.store(11, Ordering::SeqCst);
     let releases = h.fake.log.lock().releases;
+    let generation = h.state().record.generation;
     h.input(MOVE);
     h.step();
-    assert_eq!(h.inputs(), 1);
+    assert_eq!(h.inputs(), 2);
     assert!(h.fake.log.lock().releases > releases);
+    assert!(h.state().record.generation > generation);
+    assert!(h.state().record.controlling);
 
     // View-only: the host's revoke ends control at once.
     h.present();
     h.shared.policy.set(false);
     h.input(MOVE);
     h.step();
-    assert!(!h.state().controlling);
-    assert!(!h.state().control_allowed);
-    assert_eq!(h.inputs(), 1);
+    assert!(!h.state().record.controlling);
+    assert!(!h.state().record.control_allowed);
+    assert_eq!(h.inputs(), 2);
 }
 
 #[test]
@@ -616,7 +633,7 @@ fn native_input_failure_ends_control_and_survives_new_video() {
         drag_start: false,
     });
     h.step();
-    let failed = h.state();
+    let failed = h.state().record;
     assert!(!failed.controlling);
     assert_eq!(failed.reason, Some(StateReason::InputFailed));
     assert!(failed.message.starts_with("input_failed"));
@@ -624,17 +641,17 @@ fn native_input_failure_ends_control_and_survives_new_video() {
     // never replayed.
     h.input(MOVE);
     h.run(Duration::from_millis(200), true);
-    assert_eq!(h.state().reason, Some(StateReason::InputFailed));
-    assert_eq!(h.state().message, failed.message);
+    assert_eq!(h.state().record.reason, Some(StateReason::InputFailed));
+    assert_eq!(h.state().record.message, failed.message);
 
     h.fake.fail_input.store(false, Ordering::SeqCst);
     h.send(LaneCommand::Control { enabled: true });
     h.step();
-    assert_eq!(h.state().reason, None);
+    assert_eq!(h.state().record.reason, None);
     h.present();
     h.input(MOVE);
     h.step();
-    assert!(h.state().controlling);
+    assert!(h.state().record.controlling);
     assert_eq!(h.inputs(), 1);
 }
 
@@ -662,18 +679,18 @@ fn observation_never_acquires_write_admission_and_revocation_releases_it() {
     h.send(LaneCommand::Control { enabled: true });
     h.step();
     assert_eq!(writers.load(Ordering::SeqCst), 0);
-    assert_eq!(h.state().reason, Some(StateReason::ControlDenied));
+    assert_eq!(h.state().record.reason, Some(StateReason::ControlDenied));
 
     h.shared.policy.set(true);
     h.send(LaneCommand::Control { enabled: true });
     h.step();
     assert_eq!(writers.load(Ordering::SeqCst), 1);
     // A repeated grant keeps the lease and the generation.
-    let generation = h.state().generation;
+    let generation = h.state().record.generation;
     h.send(LaneCommand::Control { enabled: true });
     h.step();
     assert_eq!(writers.load(Ordering::SeqCst), 1);
-    assert_eq!(h.state().generation, generation);
+    assert_eq!(h.state().record.generation, generation);
     h.send(LaneCommand::EndControl);
     h.step();
     assert_eq!(writers.load(Ordering::SeqCst), 0);
@@ -702,7 +719,7 @@ fn lock_is_control_gated_and_failure_keeps_control() {
     h.input(Input::Lock {});
     h.step();
     let failed = h.state();
-    assert!(failed.controlling, "a failed lock held nothing down");
+    assert!(failed.record.controlling, "a failed lock held nothing down");
     let (code, message, serial) = failed.notice.unwrap();
     assert_eq!(code, NoticeCode::LockFailed);
     assert!(message.contains("rejected"));
@@ -711,7 +728,7 @@ fn lock_is_control_gated_and_failure_keeps_control() {
     assert_eq!(h.state().notice.map(|notice| notice.2), Some(serial));
     h.run(Duration::from_millis(200), true);
     assert!(h.state().notice.is_none());
-    assert!(h.state().controlling);
+    assert!(h.state().record.controlling);
 
     h.fake.fail_lock.store(false, Ordering::SeqCst);
     h.present();
@@ -735,7 +752,7 @@ fn drag_start_press_waits_out_the_double_click_time() {
     /// Control, a fresh presentation, a click, and 100 ms later a drag start
     /// and a move, which are held.
     fn hold(h: &mut Harness) -> usize {
-        if !h.state().controlling {
+        if !h.state().record.controlling {
             h.send(LaneCommand::Control { enabled: true });
             h.step();
         }
@@ -811,10 +828,10 @@ fn drag_start_press_waits_out_the_double_click_time() {
     h.shared.policy.set(true);
     h.run(ms(700), true);
     assert_eq!(h.inputs(), injected);
-    assert!(!h.state().controlling);
+    assert!(!h.state().record.controlling);
 
     let injected = hold(&mut h);
-    let (generation, now) = (h.state().generation, h.now());
+    let (generation, now) = (h.state().record.generation, h.now());
     assert!(!h.shared.auth.lock().on_presented(generation, u64::MAX, now));
     h.run(ms(700), true);
     assert_eq!(h.inputs(), injected);

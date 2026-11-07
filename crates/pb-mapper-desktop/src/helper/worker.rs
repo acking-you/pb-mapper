@@ -6,6 +6,13 @@ use windows::Win32::{Foundation::*, System::StationsAndDesktops::*, UI::WindowsA
 #[cfg(feature = "windows-helper")]
 use windows::Win32::{System::Threading::*, UI::Accessibility::*};
 static EPOCH: AtomicU64 = AtomicU64::new(1);
+// SessionIdentity::check is an RPC to the session manager (~120 µs), and one
+// helper request checks several times. An answer stands this long while no
+// desktop switch is seen and the console session is still ours: lock, unlock
+// and UAC switch desktops, and a logoff and a new login take far longer. Not
+// on the Winlogon desktop: UAC and the lock UI share it, so a lock there may
+// raise no switch and the console state is the only signal.
+const CONSOLE_REUSE: std::time::Duration = std::time::Duration::from_millis(4);
 // SendInput requires journal-playback access on the bound desktop handle.
 // READ/WRITEOBJECTS alone allows SetCursorPos but rejects buttons and keys,
 // even for a SYSTEM process with UIAccess. Do not broaden the worker token.
@@ -123,12 +130,48 @@ impl BindingState {
     }
 }
 
+/// The last console answer, with the epoch it was asked under and when. A
+/// failure is never kept: the next check asks Windows again.
+#[derive(Default)]
+struct ConsoleMemo(std::cell::Cell<Option<(u64, std::time::Instant, os::ConsoleState)>>);
+impl ConsoleMemo {
+    /// `desktop` is the bound desktop's name: on Winlogon every check asks.
+    fn get(
+        &self,
+        desktop: &str,
+        epoch: u64,
+        now: std::time::Instant,
+        query: impl FnOnce() -> Result<os::ConsoleState>,
+    ) -> Result<os::ConsoleState> {
+        if desktop != "winlogon"
+            && let Some((asked, at, console)) = self.0.get()
+            && asked == epoch
+            && now.saturating_duration_since(at) < CONSOLE_REUSE
+        {
+            return Ok(console);
+        }
+        self.fresh(epoch, now, query)
+    }
+    fn fresh(
+        &self,
+        epoch: u64,
+        now: std::time::Instant,
+        query: impl FnOnce() -> Result<os::ConsoleState>,
+    ) -> Result<os::ConsoleState> {
+        self.0.set(None);
+        let console = query()?;
+        self.0.set(Some((epoch, now, console)));
+        Ok(console)
+    }
+}
+
 /// Owned by exactly one capture thread. The event listener only changes an
 /// atomic epoch; it never captures, injects, or opens interactive windows.
 pub(crate) struct DesktopBinding {
     original: isize,
     bound: isize,
     session: os::SessionIdentity,
+    checked: ConsoleMemo,
     state: BindingState,
     _events: Events,
 }
@@ -151,16 +194,28 @@ impl DesktopBinding {
             original: original.0 as isize,
             bound: 0,
             session,
+            checked: ConsoleMemo::default(),
             state: BindingState::default(),
             _events: Events::new()?,
         })
     }
     pub fn changed(&self) -> bool {
-        self.state.epoch != EPOCH.load(Ordering::Acquire)
+        let epoch = EPOCH.load(Ordering::Acquire);
+        self.state.epoch != epoch
             || !self
-                .session
-                .check()
+                .console(epoch)
                 .is_ok_and(|console| self.state.console == Some(console))
+    }
+    /// `epoch` is sampled before asking, so a switch during the RPC
+    /// invalidates its answer.
+    fn console(&self, epoch: u64) -> Result<os::ConsoleState> {
+        let now = std::time::Instant::now();
+        let check = || self.session.check();
+        if os::active_session() != self.session.session {
+            // Checking an inactive session fails before any RPC.
+            return self.checked.fresh(epoch, now, check);
+        }
+        self.checked.get(&self.state.name, epoch, now, check)
     }
     pub fn generation(&self) -> u64 {
         self.state.generation
@@ -173,7 +228,10 @@ impl DesktopBinding {
         }
     }
     pub fn enter(&mut self, before_switch: impl FnOnce()) -> Result<()> {
-        let console = match self.session.check() {
+        // Sample before asking and opening: a later notification must not be
+        // acknowledged as if it described the answer or handle we already have.
+        let epoch = EPOCH.load(Ordering::Acquire);
+        let console = match self.console(epoch) {
             Ok(console) => console,
             Err(failure) => {
                 // A reused session ID must never keep old input or video state.
@@ -181,9 +239,6 @@ impl DesktopBinding {
                 return Err(failure);
             }
         };
-        // Sample before opening: a later notification must not be acknowledged
-        // as if it described the handle we already opened.
-        let epoch = EPOCH.load(Ordering::Acquire);
         let desktop = unsafe { OpenInputDesktop(Default::default(), false, INPUT_DESKTOP_ACCESS) }
             .map_err(error)?;
         let mut bound = false;
@@ -207,7 +262,12 @@ impl DesktopBinding {
                 return Err(error("unsupported input desktop"));
             }
             self.state.enter(name, epoch, console, before_switch, || {
-                if self.session.check()? != console || EPOCH.load(Ordering::Acquire) != epoch {
+                // Ask Windows itself before binding, and keep its answer: a
+                // stale one must not fail every retry until it ages out.
+                let fresh = self
+                    .checked
+                    .fresh(epoch, std::time::Instant::now(), || self.session.check())?;
+                if fresh != console || EPOCH.load(Ordering::Acquire) != epoch {
                     return Err(error("input desktop changed before binding"));
                 }
                 // The caller has released input and desktop-affine capture/COM
@@ -386,8 +446,8 @@ impl Response {
 }
 
 /// One request on the worker's desktop-bound thread. The host's thread C
-/// paces and authorises; this checks the desktop generation and the input
-/// sequence again at the injection boundary.
+/// paces and authorises; this checks the input sequence again, and the
+/// backend the whole desktop the host expects, at the injection boundary.
 #[cfg(feature = "windows-helper")]
 fn serve(
     backend: &mut dyn Backend,
@@ -407,6 +467,26 @@ fn serve(
         backend.release();
         return Ok((response, vec![]));
     }
+    if let Request::Input {
+        expected,
+        sequence: next,
+        input,
+    } = request
+    {
+        if next <= *sequence {
+            backend.release();
+            return Err(error("repeated helper input"));
+        }
+        *sequence = next;
+        // Binds this thread to the input desktop, and fails unless it is
+        // still `expected`.
+        backend.input_in_context(&expected, &input)?;
+        *last_input = std::time::Instant::now();
+        // The host keeps the desktop each answer reports: this is the one the
+        // input reached.
+        response.context = Some(expected);
+        return Ok((response, vec![]));
+    }
     let context = backend.context()?;
     // Context checks observe the pointer too, so it follows while capture is
     // idle. The backend checks this desktop identity; observing it never
@@ -422,7 +502,9 @@ fn serve(
             response.double_click = backend.double_click_guard();
             vec![]
         }
-        Request::Context {} | Request::Release {} | Request::Close {} => vec![],
+        Request::Context {} | Request::Release {} | Request::Close {} | Request::Input { .. } => {
+            vec![]
+        }
         Request::Attach { .. } => return Err(error("worker is already attached")),
         Request::ConfigureVideo {
             limits,
@@ -472,20 +554,6 @@ fn serve(
             if generation != context.generation {
                 return Err(error("stale helper presentation"));
             }
-            *last_input = std::time::Instant::now();
-            vec![]
-        }
-        Request::Input {
-            generation,
-            sequence: next,
-            input,
-        } => {
-            if generation != context.generation || next <= *sequence {
-                backend.release();
-                return Err(error("stale or repeated helper input"));
-            }
-            *sequence = next;
-            backend.input_in_context(&context, &input)?;
             *last_input = std::time::Instant::now();
             vec![]
         }
@@ -639,6 +707,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.generation, 4);
+    }
+
+    #[test]
+    fn a_console_answer_stands_only_within_one_epoch_and_window_off_winlogon() {
+        use os::ConsoleState::{Locked, Unlocked};
+        let memo = ConsoleMemo::default();
+        let ordinary = "default";
+        let t0 = std::time::Instant::now();
+        let soon = t0 + std::time::Duration::from_millis(3);
+        assert_eq!(
+            memo.get(ordinary, 1, t0, || Ok(Unlocked)).unwrap(),
+            Unlocked
+        );
+        assert_eq!(
+            memo.get(ordinary, 1, soon, || panic!("asked again"))
+                .unwrap(),
+            Unlocked
+        );
+        // A desktop switch asks again inside the window, and so does age.
+        assert_eq!(memo.get(ordinary, 2, soon, || Ok(Locked)).unwrap(), Locked);
+        let later = soon + CONSOLE_REUSE;
+        assert_eq!(
+            memo.get(ordinary, 2, later, || Ok(Unlocked)).unwrap(),
+            Unlocked
+        );
+        // A forced check replaces the answer, and a failure is never kept.
+        assert!(memo.fresh(2, later, || Err(error("logged off"))).is_err());
+        assert_eq!(memo.get(ordinary, 2, later, || Ok(Locked)).unwrap(), Locked);
+        // UAC and the lock UI share Winlogon, where a lock may raise no switch:
+        // the answer kept just now must not hide one.
+        assert_eq!(
+            memo.get("winlogon", 2, later, || Ok(Unlocked)).unwrap(),
+            Unlocked
+        );
+    }
+
+    #[test]
+    fn input_reaches_only_the_desktop_the_host_expected() {
+        /// The bound desktop, which the test changes under the host.
+        struct Bound {
+            context: DesktopContext,
+            injected: u32,
+        }
+        impl Backend for Bound {
+            fn display(&mut self) -> Result<crate::Display> {
+                Ok(self.context.display.clone())
+            }
+            fn context(&mut self) -> Result<DesktopContext> {
+                Ok(self.context.clone())
+            }
+            fn capture(&mut self) -> Result<Vec<u8>> {
+                Ok(vec![])
+            }
+            fn input(&mut self, _: &Input) -> Result<()> {
+                self.injected += 1;
+                Ok(())
+            }
+            fn release(&mut self) {}
+        }
+        let expected = DesktopContext {
+            display: crate::Display {
+                id: 1,
+                name: "bound".into(),
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+            generation: 1,
+            desktop: "ordinary".into(),
+        };
+        let mut backend = Bound {
+            context: expected.clone(),
+            injected: 0,
+        };
+        let (mut sequence, mut last_input) = (0, std::time::Instant::now());
+        let mut send = |backend: &mut Bound, next| {
+            let request = Request::Input {
+                expected: expected.clone(),
+                sequence: next,
+                input: Input::Move { x: 1, y: 1 },
+            };
+            serve(backend, request, &mut sequence, &mut last_input).map(|(response, _)| response)
+        };
+        // The host keeps the desktop an answer reports, for its pointer.
+        let response = send(&mut backend, 1).unwrap();
+        assert_eq!(response.context, Some(expected.clone()));
+        assert!(send(&mut backend, 1).is_err(), "a repeated sequence");
+        // The same generation on a resized display is another desktop.
+        backend.context.display.width = 32;
+        assert!(send(&mut backend, 2).is_err());
+        assert_eq!(backend.injected, 1);
     }
 
     #[tokio::test(start_paused = true)]
