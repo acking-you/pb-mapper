@@ -325,7 +325,7 @@
   "remoteOfflineLast": "未在共享 · 上次 {when}",
   "remoteScanAdd": "扫码添加",
   "remotePasteInvite": "粘贴邀请",
-  "remoteMobileHostNote": "手机可以查看并控制 Windows 电脑，暂不能被远程控制。",
+  "remoteMobileHostNote": "此设备可以查看并控制 Windows 电脑，暂不能被远程控制。",
   "remoteRelayOnly": "仅使用中继",
   "hostUnsupported": "目前仅 Windows 可以共享桌面。此设备可以查看远程桌面。",
   "hostNeedsMediaFoundation": "共享此桌面需要 Windows Media Foundation（请安装媒体功能包，Windows Server 上请启用 Media Foundation 功能）。此电脑仍可查看远程桌面。",
