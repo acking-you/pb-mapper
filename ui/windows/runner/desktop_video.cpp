@@ -38,6 +38,11 @@ using Reply = std::unique_ptr<flutter::MethodResult<Value>>;
 using Clock = std::chrono::steady_clock;
 constexpr UINT kWake = WM_APP + 0x413;
 constexpr uint32_t kMaxBytes = 4 * 1024 * 1024;
+// The largest picture a session allows (VideoLimits, 3840 x 2160). The viewer
+// refuses a larger one before the sink, but a unit that bypasses it (the test
+// source) once crashed Media Foundation's configure-failure path at 16384 x
+// 16384, so no size beyond it reaches a decoder.
+constexpr uint32_t kMaxWidth = 3840, kMaxHeight = 2160;
 constexpr int64_t kSnapshotWidth = 320;
 constexpr float kSnapshotQuality = 0.8f;
 constexpr auto kSnapshotDeadline = std::chrono::milliseconds(300);
@@ -704,6 +709,9 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       // Only a size change or a failure (which released it) rebuilds the decoder.
       if (!decoder || decoder->width != frame.width || decoder->height != frame.height) {
         if (!frame.key) throw std::runtime_error("A fresh key frame is required");
+        if (frame.width == 0 || frame.height == 0 || frame.width > kMaxWidth || frame.height > kMaxHeight) {
+          throw std::runtime_error("Video size outside the session limits");
+        }
         decoder.reset();
         decoder = std::make_unique<Decoder>(frame, adapter_.Get());
         ++configurations_;
