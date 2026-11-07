@@ -9,6 +9,7 @@ import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/minimap.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/quality_panel.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_cursor_layer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_input.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_surface.dart';
@@ -18,6 +19,7 @@ import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_menus.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_overlays.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_stage.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_toolbar.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 import 'package:pb_mapper_ui/src/theme/motion.dart';
@@ -291,6 +293,51 @@ void main() {
     viewport.dispose();
     latch.dispose();
     store.dispose();
+  });
+
+  testWidgets('the chip and the quality panel show no figures while the '
+      'connection is down', (tester) async {
+    _size(tester, const Size(1280, 800));
+    // The store keeps its last sample through a reconnect.
+    final session = ValueNotifier(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.reconnecting,
+      ),
+    );
+    final stats = ValueNotifier(
+      const DesktopStats(
+        path: 'direct',
+        rttMs: 18,
+        presentedFps: 60,
+        receivedBitrateBps: 8000000,
+        width: 1920,
+        height: 1080,
+        codec: 'h264',
+      ),
+    );
+    await tester.pumpWidget(
+      _app(
+        Column(
+          children: [
+            ToolbarStatusChip(session: session, stats: stats, onTap: () {}),
+            QualityPanel(session: session, stats: stats),
+          ],
+        ),
+      ),
+    );
+    // Neither the last sample nor zeros.
+    expect(find.textContaining(RegExp(r'\d (ms|fps|Mbps)')), findsNothing);
+    expect(find.text('— ms · — fps'), findsOneWidget);
+
+    session.value = const DesktopSessionView(
+      target: _target,
+      phase: DesktopPhase.live,
+      path: 'direct',
+    );
+    await tester.pump();
+    expect(find.text('18 ms · 60 fps'), findsOneWidget);
+    expect(find.text('60 fps'), findsOneWidget);
   });
 
   testWidgets(

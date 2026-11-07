@@ -87,11 +87,7 @@ ViewerOverlay viewerOverlayFor(DesktopSessionView s) => switch (s.phase) {
 
 /// The host shows this viewer its desktop but does not let it control.
 bool showsViewOnly(DesktopSessionView s) =>
-    s.target != null &&
-    !s.controlAllowed &&
-    (s.phase == DesktopPhase.live ||
-        s.phase == DesktopPhase.recovering ||
-        s.phase == DesktopPhase.waitingForDesktop);
+    s.target != null && !s.controlAllowed && s.connected;
 
 /// `direct` or `relay` in words; empty while the path is unknown.
 String viewerPathLabel(AppLocalizations l10n, String? path) => switch (path) {
@@ -951,7 +947,9 @@ class _DegradedPill extends StatelessWidget {
                   height: 34,
                   tint: ViewerPalette.chrome,
                   leading: _dot(ViewerPalette.caution),
-                  text: l10n.viewerSlow(viewerPathLabel(l10n, st.path)),
+                  text: l10n.viewerSlow(
+                    viewerPathLabel(l10n, session.value.path),
+                  ),
                   trailing: Text(
                     st.pictureLatencyMs == null
                         ? '—'

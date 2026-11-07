@@ -432,8 +432,9 @@ class _ModeControl extends StatelessWidget {
   );
 }
 
-/// The path, round trip and frame rate; when the picture lags, its delay.
-/// A tap opens or closes the quality panel.
+/// The path, round trip and frame rate, dashes while the connection is not
+/// up; when the picture lags, its delay. A tap opens or closes the quality
+/// panel.
 class ToolbarStatusChip extends StatelessWidget {
   const ToolbarStatusChip({
     super.key,
@@ -455,7 +456,7 @@ class ToolbarStatusChip extends StatelessWidget {
       final st = stats.value;
       final live = s.phase == DesktopPhase.live;
       final degraded = live && st.degraded;
-      final path = viewerPathLabel(l10n, st.path.isEmpty ? s.path : st.path);
+      final path = viewerPathLabel(l10n, s.path);
       final dot = !live
           ? ViewerPalette.textQuiet
           : degraded
@@ -464,7 +465,9 @@ class ToolbarStatusChip extends StatelessWidget {
       final label = degraded ? l10n.viewerSlow(path) : path;
       final figures = degraded
           ? '${st.pictureLatencyMs ?? '—'} ms'
-          : '${st.rttMs ?? '—'} ms · ${st.presentedFps.round()} fps';
+          : s.connected
+          ? '${st.rttMs ?? '—'} ms · ${st.presentedFps.round()} fps'
+          : '— ms · — fps';
       return _Pressable(
         onTap: onTap,
         tooltip: l10n.viewerQuality,

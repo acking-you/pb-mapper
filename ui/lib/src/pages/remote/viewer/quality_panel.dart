@@ -9,13 +9,16 @@ import '../../../theme/viewer_palette.dart';
 import 'viewer_overlays.dart';
 
 /// The connection's figures, refreshed with the store's stats (at most
-/// once a second, and sampled only while something like this listens).
+/// once a second, and sampled only while something like this listens);
+/// dashes while the connection is not up.
 class QualityPanel extends StatelessWidget {
   const QualityPanel({
     super.key = const Key('viewer-quality-panel'),
+    required this.session,
     required this.stats,
   });
 
+  final ValueListenable<DesktopSessionView> session;
   final ValueListenable<DesktopStats> stats;
 
   static String _codec(String codec) => switch (codec) {
@@ -25,11 +28,13 @@ class QualityPanel extends StatelessWidget {
   };
 
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder(
-    valueListenable: stats,
-    builder: (context, st, _) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([session, stats]),
+    builder: (context, _) {
       final l10n = context.l10n;
-      final path = viewerPathLabel(l10n, st.path);
+      final s = session.value;
+      final st = s.connected ? stats.value : DesktopStats.none;
+      final path = viewerPathLabel(l10n, s.path);
       final transport = st.relayTransport;
       final codec = _codec(st.codec);
       final rows = <(String, String, bool, Color?)>[
@@ -37,7 +42,7 @@ class QualityPanel extends StatelessWidget {
           l10n.qualityPath,
           path.isEmpty
               ? '—'
-              : st.path == 'relay' && transport != null && transport.isNotEmpty
+              : s.path == 'relay' && transport != null && transport.isNotEmpty
               ? '$path · ${transport.toUpperCase()}'
               : path,
           false,
@@ -55,10 +60,17 @@ class QualityPanel extends StatelessWidget {
           true,
           st.degraded ? ViewerPalette.caution : null,
         ),
-        (l10n.qualityFps, '${st.presentedFps.round()} fps', true, null),
+        (
+          l10n.qualityFps,
+          s.connected ? '${st.presentedFps.round()} fps' : '—',
+          true,
+          null,
+        ),
         (
           l10n.qualityBitrate,
-          '${(st.receivedBitrateBps / 1e6).toStringAsFixed(1)} Mbps',
+          s.connected
+              ? '${(st.receivedBitrateBps / 1e6).toStringAsFixed(1)} Mbps'
+              : '—',
           true,
           null,
         ),

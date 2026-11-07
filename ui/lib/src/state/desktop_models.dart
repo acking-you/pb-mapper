@@ -213,6 +213,14 @@ class DesktopSessionView {
 
   bool get inputLive => fresh && controlling;
 
+  /// The connection is up: live, recovering a stalled picture, or waiting
+  /// for the host's desktop. Only then are its figures and a view-only
+  /// grant current.
+  bool get connected =>
+      phase == DesktopPhase.live ||
+      phase == DesktopPhase.recovering ||
+      phase == DesktopPhase.waitingForDesktop;
+
   @override
   bool operator ==(Object other) =>
       other is DesktopSessionView &&

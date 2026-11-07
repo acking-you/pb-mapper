@@ -441,7 +441,10 @@ class _TouchViewerState extends State<TouchViewer> {
           Positioned(
             left: content.left + 12,
             top: content.top + 12,
-            child: QualityPanel(stats: _desktop.stats),
+            child: QualityPanel(
+              session: _desktop.session,
+              stats: _desktop.stats,
+            ),
           ),
       ],
     );

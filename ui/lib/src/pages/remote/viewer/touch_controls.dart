@@ -235,8 +235,8 @@ class QualityGutterButton extends StatelessWidget {
       final st = stats.value;
       final live = s.phase == DesktopPhase.live;
       final degraded = live && st.degraded;
-      final path = viewerPathLabel(l10n, st.path.isEmpty ? s.path : st.path);
-      final fps = live ? st.presentedFps.round() : null;
+      final path = viewerPathLabel(l10n, s.path);
+      final fps = s.connected ? st.presentedFps.round() : null;
       final dot = !live
           ? ViewerPalette.textQuiet
           : degraded
@@ -246,7 +246,9 @@ class QualityGutterButton extends StatelessWidget {
         child: Semantics(
           button: true,
           selected: selected,
-          label: l10n.touchQualityA11y(path.isEmpty ? '—' : path, fps ?? 0),
+          label: fps == null
+              ? l10n.viewerQuality
+              : l10n.touchQualityA11y(path.isEmpty ? '—' : path, fps),
           child: Material(
             type: MaterialType.transparency,
             child: InkWell(
