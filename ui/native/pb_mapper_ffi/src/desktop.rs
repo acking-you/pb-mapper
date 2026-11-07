@@ -11,6 +11,7 @@ use crate::{
     error::{CtlError, ErrorCode},
     handle::PbMapperHandle,
     response::{err_ctl, err_null_handle, ok_data, parse_c_string},
+    state::process_credential,
 };
 use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
@@ -1107,6 +1108,9 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
             "this desktop belongs to the background service; enable it to reuse its invitation",
         ));
     }
+    // Read under the same lock as the relay settings the trust scope records,
+    // so the two cannot disagree. A background start does not use the client,
+    // but it is the window's cached one, which its relay questions reuse.
     let (directory, config, client) = {
         let state = handle.state.lock().await;
         (
@@ -1115,7 +1119,7 @@ async fn start_host(handle: &PbMapperHandle, request: Request) -> Result<Value, 
             state.relay_client()?,
         )
     };
-    let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
+    let credential = process_credential()?;
     #[cfg(windows)]
     if let Request::HostStart {
         background: true,
@@ -1342,7 +1346,7 @@ async fn restart_host(
         let state = handle.state.lock().await;
         (state.get_config_status().await, state.relay_client()?)
     };
-    let credential = get_process_credential().map_err(CtlError::invalid_argument)?;
+    let credential = process_credential()?;
     if config.server_address != local.scope.relay || credential.key_id() != local.scope.namespace {
         return Err(err(
             "the relay settings changed since sharing started; stop sharing and share again",
@@ -1412,7 +1416,7 @@ async fn enable_host(
         let state = handle.state.lock().await;
         (state.desktop_config_dir(), state.get_config_status().await)
     };
-    let credential = get_process_credential().map_err(err)?;
+    let credential = process_credential()?;
     let scope = trust::Scope {
         directory: directory.clone(),
         relay: config.server_address.clone(),

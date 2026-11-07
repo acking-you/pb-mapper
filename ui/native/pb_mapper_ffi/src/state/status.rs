@@ -50,9 +50,7 @@ impl PbMapperState {
         {
             return Ok(client.clone());
         }
-        let credential = get_process_credential().map_err(|error| {
-            CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
-        })?;
+        let credential = process_credential()?;
         let client = Client::from_credential(
             &self.config.server_address,
             credential,
