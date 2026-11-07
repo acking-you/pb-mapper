@@ -328,7 +328,7 @@ void main() {
     );
     // Neither the last sample nor zeros.
     expect(find.textContaining(RegExp(r'\d (ms|fps|Mbps)')), findsNothing);
-    expect(find.text('— ms · — fps'), findsOneWidget);
+    expect(find.text('  — ms ·   — fps'), findsOneWidget);
 
     session.value = const DesktopSessionView(
       target: _target,
@@ -336,8 +336,44 @@ void main() {
       path: 'direct',
     );
     await tester.pump();
-    expect(find.text('18 ms · 60 fps'), findsOneWidget);
+    expect(find.text(' 18 ms ·  60 fps'), findsOneWidget);
     expect(find.text('60 fps'), findsOneWidget);
+  });
+
+  testWidgets('the chip keeps its width as the figures change', (tester) async {
+    // The toolbar is centred around the chip: a wider figure would move
+    // every button.
+    final stats = ValueNotifier(
+      const DesktopStats(path: 'direct', rttMs: 8, presentedFps: 4),
+    );
+    await tester.pumpWidget(
+      _app(
+        Center(
+          child: ToolbarStatusChip(
+            key: const Key('viewer-quality-chip'),
+            session: ValueNotifier(
+              const DesktopSessionView(
+                target: _target,
+                phase: DesktopPhase.live,
+                path: 'direct',
+              ),
+            ),
+            stats: stats,
+            onTap: () {},
+          ),
+        ),
+      ),
+    );
+    final chip = find.byKey(const Key('viewer-quality-chip'));
+    final width = tester.getSize(chip).width;
+
+    stats.value = const DesktopStats(
+      path: 'direct',
+      rttMs: 128,
+      presentedFps: 120,
+    );
+    await tester.pump();
+    expect(tester.getSize(chip).width, width);
   });
 
   testWidgets(

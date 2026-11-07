@@ -463,11 +463,15 @@ class ToolbarStatusChip extends StatelessWidget {
           ? ViewerPalette.caution
           : ViewerPalette.success;
       final label = degraded ? l10n.viewerSlow(path) : path;
+      // Each figure right-aligned in fixed mono cells: the bar is centred, so
+      // a figure gaining a digit would shift every button.
+      String cell(Object? figure, int width) =>
+          '${figure ?? '—'}'.padLeft(width);
       final figures = degraded
-          ? '${st.pictureLatencyMs ?? '—'} ms'
+          ? '${cell(st.pictureLatencyMs, 4)} ms'
           : s.connected
-          ? '${st.rttMs ?? '—'} ms · ${st.presentedFps.round()} fps'
-          : '— ms · — fps';
+          ? '${cell(st.rttMs, 3)} ms · ${cell(st.presentedFps.round(), 3)} fps'
+          : '${cell(null, 3)} ms · ${cell(null, 3)} fps';
       return _Pressable(
         onTap: onTap,
         tooltip: l10n.viewerQuality,
