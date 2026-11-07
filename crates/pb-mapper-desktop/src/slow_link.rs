@@ -213,18 +213,23 @@ async fn feedback_case(label: &str, roundtrip_ms: u64, consumer_ms: u64, seconds
         true,
         None,
     );
-    let viewer = Viewer::connect_with_presentation_feedback(
+    let viewer = Viewer::connect(
         &remote,
-        host.invitation().clone(),
+        host.invitation(),
         ConnectOptions {
             path: PathPolicy::RelayOnly,
             ..Default::default()
         },
-        vec![VideoCodec::H264],
-        preferences,
+        ViewerConfig {
+            codecs: vec![VideoCodec::H264],
+            limits: preferences.limits(),
+            quality: QualityPreset::Balanced,
+            progress: None,
+        },
     )
     .await
     .unwrap();
+    let consumer = viewer.video_sink().attach().unwrap();
     let mut deferred = VecDeque::new();
     let mut images = 0u32;
     let mut keyframes = 0u32;
@@ -236,19 +241,13 @@ async fn feedback_case(label: &str, roundtrip_ms: u64, consumer_ms: u64, seconds
     while start.elapsed() < Duration::from_secs(seconds) {
         tick.tick().await;
         while Instant::now() >= next_consume
-            && let Some(frame) = viewer.next_frame()
+            && let Pull::Unit(unit) = consumer.next(Duration::ZERO, wire::MAX_PAYLOAD)
         {
-            if !frame.bytes.is_empty() {
-                next_consume = Instant::now() + Duration::from_millis(consumer_ms);
-                images += 1;
-                keyframes += u32::from(frame.status.video.keyframe);
-                deferred.push_back((
-                    Instant::now(),
-                    frame.status.generation,
-                    frame.status.frame_id,
-                ));
-                peak = peak.max(deferred.len());
-            }
+            next_consume = Instant::now() + Duration::from_millis(consumer_ms);
+            images += 1;
+            keyframes += u32::from(unit.keyframe);
+            deferred.push_back((Instant::now(), unit.generation, unit.frame_id));
+            peak = peak.max(deferred.len());
         }
         let mut newest = None;
         while deferred
@@ -258,7 +257,7 @@ async fn feedback_case(label: &str, roundtrip_ms: u64, consumer_ms: u64, seconds
             newest = deferred.pop_front();
         }
         if let Some((_, generation, id)) = newest {
-            viewer.presented(generation, id);
+            consumer.presented(generation, id);
         }
     }
     let status = viewer.status();
@@ -268,25 +267,25 @@ async fn feedback_case(label: &str, roundtrip_ms: u64, consumer_ms: u64, seconds
     let _ = delayed.await;
     let expired = expired.load(Ordering::Relaxed);
     println!(
-        "async_feedback case={label} roundtrip_ms={roundtrip_ms} consumer_ms={consumer_ms} source_fps=60 elapsed_s={:.3} consumed={images} keyframes={keyframes} expired_encoder_outputs={expired} peak_deferred_acks={peak} bitrate={} dropped={} state={}",
+        "async_feedback case={label} roundtrip_ms={roundtrip_ms} consumer_ms={consumer_ms} source_fps=60 elapsed_s={:.3} consumed={images} keyframes={keyframes} expired_encoder_outputs={expired} peak_deferred_acks={peak} bitrate={} dropped={} state={:?}",
         start.elapsed().as_secs_f64(),
-        status.bitrate,
-        status.dropped_frames,
+        status.stats.bitrate,
+        status.stats.dropped_frames,
         status.state
     );
-    assert_eq!(status.state, "streaming");
+    assert_eq!(status.state, ViewerState::Streaming);
     if consumer_ms == 0 {
         assert_eq!(
-            status.bitrate, preferences.bitrate,
+            status.stats.bitrate, preferences.bitrate,
             "fixed propagation delay is not congestion"
         );
     } else {
         assert!(
-            status.bitrate < preferences.bitrate,
+            status.stats.bitrate < preferences.bitrate,
             "actual consumer backlog must still apply backpressure"
         );
     }
-    assert!(peak <= crate::media::MAX_QUEUED_FRAMES);
+    assert!(peak <= crate::video_sink::SINK_MAX_UNITS);
     assert_eq!(
         expired, 0,
         "network credit must not starve completed encoder output"
