@@ -140,6 +140,48 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps
 
+  # The remote desktop's host side (capture, encoder, helper, DPAPI vaults)
+  # and its acceptance examples compile only on Windows, so the Linux job
+  # above never builds, lints or tests them.
+  rust-windows-desktop:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: 0  # Incremental state only bloats the cached target/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-desktop-
+
+      # Only these two packages: the rest of the workspace has a few
+      # cfg(windows) lines at most, and its known Windows flakes (pb-mapper-cli's
+      # regression tests, pb-mapper-client's direct test) would only add noise.
+      - name: Run Clippy
+        run: cargo clippy -p pb-mapper-desktop -p pb-mapper-ffi --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test -p pb-mapper-desktop -p pb-mapper-ffi --all-features
+
   node-e2e:
     needs: changes
     if: needs.changes.outputs.node == 'true'
