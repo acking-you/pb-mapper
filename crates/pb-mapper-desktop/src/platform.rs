@@ -22,20 +22,27 @@ pub fn capabilities() -> Capabilities {
 pub fn media_foundation() -> bool {
     #[cfg(windows)]
     {
+        use ::windows::Win32::System::LibraryLoader::{
+            LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+        };
         static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *INSTALLED.get_or_init(|| system_library(::windows::core::w!("mfplat.dll")))
+        // Loaded from System32 only and kept loaded, so the delay-loaded
+        // imports bind to this copy.
+        *INSTALLED.get_or_init(|| {
+            unsafe {
+                LoadLibraryExW(
+                    ::windows::core::w!("mfplat.dll"),
+                    None,
+                    LOAD_LIBRARY_SEARCH_SYSTEM32,
+                )
+            }
+            .is_ok()
+        })
     }
     #[cfg(not(windows))]
     {
         false
     }
-}
-/// Loads `name` from System32 only and keeps it loaded, so a delay-loaded
-/// import of the same name binds to this copy.
-#[cfg(windows)]
-pub(crate) fn system_library(name: ::windows::core::PCWSTR) -> bool {
-    use ::windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
-    unsafe { LoadLibraryExW(name, None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.is_ok()
 }
 pub fn displays() -> Result<Vec<Display>> {
     #[cfg(windows)]

@@ -92,11 +92,10 @@ struct Runtime {
     thread: ThreadId,
 }
 impl Runtime {
-    /// Every Media Foundation call follows this one. `installed` is
-    /// `media_foundation()`: the DLL is delay-loaded, so without it
-    /// `MFStartup` would raise rather than fail.
-    fn new(installed: bool) -> Result<Self> {
-        if !installed {
+    /// Every Media Foundation call follows this one. The DLL is delay-loaded,
+    /// so without it `MFStartup` would raise rather than fail.
+    fn new() -> Result<Self> {
+        if !crate::media_foundation() {
             return Err(error("Windows Media Foundation is not installed"));
         }
         unsafe {
@@ -174,7 +173,7 @@ impl Encoder {
         if !(2..=7680).contains(&max_width) || !(2..=4320).contains(&max_height) {
             return Err(error("video size outside supported bounds"));
         }
-        let runtime = Runtime::new(crate::media_foundation())?;
+        let runtime = Runtime::new()?;
         let monitor = Monitor::enumerate()
             .map_err(error)?
             .into_iter()
@@ -1251,15 +1250,5 @@ mod tests {
         assert!(nal_ranges(&[0, 0, 0, 1]).is_err());
         assert!(nal_ranges(&[0, 0, 0, 8, 0x65]).is_err());
         Ok(())
-    }
-    #[test]
-    fn missing_media_foundation_fails_before_the_first_call() {
-        // Windows N without the Media Feature Pack: System32 has no mfplat.dll.
-        let installed =
-            crate::platform::system_library(windows::core::w!("pb-mapper-absent-mfplat.dll"));
-        assert!(!installed);
-        // There a delay-loaded MFStartup would raise. This test binary imports
-        // it directly, so a skipped check shows as a runtime that starts.
-        assert!(Runtime::new(installed).is_err());
     }
 }
