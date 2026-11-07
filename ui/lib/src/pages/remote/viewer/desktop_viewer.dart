@@ -115,7 +115,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
       widget.prefs.addListener(_prefsChanged);
       _prefsChanged();
     }
-    // What the host offers can change while the viewer is up: Paste new
+    // The screen's actions can change while the viewer is up: Paste new
     // invitation, once the computer is remembered.
     _actions = _buildActions();
   }

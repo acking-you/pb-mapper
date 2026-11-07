@@ -155,14 +155,14 @@ class _TouchViewerState extends State<TouchViewer> {
   void didUpdateWidget(covariant TouchViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
     assert(identical(oldWidget.desktop, widget.desktop));
-    final prefs = !identical(oldWidget.prefs, widget.prefs);
-    if (prefs) {
+    final newPrefs = !identical(oldWidget.prefs, widget.prefs);
+    if (newPrefs) {
       oldWidget.prefs.removeListener(_prefsChanged);
       widget.prefs.addListener(_prefsChanged);
     }
-    // What the host offers can change while the viewer is up: Paste new
+    // The screen's actions can change while the viewer is up: Paste new
     // invitation, once the computer is remembered.
-    if (prefs ||
+    if (newPrefs ||
         (oldWidget.onPasteNewInvite == null) !=
             (widget.onPasteNewInvite == null)) {
       _actions = _buildActions();
@@ -170,7 +170,7 @@ class _TouchViewerState extends State<TouchViewer> {
     } else if (oldWidget.title != widget.title) {
       _stage = _buildStage();
     }
-    if (prefs) _prefsChanged();
+    if (newPrefs) _prefsChanged();
   }
 
   @override
