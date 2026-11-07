@@ -515,6 +515,8 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       video_context->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &rect);
       video_context->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &rect);
       video_context->VideoProcessorSetStreamFrameFormat(processor.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+      // The picture is the host's pixels: no driver denoise, sharpening or colour correction.
+      video_context->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
       D3D11_VIDEO_PROCESSOR_COLOR_SPACE color{};
       color.YCbCr_Matrix = 1;  // BT.709, matching the desktop encoder.
       color.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
