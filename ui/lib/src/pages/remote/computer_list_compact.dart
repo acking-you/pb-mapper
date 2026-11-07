@@ -37,7 +37,7 @@ Future<void> openEntry(BuildContext context, RemoteEntry entry) async {
 
 /// The remote computers on a phone (MobileHome): the computer being viewed,
 /// or the last one opened, as a card with its last picture; the others as
-/// rows; then the ways to add one.
+/// rows; then the ways to add one; with none yet, first how to get one.
 class CompactComputerList extends StatelessWidget {
   const CompactComputerList({super.key});
 
@@ -102,6 +102,15 @@ class CompactComputerList extends StatelessWidget {
               ),
               const SizedBox(height: 12),
             ],
+            if (featured == null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+                child: RemoteEmptyMessage(
+                  body: InviteScanner.supported
+                      ? l10n.remoteEmptyBodyMobile
+                      : l10n.remoteEmptyBody,
+                ),
+              ),
             const AddComputerButtons(),
             if (cannotRemember(store.computers.support)) ...[
               const SizedBox(height: 10),

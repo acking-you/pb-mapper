@@ -322,6 +322,7 @@
   "remoteListTitle": "Remote computers",
   "remoteEmptyTitle": "No remote computers yet",
   "remoteEmptyBody": "Turn on remote control in pb-mapper on the other computer, copy its private invitation and paste it here.",
+  "remoteEmptyBodyMobile": "Turn on remote control in pb-mapper on your Windows computer, then scan its QR code or paste its private invitation.",
   "remoteAddHint": "Paste another computer's private invitation",
   "remoteRememberNote": "Only invitations you choose to remember are saved on this device, encrypted by the system.",
   "remoteViewing": "Viewing",

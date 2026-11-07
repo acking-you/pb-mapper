@@ -836,29 +836,7 @@ class RemoteEmptyCard extends StatelessWidget {
                 ),
                 child: Column(
                   children: [
-                    const RemoteEmptyIllustration(),
-                    const SizedBox(height: 14),
-                    Text(
-                      l10n.remoteEmptyTitle,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 360),
-                      child: Text(
-                        l10n.remoteEmptyBody,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 13.5,
-                          height: 1.6,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
+                    RemoteEmptyMessage(body: l10n.remoteEmptyBody),
                     const SizedBox(height: 20),
                     OutlinedButton.icon(
                       key: const Key('remote-add-empty'),
@@ -888,6 +866,41 @@ class RemoteEmptyCard extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The empty list's picture, title and how to add a computer.
+class RemoteEmptyMessage extends StatelessWidget {
+  const RemoteEmptyMessage({super.key, required this.body});
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        const RemoteEmptyIllustration(),
+        const SizedBox(height: 14),
+        Text(
+          context.l10n.remoteEmptyTitle,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 14),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Text(
+            body,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 13.5,
+              height: 1.6,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
