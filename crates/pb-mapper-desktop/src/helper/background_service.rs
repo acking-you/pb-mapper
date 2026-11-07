@@ -588,7 +588,11 @@ fn protect(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>> {
 /// and administrators may even read a grant.
 fn private_file(path: &Path) -> Result<()> {
     os::protected_file(path)?;
-    os::check_acl(path, u32::MAX)
+    os::check_acl(path, u32::MAX).map_err(|failure| {
+        error(format!(
+            "Background authorization must be private to SYSTEM and administrators: {failure}"
+        ))
+    })
 }
 
 #[cfg(test)]
