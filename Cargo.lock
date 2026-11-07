@@ -3122,6 +3122,7 @@ name = "pb-mapper-desktop"
 version = "0.10.2"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "enigo",
  "image",
  "parking_lot",

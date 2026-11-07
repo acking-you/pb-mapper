@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = Client::new(ClientConfig { server: config.server_address.clone(), credential: key.credential.clone(), keep_alive: true, namespace: None })?.with_relay_transport(config.relay_transport)?;
         let display = pb_mapper_desktop::displays()?.into_iter().next().ok_or("no display")?;
         let host = Host::start(&client, HostOptions { service: format!("desktop:acceptance-{}",std::process::id()), display_id:display.id, allow_control:args.iter().any(|arg| arg == "--control"),allow_direct:true }).await?;
-        let controller = serde_json::json!({"server":config.server_address,"credential":key.credential,"transport":config.relay_transport,"invitation":host.invitation().encode()?});
+        let controller = serde_json::json!({"server":config.server_address,"credential":key.credential,"transport":config.relay_transport,"invitation":host.invitation().encode()});
         std::fs::write(output.join("controller.json"),serde_json::to_vec(&controller)?)?;
         println!("host_ready display={}x{} duration={seconds} mode={mode}", display.width,display.height);
         if mode == "serve" {
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if output.join("stop").exists() { break; }
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let s=host.status();
-                println!("state={} codec={:?} unique_capture_fps={:.1} frames={} dropped={} message={}",s.state,s.video.codec,s.capture_fps,s.frames,s.dropped_frames,s.message);
+                println!("state={:?} viewer={:?} message={}",s.state,s.viewer,s.message);
             }
         } else {
             for policy in [PathPolicy::Auto,PathPolicy::RelayOnly] {

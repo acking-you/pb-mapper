@@ -99,8 +99,8 @@ struct AsyncVideo {
     independent: bool,
 }
 impl Backend for AsyncVideo {
-    fn configure_video(&mut self, preferences: VideoPreferences) -> Result<()> {
-        self.source.configure_video(preferences)
+    fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
+        self.source.configure_video(limits, nominal_fps)
     }
     fn display(&mut self) -> Result<Display> {
         self.source.display()
@@ -113,19 +113,19 @@ impl Backend for AsyncVideo {
         expected: &DesktopContext,
         codec: VideoCodec,
         keyframe: bool,
-        bitrate: u32,
+        rate: VideoRate,
     ) -> Result<Option<EncodedFrame>> {
-        let ready = self.drain_video(expected)?;
+        let ready = self.drain_video(expected, Duration::ZERO)?;
         if self.pending.len() < 2
             && let Some(frame) =
                 self.source
-                    .capture_video(expected, codec, keyframe || self.independent, bitrate)?
+                    .capture_video(expected, codec, keyframe || self.independent, rate)?
         {
             self.pending.push_back((Instant::now(), frame));
         }
         Ok(ready)
     }
-    fn drain_video(&mut self, _: &DesktopContext) -> Result<Option<EncodedFrame>> {
+    fn drain_video(&mut self, _: &DesktopContext, _: Duration) -> Result<Option<EncodedFrame>> {
         if self
             .pending
             .front()
@@ -293,10 +293,10 @@ async fn feedback_case(label: &str, roundtrip_ms: u64, consumer_ms: u64, seconds
     );
 }
 impl Backend for SyntheticVideo {
-    fn configure_video(&mut self, preferences: VideoPreferences) -> Result<()> {
-        preferences.validate()?;
+    fn configure_video(&mut self, limits: VideoLimits, _nominal_fps: u32) -> Result<()> {
+        limits.validate()?;
         if self.adaptive.is_some() {
-            self.adaptive = Some(preferences);
+            self.adaptive = Some(limits.into());
         }
         Ok(())
     }
@@ -318,7 +318,7 @@ impl Backend for SyntheticVideo {
         _: &DesktopContext,
         _: VideoCodec,
         keyframe: bool,
-        bitrate: u32,
+        rate: VideoRate,
     ) -> Result<Option<EncodedFrame>> {
         if Instant::now() < self.next {
             return Ok(None);
@@ -339,11 +339,12 @@ impl Backend for SyntheticVideo {
                 keyframe,
                 pts_us: u64::from(id) * 11_111,
                 duplicate: false,
+                encode_us: 0,
             },
             bytes: vec![
                 0x65;
                 if self.adaptive.is_some() {
-                    (bitrate as usize / fps as usize / 8 * if keyframe { 4 } else { 1 })
+                    (rate.bitrate as usize / fps as usize / 8 * if keyframe { 4 } else { 1 })
                         .clamp(256, FRAME_BYTES)
                 } else {
                     FRAME_BYTES
@@ -415,7 +416,7 @@ async fn sustained_slow_tls_reader() {
         )
         .await
         .unwrap();
-    let mut tls = security::client(&host.invitation().certificate)
+    let mut tls = security::client(host.invitation().fingerprint)
         .unwrap()
         .connect(
             quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
@@ -426,7 +427,7 @@ async fn sustained_slow_tls_reader() {
     wire::write_json(
         &mut tls,
         &Command::Authenticate {
-            token: host.invitation().token.clone(),
+            token: host.invitation().token_text(),
             codecs: vec![VideoCodec::H264],
             video: Some(VideoPreferences::default()),
             presentation_feedback: false,
@@ -472,7 +473,7 @@ async fn sustained_slow_tls_reader() {
         .await
         .unwrap()
         .unwrap();
-        let state = host.status();
+        let state = host.v1_status();
         assert_eq!(
             state.state, "streaming",
             "host must remain active for all 30 seconds"
@@ -487,17 +488,17 @@ async fn sustained_slow_tls_reader() {
             wire::write_json(&mut write, &Command::Control { enabled: true })
                 .await
                 .unwrap();
-            observed(&probe, "control enabled", || host.status().controlling).await;
+            observed(&probe, "control enabled", || host.v1_status().controlling).await;
             control_ms = at.elapsed().as_secs_f64() * 1000.0;
-            let generation_frame = host.status().frame_id;
+            let generation_frame = host.v1_status().frame_id;
             observed(&probe, "new control generation's first frame", || {
-                host.status().frame_id > generation_frame
+                host.v1_status().frame_id > generation_frame
             })
             .await;
             for sequence in 1..=2 {
                 // The synthetic backend injects no OS input. Use a known fresh
                 // host frame to isolate command responsiveness from staleness.
-                let state = host.status();
+                let state = host.v1_status();
                 wire::write_json(
                     &mut write,
                     &Command::Input {
@@ -508,6 +509,7 @@ async fn sustained_slow_tls_reader() {
                             input: Input::Button {
                                 button: Button::Left,
                                 down: true,
+                                drag_start: false,
                             },
                         },
                     },
@@ -546,7 +548,7 @@ async fn sustained_slow_tls_reader() {
             );
         }
     }
-    let state = host.status();
+    let state = host.v1_status();
     let elapsed = start.elapsed().as_secs_f64();
     assert!(
         probe.frames.load(Ordering::Relaxed) > halfway_frames + 300,
@@ -660,7 +662,7 @@ async fn presentation_feedback_recovers_after_slow_tls_and_renderer() {
         )
         .await
         .unwrap();
-    let mut tls = security::client(&host.invitation().certificate)
+    let mut tls = security::client(host.invitation().fingerprint)
         .unwrap()
         .connect(
             quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
@@ -671,7 +673,7 @@ async fn presentation_feedback_recovers_after_slow_tls_and_renderer() {
     wire::write_json(
         &mut tls,
         &Command::Authenticate {
-            token: host.invitation().token.clone(),
+            token: host.invitation().token_text(),
             codecs: vec![VideoCodec::H264],
             video: Some(VideoPreferences::default()),
             presentation_feedback: true,
@@ -746,7 +748,7 @@ async fn presentation_feedback_recovers_after_slow_tls_and_renderer() {
         assert!(
             !reader.is_finished(),
             "feedback session ended before recovery: {:?}",
-            host.status()
+            host.v1_status()
         );
         assert!(!acknowledgments.is_finished());
         wire::write_json(&mut *write.lock().await, &Command::Ping)

@@ -295,6 +295,7 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                 }
             };
             let mut sequence = 0;
+            let mut pace_fps = crate::VideoPreferences::default().max_fps;
             let mut last_input = std::time::Instant::now();
             while !stopped.is_cancelled() {
                 if last_input.elapsed() > std::time::Duration::from_secs(2) {
@@ -329,7 +330,8 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                         Request::Attach { .. } => return Err(error("worker is already attached")),
                         Request::ConfigureVideo { preferences } => {
                             preferences.validate()?;
-                            backend.configure_video(preferences)?;
+                            backend.configure_video(preferences.limits(), preferences.max_fps)?;
+                            pace_fps = preferences.max_fps;
                             vec![]
                         }
                         Request::Capture => backend.capture_consistent(&context)?,
@@ -337,7 +339,7 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                             if expected != context {
                                 return Err(error("stale video drain request"));
                             }
-                            match backend.drain_video(&expected)? {
+                            match backend.drain_video(&expected, std::time::Duration::ZERO)? {
                                 Some(frame) => {
                                     video = Some(frame.format);
                                     frame.bytes
@@ -354,7 +356,8 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                             if expected != context || !(256_000..=40_000_000).contains(&bitrate) {
                                 return Err(error("invalid or stale video request"));
                             }
-                            match backend.capture_video(&expected, codec, keyframe, bitrate)? {
+                            let rate = crate::VideoRate { bitrate, pace_fps };
+                            match backend.capture_video(&expected, codec, keyframe, rate)? {
                                 Some(frame) => {
                                     video = Some(frame.format);
                                     frame.bytes

@@ -64,12 +64,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut backend = if backend_mode {
         let mut backend = pb_mapper_desktop::native_backend(display.id)?;
-        backend.configure_video(pb_mapper_desktop::VideoPreferences {
-            max_width,
-            max_height,
-            max_fps: fps,
-            bitrate,
-        })?;
+        backend.configure_video(
+            pb_mapper_desktop::VideoLimits {
+                max_width,
+                max_height,
+                max_fps: fps,
+            },
+            fps,
+        )?;
         Some(backend)
     } else {
         None
@@ -154,10 +156,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &context,
                     pb_mapper_desktop::VideoCodec::H264,
                     force,
-                    if changed_bitrate {
-                        bitrate.min(12_000_000)
-                    } else {
-                        bitrate
+                    pb_mapper_desktop::VideoRate {
+                        bitrate: if changed_bitrate {
+                            bitrate.min(12_000_000)
+                        } else {
+                            bitrate
+                        },
+                        pace_fps: fps,
                     },
                 )?
                 .map(|frame| Encoded {

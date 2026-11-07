@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Host, HostIdentity, HostOptions};
+use crate::{Host, HostIdentity, HostOptions, HostState};
 use pb_mapper_client::sdk::{Client, ClientConfig};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
@@ -168,13 +168,16 @@ impl Supervisor {
         Snapshot {
             configured: saved.is_some(),
             enabled: self.enabled,
-            host: self.host.as_ref().map(Host::status),
+            host: self
+                .host
+                .as_ref()
+                .map(|host| crate::legacy_host_status(&host.status())),
             invitation: saved.and_then(|saved| {
                 saved
                     .identity
                     .invitation(saved.options.settings.service.clone())
-                    .encode()
                     .ok()
+                    .map(|invitation| invitation.encode())
             }),
             settings: saved.map(|saved| saved.options.settings.clone()),
             server: saved.map(|saved| saved.options.server.clone()),
@@ -352,8 +355,8 @@ impl Supervisor {
             return;
         };
         if let Some(host) = &self.host {
-            match host.status().state.as_str() {
-                "capture_unavailable" => {
+            match host.status().state {
+                HostState::CaptureUnavailable => {
                     let since = self.capture_failure_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= Duration::from_secs(5) {
                         self.deactivate().await;
@@ -363,7 +366,7 @@ impl Supervisor {
                         self.retry_delay = (self.retry_delay * 2).min(Duration::from_secs(60));
                     }
                 }
-                "streaming" => {
+                HostState::Streaming => {
                     self.capture_failure_since = None;
                     self.retry_delay = Duration::from_secs(1);
                 }
@@ -803,8 +806,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(host.status().state, "waiting");
-        let invitation = host.invitation().encode().unwrap();
+        assert_eq!(host.status().state, HostState::Waiting);
+        let invitation = host.invitation().encode();
         supervisor.host = Some(host);
         supervisor.reconcile_session(Ok(None)).await;
         assert!(supervisor.host.is_none());
@@ -814,7 +817,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(host.invitation().encode().unwrap(), invitation);
+        assert_eq!(host.invitation().encode(), invitation);
         host.stop().await.unwrap();
     }
 
