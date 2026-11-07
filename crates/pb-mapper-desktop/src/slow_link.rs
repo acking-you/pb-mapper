@@ -13,7 +13,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},

@@ -7,10 +7,10 @@
 use crate::{Display, InputEvent, KeyframeReason, QualityPreset, VideoCodec, VideoLimits};
 use serde::{Deserialize, Serialize};
 
-/// The host captures and injects on a Windows backend that can lock it.
+/// The host captures and injects on a Windows backend that can lock it. The
+/// v2.0 host advertises nothing else: it cannot tell, before thread C builds
+/// the backend, whether the privileged helper (`secure_desktop`) captures.
 pub(crate) const CAPABILITY_LOCK: &str = "lock";
-/// The privileged helper is active, so the secure desktop is shared too.
-pub(crate) const CAPABILITY_SECURE_DESKTOP: &str = "secure_desktop";
 const MAX_CAPABILITIES: usize = 16;
 
 /// Capability lists hold at most 16 values of `[a-z0-9_]{1,32}`. A receiver
@@ -354,7 +354,7 @@ mod tests {
                 limits,
                 nominal_fps: 60,
                 quality: QualityPreset::Quality,
-                capabilities: vec![CAPABILITY_LOCK.into(), CAPABILITY_SECURE_DESKTOP.into()],
+                capabilities: vec![CAPABILITY_LOCK.into(), "secure_desktop".into()],
             },
             HostMessage::Rejected {
                 reason: RejectReason::Busy,

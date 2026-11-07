@@ -423,7 +423,7 @@ async fn manage(
                 let sender = sender.clone();
                 requests.spawn(async move {
                     let _owner = os::verify_management_client(&caller, &config)?;
-                    let command = tokio::time::timeout(super::super::TIMEOUT, crate::wire::read_json(&mut caller)).await.map_err(error)??;
+                    let command = tokio::time::timeout(super::super::TIMEOUT, ipc::read_json(&mut caller)).await.map_err(error)??;
                     let (reply, result) = oneshot::channel();
                     sender.try_send((command, reply)).map_err(|_| error("Background management is busy"))?;
                     let result = result.await.map_err(error)?;
@@ -431,7 +431,7 @@ async fn manage(
                         Ok(snapshot) => Response { snapshot: Some(snapshot), error: None },
                         Err(e) => Response { snapshot: None, error: Some(e.to_string()) },
                     };
-                    tokio::time::timeout(super::super::TIMEOUT, crate::wire::write_json(&mut caller, &response)).await.map_err(error)??;
+                    tokio::time::timeout(super::super::TIMEOUT, ipc::write_json(&mut caller, &response)).await.map_err(error)??;
                     Ok::<_, std::io::Error>(())
                 });
             },

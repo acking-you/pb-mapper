@@ -101,7 +101,7 @@ impl Session {
             shared: Arc::new(SessionShared::new(
                 policy,
                 cancel,
-                Targets::new(limits.max_fps, targets.pace_fps, targets.encoder_bps),
+                Targets::new(targets.pace_fps, targets.encoder_bps),
             )),
             codec,
             started_unix_ms: SystemTime::now()

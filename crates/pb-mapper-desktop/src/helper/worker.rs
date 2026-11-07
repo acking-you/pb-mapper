@@ -265,7 +265,7 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
         let Request::Attach {
             display_id,
             session,
-        } = tokio::time::timeout(TIMEOUT, crate::wire::read_json(&mut pipe))
+        } = tokio::time::timeout(TIMEOUT, ipc::read_json(&mut pipe))
             .await
             .map_err(error)??
         else {
@@ -332,15 +332,15 @@ pub fn run(name: &str, parent: u32) -> Result<()> {
                     .map_err(error)?
                     .map_err(error)?;
                 tokio::time::timeout(TIMEOUT, async {
-                    crate::wire::write_json(&mut pipe, &response).await?;
-                    crate::wire::write_bytes(&mut pipe, &image, crate::wire::MAX_FRAME).await
+                    ipc::write_json(&mut pipe, &response).await?;
+                    ipc::write_bytes(&mut pipe, &image, ipc::MAX_FRAME).await
                 })
                 .await
                 .map_err(error)??;
                 if close {
                     return Ok(());
                 }
-                request = tokio::time::timeout(TIMEOUT, crate::wire::read_json(&mut pipe))
+                request = tokio::time::timeout(TIMEOUT, ipc::read_json(&mut pipe))
                     .await
                     .map_err(error)??;
             }

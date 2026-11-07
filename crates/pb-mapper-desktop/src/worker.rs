@@ -7,16 +7,9 @@
 //! Input is authorised only by `AuthLedger`, which only a validated
 //! presentation advances. Capture, receipts and cursor sampling renew nothing.
 
-// The host spawns thread C once its v2 session lands; until then only the
-// tests here run it, and the v1 host runs on `v1::Worker`.
-#![cfg_attr(not(test), allow(dead_code))]
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
-mod v1;
-
-pub(crate) use v1::Worker;
 
 use crate::{
     Backend, Button, ControlAdmission, ControlLease, DesktopContext, EncodedFrame, Input,

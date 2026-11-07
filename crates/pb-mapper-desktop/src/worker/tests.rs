@@ -130,7 +130,7 @@ fn session(allowed: bool) -> Arc<SessionShared> {
     Arc::new(SessionShared::new(
         Arc::new(Policy::new(allowed)),
         CancellationToken::new(),
-        Targets::new(60, 60, 4_000_000),
+        Targets::new(60, 4_000_000),
     ))
 }
 

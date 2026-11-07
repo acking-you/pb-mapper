@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 /// The least time between a requested IDR and the previous one.
 pub(crate) const HOST_IDR_MIN_INTERVAL: Duration = Duration::from_millis(300);
 
+/// Why an IDR is asked for. A new encoder and late encoder output need no
+/// request: the encoder starts with an IDR and replaces late output with one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IdrReason {
-    NewEncoder,
     /// `Engine::invalidate`: a control grant or revoke, an input failure, or
     /// capture recovered.
     Generation,
@@ -18,7 +19,6 @@ pub(crate) enum IdrReason {
     Viewer(KeyframeReason),
     /// The outgoing head grew stale, or the hand-off overflowed.
     HostResync,
-    EncoderLate,
 }
 
 pub(crate) struct IdrPolicy {
@@ -26,8 +26,6 @@ pub(crate) struct IdrPolicy {
     pending: Option<IdrReason>,
     forced: bool,
     last_emitted: Option<Instant>,
-    requested: u64,
-    emitted: u64,
 }
 impl IdrPolicy {
     pub fn new() -> Self {
@@ -35,8 +33,6 @@ impl IdrPolicy {
             pending: None,
             forced: false,
             last_emitted: None,
-            requested: 0,
-            emitted: 0,
         }
     }
 
@@ -66,21 +62,15 @@ impl IdrPolicy {
         self.pending = None;
         self.forced = false;
         self.last_emitted = Some(now);
-        self.emitted += 1;
     }
 
-    pub fn pending(&self) -> Option<IdrReason> {
+    #[cfg(test)]
+    fn pending(&self) -> Option<IdrReason> {
         self.pending
-    }
-
-    /// `(requested, emitted)` since the session started.
-    pub fn counts(&self) -> (u64, u64) {
-        (self.requested, self.emitted)
     }
 
     fn note(&mut self, reason: IdrReason) {
         self.pending.get_or_insert(reason);
-        self.requested += 1;
     }
 }
 
@@ -114,7 +104,6 @@ mod tests {
         assert!(idr.take_due(ms(316)));
         idr.on_emitted(ms(316));
         assert!(!idr.take_due(ms(400)));
-        assert_eq!(idr.counts(), (10, 2));
 
         // A force bypasses the interval.
         idr.force(IdrReason::Generation);

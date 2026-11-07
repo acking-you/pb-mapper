@@ -89,8 +89,8 @@ async fn call(command: Command) -> Result<Snapshot> {
     let mut pipe = ipc::connect(PIPE)?;
     os::verify_server(&pipe, &config.helper_executable, None)?;
     tokio::time::timeout(CALL_TIMEOUT, async {
-        crate::wire::write_json(&mut pipe, &command).await?;
-        let response: Response = crate::wire::read_json(&mut pipe).await?;
+        ipc::write_json(&mut pipe, &command).await?;
+        let response: Response = ipc::read_json(&mut pipe).await?;
         match (response.snapshot, response.error) {
             (_, Some(message)) => Err(error(message)),
             (Some(snapshot), None) => Ok(snapshot),

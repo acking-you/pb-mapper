@@ -5,47 +5,30 @@
 //! The native Windows backend captures the ordinary desktop. An explicitly
 //! installed, authorized helper handles UAC/Winlogon on its bound desktop.
 
-// The host runs protocol v2; the viewer and thread C join it at G1. Until then
-// the v1 viewer runs, the v1 worker and its presentation-credit pipeline
-// (`congestion`) are reached only by their own tests, and the v2 plumbing that
-// thread C will drive is reached only by tests. `not(test)` marks the modules
-// whose tests use all of them; the plain allows cover plumbing no test drives.
-// The G1 cleanup removes these allows.
-#[cfg_attr(not(test), allow(dead_code))]
 mod auth;
-#[allow(dead_code)]
-mod congestion;
 mod credit;
 #[cfg(windows)]
 pub mod helper;
 mod host;
-#[allow(dead_code)]
 mod idr;
 mod invite;
-#[allow(dead_code)]
 mod lane;
-mod media;
-#[allow(dead_code)]
 mod outgoing;
 mod pacer;
 mod platform;
-#[cfg_attr(not(test), allow(dead_code))]
 mod protocol;
 mod qos;
 mod scheduler;
 mod security;
 mod session;
-#[allow(dead_code)]
 mod shared;
 #[cfg(test)]
 mod slow_link;
 #[cfg(test)]
 mod tests;
-#[allow(dead_code)]
 mod video_sink;
 mod viewer;
 mod wire;
-#[allow(dead_code)]
 mod worker;
 #[cfg(windows)]
 pub mod video {
@@ -53,7 +36,7 @@ pub mod video {
 }
 
 use serde::{Deserialize, Serialize};
-use std::{io, sync::Arc, time::Duration};
+use std::{io, time::Duration};
 
 pub use host::{Host, HostOptions};
 pub use invite::{Invitation, InvitationError, InvitationFormat};
@@ -121,111 +104,12 @@ pub struct Capabilities {
     pub mode: String,
 }
 
-/// The v1 per-message status. It still drives the v1 host and viewer until the
-/// G1 cleanup deletes it; `HostStatus` and the viewer's status replace it.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SessionStatus {
-    pub state: String,
-    pub message: String,
-    pub control_allowed: bool,
-    pub controlling: bool,
-    pub generation: u64,
-    pub frame_id: u64,
-    pub display: Option<Display>,
-    pub path: String,
-    /// Local transport observation, never trusted as host authorization.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_stage: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_failure: Option<String>,
-    pub frames: u64,
-    pub bytes: u64,
-    #[serde(default)]
-    pub desktop: String,
-    #[serde(default)]
-    pub video: VideoFormat,
-    #[serde(default)]
-    pub capture_fps: f32,
-    #[serde(default)]
-    pub receive_fps: f32,
-    #[serde(default)]
-    pub dropped_frames: u64,
-    #[serde(default)]
-    pub bitrate: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<CursorPosition>,
-    /// Host frame-ready to renderer acknowledgment round trip, including
-    /// transport, presentation and acknowledgment coalescing. Not one-way latency.
-    /// Zero means no current-generation renderer acknowledgment has been measured.
-    #[serde(default)]
-    pub frame_ack_ms: f32,
-    /// Optional transport-only startup probe. Older viewers ignore it; newer
-    /// viewers echo it before any decoder/UI work. It is never a picture ACK.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub roundtrip_probe: Option<u64>,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoCodec {
     #[default]
     Jpeg,
     H264,
-}
-
-/// The v1 renderer limits, with a bitrate ceiling. `VideoLimits` replaces them;
-/// the v1 pipeline keeps them until the G1 cleanup.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct VideoPreferences {
-    pub max_width: u32,
-    pub max_height: u32,
-    pub max_fps: u32,
-    pub bitrate: u32,
-}
-impl Default for VideoPreferences {
-    fn default() -> Self {
-        Self {
-            max_width: 1920,
-            max_height: 1080,
-            max_fps: 90,
-            bitrate: 12_000_000,
-        }
-    }
-}
-impl VideoPreferences {
-    /// Reject invalid limits before opening a session or creating GPU resources.
-    pub fn validate(&self) -> Result<()> {
-        if !(2..=3840).contains(&self.max_width)
-            || !(2..=2160).contains(&self.max_height)
-            || !(30..=120).contains(&self.max_fps)
-            || !(1_000_000..=40_000_000).contains(&self.bitrate)
-        {
-            return Err(error("video preferences outside supported bounds"));
-        }
-        Ok(())
-    }
-    /// The v1 pipeline's bridge to the v2 `Backend` signatures.
-    pub(crate) fn limits(&self) -> VideoLimits {
-        VideoLimits {
-            max_width: self.max_width,
-            max_height: self.max_height,
-            max_fps: self.max_fps,
-        }
-    }
-}
-impl From<VideoLimits> for VideoPreferences {
-    /// The v1 helper IPC still carries preferences. Limits have no bitrate
-    /// ceiling: each capture call passes the actual rate, so the ceiling sent
-    /// here is the largest valid one.
-    fn from(limits: VideoLimits) -> Self {
-        Self {
-            max_width: limits.max_width,
-            max_height: limits.max_height,
-            max_fps: limits.max_fps,
-            bitrate: 40_000_000,
-        }
-    }
 }
 
 /// What a viewer asks the host to favour. Each preset maps to bitrate and
@@ -335,14 +219,6 @@ pub struct DesktopContext {
     pub display: Display,
     pub generation: u64,
     pub desktop: String,
-}
-
-/// An owned encoded access unit plus geometry. Bridges copy or retain it, never a
-/// borrowed pointer to a buffer a capture worker may overwrite.
-#[derive(Clone)]
-pub struct Frame {
-    pub status: SessionStatus,
-    pub bytes: Arc<[u8]>,
 }
 
 /// Deliberately small, platform-independent input vocabulary. Text is Unicode
@@ -634,38 +510,4 @@ pub enum HostPath {
     Direct,
     Relay,
     Unknown,
-}
-
-/// The pre-v2 host status shape that the old app reads (the FFI `status` op and
-/// the G1 shim). Serialize the result; it goes away with the shim at G2.
-#[doc(hidden)]
-pub fn legacy_host_status(status: &HostStatus) -> SessionStatus {
-    let viewer = status.viewer.as_ref();
-    SessionStatus {
-        state: match status.state {
-            HostState::Waiting => "waiting",
-            HostState::Connecting => "connecting",
-            HostState::Streaming => "streaming",
-            HostState::Paused => "paused",
-            HostState::CaptureUnavailable => "capture_unavailable",
-            HostState::Stopped => "stopped",
-        }
-        .into(),
-        message: status.message.clone(),
-        control_allowed: status.control_allowed,
-        controlling: viewer.is_some_and(|viewer| viewer.controlling),
-        display: status.display.clone(),
-        path: match viewer.map(|viewer| viewer.path) {
-            Some(HostPath::Direct) => "direct",
-            Some(HostPath::Relay) => "relay",
-            Some(HostPath::Unknown) | None => "",
-        }
-        .into(),
-        desktop: match status.desktop {
-            DesktopKind::Ordinary => "ordinary",
-            DesktopKind::Secure => "secure",
-        }
-        .into(),
-        ..SessionStatus::default()
-    }
 }

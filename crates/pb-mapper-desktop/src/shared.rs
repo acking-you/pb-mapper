@@ -93,16 +93,13 @@ pub(crate) struct Targets {
     pub pace_fps: AtomicU32,
     pub encoder_bps: AtomicU32,
     pub paused: AtomicBool,
-    /// `limits.max_fps`, constant for the session.
-    pub nominal_fps: u32,
 }
 impl Targets {
-    pub fn new(nominal_fps: u32, pace_fps: u32, encoder_bps: u32) -> Self {
+    pub fn new(pace_fps: u32, encoder_bps: u32) -> Self {
         Self {
             pace_fps: AtomicU32::new(pace_fps),
             encoder_bps: AtomicU32::new(encoder_bps),
             paused: AtomicBool::new(false),
-            nominal_fps,
         }
     }
 }
