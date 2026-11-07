@@ -30,6 +30,11 @@ String maskInvitation(String invitation) {
   return 'json·$bullets••••';
 }
 
+/// Whether [text] has an invitation in it, token and all: a `pbd1` one
+/// anywhere, or a v1 JSON one.
+bool carriesInvitation(String text) =>
+    text.contains('pbd1.') || text.contains('"token"');
+
 /// `direct` and `relay` in words; anything else (not yet known) as a dash.
 String pathLabel(BuildContext context, String? path) => switch (path) {
   'direct' => context.l10n.pathDirect,
