@@ -247,8 +247,13 @@ statements stay until the owner accepts fluidity.
    - I: `video_bench --pace 60,30,15,5` and `video_bench 60 60` on each host
      GPU.
 2. Windows chrome: at 100, 125 and 150 % scaling, maximised and restored, the
-   hovered close button sits at least 16 px inside the sheet edge and the
-   glyphs are crisp; the icons look right on every page.
+   close button sits flush in the window's top-right corner, as tall as the
+   page's title bar; its hover red reaches both edges with no fringe, no
+   backdrop shows around the three buttons, and the glyphs are crisp. With a
+   dialog open the buttons stay undimmed and still respond; switching pages
+   never moves or fades them; their glyphs dim while another window is
+   active. A restored window resizes from its top edge, over the buttons
+   too, and still drags just below it. The icons look right on every page.
 3. Navigation: six rail entries; five bar entries on the phone; Logs is
    reachable from Settings, and its back button returns.
 4. Host (Windows):

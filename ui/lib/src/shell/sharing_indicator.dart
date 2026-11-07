@@ -352,8 +352,8 @@ class _SharingIndicatorState extends State<SharingIndicator> {
 
 /// The D15 controls wherever no capsule is reachable: the setup flow and
 /// the viewer, which have no title-bar capsule, and under any dialog's
-/// barrier. It sits above the navigator, so above every route; for the same
-/// reason it has no overlay, and so no tooltips or menus.
+/// barrier. It sits above the navigator, so above every route; its buttons
+/// say what they do, so it needs no tooltips or menus.
 class SharingFallbackLayer extends StatefulWidget {
   const SharingFallbackLayer({
     super.key,

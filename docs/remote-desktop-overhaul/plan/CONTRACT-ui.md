@@ -80,21 +80,50 @@ the merged code does:
   `viewerEndedUnreachable`, `viewerEndedBusy`; plainer last-used English
   strings; `computer-featured-more`.
 
-Amended after the owner's review of the title bar (2026-11-08): a caption
-button inside a sheet that floats on the backdrop read as two layers, not as
-Windows' own. These sections now say what the merged code does:
+Amended after the owner's review of the title bar (2026-11-08): caption
+buttons inside a sheet that floats on the backdrop, shorter than their bar,
+fading in with each page and dimmed by a dialog's barrier read as layers
+stacked on the window, not as Windows' own. These sections now say what the
+merged code does:
 
-- §0 item 7, §1.2 (D25), §8.2 and §12: the caption buttons are square
-  46×32 (`kCaptionButtonWidth`, `kCaptionButtonHeight`; no radius), flush in
-  the window's top-right corner — `Positioned(top: 0, right: 0)` in the page
-  bar and on the setup screen, the page's actions keeping
-  `kCaptionButtonsWidth + 16` clear. The viewer's fill its 36 px bar
-  (`CaptionButtons(height: 36)`, end padding 0).
+- §0 item 7, §1.2 (D25), §8.2 and §12: the caption buttons are one
+  `WindowControls` (`U/shell/window_chrome.dart`) for the app's life,
+  `Positioned.fill` last in `MaterialApp.builder`'s `Stack`, above the
+  navigator and `SharingFallbackLayer`; `Overlay.wrap` around that `Stack`
+  gives their tooltips an overlay. Square plates, 46 wide
+  (`kCaptionButtonWidth`) and as tall as the bar on screen, flush in the
+  window's top-right corner: `kPageBarHeight` 58 and `kCompactPageBarHeight`
+  54 (`U/shell/page_frame.dart`, also behind `PageFrame.barHeight`),
+  `kViewerTitleBarHeight` 36 in `CaptionTone.viewer`
+  (`V/viewer_title_bar.dart`), `kCaptionButtonHeight` 32 while loading and on
+  the setup screen. Each plate's width and height are rounded to whole device
+  pixels. `WindowControls` alone listens to `window_manager`: maximised (the
+  middle glyph), full screen (it hides) and focus (an inactive window's idle
+  glyphs are the tone's ink at 36 %). The page bar keeps
+  `kCaptionButtonsWidth + 16` clear at its end; the viewer's bar ends with
+  `SizedBox(width: kCaptionButtonsWidth)` after its 12 px gap, end padding 0;
+  the setup screen's card is centred and keeps nothing. On Windows only, a
+  restored window that is not full screen gets `DragToResizeArea` (top-left,
+  top, top-right) in a `kTopResizeBand` 4 px band above the buttons.
 - §12: where the app draws caption buttons, `AppShell` gives the sheet no
   inset and `ContentSheet(anchored: true)` runs to the window's top, right
   and bottom edges, rounded and edged only from its top-left corner down its
   left side; the drag strip above the sheet goes with the inset. macOS and a
   wide tablet keep the inset sheet.
+- §4.6: on Windows and Linux the sheet is 8 px wider, 508 at the narrowest
+  rail window and 968 in the default one, so the room budget's title keeps
+  8 px more; the caption buttons sit over the bar's end padding. A dialog's
+  barrier covers the capsule and the title but never the caption buttons.
+  The fallback layer is now inside the builder's overlay; it still has no
+  tooltips or menus.
+- §14.1 (T6): `T/title_bar_test.dart` — on Windows, `caption-close` flush
+  in the window's corner and as tall as the bar within a device pixel,
+  restored at 1.25 and maximised at 1.0, then compact, in the viewer and on
+  the setup screen; the window's corner pixel closes a maximised window and
+  resizes a restored one, which closes just below the band, where the bar
+  still drags beside the buttons; with `confirmDestructive` open a click on
+  the close still reaches it; mid-way through a rail switch with motion on,
+  it is in the corner with no fading ancestor; macOS keeps the inset sheet.
 
 Base: `design/ui-interaction.md` (the winner of both judgements). Grafts come
 from `design/ui-structure.md`. Every must-fix raised by both judges is

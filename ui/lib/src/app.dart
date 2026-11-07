@@ -20,13 +20,16 @@ import 'package:pb_mapper_ui/src/pages/overview_page.dart';
 import 'package:pb_mapper_ui/src/pages/relay_page.dart';
 import 'package:pb_mapper_ui/src/pages/remote/remote_page.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_screen.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_title_bar.dart';
 import 'package:pb_mapper_ui/src/pages/settings_page.dart';
 import 'package:pb_mapper_ui/src/pages/setup_flow.dart';
 import 'package:pb_mapper_ui/src/pages/tunnels_page.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/app_shell.dart';
+import 'package:pb_mapper_ui/src/shell/page_frame.dart';
 import 'package:pb_mapper_ui/src/shell/sharing_indicator.dart';
+import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/relay_store.dart';
 import 'package:pb_mapper_ui/src/state/remote_desktop.dart';
@@ -408,18 +411,38 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
       navigatorObservers: [_sharing.observer],
       // Inside MaterialApp, so a toast raised without a context still wears
       // the theme and speaks the language. The fallback layer sits above the
-      // navigator, so above every route, dialog and the viewer (D15).
+      // navigator, so above every route, dialog and the viewer (D15), and
+      // the caption buttons above that: one set for the app's life, which no
+      // page transition moves and no barrier covers. Their tooltips need an
+      // overlay up here too.
       builder: (context, child) => ToastificationWrapper(
-        child: Stack(
-          children: [
-            Positioned.fill(child: child ?? const SizedBox.shrink()),
-            SharingFallbackLayer(desktop: _store.desktop, chrome: _sharing),
-          ],
+        child: Overlay.wrap(
+          child: Stack(
+            children: [
+              Positioned.fill(child: child ?? const SizedBox.shrink()),
+              SharingFallbackLayer(desktop: _store.desktop, chrome: _sharing),
+              if (drawsCaptionButtons)
+                Positioned.fill(child: _windowControls(context)),
+            ],
+          ),
         ),
       ),
       home: Builder(builder: _home),
     );
   }
+
+  /// The caption buttons as tall as the title bar on screen, in its tone.
+  WindowControls _windowControls(BuildContext context) => switch (_setup) {
+    false when _viewer.showing => const WindowControls(
+      height: kViewerTitleBarHeight,
+      tone: CaptionTone.viewer,
+    ),
+    false => WindowControls(
+      height: usesRail(context) ? kPageBarHeight : kCompactPageBarHeight,
+    ),
+    // Loading and first-run setup have no bar: Windows' own height.
+    _ => const WindowControls(height: kCaptionButtonHeight),
+  };
 
   Widget _home(BuildContext context) {
     final setup = _setup;
