@@ -56,11 +56,10 @@ is the Remote tab. How the page and the viewer are laid out is in
    phone, **Scan to add** or **Paste invitation**). The app recognises the
    host's service and fingerprint before connecting, and refuses a pb-mapper
    setup string. **Connect** (or Enter in the name) opens the viewer.
-   **Remember this computer**,
-   on by default, keeps it in the list once its first picture arrives;
-   **Relay only** is under **More options**. The UI requests the host's
-   permitted control only after a fresh frame is actually presented; the
-   SDK's explicit control-grant boundary is unchanged.
+   **Remember this computer**, on by default, keeps it in the list once its
+   first picture arrives; **Relay only** is under **More options**. The UI
+   requests the host's permitted control only after a fresh frame is actually
+   presented; the SDK's explicit control-grant boundary is unchanged.
 5. Drive it with a mouse and keyboard, or by touch; see
    [Gestures, keys and modifiers](#gestures-keys-and-modifiers). The
    **Shortcuts** menu sends the system shortcuts this computer would keep
@@ -249,8 +248,8 @@ pasting an invitation again:
 - A changed host identity never touches the saved computer; only **Paste new
   invitation** replaces its invitation, once the new session is remembered:
   at its first picture with **Remember this computer** on, or when its row (on
-  a phone, its card) is remembered later. Until then the session is a computer of its own, and the
-  saved one keeps its record and last picture.
+  a phone, its card) is remembered later. Until then the session is a computer
+  of its own, and the saved one keeps its record and last picture.
 - **Remove this computer** deletes its invitation and its last picture.
 - Saved computers that can no longer be opened (DPAPI after a restored
   profile or a password reset, a damaged file) are offered as **Clear saved
@@ -767,10 +766,10 @@ follows a new generation, a host recovery or a resume), then after 0.5, 1, 2
 and 4 s, and every 4 s after that, until an IDR's header arrives, even while
 its payload is still in transit; until that IDR has landed, the hold and the
 backoff still gate other requests. A user request skips the backoff but not
-the 500 ms minimum. Units handed out with nothing presented for 700 ms also ask for
-one. Five decoder errors in 30 s with nothing presented end the session with
-`decoder_failed`. No request is sent while paused or while the host reports
-capture unavailable.
+the 500 ms minimum. Units handed out with nothing presented for 700 ms also
+ask for one. Five decoder errors in 30 s with nothing presented end the
+session with `decoder_failed`. No request is sent while paused or while the
+host reports capture unavailable.
 
 `pause` revokes control, tells the host to stop capturing and clears the sink;
 probes are still echoed and pings sent, so the host sees a live, paused viewer.
@@ -875,20 +874,21 @@ After a stall the app asks for a keyframe first. A failed stream, or five
 seconds without video while the viewer shows and the session streams
 (counted from the later of the last video and the session streaming again
 after a pause or unavailable capture), opens a fresh authenticated session
-with the same target and path preference after 1, 2, 4, 8 and 15
-seconds. Retrying stops once failures have gone on for two minutes, counted
-from the first since the last live picture and never while the viewer is
-hidden; the session then ends, saying why, with Reconnect. Capture-unavailable
-states wait for the remote desktop instead of retrying around missing Windows
-permissions. Disconnect cancels recovery. A
-hidden viewer never reconnects; when it shows again, a session the host closed
-meanwhile reconnects at once. A retry restores previously requested control
-only after a fresh picture and host permission. No queued clicks or keys are
-replayed. A remembered computer reconnects by its id; a pasted invitation that
-was not remembered stays in memory only.
+with the same target and path preference after 1, 2, 4, 8 and 15 seconds.
+Retrying stops once failures have gone on for two minutes, counted from the
+first since the last live picture and never while the viewer is hidden; the
+session then ends, saying why, with Reconnect. Capture-unavailable states wait
+for the remote desktop instead of retrying around missing Windows permissions.
+Disconnect cancels recovery. A hidden viewer never reconnects; when it shows
+again, a session the host closed meanwhile reconnects at once. A retry
+restores previously requested control only after a fresh picture and host
+permission. No queued clicks or keys are replayed. A remembered computer
+reconnects by its id; a pasted invitation that was not remembered stays in
+memory only.
 
 Windows decodes H.264 with Media Foundation into D3D11 shared textures (or
-takes JPEG where Media Foundation is not installed), and Android with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer.
+takes JPEG where Media Foundation is not installed), and Android with
+`MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer.
 Capture, encoding, decoding and blocking FFI calls stay off the Dart UI
 isolate, and pinch and pan keep the same texture and decoder. On Android a
 decoder reset is acknowledged by the codec worker, keeps the Surface, and cannot
