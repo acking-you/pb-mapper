@@ -193,12 +193,6 @@ class _SetupFlowState extends State<SetupFlow> {
                 height: 44,
                 child: WindowDragArea(),
               ),
-            if (drawsCaptionButtons)
-              const Positioned(
-                top: 6,
-                right: 6,
-                child: CaptionButtons(height: 34),
-              ),
           ],
         ),
       ),

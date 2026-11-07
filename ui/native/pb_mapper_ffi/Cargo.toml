@@ -10,11 +10,19 @@ crate-type = ["cdylib", "staticlib"]
 [lints]
 workspace = true
 
+[features]
+# `pb_mapper_desktop_video_test_source_v1`: plays a `video_bench --dump` clip
+# into a video source, so native consumers run on a device without a session.
+# A debugging aid; no release script enables it.
+desktop-test-source = ["dep:bytes"]
+
 [dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+rolling-file.workspace = true
 tokio.workspace = true
 clap.workspace = true
 better_mimalloc_rs.workspace = true
@@ -22,6 +30,7 @@ tokio-util.workspace = true
 dirs.workspace = true
 
 pb-mapper-auth.workspace = true
+pb-mapper = { workspace = true, features = ["desktop"] }
 # Direct sessions, as the CLI has them: a connection tries a direct path
 # first and falls back to the relay, and the embedded relay offers one. The
 # relay itself is reached over TCP or, when Settings says so, QUIC.
@@ -32,9 +41,17 @@ pb-mapper-protocol.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p", "relay-quic"] }
 uni-stream.workspace = true
 parking_lot.workspace = true
-# The update manifest's Ed25519 signature; see src/update.rs.
+# The update manifest's Ed25519 signature; see src/update.rs. Also the
+# remembered computers' AES-GCM on Android; see src/desktop_computers.rs.
 ring.workspace = true
+# The remembered computers' vault key, as Dart passes it.
+base64.workspace = true
+bytes = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
 
 [dev-dependencies]
 # A live relay for the Relay page's calls; see src/relay.rs.
 pb-mapper-testkit.workspace = true
+bytes.workspace = true

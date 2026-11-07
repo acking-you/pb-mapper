@@ -1,0 +1,518 @@
+{
+  "build": "0.10.2+922",
+  "date": "2026-11-06",
+  "os": "Windows 11 Enterprise 10.0.26300",
+  "cpu": "AMD Ryzen 9 9950X",
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "driver": "32.0.16.1088",
+  "source_display": "2560x1440 at 165 Hz",
+  "flutter": "3.44.9",
+  "rust": "1.99.1",
+  "topology": "Windows host and viewers on one machine, deployed TCP relay for coordination/forced relay. Not independent NAT or a physical phone.",
+  "windows_ffi_sha256": "856e9c8b11d6c6dc5f502dd012be4a09a6b53a19a66a8ac38df63efbf46c570f",
+  "runs": [
+    {
+      "label": "Final native Windows direct; visible moving pattern; 60 samples",
+      "report_sha256": "67595a57d1d407695ad93b5d59d790b54b782759f4980749f4eb118e76d616cc",
+      "sample_count": 60,
+      "native_presented_fps": 84.74777669164179,
+      "first_elapsed_us": 5008402,
+      "last_elapsed_us": 60089493,
+      "first_native": {
+        "decoded": 415,
+        "decoder": "Media Foundation / D3D11",
+        "dropped": 0,
+        "presented": 394,
+        "submitted": 415
+      },
+      "last_native": {
+        "decoded": 5367,
+        "decoder": "Media Foundation / D3D11",
+        "dropped": 0,
+        "presented": 5062,
+        "submitted": 5367
+      },
+      "mean_unique_capture_fps": 89.91238821784316,
+      "mean_unique_receive_fps": 89.91252603202604,
+      "mean_frame_ack_ms": 17.351471449543542,
+      "observed_paths": [
+        "direct"
+      ],
+      "widths": [
+        1920
+      ],
+      "heights": [
+        1080
+      ],
+      "maximum_sdk_dropped": 0.0,
+      "maximum_reconnects": 0.0,
+      "error_sample_count": 0
+    },
+    {
+      "label": "Android VM diagnostic baseline; retained congestion/media logic; 120 samples",
+      "report_sha256": "a0beef9cb521b31107f5f800b45b28bcb4f17c413c91bc8a1b766ae25d4208d0",
+      "sample_count": 120,
+      "native_presented_fps": 17.78460614493009,
+      "first_elapsed_us": 5451485,
+      "last_elapsed_us": 125049298,
+      "first_native": {
+        "submitted": 92,
+        "submittedKeyframes": 5,
+        "decoded": 92,
+        "presented": 65,
+        "lastPresentedGeneration": 3,
+        "lastPresentedFrameId": 94,
+        "dropped": 24,
+        "decoder": "c2.goldfish.h264.decoder",
+        "configurations": 2,
+        "recoveries": 0,
+        "lastRecovery": "",
+        "queued": 0,
+        "decoding": 0,
+        "outputs": 1,
+        "surfacePending": true,
+        "timings": {
+          "elapsed_ms": 4247,
+          "input_wait": {
+            "samples": 91,
+            "mean_ms": 4.84599010989011,
+            "max_ms": 153.2776
+          },
+          "decode_callback": {
+            "samples": 92,
+            "mean_ms": 32.87158478260869,
+            "max_ms": 124.6498
+          },
+          "ready_to_release": {
+            "samples": 67,
+            "mean_ms": 16.32567014925373,
+            "max_ms": 59.4013
+          },
+          "receive_to_present": {
+            "samples": 64,
+            "mean_ms": 98.97326875,
+            "max_ms": 280.2641
+          },
+          "surface_consume": {
+            "samples": 65,
+            "mean_ms": 44.263816923076924,
+            "max_ms": 105.1488
+          },
+          "consume_dispatch": {
+            "samples": 65,
+            "mean_ms": 6.304372307692308,
+            "max_ms": 65.4913
+          },
+          "pump_dispatch": {
+            "samples": 89,
+            "mean_ms": 8.516853932584269,
+            "max_ms": 68.0
+          },
+          "pump_work": {
+            "samples": 348,
+            "mean_ms": 5.517441954022988,
+            "max_ms": 138.6255
+          },
+          "peak_pending": 4,
+          "peak_outputs": 2
+        }
+      },
+      "last_native": {
+        "submitted": 3271,
+        "submittedKeyframes": 117,
+        "decoded": 3270,
+        "presented": 2192,
+        "lastPresentedGeneration": 3,
+        "lastPresentedFrameId": 3277,
+        "dropped": 1076,
+        "decoder": "c2.goldfish.h264.decoder",
+        "configurations": 5,
+        "recoveries": 0,
+        "lastRecovery": "",
+        "queued": 0,
+        "decoding": 1,
+        "outputs": 0,
+        "surfacePending": true,
+        "timings": {
+          "elapsed_ms": 123845,
+          "input_wait": {
+            "samples": 3270,
+            "mean_ms": 2.577507859327217,
+            "max_ms": 153.2776
+          },
+          "decode_callback": {
+            "samples": 3270,
+            "mean_ms": 18.78405348623853,
+            "max_ms": 188.4056
+          },
+          "ready_to_release": {
+            "samples": 2194,
+            "mean_ms": 19.33415164083865,
+            "max_ms": 126.3918
+          },
+          "receive_to_present": {
+            "samples": 2191,
+            "mean_ms": 89.00082487448654,
+            "max_ms": 380.1053
+          },
+          "surface_consume": {
+            "samples": 2192,
+            "mean_ms": 48.422982253649636,
+            "max_ms": 260.1768
+          },
+          "consume_dispatch": {
+            "samples": 2192,
+            "mean_ms": 4.141619343065694,
+            "max_ms": 94.3637
+          },
+          "pump_dispatch": {
+            "samples": 3264,
+            "mean_ms": 4.839460784313725,
+            "max_ms": 90.0
+          },
+          "pump_work": {
+            "samples": 12018,
+            "mean_ms": 3.654581045099018,
+            "max_ms": 148.1567
+          },
+          "peak_pending": 4,
+          "peak_outputs": 2
+        }
+      },
+      "mean_unique_capture_fps": 26.638529201448637,
+      "mean_unique_receive_fps": 26.47671535814377,
+      "mean_frame_ack_ms": 251.36012721359785,
+      "observed_paths": [
+        "direct"
+      ],
+      "widths": [
+        1920,
+        1280,
+        960,
+        640
+      ],
+      "heights": [
+        1080,
+        720,
+        540,
+        360
+      ],
+      "maximum_sdk_dropped": 0.0,
+      "maximum_reconnects": 0.0,
+      "error_sample_count": 0
+    },
+    {
+      "label": "Android VM forced-relay diagnostic baseline; retained congestion/media logic; 120 samples",
+      "report_sha256": "cdd05b51e27c6fedf9beb9922b16e2e24f41de299db5d6f017ba94aa101e81c0",
+      "sample_count": 120,
+      "native_presented_fps": 15.939751293451735,
+      "first_elapsed_us": 5139166,
+      "last_elapsed_us": 124463487,
+      "first_native": {
+        "submitted": 57,
+        "submittedKeyframes": 4,
+        "decoded": 57,
+        "presented": 49,
+        "lastPresentedGeneration": 3,
+        "lastPresentedFrameId": 62,
+        "dropped": 7,
+        "decoder": "c2.goldfish.h264.decoder",
+        "configurations": 2,
+        "recoveries": 0,
+        "lastRecovery": "",
+        "queued": 0,
+        "decoding": 0,
+        "outputs": 0,
+        "surfacePending": false,
+        "timings": {
+          "elapsed_ms": 3100,
+          "input_wait": {
+            "samples": 54,
+            "mean_ms": 3.769368518518519,
+            "max_ms": 66.3672
+          },
+          "decode_callback": {
+            "samples": 54,
+            "mean_ms": 21.094379629629632,
+            "max_ms": 133.5278
+          },
+          "ready_to_release": {
+            "samples": 48,
+            "mean_ms": 13.95951875,
+            "max_ms": 53.8125
+          },
+          "receive_to_present": {
+            "samples": 47,
+            "mean_ms": 83.9432829787234,
+            "max_ms": 230.8184
+          },
+          "surface_consume": {
+            "samples": 47,
+            "mean_ms": 44.43562765957447,
+            "max_ms": 77.1891
+          },
+          "consume_dispatch": {
+            "samples": 47,
+            "mean_ms": 3.3157361702127663,
+            "max_ms": 19.5331
+          },
+          "pump_dispatch": {
+            "samples": 53,
+            "mean_ms": 5.09433962264151,
+            "max_ms": 36.0
+          },
+          "pump_work": {
+            "samples": 216,
+            "mean_ms": 3.6571712962962963,
+            "max_ms": 76.3918
+          },
+          "peak_pending": 3,
+          "peak_outputs": 2
+        }
+      },
+      "last_native": {
+        "submitted": 2442,
+        "submittedKeyframes": 92,
+        "decoded": 2441,
+        "presented": 1951,
+        "lastPresentedGeneration": 3,
+        "lastPresentedFrameId": 2447,
+        "dropped": 489,
+        "decoder": "c2.goldfish.h264.decoder",
+        "configurations": 5,
+        "recoveries": 0,
+        "lastRecovery": "",
+        "queued": 0,
+        "decoding": 1,
+        "outputs": 0,
+        "surfacePending": false,
+        "timings": {
+          "elapsed_ms": 122400,
+          "input_wait": {
+            "samples": 2439,
+            "mean_ms": 2.3587166051660517,
+            "max_ms": 193.2243
+          },
+          "decode_callback": {
+            "samples": 2438,
+            "mean_ms": 16.37950237899918,
+            "max_ms": 227.4975
+          },
+          "ready_to_release": {
+            "samples": 1950,
+            "mean_ms": 17.962893846153847,
+            "max_ms": 139.3463
+          },
+          "receive_to_present": {
+            "samples": 1949,
+            "mean_ms": 87.19514022575679,
+            "max_ms": 396.9016
+          },
+          "surface_consume": {
+            "samples": 1949,
+            "mean_ms": 50.530376090302724,
+            "max_ms": 265.6682
+          },
+          "consume_dispatch": {
+            "samples": 1949,
+            "mean_ms": 3.0237890200102617,
+            "max_ms": 61.7674
+          },
+          "pump_dispatch": {
+            "samples": 2437,
+            "mean_ms": 3.6971686499794827,
+            "max_ms": 73.0
+          },
+          "pump_work": {
+            "samples": 9282,
+            "mean_ms": 3.23025639948287,
+            "max_ms": 184.4719
+          },
+          "peak_pending": 4,
+          "peak_outputs": 2
+        }
+      },
+      "mean_unique_capture_fps": 19.919514809963765,
+      "mean_unique_receive_fps": 19.952434110032176,
+      "mean_frame_ack_ms": 384.2628446859847,
+      "observed_paths": [
+        "relay"
+      ],
+      "widths": [
+        1920,
+        1280,
+        960,
+        640
+      ],
+      "heights": [
+        1080,
+        720,
+        540,
+        360
+      ],
+      "maximum_sdk_dropped": 0.0,
+      "maximum_reconnects": 0.0,
+      "error_sample_count": 0
+    },
+    {
+      "label": "Final Android x86_64 native forced-relay smoke; 60 samples",
+      "report_sha256": "305b93349ca01566e99bddc8264fa239e06306727a6787d71b9eb74fcc122dd1",
+      "sample_count": 60,
+      "native_presented_fps": 14.240834914242788,
+      "first_elapsed_us": 5198030,
+      "last_elapsed_us": 62708703,
+      "first_native": {
+        "submitted": 48,
+        "submittedKeyframes": 3,
+        "decoded": 48,
+        "presented": 41,
+        "lastPresentedGeneration": 3,
+        "lastPresentedFrameId": 48,
+        "dropped": 7,
+        "decoder": "c2.goldfish.h264.decoder",
+        "configurations": 2,
+        "recoveries": 0,
+        "lastRecovery": "",
+        "queued": 0,
+        "decoding": 0,
+        "outputs": 0,
+        "surfacePending": false,
+        "timings": {
+          "elapsed_ms": 3137,
+          "input_wait": {
+            "samples": 47,
+            "mean_ms": 3.6999574468085106,
+            "max_ms": 93.2759
+          },
+          "decode_callback": {
+            "samples": 47,
+            "mean_ms": 37.68424893617021,
+            "max_ms": 154.5277
+          },
+          "ready_to_release": {
+            "samples": 40,
+            "mean_ms": 21.5366675,
+            "max_ms": 58.8659
+          },
+          "receive_to_present": {
+            "samples": 40,
+            "mean_ms": 118.4913775,
+            "max_ms": 333.3728
+          },
+          "surface_consume": {
+            "samples": 40,
+            "mean_ms": 55.5903325,
+            "max_ms": 105.4001
+          },
+          "consume_dispatch": {
+            "samples": 40,
+            "mean_ms": 5.063735,
+            "max_ms": 37.951
+          },
+          "pump_dispatch": {
+            "samples": 47,
+            "mean_ms": 6.0212765957446805,
+            "max_ms": 34.0
+          },
+          "pump_work": {
+            "samples": 186,
+            "mean_ms": 5.724646236559139,
+            "max_ms": 84.5744
+          },
+          "peak_pending": 3,
+          "peak_outputs": 2
+        }
+      },
+      "last_native": {
+        "submitted": 1069,
+        "submittedKeyframes": 47,
+        "decoded": 1069,
+        "presented": 860,
+        "lastPresentedGeneration": 3,
+        "lastPresentedFrameId": 1071,
+        "dropped": 208,
+        "decoder": "c2.goldfish.h264.decoder",
+        "configurations": 5,
+        "recoveries": 0,
+        "lastRecovery": "",
+        "queued": 0,
+        "decoding": 0,
+        "outputs": 0,
+        "surfacePending": true,
+        "timings": {
+          "elapsed_ms": 60653,
+          "input_wait": {
+            "samples": 1068,
+            "mean_ms": 3.609013576779026,
+            "max_ms": 206.8024
+          },
+          "decode_callback": {
+            "samples": 1068,
+            "mean_ms": 23.86268661048689,
+            "max_ms": 255.8655
+          },
+          "ready_to_release": {
+            "samples": 860,
+            "mean_ms": 19.075663953488373,
+            "max_ms": 92.8075
+          },
+          "receive_to_present": {
+            "samples": 859,
+            "mean_ms": 101.45053993015134,
+            "max_ms": 475.4614
+          },
+          "surface_consume": {
+            "samples": 859,
+            "mean_ms": 54.640870779976716,
+            "max_ms": 118.5551
+          },
+          "consume_dispatch": {
+            "samples": 859,
+            "mean_ms": 4.333940745052386,
+            "max_ms": 92.6403
+          },
+          "pump_dispatch": {
+            "samples": 1068,
+            "mean_ms": 5.901685393258427,
+            "max_ms": 81.0
+          },
+          "pump_work": {
+            "samples": 4080,
+            "mean_ms": 4.311125049019608,
+            "max_ms": 181.2319
+          },
+          "peak_pending": 4,
+          "peak_outputs": 2
+        }
+      },
+      "mean_unique_capture_fps": 17.58856038335277,
+      "mean_unique_receive_fps": 17.508337878672187,
+      "mean_frame_ack_ms": 427.09708091413216,
+      "observed_paths": [
+        "relay"
+      ],
+      "widths": [
+        1920,
+        1280,
+        960,
+        640
+      ],
+      "heights": [
+        1080,
+        720,
+        540,
+        360
+      ],
+      "maximum_sdk_dropped": 0.0,
+      "maximum_reconnects": 0.0,
+      "error_sample_count": 0,
+      "host_after_disconnect": "waiting with empty message"
+    }
+  ],
+  "limitations": [
+    "The 120-sample Android diagnostic baselines precede lifecycle/TLS close fixes; the final native 60-sample smoke includes those fixes.",
+    "Native presented FPS is texture consumption, not decoder submissions or motion-to-photon latency.",
+    "Live relay conditions and brief input checks prevent a strictly controlled before/after comparison.",
+    "The earlier two-slot and reference-mean experiments are excluded from final code."
+  ]
+}

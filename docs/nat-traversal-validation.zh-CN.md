@@ -77,3 +77,22 @@ fallback 次数仍为 1；随后通知真实网络变化，下一次连接允许
 ```bash
 cargo test -p pb-mapper-client --all-features --lib --locked
 ```
+
+## Android 蜂窝网络真机验收（2026-11-06）
+
+版本 `0.10.2+927`，Vivo V2405DA / Android API 36，Windows 11 提供端。
+手机 Wi-Fi 关闭，CipherRelay VPN 保持运行，pb-mapper 应用绕过 VPN。
+应用显示 direct，提供端记录 10 次 direct 路径事件，对端 IPv6 与手机蜂窝
+地址一致，用户确认业务流量正常。脱敏环境、时间和安装包摘要见
+[`android-cellular-927.json`](validation/android-cellular-927.json)。
+
+此前本地 926 应用实际在 VPN 接管范围内，出现 STUN 超时并在提交前回退
+中继；shell 中的 SDK 0.7.0 和 0.10.2 都绕过该 VPN，均完成 IPv6 直连及
+HTTP 200，不能据此推断新 SDK 退化。修正应用绕过规则后验证成功；本轮
+没有修改 P2P 协议，也不声称任意 VPN 路径都不能直连。
+
+这些事件对应普通业务隧道，不能证明远程桌面的视频流畅度。用户随后明确
+反馈直连下桌面仍严重卡顿、不足 30 帧，明显不如 RustDesk（用户观察，尚非
+仪器采样）。**桌面性能验收未通过，解决前不得合并 PR #51。**
+待查明事项、代码入口与后续验收要求见
+[性能交接](validation/desktop-input-backpressure.md#performance-handoff-2026-11-06)。

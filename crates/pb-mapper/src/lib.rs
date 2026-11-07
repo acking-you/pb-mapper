@@ -63,3 +63,8 @@
 //! (`cargo install pb-mapper-cli`).
 
 pub use pb_mapper_client::sdk::*;
+
+/// Optional endpoint-owned remote desktop. No capture or input work runs until
+/// a host is explicitly started and an authorized viewer connects.
+#[cfg(feature = "desktop")]
+pub use pb_mapper_desktop as desktop;

@@ -7,8 +7,10 @@ it is laid out, and how the galaxy view is drawn.
 
 ## Principles
 
-- **One question per screen.** The app has five places — Overview, Tunnels,
-  Relay, Logs, Settings — and everything else opens over one of them.
+- **One question per screen.** The app has six places — Overview, Tunnels,
+  Remote desktop, Relay, Logs, Settings — and everything else opens over one
+  of them. The remote viewer is the one exception: while it shows, it is the
+  whole window.
 - **Colour is meaning.** Neutrals carry no hue; controls are ink. Green is a
   running tunnel, amber retrying, red failed, grey stopped. The logo blue marks
   only this computer and live tunnels. Selection is position, never colour.
@@ -23,6 +25,7 @@ it is laid out, and how the galaxy view is drawn.
 |---|---|---|
 | Overview | Where everything is, at a glance: the galaxy | `pages/overview_page.dart` |
 | Tunnels | What this computer shares and what it connects to | `pages/tunnels_page.dart` |
+| Remote desktop | Who can see this computer, and which computers it can see | `pages/remote/` |
 | Relay | Whether the relay answers, who this computer is to it, what it holds, and what an administrator can change | `pages/relay_page.dart`, `pages/relay/` |
 | Logs | What the Rust side said | `pages/logs_page.dart` |
 | Settings | Where the relay is, this computer's credential, theme, language | `pages/settings_page.dart` |
@@ -38,9 +41,18 @@ string as Settings, fills the relay fields and stages the carrier and
 keep-alive preference until the user continues. Every step can be skipped; the app opens on
 the galaxy, where a new tunnel spirals out of its star.
 
+On a phone the bottom bar has room for five: Logs opens from a row in
+Settings, with a back button (and Android Back) to return there. On
+Android, Back at the root sends the app to the background, as Home does, so
+tunnels and a paused session keep running. (On Android 16 the system decides
+this itself, and does it only for an app opened from the launcher.)
+
 All pages read one `AppStore` (`state/app_store.dart`), kept fresh by the Rust
 change stream and a slow relay check. The tray reads the same store instead of
-polling the FFI on its own.
+polling the FFI on its own. The remote desktop has its own store,
+`DesktopStore` (`state/desktop_store.dart`), whose views — this computer as a
+host, the open session, its statistics — each notify only their own
+listeners, so a live picture never rebuilds a page.
 
 ### The Relay page
 
@@ -169,15 +181,142 @@ form. Each tunnel keeps the carrier it started with.
 - **This computer's relay** can offer QUIC on a UDP port of its own, next
   to the TCP port; the TCP port's UDP twin already carries direct sessions.
 
-The window's own questions — the relay check, the Relay page — go over the
-chosen carrier through one client kept per relay setting, which shares its
-QUIC connection with the tunnels. Whether the relay offers QUIC is asked
-over TCP beside them, so Settings can say so even when QUIC does not get
-through — once per relay setting, and again on Test, since a relay from
-before QUIC logs the question. The exception is a check over QUIC that
-gets no answer at all: then TCP is asked at once, and a relay that answers
-there and offers QUIC is reported as its UDP port not getting through —
-usually a firewall that opened only TCP — not as a relay that is silent.
+The window's own questions — the relay check, the Relay page, the remote
+desktop — go over the chosen carrier through one client kept per relay
+setting, which shares its QUIC connection with the tunnels. Whether the
+relay offers QUIC is asked over TCP beside them, so Settings can say so even
+when QUIC does not get through — once per relay setting, and again on Test,
+since a relay from before QUIC logs the question. The exception is a check
+over QUIC that gets no answer at all: then TCP is asked at once, and a relay
+that answers there and offers QUIC is reported as its UDP port not getting
+through — usually a firewall that opened only TCP — not as a relay that is
+silent.
+
+### Remote desktop
+
+The Remote desktop page (`pages/remote/`) holds both ends: a card for this
+computer as a host, and the computers it views. A wide page sets them side
+by side, a narrower one stacks them. A phone shows the list and a note that
+it can view and control but not be controlled: only Windows shares its
+desktop for now. On Windows without Media Foundation the host card is
+replaced by a note saying sharing needs the Media Feature Pack; viewing
+still works, over JPEG.
+
+- **This computer** (`host_card.dart`). Off, one action turns remote
+  control on: Windows' consent for the helper service when needed, then a
+  private invitation. Sharing, the card says who is connected and what they
+  may do, with Make view-only and Disconnect viewer on that line; then who
+  the invitation lets in (View only or View and control), the invitation,
+  the shared display, how sharing outlives the window and the UAC helper's
+  state, with Stop sharing at its foot and revoke, rename and helper
+  maintenance under More.
+- **The invitation stays a secret on screen.** It shows masked, Copy puts
+  it on the clipboard, and its QR code (`invite_qr.dart`) appears only when
+  asked for and hides again when the page is left or the app goes inactive.
+- **Remote computers** (`computer_list.dart`, `computer_list_compact.dart`).
+  Each remembered computer with its state: Online while the relay lists its
+  service (the list the app already polls), Not sharing, or Other relay when
+  it was saved under another relay or credential. The open session's
+  computer reads Viewing, with Back to picture. Only one remote computer is
+  open at a time, so opening another asks first. A phone features the one
+  used last, with its last picture and a More that renames, removes or
+  remembers it, above the others, and offers Scan to add and Paste
+  invitation; with none yet, it first says where an invitation comes from.
+  A wide list shows a row's More on hover, and also while focus is within
+  the row, so the keyboard and screen readers reach it; on a touch screen,
+  which has no hover, it is always shown.
+- **Adding** (`add_computer.dart`) recognises an invitation before
+  connecting: it shows the host's service and the fingerprint the
+  connection will be held to, never the token; a name refuses an invitation
+  pasted into it, since names are shown in clear. On a desktop the dialog
+  takes the paste at once, selects the recognised name, and connects on
+  Enter. A pb-mapper setup string is
+  named as one and sent to Settings; a computer already in the list, or one
+  whose identity changed, is said so and never merged in silently. On a
+  phone or tablet narrower than the rail the camera reads the QR code
+  (`invite_scanner.dart`). Remember is on by default, but a computer is
+  remembered only after its first picture, so a wrong invitation leaves
+  nothing behind.
+- **Where they are kept.** Rust keeps remembered computers in an encrypted
+  vault (`desktop_computers.rs`): DPAPI on Windows, and on Android a key the
+  Android Keystore wraps. Their invitations never come back to Dart; a
+  computer is opened by its id. Other platforms cannot remember, and the add
+  form says why. A computer's last picture is a small image in the app's
+  private storage, deleted with it. Saved computers that cannot be decrypted
+  or decoded are said so, with Clear saved computers, rather than as a
+  device that cannot remember.
+- **Desktop services are not tunnels.** A `desktop:` service is left out of
+  Tunnels, the galaxy and the editor's suggestions; the Relay page lists it
+  without Connect.
+
+### The viewer
+
+Viewing is a mode of the app, not a page: while the viewer shows it takes
+the whole window in place of the rail and the page
+(`pages/remote/viewer/viewer_screen.dart`), so there is only ever one. Back
+returns to the list and keeps the session, paused: the host stops capturing
+and the list offers Back to picture. A session left paused, by Back or by a
+hidden or minimised window, ends after ten minutes, since it holds the
+host's only viewer slot; one whose host identity changed holds no slot and
+keeps its card until the user acts.
+
+Both layouts share one stage (`viewer_stage.dart`): the picture, the remote
+cursor and the overlays. Nothing opaque covers the picture while a frame can
+still arrive. Connecting lists its steps on a card over a dim scrim; a lost
+connection greys the last picture under a pill with the countdown and Retry
+now, says when the relay it was opened through no longer lists the computer,
+and ends after two minutes of failures; a secure or missing remote desktop is
+said over the last picture. Only
+a changed host identity is opaque: it stops reconnecting and offers Paste
+new invitation for a remembered computer. An ended session says why, and
+offers Reconnect where that can help.
+
+- **Desktop** (`desktop_viewer.dart`): a dark title bar with the computer's
+  name, the sharing capsule when this computer is being viewed too, and the
+  caption buttons in their dark tone. Below it, a floating toolbar: the
+  connection chip (path, round trip, frame rate; it shows or hides the
+  quality panel), View and Control, Display (scaling, picture preference),
+  Shortcuts, More, full screen and Disconnect. It is pinned at first;
+  unpinned, it folds to a handle 2 s after the pointer leaves it, and never
+  while one of its menus is open. In control, a hint says that keyboard and
+  mouse now go to the remote computer, and that the system shortcuts this
+  computer keeps for itself are in the Shortcuts menu.
+- **Phone and tablet** (`touch_viewer.dart`): immersive, and landscape on a
+  phone. The controls stand in the black gutters beside the picture — Back,
+  the path and frame rate, and the input mode on one side; Keyboard,
+  Shortcuts, Right click and More on the other. A tablet in portrait gets
+  bars, and a screen the picture fills gets plates over it. Overlays keep to
+  the fitted picture between the gutters. The keyboard brings a modifier bar
+  (Ctrl, Alt, Shift, Win, Esc, Tab, the F keys, arrows and paging) and,
+  while the picture is zoomed or covered, a minimap. Direct touch can add a
+  virtual mouse. The first session opens the gesture sheet by itself; a long
+  press on the input mode opens it again.
+
+How touch, the mouse and keys become remote input is in
+[the remote desktop's documentation](remote-desktop.md#gestures-keys-and-modifiers).
+
+### When this computer is viewed
+
+While a viewer is connected to this computer, Disconnect viewer and Stop
+sharing are always within reach (`shell/sharing_indicator.dart`):
+
+- **A capsule** in the title bar of every page and of the viewer — Being
+  viewed or Being controlled, then the two actions. It fits its bar's width:
+  label and buttons from a 960 px bar (the default window's sheet is 968 px
+  on Windows and Linux, 960 on macOS), buttons alone from 640 px, below that
+  a dot with a menu. The Remote page's host card carries the same two
+  actions instead.
+- **A pill above every route**, where no capsule can be reached: first-run
+  setup, the full-screen viewer, and any dialog whose barrier covers the
+  title bar; the capsule under it steps aside, so one set shows.
+- **The tray**: its active icon, a tooltip that leads with who is watching,
+  and both actions in its menu. A sharing computer usually sits in the tray
+  with its window closed, so when a viewer arrives the window comes back
+  without taking focus. It is not kept on top.
+
+Both actions work while another host action is still running. When the
+Windows service shares with the app closed nothing is shown: the service
+cannot draw in the user's session.
 
 ## Layout
 
@@ -186,22 +325,71 @@ The window is layered as in POCOX (`theme/glass.dart`):
 1. `AppBackdrop` — the window's ground, lit softly from above;
 2. the rail (`shell/navigation.dart`), straight on the backdrop, its selection
    a pane of glass that glides between rows;
-3. `ContentSheet` — the rounded page; grouped grey for pages of cards;
+3. `ContentSheet` — the page; grouped grey for pages of cards. On macOS
+   (and a wide tablet) it floats 8 px inside the window, rounded all round;
+   on Windows and Linux it runs to the window's top, right and bottom edges,
+   rounded and edged only where it leaves the backdrop, down its left side
+   from the top-left corner;
 4. `Glass` — translucent panels over the page: the galaxy's summary, its
    details panel, toasts.
 
 The native title bar is hidden on desktop. The page's own title bar is window
-chrome: its empty space drags, and on Windows and Linux it carries the caption
-buttons (`shell/window_chrome.dart`). macOS keeps its traffic lights.
+chrome: its empty space drags, and on Windows and Linux the caption buttons
+sit over its end (`shell/window_chrome.dart`). macOS keeps its traffic lights.
+
+The caption buttons are where Windows puts its own and look like them: 46 px
+wide, square-cornered, flush in the window's top-right corner, on the page's surface
+rather than inside a card on the backdrop. Like Windows' in a tall title bar
+that holds controls, they are as tall as the bar under them — 58 px beside
+the rail, 54 on a compact window, 36 over the viewer, Windows' 32 while
+loading and on the setup screen — so their glyphs sit on the title's row.
+They are one set for the app's whole life (`WindowControls`, drawn in
+`app.dart` above the navigator): a page switch neither moves nor fades them,
+a new bar's height is theirs in the next frame rather than grown into, and a
+dialog's barrier dims the rest of the title bar but never them. A menu that
+opens from the title bar, the sharing capsule's on a narrow window, opens
+over them in the root overlay, as Windows' menus open over its own. Each
+plate is a whole number of device pixels, so the hover fills reach both edges
+without a fringe at 125 % and 150 %; the close button's red runs into the
+corner, which Windows rounds itself, and a maximised window's close sits
+where the pointer stops at the screen's corner. Their glyphs are the primary
+ink, as Windows' are, and dim while the window is not the active one, laid on
+as one layer so the close's crossing does not darken. The page's actions keep 16 px
+clear of them. Their glyphs are drawn, not icons: 10 px, a one-pixel stroke,
+snapped to device pixels so they stay sharp at 125 % and 150 %.
+
+On Windows a restored window resizes from a 4 px band along its top edge,
+over the caption buttons too, as native windows do: the hidden title bar
+leaves Windows next to none of its own there. Its other edges are Windows'.
+A known gap: hovering Maximize does not offer Snap Layouts, which Windows
+shows only over a button it hit-tests natively; buttons Flutter draws would
+need that hit-testing added to the runner. Win+Z, which Windows handles for
+any window with a maximise box, should still open them; the acceptance
+procedure checks it.
 
 Below 720 px (900 px on a touch screen) the rail becomes a bottom bar and the
 page fills the window. Cards reflow by the width they get, not by a global
 breakpoint.
 
+The viewer is dark whatever the app's theme, so a remote picture is never
+framed in white (`theme/viewer_palette.dart`). Its chrome is translucent
+graphite over the picture rather than the app's glass, since a blur over a
+live video would be redrawn every frame; `viewerTheme` gives its menus,
+dialogs and tooltips the same palette. Over its title bar the caption buttons
+take its dark tone and its 36 px height; in full screen they hide with it.
+
 Type is Google Sans Flex for prose (Segoe UI on Windows) and Geist Mono for
 keys, addresses and logs; Chinese falls back to the bundled Noto Sans SC subset
 on Windows and Linux and to PingFang SC on Apple platforms
-(`theme/fonts.dart`). Icons are Lucide at its 300 stroke (`theme/app_icons.dart`).
+(`theme/fonts.dart`).
+
+Icons are Lucide only, through `theme/app_icons.dart`, named for what each
+means here; no Material `Icons.*`. Four sizes (`AppIconSize`): 16 beside a
+label or inline, 18 in buttons and menus, 20 in the rail and the bottom bar,
+24 for empty states and tiles. Weight follows size: the 400 stroke up to
+20 px, where the 300 stroke thins to grey, and the 300 stroke (the `…Large`
+constants) from 24 px. An icon takes the colour of its text; status is told
+by coloured dots, and blue stays for this computer and live traffic.
 
 ## The galaxy
 
@@ -299,15 +487,35 @@ CPU and memory without starting tunnels or reading settings.
 - `test/planet_atlas_test.dart`, `test/galaxy_lines_test.dart` and
   `test/galaxy_render_lifecycle_test.dart`: cached/vector image parity, line
   clipping, resource bounds, backgrounding, interaction and reduced motion.
+- `test/title_bar_test.dart`: the caption buttons flush in the window's
+  corner and as tall as the bar on screen, the sheet's colour in the corner
+  pixel, restored at 125 % and maximised; the top edge that resizes a
+  restored window; the compact layout, a widened one taking the taller bar
+  at once, the viewer and the setup screen; a dialog's barrier leaving them
+  uncovered, the capsule's menu opening over them, and a page switch leaving
+  them still; macOS's inset sheet.
+- Remote desktop, against `FakeDesktopApi` and an in-memory vault:
+  `remote_page_test.dart` (the add flow never shows an invitation, enabling
+  and stopping a share, the QR hiding), `sharing_test.dart` (the capsule and
+  the pill), `remote_desktop_test.dart` and `remote_computers_test.dart`
+  (remembering at the first picture, pausing, forgetting),
+  `viewer_chrome_test.dart` (the toolbar, the overlays, input only while
+  live), and the input core's pure tests — `touch_gesture_test.dart`,
+  `remote_input_test.dart`, `remote_text_input_test.dart`,
+  `remote_surface_test.dart`.
 
 To look at the design without a device, render the pages with their real
 typefaces to PNGs:
 
 ```sh
 cd ui
-PB_MAPPER_UI_PREVIEW_DIR=/tmp/pbm-preview FLUTTER_ROOT=$(dirname $(dirname $(which flutter))) \
-  flutter test test/preview_test.dart
+PB_MAPPER_UI_PREVIEW_DIR=/tmp/pbm-preview flutter test test/preview_test.dart
 ```
+
+The remote desktop previews run through the whole app with a remote
+computer's picture painted by `test/remote_screen_fixture.dart`. The ones
+shaped for a desktop render as Windows, where a computer can share, in
+Segoe UI when the machine has it; elsewhere their words are boxes.
 
 ## Updates
 
@@ -362,8 +570,7 @@ regenerate both:
 
 ```sh
 cd ui
-PB_MAPPER_REGEN_POSTER=1 FLUTTER_ROOT=$(dirname $(dirname $(which flutter))) \
-  flutter test test/gen_poster_test.dart
+PB_MAPPER_REGEN_POSTER=1 flutter test test/gen_poster_test.dart
 ```
 
 It is opt-in because the PNGs differ slightly from one platform's rasterizer to

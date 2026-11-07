@@ -1,0 +1,51 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-11-07T02:30:00Z"},
+  "title": "pb-mapper 远程桌面交互重设计",
+  "launch": {"view": "canvas"},
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {"x": 0, "y": 0, "w": 1440, "h": 900, "title": "桌面 · 远程桌面页（正在共享）"},
+    "HostSetup.dc.html": {"x": 1520, "y": 0, "w": 1440, "h": 900, "title": "桌面 · 首次开启远程控制"},
+    "AddComputer.dc.html": {"x": 3040, "y": 0, "w": 1440, "h": 900, "title": "桌面 · 添加远程电脑"},
+    "Viewer.dc.html": {"x": 4560, "y": 0, "w": 1440, "h": 900, "title": "桌面 · 查看器（控制中，快捷键菜单）"},
+    "ViewerStates.dc.html": {"x": 6080, "y": 0, "w": 1440, "h": 1400, "title": "桌面 · 查看器状态"},
+    "MobileHome.dc.html": {"x": 0, "y": 1840, "w": 390, "h": 844, "title": "手机 · 远程标签页"},
+    "MobileAdd.dc.html": {"x": 470, "y": 1840, "w": 390, "h": 844, "title": "手机 · 扫码添加电脑"},
+    "MobileViewer.dc.html": {"x": 940, "y": 1840, "w": 844, "h": 390, "title": "手机 · 横屏查看器（触控板模式）"},
+    "MobileKeyboard.dc.html": {"x": 1864, "y": 1840, "w": 844, "h": 390, "title": "手机 · 键盘与修饰键条"},
+    "MobileGestures.dc.html": {"x": 2788, "y": 1840, "w": 390, "h": 844, "title": "手机 · 操作方式"},
+    "AppRail.dc.html": {"x": 0, "y": 3104, "w": 232, "h": 900, "title": "组件 · 桌面侧栏"},
+    "RemoteScreen.dc.html": {"x": 312, "y": 3104, "w": 1280, "h": 800, "title": "组件 · 远程画面占位"},
+    "MobileTabBar.dc.html": {"x": 1672, "y": 3104, "w": 390, "h": 84, "title": "组件 · 手机底栏"},
+    "Icons.dc.html": {"x": 0, "y": 4424, "w": 1440, "h": 2440, "title": "图标系统"},
+    "TitleBarFix.dc.html": {"x": 1520, "y": 4424, "w": 1440, "h": 820, "title": "待修 · 标题栏窗口按钮与内容页边缘重叠"}
+  },
+  "order": [
+    "Main.dc.html",
+    "HostSetup.dc.html",
+    "AddComputer.dc.html",
+    "Viewer.dc.html",
+    "ViewerStates.dc.html",
+    "MobileHome.dc.html",
+    "MobileAdd.dc.html",
+    "MobileViewer.dc.html",
+    "MobileKeyboard.dc.html",
+    "MobileGestures.dc.html",
+    "AppRail.dc.html",
+    "RemoteScreen.dc.html",
+    "MobileTabBar.dc.html",
+    "Icons.dc.html",
+    "TitleBarFix.dc.html"
+  ],
+  "notes": {
+    "rowDesktop": {"x": 0, "y": -300, "text": "桌面端：管理集中在一页，画面占满窗口", "kind": "title1", "maxW": 7520},
+    "stickyDesktop": {"x": 7600, "y": 0, "w": 420, "fill": "blue", "text": "桌面端要点\n\n1. 侧栏新增“远程桌面”：左边是这台电脑的共享，右边是远程电脑。\n2. 开启只有一个按钮；辅助服务、服务名、撤销放进“更多”。\n3. 查看器隐藏侧栏，画面占满窗口，只留一条浮动工具栏，鼠标离开 2 秒后收起。\n4. 连接状态叠加在画面上，不再把画面往下推。\n\n借鉴 RustDesk：工具栏可固定，或收起成顶部小把手；“显示”菜单含缩放方式和画质偏好（画质优先 / 平衡 / 流畅优先）；可打开连接质量浮层。"},
+    "rowMobile": {"x": 0, "y": 1540, "text": "手机端：画面优先，控件放进两侧留白", "kind": "title1", "maxW": 3180},
+    "stickyMobile": {"x": 3260, "y": 1840, "w": 420, "fill": "green", "text": "手机端要点\n\n1. 底栏加“远程”，日志移到设置里。\n2. 扫电脑上的二维码添加，粘贴邀请作为备选。\n3. 横屏时 16:9 画面两侧有留白，按钮全部放在留白里。\n4. 触控板模式默认，手势与 RustDesk 一致：三指上下滚动，双指移动或捏合调整画面。\n5. 键盘上方有修饰键条。\n\n借鉴 RustDesk：Ctrl / Alt / Shift / Win 可锁定，Fn 切换 F1–F12，常用键和 Ctrl+C / V 一键发送；直接触摸模式可开启虚拟鼠标。"},
+    "rowComponents": {"x": 0, "y": 2844, "text": "组件", "kind": "title1", "maxW": 2062},
+    "rowIcons": {"x": 0, "y": 4124, "text": "图标系统与标题栏修正", "kind": "title1", "maxW": 2960},
+    "stickyIcons": {"x": 3040, "y": 4424, "w": 420, "fill": "purple", "text": "图标要点\n\n1. 只用一套图标：全部来自 Lucide，窗口按钮按 Windows 原生样式自绘；不再混用 Material Icons。\n2. 粗细跟着尺寸走：20 px 及以下用 400，24 px 及以上用 300。\n3. 四档尺寸：16 / 18 / 20 / 24。\n4. 改了三处：隧道 cable → route，中继在线 / 离线 wifi → cloud；新增远程桌面一组。\n\n图标画板里显示的是 lucide_icons_flutter 3.1.25 自带字体的真实字形。"}
+  },
+  "designSystems": []
+}

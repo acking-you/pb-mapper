@@ -52,6 +52,11 @@ pb-mapper/
 │   ├── pb-mapper-protocol/ # Message framing, v2 secure sessions, forwarding
 │   ├── pb-mapper-server/   # Central relay server, plus the task manager
 │   ├── pb-mapper-client/   # Both tunnel ends: `register` and `connect`
+│   ├── pb-mapper-desktop/  # Remote desktop: host, viewer, receipt credit, QoS,
+│   │                       # Windows capture and the UAC/Winlogon helper
+│   ├── pb-mapper/          # The published SDK facade over pb-mapper-client;
+│   │                       # feature `desktop` re-exports pb-mapper-desktop
+│   ├── pb-mapper-node/     # Node-API bindings for the client SDK, built by js/
 │   ├── pb-mapper-testkit/  # Test support: a complete e2e tunnel, for any test file
 │   └── pb-mapper-cli/      # The `pb-mapper` binary, integration tests, examples
 ├── ui/                    # Flutter UI, talking to Rust over dart:ffi
@@ -83,6 +88,18 @@ pb-mapper-cli          pb-mapper-ffi
                   ▼
             pb-mapper-core
 ```
+
+The remote desktop sits above `pb-mapper-client` and reaches the FFI through
+the SDK facade:
+
+```
+pb-mapper-ffi ─▶ pb-mapper (feature desktop) ─▶ pb-mapper-desktop ─▶ pb-mapper-client
+```
+
+`pb-mapper` is the published SDK facade over `pb-mapper-client`. Its optional
+`desktop` feature re-exports `pb-mapper-desktop` as `pb_mapper::desktop`, and
+only the FFI enables it, so no CLI, relay or plain SDK build links capture,
+codec or input code. On Windows, `pb-mapper-desktop` also uses `pb-mapper-core`.
 
 Note that the binary is still named `pb-mapper`, discovered from
 `src/bin/pb-mapper.rs` inside `pb-mapper-cli`. The release workflows, both
@@ -140,12 +157,43 @@ Nothing in the SDK crates knows it exists.
   - `server/`: `register` — publishes a local service (`mod.rs`, `stream.rs`, `error.rs`)
   - `client/`: `connect` — subscribes and listens locally, plus `status.rs`
 
+- **`pb-mapper-desktop/`**: Endpoint-owned remote desktop, reached as
+  `pb_mapper::desktop`; how it works is in `docs/remote-desktop.md`
+  - `host.rs`, `session.rs`, `shared.rs`: The host, and one session's network
+    side, B-recv and B-send over TLS; `shared.rs` states the lock discipline
+  - `worker.rs`, `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the one
+    desktop-bound thread (capture, encode, input), its pacing, its one wait,
+    and the input lane from B-recv
+  - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
+    QoS, on-demand IDRs, and the hand-off from thread C to B-send
+  - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
+    (ALPN `pb-mapper/desktop/2`), invitations, certificate pinning, and the
+    input authorisation ledger
+  - `viewer/`, `video_sink.rs`: The viewer, and its one hand-off to a native
+    consumer, which is also where a presentation is validated
+  - `platform.rs`, `windows.rs`: Capabilities, displays, and the Windows
+    backend (xcap displays, enigo input, the desktop binding)
+  - `video/windows.rs`: Desktop Duplication → D3D11 → Media Foundation H.264
+  - `helper/` (Windows): The opt-in UAC/Winlogon service and the UI's client to
+    it; the service side and the `pb-mapper-desktop-helper` binary need
+    `--features windows-helper`. `HELPER_PROTOCOL` (`helper/mod.rs`) and the
+    `.v<n>` pipe names change together; an installed helper of another
+    protocol is offered Update
+  - `dpapi.rs` (Windows): The one DPAPI call every Windows store uses, current
+    user or machine scope; the FFI's vault and trust files go through it
+  - `tests.rs`, `tests/session.rs`: Tests over a real relay and TLS, the second
+    end to end; `slow_link.rs`: the ignored acceptance cases
+  - `examples/`: Capture, transport and viewer probes, and `video_bench`, the
+    Windows capture and encode benchmark
+
 - **`pb-mapper-testkit/`**: Test support only; nothing shipped depends on it
   - `relay.rs`: `Relay` — a live server that retains its `AuthRuntime`, so a case
     can issue, renew, and revoke credentials without the admin wire protocol
   - `tunnel.rs`: `TunnelSpec` / `Tunnel` / `TunnelHarness` — echo server plus
     `register` plus `connect`, each on reserved loopback ports
   - `echo.rs`, `traffic.rs`: Echo servers and the framed and raw traffic drivers
+  - `shaped.rs`: `Shape` / `shaped_link` — a TCP hop with delay and rate
+    adjustable while connections run, shared by the remote desktop's tests
   - A crate rather than `tests/common/mod.rs`: that module is compiled separately
     into every test binary, and whatever a binary does not use is reported as
     dead code — fatal under `-D warnings`
@@ -164,8 +212,11 @@ Nothing in the SDK crates knows it exists.
 
 The design and its rules are in `docs/ui-design.md`.
 
-- **`lib/src/app.dart`**: The root — owns the store, the preferences and the
-  galaxy's state; chooses first-run setup or the five pages; runs the tray
+- **`lib/src/app.dart`**: The root — owns the store, the preferences, the
+  galaxy's state and the remote desktop's (`ViewerHost`, `RemoteDesktop`,
+  `SharingChrome`); chooses first-run setup, the six pages, or the remote
+  viewer in their place while `ViewerHost.showing`; runs the tray, which
+  also says when this computer is being viewed
 
 - **`lib/src/pages/`**: One file per place
   - `overview_page.dart`: The galaxy, with a floating summary and details panel
@@ -180,24 +231,52 @@ The design and its rules are in `docs/ui-design.md`.
   - `setup_flow.dart`: First run — relay, then what to do, then that tunnel
   - `tunnel_editor.dart`: The one share/connect form, and `followTunnel`
   - `tunnel_actions.dart`: Start/stop, delete, copy — shared by list and panel
+  - `remote/`: The Remote desktop page — `remote_page.dart` lays out
+    `host_card.dart` (this computer as a host, its masked invitation and
+    `invite_qr.dart`) and the remembered computers (`computer_list.dart`,
+    or `computer_list_compact.dart` on a phone); `add_computer.dart` and
+    `invite_scanner.dart` recognise a pasted or scanned invitation before
+    connecting; `remote_actions.dart` holds the confirmations
+  - `remote/viewer/`: The viewer, shown by `viewer_screen.dart` in place of
+    the shell. `viewer_stage.dart` (picture, remote cursor, overlays) is
+    shared by `desktop_viewer.dart` (title bar, floating toolbar, menus) and
+    `touch_viewer.dart` (gutters, modifier bar, minimap, virtual mouse,
+    gesture sheet). Input leaves through one door, `remote_input.dart`;
+    touch is decided by the pure `touch_gestures.dart`, modifiers by
+    `modifier_latch.dart`, hardware keys by `remote_keys.dart`, the soft
+    keyboard by `remote_text_input.dart`. The gestures and key rules are in
+    `docs/remote-desktop.md`
 
 - **`lib/src/shell/`**: Navigation and window chrome
-  - `app_scope.dart`: `AppPage` and the `AppScope` every page reads
+  - `app_scope.dart`: `AppPage` (six places; the phone bar has five, Logs
+    opening from Settings) and the `AppScope` every page reads
   - `app_shell.dart`: Rail on the backdrop and a sheet, or a bottom bar
-  - `navigation.dart`: The rail (with the relay's state at its foot), the bar
+  - `navigation.dart`: The rail (with the relay's state at its foot and a
+    dot on Remote desktop while sharing), the bar
   - `page_frame.dart`: A page's title bar, which is also the window's
   - `window_chrome.dart`: Drag areas and the Windows/Linux caption buttons
+  - `sharing_indicator.dart`: While this computer is viewed, Disconnect
+    viewer and Stop sharing — a capsule in the title bar, or a pill above
+    every route where no capsule can be reached
   - `app_prefs.dart`: Theme, language, last page
 
 - **`lib/src/state/`**: `AppStore` (every read and write, kept fresh by the
   change stream), `RelayStore` (the Relay page's reads and the administrator's
-  changes, polled only while that page is on screen) and the `Tunnel` model
+  changes, polled only while that page is on screen) and the `Tunnel` model.
+  The remote desktop: `DesktopStore` (`desktop_store.dart`; its views —
+  host, session, stats — each notify only their own listeners, never
+  `AppStore`), `RemoteDesktop` (`remote_desktop.dart`: which computer is
+  open, Back pausing it, remembering at the first picture),
+  `RemoteComputerStore` (`remote_computers.dart`: the remembered list and
+  its thumbnails) and `ViewerPrefs` (`viewer_prefs.dart`)
 
 - **`lib/src/galaxy/`**: The galaxy view — scene model, camera, frame buffer
   over `pb_mapper_galaxy_frame_v1` with its Dart mirror, painter, details panel
 
 - **`lib/src/theme/`**: POCOX's design system — colours, type, glass layers,
-  motion, Lucide icons
+  motion, Lucide icons (`app_icons.dart`: weight 400, four sizes; no
+  Material `Icons.*`, which CI greps for), and the viewer's dark palette
+  (`viewer_palette.dart`)
 
 - **`lib/src/updates/`**: The self-update, after proxy-everything's — find the
   newest `vX.Y.Z-ui` release, check its Ed25519-signed manifest, download and
@@ -217,16 +296,68 @@ The design and its rules are in `docs/ui-design.md`.
   - `pb_mapper_api.dart`: `PbMapperApiClient`, the interface the views take,
     and `PbMapperApi`, the real implementation over the FFI
   - `relay_models.dart`: What the relay calls return, and `RelayCallException`
+  - `desktop_api.dart`: `DesktopApiClient`, the remote desktop's interface,
+    and `DesktopApi` over the FFI: lifecycle calls on a background isolate,
+    the hot ops and the per-frame view on the UI isolate. Its failures carry
+    the FFI `ErrorCode`; never match their text
+  - `desktop_video.dart`: The native H.264 decoder's Flutter texture, over
+    the `pb_mapper/desktop_video` channel. Dart binds it to a video source;
+    the decoder pulls the video from Rust itself
+  - `remote_computer_vault.dart`: `RemoteComputerVault`, the `computers_*`
+    ops below, and on Android the `pb_mapper/keystore` channel that unlocks
+    them; records cross without their invitations
 
 - **`native/pb_mapper_ffi/`**: The Rust C ABI crate (a workspace member)
   - Every call returns a JSON envelope: `{"success": bool, "message": …, "data": …}`
-    — except three small calls that return a plain integer:
-    `pb_mapper_galaxy_frame_v1`, made once per frame, and
-    `pb_mapper_ed25519_verify_v1`, the update manifest's signature check,
-    both leaf calls over caller-owned buffers; and
-    `pb_mapper_spawn_hidden_powershell_v1`, which starts the Windows
-    update's hand-off so that it outlives the app (a detached Dart child
-    cannot: PowerShell without a console exits at once)
+    — except the calls that return a plain integer:
+    - `pb_mapper_galaxy_frame_v1`, made once per frame, and
+      `pb_mapper_ed25519_verify_v1`, the update manifest's signature check,
+      both leaf calls over caller-owned buffers;
+    - `pb_mapper_spawn_hidden_powershell_v1`, which starts the Windows
+      update's hand-off so that it outlives the app (a detached Dart child
+      cannot: PowerShell without a console exits at once);
+    - `pb_mapper_desktop_view_v1`, the remote desktop's per-frame view leaf:
+      it fills a caller-owned 56-byte `PbDesktopViewV1` (mirrored in
+      `pb_mapper_ffi.dart`; `size_of` and `offset_of` asserts guard it, as
+      they guard `PbDesktopVideoMetaV1` on both sides) and returns 1, 0
+      without a viewer, or -1;
+    - the desktop video exports and their JNI twins, below
+  - `desktop.rs`: The remote desktop. `pb_mapper_desktop_call_json` takes
+    the lifecycle ops (sharing, the helper and background host, trust,
+    `inspect_invitation`, `connect`, `disconnect`) under `block_on`, so only
+    a background isolate calls it. `pb_mapper_desktop_viewer_call_json`
+    takes the viewer's closed set of hot ops (`viewer_status`, `control`,
+    `release`, `input`, `keyframe`, `quality`, `pause`, `resume`): it never
+    enters the runtime, awaits or takes a tokio lock, so the UI isolate
+    calls it, as it calls the view leaf. Errors are typed `ErrorCode`s
+    (`error.rs`), never text to match
+  - `desktop_video.rs`: Video goes from the viewer's `VideoSink` straight to
+    its consumer. On Android, and on Windows where Media Foundation is
+    installed, that is the native decoder (the runner's decoder thread in
+    `windows/runner/desktop_video.cpp`, the Android feeder), so H.264 never
+    passes through Dart; elsewhere, Windows without Media Foundation
+    included, it is Dart's JPEG isolate. The runner and this DLL delay-load
+    `mfplat.dll`, so the app starts without it. `connect` returns a
+    `video_source`; a consumer attaches to it and pulls with
+    `pb_mapper_desktop_video_{attach,next,presented,keyframe,failed,report,detach}_v1`;
+    `failed` reports a decoder failure with its text.
+    Ids, never pointers, cross; no id is reused, so a stale one reads as
+    closed. The return codes are one space (`PbVideo` in Dart). Only `next`
+    blocks, never on a UI thread. `pb_mapper_desktop_instance_token_v1`
+    proves a native consumer loaded the library Dart loaded. The
+    `desktop-test-source` feature adds a clip player for device runs; no
+    release enables it
+  - `desktop_jni.rs` (Android): The same exports as the static natives of
+    `DesktopVideoNative.kt`, through which `VideoFeeder.kt` feeds
+    `MediaCodec`. A JNI failure returns a code, never a throw
+  - `desktop_computers.rs`: Remembered computers, the `computers_*` ops of
+    `pb_mapper_desktop_call_json`. One vault per profile: DPAPI on Windows;
+    on Android AES-256-GCM under a data key that an Android Keystore key
+    wraps, which Dart unwraps through the `pb_mapper/keystore` channel
+    (`ComputerKeystore.kt`) to unlock the vault once per process.
+    Invitations never return to Dart: a computer is remembered from the
+    live, pinned session, and `connect` takes its `computer_id`.
+    `desktop_trust.rs` keeps the sharing side's remembered identity
   - `relay.rs`: `pb_mapper_relay_call_json`, one export for every question
     and administrator request to the relay, dispatched on the request's
     `"op"` and answered with the SDK's `Client`/`Admin`. A new relay
@@ -247,7 +378,8 @@ The design and its rules are in `docs/ui-design.md`.
     `pb_mapper_update_config` with the address and credential; a tunnel
     keeps the one it started with and reports it as `relayTransport`.
     `pb_mapper_start_server` takes a `quic_port` (0: none). The window's
-    own relay questions go through `relay_client()`, cached per config,
+    own relay questions, and the remote desktop's connects and host starts,
+    go through `relay_client()`, cached per config,
     which shares the process's QUIC connection with the tunnels. See
     "How this computer reaches the relay" in `docs/ui-design.md`
   - `unwrap_used` and `expect_used` are `deny` here — see its `Cargo.toml`
@@ -324,7 +456,8 @@ and it is what lets a widget test substitute `FakePbMapperApi`
 
 ### What the UI does
 
-Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
+Six pages, a first-run flow and the remote viewer (`docs/ui-design.md` has
+the reasoning):
 
 - **Overview**: the galaxy — this computer and the relay as two stars, each
   tunnel and each service on the relay as a planet, live tunnels as arcs:
@@ -333,7 +466,16 @@ Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
   the route and says why when it is the relay
 - **Tunnels**: what this computer shares and what it connects to, each
   running one with a chip for its path (`widgets/path.dart`), and a count of
-  the relay's other services that leads to Relay
+  the relay's other services that leads to Relay. `desktop:` services are
+  not tunnels: Tunnels and the galaxy leave them out
+- **Remote desktop** (the **Remote** tab on a phone): this computer as a
+  host — turn remote control on, the masked invitation with Copy and a QR
+  code on request, who is connected, view-only or control, Stop sharing,
+  the helper — and the computers it views, remembered in Rust's encrypted
+  vault and opened by id, added by pasting or scanning an invitation. The
+  viewer replaces the whole window: on a desktop a dark title bar and a
+  floating toolbar; on a phone landscape gutters, a modifier bar and a
+  minimap. Back keeps the session paused for up to ten minutes
 - **Relay**: whether the relay answers and how fast, and who this computer is
   to it (administrator, temporary credential #n, or neither). Services, with
   Connect and the connections the relay holds; connections and direct
@@ -347,7 +489,8 @@ Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
   Over QUIC, the link's round trip, loss and streams, measured locally.
   Also the relay this computer can run itself, with an optional QUIC port,
   and its key
-- **Logs**: the Rust log, by minimum level and word, following new lines
+- **Logs**: the Rust log, by minimum level and word, following new lines;
+  on a phone it opens from Settings
 - **Settings**: relay address, credential, the carrier (TCP or QUIC) with
   what the relay offers, default keep-alive, a copyable setup string for
   another computer, theme and language
@@ -357,7 +500,9 @@ Sharing and connecting are one editor with a Share/Connect switch; its More
 options hold the direct switch, off being `--relay-only`. The rail's
 relay status and the galaxy's relay star both open Relay. An administrator
 section is shown only when the relay confirms the administrator key — the
-credential's own shape decides nothing.
+credential's own shape decides nothing. While someone views this computer,
+Disconnect viewer and Stop sharing are in the title bar, above any dialog,
+and in the tray.
 ## Key Features
 
 ### Core Networking
@@ -410,12 +555,21 @@ credential's own shape decides nothing.
 - **Toolchain**: rust-toolchain.toml for reproducible builds
 - **Testing**: Unit tests live beside the code; integration tests are in
   `crates/pb-mapper-cli/tests/`, which is the crate that depends on every layer
-  they exercise. The e2e scaffolding is `pb-mapper-testkit`, so a new test file
-  stands up its own full `server` + `register` + `connect` flow instead of
-  everything accumulating in one file.
+  they exercise. Two crates keep their own: the CLI does not depend on
+  `pb-mapper-desktop`, so the remote desktop's end to end test is that crate's
+  `tests/session.rs`; and `pb-mapper-core`'s `tests/process_environment.rs` is a
+  single-threaded, harness-free binary, because environment writes must not
+  share a process with reader threads. The e2e scaffolding is
+  `pb-mapper-testkit`, so a new test file stands up its own full `server` +
+  `register` + `connect` flow instead of everything accumulating in one file.
 
 ### UI Development Guidelines
 - **Framework**: Flutter 3.44.9, Material 3. CI pins the same version.
+- **CI gates**: From `ui/`, CI runs `flutter gen-l10n` and fails unless
+  `l10n_untranslated.json` is `{}` (it lists each key `app_zh.arb` lacks), then
+  `dart format --output=none --set-exit-if-changed lib test tool`, `flutter
+  analyze --no-fatal-infos`, the `Icons.*` grep and `flutter test`. Run `dart
+  format lib test tool` before committing Dart.
 - **State Management**: Plain `StatefulWidget` state; no state-management package
 - **Architecture**: `AppShell` owns navigation; every page reads one `AppStore`,
   which takes its `PbMapperApiClient` as a parameter so tests can pass a fake.
@@ -478,6 +632,19 @@ docker-compose -f docker/docker-compose.yml up
 - **Widget Tests**: `flutter test` in ui/ directory
 - **Integration Tests**: `crates/pb-mapper-cli/tests/` — end-to-end tests built
   on `pb-mapper-testkit`
+- **Remote desktop (Rust)**: `cargo test -p pb-mapper-desktop -- --ignored
+  --nocapture slow_link` runs the ignored acceptance cases: a synthetic encoder
+  over a real relay and TLS on a shaped link. CI does not run them. The host's
+  capture, encoder and helper compile only on Windows, where CI's
+  `rust-windows-desktop` job lints and tests them
+- **Android unit tests**: `./gradlew :app:testDebugUnitTest` from `ui/android`,
+  JVM tests of `VideoFeeder`, the decoder rules, the presentation queue and
+  `ComputerKeystore`. `gradlew` is git-ignored; `flutter build apk
+  --config-only` in `ui/` writes it. CI's `android-check` job runs them
+- **Device acceptance**: `scripts/test/desktop-ui-acceptance.md` (the viewer and
+  its native decoder on devices, against a test host) and
+  `scripts/test/windows-helper-acceptance.md` (the helper, UAC and Winlogon on an
+  isolated Windows VM) — manual procedures
 - **Examples**: `examples/` directory provides working usage examples
 
 ### Service Deployment

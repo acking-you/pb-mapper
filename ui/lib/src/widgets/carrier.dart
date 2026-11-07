@@ -37,7 +37,11 @@ class CarrierChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(carrierIcon(carrier), size: 13, color: scheme.onSurfaceVariant),
+          Icon(
+            carrierIcon(carrier),
+            size: AppIconSize.inline,
+            color: scheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 5),
           Text(
             carrier.label,

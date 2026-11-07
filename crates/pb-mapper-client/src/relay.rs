@@ -74,7 +74,9 @@ pub(crate) async fn discover(
     addr: SocketAddr,
     credential: Credential,
 ) -> Result<(SocketAddr, QuicEndpoint), ConnectError> {
+    tracing::debug!(event = "relay_quic_discovery_start", %addr);
     let mut tcp = tokio::net::TcpStream::connect(addr).await?;
+    tracing::debug!(event = "relay_quic_discovery_connected", %addr);
     tcp.set_nodelay(true)?;
     let relay_addr = tcp.peer_addr()?;
     let session = ClientHeaderSession::new_v2(&credential).map_err(io::Error::other)?;
@@ -88,6 +90,7 @@ pub(crate) async fn discover(
         )
         .await
         .map_err(io::Error::other)?;
+    tracing::debug!(event = "relay_quic_discovery_answered", %addr);
     match PbConnResponse::decode(&response).map_err(io::Error::other)? {
         PbConnResponse::QuicEndpoint(Some(endpoint))
             if endpoint.port != 0

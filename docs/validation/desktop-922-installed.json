@@ -1,0 +1,115 @@
+{
+  "source_revision": "33275f87413040f8e6b1dfc1237b775898a07cea",
+  "verified_at_utc": "2026-11-06T04:56:12.8232731Z",
+  "local_date": "2026-11-06",
+  "local_timezone": "Asia/Singapore",
+  "service": {
+    "name": "PbMapperDesktop",
+    "state": "Running",
+    "startup": "Auto",
+    "pid_before_upgrade": 99536,
+    "pid_after_upgrade": 97260,
+    "account": "LocalSystem"
+  },
+  "installed_files": [
+    {
+      "file": "pb-mapper-desktop-helper.exe",
+      "sha256": "cf5fe2814a55494848f20519c9511f6d1edf358c6e1bbee808c693d33eddcb4c",
+      "matches_delivered_package": true
+    },
+    {
+      "file": "pb_mapper_ffi.dll",
+      "sha256": "856e9c8b11d6c6dc5f502dd012be4a09a6b53a19a66a8ac38df63efbf46c570f",
+      "matches_delivered_package": true
+    },
+    {
+      "file": "pb_mapper_ui.exe",
+      "sha256": "f0136085bdc18f7c1b568fdb0b88b1e242a1207ba10bbd05dadc0182d3cf471b",
+      "matches_delivered_package": true
+    },
+    {
+      "file": "data/app.so",
+      "sha256": "ea76a2adbccd04dc0cbd54c0561c92fe1e58b014ae701c9ac729cdb6d91c8e5a",
+      "matches_delivered_package": true
+    }
+  ],
+  "checks": {
+    "upgrade_restarted_service": true,
+    "ui_restarted_automatically": true,
+    "sharing_restored_after_upgrade": true,
+    "fresh_invitation_unchanged_after_upgrade": true,
+    "full_ui_exit_kept_service_running": true,
+    "no_desktop_test_ui_during_background_probes": true,
+    "ui_direct_live_video": true,
+    "ui_forced_relay_live_video": true,
+    "fresh_frame_automatic_control": true,
+    "normal_disconnect_left_host_available": true,
+    "stop_persisted_across_full_ui_exit_and_reopen": true,
+    "enable_after_stop_needed_no_uac": true,
+    "fresh_invitation_unchanged_after_stop_and_enable": true
+  },
+  "background_probe": {
+    "source_revision": "33275f87413040f8e6b1dfc1237b775898a07cea",
+    "ffi_sha256": "856e9c8b11d6c6dc5f502dd012be4a09a6b53a19a66a8ac38df63efbf46c570f",
+    "tests": [
+      {
+        "policy": "auto",
+        "actual_paths": [
+          "direct"
+        ],
+        "seconds": 8.0,
+        "received_frames": 680,
+        "decoded_frames": 0,
+        "unique_frame_ids": 680,
+        "generations": [
+          4
+        ],
+        "dimensions": [
+          [
+            1920,
+            1080
+          ]
+        ],
+        "input_requested": false,
+        "simulated_presentation_ack": true,
+        "native_ui_presentation_measured": false
+      },
+      {
+        "policy": "relay",
+        "actual_paths": [
+          "relay"
+        ],
+        "seconds": 8.0,
+        "received_frames": 306,
+        "decoded_frames": 0,
+        "unique_frame_ids": 306,
+        "generations": [
+          4
+        ],
+        "dimensions": [
+          [
+            1920,
+            1080
+          ]
+        ],
+        "input_requested": false,
+        "simulated_presentation_ack": true,
+        "native_ui_presentation_measured": false
+      }
+    ],
+    "relay_transport": "tcp",
+    "desktop_test_ui_count_before_and_after": 0,
+    "service_pid_before_and_after": 97260
+  },
+  "limits": [
+    "Physical phone acceptance deferred by user",
+    "Local installer consent is not remote secure-desktop UAC acceptance",
+    "No OS reboot, standalone SCM restart, sleep/resume or lock-screen password test",
+    "Independent viewer used TCP relay carrier with simulated H264 ACKs; no presented-FPS claim",
+    "Standalone Python/FFI probe with saved QUIC carrier returned Windows 10054; normal UI direct/relay and TCP-carrier probes succeeded"
+  ],
+  "ui_process": {
+    "pid": 62104,
+    "token_is_elevated": false
+  }
+}

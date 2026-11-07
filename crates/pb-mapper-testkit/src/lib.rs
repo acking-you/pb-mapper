@@ -24,6 +24,9 @@
 //!     .await;
 //! ```
 //!
+//! A case that needs a slower network puts a [`shaped_link`] hop, with its
+//! delay and rate, in front of a [`Relay`] and connects through the hop.
+//!
 //! Everything here is a readiness probe rather than a sleep: [`Relay`] polls the
 //! `Keys` status to see a registration, and [`Tunnel::start`] returns only once a
 //! payload has made the full round trip. That is why the cases carry no timing
@@ -50,11 +53,13 @@ use pb_mapper_core::config::init_tracing;
 mod control;
 mod echo;
 mod relay;
+mod shaped;
 mod traffic;
 mod tunnel;
 
 pub use control::{V2ControlSpec, register_v2_control};
 pub use relay::Relay;
+pub use shaped::{Shape, shaped_link};
 pub use traffic::{
     TimerTickGuard, connected_udp_socket, gen_random_msg, probe_udp_socket, raw_tcp_probe,
     run_echo_delay, run_raw_tcp_echo, run_udp_datagram_echo, tagged_echo,

@@ -303,14 +303,17 @@ class _EmptyCard extends StatelessWidget {
                     key: const Key('empty-share'),
                     onPressed: () =>
                         openTunnelEditor(context, kind: TunnelKind.share),
-                    icon: const Icon(AppIcons.share, size: 17),
+                    icon: const Icon(AppIcons.share, size: AppIconSize.button),
                     label: Text(l10n.addShare),
                   ),
                   OutlinedButton.icon(
                     key: const Key('empty-connect'),
                     onPressed: () =>
                         openTunnelEditor(context, kind: TunnelKind.connect),
-                    icon: const Icon(AppIcons.connect, size: 17),
+                    icon: const Icon(
+                      AppIcons.connect,
+                      size: AppIconSize.button,
+                    ),
                     label: Text(l10n.addConnect),
                   ),
                 ],

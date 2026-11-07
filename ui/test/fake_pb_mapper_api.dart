@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'fake_desktop_api.dart';
 
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 
@@ -9,6 +10,8 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 /// what later reads return, so a view can be driven through a whole flow:
 /// register, see it listed, stop it, see it stopped.
 class FakePbMapperApi implements PbMapperApiClient {
+  @override
+  final FakeDesktopApi desktop = FakeDesktopApi();
   FakePbMapperApi({
     this.services = const [],
     this.clients = const [],
@@ -39,6 +42,14 @@ class FakePbMapperApi implements PbMapperApiClient {
   /// before it arrives.
   Duration configDelay = Duration.zero;
 
+  /// Make reading the config fail.
+  bool configFails = false;
+
+  /// Holds a forced relay check until it completes, standing in for a relay
+  /// that has not answered yet. Other calls go on meanwhile, as the Rust
+  /// side's do: it asks the relay without holding its state lock.
+  Completer<void>? relayGate;
+
   /// Every call that changes something, in order, so a test can assert what
   /// the view asked for rather than only what it drew.
   final List<String> calls = [];
@@ -58,6 +69,7 @@ class FakePbMapperApi implements PbMapperApiClient {
   @override
   Future<ConfigStatus> fetchConfig() async {
     if (configDelay > Duration.zero) await Future<void>.delayed(configDelay);
+    if (configFails) throw StateError('reading the config failed');
     return config;
   }
 
@@ -177,8 +189,12 @@ class FakePbMapperApi implements PbMapperApiClient {
       link ?? RelayLink(transport: config.relayTransport);
 
   @override
-  Future<ServerStatusDetail> forceRefreshServerStatus() async =>
-      getServerStatusDetail();
+  Future<ServerStatusDetail> forceRefreshServerStatus() async {
+    if (relayGate case final gate? when !gate.isCompleted) {
+      await gate.future;
+    }
+    return getServerStatusDetail();
+  }
 
   /// What the relay is holding, keyed by service. Absent means none.
   Map<String, List<ServiceConnInfo>> conns;
@@ -188,7 +204,9 @@ class FakePbMapperApi implements PbMapperApiClient {
       conns[serviceKey] ?? const [];
 
   @override
-  Future<List<ServiceConfigInfo>> getServiceConfigs() async => services;
+  Future<List<ServiceConfigInfo>> getServiceConfigs() async {
+    return services;
+  }
 
   @override
   Future<ServiceStatusSignal> getServiceStatus(String serviceKey) async =>
@@ -258,7 +276,9 @@ class FakePbMapperApi implements PbMapperApiClient {
   }
 
   @override
-  Future<List<ClientConfigInfo>> getClientConfigs() async => clients;
+  Future<List<ClientConfigInfo>> getClientConfigs() async {
+    return clients;
+  }
 
   @override
   Future<ClientStatusSignal> getClientStatus(String serviceKey) async =>

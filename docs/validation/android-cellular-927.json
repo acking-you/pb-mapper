@@ -1,0 +1,73 @@
+{
+  "recorded_date": "2026-11-06",
+  "source_commit": "6a695dea4e11ddb8492f8ca846b7187809029fd4",
+  "build": "0.10.2+927",
+  "environment": {
+    "phone": "Vivo V2405DA",
+    "android_api": 36,
+    "android_version_code": 2927,
+    "android_abi": "arm64-v8a",
+    "provider_os": "Windows 11",
+    "wifi_enabled": false,
+    "vpn_active": true,
+    "pb_mapper_excluded_from_vpn": true
+  },
+  "cellular_acceptance": {
+    "verified_at_utc": "2026-11-06T15:19:23.995692Z",
+    "scope": "Ordinary llm-frontend tunnel, not desktop presentation performance",
+    "app_ui_path": "direct",
+    "user_confirmed_working_traffic": true,
+    "provider_direct_events_matching_phone_cellular_ipv6": 10,
+    "first_event_utc": "2026-11-06T15:16:49.012891Z",
+    "last_event_utc": "2026-11-06T15:16:57.892325Z",
+    "observed_log_fields": {
+      "event": "session_path_selected",
+      "path": "direct",
+      "service": "llm-frontend"
+    }
+  },
+  "earlier_local_build_failure": {
+    "build": 926,
+    "observation": "STUN binding timed out; direct failed before commit and fell back to relay",
+    "effective_app_route": "Included in Android VPN UID ranges; application bypass was unchecked",
+    "shell_control": "SDK 0.7.0 and 0.10.2 both completed IPv6 direct and HTTP 200 outside the VPN",
+    "correction": "Applied the CipherRelay bypass selection for com.pb_mapper.ui and verified effective VPN exclusion",
+    "source_comparison": "client, protocol and core sources unchanged between c9bdc37 and 6a695de",
+    "p2p_protocol_changed": false,
+    "limit": "Route difference confounded the version comparison; no claim that all VPN-routed P2P fails"
+  },
+  "runtime_logging_acceptance": {
+    "windows_default_info_persisted": true,
+    "windows_normal_destroy_flushed": true,
+    "android_startup_log_persisted": true,
+    "android_idle_retention_deleted_61_minute_old_file": true,
+    "android_retention_observed_after_seconds": 67.94,
+    "android_probe_build": "Temporary debuggable manifest with release-identical native libraries and AOT code; production manifest restored",
+    "limit": "Observation confirms idle deletion, not a measured 15-second maximum cleanup latency"
+  },
+  "installed_artifacts": {
+    "android_apk_sha256": "d677e5d52a8151b9ed7ed1847dcb5a5da721254ec4248249b57740f942f16f94",
+    "android_signing_certificate_sha256": "5ac9aa7c2a99b410864e7e88b4ec9a28771ddadf69c620a9b18b8dd66ac8305c",
+    "installed_android_apk_matches_release": true,
+    "installed_android_debuggable": false,
+    "windows_zip_sha256": "97f545229050ec3f8840c966e38852ebeba62d22389dc05576b9b40763ebd252",
+    "windows_all_installed_files_match_bundle": true
+  },
+  "logging_revision_verification": [
+    "cargo fmt --all",
+    "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+    "cargo test -p pb-mapper-ffi disk_log::tests (4 passed)",
+    "Dart analysis of modified FFI files",
+    "Android signing, in-place upgrade and 16 KiB alignment"
+  ],
+  "desktop_performance": {
+    "status": "failed_user_acceptance",
+    "merge_blocker": true,
+    "user_report": "Severe stutter even when direct; below 30 fps; RustDesk is smoother with a higher frame rate",
+    "instrumented_phone_fps": null,
+    "instrumented_rustdesk_comparison": null,
+    "root_cause": "Not established",
+    "handoff": "desktop-input-backpressure.md#performance-handoff-2026-11-06"
+  },
+  "privacy": "Raw addresses, user paths, credentials, invitation capabilities and screen contents omitted"
+}

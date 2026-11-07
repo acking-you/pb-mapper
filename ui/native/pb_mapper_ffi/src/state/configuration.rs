@@ -12,6 +12,9 @@
 use super::*;
 
 impl PbMapperState {
+    pub(crate) fn desktop_config_dir(&self) -> PathBuf {
+        self.config_dir.clone()
+    }
     pub(super) async fn reset_status_caches(&self) {
         {
             let mut cache = self.local_server_status_cache.write().await;
@@ -39,7 +42,7 @@ impl PbMapperState {
             server_port: None,
             server_quic_port: None,
             relay_client: SyncMutex::new(None),
-            quic_offer: SyncMutex::new(None),
+            quic_offer: None,
             registered_services: Arc::new(RwLock::new(HashMap::new())),
             active_connections: Arc::new(RwLock::new(HashMap::new())),
             service_runtime: HashMap::new(),
@@ -93,7 +96,7 @@ impl PbMapperState {
     }
 
     #[allow(unused_variables)]
-    fn get_config_dir(app_directory_path: &Option<String>) -> PathBuf {
+    pub(crate) fn get_config_dir(app_directory_path: &Option<String>) -> PathBuf {
         // An explicit path wins everywhere. Mobile is where it normally comes
         // from — Flutter hands it over, because there is no OS config dir to
         // discover — but honouring it on desktop too is what lets a test point

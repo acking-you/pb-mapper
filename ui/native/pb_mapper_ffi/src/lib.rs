@@ -6,6 +6,12 @@ mod cli;
 mod client;
 mod config;
 mod ctl;
+mod desktop;
+mod desktop_computers;
+#[cfg(target_os = "android")]
+mod desktop_jni;
+mod desktop_video;
+mod disk_log;
 mod error;
 mod events;
 mod galaxy;
@@ -29,13 +35,42 @@ pub use client::{
 pub use config::{
     pb_mapper_get_config_json, pb_mapper_reveal_isolated_admin_key, pb_mapper_update_config,
 };
+pub use desktop::{
+    PbDesktopViewV1, pb_mapper_desktop_call_json, pb_mapper_desktop_view_v1,
+    pb_mapper_desktop_viewer_call_json,
+};
+#[cfg(target_os = "android")]
+pub use desktop_jni::{
+    Java_com_pb_1mapper_ui_DesktopVideoNative_attach,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_detach,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_failed,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_instanceToken,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_keyframe,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_next,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_presented,
+    Java_com_pb_1mapper_ui_DesktopVideoNative_report,
+};
+pub use desktop_video::{
+    PbDesktopVideoMetaV1, pb_mapper_desktop_instance_token_v1, pb_mapper_desktop_video_attach_v1,
+    pb_mapper_desktop_video_detach_v1, pb_mapper_desktop_video_failed_v1,
+    pb_mapper_desktop_video_keyframe_v1, pb_mapper_desktop_video_next_v1,
+    pb_mapper_desktop_video_presented_v1, pb_mapper_desktop_video_report_v1,
+};
+#[cfg(feature = "desktop-test-source")]
+pub use desktop_video::{
+    pb_mapper_desktop_video_test_source_pause_v1, pb_mapper_desktop_video_test_source_stop_v1,
+    pb_mapper_desktop_video_test_source_v1,
+};
 pub use events::pb_mapper_set_change_callback;
 pub use galaxy::pb_mapper_galaxy_frame_v1;
 pub use handle::{
     PbMapperHandle, pb_mapper_create, pb_mapper_destroy, pb_mapper_set_app_dir,
     pb_mapper_start_control_server,
 };
-pub use logging::{pb_mapper_free_string, pb_mapper_init_logging, pb_mapper_set_log_callback};
+pub use logging::{
+    pb_mapper_free_string, pb_mapper_init_logging, pb_mapper_set_log_callback,
+    pb_mapper_shutdown_logging,
+};
 pub use relay::pb_mapper_relay_call_json;
 pub use server::{
     pb_mapper_force_refresh_server_status_json, pb_mapper_get_local_server_status_json,

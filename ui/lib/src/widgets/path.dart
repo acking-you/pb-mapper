@@ -35,7 +35,7 @@ class PathChip extends StatelessWidget {
         color: scheme.onSurfaceVariant,
       ),
     );
-    Widget icon = Icon(pathIcon(mode), size: 13, color: color);
+    Widget icon = Icon(pathIcon(mode), size: AppIconSize.inline, color: color);
     if (mode == PathMode.trying) icon = _Breathing(child: icon);
     return Tooltip(
       message: pathDetail(context, tunnel),
@@ -108,7 +108,7 @@ class PathRoute extends StatelessWidget {
                     : const Alignment(0, 0.95),
                 child: Icon(
                   AppIcons.relay,
-                  size: 14,
+                  size: AppIconSize.inline,
                   color: throughRelay ? muted : muted.withValues(alpha: 0.45),
                 ),
               ),

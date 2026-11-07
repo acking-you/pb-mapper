@@ -1,10 +1,15 @@
 import 'dart:async';
+import 'dart:io' show Directory;
+import 'desktop_store.dart';
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/common/polling.dart';
 import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
+import 'package:pb_mapper_ui/src/state/remote_computers.dart';
 import 'package:pb_mapper_ui/src/state/remote_service.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 
@@ -30,27 +35,51 @@ enum RelayState {
 ///
 /// Freshness comes from the Rust change stream (a tunnel's state moving, a
 /// terminal command, a config edit), a slow relay check, since nothing on this
-/// side is told when another computer registers a key, and a periodic read of
-/// this computer's tunnels, without which the stream would go quiet (see
+/// side is told when another computer registers a key, and, while one of this
+/// computer's tunnels runs, a periodic read of what its events leave out (see
 /// [tunnelInterval]).
 class AppStore extends ChangeNotifier {
+  DesktopStore? _desktop;
+  DesktopStore get desktop =>
+      _desktop ??= DesktopStore(api.desktop, onRestartReady: onRestartReady);
   AppStore({
     required this.api,
     Stream<StateChange>? changes,
     this.relayInterval = const Duration(seconds: 12),
     this.tunnelInterval = const Duration(seconds: 6),
-  }) : _changes = changes ?? PbMapperService.changeStream;
+    this.onRestartReady,
+    RemoteComputerVault? vault,
+    Future<Directory> Function()? thumbnailDir,
+  }) : _changes = changes ?? PbMapperService.changeStream,
+       _vault = vault,
+       _thumbnailDir = thumbnailDir ?? _defaultThumbnailDir;
 
   final PbMapperApiClient api;
+  final Future<void> Function()? onRestartReady;
   final Stream<StateChange> _changes;
+  final RemoteComputerVault? _vault;
+  final Future<Directory> Function() _thumbnailDir;
+  RemoteComputerStore? _computers;
+
+  /// The computers this device remembers, read in [start].
+  RemoteComputerStore get computers => _computers ??= RemoteComputerStore(
+    _vault ?? defaultRemoteComputerVault(),
+    thumbnailDir: _thumbnailDir,
+  );
+
+  static Future<Directory> _defaultThumbnailDir() async => Directory(
+    '${(await getApplicationSupportDirectory()).path}/desktop-thumbnails',
+  );
 
   /// How often the relay is asked what it holds while nothing else asks.
   final Duration relayInterval;
 
-  /// How often this computer's tunnels are read again. The Rust side probes a
-  /// tunnel's health only when its cached status is read and has gone stale,
-  /// and only a probe that sees a transition sends a change event; with no
-  /// reads, a tunnel that fails after it settled would stay drawn as running.
+  /// How often this computer's tunnels are read again while one runs. Their
+  /// change events say when a tunnel's state or the paths its sessions take
+  /// change, but not its session counts or the message a failing one
+  /// carries; this read keeps those fresh. A stopped tunnel's read never
+  /// changes, and starting one is always announced, so with none running
+  /// nothing is read.
   final Duration tunnelInterval;
 
   ConfigStatus config = const ConfigStatus(
@@ -77,7 +106,7 @@ class AppStore extends ChangeNotifier {
   ChangeSubscription? _subscription;
   Timer? _relayTimer;
   Timer? _tunnelTimer;
-  final Completer<void> _firstRead = Completer<void>();
+  final Completer<bool> _firstRead = Completer<bool>();
 
   String get relayAddress => config.serverAddress.trim();
 
@@ -107,6 +136,16 @@ class AppStore extends ChangeNotifier {
   int get ownNamespace =>
       identity.role == RelayRole.temporary ? identity.keyId ?? 0 : 0;
 
+  /// The key id of this computer's credential: a temporary credential's
+  /// id, 0 for the administrator key; null until it is known. Remote
+  /// desktop trust binds to the credential, not to a namespace, which a
+  /// temporary key can share with others (D29).
+  int? get credentialKeyId => switch (identity.role) {
+    RelayRole.admin => 0,
+    RelayRole.temporary => identity.keyId,
+    RelayRole.none => null,
+  };
+
   /// Every service the relay lists right now; empty while it is not
   /// answering. With the administrator key, every namespace's: the
   /// administrator can connect to any of them. Otherwise this credential's
@@ -127,17 +166,29 @@ class AppStore extends ChangeNotifier {
   }
 
   /// Services on the relay that this computer does not share itself: what
-  /// there is to connect to, by name.
+  /// there is to connect to, by name. A remote desktop's service is not a
+  /// tunnel's to connect to: it is in Remote desktop (D26).
   List<RemoteService> get remoteServices {
     final mine = {for (final s in shares) s.key};
     return [
       for (final s in relayServices)
-        if (s.namespace != ownNamespace || !mine.contains(s.name)) s,
+        if (!s.isDesktop &&
+            (s.namespace != ownNamespace || !mine.contains(s.name)))
+          s,
     ]..sort((a, b) {
       final byName = a.name.compareTo(b.name);
       return byName != 0 ? byName : a.namespace.compareTo(b.namespace);
     });
   }
+
+  /// The desktop services this computer's viewer can reach, by name: what
+  /// says a remembered computer is sharing (D22). A temporary credential
+  /// sees only its own namespace's services already; the administrator
+  /// sees every namespace's, but its viewer connects in its own, 0 (D29).
+  Set<String> get desktopServiceNames => {
+    for (final s in relayServices)
+      if (s.isDesktop && (!identity.isAdmin || s.namespace == 0)) s.name,
+  };
 
   /// The service on the relay that [id] names, if it lists one.
   RemoteService? remoteById(String id) =>
@@ -165,8 +216,9 @@ class AppStore extends ChangeNotifier {
       );
 
   /// Completes once [start]'s first read of the config and the tunnels is in,
-  /// without waiting for the relay to answer.
-  Future<void> get ready => _firstRead.future;
+  /// without waiting for the relay to answer, with whether every read
+  /// succeeded.
+  Future<bool> get ready => _firstRead.future;
 
   /// Begin reading and listening. Safe to call more than once.
   Future<void> start() async {
@@ -179,8 +231,12 @@ class AppStore extends ChangeNotifier {
       StateChangeKind.config,
     }, _onChange);
     _relayTimer = Timer.periodic(relayInterval, (_) => checkRelay());
-    _tunnelTimer = Timer.periodic(tunnelInterval, (_) => _loadTunnels());
+    _tunnelTimer = Timer.periodic(tunnelInterval, (_) {
+      if (tunnels.any((t) => t.isLive)) unawaited(_loadTunnels());
+    });
+    unawaited(computers.load());
     await refresh(force: true);
+    if (!_disposed) unawaited(desktop.restoreOnStartup());
   }
 
   /// Re-read whatever a burst of changes touched.
@@ -203,9 +259,9 @@ class AppStore extends ChangeNotifier {
   /// Read everything again; [force] makes the relay answer now rather than
   /// from the Rust side's cache.
   Future<void> refresh({bool force = false}) async {
-    await Future.wait([_loadConfig(), _loadTunnels()]);
+    final read = await Future.wait([_loadConfig(), _loadTunnels()]);
     loaded = true;
-    if (!_firstRead.isCompleted) _firstRead.complete();
+    if (!_firstRead.isCompleted) _firstRead.complete(read.every((ok) => ok));
     _notify();
     await checkRelay(force: force);
   }
@@ -270,16 +326,21 @@ class AppStore extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> _loadConfig() async {
+  // Each read says whether it succeeded, and keeps what it had when not.
+
+  Future<bool> _loadConfig() async {
     try {
       config = await api.fetchConfig();
+      return true;
     } catch (_) {
       // Keep what was there: a failed read is not a cleared config.
+      return false;
+    } finally {
+      _notify();
     }
-    _notify();
   }
 
-  Future<void> _loadShares() async {
+  Future<bool> _loadShares() async {
     try {
       final next =
           (await api.getServiceConfigs()).map(Tunnel.fromService).toList()
@@ -288,10 +349,13 @@ class AppStore extends ChangeNotifier {
         shares = next;
         _notify();
       }
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  Future<void> _loadConnections() async {
+  Future<bool> _loadConnections() async {
     try {
       final next =
           (await api.getClientConfigs()).map(Tunnel.fromClient).toList()
@@ -300,12 +364,16 @@ class AppStore extends ChangeNotifier {
         connections = next;
         _notify();
       }
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  Future<void> _loadTunnels() async {
-    if (_disposed) return;
-    await Future.wait([_loadShares(), _loadConnections()]);
+  Future<bool> _loadTunnels() async {
+    if (_disposed) return false;
+    final read = await Future.wait([_loadShares(), _loadConnections()]);
+    return read.every((ok) => ok);
   }
 
   Future<void> _reload(TunnelKind kind) =>
@@ -498,6 +566,8 @@ class AppStore extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _desktop?.dispose();
+    _computers?.dispose();
     _subscription?.cancel();
     _relayTimer?.cancel();
     _tunnelTimer?.cancel();

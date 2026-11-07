@@ -9,6 +9,7 @@ target
 # .` away from the history.
 ui/native/**/libpb_mapper_ffi.*
 ui/native/**/pb_mapper_ffi.*
+ui/native/windows/**/pb-mapper-desktop-helper.exe
 # Packaging output: msix payloads and store assets, tens of megabytes of it.
 ui/dist/
 # Python release tooling bytecode.

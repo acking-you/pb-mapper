@@ -16,8 +16,10 @@ publish = ["crates-io"]
 
 [dependencies]
 pb-mapper-client.workspace = true
+pb-mapper-desktop = { workspace = true, optional = true }
 
 [features]
+desktop = ["dep:pb-mapper-desktop"]
 port-mapping = ["p2p", "pb-mapper-client/port-mapping"]
 relay-quic = ["pb-mapper-client/relay-quic"]
 # Direct QUIC with relay fallback is the default path; the relay carrier is TCP.

@@ -118,7 +118,7 @@ class UpdateDialog extends StatelessWidget {
             TextButton.icon(
               style: TextButton.styleFrom(padding: EdgeInsets.zero),
               onPressed: () => _open(release.page),
-              icon: const Icon(AppIcons.external, size: 15),
+              icon: const Icon(AppIcons.external, size: AppIconSize.inline),
               label: Text(l10n.updateReleaseNotes),
             ),
           ],

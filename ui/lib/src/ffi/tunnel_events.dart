@@ -49,7 +49,9 @@ class TunnelDiagnostics {
         _ => null,
       },
       portMapping = switch (raw['port_mapping']) {
-        final Map<dynamic, dynamic> m => PortMappingDiagnostics.fromMap(_map(m)),
+        final Map<dynamic, dynamic> m => PortMappingDiagnostics.fromMap(
+          _map(m),
+        ),
         _ => null,
       },
       events = [

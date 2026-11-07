@@ -15,6 +15,7 @@ use crate::state::PbMapperState;
 
 /// Opaque handle for the pb-mapper runtime and shared state.
 pub struct PbMapperHandle {
+    pub(crate) desktop: crate::desktop::DesktopState,
     /// The window's readers of tunnel events.
     pub(crate) tunnel_events: crate::tunnel_events::TunnelEventReaders,
     pub(crate) runtime: Runtime,
@@ -42,6 +43,7 @@ pub extern "C" fn pb_mapper_create() -> *mut PbMapperHandle {
 
     let state = PbMapperState::new(None);
     let handle = PbMapperHandle {
+        desktop: Default::default(),
         tunnel_events: Default::default(),
         runtime,
         state: Arc::new(Mutex::new(state)),
@@ -90,6 +92,7 @@ pub unsafe extern "C" fn pb_mapper_start_control_server(
 pub unsafe extern "C" fn pb_mapper_destroy(handle: *mut PbMapperHandle) {
     if !handle.is_null() {
         unsafe { drop(Box::from_raw(handle)) };
+        crate::logging::pb_mapper_shutdown_logging();
     }
 }
 
@@ -116,6 +119,9 @@ pub unsafe extern "C" fn pb_mapper_set_app_dir(
     };
 
     let handle = unsafe { &*handle };
+    // Configure before loading the saved state so configuration errors and all
+    // subsequent native diagnostics reach the same directory as its files.
+    crate::disk_log::configure(&PbMapperState::get_config_dir(&path_opt));
     let state = handle.state.clone();
     let result = handle.runtime.block_on(async move {
         let mut state = state.lock().await;

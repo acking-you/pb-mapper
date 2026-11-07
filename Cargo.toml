@@ -26,6 +26,7 @@ expect_used = "deny"
 pb-mapper-auth = { path = "crates/pb-mapper-auth", version = "0.10.2" }
 pb-mapper = { path = "crates/pb-mapper", version = "0.10.2" }
 pb-mapper-client = { path = "crates/pb-mapper-client", version = "0.10.2" }
+pb-mapper-desktop = { path = "crates/pb-mapper-desktop", version = "0.10.2" }
 pb-mapper-core = { path = "crates/pb-mapper-core", version = "0.10.2" }
 pb-mapper-protocol = { path = "crates/pb-mapper-protocol", version = "0.10.2" }
 pb-mapper-server = { path = "crates/pb-mapper-server", version = "0.10.2" }
@@ -34,12 +35,22 @@ pb-mapper-galaxy = { path = "ui/native/pb_mapper_galaxy" }
 pb-mapper-testkit = { path = "crates/pb-mapper-testkit" }
 
 base64 = "0.23.1"
+enigo = { version = "0.6.1", default-features = false }
+image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_Graphics_Gdi"] }
+windows-service = "0.8.1"
+xcap = { version = "0.9.8", default-features = false }
+windows-capture = "2.0.1"
 better_mimalloc_rs = { version = "0.1.2", features = ["config"] }
 bytes = "1.11"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0.0"
 hashbrown = { version = "0.17.1" }
 hickory-resolver = { version = "0.26.1" }
+# The Android video feeder's exports in pb-mapper-ffi. Already locked through
+# netdev, so an offline `--locked` build needs nothing new.
+jni = "0.21.1"
 # The published fork is source-equivalent to the former Git dependency. Keep
 # the local crate name so server code does not need to know the package name.
 kanal = { package = "kanal-plus", version = "0.2.0" }
@@ -47,6 +58,7 @@ parking_lot = "0.12"
 portmapper = { package = "portmapper-plus", path = "deps/portmapper/portmapper", version = "0.20.0", default-features = false }
 rand = "0.10"
 ring = "0.17.14"
+rolling-file = "0.2.0"
 # Pinned forks, published by `release-sdk.yml` as quinn-plus (with
 # quinn-proto-plus and quinn-udp-plus) and rcgen-plus, under the crate names
 # the code imports. Bump a fork's version whenever its pinned source changes:
@@ -61,6 +73,7 @@ subtle = "2.6.1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 tracing = "0.1.40"
+tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.18", features = [
     "env-filter",
     "fmt",

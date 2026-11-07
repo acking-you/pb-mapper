@@ -313,7 +313,11 @@ class _Hero extends StatelessWidget {
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(AppIcons.info, size: 15, color: onSurfaceMuted(scheme)),
+                  Icon(
+                    AppIcons.info,
+                    size: AppIconSize.inline,
+                    color: onSurfaceMuted(scheme),
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -365,7 +369,11 @@ class _QuicLink extends StatelessWidget {
       key: const Key('relay-link'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(AppIcons.carrierQuic, size: 15, color: onSurfaceMuted(scheme)),
+        Icon(
+          AppIcons.carrierQuic,
+          size: AppIconSize.inline,
+          color: onSurfaceMuted(scheme),
+        ),
         const SizedBox(width: 8),
         Expanded(
           child: Column(
@@ -415,7 +423,11 @@ class _AlsoQuic extends StatelessWidget {
     return Row(
       key: const Key('relay-also-quic'),
       children: [
-        Icon(AppIcons.carrierQuic, size: 15, color: onSurfaceMuted(scheme)),
+        Icon(
+          AppIcons.carrierQuic,
+          size: AppIconSize.inline,
+          color: onSurfaceMuted(scheme),
+        ),
         const SizedBox(width: 8),
         Expanded(
           child: Text(

@@ -160,12 +160,17 @@ impl Consumer {
             ..
         } = response
         else {
+            tracing::debug!(service = %key, "relay or publisher does not offer direct");
             *slot = None;
             // Set before the lock is released, so no queued setup repeats the query.
             self.cooldown().back_off(Instant::now());
             return Ok(None);
         };
         if capability.version != DIRECT_VERSION {
+            tracing::debug!(
+                version = capability.version,
+                "unsupported direct coordination version"
+            );
             self.cooldown().back_off(Instant::now());
             return Ok(None);
         }
@@ -215,15 +220,28 @@ impl Consumer {
             };
             Ok::<_, io::Error>(Some((control, network, grant)))
         };
-        let Ok(Ok(Some((control, network, grant)))) = tokio::time::timeout_at(
+        let negotiation = tokio::time::timeout_at(
             deadline.min(Instant::now() + Duration::from_secs(3)),
             negotiation,
         )
-        .await
-        else {
-            attempt.fell_back("direct_negotiation_unavailable");
-            self.cooldown().back_off(Instant::now());
-            return Ok(None);
+        .await;
+        let (control, network, grant) = match negotiation {
+            Ok(Ok(Some(prepared))) => prepared,
+            result => {
+                let reason = match result {
+                    Ok(Ok(None)) => "direct_not_offered",
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "direct coordination or discovery failed before a grant");
+                        "direct_negotiation_failed"
+                    }
+                    Err(_) => "direct_negotiation_timeout",
+                    Ok(Ok(Some(_))) => unreachable!(),
+                };
+                tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason);
+                attempt.fell_back(reason);
+                self.cooldown().back_off(Instant::now());
+                return Ok(None);
+            }
         };
         let deadline = deadline.min(Instant::now() + Duration::from_millis(grant.ttl_ms));
         // Only a namespace this client named, or the administrator's, can be checked

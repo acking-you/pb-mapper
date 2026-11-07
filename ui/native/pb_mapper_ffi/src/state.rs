@@ -754,7 +754,7 @@ pub struct PbMapperState {
     /// What the relay said about QUIC for these settings: asked again only by
     /// a forced check (Settings' Test) or a change of settings, not every
     /// periodic one, since a relay from before QUIC logs the question.
-    quic_offer: SyncMutex<Option<(AppConfig, Option<u16>)>>,
+    quic_offer: Option<(AppConfig, Option<u16>)>,
     registered_services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
     active_connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
     service_runtime: HashMap<String, TunnelRuntime>,
@@ -774,6 +774,16 @@ pub struct PbMapperState {
 mod configuration;
 mod runtime;
 mod status;
+
+pub use status::{force_refresh_server_status, get_server_status_detail, get_service_conns};
+
+/// This computer's credential, or `INVALID_ARGUMENT` saying it has none,
+/// which no retry can mend.
+pub(crate) fn process_credential() -> Result<Credential, CtlError> {
+    get_process_credential().map_err(|error| {
+        CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
+    })
+}
 
 /// Registers a service, holding the state lock only for the bookkeeping.
 ///
@@ -1313,6 +1323,9 @@ mod tests {
         .unwrap();
         assert_eq!(&echoed, b"quic");
 
+        let detail = force_refresh_server_status(&state).await.unwrap();
+        assert!(detail.server_available, "{:?}", detail.error);
+        assert!(detail.quic_port.is_some());
         {
             let state = state.lock().await;
             let share = &state.get_service_configs().await[0];
@@ -1342,9 +1355,6 @@ mod tests {
             assert_eq!(read(Some(true.into())), PortMapping::Always);
             assert_eq!(read(Some(false.into())), PortMapping::Off);
             assert_eq!(read(Some("off".into())), PortMapping::Off);
-            let detail = state.force_refresh_server_status().await.unwrap();
-            assert!(detail.server_available, "{:?}", detail.error);
-            assert!(detail.quic_port.is_some());
             let admin = parse_credential(pb_mapper_testkit::TEST_ADMIN_KEY).unwrap();
             let moving =
                 state.on_other_carrier(&relay.addr().to_string(), None, admin, RelayTransport::Tcp);
@@ -1405,7 +1415,7 @@ mod tests {
             state.config.relay_transport = RelayTransport::Quic;
         }
 
-        let detail = state.lock().await.get_server_status_detail().await.unwrap();
+        let detail = get_server_status_detail(&state).await.unwrap();
         assert!(!detail.server_available);
         assert_eq!(detail.quic_port, Some(blocked));
         let error = detail.error.unwrap();

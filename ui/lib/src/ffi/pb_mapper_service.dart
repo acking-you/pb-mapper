@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -23,7 +24,141 @@ class LogMessage {
   });
 }
 
+/// One JPEG picture from a desktop video source; [consumer] receipts it.
+typedef DesktopJpegUnit = ({
+  int consumer,
+  int generation,
+  int frameId,
+  Uint8List bytes,
+});
+
 class PbMapperService {
+  /// A desktop lifecycle op, on a worker isolate: these may block on the
+  /// network.
+  Future<Map<String, dynamic>> desktopCall(Map<String, Object?> request) =>
+      _runJsonOnWorker('desktop', {'request': jsonEncode(request)});
+
+  /// A desktop viewer hot op (`pb_mapper_desktop_viewer_call_json`), on the
+  /// calling isolate: the export never blocks, so the UI isolate calls it
+  /// directly.
+  Map<String, dynamic> desktopViewerCallSync(Map<String, Object?> request) {
+    final arg = jsonEncode(request).toNativeUtf8();
+    try {
+      return _decodeJsonStatic(
+        _ffi,
+        _ffi.pbMapperDesktopViewerCall(_requireHandle(), arg),
+      );
+    } finally {
+      calloc.free(arg);
+    }
+  }
+
+  /// Fills [scratch] from the per-frame view leaf: 1 a viewer, 0 none.
+  int desktopView(Pointer<PbDesktopViewV1> scratch) =>
+      _ffi.pbMapperDesktopView(_requireHandle(), scratch);
+
+  /// What native video consumers compare with their own (D9).
+  int instanceToken() => _ffi.pbMapperDesktopInstanceToken();
+
+  /// Receipts a JPEG picture the window showed: true when Rust accepted it.
+  bool desktopVideoPresented(int consumer, int generation, int frameId) =>
+      _ffi.pbMapperDesktopVideoPresented(consumer, generation, frameId) ==
+      PbVideo.unit;
+
+  /// A JPEG source's pictures, pulled by a worker isolate one at a time: the
+  /// next is pulled once the last was delivered and the subscription is not
+  /// paused, so a listener that pauses until it has shown a picture holds
+  /// the worker. Cancelling detaches the consumer.
+  Stream<DesktopJpegUnit> desktopJpegUnits(int source) {
+    final port = ReceivePort('desktop-jpeg');
+    late final StreamController<DesktopJpegUnit> units;
+    SendPort? control;
+    int? consumer;
+    var cancelled = false;
+    // The worker starts with one credit; a delivered picture owes it back.
+    var owed = false;
+
+    void grant() {
+      if (cancelled || !owed || units.isPaused) return;
+      owed = false;
+      control?.send(true);
+    }
+
+    void stop() {
+      control?.send(false);
+      // Detaching wakes a pull blocked in Rust at once.
+      final id = consumer;
+      if (id != null) _ffi.pbMapperDesktopVideoDetach(id);
+    }
+
+    void onMessage(Object? message) {
+      switch (message) {
+        case SendPort worker:
+          control = worker;
+          if (cancelled) stop();
+        case int id when id > 0:
+          consumer = id;
+          if (cancelled) stop();
+        case int code:
+          if (!cancelled) {
+            units.addError(
+              StateError('desktop video source $source: attach failed ($code)'),
+            );
+          }
+        case (int c, int g, int f, TransferableTypedData data):
+          if (cancelled) return;
+          owed = true;
+          units.add((
+            consumer: c,
+            generation: g,
+            frameId: f,
+            bytes: data.materialize().asUint8List(),
+          ));
+          grant();
+        case [Object? error, Object? _]:
+          // The worker's uncaught error; its exit follows.
+          if (!cancelled) units.addError(StateError('$error'));
+        case null:
+          // The worker exited.
+          port.close();
+          if (!cancelled) unawaited(units.close());
+      }
+    }
+
+    // Synchronous, so a listener's pause inside its handler is seen before
+    // the credit is granted.
+    units = StreamController<DesktopJpegUnit>(
+      sync: true,
+      onListen: () {
+        port.listen(onMessage);
+        unawaited(
+          Isolate.spawn(
+            _desktopJpegWorker,
+            (source, port.sendPort),
+            onExit: port.sendPort,
+            onError: port.sendPort,
+            debugName: 'desktop-jpeg',
+          ).then<void>(
+            (_) {},
+            onError: (Object error) {
+              port.close();
+              if (!cancelled) {
+                units.addError(error);
+                unawaited(units.close());
+              }
+            },
+          ),
+        );
+      },
+      onResume: grant,
+      onCancel: () {
+        cancelled = true;
+        stop();
+      },
+    );
+    return units.stream;
+  }
+
   static final PbMapperService _instance = PbMapperService._internal();
   factory PbMapperService() => _instance;
   PbMapperService._internal();
@@ -89,12 +224,12 @@ class PbMapperService {
 
   void initLogging() {
     if (_loggingInitialized) return;
-    ensureInitialized();
 
     _logCallable = NativeCallable<LogCallbackNative>.listener(_logCallback);
     _ffi.pbMapperSetLogCallback(_logCallable!.nativeFunction);
     _ffi.pbMapperInitLogging();
     _loggingInitialized = true;
+    ensureInitialized();
   }
 
   static void _logCallback(int level, Pointer<Utf8> message, int timestamp) {
@@ -152,6 +287,9 @@ class PbMapperService {
   void dispose() {
     _disposeRequested = true;
     _destroyIfIdle();
+    // The tray exits the process immediately after dispose, even when an FFI
+    // call still owns the handle. Drain disk logs before that exit as well.
+    if (_loggingInitialized) _ffi.pbMapperShutdownLogging();
   }
 
   // Worker isolates borrow the handle: one still in a call, a tunnel event
@@ -361,6 +499,81 @@ Map<String, dynamic> _decodeJsonStatic(PbMapperFFI ffi, Pointer<Utf8> ptr) {
   }
 }
 
+/// The JPEG consumer of one desktop video source, on its own isolate:
+/// `next_v1` blocks, so it never runs on the UI isolate. It holds no handle;
+/// the video exports take none.
+///
+/// To the main isolate it sends its control port, then the consumer id (or
+/// the failed attach's code), then each picture. It pulls only with a credit:
+/// one to start, one more per `true` on the control port; `false` stops it.
+Future<void> _desktopJpegWorker((int, SendPort) args) async {
+  final (source, main) = args;
+  final ffi = PbMapperFFI();
+  final control = ReceivePort();
+  var credits = 1;
+  var stopped = false;
+  Completer<void>? wake;
+  control.listen((message) {
+    if (message == true) {
+      credits++;
+    } else {
+      stopped = true;
+    }
+    wake?.complete();
+    wake = null;
+  });
+  main.send(control.sendPort);
+  final consumer = ffi.pbMapperDesktopVideoAttach(source);
+  main.send(consumer);
+  if (consumer <= 0) {
+    control.close();
+    return;
+  }
+  // MAX_PAYLOAD; NEED_CAPACITY grows it and keeps the unit queued.
+  var capacity = 4 << 20;
+  var buffer = malloc<Uint8>(capacity);
+  final meta = calloc<PbDesktopVideoMetaV1>();
+  try {
+    while (!stopped) {
+      if (credits == 0) {
+        await (wake = Completer<void>()).future;
+        continue;
+      }
+      final code = ffi.pbMapperDesktopVideoNext(
+        consumer,
+        50,
+        buffer,
+        capacity,
+        meta,
+      );
+      if (code == PbVideo.unit) {
+        credits--;
+        final unit = meta.ref;
+        main.send((
+          consumer,
+          unit.generation,
+          unit.frameId,
+          TransferableTypedData.fromList([buffer.asTypedList(unit.len)]),
+        ));
+      } else if (code == PbVideo.needCapacity) {
+        malloc.free(buffer);
+        capacity = meta.ref.len;
+        buffer = malloc<Uint8>(capacity);
+      } else if (code != PbVideo.timeout && code != PbVideo.paused) {
+        // CLOSED, NOT_ATTACHED or INVALID: the source is gone.
+        break;
+      }
+      // Lets the control port deliver a credit or the stop between pulls.
+      await Future<void>.delayed(Duration.zero);
+    }
+  } finally {
+    ffi.pbMapperDesktopVideoDetach(consumer);
+    malloc.free(buffer);
+    calloc.free(meta);
+    control.close();
+  }
+}
+
 // Background isolate entry point for synchronous FFI calls.
 Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
   final ffi = PbMapperFFI();
@@ -397,6 +610,10 @@ Map<String, dynamic> _callJsonIsolate(Map<String, dynamic> params) {
       case 'tunnelEvents':
         arg1 = (params['request'] as String).toNativeUtf8();
         result = ffi.pbMapperTunnelEventsCall(handle, arg1);
+        break;
+      case 'desktop':
+        arg1 = (params['request'] as String).toNativeUtf8();
+        result = ffi.pbMapperDesktopCall(handle, arg1);
         break;
       case 'registerService':
         arg1 = (params['serviceKey'] as String).toNativeUtf8();

@@ -23,6 +23,7 @@ else()
       "Debug" "Profile" "Release")
   endif()
 endif()
+
 # Define settings for the Profile build mode.
 set(CMAKE_EXE_LINKER_FLAGS_PROFILE "${CMAKE_EXE_LINKER_FLAGS_RELEASE}")
 set(CMAKE_SHARED_LINKER_FLAGS_PROFILE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE}")
@@ -113,4 +114,10 @@ if(EXISTS "${PB_MAPPER_FFI_DIR}/pb_mapper_ffi.dll")
   install(FILES "${PB_MAPPER_FFI_DIR}/pb_mapper_ffi.dll"
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
+endif()
+
+# The helper remains a separate process; the Flutter UI is never privileged.
+set(PB_MAPPER_HELPER "${PB_MAPPER_FFI_DIR}/pb-mapper-desktop-helper.exe")
+if(EXISTS "${PB_MAPPER_HELPER}")
+  install(FILES "${PB_MAPPER_HELPER}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
 endif()

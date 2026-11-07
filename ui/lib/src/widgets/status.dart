@@ -96,7 +96,9 @@ class _PulsingDotState extends State<PulsingDot>
 }
 
 /// A dot and a word. [filled] sets it in a faint pill of its own colour, for
-/// a card where a bare dot and text would float without weight.
+/// a card where a bare dot and text would float without weight; [inkLabel]
+/// writes the word in that colour too, for a pill that is the card's status
+/// rather than a note beside it.
 class StatusChip extends StatelessWidget {
   const StatusChip({
     super.key,
@@ -105,12 +107,14 @@ class StatusChip extends StatelessWidget {
     this.pulsing = false,
     this.filled = true,
     this.shrinks = false,
+    this.inkLabel = false,
   });
 
   final Color color;
   final String label;
   final bool pulsing;
   final bool filled;
+  final bool inkLabel;
 
   /// Ellipsize the label when room runs out. Only where the chip's width is
   /// bounded: as a fixed child of a Row it meets unbounded width, where a
@@ -119,12 +123,14 @@ class StatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    final ink = inkLabel
+        ? color
+        : Theme.of(context).colorScheme.onSurfaceVariant;
     final text = Text(
       label,
       maxLines: 1,
       overflow: shrinks ? TextOverflow.ellipsis : null,
-      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: muted),
+      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ink),
     );
     final row = Row(
       mainAxisSize: MainAxisSize.min,

@@ -112,11 +112,7 @@ class _TunnelDiagnosticsPanelState extends State<TunnelDiagnosticsPanel> {
       ClipboardData(text: const JsonEncoder.withIndent('  ').convert(report)),
     );
     if (!mounted) return;
-    showToast(
-      context,
-      context.l10n.diagnosticsCopied,
-      kind: ToastKind.success,
-    );
+    showToast(context, context.l10n.diagnosticsCopied, kind: ToastKind.success);
   }
 
   @override
@@ -292,10 +288,7 @@ class _Facts extends StatelessWidget {
             color: cautionColor(scheme),
           )
         else if (diagnostics.lastSetup case final setup?)
-          _Pill(
-            icon: AppIcons.relay,
-            text: l10n.diagnosticsRelay(_ms(setup)),
-          ),
+          _Pill(icon: AppIcons.relay, text: l10n.diagnosticsRelay(_ms(setup))),
         if (sessions != null)
           _Pill(
             icon: AppIcons.direct,
@@ -327,13 +320,14 @@ class _Pill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
       decoration: BoxDecoration(
-        color: color?.withValues(alpha: 0.12) ?? softWash(scheme, strength: 1.3),
+        color:
+            color?.withValues(alpha: 0.12) ?? softWash(scheme, strength: 1.3),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 13, color: ink),
+          Icon(icon, size: AppIconSize.inline, color: ink),
           const SizedBox(width: 5),
           Text(
             text,
@@ -485,7 +479,9 @@ class _PortMapping extends StatelessWidget {
               key: const Key('port-mapping-address'),
               style: mono(
                 fontSize: 13,
-                color: status.active ? scheme.onSurface : onSurfaceMuted(scheme),
+                color: status.active
+                    ? scheme.onSurface
+                    : onSurfaceMuted(scheme),
               ),
             ),
           ],
@@ -534,7 +530,7 @@ class _Missed extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(AppIcons.info, size: 14, color: caution),
+          Icon(AppIcons.info, size: AppIconSize.inline, color: caution),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -619,9 +615,7 @@ _Reading _read(BuildContext context, TunnelEvent event) {
     case 'port_mapping_changed':
       final status = event.mapping;
       return (
-        title: status == null
-            ? l10n.portMapping
-            : _stageLabel(context, status),
+        title: status == null ? l10n.portMapping : _stageLabel(context, status),
         detail: switch (status) {
           PortMappingStatus(:final error?) => error,
           PortMappingStatus(:final externalAddress?, :final protocol) => [
@@ -727,7 +721,11 @@ class _EventRowState extends State<_EventRow> {
                     color: color.withValues(alpha: 0.13),
                     shape: BoxShape.circle,
                   ),
-                  child: Icon(reading.icon, size: 15, color: color),
+                  child: Icon(
+                    reading.icon,
+                    size: AppIconSize.inline,
+                    color: color,
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
