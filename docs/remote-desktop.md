@@ -30,50 +30,231 @@ accepts real-device fluidity; see
 
 ## Use the UI
 
+Remote desktop is a page of its own, between Tunnels and Relay; on a phone it
+is the Remote tab. How the page and the viewer are laid out is in
+[the UI design](ui-design.md#remote-desktop).
+
 1. Configure both apps for the deployed relay and a namespace they can both
    access. Use a dedicated scoped relay credential for the controller; never
    transfer the relay administrator credential to a phone.
-2. On Windows, open the monitor button on **Tunnels** and choose **Enable remote
-   control**. This single action prepares the authorized helper, persistent
-   service, input permission and automatic restoration. Complete any Windows
-   consent yourself; a successful installation restarts the unprivileged UI and
-   resumes the saved operation. Advanced settings select the display and a
-   unique service name such as `desktop:my-computer`. Names start with
-   `desktop:` and contain only ASCII letters, digits, `.`, `_`, `:`, or `-`,
-   with a maximum of 128 bytes. A slash is invalid for scoped relay services.
-3. Copy the reusable invitation privately: anyone possessing it can view and
-   control this desktop while its host permission is enabled. It contains no
-   relay credential. Advanced settings can revoke input while retaining viewing.
-4. On the controller, open Remote desktop, paste the invitation, and open its
-   screen. The UI automatically requests the host's permitted control after a
-   fresh frame is actually presented. The SDK's explicit control-grant boundary
-   remains unchanged. Choose **relay only** in Advanced before connecting to
-   exercise that path.
-5. Touch mode uses a single tap for left click and a two-finger tap for right
-   click; hold before moving to drag a remote item. Trackpad mode moves the remote
-   cursor with one finger and also uses a long press to drag. Moving a two-finger
-   gesture zooms/pans in either mode, without switching away from mouse control.
-   The toolbar also exposes mouse buttons, scrolling, text and key combinations.
-   Unicode insertion is supported;
-   it is not a remote IME session. Secure-attention sequences are unsupported.
-6. End control to retain viewing, or disconnect. The host retains a persistent
-   **Stop sharing** action across navigation and can revoke input independently.
+2. On Windows, open **Remote desktop** and choose **Turn on remote control**.
+   This single action prepares the authorized helper, persistent service,
+   input permission and automatic restoration. Complete any Windows consent
+   yourself; a successful installation restarts the unprivileged UI on this
+   page and resumes the saved operation. **Share the ordinary desktop only**
+   skips the helper, and with it UAC and the lock screen. The card selects
+   the shared display; switching it reconnects the current viewer. **More**
+   renames the service, for example to `desktop:my-computer`. Names start
+   with `desktop:` and contain only ASCII letters, digits, `.`, `_`, `:`, or
+   `-`, with a maximum of 128 bytes. A slash is invalid for scoped relay
+   services.
+3. Copy the invitation privately, or show its QR code to a phone: anyone
+   holding it can view this desktop, and control it while **View and
+   control** is chosen. It contains no relay credential. The card shows it
+   masked; the QR code hides again when you leave the page or the app.
+4. On the controller, open Remote desktop and choose **Add computer** (on a
+   phone, **Scan to add** or **Paste invitation**). The app recognises the
+   host's service and fingerprint before connecting, and refuses a pb-mapper
+   setup string. **Connect** opens the viewer. **Remember this computer**,
+   on by default, keeps it in the list once its first picture arrives;
+   **Relay only** is under **More options**. The UI requests the host's
+   permitted control only after a fresh frame is actually presented; the
+   SDK's explicit control-grant boundary is unchanged.
+5. Drive it with a mouse and keyboard, or by touch; see
+   [Gestures, keys and modifiers](#gestures-keys-and-modifiers). The
+   **Shortcuts** menu sends the system shortcuts this computer would keep
+   for itself.
+6. **View** keeps watching without control; **Disconnect** ends the session.
+   **Back** returns to the list with the session paused. On the host, the
+   viewer's line offers **Make view-only** and **Disconnect viewer**, and
+   **Stop sharing** is always within reach while a viewer is connected (see
+   [Who is viewing](#who-is-viewing-and-a-hidden-window)).
 
-There is one selected display and one viewer. Stop and restart sharing to select
-another display. Input uses the selected display's physical coordinates, DPI,
-letterboxing and viewer transform, including negative monitor origins. A stale
-screen disables input while keeping the texture visible with a status hint.
-The H.264 capture backend currently rejects rotated
-displays instead of presenting incorrect geometry. Cursor metadata shows a
-generic position indicator, not the original Windows cursor bitmap or shape.
+There is one shared display and one viewer at a time. Input uses the shared
+display's physical coordinates, DPI, letterboxing and viewer transform,
+including negative monitor origins. A stale screen disables input while
+keeping the texture visible. The H.264 capture backend currently rejects
+rotated displays instead of presenting incorrect geometry. Cursor metadata
+shows a generic position indicator, not the original Windows cursor bitmap or
+shape.
+
+## Gestures, keys and modifiers
+
+### Touch
+
+A phone or tablet starts in trackpad mode; the input-mode button switches to
+direct touch, and a long press on it shows the gestures.
+
+| Gesture | Trackpad (default) | Direct touch |
+| --- | --- | --- |
+| Slide one finger | Moves the pointer | Drags from where it started |
+| Tap | Left click at the pointer, sent at once | Left click where tapped |
+| Long press (500 ms) | Right click | Right click where pressed |
+| Double-tap, hold (300 ms) and move | Drags | — (a double tap is a double click) |
+| Three-finger swipe up or down | Scrolls, a notch per 24 px | Scrolls |
+| Two fingers | Pan and pinch the picture here (1× to 8×); nothing is sent | Same |
+| Two-finger tap | Nothing | Nothing |
+
+Changes from the PR #51 preview builds:
+
+- Right click was a two-finger tap. It is a long press, and a two-finger tap
+  now does nothing.
+- Drag was a press held before moving. In trackpad mode it is a double tap
+  whose second touch is held, then moved.
+- Scrolling was a toolbar button. It is a three-finger swipe; the content
+  follows the fingers.
+- Trackpad is the default mode, and a tap clicks at once rather than after a
+  wait for a possible double tap.
+- Zoom never changes mode: two fingers always move the picture, never the
+  remote pointer.
+
+**The drag-start guard.** The second tap of a double-tap-and-hold would reach
+Windows as a double click on the item about to be dragged. The viewer sends
+that press no earlier than 520 ms after the first click, and the host holds
+any press marked as a drag start until the OS double-click time (plus 20 ms,
+at most 600 ms) has passed since a click on the same spot. A finger lifted
+before then still drags: press, move and release go together, and the host
+re-checks the held press's authorisation when it lets it go. A quick second
+tap is a second click, which is a double click.
+
+With a mouse or a touchpad, buttons and the wheel go to the remote computer
+(a notch per 30 px of scrolling); Ctrl with the wheel, or a touchpad pinch,
+zooms the picture here. A Windows touchscreen uses the desktop viewer with
+direct touch.
+
+### Modifiers
+
+The modifier bar above a phone's keyboard latches Ctrl, Alt, Shift and Win:
+tap once to arm one for the next key, click, drag or scroll, tap again to
+lock it, and tap a locked one to release it. Every key or click sent with
+modifiers goes as one sequence — the modifiers down, the action, the
+modifiers up — so nothing stays held on the host. Latches clear on reconnect,
+when the viewer closes, and when the app loses focus. **Release all keys**
+in Shortcuts releases whatever this viewer holds on the host.
+
+### Keyboards
+
+A hardware keyboard, including a Bluetooth one on a phone, reaches the host
+by these rules:
+
+- Ctrl, Alt, Shift and Win held down go to the host as real presses and
+  releases. They are never wrapped around another key, because the host does
+  not count presses and would release a modifier still held.
+- F1–F12, Enter, Esc, Tab, Backspace, Delete, Insert, Home, End, Page Up,
+  Page Down and the arrows go as keys; with a modifier latched, as one
+  wrapped tap. Tab never moves focus out of the picture.
+- A letter, digit or space typed while Ctrl, Alt or Win is held is a
+  shortcut: Ctrl+S, Alt+F and Win+E reach the host as such. On layouts where
+  AltGr (Ctrl+Alt) types a character, such as German, French or Polish, that
+  character is typed instead.
+- Anything else printable is typed as the character this computer's layout
+  produced.
+- **Not sent:** keys outside the host's vocabulary. PrintScreen, Caps Lock
+  and the Menu key do nothing, and Ctrl or Alt with punctuation (Ctrl+-,
+  Ctrl+=, Ctrl+[, Ctrl+], Ctrl+/) is not sent as a shortcut. Shortcuts that
+  this computer's system takes first — Alt+Tab, the Windows key, Win+L,
+  Ctrl+Alt+Del — never reach the app; use the Shortcuts menu. Ctrl+Alt+Del
+  is unsupported, since `SendInput` cannot produce it. **Lock remote
+  computer** is the host's own command: it needs control, and says so when
+  locking fails.
+
+Typed characters arrive as Unicode, so a remote input method does not compose
+them. Compose text here instead: **Type text…** on a desktop, or the soft
+keyboard on a phone, which sends what the input method commits, turns
+Backspace into deletions and Enter into Enter. While a modifier is latched
+the first 16 typed characters go as keys, so the bar's Ctrl followed by C on
+the soft keyboard sends Ctrl+C.
+
+## Viewer states
+
+| State | What the viewer shows |
+| --- | --- |
+| Connecting | Its steps — finding the host, going direct or through the relay, checking its identity, the first picture — with Cancel |
+| Live | The picture; the toolbar's chip says when it is delayed |
+| Reconnecting | The last picture greyed, a countdown (1, 2, 4, 8, then 15 s) and Retry now; a busy host is retried the same way |
+| Waiting for the remote desktop | The last picture, and why: a UAC prompt or the lock screen without the helper, or no desktop at all |
+| Recovering the picture | The last picture while a new keyframe comes |
+| Host identity changed | An opaque card. Retries stop, and nothing replaces the saved identity except **Paste new invitation**, which opens the add flow for that computer |
+| Ended | Why — sharing stopped, the host ended the session, the invitation was revoked or refused, a different pb-mapper version, the picture could not be decoded — with Reconnect where it can help, Retry after a decoder failure, and Paste new invitation for a revoked or refused one |
+
+Only the overlay for a changed identity is opaque; the others keep the last
+picture visible. Input goes to the host only while the picture is fresh and
+this viewer holds control: every other state pauses it, and nothing queued
+is replayed afterwards. The protocol-v2 handshake refuses a peer of another
+version, so a PR #51 preview build on either side ends in the version
+message, never mid-session.
+
+### Leaving the picture
+
+**Back** keeps the session but pauses it: the host stops capturing, control
+ends, and the list shows the computer as Viewing with **Back to picture**,
+which resumes from a fresh keyframe. A session left paused ends after ten
+minutes, because it holds the host's only viewer slot and every other viewer
+would be told the computer is busy. A phone that goes to the background
+pauses the same way; if Android froze the app and the host closed the
+session meanwhile, the viewer reconnects once, at once, on its return.
+For a remembered computer, leaving the picture or disconnecting saves the
+last frame as its thumbnail.
+
+## Who is viewing, and a hidden window
+
+While a viewer is connected, the host shows it in three places:
+
+- a capsule in the title bar of every page and of its own viewer — Being
+  viewed or Being controlled, with **Disconnect viewer** and **Stop
+  sharing**;
+- a pill above everything else where no title bar can be reached: first-run
+  setup, a full-screen viewer, and any open dialog;
+- the tray: the active icon, a tooltip that leads with who is watching, and
+  both actions in its menu.
+
+Both actions work even while another host action is still running.
+**Disconnect viewer** is final for that session: the viewer is told the host
+ended it and does not reconnect by itself.
+
+A sharing computer usually has its window closed to the tray, where an
+in-window capsule cannot be seen. So when a viewer arrives while the window is
+hidden or minimised, the window comes back without taking focus, once per
+viewer session; closing it again is respected. It is not kept on top. When
+the Windows service shares with the app not running at all, nothing shows a
+viewer: the service cannot draw in the user's session. Keep the app in the
+tray to see who is connected.
+
+## Remembered computers
+
+A controller can remember the computers it views, so it reconnects without
+pasting an invitation again:
+
+- A computer is remembered only after its first picture, from the live session,
+  which has already passed the certificate pin. A wrong or unreachable
+  invitation leaves nothing behind.
+- The vault is one encrypted file per app profile beside the configuration:
+  `desktop-computers.dpapi` under current-user DPAPI on Windows; on Android
+  `desktop-computers.bin`, sealed with AES-256-GCM under a data key that an
+  Android Keystore key wraps (`desktop-computers.key`, unwrapped through the
+  `pb_mapper/keystore` channel once per process). Other platforms cannot
+  remember computers, and the add form says so. At most 50 are kept.
+- Invitations never return to Dart. The list carries names, services,
+  fingerprints and when each was last used; opening one connects by its id,
+  and Rust looks the invitation up.
+- Online status comes from the relay's service list, which the app already
+  polls. A computer saved under another relay address or credential reads
+  Other relay and opens only after switching back in Settings.
+- A changed host identity never touches the saved computer; only **Paste new
+  invitation** replaces its invitation, at the new session's first picture.
+- **Remove this computer** deletes its invitation and its last picture.
+- Android cloud backup and device-to-device transfer exclude the app's
+  configuration directory, so they restore neither the vault nor the relay
+  credential nor the tunnels.
 
 ## Remembered authorization and unattended use
 
-**Enable remote control** is the explicit host authorization for persistent
+**Turn on remote control** is the explicit host authorization for persistent
 viewing and input. The Windows service owns the TLS identity, 256-bit invitation
 token, selected display and permissions. The grant is bound to the exact relay
-address and credential namespace ID. The controller must retain its private
-invitation; automatic mobile invitation storage is not implemented.
+address and credential namespace ID. The controller keeps its private
+invitation itself, or lets the app remember it in its encrypted vault (see
+[Remembered computers](#remembered-computers)).
 
 The invitation is a bearer capability, not a certificate identifying a particular
 phone. Changing a relay or namespace does not silently reuse it elsewhere. Input
@@ -84,8 +265,8 @@ mismatch stops automatic retries and never replaces the pinned identity.
 
 | Action | Result |
 | --- | --- |
-| Enable remote control | Starts the service-owned host with input and automatic restoration enabled; reuses its invitation |
-| Stop sharing | Closes sessions and disables automatic sharing; the same invitation resumes on the next explicit Enable |
+| Turn on remote control | Starts the service-owned host with input and automatic restoration enabled; reuses its invitation |
+| Stop sharing | Closes sessions and disables automatic sharing; the same invitation resumes on the next explicit Start sharing |
 | Close the app | Stops its viewer; service-owned sharing continues |
 | Upgrade legacy app-owned sharing | Transfers the saved identity if no same-scope service identity exists; an existing service identity remains authoritative |
 | Revoke invitation and stop sharing | Deletes remembered trust, closes the current host, and requires a new invitation for future sharing |
@@ -151,7 +332,7 @@ Windows remote-control preparation checks
 that the helper is installed, running, that this application is authorized,
 and that its live process image matches the protected installation. An identity
 query failure requires repairing/updating the helper and is never shown as ready.
-Use **Enable remote control** and deliberately complete Windows' local
+Use **Turn on remote control** and deliberately complete Windows' local
 administrator consent when required. Installation automatically replaces the current
 application and returns to the remote desktop page, preserving saved settings
 and background sharing authorization. There is no separate "open installed app"
@@ -211,7 +392,8 @@ Abnormal service exits use SCM recovery delays of 5, 15 and then 60 seconds,
 reset after 24 hours. Normal Stop exits do not request recovery. Windows may
 apply the non-crash failure flag after the next OS restart. Disable and uninstall
 disable startup before stopping, so an already queued SCM restart cannot undo
-that action. **Enable helper** explicitly restores automatic service startup.
+that action. **Turn on remote control** explicitly restores automatic service
+startup.
 Updating a disabled or stopped installation preserves that state.
 
 Disable stops the service and disables its startup. Uninstall stops/deletes the
@@ -625,16 +807,17 @@ the same `seq`. `deployed --feedback-log` enables both host targets.
 
 ### The app's video path
 
-The viewer's status bar reports connecting, waiting for a local desktop,
-recovering video, a reconnect countdown, or live or delayed video. After a
-stall the UI asks for a keyframe first. A failed stream or a continued stall
-opens a fresh authenticated session with the same in-memory invitation and path
-preference, after 1, 2, 4, 8 and 15 seconds. Capture-unavailable states wait for
-the local desktop instead of retrying around missing Windows permissions.
-Manual disconnect cancels recovery; backgrounding pauses retries and ends
-control. A foreground retry may restore previously requested control only after
-a fresh picture and host permission. No queued clicks or keys are replayed, and
-the invitation is not persisted by this policy.
+The viewer's overlays report the states in [Viewer states](#viewer-states).
+After a stall the app asks for a keyframe first. A failed stream, or five
+seconds without video while the viewer shows, opens a fresh authenticated
+session with the same target and path preference after 1, 2, 4, 8 and 15
+seconds. Capture-unavailable states wait for the remote desktop instead of
+retrying around missing Windows permissions. Disconnect cancels recovery. A
+hidden viewer never reconnects; when it shows again, a session the host closed
+meanwhile reconnects at once. A retry restores previously requested control
+only after a fresh picture and host permission. No queued clicks or keys are
+replayed. A remembered computer reconnects by its id; a pasted invitation that
+was not remembered stays in memory only.
 
 Windows decodes H.264 with Media Foundation into D3D11 shared textures, and
 Android with `MediaCodec` into a `SurfaceTexture` on Flutter's OpenGL renderer.
@@ -642,16 +825,14 @@ Capture, encoding, decoding and blocking FFI calls stay off the Dart UI
 isolate, and pinch and pan keep the same texture and decoder. On Android a
 decoder reset is acknowledged by the codec worker, keeps the Surface, and cannot
 close a newer codec; after a stall the renderer drops obsolete decoded pictures
-but keeps compressed H.264 references. In this revision the app still reads
-video through its earlier frame exports, which return an owned buffer: a
-little-endian u32 metadata length, JSON status and the encoded bytes, freed with
-`pb_mapper_desktop_free_frame`. Video bytes never become JSON or base64. A
-temporary compatibility layer serves them from the session's `VideoSink`, in
-order, and passes each presentation the app reports to
-`VideoConsumer::presented`. The native consumers replace it, so H.264 never
-crosses Dart: a Kotlin feeder thread pulls through JNI on Android, and the
-runner's decoder thread pulls through C exports on Windows. Dart then reads
-only status and the per-frame view.
+but keeps compressed H.264 references. The decoders pull video from the
+session's `VideoSink` themselves, so H.264 never crosses Dart: a Kotlin feeder
+thread pulls through JNI on Android, and the runner's decoder thread through
+the `pb_mapper_desktop_video_*_v1` C exports on Windows. Each reports its
+presentations to `VideoConsumer::presented` directly. Dart reads only status,
+geometry, statistics and the latest cursor, through the per-frame view leaf.
+Other platforms take JPEG, which Dart decodes off the UI isolate. Video bytes
+never become JSON or base64.
 
 ## Measurements and remaining acceptance
 

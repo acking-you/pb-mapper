@@ -164,8 +164,11 @@ Nothing in the SDK crates knows it exists.
 
 The design and its rules are in `docs/ui-design.md`.
 
-- **`lib/src/app.dart`**: The root — owns the store, the preferences and the
-  galaxy's state; chooses first-run setup or the five pages; runs the tray
+- **`lib/src/app.dart`**: The root — owns the store, the preferences, the
+  galaxy's state and the remote desktop's (`ViewerHost`, `RemoteDesktop`,
+  `SharingChrome`); chooses first-run setup, the six pages, or the remote
+  viewer in their place while `ViewerHost.showing`; runs the tray, which
+  also says when this computer is being viewed
 
 - **`lib/src/pages/`**: One file per place
   - `overview_page.dart`: The galaxy, with a floating summary and details panel
@@ -180,24 +183,52 @@ The design and its rules are in `docs/ui-design.md`.
   - `setup_flow.dart`: First run — relay, then what to do, then that tunnel
   - `tunnel_editor.dart`: The one share/connect form, and `followTunnel`
   - `tunnel_actions.dart`: Start/stop, delete, copy — shared by list and panel
+  - `remote/`: The Remote desktop page — `remote_page.dart` lays out
+    `host_card.dart` (this computer as a host, its masked invitation and
+    `invite_qr.dart`) and the remembered computers (`computer_list.dart`,
+    or `computer_list_compact.dart` on a phone); `add_computer.dart` and
+    `invite_scanner.dart` recognise a pasted or scanned invitation before
+    connecting; `remote_actions.dart` holds the confirmations
+  - `remote/viewer/`: The viewer, shown by `viewer_screen.dart` in place of
+    the shell. `viewer_stage.dart` (picture, remote cursor, overlays) is
+    shared by `desktop_viewer.dart` (title bar, floating toolbar, menus) and
+    `touch_viewer.dart` (gutters, modifier bar, minimap, virtual mouse,
+    gesture sheet). Input leaves through one door, `remote_input.dart`;
+    touch is decided by the pure `touch_gestures.dart`, modifiers by
+    `modifier_latch.dart`, hardware keys by `remote_keys.dart`, the soft
+    keyboard by `remote_text_input.dart`. The gestures and key rules are in
+    `docs/remote-desktop.md`
 
 - **`lib/src/shell/`**: Navigation and window chrome
-  - `app_scope.dart`: `AppPage` and the `AppScope` every page reads
+  - `app_scope.dart`: `AppPage` (six places; the phone bar has five, Logs
+    opening from Settings) and the `AppScope` every page reads
   - `app_shell.dart`: Rail on the backdrop and a sheet, or a bottom bar
-  - `navigation.dart`: The rail (with the relay's state at its foot), the bar
+  - `navigation.dart`: The rail (with the relay's state at its foot and a
+    dot on Remote desktop while sharing), the bar
   - `page_frame.dart`: A page's title bar, which is also the window's
   - `window_chrome.dart`: Drag areas and the Windows/Linux caption buttons
+  - `sharing_indicator.dart`: While this computer is viewed, Disconnect
+    viewer and Stop sharing — a capsule in the title bar, or a pill above
+    every route where no capsule can be reached
   - `app_prefs.dart`: Theme, language, last page
 
 - **`lib/src/state/`**: `AppStore` (every read and write, kept fresh by the
   change stream), `RelayStore` (the Relay page's reads and the administrator's
-  changes, polled only while that page is on screen) and the `Tunnel` model
+  changes, polled only while that page is on screen) and the `Tunnel` model.
+  The remote desktop: `DesktopStore` (`desktop_store.dart`; its views —
+  host, session, stats — each notify only their own listeners, never
+  `AppStore`), `RemoteDesktop` (`remote_desktop.dart`: which computer is
+  open, Back pausing it, remembering at the first picture),
+  `RemoteComputerStore` (`remote_computers.dart`: the remembered list and
+  its thumbnails) and `ViewerPrefs` (`viewer_prefs.dart`)
 
 - **`lib/src/galaxy/`**: The galaxy view — scene model, camera, frame buffer
   over `pb_mapper_galaxy_frame_v1` with its Dart mirror, painter, details panel
 
 - **`lib/src/theme/`**: POCOX's design system — colours, type, glass layers,
-  motion, Lucide icons
+  motion, Lucide icons (`app_icons.dart`: weight 400, four sizes; no
+  Material `Icons.*`, which CI greps for), and the viewer's dark palette
+  (`viewer_palette.dart`)
 
 - **`lib/src/updates/`**: The self-update, after proxy-everything's — find the
   newest `vX.Y.Z-ui` release, check its Ed25519-signed manifest, download and
@@ -224,6 +255,9 @@ The design and its rules are in `docs/ui-design.md`.
   - `desktop_video.dart`: The native H.264 decoder's Flutter texture, over
     the `pb_mapper/desktop_video` channel. Dart binds it to a video source;
     the decoder pulls the video from Rust itself
+  - `remote_computer_vault.dart`: `RemoteComputerVault`, the `computers_*`
+    ops below, and on Android the `pb_mapper/keystore` channel that unlocks
+    them; records cross without their invitations
 
 - **`native/pb_mapper_ffi/`**: The Rust C ABI crate (a workspace member)
   - Every call returns a JSON envelope: `{"success": bool, "message": …, "data": …}`
@@ -369,7 +403,8 @@ and it is what lets a widget test substitute `FakePbMapperApi`
 
 ### What the UI does
 
-Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
+Six pages, a first-run flow and the remote viewer (`docs/ui-design.md` has
+the reasoning):
 
 - **Overview**: the galaxy — this computer and the relay as two stars, each
   tunnel and each service on the relay as a planet, live tunnels as arcs:
@@ -378,7 +413,16 @@ Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
   the route and says why when it is the relay
 - **Tunnels**: what this computer shares and what it connects to, each
   running one with a chip for its path (`widgets/path.dart`), and a count of
-  the relay's other services that leads to Relay
+  the relay's other services that leads to Relay. `desktop:` services are
+  not tunnels: Tunnels and the galaxy leave them out
+- **Remote desktop** (the **Remote** tab on a phone): this computer as a
+  host — turn remote control on, the masked invitation with Copy and a QR
+  code on request, who is connected, view-only or control, Stop sharing,
+  the helper — and the computers it views, remembered in Rust's encrypted
+  vault and opened by id, added by pasting or scanning an invitation. The
+  viewer replaces the whole window: on a desktop a dark title bar and a
+  floating toolbar; on a phone landscape gutters, a modifier bar and a
+  minimap. Back keeps the session paused for up to ten minutes
 - **Relay**: whether the relay answers and how fast, and who this computer is
   to it (administrator, temporary credential #n, or neither). Services, with
   Connect and the connections the relay holds; connections and direct
@@ -392,7 +436,8 @@ Five pages and a first-run flow (`docs/ui-design.md` has the reasoning):
   Over QUIC, the link's round trip, loss and streams, measured locally.
   Also the relay this computer can run itself, with an optional QUIC port,
   and its key
-- **Logs**: the Rust log, by minimum level and word, following new lines
+- **Logs**: the Rust log, by minimum level and word, following new lines;
+  on a phone it opens from Settings
 - **Settings**: relay address, credential, the carrier (TCP or QUIC) with
   what the relay offers, default keep-alive, a copyable setup string for
   another computer, theme and language
@@ -402,7 +447,9 @@ Sharing and connecting are one editor with a Share/Connect switch; its More
 options hold the direct switch, off being `--relay-only`. The rail's
 relay status and the galaxy's relay star both open Relay. An administrator
 section is shown only when the relay confirms the administrator key — the
-credential's own shape decides nothing.
+credential's own shape decides nothing. While someone views this computer,
+Disconnect viewer and Stop sharing are in the title bar, above any dialog,
+and in the tray.
 ## Key Features
 
 ### Core Networking
