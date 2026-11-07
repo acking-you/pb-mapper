@@ -29,6 +29,10 @@ class RemoteService {
 
   String get id => relayServiceId(namespace, name);
 
+  /// A remote desktop host's service (`desktop:…`): it belongs to Remote
+  /// desktop, not to the tunnels (D26).
+  bool get isDesktop => name.startsWith('desktop:');
+
   @override
   bool operator ==(Object other) =>
       other is RemoteService &&

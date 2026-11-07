@@ -2,10 +2,13 @@ import 'dart:async';
 import 'desktop_store.dart';
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:pb_mapper_ui/src/common/polling.dart';
 import 'package:pb_mapper_ui/src/common/state_change.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/ffi/pb_mapper_service.dart';
+import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
+import 'package:pb_mapper_ui/src/state/remote_computers.dart';
 import 'package:pb_mapper_ui/src/state/remote_service.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 
@@ -45,11 +48,21 @@ class AppStore extends ChangeNotifier {
     this.relayInterval = const Duration(seconds: 12),
     this.tunnelInterval = const Duration(seconds: 6),
     this.onRestartReady,
-  }) : _changes = changes ?? PbMapperService.changeStream;
+    RemoteComputerVault? vault,
+  }) : _changes = changes ?? PbMapperService.changeStream,
+       _vault = vault;
 
   final PbMapperApiClient api;
   final Future<void> Function()? onRestartReady;
   final Stream<StateChange> _changes;
+  final RemoteComputerVault? _vault;
+  RemoteComputerStore? _computers;
+
+  /// The computers this device remembers, read in [start].
+  RemoteComputerStore get computers => _computers ??= RemoteComputerStore(
+    _vault ?? defaultRemoteComputerVault(),
+    thumbnailDir: getApplicationSupportDirectory,
+  );
 
   /// How often the relay is asked what it holds while nothing else asks.
   final Duration relayInterval;
@@ -114,6 +127,16 @@ class AppStore extends ChangeNotifier {
   int get ownNamespace =>
       identity.role == RelayRole.temporary ? identity.keyId ?? 0 : 0;
 
+  /// The key id of this computer's credential: a temporary credential's
+  /// id, 0 for the administrator key; null until it is known. Remote
+  /// desktop trust binds to the credential, not to a namespace, which a
+  /// temporary key can share with others (D29).
+  int? get credentialKeyId => switch (identity.role) {
+    RelayRole.admin => 0,
+    RelayRole.temporary => identity.keyId,
+    RelayRole.none => null,
+  };
+
   /// Every service the relay lists right now; empty while it is not
   /// answering. With the administrator key, every namespace's: the
   /// administrator can connect to any of them. Otherwise this credential's
@@ -134,17 +157,29 @@ class AppStore extends ChangeNotifier {
   }
 
   /// Services on the relay that this computer does not share itself: what
-  /// there is to connect to, by name.
+  /// there is to connect to, by name. A remote desktop's service is not a
+  /// tunnel's to connect to: it is in Remote desktop (D26).
   List<RemoteService> get remoteServices {
     final mine = {for (final s in shares) s.key};
     return [
       for (final s in relayServices)
-        if (s.namespace != ownNamespace || !mine.contains(s.name)) s,
+        if (!s.isDesktop &&
+            (s.namespace != ownNamespace || !mine.contains(s.name)))
+          s,
     ]..sort((a, b) {
       final byName = a.name.compareTo(b.name);
       return byName != 0 ? byName : a.namespace.compareTo(b.namespace);
     });
   }
+
+  /// The desktop services this computer's viewer can reach, by name: what
+  /// says a remembered computer is sharing (D22). A temporary credential
+  /// sees only its own namespace's services already; the administrator
+  /// sees every namespace's, but its viewer connects in its own, 0 (D29).
+  Set<String> get desktopServiceNames => {
+    for (final s in relayServices)
+      if (s.isDesktop && (!identity.isAdmin || s.namespace == 0)) s.name,
+  };
 
   /// The service on the relay that [id] names, if it lists one.
   RemoteService? remoteById(String id) =>
@@ -187,6 +222,7 @@ class AppStore extends ChangeNotifier {
     }, _onChange);
     _relayTimer = Timer.periodic(relayInterval, (_) => checkRelay());
     _tunnelTimer = Timer.periodic(tunnelInterval, (_) => _loadTunnels());
+    unawaited(computers.load());
     await refresh(force: true);
     if (!_disposed) unawaited(desktop.restoreOnStartup());
   }
@@ -507,6 +543,7 @@ class AppStore extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _desktop?.dispose();
+    _computers?.dispose();
     _subscription?.cancel();
     _relayTimer?.cancel();
     _tunnelTimer?.cancel();
