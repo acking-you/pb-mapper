@@ -318,8 +318,9 @@ The final protected installation subsequently passed hash matching, upgrade
 restart, normal-UI direct/relay viewing and persistent Stop across UI restart.
 A separate FFI viewer received direct/relay video while the test UIs were absent;
 it used a TCP relay carrier and simulated H264 ACKs, not native presentation.
-Android VM touch and trackpad gestures reached an owned Windows input target;
-text and scrolling also passed. OS reboot, standalone SCM restart, physical-phone and
-secure-desktop/UAC control remain unverified. See
+Build 922's Android VM run of the PR #51 touch and trackpad gestures, since
+replaced, reached an owned Windows input target; text and scrolling also
+passed. The current gestures are Stage 3, item 7. OS reboot, standalone SCM
+restart, physical-phone and secure-desktop/UAC control remain unverified. See
 [the current evidence summary](../../docs/remote-desktop.md#measurements-and-remaining-acceptance)
 for the environment, provenance and remaining acceptance boundaries.

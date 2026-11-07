@@ -877,9 +877,9 @@ native texture consumption through the product viewer and decoder.
 
 No phone or Windows viewer run of the receipt-credit pipeline has been recorded
 yet. Its evidence so far is the encoder bench above and the synthetic cases
-below. Through the earlier app's compatibility layer, a session runs on
-Balanced, so it never exceeds 60 FPS; the build 922 rates below are not
-comparable with such a run.
+below. A session runs on the preset remembered for its computer. Balanced, the
+default, never exceeds 60 FPS, so only a Smooth run on a Windows viewer above
+60 Hz compares with the earlier builds' Windows rates below.
 
 The ignored `slow_link` cases
 (`cargo test -p pb-mapper-desktop -- --ignored --nocapture slow_link`) use a
@@ -985,11 +985,15 @@ and [its limits](validation/desktop-922.md#final-protected-service-update-2026-1
 This verifies upgrade-driven service replacement and UI exit/relaunch, not OS
 reboot, standalone SCM restart, sleep/resume or remote control of a UAC prompt.
 
-Android VM touch tap, hold-drag, two-finger right click and pinch, plus trackpad
-hold-drag/right click, passed against a benign owned Windows target with event
-counters. Text insertion and scrolling passed in the preceding input run. These
-are actual controller-to-target checks; they do not establish physical touchscreen
-or secure-desktop behavior.
+Build 922's Android VM run of the PR #51 gestures, since replaced (see
+[Gestures, keys and modifiers](#gestures-keys-and-modifiers)), passed against a
+benign owned Windows target with event counters: touch tap, hold-drag,
+two-finger right click and pinch, plus trackpad hold-drag/right click. Text
+insertion and scrolling passed in the preceding input run. These were actual
+controller-to-target checks; they do not establish physical touchscreen or
+secure-desktop behavior. The current gestures have not yet reached a target;
+they are item 7 of
+[Stage 3](../scripts/test/desktop-ui-acceptance.md#stage-3-full-acceptance).
 
 Supporting experiments remain separate from UI presentation acceptance. Earlier
 split-TLS transport probes measured 43.62 / 32.26 Mbit/s with a 194 ms median ping
@@ -1014,7 +1018,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Capability | Current evidence / limit |
 | --- | --- |
 | Windows ordinary desktop | Capture and native video paths exercised on the machine above |
-| Input / Unicode / touch mapping | Android VM gestures and text/scroll reached a benign Windows target; physical-device and secure-desktop acceptance outstanding |
+| Input / Unicode / touch mapping | Build 922's PR #51 gestures and text/scroll reached a benign Windows target from the Android VM; the current gestures, physical-device and secure-desktop acceptance outstanding |
 | Direct and forced relay | Android VM runtime baselines above and deployed TCP experiments recorded; independent cross-network UI acceptance outstanding |
 | Android viewer | Native MediaCodec/Flutter texture path exercised in an Android VM; physical phone validation outstanding |
 | iOS viewer | Shared Flutter/JPEG path exists; packaged build and device validation outstanding |

@@ -133,8 +133,8 @@ Desktop video never enters the JSON control envelope. On Windows and Android
 the native decoder pulls H.264 from Rust itself, through plain C exports or
 their JNI twins, and draws into a Flutter texture; Dart reads only status and
 the per-frame view. Elsewhere JPEG comes to Dart as bytes and is decoded off
-the UI isolate. See the desktop document above for queue bounds, presentation
-acknowledgements and ownership.
+the UI isolate. See the desktop document above for queue bounds, receipt
+credit and ownership.
 
 To run and build this app, you need to have
 [Flutter SDK](https://docs.flutter.dev/get-started/install)
