@@ -77,19 +77,26 @@ class AddComputerResult {
       'replaces: $replaceId, existing: ${existing?.id})';
 }
 
-/// A remember waiting for its session's first picture.
-class _PendingRemember {
-  const _PendingRemember({
+/// Why a computer the user asked to remember was not remembered.
+enum RememberFailure { full, unavailable }
+
+/// The computer a session was opened for, as its invitation or its record
+/// names it: what a remember must match, since the vault refuses any other
+/// live session.
+class _Target {
+  const _Target({
     required this.id,
     required this.name,
     required this.service,
     required this.fingerprint,
     required this.relayOnly,
     this.replaceId,
+    this.onRememberFailed,
   });
   final String id, name, service, fingerprint;
   final bool relayOnly;
   final String? replaceId;
+  final ValueChanged<RememberFailure>? onRememberFailed;
 }
 
 /// Viewing other computers: which one is open, opening, leaving and ending
@@ -121,7 +128,11 @@ class RemoteDesktop {
   final int Function() _credentialKeyId;
   final DateTime Function() _now;
 
-  _PendingRemember? _pending;
+  /// The computer the current session was opened for.
+  _Target? _current;
+
+  /// [_current] is to be remembered at its first picture.
+  bool _rememberPending = false;
 
   /// The target whose first picture was already handled.
   String? _liveKey;
@@ -143,14 +154,17 @@ class RemoteDesktop {
     return (id == null ? null : computers.byId(id))?.name ?? target.name;
   }
 
+  /// A session is open that opening another computer would end. One whose
+  /// host's identity changed has nothing left to lose.
+  bool get hasOpenSession {
+    final session = desktop.session.value;
+    return _open(session) && session.phase != DesktopPhase.identityChanged;
+  }
+
   /// Whether opening [c] would end another open session (a switch to
   /// confirm).
-  bool switchesFrom(RemoteComputer c) {
-    final session = desktop.session.value;
-    return session.target?.computerId != c.id &&
-        _open(session) &&
-        session.phase != DesktopPhase.identityChanged;
-  }
+  bool switchesFrom(RemoteComputer c) =>
+      hasOpenSession && desktop.session.value.target?.computerId != c.id;
 
   /// Shows [c]: its open session if it has one, else a new one, ending
   /// whatever else was open.
@@ -163,8 +177,15 @@ class RemoteDesktop {
     }
     // On Android a connect by id needs the vault unlocked first.
     await computers.load();
-    _pending = null;
     unawaited(_endSession());
+    _current = _Target(
+      id: c.id,
+      name: c.name,
+      service: c.service,
+      fingerprint: c.fingerprint,
+      relayOnly: c.relayOnly,
+    );
+    _rememberPending = false;
     unawaited(
       desktop.connect(
         DesktopTarget(
@@ -179,23 +200,27 @@ class RemoteDesktop {
   }
 
   /// Connects what the add flow recognised. A computer to remember is
-  /// remembered only after its first picture, never before (D20).
-  Future<void> connectNew(AddComputerResult result) async {
+  /// remembered only after its first picture, never before (D20); when that
+  /// fails for a reason the user can act on, [onRememberFailed] says which.
+  Future<void> connectNew(
+    AddComputerResult result, {
+    ValueChanged<RememberFailure>? onRememberFailed,
+  }) async {
     if (result.existing case final existing?) return open(existing);
     _cancelPausedTimer();
     final replaceId = result.replaceId;
     final id = replaceId ?? computers.newId();
-    _pending = result.remember
-        ? _PendingRemember(
-            id: id,
-            name: result.name,
-            service: result.info.service,
-            fingerprint: result.info.fingerprint,
-            relayOnly: result.relayOnly,
-            replaceId: replaceId,
-          )
-        : null;
     unawaited(_endSession());
+    _current = _Target(
+      id: id,
+      name: result.name,
+      service: result.info.service,
+      fingerprint: result.info.fingerprint,
+      relayOnly: result.relayOnly,
+      replaceId: replaceId,
+      onRememberFailed: onRememberFailed,
+    );
+    _rememberPending = result.remember;
     unawaited(
       desktop.connect(
         DesktopTarget(
@@ -210,6 +235,29 @@ class RemoteDesktop {
       ),
     );
     viewer.open();
+  }
+
+  /// Whether the open session's computer can still be remembered: it was
+  /// connected without remembering and has shown its picture.
+  bool get canRememberCurrent {
+    final session = desktop.session.value;
+    final id = session.target?.computerId;
+    return id != null &&
+        _current?.id == id &&
+        computers.byId(id) == null &&
+        session.phase == DesktopPhase.live &&
+        session.hasPicture;
+  }
+
+  /// Remembers the open session's computer after all. Null when it was
+  /// remembered, or the vault refused because the session is no longer
+  /// that computer's.
+  Future<RememberFailure?> rememberCurrent() async {
+    final current = _current;
+    if (current == null || !canRememberCurrent) return null;
+    _rememberPending = false;
+    final record = await _remember(current, desktop.session.value);
+    return record == null ? _failure() : null;
   }
 
   /// Leaves the picture and keeps the session, paused (D13): back to the
@@ -241,7 +289,7 @@ class RemoteDesktop {
   /// Ends the session, with its last picture (D23), and closes the viewer.
   Future<void> disconnect() async {
     _cancelPausedTimer();
-    _pending = null;
+    _rememberPending = false;
     final ending = _endSession();
     viewer.close();
     await ending;
@@ -305,30 +353,24 @@ class RemoteDesktop {
       unawaited(_firstPicture(session));
     } else if ((session.phase == DesktopPhase.identityChanged ||
             session.phase == DesktopPhase.ended) &&
-        _pending?.id == key) {
+        _current?.id == key) {
       // Not proven to be the computer it claims: nothing is remembered.
-      _pending = null;
+      _rememberPending = false;
     }
   }
 
   Future<void> _firstPicture(DesktopSessionView session) async {
-    final target = session.target;
-    final id = target?.computerId;
-    if (target == null || id == null) return;
-    final pending = _pending;
-    if (pending != null && pending.id == id) {
-      _pending = null;
-      await computers.rememberSession(
-        id: id,
-        name: pending.name,
-        service: pending.service,
-        fingerprint: pending.fingerprint,
-        relay: _relayAddress(),
-        namespace: _credentialKeyId(),
-        relayOnly: pending.relayOnly,
-        quality: target.quality,
-        replaceId: pending.replaceId,
-      );
+    final id = session.target?.computerId;
+    if (id == null) return;
+    final current = _current;
+    if (_rememberPending && current != null && current.id == id) {
+      _rememberPending = false;
+      if (await _remember(current, session) == null) {
+        if (_failure() case final failure?) {
+          current.onRememberFailed?.call(failure);
+        }
+      }
+      return;
     }
     if (computers.byId(id) != null) {
       await computers.recordSession(
@@ -339,6 +381,42 @@ class RemoteDesktop {
       );
     }
   }
+
+  /// Remembers [target] for the live [session] (after the TLS pin and the
+  /// first picture), then records the session on it.
+  Future<RemoteComputer?> _remember(
+    _Target target,
+    DesktopSessionView session,
+  ) async {
+    final record = await computers.rememberSession(
+      id: target.id,
+      name: target.name,
+      service: target.service,
+      fingerprint: target.fingerprint,
+      relay: _relayAddress(),
+      namespace: _credentialKeyId(),
+      relayOnly: target.relayOnly,
+      quality: session.target?.quality ?? DesktopQuality.balanced,
+      replaceId: target.replaceId,
+    );
+    if (record != null) {
+      await computers.recordSession(
+        record.id,
+        at: _now(),
+        path: session.path,
+        controlAllowed: session.controlAllowed,
+      );
+    }
+    return record;
+  }
+
+  /// Why a remember just returned nothing, when the user can act on it; a
+  /// refusal for another live session says nothing.
+  RememberFailure? _failure() => !computers.support.available
+      ? RememberFailure.unavailable
+      : computers.full
+      ? RememberFailure.full
+      : null;
 
   void _onViewer() {
     if (viewer.showing) _cancelPausedTimer();

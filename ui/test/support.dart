@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,7 +25,10 @@ final changes = StreamController<StateChange>.broadcast();
 
 /// Pump the whole app over [api] at [size], opening on [page], with motion
 /// reduced so the galaxy settles and pumpAndSettle can finish. Remembered
-/// computers live in [vault], an in-memory one unless a test passes its own.
+/// computers live in [vault], an in-memory one unless a test passes its own,
+/// and their last pictures in [thumbnails], a fresh temporary directory
+/// unless a test passes its own (it must exist: a widget test's clock never
+/// finishes creating one).
 Future<void> pumpApp(
   WidgetTester tester,
   FakePbMapperApi api, {
@@ -37,7 +41,14 @@ Future<void> pumpApp(
   UpdateController? updates,
   ViewerPrefs? viewerPrefs,
   RemoteComputerVault? vault,
+  Directory? thumbnails,
 }) async {
+  if (thumbnails == null) {
+    final temp = Directory.systemTemp.createTempSync('pbm-thumbnails-');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    thumbnails = temp;
+  }
+  final thumbnailDir = thumbnails;
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -61,6 +72,7 @@ Future<void> pumpApp(
         updates: updates,
         viewerPrefs: viewerPrefs ?? ViewerPrefs(persist: false),
         vault: vault ?? FakeRemoteComputerVault(),
+        thumbnailDir: () async => thumbnailDir,
       ),
     ),
   );

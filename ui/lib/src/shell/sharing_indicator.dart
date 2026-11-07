@@ -209,7 +209,12 @@ class _SharingIndicatorState extends State<SharingIndicator> {
       fixedSize: const Size.fromHeight(26),
       padding: const EdgeInsets.symmetric(horizontal: 10),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
-      textStyle: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500),
+      // From the theme's label style: a bare TextStyle here would replace
+      // it and lose the UI typeface.
+      textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+        fontSize: 12.5,
+        fontWeight: FontWeight.w500,
+      ),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       visualDensity: VisualDensity.compact,
     );

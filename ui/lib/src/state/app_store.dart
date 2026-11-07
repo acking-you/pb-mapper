@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Directory;
 import 'desktop_store.dart';
 
 import 'package:flutter/foundation.dart';
@@ -48,19 +49,26 @@ class AppStore extends ChangeNotifier {
     this.tunnelInterval = const Duration(seconds: 6),
     this.onRestartReady,
     RemoteComputerVault? vault,
+    Future<Directory> Function()? thumbnailDir,
   }) : _changes = changes ?? PbMapperService.changeStream,
-       _vault = vault;
+       _vault = vault,
+       _thumbnailDir = thumbnailDir ?? _defaultThumbnailDir;
 
   final PbMapperApiClient api;
   final Future<void> Function()? onRestartReady;
   final Stream<StateChange> _changes;
   final RemoteComputerVault? _vault;
+  final Future<Directory> Function() _thumbnailDir;
   RemoteComputerStore? _computers;
 
   /// The computers this device remembers, read in [start].
   RemoteComputerStore get computers => _computers ??= RemoteComputerStore(
     _vault ?? defaultRemoteComputerVault(),
-    thumbnailDir: getApplicationSupportDirectory,
+    thumbnailDir: _thumbnailDir,
+  );
+
+  static Future<Directory> _defaultThumbnailDir() async => Directory(
+    '${(await getApplicationSupportDirectory()).path}/desktop-thumbnails',
   );
 
   /// How often the relay is asked what it holds while nothing else asks.

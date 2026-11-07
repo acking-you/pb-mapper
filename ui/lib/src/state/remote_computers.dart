@@ -131,6 +131,8 @@ final class RememberUnavailable extends RememberSupport {
 /// vault. Nothing is ever written in plain text: a vault that fails turns
 /// [support] unavailable instead.
 class RemoteComputerStore extends ChangeNotifier {
+  /// [thumbnailDir] is the private directory last pictures live in; it is
+  /// created when missing.
   RemoteComputerStore(
     this._vault, {
     required Future<Directory> Function() thumbnailDir,
@@ -187,9 +189,8 @@ class RemoteComputerStore extends ChangeNotifier {
 
   Future<void> _load() async {
     try {
-      final base = await _thumbnailDir();
-      final dir = Directory('${base.path}/desktop-thumbnails');
-      await dir.create(recursive: true);
+      final dir = await _thumbnailDir();
+      if (!dir.existsSync()) await dir.create(recursive: true);
       _thumbnails = dir;
     } catch (error) {
       // Without a private directory there are no last pictures; the

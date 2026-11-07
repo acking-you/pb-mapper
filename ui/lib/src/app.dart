@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show exit;
+import 'dart:io' show Directory, exit;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
@@ -50,6 +50,7 @@ class PbMapperApp extends StatefulWidget {
     this.prefs,
     this.viewerPrefs,
     this.vault,
+    this.thumbnailDir,
     this.needsSetup,
     this.initialPage,
     this.desktop = false,
@@ -66,6 +67,10 @@ class PbMapperApp extends StatefulWidget {
 
   /// Where remembered computers are kept; tests pass their own.
   final RemoteComputerVault? vault;
+
+  /// The directory their last pictures go in: one under the app's support
+  /// directory unless a test passes its own.
+  final Future<Directory> Function()? thumbnailDir;
 
   /// Null asks the API whether this install was ever set up.
   final bool? needsSetup;
@@ -94,6 +99,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
     changes: widget.changes,
     onRestartReady: () async => _quit(),
     vault: widget.vault,
+    thumbnailDir: widget.thumbnailDir,
   );
   late final RelayStore _relay = RelayStore(app: _store);
   late final AppPrefs _prefs = widget.prefs ?? AppPrefs();
