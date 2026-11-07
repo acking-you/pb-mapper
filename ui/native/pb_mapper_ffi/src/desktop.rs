@@ -763,7 +763,7 @@ async fn helper_action(handle: &PbMapperHandle, verb: HelperVerb) -> Result<Valu
         use desktop::helper::Action;
         // Installing may resume a saved service grant. Keep it serialized
         // with local starts until the helper process exits. An update from
-        // here keeps a stopped or Disabled service so.
+        // here keeps a stopped or Disabled service as it is.
         let local = handle.desktop.host.lock().await;
         let action = match verb {
             HelperVerb::Install if local.is_some() => {

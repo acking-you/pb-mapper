@@ -797,8 +797,9 @@ mod tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Install this bundle, or update the installed helper in place. An update
-    /// keeps a stopped or Disabled service so, unless `enable` also restores
-    /// automatic startup and starts it, as `Enable` does.
+    /// keeps the service's startup type and running state, stopped or Disabled
+    /// included, unless `enable` restores automatic startup and starts it, as
+    /// `Enable` does.
     Install {
         enable: bool,
     },
