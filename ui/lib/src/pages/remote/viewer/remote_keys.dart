@@ -32,9 +32,6 @@ enum RemoteShortcut {
   /// Releases every key and button this viewer holds on the host.
   releaseKeys;
 
-  /// Whether it acts on the host, and so needs control.
-  bool get needsControl => index <= lock.index;
-
   /// The keys a chord presses, in order; released in reverse. Empty for the
   /// entries that are not chords.
   List<RemoteKey> get chord => switch (this) {

@@ -11,7 +11,6 @@ abstract interface class DesktopVideoTexture {
   /// Binds the decoder to a viewer's video source. A reconnect binds the new
   /// source; the texture and its last picture persist.
   Future<void> attach(int videoSource);
-  Future<void> detach();
 
   /// Writes the last presented picture as a JPEG at most [maxWidth] wide
   /// (D23). False when there is none. The caller bounds the wait.
@@ -63,12 +62,6 @@ class _ChannelVideoTexture implements DesktopVideoTexture {
       'textureId': textureId,
       'source': videoSource,
     });
-  }
-
-  @override
-  Future<void> detach() async {
-    if (_disposed) return;
-    await _channel.invokeMethod<void>('detach', {'textureId': textureId});
   }
 
   @override

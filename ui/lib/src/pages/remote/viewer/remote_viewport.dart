@@ -87,9 +87,6 @@ final class RemoteViewport extends ChangeNotifier {
 
   ViewerScaleMode get mode => _mode;
 
-  /// Whether the user zoomed or panned since [beginKeyboard].
-  bool get navigatedSinceKeyboard => _navigated;
-
   /// The picture point under [local], or null outside the picture unless
   /// [clamp] pulls it to the nearest edge.
   Offset? toNormalized(Offset local, {bool clamp = false}) {

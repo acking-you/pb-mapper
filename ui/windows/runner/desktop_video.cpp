@@ -835,8 +835,7 @@ struct DesktopVideo::Impl {
         if (call.method_name() == "attach") {
           viewer->Attach(static_cast<uint64_t>(Number(*args, "source")));
           result->Success();
-        } else if (call.method_name() == "detach") { viewer->Detach(); result->Success(); }
-        else if (call.method_name() == "snapshot") {
+        } else if (call.method_name() == "snapshot") {
           const int64_t width = args->find(Value("maxWidth")) == args->end() ? kSnapshotWidth : Number(*args, "maxWidth");
           if (width <= 0) throw std::runtime_error("Invalid snapshot width");
           auto path = Path(*args, "path");

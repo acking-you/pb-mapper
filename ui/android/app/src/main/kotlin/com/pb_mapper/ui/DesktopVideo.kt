@@ -57,7 +57,6 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
                             viewer.attach(call.argument<Number>("source")?.toLong() ?: error("Missing video source"))
                             result.success(null)
                         }
-                        "detach" -> { viewer.detach(); result.success(null) }
                         "snapshot" -> {
                             val path = call.argument<String>("path")?.takeIf { it.isNotEmpty() } ?: error("Missing snapshot path")
                             val maxWidth = call.argument<Number>("maxWidth")?.toInt() ?: SNAPSHOT_WIDTH
@@ -233,8 +232,6 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             consumer = next
             feeder = VideoFeeder(api, next, this, pool).apply { start() }
         }
-
-        fun detach() = stopFeeder()
 
         private fun stopFeeder() {
             feeder?.close()

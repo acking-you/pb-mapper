@@ -617,9 +617,6 @@ class FakeVideoTexture implements DesktopVideoTexture {
   Future<void> attach(int videoSource) async => attached.add(videoSource);
 
   @override
-  Future<void> detach() async {}
-
-  @override
   Future<bool> snapshot(String path, {int maxWidth = 320}) {
     snapshots.add(path);
     return snapshotAnswer();
