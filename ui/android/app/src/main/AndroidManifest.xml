@@ -10,7 +10,9 @@
         android:label="pb-mapper UI"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules">
         <!-- The acknowledged desktop decoder uses SurfaceTexture. Keep it on
              OpenGL: Impeller's Vulkan compatibility bridge copies and resizes
              that texture to the transformed viewport on every paint, including

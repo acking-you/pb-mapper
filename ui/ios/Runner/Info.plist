@@ -24,6 +24,9 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Translated in en.lproj and zh-Hans.lproj/InfoPlist.strings -->
+	<key>NSCameraUsageDescription</key>
+	<string>pb-mapper uses the camera to scan another computer's remote desktop QR code. Nothing is saved or uploaded.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

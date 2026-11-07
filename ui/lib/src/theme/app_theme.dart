@@ -101,6 +101,12 @@ Color cautionColor(ColorScheme scheme) => scheme.brightness == Brightness.light
 Color onSurfaceMuted(ColorScheme scheme) =>
     scheme.onSurface.withValues(alpha: 0.55);
 
+/// Text a step quieter than `onSurfaceVariant`: help under a control, a
+/// footnote, a service name beside its title. Still above 4.5:1 on cards.
+Color quietText(ColorScheme scheme) => scheme.brightness == Brightness.light
+    ? const Color(0xFF6E6E73)
+    : const Color(0xFF8E8E93);
+
 /// A faint neutral wash: a highlighted option, a chip that is "on" without
 /// being a status.
 Color softWash(ColorScheme scheme, {double strength = 1}) =>

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
 import 'package:pb_mapper_ui/src/theme/motion.dart';
+import 'package:pb_mapper_ui/src/theme/viewer_palette.dart';
 import 'package:window_manager/window_manager.dart';
 
 /// The native title bar is hidden on every desktop (see `main.dart`), so the
@@ -62,8 +63,9 @@ Future<void> _toggleMaximize() async {
   }
 }
 
-/// What the caption buttons are drawn over: the app's own surfaces.
-enum CaptionTone { surface }
+/// What the caption buttons are drawn over: the app's own surfaces, or the
+/// remote desktop viewer's dark title bar.
+enum CaptionTone { surface, viewer }
 
 /// The four marks a caption button draws.
 enum CaptionGlyph { minimize, maximize, restore, close }
@@ -202,6 +204,12 @@ class _CaptionButtonState extends State<_CaptionButton> {
         scheme.onSurface,
         scheme.onSurface.withValues(alpha: 0.08),
         scheme.onSurface.withValues(alpha: 0.12),
+      ),
+      CaptionTone.viewer => (
+        ViewerPalette.textSecondary,
+        ViewerPalette.text,
+        Colors.white.withValues(alpha: 0.09),
+        Colors.white.withValues(alpha: 0.14),
       ),
     };
     final Color bg;
