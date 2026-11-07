@@ -408,8 +408,8 @@ fn serve(
         return Ok((response, vec![]));
     }
     let context = backend.context()?;
-    // Context polling observes the pointer even when capture is idle or
-    // paused. The backend checks this desktop identity; observing it never
+    // Context checks observe the pointer too, so it follows while capture is
+    // idle. The backend checks this desktop identity; observing it never
     // renews last_input or acknowledges video.
     let observe_cursor = matches!(
         request,
