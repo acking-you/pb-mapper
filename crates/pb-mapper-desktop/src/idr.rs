@@ -12,8 +12,8 @@ pub(crate) const HOST_IDR_MIN_INTERVAL: Duration = Duration::from_millis(300);
 /// request: the encoder starts with an IDR and replaces late output with one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IdrReason {
-    /// `Engine::invalidate`: a control grant or revoke, an input failure, or
-    /// capture recovered.
+    /// `Engine::invalidate`: a control grant or revoke, an input failure, a
+    /// new desktop, or a capture failure that ended streaming.
     Generation,
     Resume,
     Viewer(KeyframeReason),
