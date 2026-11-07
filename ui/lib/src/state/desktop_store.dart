@@ -510,13 +510,21 @@ class DesktopStore {
       // each page visit reads it again. A failed read is retried.
       final trust = await _readTrust(serial) ?? const DesktopTrust();
       if (!_hostCurrent(serial)) return;
+      // A computer that cannot share (Windows without Media Foundation)
+      // restores nothing and retries nothing: the grant stays for a start
+      // where it can, and the Remote page says why. Local, no service IPC.
+      _capabilities = await _api.capabilities();
+      if (!_hostCurrent(serial)) return;
+      if (_capabilities?.host != true) {
+        _publishHost();
+        return;
+      }
       if (trust.saved?.background == true &&
           trust.saved?.autoStart == true &&
           trust.matchesRelay) {
         await _resumePendingHost(serial);
         return;
       }
-      _capabilities = await _api.capabilities();
       await _discoverBackground();
       await _readHost();
       if (!_hostCurrent(serial)) return;

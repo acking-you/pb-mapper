@@ -593,8 +593,10 @@ conversion, followed by a low-latency Media Foundation hardware encoder with no
 B-frame reordering. Each duplication frame is released at once, so no update is
 missed between ticks. Hosting requires Media Foundation and a compatible
 hardware H.264 MFT on the capture GPU, and reports an error when that path is
-unavailable; without Media Foundation the capabilities report no host and a
-host refuses to start. JPEG remains an
+unavailable; without Media Foundation the capabilities report no host, a
+host refuses to start, and the app restores no remembered sharing grant
+(it keeps it for a start where Media Foundation is installed) and retries
+nothing. JPEG remains an
 SDK compatibility path at up to 8 FPS; there is no promise that every hardware
 failure silently falls back to JPEG. The encoder runs at the session's nominal
 frame rate (the viewer's `max_fps`) and is never rebuilt for a frame rate,
