@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -280,6 +282,25 @@ void main() {
       expect(find.byType(OverviewPage), findsOneWidget);
       await finish(tester);
     });
+
+    testWidgets('a configured install opens before the relay answers', (
+      tester,
+    ) async {
+      final relay = Completer<void>();
+      final api = FakePbMapperApi()..relayGate = relay;
+      await pumpApp(tester, api, needsSetup: null);
+      expect(find.byType(OverviewPage), findsOneWidget);
+      relay.complete();
+      await finish(tester);
+    });
+
+    testWidgets('a failed first read does not open setup', (tester) async {
+      final api = _fresh()..configFails = true;
+      await pumpApp(tester, api, needsSetup: null);
+      expect(find.byKey(const Key('setup-title')), findsNothing);
+      expect(find.byType(OverviewPage), findsOneWidget);
+      await finish(tester);
+    });
   });
 
   group('SetupState', () {
@@ -289,11 +310,18 @@ void main() {
       expect(SetupState.isServerConfigured('relay.example:7666'), isTrue);
     });
 
-    test('a fresh install needs setup, a used one does not', () async {
-      expect(await SetupState.needsSetup(_fresh()), isTrue);
+    test('a fresh install needs setup, a used one does not', () {
       expect(
-        await SetupState.needsSetup(
-          _fresh()..services = [fakeService(serviceKey: 'web')],
+        SetupState.needsSetup(
+          serverAddress: SetupState.defaultServerAddress,
+          hasTunnels: false,
+        ),
+        isTrue,
+      );
+      expect(
+        SetupState.needsSetup(
+          serverAddress: SetupState.defaultServerAddress,
+          hasTunnels: true,
         ),
         isFalse,
       );

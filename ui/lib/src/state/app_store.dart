@@ -104,7 +104,7 @@ class AppStore extends ChangeNotifier {
   ChangeSubscription? _subscription;
   Timer? _relayTimer;
   Timer? _tunnelTimer;
-  final Completer<void> _firstRead = Completer<void>();
+  final Completer<bool> _firstRead = Completer<bool>();
 
   String get relayAddress => config.serverAddress.trim();
 
@@ -214,8 +214,9 @@ class AppStore extends ChangeNotifier {
       );
 
   /// Completes once [start]'s first read of the config and the tunnels is in,
-  /// without waiting for the relay to answer.
-  Future<void> get ready => _firstRead.future;
+  /// without waiting for the relay to answer, with whether every read
+  /// succeeded.
+  Future<bool> get ready => _firstRead.future;
 
   /// Begin reading and listening. Safe to call more than once.
   Future<void> start() async {
@@ -254,9 +255,9 @@ class AppStore extends ChangeNotifier {
   /// Read everything again; [force] makes the relay answer now rather than
   /// from the Rust side's cache.
   Future<void> refresh({bool force = false}) async {
-    await Future.wait([_loadConfig(), _loadTunnels()]);
+    final read = await Future.wait([_loadConfig(), _loadTunnels()]);
     loaded = true;
-    if (!_firstRead.isCompleted) _firstRead.complete();
+    if (!_firstRead.isCompleted) _firstRead.complete(read.every((ok) => ok));
     _notify();
     await checkRelay(force: force);
   }
@@ -321,16 +322,21 @@ class AppStore extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> _loadConfig() async {
+  // Each read says whether it succeeded, and keeps what it had when not.
+
+  Future<bool> _loadConfig() async {
     try {
       config = await api.fetchConfig();
+      return true;
     } catch (_) {
       // Keep what was there: a failed read is not a cleared config.
+      return false;
+    } finally {
+      _notify();
     }
-    _notify();
   }
 
-  Future<void> _loadShares() async {
+  Future<bool> _loadShares() async {
     try {
       final next =
           (await api.getServiceConfigs()).map(Tunnel.fromService).toList()
@@ -339,10 +345,13 @@ class AppStore extends ChangeNotifier {
         shares = next;
         _notify();
       }
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  Future<void> _loadConnections() async {
+  Future<bool> _loadConnections() async {
     try {
       final next =
           (await api.getClientConfigs()).map(Tunnel.fromClient).toList()
@@ -351,12 +360,16 @@ class AppStore extends ChangeNotifier {
         connections = next;
         _notify();
       }
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  Future<void> _loadTunnels() async {
-    if (_disposed) return;
-    await Future.wait([_loadShares(), _loadConnections()]);
+  Future<bool> _loadTunnels() async {
+    if (_disposed) return false;
+    final read = await Future.wait([_loadShares(), _loadConnections()]);
+    return read.every((ok) => ok);
   }
 
   Future<void> _reload(TunnelKind kind) =>

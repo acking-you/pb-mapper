@@ -72,7 +72,8 @@ class PbMapperApp extends StatefulWidget {
   /// directory unless a test passes its own.
   final Future<Directory> Function()? thumbnailDir;
 
-  /// Null asks the API whether this install was ever set up.
+  /// Null decides from the saved config and tunnels whether this install was
+  /// ever set up.
   final bool? needsSetup;
 
   /// The page to open on, over the one remembered from last time: Remote
@@ -138,13 +139,26 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   }
 
   Future<void> _boot() async {
-    await Future.wait([_prefs.load(), _viewerPrefs.load()]);
     final started = _store.start();
     // Setup seeds its fields from the store once, so the saved config has to
     // be in it first: shown any earlier, setup would offer a blank credential
     // and saving the relay would overwrite the real one with it.
-    await _store.ready;
-    final setup = widget.needsSetup ?? await SetupState.needsSetup(widget.api);
+    final (_, read) = await (
+      Future.wait([_prefs.load(), _viewerPrefs.load()]),
+      _store.ready,
+    ).wait;
+    // Whether this install needs setup comes from that same read. Reading
+    // again would queue behind the relay check the store makes next, which
+    // holds the native state lock until the relay answers. A read that failed
+    // is not evidence of a new install, and dropping an existing user into
+    // setup is the worse mistake.
+    final setup =
+        widget.needsSetup ??
+        (read &&
+            SetupState.needsSetup(
+              serverAddress: _store.relayAddress,
+              hasTunnels: _store.tunnels.isNotEmpty,
+            ));
     if (!mounted) return;
     setState(() {
       _setup = setup;
