@@ -586,6 +586,50 @@ void main() {
   );
 
   testWidgets(
+    "a phone's More panel keeps Disconnect in reach without scrolling",
+    (tester) async {
+      _size(tester, const Size(844, 390));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      var disconnected = 0;
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+            onDisconnect: () async => disconnected++,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('touch-more')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final disconnect = find.byKey(const Key('more-disconnect')).hitTestable();
+      expect(disconnect, findsOneWidget);
+      await tester.tap(disconnect);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(disconnected, 1);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
     'a trackpad stroke repaints the cursor and the ring alone, and a pan the '
     'stage and the minimap alone',
     (tester) async {
