@@ -23,7 +23,7 @@ use std::path::PathBuf;
 pub use client::backend;
 #[cfg(feature = "windows-helper")]
 pub(crate) use os::SessionIdentity;
-pub use os::request_installation;
+pub use os::{Action, request_installation};
 pub use restart::prepare as prepare_application_restart;
 
 #[cfg(feature = "windows-helper")]
@@ -263,12 +263,17 @@ pub fn run() -> Result<()> {
             worker::run(pipe, parent.parse().map_err(error)?)
         }
         [mode, parent] if mode == "restart-ui" => restart::run(parent.parse().map_err(error)?),
-        [mode, source, sid] if mode == "install" => install::install(&PathBuf::from(source), sid),
+        [mode, source, sid] if mode == "install" => {
+            install::install(&PathBuf::from(source), sid, false)
+        }
+        [mode, source, sid, then] if mode == "install" && then == "enable" => {
+            install::install(&PathBuf::from(source), sid, true)
+        }
         [mode] if mode == "enable" => install::enable(),
         [mode] if mode == "disable" => install::disable(),
         [mode] if mode == "uninstall" => install::uninstall(),
         _ => Err(error(
-            "expected install <UI bundle> <authorized SID>, service, enable, disable or uninstall",
+            "expected install <UI bundle> <authorized SID> [enable], service, enable, disable or uninstall",
         )),
     }
 }
