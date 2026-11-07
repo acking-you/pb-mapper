@@ -1413,6 +1413,28 @@ mod tests {
         viewer.stop().await.unwrap();
     }
 
+    /// An IDR slower to cross than the hold after a new generation: its
+    /// header answers the hold, so nothing asks for another while its payload
+    /// is still in transit.
+    #[tokio::test]
+    async fn an_idr_slower_than_the_hold_is_not_asked_for_again() {
+        let (viewer, mut host, _) = connect(accepted()).await;
+        let viewer = viewer.unwrap();
+        send(&mut host, state(1, false), None).await;
+        // The header now, its payload record only once the hold has expired.
+        send(&mut host, video(1, 1, 1, true), None).await;
+        tokio::time::sleep(recovery::HOLD_AFTER_DISCONTINUITY + 3 * VIEWER_TICK).await;
+        host.write_u32(64).await.unwrap();
+        host.write_all(&[1; 64]).await.unwrap();
+        until(&mut host, |m| {
+            matches!(m, ViewerMessage::Received { seq: 1 })
+        })
+        .await;
+        assert_eq!(viewer.status().stats.keyframes_requested, 0);
+        drop(host);
+        viewer.stop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_decoder_that_cannot_recover_ends_the_session() {
         let (viewer, mut host, _) = connect(accepted()).await;
