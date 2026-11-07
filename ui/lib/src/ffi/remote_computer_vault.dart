@@ -163,6 +163,7 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
       await _call('computers_key') as Map,
     );
     final wrapped = stored['wrapped'] as String?;
+    String? gone;
     if (wrapped != null) {
       try {
         final key = await _keystore.invokeMethod<Uint8List>(
@@ -184,8 +185,7 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
         // The Keystore key is gone, or no longer opens its wrapped copy:
         // what it sealed can never be read again, so the vault starts
         // empty under a new key.
-        debugPrint('Remembered computers reset: ${error.message}');
-        await reset();
+        gone = error.message ?? error.code;
       }
     }
     final key = Uint8List.fromList([
@@ -197,6 +197,12 @@ final class FfiRemoteComputerVault implements RemoteComputerVault {
         'IO',
         'the Keystore wrap failed',
       );
+    }
+    // Only a Keystore that seals a new key starts the vault over: one that
+    // cannot may be failing for now, and the next load tries again.
+    if (gone != null) {
+      await reset();
+      debugPrint('Remembered computers reset: $gone');
     }
     await _call('computers_unlock', {
       'key': base64Encode(key),

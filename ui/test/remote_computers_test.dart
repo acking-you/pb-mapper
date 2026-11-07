@@ -24,6 +24,7 @@ const _office = DesktopInvitationInfo(
 /// Answers the vault's ops as Rust does on Android, with a wrapped key on
 /// disk.
 class _AndroidVaultService implements PbMapperService {
+  /// The vault's ops, and the Keystore calls between them.
   final ops = <String>[];
 
   @override
@@ -56,17 +57,21 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     addTearDown(() => messenger.setMockMethodCallHandler(keystore, null));
     for (final (code, starts) in [('KEYSTORE', false), ('KEY_GONE', true)]) {
+      final service = _AndroidVaultService();
       messenger.setMockMethodCallHandler(keystore, (call) async {
+        service.ops.add(call.method);
         if (call.method == 'unwrap') throw PlatformException(code: code);
         return Uint8List(60);
       });
-      final service = _AndroidVaultService();
       final vault = FfiRemoteComputerVault(service, keystore: keystore);
       expect((await vault.open()).available, starts);
+      // The new key is sealed before the old vault goes: a Keystore that
+      // cannot seal one now leaves the vault for the next load.
       expect(service.ops, [
         'computers_support',
         'computers_key',
-        if (starts) ...['computers_reset', 'computers_unlock'],
+        'unwrap',
+        if (starts) ...['wrap', 'computers_reset', 'computers_unlock'],
       ]);
     }
   });
