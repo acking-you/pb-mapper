@@ -22,6 +22,24 @@ All notable changes to this project will be documented in this file.
 - Draw the Windows and Linux caption buttons at 46×32 with their own glyphs, sharp at 125 % and 150 %, 16 px inside the page's edge, so the close button's red no longer reaches the rounded corner. Icons use Lucide's 400 weight throughout, at four sizes.
 - SDK: breaking. `pb_mapper::desktop::Viewer` is rewritten for desktop protocol v2; a viewer or host of an earlier version fails at the handshake with a version mismatch. `Viewer::connect(&client, &invitation, options, ViewerConfig { codecs, limits, quality, progress })` replaces `connect`, `connect_with_codecs`, `connect_with_video_preferences` and `connect_with_presentation_feedback`, and fails with a typed `ConnectError`. Video is consumed through `viewer.video_sink().attach()` (`VideoConsumer::next`, `presented`, `keyframe`, `report`); `frames`, `latest_frame`, `next_frame` and `Viewer::presented` are gone. The sink keeps only the newest decodable frames, caps the host's frame rate when the consumer falls behind, and ends the session with `decoder_failed` when the decoder cannot recover. `Viewer::input(generation, &[Input])` stamps the presented frame and the sequence itself and fails with a typed `InputError`. `status()` returns `ViewerStatus` and `view()` a `DesktopView`. Viewers describe their renderer with `VideoLimits` instead of `VideoPreferences`.
 - The app adds `qr` and `mobile_scanner` for invitation QR codes; Android asks for the camera only to scan. Known limits: the iOS and macOS builds with `mobile_scanner` are unverified (there is no Mac to build on and no checked-in Podfile), and remote desktop's UAC acceptance and real-phone fluidity are still pending (see `docs/remote-desktop.md`).
+- Stop a slow keyframe from setting off another. On a slow host uplink, frames waiting behind a keyframe still in flight no longer count as stale, so the host lowers its bitrate instead of sending keyframe after keyframe.
+- Encode each requested keyframe once: a request made while a keyframe is still being encoded is answered by it, so a slow encoder no longer sends two.
+- Resume a paused session on a desktop shared through the helper or the background service. The helper waited only 3 s for the next request, so a viewer paused for longer came back to a failed capture.
+- Retry a capture that keeps failing five times a second rather than sixty, and show a steady capture-unavailable state instead of a flicker.
+- Keep the helper's desktop and cursor across a failed command: a Lock refused on a locked desktop, or taking or releasing control, no longer flashes "Waiting for the remote desktop".
+- Return to a paused viewer without reconnecting. Time spent paused, or with capture unavailable, no longer counts towards the five seconds without video that open a new session.
+- Leave the host's frame rate alone while a phone's decoder starts: the viewer judges its backlog only from half a second after the decoder took its first keyframe, and drops nothing for age before then.
+- Keep Android's remembered computers when the Keystore is only busy. The vault starts over only when its key is gone or no longer opens its wrapped copy, and only after a new key is sealed.
+- Offer **Clear saved computers** when the saved list can no longer be decrypted or decoded, on Windows as on Android, instead of saying this device cannot remember. A file that is only locked is tried again at the next load.
+- Count a remembered computer's name in characters, as the vault does, and treat a name the vault refuses as a refused change rather than a broken vault.
+- Drag where the finger goes in trackpad mode: a double-tap-and-hold drag snapped the remote pointer back to where it started, and a quick lift clicked instead of dragging.
+- Send one Enter for each Return on an iPhone or iPad soft keyboard; it sent two.
+- Let the Remote desktop page leave loading when Windows cannot unlock the saved sharing grant. It says why and offers **Revoke the saved invitation**, and no longer retries the grant in the background.
+- Show a remembered computer's new last picture on a phone's featured card, which kept the old one.
+- Offer to rename the desktop service only while sharing, since renaming a stopped host always failed.
+- Open the add sheet, with the camera, on tablets and landscape phones narrower than the rail; they got the paste-only dialog.
+- Keep the invitation scanner looking after it rejects a code.
+- Keep a saved computer's record when its new invitation is connected with Remember off. The new session no longer writes onto it, and remembering the session later replaces the saved computer instead of adding a second one.
 
 ## [0.10.2] - 2026-11-03
 - Import a setup string directly from the clipboard during first-run setup. The relay address, credential, transport and keep-alive preference are staged until continuing, and invalid or unavailable clipboard contents leave existing edits intact.

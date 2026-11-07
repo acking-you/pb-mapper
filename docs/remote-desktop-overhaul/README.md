@@ -2,7 +2,7 @@
 
 这里存放 PR #51 后续改造的全部开发文档：已确认的设计稿、性能分析、实现清单，以及实现时使用的需求、决策、接口契约和工作计划。PR #51 仍因真机流畅度阻塞合并；这些文档描述的改造完成并经用户在真机上认可之前，阻塞不解除。
 
-截至 2026-11-07：设计已由用户确认；实现正在独立分支上按 [`plan/WORKPLAN.md`](plan/WORKPLAN.md) 分 9 个工作包进行，尚未推送到本 PR。
+截至 2026-11-07：设计已由用户确认；[`plan/WORKPLAN.md`](plan/WORKPLAN.md) 的 9 个工作包，以及对抗性审查发现问题的修复，都已在分支 `claude/remote-desktop-overhaul` 上实现；所有可自动化的检查均已通过。PR #51 仍保持合并阻塞，直到用户在真机上认可流畅度。
 
 ## 先看这三份
 
@@ -14,12 +14,12 @@
 
 ## 实现依据（`plan/`）
 
-实现阶段以这几份为准，冲突时的优先级：`WORKPLAN` 里标 **AMEND** 的条目 > 两份 `CONTRACT` > `DECISIONS` > `BRIEF`。
+实现阶段以这几份为准，冲突时的优先级：`WORKPLAN` 里标 **AMEND** 的条目 > 两份 `CONTRACT` > `DECISIONS` > `BRIEF`。两份 `CONTRACT` 已按对抗性审查后的修复更新，改动的章节列在各自开头。
 
 | 文档 | 内容 |
 | --- | --- |
 | [BRIEF.md](plan/BRIEF.md) | 原始需求：性能项 P0-1…P2-1 与 P1-4、UI 重设计、新能力、图标规则、标题栏修正、要更新的文档、工程规则 |
-| [DECISIONS.md](plan/DECISIONS.md) | 31 条跨模块决策（D1–D31）：协议 v2 与 ALPN、`pbd1` 邀请与证书固定、接收即归还信用、无限 GOP、手机视频不经 Dart、手势、记住的电脑加密存储等 |
+| [DECISIONS.md](plan/DECISIONS.md) | 32 条跨模块决策（D1–D32）：协议 v2 与 ALPN、`pbd1` 邀请与证书固定、接收即归还信用、无限 GOP、手机视频不经 Dart、手势、记住的电脑加密存储等 |
 | [CONTRACT-perf.md](plan/CONTRACT-perf.md) | 性能架构契约：常量表、线协议 v2、主机会话与信用、QoS、采集节拍与编码器、输入授权边界、查看端、FFI、原生解码、Dart 存储、测试 |
 | [CONTRACT-ui.md](plan/CONTRACT-ui.md) | UI 契约：外壳与导航、共享指示、记住的电脑与保险库、远程页、查看器（桌面 / 手机）、交互规范、图标、标题栏、文案、测试 |
 | [WORKPLAN.md](plan/WORKPLAN.md) | 9 个工作包的归属文件、依赖、验收命令、合并顺序（G0–G3）与真机验收步骤 |

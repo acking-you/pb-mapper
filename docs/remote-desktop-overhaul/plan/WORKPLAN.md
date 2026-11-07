@@ -99,7 +99,10 @@ made. Section 1.3 lists the questions only the owner can answer.
 ```dart
 // U/state/desktop_models.dart
 class DesktopHostView {                       // perf §9.4 fields plus:
-  final bool loaded;      // false until the first capabilities() + hostStatus() + trustStatus() round trip
+  final bool loaded;      // false until the first capabilities() + hostStatus() + trustStatus() round trip;
+                          // a trustStatus() that failed also counts (amended after the adversarial review)
+  final bool trustUnreadable; // that trustStatus() failed; `error` falls back to its error; re-read on a page
+                          // visit, never on a timer; restoreOnStartup treats it as nothing to restore (CONTRACT-ui §6.2)
   final bool configured;  // (trust.saved != null && trust.matchesRelay) || background?.configured == true
   // invitation, first match (perf §9.4; no separate invitation cache in the store):
   //   hostStatus().host?.invitation                                   // a local host runs

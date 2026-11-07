@@ -220,15 +220,18 @@ desktop for now.
   connection will be held to, never the token. A pb-mapper setup string is
   named as one and sent to Settings; a computer already in the list, or one
   whose identity changed, is said so and never merged in silently. On a
-  phone the camera reads the QR code (`invite_scanner.dart`). Remember is on
-  by default, but a computer is remembered only after its first picture, so
-  a wrong invitation leaves nothing behind.
+  phone or tablet narrower than the rail the camera reads the QR code
+  (`invite_scanner.dart`). Remember is on by default, but a computer is
+  remembered only after its first picture, so a wrong invitation leaves
+  nothing behind.
 - **Where they are kept.** Rust keeps remembered computers in an encrypted
   vault (`desktop_computers.rs`): DPAPI on Windows, and on Android a key the
   Android Keystore wraps. Their invitations never come back to Dart; a
   computer is opened by its id. Other platforms cannot remember, and the add
   form says why. A computer's last picture is a small image in the app's
-  private storage, deleted with it.
+  private storage, deleted with it. Saved computers that cannot be decrypted
+  or decoded are said so, with Clear saved computers, rather than as a
+  device that cannot remember.
 - **Desktop services are not tunnels.** A `desktop:` service is left out of
   Tunnels, the galaxy and the editor's suggestions; the Relay page lists it
   without Connect.

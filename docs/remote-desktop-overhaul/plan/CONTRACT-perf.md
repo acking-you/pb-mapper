@@ -5,6 +5,27 @@ P2-1 and the regression guards) and DECISIONS D1-D14, D17, D23 and D24. It also
 covers the pbd1 invite and pinning (D3), the helper upgrade (D2) and the
 `DesktopStore`/`DesktopApiClient` surface that the UI consumes.
 
+Amended after the adversarial review (2026-11-07). These sections now say
+what the merged code does:
+
+- 3 (`IDR_GRACE` row), 6.5 and 6.7: the sink drops nothing for age before
+  the consumer's first IDR, and the fps cap judges the consumer only from
+  `IDR_GRACE` after that first IDR (`first_idr_pulled_at`).
+- 5.5 step 8.3, 5.7 and 13.1: a head ages from the later of `ready_at` and
+  the last IDR receipt, and never while an IDR is in flight
+  (`CreditLedger::aging_since`).
+- 5.8 and 5.9.3: a 3 s window with only tainted samples steps bpf on their
+  worst delay with `dynamic = false`, so it can only lower bpf.
+- 5.10.2, 5.10.3 and 5.11: `IdrPolicy::on_emitted` became `answered(now)`,
+  called when `capture_video` is handed a keyframe and again when one is
+  emitted; a capture failure is fresh only when it ends streaming, retries
+  run every `UNAVAILABLE_RETRY` and capture right after their context check,
+  and a recovery on an unchanged context starts no generation.
+- 5.16 item 3: the helper worker's wait for the next request is unbounded;
+  the 3 s timeout bounds each answer and write.
+- 6.10 and 9.6.2: `last_video_age_ms` counts from the later of the last
+  video and the last entry into streaming.
+
 Base: `design/perf-minimal.md`, the overall winner. Grafts come from
 `design/perf-robust.md` and `design/perf-rustdesk.md`. Every must-fix raised
 by the three judges is resolved, and section 1 traces each one.
@@ -249,7 +270,7 @@ cursor:   C sample 16 ms -> watch -> B-send CursorGate (300 ms echo suppression)
 | `CURSOR_ECHO_SUPPRESS` / `NOTICE_TTL` | 300 ms / 5 s | session.rs, worker.rs |
 | `input_wait` gate | p99 ≤ 5 ms ordinary, ≤ 15 ms helper | acceptance |
 | `SINK_MAX_UNITS` / `SINK_MAX_BYTES` | 32 / 8 MiB | video_sink.rs |
-| `BACKLOG_AGE` / `BACKLOG_MIN_UNITS` / `IDR_GRACE` | 250 ms / 3 / 500 ms | video_sink.rs |
+| `BACKLOG_AGE` / `BACKLOG_MIN_UNITS` / `IDR_GRACE` | 250 ms / 3 / 500 ms (`IDR_GRACE` also delays the fps cap's judgment from the first IDR pull, 6.7) | video_sink.rs |
 | `PRESENTED_SEND_MIN_INTERVAL` | 100 ms (bypassed for input, see 6.4) | outbound.rs |
 | `INPUT_QUEUE` / `INPUT_QUEUE_BYTES` / `INPUT_BATCH_MAX` | 512 events / 256 KiB (encoded `Input` JSON) / 16; a single `Move` replaces a queued tail `Move` (6.4) | outbound.rs |
 | `KEYFRAME_MIN_INTERVAL` / backoff | 500 ms / ×2 up to 4 s | recovery.rs |
@@ -724,8 +745,12 @@ Unresponsiveness never closes a session.
    1. `head = outgoing.peek_meta()`.
    2. `head.generation < last_state_generation` → `outgoing.pop()`,
       `dropped += 1`, continue. Stale units get **no seq**.
-   3. `head.age > OUTGOING_MAX_AGE` → `outgoing.clear()`,
-      `idr.request(HostResync)`, wake C, continue.
+   3. `credit.aging_since(head.ready_at)` is `Some(since)` and
+      `now − since > OUTGOING_MAX_AGE` → `outgoing.clear()`,
+      `idr.request(HostResync)`, wake C, continue. `aging_since` is
+      `max(ready_at, last IDR receipt)`, and `None` while
+      `credit.idr_inflight()` is `Some`: a head waiting behind an IDR in
+      flight never ages, since that IDR is already the resync.
    4. `head.generation > last_state_generation` → write `State` first.
    5. Compute the window (5.7.1).
    6. `credit.admit(meta, window, now)` → `Send(seq)` or `Wait`.
@@ -768,6 +793,7 @@ impl Outgoing {
 pub(crate) struct CreditLedger {
     last_admitted: u64, acked: u64,
     in_flight: VecDeque<Sent>, in_flight_bytes: usize, idr_inflight: Option<u64 /*seq*/>,
+    idr_received: Option<Instant>,                             // the last IDR's receipt; aging_since (5.5 step 8.3)
     ack_samples: VecDeque<(Instant, u32 /*ack delay ms*/)>,   // last ACK_SAMPLE_WINDOW
     delivered: VecDeque<(Instant, u32 /*bytes*/)>,            // last DELIVERY_WINDOW
     last_receipt: Instant,
@@ -824,7 +850,8 @@ book: seq = last_admitted + 1; last_admitted = seq; in_flight.push_back(Sent{seq
 3. Otherwise pop every entry with `seq ≤` the acked seq:
    - subtract its bytes;
    - push `(now, bytes)` into `delivered`;
-   - clear `idr_inflight` if that entry is popped;
+   - clear `idr_inflight` and set `idr_received = now` if that entry is
+     popped;
    - for the newest popped entry, push `(now, now − sent_at)` into
      `ack_samples`;
    - set `acked = seq` and `last_receipt = now`.
@@ -847,9 +874,10 @@ so the compiler enforces this.
   and the delay history.
 - A **tainted** sample (the probe was written while `idr_inflight` was set)
   updates `last_rtt` and the window, never the delay history or the fps
-  controller.
+  controller. Its delay (`rtt − base_rtt`) is kept apart as the bpf window's
+  worst tainted delay (5.9.3).
 - `d = max(0, mean(last DELAY_HISTORY untainted samples) − base_rtt)`. With no
-  untainted samples, the controller holds.
+  untainted samples, the fps controller holds.
 
 ### 5.9 QoS controller (`D/qos.rs`, WP-H)
 
@@ -893,7 +921,11 @@ the first untainted sample of the session also runs the bpf step immediately (Ru
 The 3 s window is evaluated on the QoS tick that crosses it.
 
 - `dynamic` = `produced.unique` delta ≥ `DYNAMIC_UNIQUE_FRAMES`.
-- No untainted sample in the window → hold.
+- No sample in the window → hold.
+- Only tainted samples in the window → one bpf step on their worst delay
+  (`rtt − base_rtt`) with `dynamic = false`, so it can only lower bpf: on a
+  link where every IDR takes seconds, smaller IDRs are the way out. Tainted
+  samples still never feed the fps controller or the delay history.
 
 | `window.max_d` | bpf factor |
 | --- | --- |
@@ -989,11 +1021,16 @@ This keeps the long-run grid (the 165 Hz rationale at
 if targets.paused:
     if backend.pending_video() > 0 { discard(backend.drain_video(&ctx, ZERO)) }  // never send while paused
     outgoing.clear(); engine.keyframe = true                                     // no cursor sampling either
-elif state == CaptureUnavailable: retry context every UNAVAILABLE_RETRY
-elif pacer.due(now):
+elif state == CaptureUnavailable && now < context_due: nothing         // context_due: see fail() below
+elif retry (CaptureUnavailable, context_due reached) || pacer.due(now):
+    // a retry is a context check followed at once by a capture, bypassing the
+    // pacer tick, so a failure that persists never publishes Connecting in between
     if outgoing.len() + backend.pending_video() < SUBMIT_GATE:
         rate = VideoRate { bitrate: targets.encoder_bps, pace_fps: targets.pace_fps }
-        produced(backend.capture_video(&ctx, codec, engine.keyframe || idr.take_due(now), rate))
+        keyframe = engine.keyframe || idr.take_due(now)
+        result = backend.capture_video(&ctx, codec, keyframe, rate)
+        if keyframe { engine.keyframe = false; idr.answered(now) }       // handed over: never asked for twice
+        produced(result)
     else:
         state.skipped_ticks += 1           // transport backpressure, never presentation
     pacer.consume(now)
@@ -1004,7 +1041,10 @@ then drain the lane again (5.12.3)
 
 `produced(Some(frame))` does the following:
 
-- If `frame.keyframe` → `idr.on_emitted(now)` and `engine.keyframe = false`.
+- If `frame.keyframe` → `idr.answered(now)`, which also coalesces requests
+  made while that IDR was being encoded. `engine.keyframe` was already
+  cleared at the submit that carried it, so a `fail()` re-force between that
+  submit and this output survives.
 - `frame_id += 1`.
 - `auth.on_produced(frame_id, now)`.
 - `outgoing.push(HostUnit)`. On `Overflow` → `idr.request(HostResync)`.
@@ -1013,13 +1053,20 @@ then drain the lane again (5.12.3)
 `produced(Err(e))`:
 
 - `e.kind() == NotConnected` → fatal. The worker exits with `CaptureFailed`.
-- Otherwise → `CaptureUnavailable` with its reason. The existing invalidate
-  and retry semantics apply.
+- Otherwise → `CaptureUnavailable` with its reason (`fail()`). A failure is
+  **fresh** only when it ends streaming (capture was available and a unit
+  had been produced in this generation): it may be a desktop switch, so it
+  invalidates (a new generation) and is retried at once. Any other failure,
+  such as a capture failing again right after a recovery, is retried every
+  `UNAVAILABLE_RETRY`, never at the capture pace.
+- A recovery on an unchanged context rebuilds the encoder with an IDR but
+  starts no generation; only a changed context, or the fresh failure above,
+  does.
 
 The context check (`backend.context()`) runs:
 
 - at most every `CONTEXT_CHECK_INTERVAL`;
-- after an error;
+- right before each retry's capture while unavailable;
 - once per submitted capture, inside the backend (the existing
   `capture_consistent` / encoder finish check).
 
@@ -1068,6 +1115,8 @@ pub trait Backend: 'static {
     fn capture(&mut self) -> Result<Vec<u8>>;
     fn cursor(&mut self, _expected: &DesktopContext) -> Result<Option<CursorPosition>> { Ok(None) }
     /// Drain finished output, then (encoder backends) submit at most one capture. JPEG default unchanged.
+    /// `keyframe` is asked for once: an encoder backend keeps it until a picture it submits carries it,
+    /// and replaces output it discards with an IDR.
     fn capture_video(&mut self, expected: &DesktopContext, codec: VideoCodec, keyframe: bool, rate: VideoRate) -> Result<Option<EncodedFrame>>;
     /// Drain only. `wait` bounds a long-poll (helper); the ordinary backend never blocks.
     fn drain_video(&mut self, _expected: &DesktopContext, _wait: Duration) -> Result<Option<EncodedFrame>> { Ok(None) }
@@ -1152,23 +1201,31 @@ automatic resolution ladder is deleted (D5).
 ### 5.11 IDR policy (`D/idr.rs`, WP-0)
 
 ```rust
-pub(crate) enum IdrReason { NewEncoder, Generation, Resume, Viewer(KeyframeReason), HostResync, EncoderLate }
-pub(crate) struct IdrPolicy { pending: Option<IdrReason>, forced: bool, last_emitted: Option<Instant>, requested: u64, emitted: u64 }
+pub(crate) enum IdrReason { Generation, Resume, Viewer(KeyframeReason), HostResync }  // a new encoder and late output need no request
+pub(crate) struct IdrPolicy { pending: Option<IdrReason>, forced: bool, last: Option<Instant> }
 impl IdrPolicy {
     pub fn force(&mut self, r: IdrReason);              // immediate on the next submit
-    pub fn request(&mut self, r: IdrReason);            // deferred until HOST_IDR_MIN_INTERVAL after last_emitted; coalesced; never dropped
-    pub fn take_due(&mut self, now: Instant) -> bool;   // forced || (pending && last_emitted.map_or(true, |t| now - t >= HOST_IDR_MIN_INTERVAL))
-    pub fn on_emitted(&mut self, now: Instant);         // clears pending and forced
+    pub fn request(&mut self, r: IdrReason);            // deferred until HOST_IDR_MIN_INTERVAL after `last`; coalesced; never dropped
+    pub fn take_due(&mut self, now: Instant) -> bool;   // forced || (pending && last.map_or(true, |t| now - t >= HOST_IDR_MIN_INTERVAL))
+    pub fn answered(&mut self, now: Instant);           // clears pending and forced; last = now
 }
 ```
+
+`answered(now)` is called when `capture_video` is handed `keyframe = true`
+(5.10.2), and again when a keyframe leaves the encoder. `take_due` therefore
+stays true only until the IDR is handed over, not until the encoder emits
+it: an IDR still being encoded at the next tick is never asked for twice.
+Nothing is lost, because the encoder latches a request it has no room for
+(`submit` keeps `force_keyframe`), late output re-forces, and a new encoder
+starts with an IDR (5.10.3).
 
 | Trigger | Kind |
 | --- | --- |
 | New encoder (session, context or display change, encoder recovery) | inherent (the encoder starts with an IDR, `video/windows.rs:238`) |
-| `Engine::invalidate` (control grant or revoke, input failure, capture recovered) | `force(Generation)` |
+| `Engine::invalidate` (control grant or revoke, input failure, a new desktop, or a capture failure that ended streaming) | `force(Generation)` |
 | `Resume` | `force(Resume)` |
 | Viewer `Keyframe{reason}` | `request(Viewer(reason))` |
-| Outgoing head older than 1 s, or overflow | `request(HostResync)` |
+| Outgoing head that waited more than 1 s (5.5 step 8.3), or overflow | `request(HostResync)` |
 | Encoder late output | inherent (`:294-301`) |
 | **Never** | periodic GOP, fps change, bpf change, preset change, congestion |
 
@@ -1392,8 +1449,15 @@ impl Host {
    both fields through. The UI offers `helper_action install`, which already
    upgrades in place (`helper/install.rs:488-536`). `background-host.dpapi`
    is kept.
-3. **IPC v2.** It stays one request and one response, with a 3 s timeout,
-   `deny_unknown_fields` and sticky failure.
+3. **IPC v2.** It stays one request and one response, `deny_unknown_fields`
+   and sticky failure. The 3 s timeout bounds each answer and each write.
+   The helper worker's wait for the next request is unbounded
+   (`exchange(pipe, display_id, serve)`), so a viewer paused for longer than
+   3 s does not break the pipe. Liveness comes from pipe EOF and the
+   service's watch: `service.rs` relays with `copy_bidirectional` and drops
+   the worker's pipe when the caller's pipe closes, when the owner process
+   exits, on a session change and on service stop; `RemoteBackend::drop`
+   sends `Close`; and the worker thread still releases held input after 2 s.
 
    ```rust
    enum Request {
@@ -1694,7 +1758,10 @@ impl Drop for VideoConsumer { /* attached = 0; notify_all */ }
 
 - `queue: VecDeque<VideoUnit>` and `bytes`;
 - `generation`, `wait_key`, `next_discontinuity`;
-- `idr_pulled_at: Option<Instant>`;
+- `idr_pulled_at: Option<Instant>` (the latest IDR the consumer took);
+- `first_idr_pulled_at: Option<Instant>`, set once by the first take of an
+  IDR or JPEG picture (`next` step 5) and never cleared: the consumer's
+  decoder starts there;
 - `handed: VecDeque<(gen, frame_id, received_at)>`, up to 256;
 - `presented: Option<(gen, frame_id, presented_at, received_at)>`;
 - `recovery: Recovery` (6.8) and `fps_cap: FpsCap` (6.7);
@@ -1714,7 +1781,9 @@ impl Drop for VideoConsumer { /* attached = 0; notify_all */ }
    independently decodable picture (`superseded += n`). `wait_key = false`.
    `u.discontinuity = next_discontinuity || n > 0`. `next_discontinuity = false`.
 5. **Backlog check** (also run at pull). The condition is:
-   - not within `IDR_GRACE` of `idr_pulled_at`;
+   - `idr_pulled_at` is `Some` and at least `IDR_GRACE` ago. Before the
+     consumer takes its first IDR nothing is dropped for age: what queued
+     is the hand-off to a consumer still attaching;
    - `queue.len() + 1 ≥ BACKLOG_MIN_UNITS`;
    - head age > `BACKLOG_AGE`.
 
@@ -1722,10 +1791,14 @@ impl Drop for VideoConsumer { /* attached = 0; notify_all */ }
    - clear the queue (`backlog_drops += 1`);
    - `wait_key = true`, `next_discontinuity = true`;
    - `request(Backlog)`;
-   - `fps_cap.on_backlog_drop()`;
+   - `fps_cap.on_backlog_drop()`, only once the cap judges the consumer
+     (`first_idr_pulled_at` at least `IDR_GRACE` ago, 6.7);
    - keep `u` only if it is a keyframe (then it carries `discontinuity`).
 6. **Overflow** (`len ≥ SINK_MAX_UNITS` or `bytes + len > SINK_MAX_BYTES`):
-   handled the same way as backlog, counted in `overflow_drops`.
+   handled the same way as backlog, at any time, counted in
+   `overflow_drops`. Within the first `IDR_GRACE` after the first IDR pull
+   it still clears the queue and requests an IDR, but is not counted by the
+   fps cap.
 7. Push, then `ready.notify_one()`.
 
 **`next(timeout, cap)`:**
@@ -1735,7 +1808,8 @@ impl Drop for VideoConsumer { /* attached = 0; notify_all */ }
 3. Re-run the backlog check against the head.
 4. Head length > `cap` → `NeedCapacity(len)` (no pop).
 5. Otherwise pop, record `(gen, frame_id, received_at)` in `handed`, and set
-   `idr_pulled_at` if it is a keyframe.
+   `idr_pulled_at` if it is a keyframe; the first such take also sets
+   `first_idr_pulled_at`.
 
 Discontinuity semantics for consumers (R18):
 
@@ -1780,7 +1854,13 @@ independently.
 
 ### 6.7 fps cap (`D/viewer/fps_cap.rs`) (D8, P1-1)
 
-It runs on every viewer tick (250 ms), **only while `state == Streaming && !paused`**.
+It runs on every viewer tick (250 ms), **only while `state == Streaming &&
+!paused && first_idr_pulled_at.elapsed() >= IDR_GRACE`**. Otherwise it is
+frozen: `high_ticks`, `short_since` and the drop flag are cleared. The
+judgment is anchored on the consumer's **first** IDR, not on every IDR: a
+later IDR (after a backlog drop or a keyframe request) does not restart this
+grace, while the age-drop grace in 6.5 still follows the latest
+`idr_pulled_at`.
 
 ```
 present_fps = accepted presentations in the last 1 s
@@ -1862,7 +1942,9 @@ pub struct ViewerStatus {
     pub generation: u64, pub display: Option<Display>, pub desktop: DesktopKind,
     pub video: Option<VideoInfo>,                 // {codec, width, height}
     pub presented: Option<PresentedInfo>,         // {generation, frame_id, age_ms}
-    pub last_video_age_ms: Option<u64>,           // since the last Video record (any generation); Dart's 5 s rule
+    pub last_video_age_ms: Option<u64>,           // since the later of the last Video record (any generation) and the
+                                                  // viewer state's last entry into Streaming (a resume, or the host's State);
+                                                  // None before the first Video record; Dart's 5 s rule
     pub quality: QualityPreset, pub capabilities: Vec<String>,
     pub notice: Option<NoticeInfo>,               // {code, message, age_ms}
     pub decoder: DecoderInfo,                     // {name, hardware: Option<bool>, state: ok|recovering|failed}
@@ -2720,7 +2802,7 @@ class DesktopStore {
 | --- | --- |
 | `connecting` | Connect in flight, with `setup` from `stage`. Or streaming with no presented frame yet (`setup = firstPicture`). |
 | `live` | Streaming, `presented` exists and `decoder.state == ok` |
-| `recovering` | Streaming and `decoder.state == recovering`, or not fresh while video flows (`last_video_age_ms < 1000`) |
+| `recovering` | Streaming and `decoder.state == recovering`, or not fresh while video flows or the session just re-entered streaming (`last_video_age_ms < 1000`, which also reads true for up to 1 s after any entry into streaming; the decoder is then awaiting an IDR anyway) |
 | `waitingForDesktop` | `state == capture_unavailable` (reason `secure_desktop`, `display_lost`, …) |
 | `paused` | The `viewer` demand was released, or the app is hidden |
 | `reconnecting` | The backoff timer is armed (`retryAt`) |
@@ -2738,7 +2820,9 @@ happens only when:
   resets the count;
 - or connect fails with `IO` or `HOST_BUSY`;
 - or `last_video_age_ms ≥ NO_VIDEO_RECONNECT` while the state is `streaming`,
-  not paused, and `decoder.state != failed`.
+  not paused, and `decoder.state != failed`. Because `last_video_age_ms`
+  restarts at every entry into streaming (6.10), this rule never counts time
+  spent paused or in `capture_unavailable`.
 
 A resume (9.6.4) that finds the session `stopped` with `transport` or
 `timeout` (the process was frozen in the background, risk R13) reconnects at
@@ -3321,7 +3405,7 @@ Commits are per work package (D27), with the tests in the same commits.
 
 | Failure | Behaviour | Owner | Proof |
 | --- | --- | --- | --- |
-| Loss on the single QUIC stream (head-of-line) | Receipts are delayed, so the window holds. The ack-queue clamp, then the probe, cut fps. Capture skips ticks while the submit gate is full, which discards nothing. Only a unit that waits in `Outgoing` longer than `OUTGOING_MAX_AGE` (1 s) is cleared, with one deferred IDR request (5.5 step 3). The burst drains through the sink by age. | credit, qos, sink | `slow_link`, case C |
+| Loss on the single QUIC stream (head-of-line) | Receipts are delayed, so the window holds. The ack-queue clamp, then the probe, cut fps. Capture skips ticks while the submit gate is full, which discards nothing. Only a unit that waits in `Outgoing` longer than `OUTGOING_MAX_AGE` (1 s), counted from the later of its `ready_at` and the last IDR receipt and never while an IDR is in flight, is cleared, with one deferred IDR request (5.5 step 8.3). The burst drains through the sink by age. | credit, qos, sink | `slow_link`, case C |
 | Bandwidth drop | The clamp acts within about 250 ms, the probe cuts fps and bpf within 1-3 s, and resolution is fixed | credit, qos | `bandwidth_limit_…`, case B/C |
 | Slow decoder | Sink backlog → fps cap at 90% / 80% of presented. Drop to an IDR only beyond 250 ms of wait. | sink, fps_cap | `slow_presenter_…`, case F |
 | Frozen renderer | Credit continues. Input is refused at both ends. Held input is released within 2 s. No teardown. | auth, sink | `frozen_renderer_…` |

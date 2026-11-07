@@ -173,3 +173,15 @@ of silently deviating.
   (`emulator-5580`) is, and serves for functional on-device checks (its
   decoder is software, so it proves function, never fluidity). Real-phone
   measurement stays with the owner at the end.
+- D32. At the owner's request, the design artboards and every development
+  doc were published into PR #51 as commit `1919fe8` on
+  `origin/codex/issue-50-remote-desktop` (on top of `a41eaa7`), under
+  `docs/remote-desktop-overhaul/` (README, design/, perf-priorities.md,
+  ui-redesign-checklist.md, plan/, proposals/, code-maps/), and the PR
+  description gained a "Redesign and performance overhaul" section with the
+  15 rendered artboards. The integration branch does not contain `1919fe8`
+  yet: merge `origin/codex/issue-50-remote-desktop` into it before any push,
+  and when the overhaul lands, update that folder's README status line
+  (it says the implementation is not yet pushed).
+  Done after the adversarial review: the integration branch merged
+  `1919fe8`, and the README status line was updated in the same pass.

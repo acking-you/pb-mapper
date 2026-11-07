@@ -7,6 +7,30 @@ surface of `CONTRACT-perf.md` §9.2-§9.5 **exactly**. Where the UI needs
 something that surface lacks, §2.2 asks for it with exact signatures; no perf
 member is renamed or re-invented here.
 
+Amended after the adversarial review (2026-11-07). These sections now say
+what the merged code does:
+
+- §2.2 (R-UI-1) and §6.2: `DesktopHostView.trustUnreadable`; a failed trust
+  read counts as loaded, shows its error with Revoke the saved invitation,
+  and is never retried on a timer. Rename is offered only while sharing.
+- §5.2 and §5.3: the vault's `computers_reset` op and `reset()` on the
+  vault and the store; `unreadable` (only on `PROTOCOL`) versus `failed`;
+  stray last pictures deleted on load; Android resets only on `KEY_GONE`,
+  after a new key is wrapped; `computers_unlock` loses `reset`;
+  `INVALID_ARGUMENT` from `computers_update` is a refused change; the name
+  limit counts runes; `thumbnailImage` replaces `thumbnailVersion`, and a
+  replaced record loses its last picture.
+- §5.4: `connectNew` gives an unremembered replacement a new id, while a
+  later Remember still replaces the confirmed record.
+- §6.4 and §6.5: the Clear saved computers note; the featured thumbnail
+  uses `thumbnailImage`.
+- §6.6: the add dialog only at the rail breakpoint, the sheet below it on
+  touch; the scanner reports each distinct code once and keeps running.
+- §10.2 and §10.5.2: the delayed drag press reads the cursor before the
+  press; one Enter per Return.
+- §14.1: T4c added, T5 gains the Return test.
+- §18 (K5): the reset runs only on `KEY_GONE`.
+
 Base: `design/ui-interaction.md` (the winner of both judgements). Grafts come
 from `design/ui-structure.md`. Every must-fix raised by both judges is
 resolved; §1.3 traces each one.
@@ -210,8 +234,14 @@ specific UI behaviour. The UI packages that depend on a request say so (§17).
 ```dart
 class DesktopHostView {
   // … perf §9.4 fields unchanged …
-  /// False until the first capabilities + host_status round trip completed.
+  /// False until the first capabilities + host_status round trip completed;
+  /// a trust_status read that failed also counts as loaded.
   final bool loaded;
+  /// The remembered grant could not be read (DPAPI cannot unlock it, or it
+  /// is invalid). `error` falls back to that read's error. It is re-read on
+  /// a page visit (`_loadHost`), never on a timer, and `restoreOnStartup`
+  /// treats it as nothing to restore rather than retrying it.
+  final bool trustUnreadable;
   /// A remembered grant **for the current relay and namespace**, or a
   /// configured background host, exists, so sharing can resume without setup:
   /// (trust.saved != null && trust.matchesRelay) || background?.configured == true.
@@ -755,27 +785,51 @@ class RemoteComputerStore extends ChangeNotifier {
   RemoteComputer? sameIdentity(DesktopInvitationInfo info);            // service and fingerprint equal
   RemoteComputer? sameServiceOtherIdentity(DesktopInvitationInfo info);
   String newId();                              // Random.secure()
-  Future<void> load();                         // vault.open() then vault.list(); resolves the thumbnail dir; idempotent (one in-flight future)
+  Future<void> load();                         // vault.open() then vault.list(); resolves the thumbnail dir; idempotent (one in-flight future);
+                                               // deletes <id>.thumb files whose id the listed vault no longer holds (D23)
+  Future<void> reset();                        // vault.reset(), then load() again: the way out of an unreadable vault
   /// [service] and [fingerprint] name the computer the caller believes is
   /// connected; the vault refuses when the live session is another one (§5.3).
   Future<RemoteComputer?> rememberSession({required String id, required String name,
       required String service, required String fingerprint,
       required String relay, required int namespace, required bool relayOnly,
-      required DesktopQuality quality, String? replaceId});   // null on failure
+      required DesktopQuality quality, String? replaceId});   // null on failure; a replaced record with another id
+                                                              // loses its last picture (file, cache eviction, version)
   Future<void> rename(String id, String name);
   Future<void> setQuality(String id, DesktopQuality quality);
   Future<void> recordSession(String id, {required DateTime at, String? path, bool? controlAllowed});
-  Future<void> forget(String id);              // vault forget, then delete the thumbnail file
+  Future<void> forget(String id);              // vault forget, then delete the thumbnail (shares _deleteThumbnail with rememberSession)
   File thumbnailFile(String id);               // <supportDir>/desktop-thumbnails/<id>.thumb; may not exist
-  int thumbnailVersion(String id);             // bumps on thumbnailWritten; Image keys use it
-  void thumbnailWritten(String id);            // evicts FileImage(file) from the image cache, notifies
+  ImageProvider? thumbnailImage(String id, {required int width});
+                                               // ResizeImage over a FileImage whose ==/hashCode carry the picture's version,
+                                               // so every rewrite is a new cache key at every width; null without a directory
+  void thumbnailWritten(String id);            // evicts the provider last handed out for id, bumps the version, notifies
 }
 ```
 
 - At most 50 entries (Rust enforces, §5.3); a full vault makes
   `rememberSession` return null and the caller toasts `remoteRememberFull`.
-- Any other vault failure turns `support` into `unavailable(reason)`;
-  nothing is ever written in plain text.
+- `load()` sets the reason `unreadable` only when `list()` fails with
+  `PROTOCOL` (the file was read and cannot be decrypted or decoded); any
+  other `list()` failure, such as `IO` from a locked file, is `failed`, which
+  the next `load()` retries. `unreadable` resolves to
+  `remoteVaultUnreadable` with a **Clear saved computers** action
+  (`reset()`, behind a destructive confirmation); every other reason,
+  `failed` included, still resolves to `addRememberUnavailable`.
+- `rememberSession` and `_update` treat `INVALID_ARGUMENT` as a refused
+  change: the record stays as it was and the vault stays available. Any
+  other vault failure turns `support` into `unavailable(reason)`; nothing is
+  ever written in plain text.
+- `kComputerNameMax` (128) lives here. The name fields use
+  `computerNameLimit` (`R/remote_actions.dart`), which counts runes (Unicode
+  scalar values) as Rust's `chars()` does and cuts only between characters.
+  It keeps the old value when that value is already at the limit, has a
+  collapsed selection and no valid composing range: that is
+  `LengthLimitingTextInputFormatter`'s enforced collapsed check combined
+  with `truncateAfterCompositionEnds`' composing check, not Flutter's exact
+  behaviour on Android and Windows (whose enforced mode has no composing
+  condition). When it truncates, it keeps the composing range clipped to the
+  kept text, as Flutter's `truncate()` does.
 - Owned by `AppStore` as `late final RemoteComputerStore computers`, loaded
   in `start()`. Tests inject `FakeRemoteComputerVault`
   (`T/fake_remote_computer_vault.dart`).
@@ -813,6 +867,7 @@ abstract interface class RemoteComputerVault {
   Future<RemoteComputer> update(String id, {String? name, DesktopQuality? quality,
       DateTime? lastConnectedAt, String? lastPath, bool? lastControlAllowed});
   Future<void> forget(String id);
+  Future<void> reset();               // computers_reset: deletes the vault file; DPAPI and Keystore alike
 }
 /// UI-2a ships this returning UnavailableRemoteComputerVault; UI-2b returns FfiRemoteComputerVault.
 RemoteComputerVault defaultRemoteComputerVault();
@@ -834,10 +889,18 @@ The `unavailable` reason is a localisation key resolved by the widgets
      `wrapped = await keystore.invokeMethod('wrap', key)`;
      `computers_unlock{key, wrapped}`.
    - present: `key = await keystore.invokeMethod('unwrap', wrapped)`;
-     `computers_unlock{key}`. A `PlatformException` (the Keystore key is
-     gone, e.g. after a device restore) → a new key and
-     `computers_unlock{key, wrapped, reset: true}` (Rust deletes the
-     unreadable file; logged at warn).
+     `computers_unlock{key}`. An unwrap that returns null is an `IO`
+     failure, not a reset.
+     - A `KEY_GONE` `PlatformException` (the Keystore key is gone or no
+       longer opens its wrapped copy, e.g. after a device restore) → generate
+       a new key and wrap it, then `computers_reset`, then
+       `computers_unlock{key, wrapped}`; the log line
+       `Remembered computers reset: <reason>` is written only after the reset
+       ran. A wrap that throws or returns null leaves the vault untouched →
+       `unavailable(failed)`.
+     - Any other `PlatformException` (a busy Keystore included) →
+       `unavailable(failed)`, with the vault files untouched; the next load
+       tries again.
    - The data key crosses Dart once per process, as base64 inside the JSON
      request, which is an immutable `String`: Dart cannot wipe it, and it
      lives until garbage collection. This is accepted: whoever can read this
@@ -852,10 +915,11 @@ The `unavailable` reason is a localisation key resolved by the widgets
 | --- | --- | --- | --- |
 | `computers_support` | — | `{available: bool, reason?: string, keystore: bool}` (Windows: DPAPI; Android: keystore; else unavailable) | — |
 | `computers_key` | — | `{wrapped: b64 \| null}` (Android) | `IO` |
-| `computers_unlock` | `key: b64` (32 bytes), `wrapped?: b64`, `reset?: bool` | `{}`; writes `desktop-computers.key` when `wrapped` is given; `reset` deletes `desktop-computers.bin` first | `INVALID_ARGUMENT` (key length), `IO` |
+| `computers_unlock` | `key: b64` (32 bytes), `wrapped?: b64` | `{}`; writes `desktop-computers.key` when `wrapped` is given | `INVALID_ARGUMENT` (key length), `IO` |
+| `computers_reset` | — | `{}`; drops the cached list and deletes `desktop-computers.dpapi` (Windows) or `desktop-computers.bin` (Android); on Android the unlocked key stays installed and `desktop-computers.key` is kept. Allowed on DPAPI as well as on Keystore | `IO`; `INVALID_ARGUMENT` on unsupported platforms |
 | `computers_list` | — | `[record]` | `IO`, `PROTOCOL` (undecryptable) |
 | `computers_remember` | `id, name, service, fingerprint, relay, namespace, relay_only, quality, replace_id?` | `record`; stores `DesktopState::current_invitation()` (R-UI-6) encoded `pbd1`, **only if** its `service` and `short_fingerprint()` equal the request's; `replace_id` replaces that entry in place | `INVALID_ARGUMENT` ("no connected session", "the connected session is a different computer", "at most 50 remembered computers"), `IO` |
-| `computers_update` | `id, name?, quality?, last_connected_ms?, last_path?, last_control_allowed?` | `record` | `NOT_FOUND`, `IO` |
+| `computers_update` | `id, name?, quality?, last_connected_ms?, last_path?, last_control_allowed?` | `record` | `NOT_FOUND`, `INVALID_ARGUMENT` (the record check, e.g. a name of more than 128 Unicode scalar values; the store treats it as a refused change, not a vault failure), `IO` |
 | `computers_forget` | `id` | `{}` (idempotent) | `IO` |
 
 - `record` = `{id, name, service, fingerprint, relay, namespace, relay_only,
@@ -905,7 +969,11 @@ installs MethodChannel `pb_mapper/keystore`:
   `PURPOSE_ENCRYPT or PURPOSE_DECRYPT`, `setRandomizedEncryptionRequired(true)`,
   no user authentication), created on first `wrap`. Output = IV(12) ‖
   ciphertext ‖ tag.
-- Errors → `result.error("KEYSTORE", message, null)`.
+- Errors → `result.error("KEY_GONE", message, null)` only when no retry could
+  ever open the wrapped key: `getKey` returns null,
+  `KeyPermanentlyInvalidatedException`, `AEADBadTagException`, or a wrapped
+  copy shorter than IV plus tag. Every other failure, a busy Keystore
+  included, → `result.error("KEYSTORE", message, null)`.
 - `K/MainActivity.kt` `configureFlutterEngine` adds
   `ComputerKeystore.register(flutterEngine.dartExecutor.binaryMessenger)`.
 
@@ -967,9 +1035,15 @@ class RemoteDesktop {
   /// computerId: c.id, name: c.name, relayOnly: c.relayOnly, quality: c.quality)
   /// without awaiting (perf §9.6.2: connect supersedes), viewer.open().
   Future<void> open(RemoteComputer c);
-  /// result.existing != null → open(existing). Else id = result.replaceId ?? computers.newId();
-  /// connect DesktopTarget(invitation: result.invitation, computerId: id, …) without
+  /// result.existing != null → open(existing). Else
+  /// id = (result.remember ? result.replaceId : null) ?? computers.newId(), and the
+  /// session's quality is looked up from that remember-gated id only, so an
+  /// unremembered replacement never writes onto the saved record; connect
+  /// DesktopTarget(invitation: result.invitation, computerId: id, …) without
   /// awaiting; viewer.open(); a remember stays pending until the first live picture.
+  /// The session target (_Target.replaceId) always carries result.replaceId, so a
+  /// later rememberCurrent() on an unremembered replacement calls
+  /// rememberSession(id: <new id>, replaceId: <confirmed id>) and replaces that record.
   Future<void> connectNew(AddComputerResult result);
   /// Leave the picture, keep the session: best-effort thumbnail, then viewer.close().
   /// Starts the kPausedSessionTimeout timer (below).
@@ -1084,7 +1158,13 @@ HostCardPhase hostCardPhase(DesktopHostView v) => switch (v) {
 
 `HostCard` = `ValueListenableBuilder<DesktopHostView>(desktop.hostView)`.
 `v.error` is orthogonal: an inline `scheme.error` line under the header in
-every phase. Local state of the setup card: `_allowControl = true`
+every phase, the loading card included. While `v.trustUnreadable`, that error
+line (`_HostError`) carries an `scheme.error` outlined
+`OutlinedButton.icon(Key('host-error-revoke'), AppIcons.screenShareOff,
+hostRevokeUnreadable)` → `confirmDestructive(hostRevokeConfirmTitle,
+hostRevokeConfirmBody, hostRevokeAction)` → `revokeTrust()`, and the setup
+card's `host-enable` and `host-enable-ordinary` are disabled (enabling reads
+the same grant and would fail the same way). Local state of the setup card: `_allowControl = true`
 (HostSetup:73), `_displayId = v.displayId ?? v.displays.first.id`.
 
 | Phase | Card | Primary | Transitions |
@@ -1133,9 +1213,11 @@ every phase. Local state of the setup card: `_allowControl = true`
   pipe has no display switch, and the FFI refuses it (perf §5.16.5, §7.2).
 - `HostMoreMenu` (`Key('host-more')`, ghost `AppIcons.more` 16 + `more`):
   `host-rename` `hostServiceName` → dialog (suffix field after a fixed
-  `desktop:` prefix, `[A-Za-z0-9._:-]{1,120}`; while sharing the dialog
-  warns `hostServiceRenameBody`) → `renameHostService('desktop:' + suffix)`;
-  disabled, with `hostBackgroundStopFirst` as its tooltip, while
+  `desktop:` prefix, `[A-Za-z0-9._:-]{1,120}`; the dialog always warns
+  `hostServiceRenameBody`) → `renameHostService('desktop:' + suffix)`;
+  enabled only while `v.sharing && !v.background`, since a rename restarts
+  the running local host: disabled with `hostRenameStartFirst` as its tooltip
+  when not sharing, and with `hostBackgroundStopFirst` (which wins) while
   `v.background` (as the display picker); helper items by `v.helper`: `host-helper-install` (`hostHelperInstall`),
   and when installed `host-helper-disable` (`hostHelperDisable`) and
   `host-helper-uninstall` (`hostHelperUninstall`); divider; `host-revoke`
@@ -1207,7 +1289,12 @@ action button; a secondary click opens the same `MenuAnchor` at the pointer:
 `Material(shape: DashedBorder(…))` + `InkWell` (1.5 px `outline`, dash 4/3,
 r14), `AppIcons.add` 18 + `remoteAddComputer` 14/500 + `remoteAddHint` 13
 `quietText` → `showAddComputer`. Footnote `remoteRememberNote`, or
-`addRememberUnavailable` when the vault is unavailable.
+`addRememberUnavailable` when the vault is unavailable, or, when it is
+`unreadable` (§5.2), `remoteVaultUnreadable` with a destructive
+**Clear saved computers** (`remoteVaultReset`) → `confirmDestructive(
+remoteVaultResetTitle, remoteVaultResetBody, remoteVaultResetAction)` →
+`computers.reset()`. The same note shows on `RemoteEmptyCard` and on the
+compact list (§6.5), and the add form uses the same wording.
 
 `RemoteEmptyCard` (no computers and no session; HostSetup:96-115): min
 height 520; `RemoteEmptyIllustration` (`CustomPainter`, 120×84, strokes per
@@ -1218,7 +1305,9 @@ DS §2.4); `remoteEmptyTitle` 16/600; `remoteEmptyBody`; outlined
 
 - `FeaturedComputerCard(Key('computer-featured'))`: the viewing computer,
   else the most recently connected. Thumbnail 16:9
-  `Image.file(computers.thumbnailFile(id), key: ValueKey(computers.thumbnailVersion(id)), cacheWidth: (w * dpr).round(), gaplessPlayback: true, errorBuilder: placeholder)`;
+  `Image(image: computers.thumbnailImage(id, width: (w * dpr).round()), gaplessPlayback: true, errorBuilder: placeholder, frameBuilder: …)`
+  (no `ValueKey` and no `cacheWidth`: the provider's cache key carries the
+  picture's version, §5.2);
   placeholder `#1F2328` + `AppIcons.remoteLarge` 24 `onSurfaceMuted`; badge
   `remoteLastPicture(when)`; name 17/600; sub `remotePathPermission(path)` /
   `remotePathViewOnly(path)` (last path and permission); status pill;
@@ -1265,14 +1354,20 @@ class AddComputerController extends ChangeNotifier {
   void edit(String text);          // debounced 250 ms
   void paste(String text);         // inspects at once
   void clear();
-  AddComputerResult? result();     // null unless recognised && (conflict == null || replaceConfirmed)
+  AddComputerResult? result();     // null unless recognised && (conflict == null || replaceConfirmed),
+                                   // whatever Remember is; with Remember off the confirmation takes
+                                   // effect through a later Remember of the session (§5.4)
 }
 ```
 
-- `showAddComputer`: non-touch platform or width ≥ 720 →
+- `showAddComputer`: non-touch platform or `usesRail(context)` (the shell's
+  own breakpoint: touch ≥ 900) →
   `showDialog(barrierColor: Color(0x52141416), builder: (_) => AddComputerDialog(…))`
-  (560 wide, r24, padding 24/28/28; DS §2.5). Touch and compact →
-  `showModalBottomSheet(isScrollControlled: true, useSafeArea: true, builder: (_) => AddComputerSheet(…))`.
+  (560 wide, r24, padding 24/28/28; DS §2.5). Touch below the rail →
+  `showModalBottomSheet(isScrollControlled: true, useSafeArea: true, builder: (_) => AddComputerSheet(…))`,
+  which honours `AddMode.scan` / `AddMode.paste`; so a phone in landscape
+  (720-899) also gets the sheet, scanner first, from the viewer's Paste new
+  invitation.
   Both pop an `AddComputerResult`; the caller runs
   `connectFromAdd(context, result)` (§6.7). The dialog closes at once; the
   viewer opens on the Connecting overlay — no spinner inside the dialog.
@@ -1320,15 +1415,20 @@ class InviteScanner extends StatefulWidget {
 ```
 
 `MobileScanner(controller: MobileScannerController(formats: [BarcodeFormat.qrCode], detectionSpeed: DetectionSpeed.noDuplicates, returnImage: false))`;
-`onDetect` → the first `rawValue` → `controller.stop()` → `onDetect(value)`
-→ `AddComputerController.paste(value)` (never auto-connects). Viewfinder 330
+`onDetect` → each distinct `rawValue` once (a Dart-side last-reported
+filter, so a rejected code left in view, also after a camera restart that
+resets mobile_scanner's own duplicate memory, is not re-inspected in a loop)
+→ `onDetect(value)` → `AddComputerController.paste(value)` (never
+auto-connects). The camera keeps running after a read; the sheet unmounts
+the scanner once the invitation is recognised, which disposes the
+controller. Viewfinder 330
 tall r20 `#161618`; reticle painter (220×220, four 28×28 L-corners 3 px white
 r10); scan line 2 px `ViewerPalette.signal` animating top↔bottom over 1.6 s,
 static under `Motion.reduced`; hint pill `scanHint`. `errorBuilder`:
 `MobileScannerErrorCode.permissionDenied` → `AppIcons.scanQrCodeLarge` 24 +
 `scanPermissionDenied`; unsupported / no camera → `scanUnavailable`. An
 `AppLifecycleListener` stops the controller on any state but `resumed` and
-restarts it on `resumed`; it is disposed with the sheet. Tests set
+restarts it on `resumed`, unconditionally; it is disposed with the sheet. Tests set
 `debugSupportedOverride = false`.
 
 ### 6.7 Page actions (`R/remote_actions.dart`)
@@ -2032,9 +2132,9 @@ cursor prediction `sink.cursor`, never the finger.
 | stroke | move | — | relative move + follow | stroke |
 | rightClicked | move | moved > 18 | relative move + follow (slide through the context menu) | stroke |
 | stroke, rightClicked | up | — | — | idle |
-| dragging (press pending) | timeout `pressDueAt` | — | `sink.press(left, lastTap.cursorAt, dragStart: true)`; `sink.move(cursor)` | dragging |
+| dragging (press pending) | timeout `pressDueAt` | — | `to = cursor`; `sink.press(left, lastTap.cursorAt, dragStart: true)`; `sink.move(to)` (the cursor is read before the press, which resets the prediction to the press point) | dragging |
 | dragging | move | — | `cursor += Δ…`; follow; `sink.move(cursor)` only once the press was sent | dragging |
-| dragging | up | press pending | `sink.press(left, start, dragStart: true)`, `sink.move(cursor)`, `sink.release(left)` now (the host holds the press, R-UI-3) | idle |
+| dragging | up | press pending | `to = cursor`; `sink.press(left, start, dragStart: true)`, `sink.move(to)`, `sink.release(left)` now (the host holds the press, R-UI-3) | idle |
 | dragging | up | press sent | `sink.release(left)` | idle |
 | any 1-finger state | 2nd down @t | — | clear deadlines; a sent press → `sink.release(left)`; a pending press is dropped; `lastTap = null`; indicator(null); remember both positions | navigate |
 | navigate | move | t ≥ secondDownAt + 80 ms, or a finger moved > 18 | `viewport.pinchPan(startPositions, positions)`: `scale = clamp(s0 · d / d0, 1, 8)`, `offset = mid − anchor · scale` (bounded) | navigate |
@@ -2293,7 +2393,12 @@ final class RemoteTextInput implements DeltaTextInputClient {
     it; on commit the committed segment is sent;
   - when not composing and the buffer drifted (< 32 or > 512 characters) →
     `setEditingState(sentinel)`.
-- `performAction(TextInputAction.newline)` → `tapKey(enter)`.
+- One Return is one Enter: `performAction(TextInputAction.newline)` and an
+  inserted `'\n'` each → `tapKey(enter)`, except that whichever arrives
+  second, as the IME's very next event (a delta batch, a value update or an
+  action), is the same Return and sends nothing. iOS sends the action and
+  then inserts the `'\n'` in the next delta batch; an Android IME may send
+  only the action. Two Returns of the same kind in a row are two Enters.
   `connectionClosed()` → `attached = false` (the gutters return).
 - `RemoteInput.typeText(s)`: while any latch is active, each of the first
   `kLatchedTextKeys` (16) characters with `forChar(c) = (key, shift)` goes as
@@ -3015,7 +3120,8 @@ glyph or layout-matrix tests.
 | T3 | `T/sharing_test.dart` (UI-3) | "while viewed, Disconnect viewer and Stop sharing are reachable in the title bar, over a dialog and without a title bar, and work while busy" — `sharing-indicator-stop` on Tunnels while `busy` calls `host_stop`; with a dialog open `sharing-fallback-disconnect` is hit-testable above the barrier and calls `host_end_session`; on the setup flow the fallback shows | D15, local stop boundary |
 | T4a | `T/remote_input_test.dart` (UI-5) | "latched modifiers wrap one action and never stay held" — Ctrl tapped once: `tapKey(c)` sends one sequence `[control↓, c↓, c↑, control↑]` and the latch is off; tapped twice: two keys both wrapped, still locked; a click is wrapped; a hardware `F5` with Ctrl latched is wrapped and its key-up sends nothing; a dropped sequence leaves nothing held; `releaseAll` sends `release` only when something is held | D16 |
 | T4b | `T/remote_input_test.dart` (UI-5) | "held Ctrl sends bare letter keys and AltGr characters stay text" — `KeyRouting.route` (pure): Ctrl held + `b` → `[key b↓]` then `[key b↑]` (no Ctrl in it); Ctrl+AltRight + `q` producing `@` → `text('@')`; Shift + `a` producing `A` → `text('A')` | U11, AltGr, `D/windows.rs:455-475` |
-| T5 | `T/remote_text_input_test.dart` (UI-5) | "IME deltas: backspace becomes keys, composing waits for its commit, newline is Enter, and drift resets the sentinel" — plus the burst bound the host queue is sized on (perf §6.4): a 64-character IME deletion is 8 sequences of ≤ 16 events; a 40-character commit with Shift locked keys 16 characters and sends the rest as `text` (the Rust side of the bound is perf `viewer::bulk_input_and_moves_never_trip_congestion`) | IME-to-host boundary (judge 2), input congestion |
+| T4c | `T/remote_input_test.dart` (review fix D) | "a trackpad drag presses at the double tap and takes the host to where the finger slid while the press waited" — over `ViewerHarness` and the real `RemoteInput`: the delayed press lands at the double tap, the following move at the slid-to point (both the `pressDueAt` timeout and an `up` while the press is pending), and a quick lift drags rather than clicks | §10.2 delayed drag press, `RemoteInput.press` prediction reset |
+| T5 | `T/remote_text_input_test.dart` (UI-5) | "IME deltas: backspace becomes keys, composing waits for its commit, newline is Enter, and drift resets the sentinel" — plus the burst bound the host queue is sized on (perf §6.4): a 64-character IME deletion is 8 sequences of ≤ 16 events; a 40-character commit with Shift locked keys 16 characters and sends the rest as `text` (the Rust side of the bound is perf `viewer::bulk_input_and_moves_never_trip_congestion`). Second test: "a Return is one Enter whether the IME sends the newline action, inserts a newline, or both in either order" (§10.5.2) | IME-to-host boundary (judge 2), input congestion |
 | T6 | `T/title_bar_test.dart` (UI-0a) | "caption buttons keep 16 px from the sheet edge and the setup screen's edge" — `debugDefaultTargetPlatformOverride = TargetPlatform.windows`, wide window at dpr 1.25: `caption-close` is 46×32, `closeRect.right ≤ sheetRect.right − 16`, vertically centred in the 58 px bar; on `SetupFlow`, `closeRect.right ≤ windowWidth − 16` and centred in its 44 px strip | requirement 4 acceptance |
 | T7a | `T/viewer_chrome_test.dart` (UI-6) | "an unpinned toolbar collapses 2 s after the pointer leaves, never while a menu is open, and focus returns to the picture when the menu closes" — 1.9 s expanded, 2.0 s handle; with Display open, 3 s still expanded; pinned never collapses; after the menu closes a hardware key reaches the fake | §10.7, §10.8 |
 | T7b | `T/viewer_chrome_test.dart` (UI-6) | "connection overlays follow the phase, stay translucent while a frame can arrive, and never replace the picture" — `ViewerStage` over `ValueNotifier`s: connecting shows `ViewerScrim` with `opaque == false`; live → reconnecting (retry pill offers Retry now) → waitingForDesktop → live keeps the same `Texture` element; identityChanged is opaque and wins | U18, §7.3, `desktop_viewer.dart:491-492` |
@@ -3181,7 +3287,7 @@ now ─ UI-0a ─ UI-0b ─ UI-1 ─┬──────── (perf WP-D D1 in
 | K2 | IME insets in immersive sticky mode on Android | on-device check; the occlusion rule (§10.6) tolerates late or animated insets |
 | K3 | `BackdropFilter` grey still over the external texture (Android GL with Impeller off; Windows) | on-device check; if unsupported, the still becomes a translucent 0.5 scrim (no opacity change elsewhere) |
 | K4 | `mobile_scanner` 7.5.0 needs a newer Kotlin Gradle plugin | bump only if the build requires it (D21); UI-1 builds the APK |
-| K5 | Keystore key lost after a device restore | backup exclusions; the reset path (§5.3) starts an empty vault |
+| K5 | Keystore key lost after a device restore | backup exclusions; the reset path (§5.3) starts an empty vault, only on `KEY_GONE` and only after a new key has been wrapped; any other Keystore failure leaves the vault for the next load |
 | K6 | AltGr detection on non-US layouts (German, French, Polish) | T4b covers the rule; on-device check with a German layout on Windows |
 | K7 | Caption glyph crispness at 125 % and 150 % | by hand in UI-0a |
 | K8 | Feel of the 520 ms drag guard, 24 px scroll notch, 80 ms join grace | tune the constants (§10.1) on device; one place each |

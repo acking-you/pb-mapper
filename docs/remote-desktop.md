@@ -43,11 +43,11 @@ is the Remote tab. How the page and the viewer are laid out is in
    yourself; a successful installation restarts the unprivileged UI on this
    page and resumes the saved operation. **Share the ordinary desktop only**
    skips the helper, and with it UAC and the lock screen. The card selects
-   the shared display; switching it reconnects the current viewer. **More**
-   renames the service, for example to `desktop:my-computer`. Names start
-   with `desktop:` and contain only ASCII letters, digits, `.`, `_`, `:`, or
-   `-`, with a maximum of 128 bytes. A slash is invalid for scoped relay
-   services.
+   the shared display; switching it reconnects the current viewer. While it
+   shares, **More** renames the service, for example to
+   `desktop:my-computer`. Names start with `desktop:` and contain only ASCII
+   letters, digits, `.`, `_`, `:`, or `-`, with a maximum of 128 bytes. A
+   slash is invalid for scoped relay services.
 3. Copy the invitation privately, or show its QR code to a phone: anyone
    holding it can view this desktop, and control it while **View and
    control** is chosen. It contains no relay credential. The card shows it
@@ -241,8 +241,19 @@ pasting an invitation again:
   polls. A computer saved under another relay address or credential reads
   Other relay and opens only after switching back in Settings.
 - A changed host identity never touches the saved computer; only **Paste new
-  invitation** replaces its invitation, at the new session's first picture.
+  invitation** replaces its invitation, once the new session is remembered:
+  at its first picture with **Remember this computer** on, or when its row is
+  remembered later. Until then the session is a computer of its own, and the
+  saved one keeps its record and last picture.
 - **Remove this computer** deletes its invitation and its last picture.
+- Saved computers that can no longer be opened (DPAPI after a restored
+  profile or a password reset, a damaged file) are offered as **Clear saved
+  computers** on the Remote page, which deletes them and their last pictures.
+  A read that fails only for now (the file is locked, say) offers nothing and
+  is tried again at the next load. On Android the vault starts over by itself
+  only when the Keystore key is gone or no longer opens its wrapped copy, and
+  only once a new key has been sealed; any other Keystore failure leaves it
+  for the next start.
 - Android cloud backup and device-to-device transfer exclude the app's
   configuration directory, so they restore neither the vault nor the relay
   credential nor the tunnels.
@@ -273,6 +284,9 @@ mismatch stops automatic retries and never replaces the pinned identity.
 
 Legacy app-owned grants and a pending installation handoff use current-user
 DPAPI in `desktop-trust.dpapi` beneath the existing configuration directory.
+A copy Windows cannot unlock (after a password reset, or a profile moved to
+another machine) or that is invalid is not retried: the Remote desktop card
+says why and offers **Revoke the saved invitation**, which deletes it.
 Successful service transfer removes the legacy copy. A pending handoff retries
 temporary IPC failures with bounded backoff; it never installs a helper without
 the explicit Enable action. Stop or Revoke cancels the pending restoration.
@@ -543,9 +557,15 @@ counted in `skipped_ticks`) only while the hand-off queue plus the encoder's
 pending units reach two: transport backpressure, never presentation. A static
 screen is resubmitted about every 250 ms as a duplicate, which unique-frame
 rates exclude. The hand-off queue holds at most four units and 8 MiB; when its
-oldest unit is more than a second old, the queue is dropped and replaced by an
-IDR. The desktop context is checked at most every 100 ms, after an error, and
-inside each capture; the injection boundary re-checks it for every input.
+oldest unit has waited more than a second, the queue is dropped and replaced
+by an IDR. The wait counts from when the unit was ready or from the last IDR
+receipt, whichever is later, and time spent behind an IDR still in flight
+never counts, since that IDR is already the resync. The desktop context is
+checked at most every 100 ms and inside each capture; the injection boundary
+re-checks it for every input. A failure that ends streaming may be a desktop
+switch, so it is retried at once. A failure before any unit since the last
+recovery is retried every 200 ms, and each retry captures right after its
+context check.
 
 Windows H.264 hosting uses DXGI Desktop Duplication, D3D11 textures and GPU NV12
 conversion, followed by a low-latency Media Foundation hardware encoder with no
@@ -564,12 +584,14 @@ lengths `u32::MAX`, `0x7FFF_FFFF`, 65 535 and 3 600 and keeps the first one it
 reads back unchanged, so a vendor that clamps or ignores the setting is
 detected; the read-back is reported as `gop`. An IDR comes with a new encoder
 (session, display or context change, recovery), a new generation (a control
-grant or revoke, an input failure, capture recovered), a resume, a viewer's
-request, or a hand-off queue that overflowed or went stale. Requests other
-than a resume or a new generation wait until 300 ms after the previous IDR.
-Encoder output more than 250 ms late is discarded, and output resumes at the
-next IDR. Nothing periodic, and no frame rate, bitrate, preset or congestion
-change, produces an IDR.
+grant or revoke, an input failure, a new desktop, or a capture failure that
+ended streaming), a resume, a viewer's request, or a hand-off queue that
+overflowed or went stale. Requests other than a resume or a new generation
+wait until 300 ms after the previous IDR. A request is answered once its IDR
+is handed to the encoder, so an IDR still being encoded is never asked for
+twice. Encoder output more than 250 ms late is discarded, and output resumes
+at the next IDR. Nothing periodic, and no frame rate, bitrate, preset or
+congestion change, produces an IDR.
 
 ### Send credit
 
@@ -611,8 +633,10 @@ The host writes a probe once a second, in stream order between video messages,
 so it measures downstream queueing; one is outstanding at a time. The base RTT
 is the minimum of the last 60 samples from the first sample on, and it resets
 when the viewer reports a path change. A probe written behind an IDR in flight
-is tainted: it updates the RTT but not the controller. The queue delay is the
-mean of the last three untainted RTTs minus the base RTT.
+is tainted: it updates the RTT but never the frame rate. A 3 s window with
+only tainted samples may step bits per frame down on their worst delay, never
+up. The queue delay is the mean of the last three untainted RTTs minus the
+base RTT.
 
 Frame rate follows RustDesk's delay steps, scaled by `max(1, ceiling / 30)`.
 Below 50 ms it climbs, with a quick step after three good samples. From 50 to
@@ -697,14 +721,17 @@ it. The sink keeps only what is still worth decoding:
 
 - An arriving IDR supersedes everything queued, marked as a discontinuity.
 - When the oldest queued unit is older than 250 ms with at least three queued,
-  and no IDR was handed out in the last 500 ms, the sink drops to the next IDR
-  and asks for one. Overflow (32 units or 8 MiB) does the same.
+  and the consumer last took an IDR more than 500 ms ago, the sink drops to
+  the next IDR and asks for one. Before the consumer takes its first IDR,
+  nothing is dropped for age: what queued is the hand-off to a consumer still
+  attaching. Overflow (32 units or 8 MiB) drops the same way at any time.
 - A P-frame that arrives while an IDR is awaited is dropped. A new generation
   starts at an IDR. JPEG keeps only the newest picture.
 
-Backlog also lowers the host's frame rate. Every 250 ms while streaming, the
-fps cap compares the queue with what the consumer presented in the last second.
-More than two queued on two consecutive ticks, or a backlog drop, sends
+Backlog also lowers the host's frame rate. Every 250 ms while streaming, from
+500 ms after the consumer took its first IDR, the fps cap compares the queue
+with what the consumer presented in the last second. More than two queued on
+two consecutive ticks, or a backlog drop from then on, sends
 `floor(presented × 0.9)` direct or `× 0.8` relayed, at least 5 and at least half
 the current cap, at most once a second. After 3 s with at most one queued it
 rises by 5, and at the preset's ceiling it is removed. Only backlog lowers it,
@@ -768,7 +795,7 @@ input authorisation.
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
-| Host hand-off | 4 units, 8 MiB, 1 s oldest; capture skipped at 2 buffered |
+| Host hand-off | 4 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 buffered |
 | Probe / unresponsive | every 1 s / after 2 s, pace 2 FPS |
 | QoS | delay history 3; RTT window 60; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
@@ -809,8 +836,10 @@ the same `seq`. `deployed --feedback-log` enables both host targets.
 
 The viewer's overlays report the states in [Viewer states](#viewer-states).
 After a stall the app asks for a keyframe first. A failed stream, or five
-seconds without video while the viewer shows, opens a fresh authenticated
-session with the same target and path preference after 1, 2, 4, 8 and 15
+seconds without video while the viewer shows and the session streams
+(counted from the later of the last video and the session streaming again
+after a pause or unavailable capture), opens a fresh authenticated session
+with the same target and path preference after 1, 2, 4, 8 and 15
 seconds. Capture-unavailable states wait for the remote desktop instead of
 retrying around missing Windows permissions. Disconnect cancels recovery. A
 hidden viewer never reconnects; when it shows again, a session the host closed
