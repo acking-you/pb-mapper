@@ -577,8 +577,10 @@ class ViewerOverlayLayer extends StatelessWidget {
     final kind = viewerOverlayFor(s).kind;
     final key = Key('viewer-overlay-${kind.name}');
     final busy = s.failure?.code == 'HOST_BUSY';
+    // A frame shorter than the card (a phone above its keyboard, a short
+    // window) scrolls it rather than cutting it off.
     Widget centred(Widget card) => Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: KeyedSubtree(key: key, child: card),
       ),

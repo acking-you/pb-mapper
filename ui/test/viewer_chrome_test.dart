@@ -10,6 +10,7 @@ import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_input.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_viewport.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_gestures.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_menus.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_overlays.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_stage.dart';
@@ -367,6 +368,83 @@ void main() {
       expect(api.inputs.length, 4);
       await mouse.removePointer();
       expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    'the soft keyboard only occludes the touch viewer, and a modifier '
+    'latched on its bar wraps the next typed key',
+    (tester) async {
+      _size(tester, const Size(844, 390));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump();
+      final scene = find.byKey(const Key('remote-scene-transform'));
+      final picture = tester.element(scene);
+      Matrix4 transform() => tester.widget<Transform>(scene).transform;
+      final before = transform();
+      List<String> sent() => [
+        for (final e in api.argsOf('input').last['inputs']! as List)
+          ViewerHarness.describe(e as Map),
+      ];
+
+      // The keyboard and the bar cover the picture; nothing relayouts.
+      await tester.tap(find.byKey(const Key('touch-keyboard')));
+      tester.view.viewInsets = const FakeViewPadding(bottom: 200);
+      await tester.pump();
+      await tester.pump(kKeyboardSettle);
+      expect(find.byKey(const Key('modifier-bar')), findsOneWidget);
+      expect(find.byKey(const Key('touch-keyboard')), findsNothing);
+      expect(tester.element(scene), same(picture));
+      expect(transform().getMaxScaleOnAxis(), before.getMaxScaleOnAxis());
+
+      // Ctrl armed on the bar applies to the next key the IME commits.
+      await tester.tap(find.byKey(const Key('modifier-control')));
+      await tester.pump();
+      final pill = find.descendant(
+        of: find.byKey(const Key('modifier-pill')),
+        matching: find.byType(ViewerPill),
+      );
+      expect(pill, findsOneWidget);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: '${'1' * 64}a',
+          selection: const TextSelection.collapsed(offset: 65),
+        ),
+      );
+      await tester.pump();
+      expect(sent(), ['control↓', 'a↓', 'a↑', 'control↑']);
+      expect(pill, findsNothing);
+
+      // The keyboard goes: the gutters return and the view is as it was.
+      await tester.tap(find.byKey(const Key('modifier-collapse')));
+      tester.view.resetViewInsets();
+      await tester.pump();
+      expect(find.byKey(const Key('touch-keyboard')), findsOneWidget);
+      expect(tester.element(scene), same(picture));
+      expect(transform(), before);
+      expect(tester.takeException(), isNull);
+
       await tester.pumpWidget(const SizedBox.shrink());
       demand.dispose();
       store.dispose();

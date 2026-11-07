@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 
 import '../../../state/desktop_input.dart';
 import '../../../state/viewer_prefs.dart';
@@ -25,6 +28,13 @@ const kNavigateStart = Duration(milliseconds: 80);
 const kThreeFingerNotchPx = 24.0;
 
 enum HapticKind { press, select }
+
+/// The viewers' haptics: a long-press right click presses; a drag start
+/// clicks.
+void viewerHaptic(HapticKind kind) => unawaited(switch (kind) {
+  HapticKind.press => HapticFeedback.mediumImpact(),
+  HapticKind.select => HapticFeedback.selectionClick(),
+});
 
 /// Where the touch gestures send pointer intent: [RemoteInput], or a
 /// recorder in tests. Points are normalised to the picture.

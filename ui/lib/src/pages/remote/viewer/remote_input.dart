@@ -268,9 +268,10 @@ final class RemoteInput implements RemotePointerSink {
   }
 
   /// Holds [key] down, wrapped in the latched modifiers, repeating its
-  /// down after [kKeyRepeatDelay] every [kKeyRepeatInterval] until
-  /// [releaseKey].
-  void pressKey(RemoteKey key) {
+  /// down after [delay] every [kKeyRepeatInterval] until [releaseKey]. A
+  /// key held past [kKeyRepeatDelay] before it was pressed repeats at once
+  /// (the modifier bar, which sends a tap on release).
+  void pressKey(RemoteKey key, {Duration delay = kKeyRepeatDelay}) {
     final g = _live;
     if (g == null) return;
     releaseKey();
@@ -279,7 +280,7 @@ final class RemoteInput implements RemotePointerSink {
     _latch.take();
     _repeatKey = key;
     _repeatMods = mods;
-    _repeatTimer = Timer(kKeyRepeatDelay, () {
+    _repeatTimer = Timer(delay, () {
       _repeatTimer = Timer.periodic(kKeyRepeatInterval, (_) {
         final g = _live;
         if (g != null) {

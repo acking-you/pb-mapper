@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../../shell/window_chrome.dart';
@@ -283,9 +282,3 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     ),
   );
 }
-
-/// Long-press right click presses; drag starts and latch changes click.
-void viewerHaptic(HapticKind kind) => unawaited(switch (kind) {
-  HapticKind.press => HapticFeedback.mediumImpact(),
-  HapticKind.select => HapticFeedback.selectionClick(),
-});

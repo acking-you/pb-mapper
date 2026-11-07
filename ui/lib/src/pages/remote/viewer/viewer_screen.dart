@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
 import 'package:pb_mapper_ui/src/state/remote_desktop.dart';
@@ -22,6 +24,11 @@ class RemoteViewerScreen extends StatefulWidget {
 class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
   RemoteDesktop? _remote;
   String _title = '';
+
+  /// A phone or a tablet.
+  static bool get _touch =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
 
   @override
   void didChangeDependencies() {
@@ -75,15 +82,29 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
           maxScaleFactor: 1.3,
           child: EntranceMotion(
             offset: 0,
-            child: DesktopViewer(
-              desktop: remote.desktop,
-              prefs: remote.prefs,
-              title: _title,
-              onBack: remote.back,
-              onDisconnect: remote.disconnect,
-              onQuality: (quality) => unawaited(remote.setQuality(quality)),
-              onReconnect: () => unawaited(remote.reconnect()),
-            ),
+            // A Windows touchscreen keeps the desktop viewer, touching
+            // directly.
+            child: _touch
+                ? TouchViewer(
+                    desktop: remote.desktop,
+                    prefs: remote.prefs,
+                    title: _title,
+                    onBack: remote.back,
+                    onDisconnect: remote.disconnect,
+                    onQuality: (quality) =>
+                        unawaited(remote.setQuality(quality)),
+                    onReconnect: () => unawaited(remote.reconnect()),
+                  )
+                : DesktopViewer(
+                    desktop: remote.desktop,
+                    prefs: remote.prefs,
+                    title: _title,
+                    onBack: remote.back,
+                    onDisconnect: remote.disconnect,
+                    onQuality: (quality) =>
+                        unawaited(remote.setQuality(quality)),
+                    onReconnect: () => unawaited(remote.reconnect()),
+                  ),
           ),
         ),
       ),

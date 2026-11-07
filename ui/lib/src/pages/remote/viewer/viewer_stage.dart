@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -140,17 +141,62 @@ class ViewerStage extends StatelessWidget {
           input: input,
         ),
         TouchIndicator(machine: machine),
-        ViewerOverlayLayer(
-          session: session,
-          stats: stats,
-          title: title,
-          actions: actions,
-          compact: compact,
-          toolbarInset: toolbarInset,
-        ),
+        if (compact)
+          _PictureFrame(viewport: viewport, child: _overlays)
+        else
+          _overlays,
       ],
     );
   }
+
+  Widget get _overlays => ViewerOverlayLayer(
+    session: session,
+    stats: stats,
+    title: title,
+    actions: actions,
+    compact: compact,
+    toolbarInset: toolbarInset,
+  );
+}
+
+/// A phone: the overlays keep to the picture as fitted, less what the soft
+/// keyboard covers, so they stay clear of the gutters around it and of the
+/// keyboard. Zoom and pan do not move them.
+class _PictureFrame extends StatelessWidget {
+  const _PictureFrame({required this.viewport, required this.child});
+
+  final RemoteViewport viewport;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: viewport,
+    child: child,
+    builder: (context, child) => LayoutBuilder(
+      builder: (context, box) {
+        final size = box.biggest;
+        final aspect = viewport.aspectRatio;
+        final width = math.min(size.width, size.height * aspect);
+        final height = width / aspect;
+        final fitted = Rect.fromLTWH(
+          (size.width - width) / 2,
+          (size.height - height) / 2,
+          width,
+          height,
+        );
+        final visible = viewport.occlusion.deflateRect(Offset.zero & size);
+        final frame = fitted.intersect(visible);
+        return Stack(
+          children: [
+            Positioned.fromRect(
+              rect: frame.width > 0 && frame.height > 0 ? frame : fitted,
+              child: child!,
+            ),
+          ],
+        );
+      },
+    ),
+  );
 }
 
 /// Keeps the viewport's aspect and scale mode in step with the picture,
