@@ -4,8 +4,12 @@ The optional `desktop` feature exposes `pb_mapper::desktop::{Host, HostOptions,
 HostIdentity, Viewer, Invitation}` for endpoint-owned screen sharing over an
 existing Client. Windows hosting includes GPU H.264 video and an opt-in privileged
 helper; the existing Flutter UI supplies Windows/Android native textures and
-separate view/control permissions. The helper's real UAC acceptance and the
-60+ FPS end-to-end UI target are still unverified. See the
+separate view/control permissions. `Host::start` and `start_with_identity`
+use the platform's own capture and encoder, and refuse before registering
+where `capabilities().host` is false: off Windows, or on Windows without Media
+Foundation. `start_with_backend` and `start_with_backend_and_identity` take an
+embedder's own backend instead. The helper's real UAC acceptance and the 60+
+FPS end-to-end UI target are still unverified. See the
 [setup, measurements and support matrix](../../docs/remote-desktop.md).
 
 A host's `invitation()` encodes as a `pbd1.` string (`Invitation::encode`,
@@ -22,14 +26,16 @@ Video goes to exactly one consumer: `viewer.video_sink().attach()` returns a
 `VideoConsumer` whose `next` blocks on the caller's thread, never on tokio. The
 sink keeps only the newest decodable frames: when the consumer falls behind it
 drops to the next IDR and caps the host's frame rate to what the consumer
-presents. The consumer reports each frame it actually showed with `presented`
-and asks for an IDR with `keyframe`. Requests are rate-limited, and a decoder
-that keeps failing ends the session with `decoder_failed`. Input is authorised
-only by a recent, validated presentation: `Viewer::input(generation, &inputs)`
-stamps the frame and sequence itself and fails with a typed `InputError`;
-transport receipts never grant input. `status()`, and per frame the
-allocation-free `view()`, report the session; `pause` and `resume` stop and
-restart video while the viewer is hidden.
+presents. The consumer reports each frame it actually showed with `presented`,
+asks for an IDR with `keyframe`, and reports a decoder error with
+`failed(message)`, which also asks for an IDR and keeps the message for the
+session's end. Requests are rate-limited, and a decoder that keeps failing
+ends the session with `decoder_failed`. Input is authorised only by a recent,
+validated presentation: `Viewer::input(generation, &inputs)` stamps the frame
+and sequence itself and fails with a typed `InputError`; transport receipts
+never grant input. `status()`, and per frame the allocation-free `view()`,
+report the session; `pause` and `resume` stop and restart video while the
+viewer is hidden.
 
 Desktop backends are constructed and retained on their capture/input worker;
 `Backend` need not be `Send`. Embedders coordinate other input writers with a
