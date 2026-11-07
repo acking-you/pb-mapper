@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod ctl;
 mod desktop;
+mod desktop_computers;
 #[cfg(target_os = "android")]
 mod desktop_jni;
 mod desktop_video;

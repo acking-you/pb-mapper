@@ -41,12 +41,15 @@ pb-mapper-protocol.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p", "relay-quic"] }
 uni-stream.workspace = true
 parking_lot.workspace = true
-# The update manifest's Ed25519 signature; see src/update.rs.
+# The update manifest's Ed25519 signature; see src/update.rs. Also the
+# remembered computers' AES-GCM on Android; see src/desktop_computers.rs.
 ring.workspace = true
+# The remembered computers' vault key, as Dart passes it.
+base64.workspace = true
 bytes = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Storage_FileSystem"] }
+windows = { workspace = true, features = ["Win32_Security_Cryptography", "Win32_System_Memory"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true

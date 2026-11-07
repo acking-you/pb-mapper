@@ -116,6 +116,7 @@ constructors! {
     timeout => Timeout,
     protocol => Protocol,
     io => Io,
+    vault_unavailable => VaultUnavailable,
     internal => Internal,
 }
 

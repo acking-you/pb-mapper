@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 #[path = "desktop_trust.rs"]
-mod trust;
+pub(crate) mod trust;
 
 #[derive(Default)]
 struct BackgroundCache {
@@ -64,6 +64,10 @@ pub(crate) struct DesktopState {
     // while its host lives so ownership can move to the service unchanged.
     host_identity: tokio::sync::Mutex<Option<LocalIdentity>>,
     background: Arc<parking_lot::Mutex<BackgroundCache>>,
+    /// The invitation of the viewer in `viewer`, which passed its certificate
+    /// pin: what remembering this computer stores. Written only under the
+    /// viewer lock, so a disconnect always clears the one it replaces.
+    current: parking_lot::Mutex<Option<Invitation>>,
 }
 #[derive(Clone)]
 struct LocalIdentity {
@@ -106,9 +110,13 @@ impl DesktopState {
         snapshot
     }
 
+    pub(crate) fn current_invitation(&self) -> Option<Invitation> {
+        self.current.lock().clone()
+    }
+
     async fn connect_viewer(
         &self,
-        connect: impl std::future::Future<Output = Result<Viewer, CtlError>>,
+        connect: impl std::future::Future<Output = Result<(Viewer, Invitation), CtlError>>,
     ) -> Result<(), CtlError> {
         // Register before any await, including the viewer/configuration locks:
         // a disconnect must invalidate setup even before network work starts.
@@ -138,7 +146,7 @@ impl DesktopState {
                 pending.take();
             }
         }
-        let viewer = result?;
+        let (viewer, invitation) = result?;
         let mut slot = self.viewer.lock().await;
         if cancel.is_cancelled()
             || self.viewer_epoch.load(Ordering::Acquire) != epoch
@@ -149,6 +157,7 @@ impl DesktopState {
             return Err(err("desktop connection cancelled"));
         }
         *slot = Some(viewer);
+        *self.current.lock() = Some(invitation);
         Ok(())
     }
     async fn disconnect_viewer(&self) -> Result<(), CtlError> {
@@ -159,7 +168,9 @@ impl DesktopState {
                 token.cancel();
             }
         }
-        if let Some(viewer) = self.viewer.lock().await.take() {
+        let mut slot = self.viewer.lock().await;
+        self.current.lock().take();
+        if let Some(viewer) = slot.take() {
             viewer.stop().await.map_err(err)?;
         }
         Ok(())
@@ -230,8 +241,12 @@ enum Request {
     HostPermission {
         allow_control: bool,
     },
+    /// Exactly one of `invitation` and `computer_id`, a remembered computer.
     Connect {
-        invitation: String,
+        #[serde(default)]
+        invitation: Option<String>,
+        #[serde(default)]
+        computer_id: Option<String>,
         #[serde(default)]
         relay_only: bool,
         #[serde(default)]
@@ -519,14 +534,28 @@ pub unsafe extern "C" fn pb_mapper_desktop_call_json(
         if text.len() > 16384 {
             return Err(CtlError::invalid_argument("desktop request too large"));
         }
-        serde_json::from_str::<Request>(&text)
+        serde_json::from_str::<Value>(&text)
             .map_err(|_| CtlError::invalid_argument("invalid desktop request"))
     }) {
         Ok(request) => request,
         Err(e) => return err_ctl(&e),
     };
     let handle = unsafe { &*handle };
-    match handle.runtime.block_on(call(handle, request)) {
+    // The remembered computers have their own strict request type.
+    let result = if request["op"]
+        .as_str()
+        .is_some_and(|op| op.starts_with("computers_"))
+    {
+        handle
+            .runtime
+            .block_on(crate::desktop_computers::call(handle, request))
+    } else {
+        match serde_json::from_value::<Request>(request) {
+            Ok(request) => handle.runtime.block_on(call(handle, request)),
+            Err(_) => Err(CtlError::invalid_argument("invalid desktop request")),
+        }
+    };
+    match result {
         Ok(value) => ok_data(value),
         Err(e) => err_ctl(&e),
     }
@@ -604,8 +633,22 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                     })
                 })
             });
+            // The invitation resumes sharing without setup, so only a grant
+            // for this relay and namespace offers one.
+            let saved = match saved {
+                Some(saved) => {
+                    let invitation = if matches {
+                        let service = saved.settings.service.clone();
+                        Some(saved.identity()?.invitation(service).map_err(err)?.encode())
+                    } else {
+                        None
+                    };
+                    Some(saved.metadata(invitation))
+                }
+                None => None,
+            };
             return Ok(
-                json!({"supported": trust::supported(), "saved": saved.as_ref().map(trust::Saved::metadata), "matches_relay": matches}),
+                json!({"supported": trust::supported(), "saved": saved, "matches_relay": matches}),
             );
         }
         Request::TrustRevoke => {
@@ -720,14 +763,42 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         }
         Request::Connect {
             invitation,
+            computer_id,
             relay_only,
             native_video,
             video,
         } => {
-            let invitation = Invitation::decode(&invitation)
-                .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?;
+            enum Target {
+                Invitation(Invitation),
+                Remembered(String),
+            }
+            // A pasted invitation is checked before anything waits; a
+            // remembered one is read inside the cancellable attempt.
+            let target = match (invitation, computer_id) {
+                (Some(text), None) => Target::Invitation(
+                    Invitation::decode(&text)
+                        .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?,
+                ),
+                (None, Some(id)) => Target::Remembered(id),
+                _ => {
+                    return Err(CtlError::invalid_argument(
+                        "connect takes exactly one of an invitation and a computer id",
+                    ));
+                }
+            };
             state
                 .connect_viewer(async {
+                    let invitation = match target {
+                        Target::Invitation(invitation) => invitation,
+                        Target::Remembered(id) => {
+                            crate::desktop_computers::invitation_for(handle, &id)
+                                .await?
+                                .ok_or_else(|| {
+                                    CtlError::not_found("remembered computer not found")
+                                })?
+                        }
+                    };
+                    let session = invitation.clone();
                     // Configuration can wait behind other app operations. Keep
                     // that wait inside the registered, cancellable attempt.
                     let config = handle.state.lock().await.get_config_status().await;
@@ -767,6 +838,7 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                         )
                         .await
                     }
+                    .map(|viewer| (viewer, session))
                     .map_err(err)
                 })
                 .await?;
@@ -1588,7 +1660,8 @@ mod tests {
                 call(
                     &handle,
                     Request::Connect {
-                        invitation: String::new(),
+                        invitation: Some(String::new()),
+                        computer_id: None,
                         relay_only: false,
                         native_video: false,
                         video: None,
@@ -1609,7 +1682,8 @@ mod tests {
                 call(
                     &handle,
                     Request::Connect {
-                        invitation: invitation.clone(),
+                        invitation: Some(invitation.clone()),
+                        computer_id: None,
                         relay_only: false,
                         native_video: false,
                         video: None,
@@ -1656,7 +1730,7 @@ mod tests {
         let state = DesktopState::default();
         let viewer = state.viewer.lock().await;
         let mut attempt = std::pin::pin!(
-            state.connect_viewer(std::future::pending::<Result<Viewer, CtlError>>())
+            state.connect_viewer(std::future::pending::<Result<(Viewer, Invitation), CtlError>>())
         );
         let mut context = Context::from_waker(Waker::noop());
         assert!(attempt.as_mut().poll(&mut context).is_pending());
@@ -1683,7 +1757,7 @@ mod tests {
             connecting
                 .connect_viewer(async {
                     let _ = entered.send(());
-                    std::future::pending::<Result<Viewer, CtlError>>().await
+                    std::future::pending::<Result<(Viewer, Invitation), CtlError>>().await
                 })
                 .await
         });
