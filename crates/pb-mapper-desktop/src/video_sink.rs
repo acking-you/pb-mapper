@@ -16,8 +16,11 @@
 //!   next IDR, one is asked for, and the fps cap learns of it. No such drop
 //!   comes within `IDR_GRACE` of handing out an IDR, whose decode may be slow,
 //!   nor before the consumer took its first: until then the wait is the
-//!   hand-off to a consumer still attaching, so only overflow drops, and the
-//!   fps cap is not judged.
+//!   hand-off to a consumer still attaching, so only overflow drops.
+//!
+//! The fps cap judges the consumer only from `IDR_GRACE` after its first IDR:
+//! what queued during the hand-off and its decoder's start, and an overflow
+//! then, are not its falling behind.
 //!
 //! Keyframe requests go through the viewer's recovery state machine and its
 //! limiter, and the viewer tick runs the fps cap and the stall watchdog here.
@@ -47,7 +50,8 @@ pub(crate) const SINK_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// A head older than this, with `BACKLOG_MIN_UNITS` queued, is a backlog.
 pub(crate) const BACKLOG_AGE: Duration = Duration::from_millis(250);
 pub(crate) const BACKLOG_MIN_UNITS: usize = 3;
-/// No backlog drop this soon after an IDR was handed out.
+/// No backlog drop this soon after an IDR was handed out, and no fps cap
+/// judgment this soon after the first.
 pub(crate) const IDR_GRACE: Duration = Duration::from_millis(500);
 /// Longest decoder name kept for the overlay.
 const DECODER_NAME_MAX: usize = 64;
@@ -164,6 +168,8 @@ struct SinkState {
     next_discontinuity: bool,
     /// When the consumer last took an IDR.
     idr_pulled_at: Option<Instant>,
+    /// When it took its first, which starts its decoder.
+    first_idr_pulled_at: Option<Instant>,
     handed: VecDeque<Handed>,
     presented: Option<Presented>,
     recovery: Recovery,
@@ -185,6 +191,7 @@ impl SinkState {
             wait_key: true,
             next_discontinuity: true,
             idr_pulled_at: None,
+            first_idr_pulled_at: None,
             handed: VecDeque::with_capacity(RECENT_FRAMES),
             presented: None,
             recovery: Recovery::default(),
@@ -225,6 +232,12 @@ impl SinkState {
                 .queue
                 .front()
                 .is_some_and(|head| now.saturating_duration_since(head.received_at) > BACKLOG_AGE)
+    }
+    /// The fps cap judges the consumer from `IDR_GRACE` after its first IDR;
+    /// before then the queue holds the hand-off's wait and its decoder's start.
+    fn judged(&self, now: Instant) -> bool {
+        self.first_idr_pulled_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= IDR_GRACE)
     }
     /// The consumer still takes frames, but the oldest it took after the last
     /// presented one has waited `STALL_WATCHDOG`, and nothing was presented
@@ -368,14 +381,14 @@ impl VideoSink {
     }
 
     /// The consumer fell behind: drop the queue, wait for the next IDR and
-    /// ask for one, and let the fps cap know once the consumer took an IDR.
+    /// ask for one, and let the fps cap know once it judges the consumer.
     fn drop_to_idr(&self, state: &mut SinkState, cause: Backlog, now: Instant) {
         let units = state.restart();
         match cause {
             Backlog::Age => state.backlog_drops += 1,
             Backlog::Overflow => state.overflow_drops += 1,
         }
-        if state.idr_pulled_at.is_some() {
+        if state.judged(now) {
             state.fps_cap.on_backlog_drop();
         }
         tracing::debug!(
@@ -437,8 +450,9 @@ impl VideoSink {
 
     /// The viewer tick (every 250 ms). Returns the fps the host should be
     /// capped at, when that changes; it is judged only while the session
-    /// streams and is not paused, once the consumer took an IDR. Also
-    /// re-requests an awaited IDR on its backoff, and runs the stall watchdog.
+    /// streams and is not paused, from `IDR_GRACE` after the consumer took its
+    /// first IDR. Also re-requests an awaited IDR on its backoff, and runs the
+    /// stall watchdog.
     pub(crate) fn tick(
         &self,
         now: Instant,
@@ -452,7 +466,7 @@ impl VideoSink {
         let paused = self.paused.load(Ordering::Acquire);
         let mut guard = self.state.lock();
         let state = &mut *guard;
-        let cap = if streaming && !paused && state.idr_pulled_at.is_some() {
+        let cap = if streaming && !paused && state.judged(now) {
             let presented_fps = state.present.presented_fps(now);
             state
                 .fps_cap
@@ -562,6 +576,7 @@ impl VideoSink {
         });
         if unit.keyframe || unit.codec == VideoCodec::Jpeg {
             state.idr_pulled_at = Some(now);
+            state.first_idr_pulled_at.get_or_insert(now);
             state.recovery.on_idr_handed(unit.generation, unit.frame_id);
         }
         Some(Pull::Unit(unit))
@@ -949,48 +964,47 @@ mod tests {
         assert_eq!(requested(), 7);
     }
 
-    /// The session streams before its consumer is attached: that wait is the
-    /// hand-off, not a decoder falling behind.
+    /// The session streams before its consumer attaches, and the consumer's
+    /// decoder takes a while to start: neither is the consumer falling behind.
     #[test]
-    fn a_consumer_still_attaching_has_no_backlog() {
-        let sink = VideoSink::detached_for_test();
-        let start = Instant::now();
-        let at = |millis: u64| start + Duration::from_millis(millis);
-        // 60 fps from an IDR at 0 ms.
-        let push = |frame_id: u64, keyframe: bool| {
-            let millis = (frame_id - 1) * 16;
-            sink.push_at(video(1, frame_id, keyframe, at(millis)), at(millis));
-        };
-        let tick = |millis: u64| sink.tick(at(millis), true, true, QualityPreset::Balanced);
-        let backlog_drops = || sink.snapshot(start).backlog_drops;
-
-        // However old and long the queue, nothing is dropped for age and the
-        // fps cap is not judged.
-        sink.on_state_at(1, true, at(0));
-        for frame_id in 1..=16 {
-            push(frame_id, frame_id == 1);
+    fn a_starting_consumer_has_no_backlog() {
+        // 60 fps from an IDR at 0 ms. The consumer attaches at `attach` ms and
+        // takes the IDR, starts its decoder for `start` ms, then takes a unit
+        // every 8 ms, twice the rate. Returns the backlog drops, and what the
+        // ticks up to 1 s capped.
+        fn run(attach: u64, start: u64) -> (u64, Vec<Option<u32>>) {
+            let sink = VideoSink::detached_for_test();
+            let begin = Instant::now();
+            let at = |millis: u64| begin + Duration::from_millis(millis);
+            sink.on_state_at(1, true, at(0));
+            let mut consumer = None;
+            let mut caps = Vec::new();
+            for millis in 0..=1000u64 {
+                if millis.is_multiple_of(16) {
+                    let frame_id = millis / 16 + 1;
+                    sink.push_at(video(1, frame_id, frame_id == 1, at(millis)), at(millis));
+                }
+                if millis == attach {
+                    let attached = sink.attach().unwrap();
+                    assert!(attached.pull_at(at(millis), 1 << 20).is_some());
+                    consumer = Some(attached);
+                } else if let Some(consumer) = &consumer
+                    && millis >= attach + start
+                    && (millis - attach - start).is_multiple_of(8)
+                {
+                    consumer.pull_at(at(millis), 1 << 20);
+                }
+                if millis.is_multiple_of(250) && millis > 0 {
+                    caps.push(sink.tick(at(millis), true, true, QualityPreset::Balanced));
+                }
+            }
+            (sink.snapshot(begin).backlog_drops, caps)
         }
-        assert_eq!(tick(250), None);
-        for frame_id in 17..=32 {
-            push(frame_id, false);
-        }
-        assert_eq!(tick(500), None);
-        assert_eq!(backlog_drops(), 0);
 
-        // The bound still holds, but its drop is not the consumer's either.
-        push(33, false);
-        assert_eq!(backlog_drops(), 1);
-        push(34, true);
-        let consumer = sink.attach().unwrap();
-        let first = consumer.pull_at(at(530), 1 << 20);
-        assert!(matches!(
-            first,
-            Some(Pull::Unit(VideoUnit {
-                frame_id: 34,
-                discontinuity: true,
-                ..
-            }))
-        ));
-        assert_eq!(tick(750), None);
+        // Attached 450 ms late behind 28 units, none dropped for their age;
+        // they are still queued on two ticks while it catches up.
+        assert_eq!(run(450, 60), (0, vec![None; 4]));
+        // A decoder starting for 350 ms overflows the queue late in its grace.
+        assert_eq!(run(200, 350), (1, vec![None; 4]));
     }
 }
