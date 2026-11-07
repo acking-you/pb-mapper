@@ -864,8 +864,10 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `keyframes_requested`, `backlog_drops`). The app also warns
 `desktop_connect_failed` with the typed failure, and a native decoder's
 failure is warned as `desktop_decoder_error` on `pb_mapper_desktop::frames`
-with its text. No line carries a token, invitation or fingerprint, and the
-background service's sessions are not logged.
+with its text as the detail. Each line names itself in an `event` field, and
+free text is Debug-formatted so that a newline in it cannot split the line.
+No line carries a token, invitation or fingerprint, and the background
+service's sessions are not logged.
 
 ### The app's video path
 

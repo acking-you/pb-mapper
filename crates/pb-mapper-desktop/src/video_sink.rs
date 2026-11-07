@@ -741,10 +741,12 @@ impl VideoConsumer {
             return false;
         }
         let message: String = message.chars().take(DECODER_ERROR_MAX).collect();
+        // Debug-formatted, as the lifecycle lines' details are: the decoder's
+        // text may carry a newline, which must not break the log line.
         tracing::warn!(
             target: "pb_mapper_desktop::frames",
-            error = %message,
-            "desktop_decoder_error"
+            event = "desktop_decoder_error",
+            detail = ?message,
         );
         self.sink.state.lock().decoder_error = message;
         self.sink.request_keyframe(KeyframeReason::DecoderError)
