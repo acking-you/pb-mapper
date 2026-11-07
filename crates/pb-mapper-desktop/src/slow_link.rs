@@ -545,9 +545,10 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
         let lowest_bitrate = lowest(|interval| interval.bitrate);
         let lowest_encoder = lowest(|interval| interval.encoder_bitrate);
         println!(
-            "bandwidth_limit link_mbps=1 limit_s=8 before_pace={} before_bitrate={} clamped_after_ms={:?} lowest_pace={lowest_pace} lowest_bitrate={lowest_bitrate} lowest_encoder_bitrate={lowest_encoder} recovered_after_ms={:?} final_pace={} final_bitrate={} expired_encoder_outputs={} state={:?}",
+            "bandwidth_limit link_mbps=1 limit_s=8 before_pace={} before_bitrate={} before_encoder_bitrate={} clamped_after_ms={:?} lowest_pace={lowest_pace} lowest_bitrate={lowest_bitrate} lowest_encoder_bitrate={lowest_encoder} recovered_after_ms={:?} final_pace={} final_bitrate={} expired_encoder_outputs={} state={:?}",
             before.pace_fps,
             before.bitrate,
+            before.encoder_bitrate,
             clamped.map(|after| after.as_millis()),
             recovered.map(|after| after.as_millis()),
             status.stats.pace_fps,
@@ -563,7 +564,12 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
             "the window must clamp within 1 s of the limit: {clamped:?}"
         );
         assert!(lowest_pace <= 15, "{lowest_pace}");
-        assert!(lowest_encoder < START_BPS, "bits per frame must fall");
+        // Bits per frame may have risen past the start by the time the limit
+        // begins, so the fall is judged against where the limit found them.
+        assert!(
+            lowest_encoder < before.encoder_bitrate,
+            "bits per frame must fall below where the limit found them: {before:?}"
+        );
         assert!(
             recovered.is_some(),
             "the bitrate must recover to 80% of the start within 30 s"
