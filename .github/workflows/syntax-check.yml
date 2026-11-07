@@ -228,6 +228,16 @@ jobs:
       - name: Run Flutter analyzer
         run: flutter analyze --no-fatal-infos
 
+      # Icons are Lucide only, through lib/src/theme/app_icons.dart: the tests
+      # and posters load no Material icon font, so an Icons.* glyph would show
+      # there as a box.
+      - name: Refuse Material icons
+        run: |
+          if grep -rnE '\bIcons\.' lib; then
+            echo "::error::Material Icons.* found; use AppIcons from lib/src/theme/app_icons.dart"
+            exit 1
+          fi
+
       - name: Run widget tests
         run: flutter test
 

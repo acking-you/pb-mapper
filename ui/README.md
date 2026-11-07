@@ -1,20 +1,23 @@
 # pb-mapper UI
 
-**Remote desktop:** open the monitor button on **Tunnels** to share a Windows
-desktop or view/control an authorized screen inside the app. It uses the existing
-relay configuration, separate desktop permission, endpoint encryption and native
-H.264 textures on Windows/Android. **Enable remote control** prepares the Windows
-helper, persistent service, input permission and reusable invitation in one flow.
-Stop pauses sharing while retaining the invitation; Revoke invalidates it.
-The separately installed UAC helper is implemented; actual secure-desktop prompt
-acceptance, physical-phone/cross-network validation and sustained 60+ FPS UI
-acceptance remain incomplete. Android development verification currently uses a
-VM. See [setup, measurements and support matrix](../docs/remote-desktop.md).
+**Remote desktop:** the **Remote desktop** page (the **Remote** tab on a phone)
+shares a Windows desktop and views or controls other computers inside the app.
+It uses the existing relay configuration, separate desktop permission, endpoint
+encryption and native H.264 textures on Windows/Android. **Turn on remote
+control** prepares the Windows helper, persistent service, input permission and
+reusable invitation in one flow. Stop pauses sharing while retaining the
+invitation; Revoke invalidates it. A viewer can remember the computers it
+opens, in an encrypted vault on Windows and Android. The separately installed
+UAC helper is implemented; actual secure-desktop prompt acceptance,
+physical-phone/cross-network validation and sustained 60+ FPS UI acceptance
+remain incomplete. Android development verification currently uses a VM. See
+[setup, gestures, measurements and support matrix](../docs/remote-desktop.md).
 
-The desktop and mobile app for pb-mapper: four pages — an Overview drawn as a
-galaxy, Tunnels, Logs and Settings — plus a three-step first run. The design
-follows POCOX's language; [`docs/ui-design.md`](../docs/ui-design.md) explains
-it.
+The desktop and mobile app for pb-mapper: six places — an Overview drawn as a
+galaxy, Tunnels, Remote desktop, Relay, Logs and Settings (on a phone, Logs
+opens from Settings) — plus a three-step first run and the full-window remote
+viewer. The design follows POCOX's language;
+[`docs/ui-design.md`](../docs/ui-design.md) explains it.
 
 Updates download and verify packages inside the app before opening the system
 installer. Android releases use the maintainer's persistent signing key in CI;
@@ -49,11 +52,16 @@ located under `ui/native`.
 
 ### Flutter UI Architecture
 
-- **Pages** live in `ui/lib/src/pages` (overview, tunnels, logs, settings,
-  first-run setup, and the one share/connect editor); the shell that frames them
-  — rail or bottom bar, window chrome — in `ui/lib/src/shell`.
+- **Pages** live in `ui/lib/src/pages` (overview, tunnels, relay, logs,
+  settings, first-run setup, and the one share/connect editor), with the
+  Remote desktop page in `pages/remote/` and its viewer in
+  `pages/remote/viewer/`; the shell that frames them — rail or bottom bar,
+  window chrome, the sharing capsule — in `ui/lib/src/shell`.
 - **State**: every page reads one `AppStore` (`ui/lib/src/state`), which wraps
-  the API and is refreshed by the Rust change stream.
+  the API and is refreshed by the Rust change stream. The remote desktop has
+  its own `DesktopStore`, whose views notify only their own listeners;
+  `RemoteDesktop` and `RemoteComputerStore` hold the open session and the
+  remembered computers, and `ViewerPrefs` the viewer's settings.
 - **Galaxy**: `ui/lib/src/galaxy` draws the overview. Its per-frame geometry is
   computed in Rust (`ui/native/pb_mapper_galaxy`, exported as
   `pb_mapper_galaxy_frame_v1`); without the library a Dart mirror draws the
@@ -121,11 +129,12 @@ this JSON envelope because:
 - **Good enough performance**: UI interactions are dominated by network calls,
   so the JSON parse cost is negligible compared to keeping the API stable.
 
-Desktop video uses separately owned binary buffers with an explicit free
-function. H.264 units flow in order to native decoder workers and Flutter
-textures; JPEG remains a compatibility path. Encoded bytes never enter the JSON
-control envelope. See the desktop document above for queue bounds, presentation
-acknowledgements and buffer ownership.
+Desktop video never enters the JSON control envelope. On Windows and Android
+the native decoder pulls H.264 from Rust itself, through plain C exports or
+their JNI twins, and draws into a Flutter texture; Dart reads only status and
+the per-frame view. Elsewhere JPEG comes to Dart as bytes and is decoded off
+the UI isolate. See the desktop document above for queue bounds, presentation
+acknowledgements and ownership.
 
 To run and build this app, you need to have
 [Flutter SDK](https://docs.flutter.dev/get-started/install)
