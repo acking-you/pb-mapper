@@ -28,6 +28,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+/// G1 only: the unchanged app on the new core. Deleted at G2.
+#[path = "desktop_shim.rs"]
+pub(crate) mod shim;
 #[path = "desktop_trust.rs"]
 pub(crate) mod trust;
 
@@ -99,6 +102,8 @@ pub(crate) struct DesktopState {
     // while its host lives so ownership can move to the service unchanged.
     host_identity: tokio::sync::Mutex<Option<LocalIdentity>>,
     background: Arc<parking_lot::Mutex<BackgroundCache>>,
+    /// The old app's frames (G1 only; deleted with the shim at G2).
+    shim: parking_lot::Mutex<Option<shim::Frames>>,
 }
 /// The running local host's identity and settings: what a restart on another
 /// display or under another service, and the background handoff, start from.
@@ -724,6 +729,8 @@ pub unsafe extern "C" fn pb_mapper_desktop_call_json(
         handle
             .runtime
             .block_on(crate::desktop_computers::call(handle, request))
+    } else if shim::routes(&request) {
+        shim::call(handle, request)
     } else {
         match serde_json::from_value::<Request>(request) {
             Ok(request) => handle.runtime.block_on(call(handle, request)),
@@ -1678,7 +1685,7 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-    fn test_handle(name: &str) -> PbMapperHandle {
+    pub(super) fn test_handle(name: &str) -> PbMapperHandle {
         let root = std::env::temp_dir().join(format!("pb-desktop-{name}-{}", std::process::id()));
         PbMapperHandle {
             desktop: Default::default(),
@@ -1698,7 +1705,7 @@ mod tests {
     }
 
     /// The lifecycle export, as a Dart worker calls it.
-    fn call_json(handle: &PbMapperHandle, request: Value) -> Value {
+    pub(super) fn call_json(handle: &PbMapperHandle, request: Value) -> Value {
         let request = CString::new(request.to_string()).unwrap();
         reply(unsafe {
             pb_mapper_desktop_call_json(std::ptr::from_ref(handle).cast_mut(), request.as_ptr())
@@ -1726,7 +1733,7 @@ mod tests {
         (code, view)
     }
 
-    fn invitation() -> Invitation {
+    pub(super) fn invitation() -> Invitation {
         desktop::HostIdentity::generate()
             .unwrap()
             .invitation("desktop:test".into())
@@ -1734,7 +1741,7 @@ mod tests {
     }
 
     /// One host record: a `u32` big-endian length, then JSON.
-    async fn send(host: &mut DuplexStream, message: Value) {
+    pub(super) async fn send(host: &mut DuplexStream, message: Value) {
         let bytes = serde_json::to_vec(&message).unwrap();
         host.write_u32(bytes.len() as u32).await.unwrap();
         host.write_all(&bytes).await.unwrap();
@@ -1743,7 +1750,7 @@ mod tests {
     /// A viewer whose scripted host accepted at once and streams the first
     /// generation. The host side stays open and silent, so `stop()` waits out
     /// the viewer's close grace, seconds long: a held stop.
-    async fn scripted_viewer() -> (Viewer, DuplexStream) {
+    pub(super) async fn scripted_viewer() -> (Viewer, DuplexStream) {
         let (stream, mut host) = tokio::io::duplex(1 << 20);
         let connecting = tokio::spawn(Viewer::over_stream_for_test(
             stream,
