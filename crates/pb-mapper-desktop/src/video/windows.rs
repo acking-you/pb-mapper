@@ -56,6 +56,7 @@ impl From<Encoded> for crate::EncodedFrame {
                 keyframe: image.keyframe,
                 pts_us: image.pts_us,
                 duplicate: image.duplicate,
+                encode_us: 0,
             },
             bytes: image.bytes,
         }

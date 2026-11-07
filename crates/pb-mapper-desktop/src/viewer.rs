@@ -138,10 +138,10 @@ impl Viewer {
             return Err(error("unsupported codec selection"));
         }
         // Validate SDK callers too, not just the UI parser.
-        let invitation = Invitation::decode(&invitation.encode()?)?;
-        let tls = security::client(&invitation.certificate)?;
+        let invitation = Invitation::decode(&invitation.encode()).map_err(error)?;
+        let tls = security::client(invitation.fingerprint)?;
         let (stream, connection) = client
-            .connect_tcp(invitation.service, options)
+            .connect_tcp(invitation.service.clone(), options)
             .await
             .map_err(error)?;
         let mut stream = tokio::time::timeout(
@@ -158,7 +158,7 @@ impl Viewer {
             wire::write_json(
                 &mut stream,
                 &Command::Authenticate {
-                    token: invitation.token,
+                    token: invitation.token_text(),
                     codecs,
                     video: Some(preferences),
                     presentation_feedback,

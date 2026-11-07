@@ -1,9 +1,13 @@
-use crate::{Backend, Frame, InputEvent, Result, SessionStatus, error, wire::Command};
+use crate::{
+    Backend, Frame, InputEvent, Result, SessionStatus, VideoCodec, VideoLimits, error,
+    shared::{EngineState, Policy, SessionShared},
+    wire::Command,
+};
 use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -14,25 +18,70 @@ use tokio_util::sync::CancellationToken;
 pub(crate) type Factory = Arc<dyn Fn() -> Result<Box<dyn Backend>> + Send + Sync>;
 type Request = (Command, oneshot::Sender<Result<()>>);
 
-pub(crate) struct Policy(AtomicU64);
-impl Policy {
-    pub fn new(allow: bool) -> Self {
-        Self(AtomicU64::new(u64::from(allow)))
+// The v2 host session spawns thread C through these once it lands; until the
+// G1 cleanup removes the allows, nothing else uses them.
+
+/// What a v2 session's thread C is started with.
+#[allow(dead_code)]
+pub(crate) struct WorkerConfig {
+    pub codec: VideoCodec,
+    pub limits: VideoLimits,
+    /// `limits.max_fps`: the encoder's nominal rate for the whole session.
+    pub nominal_fps: u32,
+    pub admission: Option<Arc<dyn crate::ControlAdmission>>,
+}
+
+/// How thread C ended.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkerExit {
+    /// `shared.cancel` ended it.
+    Cancelled,
+    /// The backend failed for good (a lost helper or an unrecoverable
+    /// encoder); the session ends with `Stopped{capture_failed}`.
+    CaptureFailed(String),
+}
+
+/// Thread C of one v2 session. It exits on `shared.cancel` (after a wake) or
+/// fatally; `exited` reports which, once it has also dropped its backend.
+#[allow(dead_code)]
+pub(crate) struct WorkerHandle {
+    join: Option<tokio::task::JoinHandle<WorkerExit>>,
+    exit: Option<WorkerExit>,
+}
+#[allow(dead_code)]
+impl WorkerHandle {
+    /// Cancel-safe, and repeatable after the worker has exited.
+    pub async fn exited(&mut self) -> WorkerExit {
+        if let Some(join) = &mut self.join {
+            let exit = join
+                .await
+                .unwrap_or_else(|failure| WorkerExit::CaptureFailed(failure.to_string()));
+            self.join = None;
+            self.exit = Some(exit);
+        }
+        self.exit.clone().unwrap_or(WorkerExit::Cancelled)
     }
-    pub fn get(&self) -> u64 {
-        self.0.load(Ordering::Acquire)
-    }
-    pub fn allowed(&self) -> bool {
-        self.get() & 1 != 0
-    }
-    pub fn set(&self, allow: bool) {
-        // A revoke followed immediately by a grant still invalidates the old
-        // input generation, even if both occur between capture iterations.
-        let _ = self
-            .0
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
-                Some(((old & !1) + 2) | u64::from(allow))
-            });
+}
+
+/// Start thread C for a v2 session. Until the capture worker lands it only
+/// publishes `connecting` and waits for the session to be cancelled.
+#[allow(dead_code)]
+pub(crate) fn spawn_session(
+    shared: Arc<SessionShared>,
+    _factory: Factory,
+    _config: WorkerConfig,
+) -> WorkerHandle {
+    let join = tokio::spawn(async move {
+        shared
+            .state
+            .send_replace(EngineState::connecting(shared.policy.allowed()));
+        shared.cancel.cancelled().await;
+        WorkerExit::Cancelled
+    });
+    WorkerHandle {
+        join: Some(join),
+        exit: None,
     }
 }
 
@@ -92,7 +141,7 @@ impl Worker {
                 match crate::scheduler::Waiter::new(&signal).and_then(|waiter| {
                     preferences.validate()?;
                     let mut backend = factory()?;
-                    backend.configure_video(preferences)?;
+                    backend.configure_video(preferences.limits(), preferences.max_fps)?;
                     Ok((waiter, backend))
                 }) {
                     Ok(ready) => ready,
@@ -128,6 +177,7 @@ impl Worker {
             let mut engine = Engine::new(backend);
             engine.codec = codec;
             engine.bitrate = preferences.bitrate;
+            engine.pace_fps = preferences.max_fps;
             engine.admission = admission;
             let mut policy = allowed.get();
             let mut next_frame = Instant::now();
@@ -226,9 +276,13 @@ impl Worker {
                         engine.bitrate = bitrate;
                         paused = waiting;
                         if configured != preferences {
-                            match engine.backend.configure_video(preferences) {
+                            match engine
+                                .backend
+                                .configure_video(preferences.limits(), preferences.max_fps)
+                            {
                                 Ok(()) => {
                                     configured = preferences;
+                                    engine.pace_fps = preferences.max_fps;
                                     outgoing.resynchronize();
                                     engine.keyframe = true;
                                 }
@@ -339,6 +393,7 @@ struct Engine {
     codec: crate::VideoCodec,
     keyframe: bool,
     bitrate: u32,
+    pace_fps: u32,
     sample_at: Instant,
     sample_frames: u64,
     admission: Option<Arc<dyn crate::ControlAdmission>>,
@@ -382,6 +437,7 @@ impl Engine {
             codec: crate::VideoCodec::Jpeg,
             keyframe: true,
             bitrate: 16_000_000,
+            pace_fps: crate::VideoPreferences::default().max_fps,
             sample_at: Instant::now(),
             sample_frames: 0,
             admission: None,
@@ -525,10 +581,14 @@ impl Engine {
                 .as_ref()
                 .ok_or_else(|| error("missing desktop context"))?;
             let frame = if submit {
+                let rate = crate::VideoRate {
+                    bitrate: self.bitrate,
+                    pace_fps: self.pace_fps,
+                };
                 self.backend
-                    .capture_video(context, self.codec, self.keyframe, self.bitrate)?
+                    .capture_video(context, self.codec, self.keyframe, rate)?
             } else {
-                self.backend.drain_video(context)?
+                self.backend.drain_video(context, Duration::ZERO)?
             };
             frame
                 .map(|frame| self.backend.cursor(context).map(|cursor| (frame, cursor)))
@@ -631,6 +691,7 @@ impl Drop for Engine {
 mod tests {
     use super::*;
     use crate::{Display, Input};
+    use std::sync::atomic::AtomicU64;
     struct Fake(Arc<parking_lot::Mutex<(u32, u32, u32, u64)>>);
     impl Backend for Fake {
         fn display(&mut self) -> Result<Display> {
@@ -777,6 +838,7 @@ mod tests {
             input: Input::Button {
                 button: crate::Button::Left,
                 down: true,
+                drag_start: false,
             },
         };
         let failure = engine.input(event.clone(), true).unwrap_err();
@@ -794,6 +856,7 @@ mod tests {
         event.input = Input::Button {
             button: crate::Button::Left,
             down: false,
+            drag_start: false,
         };
         let queued_release = engine.input(event, true).unwrap_err();
         engine.report_command_failure(&queued_release);
@@ -813,6 +876,7 @@ mod tests {
                     input: Input::Button {
                         button: crate::Button::Left,
                         down: false,
+                        drag_start: false,
                     },
                 },
                 true,
@@ -934,7 +998,7 @@ mod tests {
                 _: &crate::DesktopContext,
                 _: crate::VideoCodec,
                 _: bool,
-                _: u32,
+                _: crate::VideoRate,
             ) -> Result<Option<crate::EncodedFrame>> {
                 let mut state = self.0.lock();
                 // The first completed IDR has a second submission still in the
@@ -951,6 +1015,7 @@ mod tests {
             fn drain_video(
                 &mut self,
                 _: &crate::DesktopContext,
+                _: Duration,
             ) -> Result<Option<crate::EncodedFrame>> {
                 let mut state = self.0.lock();
                 if state.output_ready && !state.drained {
@@ -1059,7 +1124,7 @@ mod tests {
                 _: &crate::DesktopContext,
                 _: crate::VideoCodec,
                 keyframe: bool,
-                _: u32,
+                _: crate::VideoRate,
             ) -> Result<Option<crate::EncodedFrame>> {
                 let mut state = self.0.lock();
                 if state.pending > 0 {
@@ -1261,7 +1326,7 @@ mod tests {
                 _: &crate::DesktopContext,
                 _: crate::VideoCodec,
                 keyframe: bool,
-                _: u32,
+                _: crate::VideoRate,
             ) -> Result<Option<crate::EncodedFrame>> {
                 if self
                     .0

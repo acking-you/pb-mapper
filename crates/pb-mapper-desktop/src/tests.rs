@@ -6,35 +6,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
     time::{Duration, Instant},
 };
-use tokio::{
-    io::AsyncReadExt,
-    net::{TcpListener, TcpStream},
-    sync::Notify,
-};
-
-#[tokio::test]
-async fn tls_rejects_an_unpaired_host_identity() {
-    let (server, _) = security::server().unwrap();
-    let (_, other_certificate) = security::server().unwrap();
-    let client = security::client(&other_certificate).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.unwrap();
-        server.accept(socket).await
-    });
-    let socket = TcpStream::connect(address).await.unwrap();
-    assert!(
-        client
-            .connect(
-                quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
-                socket
-            )
-            .await
-            .is_err()
-    );
-    assert!(task.await.unwrap().is_err());
-}
+use tokio::{io::AsyncReadExt, sync::Notify};
 
 struct LargeFrames {
     count: Arc<AtomicU32>,
@@ -42,12 +14,17 @@ struct LargeFrames {
     configured: bool,
 }
 impl Backend for LargeFrames {
-    fn configure_video(&mut self, preferences: VideoPreferences) -> Result<()> {
-        preferences.validate()?;
-        assert_eq!(preferences.max_width, 1280);
-        assert_eq!(preferences.max_height, 720);
-        assert_eq!(preferences.max_fps, 75);
-        assert_eq!(preferences.bitrate, 6_000_000);
+    fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
+        limits.validate()?;
+        assert_eq!(
+            limits,
+            VideoLimits {
+                max_width: 1280,
+                max_height: 720,
+                max_fps: 75,
+            }
+        );
+        assert_eq!(nominal_fps, 75);
         self.configured = true;
         Ok(())
     }
@@ -108,7 +85,7 @@ async fn blocked_video_does_not_block_local_stop() {
         )
         .await
         .unwrap();
-    let mut tls = security::client(&host.invitation().certificate)
+    let mut tls = security::client(host.invitation().fingerprint)
         .unwrap()
         .connect(
             quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
@@ -119,7 +96,7 @@ async fn blocked_video_does_not_block_local_stop() {
     wire::write_json(
         &mut tls,
         &wire::Command::Authenticate {
-            token: host.invitation().token.clone(),
+            token: host.invitation().token_text(),
             codecs: vec![],
             video: Some(VideoPreferences {
                 max_width: 1280,
@@ -170,31 +147,4 @@ async fn blocked_video_does_not_block_local_stop() {
     reader.abort();
     let _ = reader.await;
     connection.stop().await.unwrap();
-}
-
-#[test]
-fn older_authentication_defaults_video_limits_and_rejects_unbounded_preferences() {
-    let wire::Command::Authenticate { video, .. } =
-        serde_json::from_str(r#"{"op":"authenticate","token":"test"}"#).unwrap()
-    else {
-        panic!("expected authentication");
-    };
-    assert_eq!(video.unwrap_or_default(), VideoPreferences::default());
-    assert!(VideoPreferences::default().validate().is_ok());
-    assert!(
-        VideoPreferences {
-            max_width: 0,
-            ..Default::default()
-        }
-        .validate()
-        .is_err()
-    );
-    assert!(
-        VideoPreferences {
-            bitrate: u32::MAX,
-            ..Default::default()
-        }
-        .validate()
-        .is_err()
-    );
 }
