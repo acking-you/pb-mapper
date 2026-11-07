@@ -250,10 +250,10 @@ pasting an invitation again:
   profile or a password reset, a damaged file) are offered as **Clear saved
   computers** on the Remote page, which deletes them and their last pictures.
   A read that fails only for now (the file is locked, say) offers nothing and
-  is tried again at the next load. On Android the vault starts over by itself
-  only when the Keystore key is gone or no longer opens its wrapped copy, and
-  only once a new key has been sealed; any other Keystore failure leaves it
-  for the next start.
+  is tried again when the app next starts. On Android the vault starts over
+  by itself only when the Keystore key is gone or no longer opens its wrapped
+  copy, and only once a new key has been sealed; any other Keystore failure
+  leaves it for the next start.
 - Android cloud backup and device-to-device transfer exclude the app's
   configuration directory, so they restore neither the vault nor the relay
   credential nor the tunnels.
