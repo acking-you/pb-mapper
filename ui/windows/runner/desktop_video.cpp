@@ -14,11 +14,12 @@
 #include <flutter/texture_registrar.h>
 
 #include <atomic>
-#include <condition_variable>
-#include <deque>
+#include <cstdint>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -26,9 +27,74 @@ namespace {
 using Microsoft::WRL::ComPtr;
 using Value = flutter::EncodableValue;
 using Map = flutter::EncodableMap;
-using SubmitReply = std::unique_ptr<flutter::MethodResult<Value>>;
-constexpr UINT kWake = WM_APP + 0x413;
-constexpr size_t kMaxBytes = 4 * 1024 * 1024;
+constexpr uint32_t kMaxBytes = 4 * 1024 * 1024;
+
+// The video C ABI of pb_mapper_ffi.dll (desktop_video.rs). The runner does
+// not link the DLL: it resolves these from the copy Dart already loaded.
+struct PbDesktopVideoMetaV1 {
+  uint64_t generation;
+  uint64_t frame_id;
+  uint64_t seq;
+  uint64_t pts_us;
+  uint64_t age_us;
+  uint32_t width;
+  uint32_t height;
+  uint32_t len;
+  uint32_t flags;
+};
+static_assert(sizeof(PbDesktopVideoMetaV1) == 56, "PbDesktopVideoMetaV1 is 56 bytes");
+constexpr int32_t kVideoUnit = 1;
+constexpr int32_t kVideoTimeout = 0;
+constexpr int32_t kVideoNeedCapacity = -2;
+constexpr int32_t kVideoPaused = -3;
+constexpr uint32_t kFlagKeyframe = 1;
+constexpr uint32_t kFlagDiscontinuity = 2;
+constexpr uint32_t kReasonDecoderError = 0;
+constexpr uint32_t kReasonGap = 1;
+constexpr uint32_t kPullTimeoutMs = 50;
+
+struct VideoLibrary {
+  HMODULE module = nullptr;
+  int64_t (*attach)(uint64_t source) = nullptr;
+  int32_t (*next)(uint64_t consumer, uint32_t timeout_ms, uint8_t* dst, uint32_t capacity, PbDesktopVideoMetaV1* meta) = nullptr;
+  int32_t (*presented)(uint64_t consumer, uint64_t generation, uint64_t frame_id) = nullptr;
+  int32_t (*keyframe)(uint64_t consumer, uint32_t reason) = nullptr;
+  int32_t (*report)(uint64_t consumer, const char* decoder_utf8, uint32_t flags) = nullptr;
+  void (*detach)(uint64_t consumer) = nullptr;
+  uint64_t (*instance_token)() = nullptr;
+  VideoLibrary() = default;
+  VideoLibrary(const VideoLibrary&) = delete;
+  VideoLibrary& operator=(const VideoLibrary&) = delete;
+  // Released by the last viewer, so a late raster callback never calls into
+  // an unpinned module.
+  ~VideoLibrary() { if (module) FreeLibrary(module); }
+};
+
+template <typename Fn>
+bool Resolve(HMODULE module, Fn& fn, const char* name) {
+  fn = reinterpret_cast<Fn>(GetProcAddress(module, name));
+  return fn != nullptr;
+}
+
+// GetModuleHandleExW finds the DLL Dart loaded and pins it. It can never load
+// a second copy, which LoadLibrary could: Rust state would then split in two.
+std::shared_ptr<const VideoLibrary> LoadVideoLibrary() {
+  auto library = std::make_shared<VideoLibrary>();
+  if (!GetModuleHandleExW(0, L"pb_mapper_ffi.dll", &library->module)) {
+    throw std::runtime_error("pb_mapper_ffi.dll is not loaded");
+  }
+  const HMODULE module = library->module;
+  if (!Resolve(module, library->attach, "pb_mapper_desktop_video_attach_v1") ||
+      !Resolve(module, library->next, "pb_mapper_desktop_video_next_v1") ||
+      !Resolve(module, library->presented, "pb_mapper_desktop_video_presented_v1") ||
+      !Resolve(module, library->keyframe, "pb_mapper_desktop_video_keyframe_v1") ||
+      !Resolve(module, library->report, "pb_mapper_desktop_video_report_v1") ||
+      !Resolve(module, library->detach, "pb_mapper_desktop_video_detach_v1") ||
+      !Resolve(module, library->instance_token, "pb_mapper_desktop_instance_token_v1")) {
+    throw std::runtime_error("pb_mapper_ffi.dll does not match this app");
+  }
+  return library;
+}
 
 void Check(HRESULT hr, const char* operation) {
   if (FAILED(hr)) throw std::runtime_error(std::string(operation) + " (" + std::to_string(static_cast<unsigned long>(hr)) + ")");
@@ -40,66 +106,46 @@ int64_t Number(const Map& map, const char* key) {
   if (const auto* value = std::get_if<int32_t>(&it->second)) return *value;
   throw std::runtime_error("Invalid video field");
 }
-bool Boolean(const Map& map, const char* key) {
-  const auto it = map.find(Value(key));
-  return it != map.end() && std::holds_alternative<bool>(it->second) && std::get<bool>(it->second);
+
+// "Media Foundation DXVA (<adapter>)", cut to the 64 bytes the report takes
+// without splitting a UTF-8 sequence.
+std::string DecoderName(IDXGIAdapter* adapter) {
+  std::string name = "Media Foundation DXVA";
+  DXGI_ADAPTER_DESC desc{};
+  if (adapter && SUCCEEDED(adapter->GetDesc(&desc))) {
+    char utf8[256] = {};
+    if (WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, utf8, static_cast<int>(sizeof(utf8)), nullptr, nullptr) > 1) {
+      name += std::string(" (") + utf8 + ")";
+    }
+  }
+  if (name.size() > 64) {
+    size_t end = 63;
+    while (end > 0 && (static_cast<unsigned char>(name[end]) & 0xC0) == 0x80) --end;
+    name = name.substr(0, end) + ")";
+  }
+  return name;
 }
-struct Packet {
-  std::vector<uint8_t> bytes;
+
+struct Frame {
   int64_t generation = 0, frame = 0;
   uint32_t width = 0, height = 0;
   uint64_t revision = 0;
   bool key = false;
 };
-struct Event {
-  int64_t texture;
-  Packet packet;
-  bool presented = false, key = false;
-  std::string error;
-};
-struct Submission {
-  Packet packet;
-  SubmitReply reply;
-};
-// Coalesce texture acknowledgements before posting to the platform thread.
-struct Events {
-  explicit Events(HWND value) : window(value) {}
-  std::mutex mutex;
-  HWND window;
-  bool active = true, posted = false;
-  std::map<std::pair<int64_t, bool>, Event> pending;
-  std::deque<SubmitReply> replies;
-  void Send(Event event) {
-    event.packet.bytes.clear();
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!active) return;
-    pending.insert_or_assign({event.texture, event.key}, std::move(event));
-    if (!posted) { posted = true; PostMessage(window, kWake, 0, 0); }
-  }
-  // The decoder owns each reply until it has consumed or retired that input.
-  // Delivery is on the platform thread, independently of presentation events.
-  void Complete(SubmitReply reply) {
-    if (!reply) return;
-    std::lock_guard<std::mutex> lock(mutex);
-    replies.push_back(std::move(reply));
-    if (!posted) { posted = true; PostMessage(window, kWake, 0, 0); }
-  }
-};
 
 struct Surface {
   ComPtr<ID3D11Texture2D> texture;
   FlutterDesktopGpuSurfaceDescriptor descriptor{};
-  Packet packet;
-  Surface(ComPtr<ID3D11Texture2D> value, const Packet& frame) : texture(std::move(value)), packet(frame) {
-    packet.bytes.clear();
+  Frame frame;
+  Surface(ComPtr<ID3D11Texture2D> value, const Frame& decoded) : texture(std::move(value)), frame(decoded) {
     descriptor.struct_size = sizeof(descriptor);
     ComPtr<IDXGIResource> resource;
     Check(texture.As(&resource), "Get shared Flutter texture");
     HANDLE shared = nullptr;
     Check(resource->GetSharedHandle(&shared), "Share Flutter texture");
     descriptor.handle = shared;
-    descriptor.width = descriptor.visible_width = frame.width;
-    descriptor.height = descriptor.visible_height = frame.height;
+    descriptor.width = descriptor.visible_width = decoded.width;
+    descriptor.height = descriptor.visible_height = decoded.height;
     descriptor.format = kFlutterDesktopPixelFormatBGRA8888;
   }
 };
@@ -108,10 +154,12 @@ struct SurfaceLease {
   FlutterDesktopGpuSurfaceDescriptor descriptor;
 };
 
+// One texture. While a source is attached, a decoder thread pulls its access
+// units straight from Rust; nothing of the video crosses Dart.
 class Viewer : public std::enable_shared_from_this<Viewer> {
  public:
-  Viewer(flutter::TextureRegistrar* registrar, std::shared_ptr<Events> events, ComPtr<IDXGIAdapter> adapter)
-      : registrar_(registrar), events_(std::move(events)), adapter_(std::move(adapter)) {}
+  Viewer(flutter::TextureRegistrar* registrar, std::shared_ptr<const VideoLibrary> video, ComPtr<IDXGIAdapter> adapter)
+      : registrar_(registrar), video_(std::move(video)), adapter_(std::move(adapter)), decoder_name_(DecoderName(adapter_.Get())) {}
   void Start() {
     std::weak_ptr<Viewer> weak = shared_from_this();
     texture_ = std::make_unique<flutter::TextureVariant>(flutter::GpuSurfaceTexture(
@@ -122,87 +170,60 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         }));
     id_ = registrar_->RegisterTexture(texture_.get());
     if (id_ < 0) throw std::runtime_error("Cannot register video texture");
-    worker_ = std::thread([this] { Run(); });
   }
-  ~Viewer() { StopWorker(); }
+  ~Viewer() { Detach(); }
   int64_t id() const { return id_; }
-  void Close() {
-    StopWorker();
-    auto keep_alive = shared_from_this();
-    registrar_->UnregisterTexture(id_, [keep_alive] {});
-  }
-  void Reset() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    ++revision_;
-    ClearQueue();
-    latest_.reset();
+  // Platform thread. The texture and its last picture stay through a
+  // reconnect; the new session's first IDR replaces them.
+  void Attach(uint64_t source) {
+    Detach();
     generation_ = -1;
     last_ = 0;
     awaiting_key_ = true;
-    wake_.notify_one();
+    paused_ = false;
+    const int64_t consumer = video_->attach(source);
+    if (consumer <= 0) throw std::runtime_error("Video source unavailable (" + std::to_string(consumer) + ")");
+    consumer_ = static_cast<uint64_t>(consumer);
+    worker_ = std::thread([this, consumer] { Run(static_cast<uint64_t>(consumer)); });
   }
-  void Submit(Packet packet, SubmitReply reply) {
-    bool request_key = false;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (stopped_ || packet.generation < generation_) { reply->Success(); return; }
-      if (generation_ != packet.generation) {
-        ++revision_;
-        ClearQueue();
-        latest_.reset();
-        generation_ = packet.generation;
-        last_ = 0;
-        awaiting_key_ = true;
-      }
-      if (packet.frame <= last_) { reply->Success(); return; }
-      last_ = packet.frame;
-      if (queue_.size() >= 4) {
-        dropped_ += queue_.size();
-        ClearQueue();
-        latest_.reset();
-        ++revision_;
-        awaiting_key_ = true;
-        request_key = true;
-      }
-      packet.revision = revision_;
-      if (awaiting_key_ && !packet.key) {
-        ++dropped_;
-        request_key = true;
-      } else {
-        awaiting_key_ = false;
-        queue_.push_back({std::move(packet), std::move(reply)});
-        ++submitted_;
-        wake_.notify_one();
-      }
-    }
-    if (reply) reply->Success();
-    if (request_key) events_->Send({id_, std::move(packet), false, true, ""});
+  // Platform thread. Detaching wakes a blocked pull, so the join is prompt.
+  void Detach() {
+    stopping_ = true;
+    if (const uint64_t consumer = consumer_.exchange(0)) video_->detach(consumer);
+    if (worker_.joinable()) worker_.join();
+    stopping_ = false;
+  }
+  void Close() {
+    Detach();
+    auto keep_alive = shared_from_this();
+    registrar_->UnregisterTexture(id_, [keep_alive] {});
   }
   Map Stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return {{Value("submitted"), Value(static_cast<int64_t>(submitted_.load()))},
             {Value("decoded"), Value(static_cast<int64_t>(decoded_.load()))},
             {Value("presented"), Value(static_cast<int64_t>(presented_.load()))},
             {Value("dropped"), Value(static_cast<int64_t>(dropped_.load()))},
-            {Value("decoder"), Value("Media Foundation / D3D11")}};
+            {Value("recoveries"), Value(static_cast<int64_t>(recoveries_.load()))},
+            {Value("lastRecovery"), Value(last_recovery_)},
+            {Value("decoder"), Value(decoder_name_)}};
   }
-  bool Current(uint64_t revision) const { return !stopped_ && revision == revision_.load(); }
 
  private:
-  // Caller holds mutex_. Retiring an input always returns its producer credit.
-  void ClearQueue() {
-    for (auto& input : queue_) events_->Complete(std::move(input.reply));
-    queue_.clear();
-  }
+  bool Current(uint64_t revision) const { return revision == revision_.load(); }
+  // Raster thread. A picture of an older revision stays on screen until a
+  // newer one replaces it, but only a current one earns a receipt.
   const FlutterDesktopGpuSurfaceDescriptor* AcquireSurface() {
     std::shared_ptr<Surface> surface;
     bool acknowledge = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!latest_ || !Current(latest_->packet.revision)) return nullptr;
+      if (!latest_) return nullptr;
       surface = latest_;
-      if (consumed_revision_ != surface->packet.revision || consumed_frame_ != surface->packet.frame) {
-        consumed_revision_ = surface->packet.revision;
-        consumed_frame_ = surface->packet.frame;
+      if (Current(surface->frame.revision) &&
+          (consumed_revision_ != surface->frame.revision || consumed_frame_ != surface->frame.frame)) {
+        consumed_revision_ = surface->frame.revision;
+        consumed_frame_ = surface->frame.frame;
         acknowledge = true;
       }
     }
@@ -217,32 +238,26 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     // Flutter also reads descriptor dimensions immediately after invoking the
     // release callback. Keep the last descriptor until its next acquisition.
     { std::lock_guard<std::mutex> lock(mutex_); borrowed_ = lease; }
-    if (acknowledge) { ++presented_; events_->Send({id_, surface->packet, true, false, ""}); }
+    if (acknowledge) {
+      ++presented_;
+      // Acquired by the compositor: the receipt Rust validates and forwards
+      // for input authorisation. Non-blocking.
+      if (const uint64_t consumer = consumer_.load()) {
+        video_->presented(consumer, static_cast<uint64_t>(surface->frame.generation), static_cast<uint64_t>(surface->frame.frame));
+      }
+    }
     return &lease->descriptor;
   }
-  void StopWorker() {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      stopped_ = true;
-      ++revision_;
-      ClearQueue();
-      latest_.reset();
-    }
-    wake_.notify_one();
-    if (worker_.joinable()) worker_.join();
-  }
-  void Fail(const Packet& packet, const std::string& reason) {
-    Packet failed = packet;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!Current(packet.revision)) return;
-      ++revision_;
-      failed.revision = revision_;
-      ClearQueue();
-      latest_.reset();
-      awaiting_key_ = true;
-    }
-    events_->Send({id_, std::move(failed), false, true, reason});
+  // Decoder thread. The next keyframe recreates the decoder in a new revision.
+  void Fail(uint64_t consumer, const std::string& reason) {
+    ++revision_;
+    awaiting_key_ = true;
+    ++recoveries_;
+    { std::lock_guard<std::mutex> lock(mutex_); last_recovery_ = reason; }
+    OutputDebugStringA(("Native H.264 decoding failed: " + reason + "\n").c_str());
+    // Rust rate-limits requests. A paused source asks for nothing: its
+    // resume already starts with an IDR.
+    if (!paused_) video_->keyframe(consumer, kReasonDecoderError);
   }
 
   struct Decoder {
@@ -254,13 +269,13 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
     ComPtr<ID3D11VideoProcessor> processor;
     ComPtr<IMFDXGIDeviceManager> manager;
     ComPtr<IMFTransform> transform;
-    std::map<LONGLONG, Packet> pending;
+    std::map<LONGLONG, Frame> pending;
     uint64_t revision;
     uint32_t width, height;
     UINT32 coded_width = 0, coded_height = 0;
     RECT source_rect{};
     LONGLONG next_pts = 0;
-    Decoder(const Packet& packet, IDXGIAdapter* adapter) : revision(packet.revision), width(packet.width), height(packet.height) {
+    Decoder(const Frame& frame, IDXGIAdapter* adapter) : revision(frame.revision), width(frame.width), height(frame.height) {
       UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
       const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
       Check(D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
@@ -326,6 +341,8 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
       }
     }
+    // A discontinuity keeps the decoder: drop what it holds of the old
+    // revision and let the IDR that follows reset its references.
     void Flush(uint64_t next_revision) {
       Check(transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0), "Reset video decoder");
       Check(transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0), "Restart video decoder");
@@ -376,26 +393,24 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
         }
       }
     }
-    void Feed(const Packet& packet) {
+    void Feed(const Frame& frame, const uint8_t* data, uint32_t len) {
       if (pending.size() >= 16) throw std::runtime_error("Native decoder backlog");
       ComPtr<IMFMediaBuffer> buffer;
-      Check(MFCreateMemoryBuffer(static_cast<DWORD>(packet.bytes.size()), &buffer), "Allocate compressed video");
-      BYTE* data = nullptr;
-      Check(buffer->Lock(&data, nullptr, nullptr), "Lock video buffer");
-      memcpy(data, packet.bytes.data(), packet.bytes.size());
+      Check(MFCreateMemoryBuffer(len, &buffer), "Allocate compressed video");
+      BYTE* target = nullptr;
+      Check(buffer->Lock(&target, nullptr, nullptr), "Lock video buffer");
+      memcpy(target, data, len);
       buffer->Unlock();
-      Check(buffer->SetCurrentLength(static_cast<DWORD>(packet.bytes.size())), "Set compressed video size");
+      Check(buffer->SetCurrentLength(len), "Set compressed video size");
       ComPtr<IMFSample> sample;
       Check(MFCreateSample(&sample), "Create compressed sample");
       Check(sample->AddBuffer(buffer.Get()), "Assign video buffer");
       next_pts += 166667;
       sample->SetSampleTime(next_pts);
       sample->SetSampleDuration(166667);
-      if (packet.key) sample->SetUINT32(MFSampleExtension_CleanPoint, TRUE);
+      if (frame.key) sample->SetUINT32(MFSampleExtension_CleanPoint, TRUE);
       Check(transform->ProcessInput(0, sample.Get(), 0), "Decode H.264 input");
-      Packet metadata = packet;
-      metadata.bytes.clear();
-      pending.emplace(next_pts, std::move(metadata));
+      pending.emplace(next_pts, frame);
     }
     std::shared_ptr<Surface> Take() {
       MFT_OUTPUT_DATA_BUFFER output{};
@@ -412,7 +427,7 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       Check(sample->GetSampleTime(&timestamp), "Get decoded timestamp");
       auto found = pending.find(timestamp);
       if (found == pending.end()) throw std::runtime_error("Unknown decoded frame");
-      Packet packet = std::move(found->second);
+      const Frame frame = found->second;
       pending.erase(pending.begin(), std::next(found));
       ComPtr<IMFMediaBuffer> buffer;
       Check(sample->GetBufferByIndex(0, &buffer), "Get decoded surface");
@@ -448,77 +463,115 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
       stream.pInputSurface = in_view.Get();
       Check(video_context->VideoProcessorBlt(processor.Get(), out_view.Get(), 0, 1, &stream), "Convert decoded GPU frame");
       context->Flush();
-      return std::make_shared<Surface>(std::move(target), packet);
+      return std::make_shared<Surface>(std::move(target), frame);
     }
   };
 
-  void Run() {
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const HRESULT mf = SUCCEEDED(com) ? MFStartup(MF_VERSION, MFSTARTUP_LITE) : com;
-    std::unique_ptr<Decoder> decoder;
-    while (!stopped_) {
-      Packet packet;
-      SubmitReply reply;
-      {
-        std::unique_lock<std::mutex> lock(mutex_);
-        wake_.wait(lock, [&] { return stopped_ || !queue_.empty() || (decoder && decoder->revision != revision_); });
-        if (stopped_) break;
-        if (decoder && decoder->revision != revision_) {
-          try { decoder->Flush(revision_); } catch (...) { decoder.reset(); }
-        }
-        if (queue_.empty()) continue;
-        packet = std::move(queue_.front().packet);
-        reply = std::move(queue_.front().reply);
-        queue_.pop_front();
-      }
-      try {
-        Check(mf, "Initialize native media decoding");
-        if (!Current(packet.revision)) { events_->Complete(std::move(reply)); continue; }
-        if (!decoder || decoder->width != packet.width || decoder->height != packet.height) {
-          if (!packet.key) throw std::runtime_error("A fresh key frame is required");
-          decoder = std::make_unique<Decoder>(packet, adapter_.Get());
-        }
-        if (!Current(packet.revision)) { events_->Complete(std::move(reply)); continue; }
-        decoder->Feed(packet);
-        events_->Complete(std::move(reply));
-        for (int i = 0; i < 16; ++i) {
-          auto surface = decoder->Take();
-          if (!surface) break;
-          ++decoded_;
-          {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!Current(surface->packet.revision)) continue;
-            latest_ = std::move(surface);
-          }
-          registrar_->MarkTextureFrameAvailable(id_);
-        }
-      } catch (const std::exception& e) {
-        events_->Complete(std::move(reply));
+  // Decoder thread: what Submit decided on the platform thread before. A new
+  // generation or a discontinuity starts a revision; older generations,
+  // duplicates and anything before the next keyframe are dropped.
+  void Accept(uint64_t consumer, std::unique_ptr<Decoder>& decoder, const uint8_t* data, const PbDesktopVideoMetaV1& meta) {
+    Frame frame;
+    frame.generation = static_cast<int64_t>(meta.generation);
+    frame.frame = static_cast<int64_t>(meta.frame_id);
+    frame.width = meta.width;
+    frame.height = meta.height;
+    frame.key = (meta.flags & kFlagKeyframe) != 0;
+    if (frame.generation < generation_) { ++dropped_; return; }
+    if (frame.generation != generation_ || (meta.flags & kFlagDiscontinuity) != 0) {
+      ++revision_;
+      generation_ = frame.generation;
+      last_ = 0;
+      awaiting_key_ = true;
+    }
+    if (frame.frame <= last_) { ++dropped_; return; }
+    last_ = frame.frame;
+    if (awaiting_key_ && !frame.key) {
+      ++dropped_;
+      video_->keyframe(consumer, kReasonGap);
+      return;
+    }
+    awaiting_key_ = false;
+    frame.revision = revision_;
+    ++submitted_;
+    try {
+      Check(mf_, "Initialize native media decoding");
+      // Only a size change or a failure (which released it) rebuilds the decoder.
+      if (!decoder || decoder->width != frame.width || decoder->height != frame.height) {
+        if (!frame.key) throw std::runtime_error("A fresh key frame is required");
         decoder.reset();
-        Fail(packet, e.what());
+        decoder = std::make_unique<Decoder>(frame, adapter_.Get());
+        video_->report(consumer, decoder_name_.c_str(), 1);
+      } else if (decoder->revision != frame.revision) {
+        decoder->Flush(frame.revision);
+      }
+      decoder->Feed(frame, data, meta.len);
+      for (int i = 0; i < 16; ++i) {
+        auto surface = decoder->Take();
+        if (!surface) break;
+        ++decoded_;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (!Current(surface->frame.revision)) continue;
+          latest_ = std::move(surface);
+        }
+        registrar_->MarkTextureFrameAvailable(id_);
+      }
+    } catch (const std::exception& e) {
+      decoder.reset();
+      Fail(consumer, e.what());
+    }
+  }
+
+  // Decoder thread, one per attached source. `next` is the only blocking call.
+  void Run(uint64_t consumer) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    mf_ = SUCCEEDED(com) ? MFStartup(MF_VERSION, MFSTARTUP_LITE) : com;
+    std::unique_ptr<Decoder> decoder;
+    std::vector<uint8_t> buf(1 << 20);
+    PbDesktopVideoMetaV1 meta{};
+    while (!stopping_) {
+      const int32_t r = video_->next(consumer, kPullTimeoutMs, buf.data(), static_cast<uint32_t>(buf.size()), &meta);
+      if (r == kVideoUnit) {
+        paused_ = false;
+        Accept(consumer, decoder, buf.data(), meta);
+      } else if (r == kVideoNeedCapacity) {
+        // The unit stays queued in Rust and arrives on the next call.
+        if (meta.len > kMaxBytes) break;
+        buf.resize(meta.len);
+      } else if (r == kVideoPaused) {
+        paused_ = true;
+      } else if (r != kVideoTimeout) {
+        break;  // Closed, detached or invalid: this consumer is done.
       }
     }
+    video_->detach(consumer);
     decoder.reset();
-    if (SUCCEEDED(mf)) MFShutdown();
+    if (SUCCEEDED(mf_)) MFShutdown();
     if (SUCCEEDED(com)) CoUninitialize();
   }
 
   flutter::TextureRegistrar* registrar_;
-  std::shared_ptr<Events> events_;
+  std::shared_ptr<const VideoLibrary> video_;
   ComPtr<IDXGIAdapter> adapter_;
+  const std::string decoder_name_;
   std::unique_ptr<flutter::TextureVariant> texture_;
   int64_t id_ = -1;
-  std::atomic<bool> stopped_{false};
+  std::atomic<uint64_t> consumer_{0};
+  std::atomic<bool> stopping_{false};
   std::atomic<uint64_t> revision_{1};
-  std::atomic<uint64_t> submitted_{0}, decoded_{0}, presented_{0}, dropped_{0};
-  std::mutex mutex_;
-  std::condition_variable wake_;
-  std::deque<Submission> queue_;
+  std::atomic<uint64_t> submitted_{0}, decoded_{0}, presented_{0}, dropped_{0}, recoveries_{0};
+  mutable std::mutex mutex_;
+  // Guarded by mutex_.
   std::shared_ptr<Surface> latest_;
   std::shared_ptr<SurfaceLease> borrowed_;
-  int64_t generation_ = -1, last_ = 0, consumed_frame_ = 0;
+  int64_t consumed_frame_ = 0;
   uint64_t consumed_revision_ = 0;
-  bool awaiting_key_ = true;
+  std::string last_recovery_;
+  // The decoder thread's own; reset by Attach while no thread runs.
+  int64_t generation_ = -1, last_ = 0;
+  bool awaiting_key_ = true, paused_ = false;
+  HRESULT mf_ = E_FAIL;
   std::thread worker_;
 };
 }  // namespace
@@ -527,44 +580,35 @@ struct DesktopVideo::Impl {
   flutter::FlutterEngine* engine;
   flutter::PluginRegistrarWindows* registrar;
   std::unique_ptr<flutter::MethodChannel<Value>> channel;
-  std::shared_ptr<Events> events;
+  // Resolved by the first create: Dart has loaded the DLL by then.
+  std::shared_ptr<const VideoLibrary> video;
   std::map<int64_t, std::shared_ptr<Viewer>> viewers;
-  Impl(flutter::FlutterEngine* value, HWND window) : engine(value), events(std::make_shared<Events>(window)) {
+  explicit Impl(flutter::FlutterEngine* value) : engine(value) {
     registrar = flutter::PluginRegistrarManager::GetInstance()->GetRegistrar<flutter::PluginRegistrarWindows>(engine->GetRegistrarForPlugin("PbMapperDesktopVideo"));
     channel = std::make_unique<flutter::MethodChannel<Value>>(engine->messenger(), "pb_mapper/desktop_video", &flutter::StandardMethodCodec::GetInstance());
     channel->SetMethodCallHandler([this](const auto& call, auto result) {
       try {
+        const auto* args = call.arguments() ? std::get_if<Map>(call.arguments()) : nullptr;
+        if (!args) throw std::runtime_error("Missing desktop video arguments");
         if (call.method_name() == "create") {
+          CheckInstance(static_cast<uint64_t>(Number(*args, "instance")));
           if (viewers.size() >= 2) throw std::runtime_error("Desktop texture limit reached");
           ComPtr<IDXGIAdapter> adapter;
           engine->GetGraphicsAdapter(&adapter);
-          auto viewer = std::make_shared<Viewer>(registrar->texture_registrar(), events, std::move(adapter));
+          auto viewer = std::make_shared<Viewer>(registrar->texture_registrar(), video, std::move(adapter));
           viewer->Start();
           viewers.emplace(viewer->id(), viewer);
           result->Success(Value(viewer->id()));
           return;
         }
-        const auto* args = call.arguments() ? std::get_if<Map>(call.arguments()) : nullptr;
-        if (!args) throw std::runtime_error("Missing desktop video arguments");
         const auto id = Number(*args, "textureId");
         const auto found = viewers.find(id);
         if (found == viewers.end()) throw std::runtime_error("Unknown desktop texture");
         auto viewer = found->second;
-        if (call.method_name() == "submit") {
-          const auto bytes = args->find(Value("bytes"));
-          if (bytes == args->end()) throw std::runtime_error("Missing compressed frame");
-          const auto* data = std::get_if<std::vector<uint8_t>>(&bytes->second);
-          const auto width = Number(*args, "width"), height = Number(*args, "height");
-          if (!data || data->empty() || data->size() > kMaxBytes || width < 2 || width > 7680 || height < 2 || height > 4320 || width * height > 16777216) throw std::runtime_error("Invalid video bounds");
-          Packet packet;
-          packet.bytes = *data;
-          packet.generation = Number(*args, "generation");
-          packet.frame = Number(*args, "frameId");
-          packet.width = static_cast<uint32_t>(width);
-          packet.height = static_cast<uint32_t>(height);
-          packet.key = Boolean(*args, "keyframe");
-          viewer->Submit(std::move(packet), std::move(result));
-        } else if (call.method_name() == "reset") { viewer->Reset(); result->Success(); }
+        if (call.method_name() == "attach") {
+          viewer->Attach(static_cast<uint64_t>(Number(*args, "source")));
+          result->Success();
+        } else if (call.method_name() == "detach") { viewer->Detach(); result->Success(); }
         else if (call.method_name() == "dispose") { viewers.erase(found); viewer->Close(); result->Success(); }
         else if (call.method_name() == "stats") result->Success(Value(viewer->Stats()));
         else result->NotImplemented();
@@ -575,33 +619,21 @@ struct DesktopVideo::Impl {
     channel->SetMethodCallHandler(nullptr);
     for (auto& entry : viewers) entry.second->Close();
     viewers.clear();
-    // All decoder threads have stopped. Resolve every outstanding submit while
-    // the Flutter engine and its binary messenger still exist.
-    Drain();
-    { std::lock_guard<std::mutex> lock(events->mutex); events->active = false; events->pending.clear(); }
   }
-  void Drain() {
-    std::map<std::pair<int64_t, bool>, Event> ready;
-    std::deque<SubmitReply> replies;
-    { std::lock_guard<std::mutex> lock(events->mutex); ready.swap(events->pending); replies.swap(events->replies); events->posted = false; }
-    for (auto& reply : replies) reply->Success();
-    for (const auto& entry : ready) {
-      const auto& event = entry.second;
-      const auto found = viewers.find(event.texture);
-      if (found == viewers.end() || !found->second->Current(event.packet.revision)) continue;
-      channel->InvokeMethod("event", std::make_unique<Value>(Map{
-        {Value("textureId"), Value(event.texture)}, {Value("generation"), Value(event.packet.generation)},
-        {Value("frameId"), Value(event.packet.frame)}, {Value("width"), Value(static_cast<int64_t>(event.packet.width))},
-        {Value("height"), Value(static_cast<int64_t>(event.packet.height))}, {Value("presented"), Value(event.presented)},
-        {Value("needKeyframe"), Value(event.key)}, {Value("message"), Value(event.error)}}));
-    }
+  // D9: Dart and this runner must reach one library instance, or the decoder
+  // would pull from a registry Dart never filled. Fails closed.
+  void CheckInstance(uint64_t dart) {
+    if (!video) video = LoadVideoLibrary();
+    const uint64_t native = video->instance_token();
+    char line[96];
+    snprintf(line, sizeof(line), "Video library instance: Dart 0x%llx, runner 0x%llx\n",
+             static_cast<unsigned long long>(dart), static_cast<unsigned long long>(native));
+    OutputDebugStringA(line);
+    if (native != dart) throw std::runtime_error("native video library loaded twice");
   }
 };
 
-DesktopVideo::DesktopVideo(flutter::FlutterEngine* engine, HWND window) : impl_(std::make_unique<Impl>(engine, window)) {}
+DesktopVideo::DesktopVideo(flutter::FlutterEngine* engine, HWND) : impl_(std::make_unique<Impl>(engine)) {}
 DesktopVideo::~DesktopVideo() = default;
-bool DesktopVideo::HandleMessage(UINT message) {
-  if (message != kWake) return false;
-  impl_->Drain();
-  return true;
-}
+// Nothing is posted to the window yet; snapshot replies will be.
+bool DesktopVideo::HandleMessage(UINT) { return false; }
