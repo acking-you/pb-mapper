@@ -45,6 +45,11 @@ class SettingsPage extends StatelessWidget {
               RelayCard(store: scope.store),
               const SizedBox(height: 16),
               _AppearanceCard(prefs: scope.prefs),
+              // A compact window's bar has no Logs: it lives here.
+              if (!ShellLayout.wideOf(context)) ...[
+                const SizedBox(height: 16),
+                const _LogsRow(),
+              ],
               const SizedBox(height: 16),
               _AboutCard(updates: scope.updates, prefs: scope.prefs),
             ],
@@ -614,6 +619,53 @@ class _AppearanceCard extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The way to Logs on a compact window.
+class _LogsRow extends StatelessWidget {
+  const _LogsRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final muted = theme.colorScheme.onSurfaceVariant;
+    return GroupCard(
+      padding: EdgeInsets.zero,
+      child: InkWell(
+        key: const Key('settings-logs'),
+        onTap: () => AppScope.of(context).go(AppPage.logs),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 14, 14, 14),
+          child: Row(
+            children: [
+              Icon(AppIcons.logs, size: AppIconSize.button, color: muted),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(l10n.navLogs, style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 2),
+                    Text(
+                      l10n.settingsLogsHint,
+                      style: theme.textTheme.bodySmall?.copyWith(color: muted),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                AppIcons.chevronRight,
+                size: AppIconSize.inline,
+                color: muted,
+              ),
+            ],
+          ),
         ),
       ),
     );

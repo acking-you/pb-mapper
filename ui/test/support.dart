@@ -1,16 +1,21 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/app.dart';
 import 'package:pb_mapper_ui/src/common/state_change.dart';
+import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
+import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
 import 'package:pb_mapper_ui/src/updates/update_controller.dart';
 import 'package:toastification/toastification.dart' show toastification;
 
 import 'fake_pb_mapper_api.dart';
+import 'fake_remote_computer_vault.dart';
 
 /// The root the app is pumped under, for screenshots.
 const Key appRootKey = Key('app-root');
@@ -18,8 +23,12 @@ const Key appRootKey = Key('app-root');
 /// Change events a test can send, standing in for the Rust callback.
 final changes = StreamController<StateChange>.broadcast();
 
-/// Pump the whole app over [api] at [size], with motion reduced so the
-/// galaxy settles and pumpAndSettle can finish.
+/// Pump the whole app over [api] at [size], opening on [page], with motion
+/// reduced so the galaxy settles and pumpAndSettle can finish. Remembered
+/// computers live in [vault], an in-memory one unless a test passes its own,
+/// and their last pictures in [thumbnails], a fresh temporary directory
+/// unless a test passes its own (it must exist: a widget test's clock never
+/// finishes creating one).
 Future<void> pumpApp(
   WidgetTester tester,
   FakePbMapperApi api, {
@@ -30,8 +39,16 @@ Future<void> pumpApp(
   Locale? locale = const Locale('en'),
   bool reducedMotion = true,
   UpdateController? updates,
-  bool openDesktopOnStartup = false,
+  ViewerPrefs? viewerPrefs,
+  RemoteComputerVault? vault,
+  Directory? thumbnails,
 }) async {
+  if (thumbnails == null) {
+    final temp = Directory.systemTemp.createTempSync('pbm-thumbnails-');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    thumbnails = temp;
+  }
+  final thumbnailDir = thumbnails;
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -53,12 +70,33 @@ Future<void> pumpApp(
         needsSetup: needsSetup,
         initialPage: page,
         updates: updates,
-        openDesktopOnStartup: openDesktopOnStartup,
+        viewerPrefs: viewerPrefs ?? ViewerPrefs(persist: false),
+        vault: vault ?? FakeRemoteComputerVault(),
+        thumbnailDir: () async => thumbnailDir,
       ),
     ),
   );
   await settle(tester);
 }
+
+/// This computer shared, with a viewer connected to it.
+DesktopHostSnapshot viewedHost({
+  bool controlling = false,
+  bool paused = false,
+}) => DesktopHostSnapshot(
+  host: DesktopHostStatus(
+    state: 'streaming',
+    controlAllowed: true,
+    service: 'desktop:here',
+    invitation: 'pbd1.here',
+    viewer: DesktopHostViewer(
+      controlling: controlling,
+      paused: paused,
+      path: 'direct',
+      since: DateTime(2026, 11, 7, 9),
+    ),
+  ),
+);
 
 /// Let async loads land and the galaxy's camera come to rest.
 Future<void> settle(WidgetTester tester) async {
