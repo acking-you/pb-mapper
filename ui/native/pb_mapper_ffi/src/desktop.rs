@@ -1667,9 +1667,27 @@ pub struct PbDesktopViewV1 {
     pub flags: u8,
     pub reserved: [u8; 2],
 }
-const _: () = assert!(
-    std::mem::size_of::<PbDesktopViewV1>() == 56 && std::mem::align_of::<PbDesktopViewV1>() == 8
-);
+// The layout of perf 7.4, field by field: `From` fills it by name, so a
+// same-size reorder would otherwise compile. desktop_ffi_test.dart pins Dart's
+// mirror to the same offsets.
+const _: () = {
+    use std::mem::offset_of;
+    type V = PbDesktopViewV1;
+    assert!(size_of::<V>() == 56 && align_of::<V>() == 8);
+    assert!(offset_of!(V, generation) == 0);
+    assert!(offset_of!(V, presented_frame_id) == 8);
+    assert!(offset_of!(V, cursor_seq) == 16);
+    assert!(offset_of!(V, presented_age_ms) == 24);
+    assert!(offset_of!(V, display_width) == 28);
+    assert!(offset_of!(V, display_height) == 32);
+    assert!(offset_of!(V, video_width) == 36);
+    assert!(offset_of!(V, video_height) == 40);
+    assert!(offset_of!(V, cursor_x) == 44);
+    assert!(offset_of!(V, cursor_y) == 48);
+    assert!(offset_of!(V, state) == 52);
+    assert!(offset_of!(V, flags) == 53);
+    assert!(offset_of!(V, reserved) == 54);
+};
 
 impl From<DesktopView> for PbDesktopViewV1 {
     /// The state and flag codes are `DesktopView`'s own.

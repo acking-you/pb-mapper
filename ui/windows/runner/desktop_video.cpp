@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -55,6 +56,12 @@ struct PbDesktopVideoMetaV1 {
   uint32_t flags;
 };
 static_assert(sizeof(PbDesktopVideoMetaV1) == 56, "PbDesktopVideoMetaV1 is 56 bytes");
+static_assert(offsetof(PbDesktopVideoMetaV1, generation) == 0 && offsetof(PbDesktopVideoMetaV1, frame_id) == 8 &&
+                  offsetof(PbDesktopVideoMetaV1, seq) == 16 && offsetof(PbDesktopVideoMetaV1, pts_us) == 24 &&
+                  offsetof(PbDesktopVideoMetaV1, age_us) == 32 && offsetof(PbDesktopVideoMetaV1, width) == 40 &&
+                  offsetof(PbDesktopVideoMetaV1, height) == 44 && offsetof(PbDesktopVideoMetaV1, len) == 48 &&
+                  offsetof(PbDesktopVideoMetaV1, flags) == 52,
+              "PbDesktopVideoMetaV1 matches desktop_video.rs");
 constexpr int32_t kVideoUnit = 1;
 constexpr int32_t kVideoTimeout = 0;
 constexpr int32_t kVideoNeedCapacity = -2;

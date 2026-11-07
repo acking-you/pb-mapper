@@ -65,7 +65,22 @@ pub struct PbDesktopVideoMetaV1 {
     /// Bit 0 keyframe, 1 discontinuity, 2 JPEG (else H.264), 3 duplicate.
     pub flags: u32,
 }
-const _: () = assert!(std::mem::size_of::<PbDesktopVideoMetaV1>() == 56);
+// The layout of perf 7.5, field by field, as the Windows runner asserts it
+// too; desktop_ffi_test.dart pins Dart's mirror to the same offsets.
+const _: () = {
+    use std::mem::offset_of;
+    type M = PbDesktopVideoMetaV1;
+    assert!(size_of::<M>() == 56);
+    assert!(offset_of!(M, generation) == 0);
+    assert!(offset_of!(M, frame_id) == 8);
+    assert!(offset_of!(M, seq) == 16);
+    assert!(offset_of!(M, pts_us) == 24);
+    assert!(offset_of!(M, age_us) == 32);
+    assert!(offset_of!(M, width) == 40);
+    assert!(offset_of!(M, height) == 44);
+    assert!(offset_of!(M, len) == 48);
+    assert!(offset_of!(M, flags) == 52);
+};
 
 impl PbDesktopVideoMetaV1 {
     pub(crate) fn of(unit: &VideoUnit) -> Self {
