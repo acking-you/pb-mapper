@@ -898,7 +898,9 @@ mod tests {
             0
         );
 
-        let source = start("clip.h264", &[keyframe, predicted].concat(), 120);
+        // An IDR supersedes whatever is still queued, so the pace leaves the
+        // consumer a wide margin to pull each unit before the next arrives.
+        let source = start("clip.h264", &[keyframe, predicted].concat(), 10);
         assert!(source > 0);
         let consumer = pb_mapper_desktop_video_attach_v1(source) as u64;
         let mut meta = PbDesktopVideoMetaV1::default();
