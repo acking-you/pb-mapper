@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:pb_mapper_ui/src/ffi/remote_computer_vault.dart';
 import 'package:pb_mapper_ui/src/state/desktop_models.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
@@ -23,6 +25,10 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
   /// The live session's service and short fingerprint, as Rust's
   /// `current_invitation()`; null accepts any.
   (String service, String fingerprint)? live;
+
+  /// While set, [rememberSession] keeps its answer until it completes: a
+  /// vault that has remembered but answers late.
+  Completer<void>? rememberHeld;
 
   /// Every call by op name, with the arguments that change something.
   final List<(String op, Map<String, Object?> args)> calls = [];
@@ -87,6 +93,7 @@ class FakeRemoteComputerVault implements RemoteComputerVault {
     } else {
       records[at] = record;
     }
+    if (rememberHeld case final held?) await held.future;
     return record;
   }
 

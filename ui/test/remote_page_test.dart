@@ -440,8 +440,9 @@ void main() {
   );
 
   testWidgets(
-    'a computer remembered while it is viewed, whose identity then changes, '
-    "takes the host's new invitation from the viewer in place of its record",
+    'a computer remembered while it is viewed, whose identity changes before '
+    "the vault answers, takes the host's new invitation from the viewer in "
+    'place of its record',
     (tester) async {
       final api = _RekeyedApi();
       final vault = FakeRemoteComputerVault();
@@ -472,7 +473,7 @@ void main() {
       }
 
       // Added with Remember on: the viewer opens before the computer is
-      // remembered, at its first picture.
+      // remembered, at its first picture, and the vault answers late.
       await _tapIn(tester, _key('remote-add-empty'));
       await settle(tester);
       await connect('pbd1.lab.OLD-TOKEN-0123');
@@ -480,11 +481,13 @@ void main() {
         tester.element(find.byType(RemoteViewerScreen)),
       ).remote;
       final id = remote.desktop.session.value.target!.computerId!;
-      expect(remote.computers.byId(id), isNull);
+      final answer = Completer<void>();
+      vault.rememberHeld = answer;
       await firstPicture();
-      expect(remote.computers.byId(id), isNotNull);
+      expect(vault.ops, contains('remember'));
 
-      // Re-keyed, the host meets the reconnect with another identity.
+      // Re-keyed, the host meets the reconnect with another identity, while
+      // the computer is not yet remembered: nothing to replace.
       api.desktop
         ..fingerprint = 'FFFF-0000-FFFF-0000'
         ..failNext('connect', 'IDENTITY_CHANGED')
@@ -493,11 +496,21 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await settle(tester);
       expect(_key('viewer-overlay-identityChanged'), findsOneWidget);
+      final l10n = lookupAppLocalizations(const Locale('en'));
+      final paste = find.text(l10n.viewerPasteNewInvite);
+      expect(paste, findsNothing);
+
+      // The vault's answer is the only change left: the card offers the
+      // host's new invitation from it.
+      vault.rememberHeld = null;
+      answer.complete();
+      await settle(tester);
+      expect(remote.computers.byId(id), isNotNull);
+      expect(paste, findsOneWidget);
 
       // The new invitation connects as that computer, by its id, and
       // replaces its record at the first picture.
-      final l10n = lookupAppLocalizations(const Locale('en'));
-      await tester.tap(find.text(l10n.viewerPasteNewInvite));
+      await tester.tap(paste);
       await settle(tester);
       const invitation = 'pbd1.lab.NEW-TOKEN-0123';
       await connect(invitation);
