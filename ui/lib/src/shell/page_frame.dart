@@ -105,7 +105,7 @@ class PageFrame extends StatelessWidget {
 
 /// The bar width from which the primary action carries its label: a 560
 /// window across the top of a phone.
-const double _labelledPrimaryWidth = 536;
+const double _labelledPrimaryWidth = 560;
 
 class _TitleBar extends StatelessWidget {
   const _TitleBar({
@@ -144,17 +144,18 @@ class _TitleBar extends StatelessWidget {
         alignment: AlignmentDirectional.centerStart,
         children: [
           const Positioned.fill(child: WindowDragArea()),
-          Padding(
-            // The caption buttons keep clear of the sheet's rounded corner.
-            padding: EdgeInsetsDirectional.only(
-              start: lead,
-              end: drawsCaptionButtons ? 16 : 8,
-            ),
-            // The capsule's form and the primary action's label follow the
-            // bar's own width, not the window's: beside the rail, a narrow
-            // window's sheet has no room for both the label and the capsule.
-            child: LayoutBuilder(
-              builder: (context, box) => Row(
+          // The capsule's form and the primary action's label follow the
+          // whole bar's width (beside the rail, the sheet's), not the
+          // window's and not the padded row's: a narrow window's sheet has
+          // no room for both the label and the capsule.
+          LayoutBuilder(
+            builder: (context, box) => Padding(
+              // The caption buttons keep clear of the sheet's rounded corner.
+              padding: EdgeInsetsDirectional.only(
+                start: lead,
+                end: drawsCaptionButtons ? 16 : 8,
+              ),
+              child: Row(
                 children: [
                   if (onBack != null) ...[
                     IconButton(

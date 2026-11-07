@@ -25,6 +25,18 @@ FakePbMapperApi _fresh() => FakePbMapperApi(
   ),
 );
 
+/// Windows' face, Segoe UI, is the system's and CI has none: there its words
+/// are em-wide boxes. Google Sans Flex stands in under its name. It sets a
+/// little wider (the full capsule 366 px against Segoe UI's 343), so a bar
+/// that fits here fits on Windows.
+Future<void> _loadSegoeUiStandIn() async {
+  final loader = FontLoader('Segoe UI');
+  for (final weight in ['Regular', 'Medium', 'SemiBold', 'Bold']) {
+    loader.addFont(rootBundle.load('assets/fonts/GoogleSansFlex-$weight.ttf'));
+  }
+  await loader.load();
+}
+
 void main() {
   testWidgets(
     'the --desktop hand-off (initialPage: remote) lands on Remote desktop',
@@ -162,6 +174,7 @@ void main() {
       // The test font draws every glyph a full em wide, about twice real
       // text: measure the bar with the real faces instead.
       await loadRealFonts();
+      await _loadSegoeUiStandIn();
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       try {
         for (final size in const [Size(720, 640), Size(1180, 780)]) {
@@ -177,6 +190,11 @@ void main() {
               page == AppPage.remote ? findsNothing : findsOneWidget,
               reason: at,
             );
+            // At the default window the capsule has room to say what is
+            // happening.
+            if (size.width == 1180 && page != AppPage.remote) {
+              expect(find.text('Being controlled'), findsOneWidget, reason: at);
+            }
             await finish(tester);
           }
         }

@@ -25,13 +25,15 @@ class ViewerTitleBar extends StatelessWidget {
     child: Stack(
       children: [
         const Positioned.fill(child: WindowDragArea()),
-        Padding(
-          padding: EdgeInsetsDirectional.only(
-            start: trafficLightInset + (onBack == null ? 16 : 8),
-            end: drawsCaptionButtons ? 4 : 12,
-          ),
-          child: LayoutBuilder(
-            builder: (context, box) => Row(
+        // The capsule's form follows the whole bar's width, as a page's
+        // title bar does, not the padded row's.
+        LayoutBuilder(
+          builder: (context, box) => Padding(
+            padding: EdgeInsetsDirectional.only(
+              start: trafficLightInset + (onBack == null ? 16 : 8),
+              end: drawsCaptionButtons ? 4 : 12,
+            ),
+            child: Row(
               children: [
                 if (onBack case final back?) ...[
                   _TitleBack(onTap: back),
