@@ -28,9 +28,7 @@ class _AndroidVaultService implements PbMapperService {
   final ops = <String>[];
 
   @override
-  Future<Map<String, dynamic>> desktopCall(
-    Map<String, Object?> request,
-  ) async {
+  Future<Map<String, dynamic>> desktopCall(Map<String, Object?> request) async {
     final op = request['op'] as String;
     ops.add(op);
     return {
@@ -97,7 +95,11 @@ void main() {
     await store.load();
     expect(
       store.support,
-      isA<RememberUnavailable>().having((s) => s.reason, 'reason', 'unreadable'),
+      isA<RememberUnavailable>().having(
+        (s) => s.reason,
+        'reason',
+        'unreadable',
+      ),
     );
     // Whose pictures these are cannot be told yet.
     expect(await picture.exists(), isTrue);
@@ -140,6 +142,36 @@ void main() {
     await store.rename(id, flags);
     expect(store.support.available, isTrue);
     expect(store.byId(id)?.name, typed);
+  });
+
+  test('a full name refuses a keystroke rather than losing its end, and a '
+      'composition is cut with the name', () {
+    const max = kComputerNameMax;
+    final full = TextEditingValue(
+      text: 'a' * max,
+      selection: const TextSelection.collapsed(offset: 1),
+    );
+    final typed = computerNameLimit.formatEditUpdate(
+      full,
+      TextEditingValue(
+        text: 'ab${'a' * (max - 1)}',
+        selection: const TextSelection.collapsed(offset: 2),
+      ),
+    );
+    expect(typed, full);
+
+    // Pinyin composing "ni" across the limit.
+    final composed = computerNameLimit.formatEditUpdate(
+      TextEditingValue(
+        text: '${'a' * (max - 1)}n',
+        composing: const TextRange(start: max - 1, end: max),
+      ),
+      TextEditingValue(
+        text: '${'a' * (max - 1)}ni',
+        composing: const TextRange(start: max - 1, end: max + 1),
+      ),
+    );
+    expect(composed.composing, const TextRange(start: max - 1, end: max));
   });
 
   test('forgetting a computer deletes its thumbnail, and a changed identity is '
