@@ -52,6 +52,11 @@ pb-mapper/
 │   ├── pb-mapper-protocol/ # Message framing, v2 secure sessions, forwarding
 │   ├── pb-mapper-server/   # Central relay server, plus the task manager
 │   ├── pb-mapper-client/   # Both tunnel ends: `register` and `connect`
+│   ├── pb-mapper-desktop/  # Remote desktop: host, viewer, receipt credit, QoS,
+│   │                       # Windows capture and the UAC/Winlogon helper
+│   ├── pb-mapper/          # The published SDK facade over pb-mapper-client;
+│   │                       # feature `desktop` re-exports pb-mapper-desktop
+│   ├── pb-mapper-node/     # Node-API bindings for the client SDK, built by js/
 │   ├── pb-mapper-testkit/  # Test support: a complete e2e tunnel, for any test file
 │   └── pb-mapper-cli/      # The `pb-mapper` binary, integration tests, examples
 ├── ui/                    # Flutter UI, talking to Rust over dart:ffi
@@ -83,6 +88,18 @@ pb-mapper-cli          pb-mapper-ffi
                   ▼
             pb-mapper-core
 ```
+
+The remote desktop sits above `pb-mapper-client` and reaches the FFI through
+the SDK facade:
+
+```
+pb-mapper-ffi ─▶ pb-mapper (feature desktop) ─▶ pb-mapper-desktop ─▶ pb-mapper-client
+```
+
+`pb-mapper` is the published SDK facade over `pb-mapper-client`. Its optional
+`desktop` feature re-exports `pb-mapper-desktop` as `pb_mapper::desktop`, and
+only the FFI enables it, so no CLI, relay or plain SDK build links capture,
+codec or input code. On Windows, `pb-mapper-desktop` also uses `pb-mapper-core`.
 
 Note that the binary is still named `pb-mapper`, discovered from
 `src/bin/pb-mapper.rs` inside `pb-mapper-cli`. The release workflows, both
@@ -139,6 +156,31 @@ Nothing in the SDK crates knows it exists.
 - **`pb-mapper-client/`**: Both ends of a tunnel
   - `server/`: `register` — publishes a local service (`mod.rs`, `stream.rs`, `error.rs`)
   - `client/`: `connect` — subscribes and listens locally, plus `status.rs`
+
+- **`pb-mapper-desktop/`**: Endpoint-owned remote desktop, reached as
+  `pb_mapper::desktop`; how it works is in `docs/remote-desktop.md`
+  - `host.rs`, `session.rs`, `shared.rs`: The host, and one session's network
+    side, B-recv and B-send over TLS; `shared.rs` states the lock discipline
+  - `worker.rs`, `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the one
+    desktop-bound thread (capture, encode, input), its pacing, its one wait,
+    and the input lane from B-recv
+  - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
+    QoS, on-demand IDRs, and the hand-off from thread C to B-send
+  - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
+    (ALPN `pb-mapper/desktop/2`), invitations, certificate pinning, and the
+    input authorisation ledger
+  - `viewer/`, `video_sink.rs`: The viewer, and its one hand-off to a native
+    consumer, which is also where a presentation is validated
+  - `platform.rs`, `windows.rs`: Capabilities, displays, and the Windows
+    backend (xcap displays, enigo input, the desktop binding)
+  - `video/windows.rs`: Desktop Duplication → D3D11 → Media Foundation H.264
+  - `helper/` (Windows): The opt-in UAC/Winlogon service and the UI's client to
+    it; the service side and the `pb-mapper-desktop-helper` binary need
+    `--features windows-helper`
+  - `tests.rs`, `tests/session.rs`: Tests over a real relay and TLS, the second
+    end to end; `slow_link.rs`: the ignored acceptance cases
+  - `examples/`: Capture, transport and viewer probes, and `video_bench`, the
+    Windows capture and encode benchmark
 
 - **`pb-mapper-testkit/`**: Test support only; nothing shipped depends on it
   - `relay.rs`: `Relay` — a live server that retains its `AuthRuntime`, so a case
@@ -502,12 +544,21 @@ and in the tray.
 - **Toolchain**: rust-toolchain.toml for reproducible builds
 - **Testing**: Unit tests live beside the code; integration tests are in
   `crates/pb-mapper-cli/tests/`, which is the crate that depends on every layer
-  they exercise. The e2e scaffolding is `pb-mapper-testkit`, so a new test file
-  stands up its own full `server` + `register` + `connect` flow instead of
-  everything accumulating in one file.
+  they exercise. Two crates keep their own: the CLI does not depend on
+  `pb-mapper-desktop`, so the remote desktop's end to end test is that crate's
+  `tests/session.rs`; and `pb-mapper-core`'s `tests/process_environment.rs` is a
+  single-threaded, harness-free binary, because environment writes must not
+  share a process with reader threads. The e2e scaffolding is
+  `pb-mapper-testkit`, so a new test file stands up its own full `server` +
+  `register` + `connect` flow instead of everything accumulating in one file.
 
 ### UI Development Guidelines
 - **Framework**: Flutter 3.44.9, Material 3. CI pins the same version.
+- **CI gates**: From `ui/`, CI runs `flutter gen-l10n` and fails unless
+  `l10n_untranslated.json` is `{}` (it lists each key `app_zh.arb` lacks), then
+  `dart format --output=none --set-exit-if-changed lib test tool`, `flutter
+  analyze --no-fatal-infos`, the `Icons.*` grep and `flutter test`. Run `dart
+  format lib test tool` before committing Dart.
 - **State Management**: Plain `StatefulWidget` state; no state-management package
 - **Architecture**: `AppShell` owns navigation; every page reads one `AppStore`,
   which takes its `PbMapperApiClient` as a parameter so tests can pass a fake.
@@ -570,6 +621,19 @@ docker-compose -f docker/docker-compose.yml up
 - **Widget Tests**: `flutter test` in ui/ directory
 - **Integration Tests**: `crates/pb-mapper-cli/tests/` — end-to-end tests built
   on `pb-mapper-testkit`
+- **Remote desktop (Rust)**: `cargo test -p pb-mapper-desktop -- --ignored
+  --nocapture slow_link` runs the ignored acceptance cases: a synthetic encoder
+  over a real relay and TLS on a shaped link. CI does not run them. The host's
+  capture, encoder and helper compile only on Windows, where CI's
+  `rust-windows-desktop` job lints and tests them
+- **Android unit tests**: `./gradlew :app:testDebugUnitTest` from `ui/android`,
+  JVM tests of `VideoFeeder`, the decoder rules, the presentation queue and
+  `ComputerKeystore`. `gradlew` is git-ignored; `flutter build apk
+  --config-only` in `ui/` writes it. CI's `android-check` job runs them
+- **Device acceptance**: `scripts/test/desktop-ui-acceptance.md` (the viewer and
+  its native decoder on devices, against a test host) and
+  `scripts/test/windows-helper-acceptance.md` (the helper, UAC and Winlogon on an
+  isolated Windows VM) — manual procedures
 - **Examples**: `examples/` directory provides working usage examples
 
 ### Service Deployment

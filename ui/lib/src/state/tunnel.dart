@@ -123,6 +123,7 @@ class Tunnel {
   /// session tries a direct path before the relay; for a share, whether it
   /// lets connections reach it that way.
   final bool allowDirect;
+
   /// When it asks the router to map its direct port; see [PortMappingMode].
   final PortMappingMode portMapping;
 
