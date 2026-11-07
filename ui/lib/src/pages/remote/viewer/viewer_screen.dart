@@ -1,19 +1,19 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:pb_mapper_ui/src/pages/desktop_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
+import 'package:pb_mapper_ui/src/state/remote_desktop.dart';
 import 'package:pb_mapper_ui/src/theme/glass.dart';
 import 'package:pb_mapper_ui/src/theme/viewer_palette.dart';
 import 'package:window_manager/window_manager.dart';
 
 /// The viewer, shown by the app in place of the shell while
-/// `ViewerHost.showing`, so there is only ever one.
-///
-/// Transitional: it hosts the previous `DesktopViewer` until the full-window
-/// viewer replaces it. That viewer pops its route on Disconnect, so it runs
-/// in a navigator of its own whose removal leaves the viewer.
+/// `ViewerHost.showing`, so there is only ever one. Back returns to the
+/// list with the session kept, paused.
 class RemoteViewerScreen extends StatefulWidget {
   const RemoteViewerScreen({super.key});
 
@@ -22,28 +22,44 @@ class RemoteViewerScreen extends StatefulWidget {
 }
 
 class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
-  static const _base = ValueKey('viewer-base');
-  static const _viewer = ValueKey('viewer');
-  String? _title;
+  RemoteDesktop? _remote;
+  String _title = '';
+
+  /// A phone or a tablet.
+  static bool get _touch =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final title = AppScope.of(context).remote.title;
-    if (title != _title) {
-      _title = title;
-      _setWindowTitle(title.isEmpty ? 'pb-mapper' : '$title — pb-mapper');
-    }
+    final remote = AppScope.of(context).remote;
+    if (identical(remote, _remote)) return;
+    _remote?.desktop.session.removeListener(_retitle);
+    _remote = remote..desktop.session.addListener(_retitle);
+    _title = remote.title;
+    _setWindowTitle();
   }
 
   @override
   void dispose() {
-    _setWindowTitle('pb-mapper');
+    _remote?.desktop.session.removeListener(_retitle);
+    _title = '';
+    _setWindowTitle();
     super.dispose();
   }
 
-  void _setWindowTitle(String title) {
+  /// The computer's name, which changes only with the session's target.
+  void _retitle() {
+    final title = _remote?.title ?? '';
+    if (title == _title) return;
+    setState(() => _title = title);
+    _setWindowTitle();
+  }
+
+  void _setWindowTitle() {
     if (!isFramelessDesktop) return;
+    final title = _title.isEmpty ? 'pb-mapper' : '$_title — pb-mapper';
     unawaited(
       windowManager.setTitle(title).catchError((Object error) {
         debugPrint('Could not title the window: $error');
@@ -66,49 +82,29 @@ class _RemoteViewerScreenState extends State<RemoteViewerScreen> {
           maxScaleFactor: 1.3,
           child: EntranceMotion(
             offset: 0,
-            child: Scaffold(
-              backgroundColor: ViewerPalette.ground,
-              body: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (isFramelessDesktop)
-                    SizedBox(
-                      height: 36,
-                      child: Row(
-                        children: [
-                          const Expanded(child: WindowDragArea()),
-                          if (drawsCaptionButtons)
-                            const Padding(
-                              padding: EdgeInsetsDirectional.only(end: 4),
-                              child: CaptionButtons(tone: CaptionTone.viewer),
-                            ),
-                        ],
-                      ),
-                    ),
-                  Expanded(
-                    child: Navigator(
-                      pages: [
-                        const MaterialPage(key: _base, child: SizedBox()),
-                        MaterialPage(
-                          key: _viewer,
-                          child: DesktopViewer(store: remote.desktop),
-                        ),
-                      ],
-                      // The old viewer's back arrow leaves the picture; its
-                      // Disconnect ends the session before it pops.
-                      onDidRemovePage: (page) {
-                        if (page.key != _viewer) return;
-                        if (remote.desktop.session.value.target == null) {
-                          remote.viewer.close();
-                        } else {
-                          remote.back();
-                        }
-                      },
-                    ),
+            // A Windows touchscreen keeps the desktop viewer, touching
+            // directly.
+            child: _touch
+                ? TouchViewer(
+                    desktop: remote.desktop,
+                    prefs: remote.prefs,
+                    title: _title,
+                    onBack: remote.back,
+                    onDisconnect: remote.disconnect,
+                    onQuality: (quality) =>
+                        unawaited(remote.setQuality(quality)),
+                    onReconnect: () => unawaited(remote.reconnect()),
+                  )
+                : DesktopViewer(
+                    desktop: remote.desktop,
+                    prefs: remote.prefs,
+                    title: _title,
+                    onBack: remote.back,
+                    onDisconnect: remote.disconnect,
+                    onQuality: (quality) =>
+                        unawaited(remote.setQuality(quality)),
+                    onReconnect: () => unawaited(remote.reconnect()),
                   ),
-                ],
-              ),
-            ),
           ),
         ),
       ),

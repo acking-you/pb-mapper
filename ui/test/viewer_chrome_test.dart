@@ -1,0 +1,454 @@
+import 'dart:ui' as ui;
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_input.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_viewport.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_gestures.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/touch_viewer.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_menus.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_overlays.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_stage.dart';
+import 'package:pb_mapper_ui/src/state/desktop_store.dart';
+import 'package:pb_mapper_ui/src/state/viewer_prefs.dart';
+import 'package:pb_mapper_ui/src/theme/motion.dart';
+import 'package:pb_mapper_ui/src/theme/viewer_palette.dart';
+
+import 'fake_desktop_api.dart';
+import 'remote_viewer_harness.dart';
+
+const _target = DesktopTarget(invitation: 'pbd1.office', name: 'Office');
+
+/// [child] as the app shows a viewer: localised, in the viewer's theme.
+Widget _app(Widget child) => MaterialApp(
+  localizationsDelegates: AppLocalizations.localizationsDelegates,
+  supportedLocales: AppLocalizations.supportedLocales,
+  home: Builder(
+    builder: (context) => Theme(data: viewerTheme(context), child: child),
+  ),
+);
+
+void _size(WidgetTester tester, Size size) {
+  tester.view
+    ..physicalSize = size
+    ..devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+/// A 16:9 picture, encoded as PNG: the store decodes it like a JPEG.
+Future<Uint8List> _png(WidgetTester tester) async =>
+    (await tester.runAsync(() async {
+      final recorder = ui.PictureRecorder();
+      Canvas(recorder).drawRect(
+        const Rect.fromLTWH(0, 0, 320, 180),
+        Paint()..color = const Color(0xff26445e),
+      );
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(320, 180);
+      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      picture.dispose();
+      return bytes!.buffer.asUint8List();
+    }))!;
+
+void main() {
+  testWidgets(
+    'an unpinned toolbar collapses 2 s after the pointer leaves, never while '
+    'a menu is open, and focus returns to the picture when the menu closes',
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setToolbarPinned(false);
+      await tester.pumpWidget(
+        _app(DesktopViewer(desktop: store, prefs: prefs, title: 'Office')),
+      );
+      await tester.pump();
+
+      final pin = find.byKey(const Key('viewer-pin')).hitTestable();
+      final handle = find
+          .byKey(const Key('viewer-toolbar-handle'))
+          .hitTestable();
+      const picture = Offset(640, 600);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: tester.getCenter(pin));
+      await tester.pump();
+      Future<void> click(Finder target) async {
+        await mouse.moveTo(tester.getCenter(target));
+        await tester.pump();
+        await mouse.down(tester.getCenter(target));
+        await mouse.up();
+        await tester.pump(const Duration(milliseconds: 300));
+      }
+
+      // The pointer leaves: two seconds later the toolbar folds away.
+      await mouse.moveTo(picture);
+      await tester.pump(const Duration(milliseconds: 1900));
+      expect(pin, findsOneWidget);
+      expect(handle, findsNothing);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(pin, findsNothing);
+      // The handle slides in.
+      await tester.pump(Motion.medium);
+      expect(handle, findsOneWidget);
+
+      // Back out, Display opened, and the pointer gone: an open menu holds
+      // the toolbar out.
+      await click(handle);
+      expect(pin, findsOneWidget);
+      await click(find.byKey(const Key('viewer-display')));
+      expect(find.byKey(const Key('display-fit')), findsOneWidget);
+      await mouse.moveTo(picture);
+      await tester.pump(const Duration(seconds: 3));
+      expect(pin, findsOneWidget);
+      expect(find.byKey(const Key('display-fit')), findsOneWidget);
+
+      // Esc closes the menu, never reaching the remote, and the picture
+      // has the keyboard again.
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const Key('display-fit')), findsNothing);
+      String key(Map<String, Object?> e) => ViewerHarness.describe(e);
+      expect(api.inputs.map(key), isNot(contains('escape↓')));
+      await tester.sendKeyEvent(LogicalKeyboardKey.f5);
+      expect(api.inputs.map(key).toList().reversed.take(2), ['f5↑', 'f5↓']);
+
+      // With the menu closed it folds away again; pinned, never.
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump(Motion.medium);
+      expect(handle, findsOneWidget);
+      await click(handle);
+      await click(pin);
+      expect(prefs.toolbarPinned, isTrue);
+      await mouse.moveTo(picture);
+      await tester.pump(const Duration(seconds: 3));
+      expect(pin, findsOneWidget);
+
+      await mouse.removePointer();
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets('connection overlays follow the phase, stay translucent while a '
+      'frame can arrive, and never replace the picture', (tester) async {
+    _size(tester, const Size(1280, 800));
+    // The input core needs a store; the stage itself reads only the
+    // notifiers below.
+    final store = DesktopStore(FakeDesktopApi());
+    final latch = ModifierLatch();
+    final viewport = RemoteViewport();
+    final prefs = ViewerPrefs(persist: false);
+    final touchMode = ValueNotifier(TouchMode.direct);
+    late final TouchGestureMachine machine;
+    final input = RemoteInput(
+      desktop: store,
+      latch: latch,
+      onLocalCancel: () => machine.cancel(Duration.zero),
+    );
+    machine = TouchGestureMachine(
+      sink: input,
+      viewport: viewport,
+      mode: () => touchMode.value,
+      interactive: () => input.ready.value,
+      haptic: (_) {},
+    );
+    final session = ValueNotifier(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.connecting,
+        setup: DesktopSetupStep.verifying,
+      ),
+    );
+    final picture = ValueNotifier<DesktopPicture?>(
+      const DesktopPicture(textureId: 7, aspectRatio: 16 / 9, codec: 'h264'),
+    );
+    await tester.pumpWidget(
+      _app(
+        ViewerStage(
+          session: session,
+          geometry: ValueNotifier(null),
+          picture: picture,
+          jpegImage: ValueNotifier(null),
+          stats: ValueNotifier(DesktopStats.none),
+          readView: () => null,
+          viewport: viewport,
+          input: input,
+          machine: machine,
+          touchMode: touchMode,
+          title: 'Office',
+          actions: ViewerActions(
+            desktop: store,
+            input: input,
+            prefs: prefs,
+            viewport: viewport,
+            onDisconnect: () async {},
+            onQuality: (_) {},
+            onTypeText: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final texture = tester.element(find.byType(Texture));
+    ViewerScrim scrim() => tester.widget<ViewerScrim>(find.byType(ViewerScrim));
+    Future<void> enter(DesktopSessionView s) async {
+      session.value = s;
+      await tester.pump();
+      expect(tester.element(find.byType(Texture)), same(texture));
+    }
+
+    // The first frame is presented while connecting: nothing opaque on it.
+    expect(find.byKey(const Key('viewer-overlay-connecting')), findsOneWidget);
+    expect(scrim().opaque, isFalse);
+
+    await enter(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.live,
+        hasPicture: true,
+        controlAllowed: true,
+      ),
+    );
+    expect(find.byType(ViewerScrim), findsNothing);
+
+    // Lost: the last picture stays, greyed, and the pill offers Retry now.
+    await enter(
+      DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.reconnecting,
+        hasPicture: true,
+        reconnectAttempt: 1,
+        retryAt: DateTime.now().add(const Duration(seconds: 2)),
+      ),
+    );
+    expect(
+      find.byKey(const Key('viewer-overlay-retryWaiting')),
+      findsOneWidget,
+    );
+    expect(find.text('Retry now'), findsOneWidget);
+    expect(find.byType(ViewerScrim), findsNothing);
+    expect(find.byType(BackdropFilter), findsOneWidget);
+
+    await enter(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.waitingForDesktop,
+        hasPicture: true,
+        secureDesktop: true,
+      ),
+    );
+    expect(
+      find.byKey(const Key('viewer-overlay-secureDesktop')),
+      findsOneWidget,
+    );
+    expect(scrim().opaque, isFalse);
+
+    await enter(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.live,
+        hasPicture: true,
+      ),
+    );
+    expect(find.byType(ViewerScrim), findsNothing);
+
+    // The session is dead: the identity change covers everything else.
+    await enter(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.identityChanged,
+        hasPicture: true,
+        secureDesktop: true,
+        reconnectAttempt: 2,
+      ),
+    );
+    expect(
+      find.byKey(const Key('viewer-overlay-identityChanged')),
+      findsOneWidget,
+    );
+    expect(scrim().opaque, isTrue);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    input.dispose();
+    machine.dispose();
+    viewport.dispose();
+    latch.dispose();
+    store.dispose();
+  });
+
+  testWidgets(
+    'the pointer maps to display pixels and nothing is sent unless input is '
+    'live',
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      final png = await _png(tester);
+      await tester.pumpWidget(
+        _app(
+          DesktopViewer(
+            desktop: store,
+            prefs: ViewerPrefs(persist: false),
+            title: 'Office',
+          ),
+        ),
+      );
+      await store.connect(_target);
+      // The host lets this viewer watch only.
+      api.viewerStatusValue = liveStatus(generation: 3, controlAllowed: false);
+      api.emitJpeg(png, generation: 3, frameId: 1);
+      for (var i = 0; i < 20 && find.byType(RawImage).evaluate().isEmpty; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.byType(RawImage), findsOneWidget);
+      expect(api.argsOf('presented'), [
+        {'consumer': 1, 'generation': 3, 'frame_id': 1},
+      ]);
+      expect(find.byKey(const Key('viewer-view-only')), findsOneWidget);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(find.byType(RawImage)));
+      await tester.tap(find.byType(RawImage));
+      await tester.pump();
+      expect(api.inputs, isEmpty);
+
+      // Allowed: control is the viewer's to ask for.
+      api.viewerStatusValue = liveStatus(generation: 3);
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const Key('viewer-mode')),
+          matching: find.text('Control'),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.session.value.inputLive, isTrue);
+      await tester.tap(find.byType(RawImage));
+      await tester.pump();
+      expect(api.inputs.map((e) => e['kind']), ['move', 'button', 'button']);
+      expect(api.inputs.first['x'], 960);
+      expect(api.inputs.first['y'], 540);
+      expect(api.inputs.last['down'], false);
+      final viewer = tester.getRect(find.byType(RawImage));
+      await mouse.moveTo(viewer.topLeft + viewer.size.center(Offset.zero) / 2);
+      await tester.pump(const Duration(milliseconds: 5));
+      expect(api.inputs.length, 4);
+      expect(api.inputs.last, containsPair('kind', 'move'));
+      expect(api.inputs.last['x'], 480);
+      expect(api.inputs.last['y'], 270);
+
+      // A stale picture takes no input.
+      api.viewerStatusValue = liveStatus(
+        generation: 3,
+        controlling: true,
+        fresh: false,
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      await mouse.moveTo(viewer.center);
+      await tester.tap(find.byType(RawImage), warnIfMissed: false);
+      await tester.pump(const Duration(milliseconds: 5));
+      expect(api.inputs.length, 4);
+      await mouse.removePointer();
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
+    'the soft keyboard only occludes the touch viewer, and a modifier '
+    'latched on its bar wraps the next typed key',
+    (tester) async {
+      _size(tester, const Size(844, 390));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump();
+      final scene = find.byKey(const Key('remote-scene-transform'));
+      final picture = tester.element(scene);
+      Matrix4 transform() => tester.widget<Transform>(scene).transform;
+      final before = transform();
+      List<String> sent() => [
+        for (final e in api.argsOf('input').last['inputs']! as List)
+          ViewerHarness.describe(e as Map),
+      ];
+
+      // The keyboard and the bar cover the picture; nothing relayouts.
+      await tester.tap(find.byKey(const Key('touch-keyboard')));
+      tester.view.viewInsets = const FakeViewPadding(bottom: 200);
+      await tester.pump();
+      await tester.pump(kKeyboardSettle);
+      expect(find.byKey(const Key('modifier-bar')), findsOneWidget);
+      expect(find.byKey(const Key('touch-keyboard')), findsNothing);
+      expect(tester.element(scene), same(picture));
+      expect(transform().getMaxScaleOnAxis(), before.getMaxScaleOnAxis());
+
+      // Ctrl armed on the bar applies to the next key the IME commits.
+      await tester.tap(find.byKey(const Key('modifier-control')));
+      await tester.pump();
+      final pill = find.descendant(
+        of: find.byKey(const Key('modifier-pill')),
+        matching: find.byType(ViewerPill),
+      );
+      expect(pill, findsOneWidget);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: '${'1' * 64}a',
+          selection: const TextSelection.collapsed(offset: 65),
+        ),
+      );
+      await tester.pump();
+      expect(sent(), ['control↓', 'a↓', 'a↑', 'control↑']);
+      expect(pill, findsNothing);
+
+      // The keyboard goes: the gutters return and the view is as it was.
+      await tester.tap(find.byKey(const Key('modifier-collapse')));
+      tester.view.resetViewInsets();
+      await tester.pump();
+      expect(find.byKey(const Key('touch-keyboard')), findsOneWidget);
+      expect(tester.element(scene), same(picture));
+      expect(transform(), before);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+}
