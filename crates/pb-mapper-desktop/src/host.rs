@@ -558,8 +558,8 @@ mod trust_tests {
         (viewer, answer)
     }
 
-    /// The next message of a kind other than probe or stats; `None` at a
-    /// clean close.
+    /// The next message of a kind other than probe or stats, past a video
+    /// unit's payload record; `None` at a clean close.
     async fn next(viewer: &mut Viewer) -> Option<HostMessage> {
         loop {
             match wire::read_header(&mut viewer.stream, Duration::from_secs(5))
@@ -567,6 +567,10 @@ mod trust_tests {
                 .unwrap()?
             {
                 HostMessage::Probe { .. } | HostMessage::Stats { .. } => {}
+                message @ HostMessage::Video { .. } => {
+                    wire::read_payload(&mut viewer.stream).await.unwrap();
+                    return Some(message);
+                }
                 message => return Some(message),
             }
         }
