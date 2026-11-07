@@ -95,7 +95,7 @@ class _TouchViewerState extends State<TouchViewer> {
   Offset? _lastTouch;
 
   /// The virtual mouse's top-left, kept while the viewer is.
-  Offset? _padAt;
+  final _padAt = ValueNotifier<Offset?>(null);
 
   DesktopStore get _desktop => widget.desktop;
 
@@ -189,6 +189,7 @@ class _TouchViewerState extends State<TouchViewer> {
     _latch.dispose();
     _touchMode.dispose();
     _modeHint.dispose();
+    _padAt.dispose();
     _picture.dispose();
     _system(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     _system(SystemChrome.setPreferredOrientations(const []));
@@ -586,15 +587,19 @@ class _TouchViewerState extends State<TouchViewer> {
       p.dx.clamp(bounds.left, bounds.right < 0 ? 0 : bounds.right),
       p.dy.clamp(bounds.top, bounds.bottom < 0 ? 0 : bounds.bottom),
     );
-    final at = clamp(
-      _padAt ?? content.bottomRight - Offset(pad.width + 12, pad.height + 12),
-    );
-    return Positioned(
-      left: at.dx,
-      top: at.dy,
+    final home = content.bottomRight - Offset(pad.width + 12, pad.height + 12);
+    Offset place(Offset? p) => clamp(p ?? home);
+    // A frame can bring several moves: each adds to where the pad is now,
+    // and rebuilds its position alone.
+    return ValueListenableBuilder(
+      valueListenable: _padAt,
+      builder: (context, p, child) {
+        final at = place(p);
+        return Positioned(left: at.dx, top: at.dy, child: child!);
+      },
       child: VirtualMousePad(
         input: _input,
-        onMove: (delta) => setState(() => _padAt = clamp(at + delta)),
+        onMove: (delta) => _padAt.value = clamp(place(_padAt.value) + delta),
       ),
     );
   }

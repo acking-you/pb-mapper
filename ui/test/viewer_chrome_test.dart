@@ -457,6 +457,52 @@ void main() {
   );
 
   testWidgets(
+    'the virtual mouse follows its grip however many moves a frame brings',
+    (tester) async {
+      _size(tester, const Size(844, 390));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await prefs.setTouchMode(TouchMode.direct);
+      await prefs.setVirtualMouse(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump();
+      final pad = find.byKey(const Key('virtual-mouse'));
+      final before = tester.getTopLeft(pad);
+
+      // Two moves on the grip before the next frame: both count.
+      final grip = await tester.startGesture(
+        tester.getBottomLeft(pad) + const Offset(36, -14),
+      );
+      await grip.moveBy(const Offset(-10, -10));
+      await grip.moveBy(const Offset(-10, -10));
+      await tester.pump();
+      expect(tester.getTopLeft(pad), before + const Offset(-20, -20));
+      await grip.up();
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
     'a trackpad stroke repaints the cursor and the ring alone, and a pan the '
     'stage and the minimap alone',
     (tester) async {
