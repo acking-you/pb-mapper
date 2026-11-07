@@ -578,8 +578,8 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
 
 /// A 1 Mbit/s link from the start, with IDRs twenty times a P-frame: each
 /// takes over a second to cross. The P-frames behind the session's first IDR
-/// wait for it rather than age out into another, and fps and bits per frame
-/// fall as on any slow link.
+/// wait for it rather than age out into another, the viewer does not ask for
+/// it again, and fps and bits per frame fall as on any slow link.
 #[test]
 #[ignore = "explicit ~15-second slow IDR acceptance"]
 fn idr_slower_than_a_second_is_followed_not_replaced() {
@@ -611,10 +611,15 @@ fn idr_slower_than_a_second_is_followed_not_replaced() {
             status.state
         );
         assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
-        // The viewer waits a second for the session's first IDR before it
-        // asks for one, so here it asks once; nothing else may add another.
-        assert!(
-            last.keyframes <= 2,
+        // The IDR's header lands well inside the viewer's 1 s hold and
+        // answers it, so nothing asks for another; the P-frames behind it
+        // must not age out into one either.
+        assert_eq!(
+            status.stats.keyframes_requested, 0,
+            "the IDR in flight answers the hold"
+        );
+        assert_eq!(
+            last.keyframes, 1,
             "the IDR in flight is the resync; the P-frames behind it must not age out into another: {last:?}"
         );
         assert!(lowest_encoder < START_BPS, "bits per frame must fall");

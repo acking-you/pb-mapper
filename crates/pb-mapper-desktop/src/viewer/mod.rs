@@ -866,6 +866,11 @@ impl Reader<'_> {
                 pts_us,
                 host_us,
             } => {
+                // Its header answers an awaited IDR; the payload may take
+                // seconds on a slow link.
+                if keyframe && generation == self.generation {
+                    self.sink.idr_arriving();
+                }
                 let bytes = wire::read_payload(read).await.map_err(Ended::failed)?;
                 let now = Instant::now();
                 // Transport credit first: it covers every unit read, including

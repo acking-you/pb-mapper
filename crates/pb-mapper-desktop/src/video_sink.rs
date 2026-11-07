@@ -380,6 +380,21 @@ impl VideoSink {
         self.ready.notify_one();
     }
 
+    /// The read task read an IDR's header: its payload is on the way, so the
+    /// awaited IDR is answered now, not once its last byte lands. An IDR that
+    /// takes longer than the hold or a backoff step to cross is then
+    /// followed, never asked for again.
+    pub(crate) fn idr_arriving(&self) {
+        self.idr_arriving_at(Instant::now());
+    }
+
+    fn idr_arriving_at(&self, now: Instant) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.state.lock().recovery.on_idr_received(now);
+    }
+
     /// The consumer fell behind: drop the queue, wait for the next IDR and
     /// ask for one, and let the fps cap know once it judges the consumer.
     fn drop_to_idr(&self, state: &mut SinkState, cause: Backlog, now: Instant) {
@@ -962,6 +977,26 @@ mod tests {
         assert!(pull_at(14_800).is_none());
         assert_eq!(backlog_drops(), 2);
         assert_eq!(requested(), 7);
+    }
+
+    /// An IDR slower to cross than the hold after a new generation: its
+    /// header answers the hold, so nothing asks for another while its payload
+    /// is still in transit.
+    #[test]
+    fn an_arriving_idr_answers_the_hold() {
+        let requested = |arriving: bool| {
+            let sink = VideoSink::detached_for_test();
+            let start = Instant::now();
+            let at = |millis: u64| start + Duration::from_millis(millis);
+            sink.on_state_at(2, true, at(0));
+            if arriving {
+                sink.idr_arriving_at(at(200));
+            }
+            sink.tick(at(1500), true, true, QualityPreset::Balanced);
+            sink.snapshot(at(1500)).keyframes_requested
+        };
+        assert_eq!(requested(false), 1, "the expired hold asks");
+        assert_eq!(requested(true), 0);
     }
 
     /// The session streams before its consumer attaches, and the consumer's

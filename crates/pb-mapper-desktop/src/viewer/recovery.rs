@@ -20,9 +20,10 @@
 //! its `State` says `streaming` again, so that `paused` is no unavailability.
 //!
 //! While an IDR is awaited, requests go at most at 0.5, 1, 2, 4, 4 … s
-//! intervals; a received IDR resets that backoff, and the timer re-requests
-//! only while no IDR answered the last request, so a renderer that takes
-//! frames but shows nothing is not fed an IDR every half second.
+//! intervals; an IDR whose header has been read resets that backoff, and the
+//! timer re-requests only while no IDR answered the last request, so neither
+//! an IDR slower to cross than the next request nor a renderer that takes
+//! frames but shows nothing brings another IDR every half second.
 use crate::{KeyframeReason, viewer::DecoderState};
 use std::{
     collections::VecDeque,
@@ -53,8 +54,8 @@ struct Awaiting {
     attempt: u32,
     /// No request but a `User` one goes before this.
     not_before: Instant,
-    /// An IDR arrived since the last request: the timer waits for it to be
-    /// shown instead of asking again.
+    /// An IDR began to arrive since the last request: the timer waits for it
+    /// to be shown instead of asking again.
     answered: bool,
     /// The first IDR handed out in this episode, `(generation, frame_id)`.
     /// Presenting it, or a later frame of its generation, ends the episode.
@@ -145,8 +146,8 @@ impl Recovery {
         }
     }
 
-    /// An IDR (or a JPEG picture) reached the sink: the host answered, so the
-    /// backoff starts over.
+    /// An IDR (or a JPEG picture) began to arrive or reached the sink: the
+    /// host answered, so the backoff starts over.
     pub fn on_idr_received(&mut self, now: Instant) {
         if let Phase::AwaitingIdr(awaiting) = &mut self.phase {
             awaiting.attempt = 0;
