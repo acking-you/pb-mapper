@@ -101,7 +101,9 @@ pub struct ViewerStatus {
     pub desktop: DesktopKind,
     pub video: Option<VideoInfo>,
     pub presented: Option<PresentedInfo>,
-    /// Time since the last `Video` record of any generation.
+    /// Time without video while it was due: since the later of the last
+    /// `Video` record, of any generation, and the session last becoming
+    /// streaming. `None` before the first record.
     pub last_video_age_ms: Option<u64>,
     pub quality: QualityPreset,
     /// What the host advertised.
