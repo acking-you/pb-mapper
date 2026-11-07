@@ -241,12 +241,6 @@ impl Host {
             Some(_) => HostPath::Unknown,
         }
     }
-    /// The pre-v2 status shape, for the v1 transport tests until they are
-    /// rewritten for v2 after the G1 merges.
-    #[cfg(test)]
-    pub(crate) fn v1_status(&self) -> crate::SessionStatus {
-        crate::legacy_host_status(&self.status())
-    }
     /// "Disconnect": end the connected viewer's session; it hears
     /// `Stopped{host_ended}`. Hosting continues, and the viewer may connect
     /// again with the same invitation.

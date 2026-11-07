@@ -87,6 +87,12 @@ fn preset(quality: QualityPreset) -> Preset {
     }
 }
 
+/// A preset's fps ceiling, before the viewer's `limits.max_fps`. The viewer's
+/// fps cap is bounded by it too.
+pub(crate) fn ceiling_fps(quality: QualityPreset) -> u32 {
+    preset(quality).ceiling_fps
+}
+
 /// What thread C is asked for, published after every change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TargetValues {

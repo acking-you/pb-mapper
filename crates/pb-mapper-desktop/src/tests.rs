@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
+use crate::protocol::{HostMessage, ViewerMessage};
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
 use pb_mapper_testkit::{Relay, admin_credential};
 use std::{
@@ -50,8 +51,10 @@ impl Backend for LargeFrames {
     fn release(&mut self) {}
 }
 
+/// A viewer that reads ~64 KiB/s, far less than one 3 MiB picture a second,
+/// and never returns credit: the host's video writer is blocked or out of
+/// credit, and a local stop must still end the session at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "v1 pipeline; rewritten for v2 after the G1 merges"]
 async fn blocked_video_does_not_block_local_stop() {
     let relay = Relay::start("desktop-backpressure").await;
     let client = Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
@@ -94,24 +97,28 @@ async fn blocked_video_does_not_block_local_stop() {
         )
         .await
         .unwrap();
-    wire::write_json(
-        &mut tls,
-        &wire::Command::Authenticate {
-            token: host.invitation().token_text(),
-            codecs: vec![],
-            video: Some(VideoPreferences {
-                max_width: 1280,
-                max_height: 720,
-                max_fps: 75,
-                bitrate: 6_000_000,
-            }),
-            presentation_feedback: false,
+    let authenticate = ViewerMessage::Authenticate {
+        token: host.invitation().token_text(),
+        codecs: vec![VideoCodec::Jpeg],
+        limits: VideoLimits {
+            max_width: 1280,
+            max_height: 720,
+            max_fps: 75,
         },
-    )
-    .await
-    .unwrap();
+        quality: QualityPreset::Balanced,
+        capabilities: vec![],
+    };
+    wire::write_message(&mut tls, &authenticate, None)
+        .await
+        .unwrap();
+    let accepted = wire::read_header(&mut tls, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(
+        matches!(accepted, Some(HostMessage::Accepted { .. })),
+        "{accepted:?}"
+    );
     let (mut read, mut write) = tokio::io::split(tls);
-    // A slow reader: ~64 KiB/s, much less than a single 3 MiB frame per second.
     let reader = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(125));
         let mut bytes = [0; 8192];
@@ -123,12 +130,18 @@ async fn blocked_video_does_not_block_local_stop() {
         }
     });
     let started = Instant::now();
+    // One picture is written or waits for credit, and two more wait in the
+    // hand-off; pings keep the session alive meanwhile.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while count.load(Ordering::Relaxed) < 12 {
-            wake.notified().await;
-            wire::write_json(&mut write, &wire::Command::Ping)
-                .await
-                .unwrap();
+        while count.load(Ordering::Relaxed) < 3 {
+            tokio::select! {
+                () = wake.notified() => {}
+                () = tokio::time::sleep(Duration::from_millis(500)) => {
+                    wire::write_message(&mut write, &ViewerMessage::Ping {}, None)
+                        .await
+                        .unwrap();
+                }
+            }
         }
     })
     .await
@@ -139,11 +152,11 @@ async fn blocked_video_does_not_block_local_stop() {
         .unwrap()
         .unwrap();
     println!(
-        "slow-reader elapsed_ms={} capture_frames={} stop_ms={} frame_limit_bytes={}",
+        "slow-reader elapsed_ms={} capture_frames={} stop_ms={} payload_limit_bytes={}",
         started.elapsed().as_millis(),
         count.load(Ordering::Relaxed),
         stopping.elapsed().as_millis(),
-        wire::MAX_FRAME
+        wire::MAX_PAYLOAD
     );
     reader.abort();
     let _ = reader.await;

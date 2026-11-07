@@ -7,7 +7,7 @@
 //! would ratchet the host down by 10% each time; under backlog, throughput is
 //! the consumer's capacity, which is what RustDesk's `decode_fps` measures. A
 //! static desktop never lowers the cap.
-use crate::QualityPreset;
+use crate::{QualityPreset, qos::ceiling_fps};
 use std::time::{Duration, Instant};
 
 /// The cap never goes below this.
@@ -22,15 +22,6 @@ const CAP_CHANGE_MIN: Duration = Duration::from_secs(1);
 const BACKLOG_HIGH: usize = 2;
 /// Up to this many queued units count as keeping up.
 const BACKLOG_LOW: usize = 1;
-
-/// The preset's fps ceiling, as the host applies it (perf §5.9.1).
-fn preset_ceiling(quality: QualityPreset) -> u32 {
-    match quality {
-        QualityPreset::Quality => 30,
-        QualityPreset::Balanced => 60,
-        QualityPreset::Smooth => 120,
-    }
-}
 
 /// Owned by the sink. `tick` runs every viewer tick while the session
 /// streams and is not paused; otherwise `freeze` keeps the cap as it is.
@@ -83,7 +74,7 @@ impl FpsCap {
         direct: bool,
         quality: QualityPreset,
     ) -> Option<u32> {
-        let ceiling = preset_ceiling(quality).min(self.max_fps);
+        let ceiling = ceiling_fps(quality).min(self.max_fps);
         let dropped = std::mem::take(&mut self.dropped);
         self.high_ticks = if backlog > BACKLOG_HIGH {
             self.high_ticks.saturating_add(1)

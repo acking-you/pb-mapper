@@ -1,302 +1,272 @@
-//! Explicit transport acceptance, not a decoder/GPU benchmark. Run with:
-//! cargo test -p pb-mapper-desktop --all-features sustained_slow_tls_reader -- --ignored --nocapture
+//! Explicit acceptance over a real relay and TLS, with a synthetic
+//! asynchronous encoder and a simulated decoder: pipeline observations, not a
+//! GPU benchmark or real rendered fps. Each case shapes the viewer's link to
+//! the relay and reads the host's once-a-second `desktop_feedback_interval`
+//! trace. The cases run one at a time. Run with:
+//! cargo test -p pb-mapper-desktop -- --ignored --nocapture slow_link
 #![allow(clippy::unwrap_used)]
-use crate::{wire::Command, *};
+use crate::*;
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
-use pb_mapper_testkit::Relay;
+use pb_mapper_testkit::{Relay, admin_credential};
 use std::{
-    collections::VecDeque,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    collections::{BTreeSet, VecDeque},
+    future::Future,
+    net::SocketAddr,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
-use tokio::{io::AsyncReadExt, sync::Notify};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
+};
+use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt};
 
-/// Delay each byte batch in both directions without sleeping the reader or
-/// imposing a bitrate. The 32 x 16 KiB channel bounds this test-only link.
-async fn delayed_copy(
-    mut read: impl tokio::io::AsyncRead + Unpin,
-    mut write: impl tokio::io::AsyncWrite + Unpin,
-    delay: Duration,
-) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let (send, mut receive) = tokio::sync::mpsc::channel::<(tokio::time::Instant, Vec<u8>)>(32);
-    let incoming = async {
-        loop {
-            let mut bytes = vec![0; 16 * 1024];
-            let size = read.read(&mut bytes).await?;
-            if size == 0 {
-                break;
-            }
-            bytes.truncate(size);
-            send.send((tokio::time::Instant::now() + delay, bytes))
-                .await
-                .map_err(error)?;
+/// Balanced's start at 1080p and 60 fps: 66 667 bits per frame (perf 5.9.1).
+const START_BPS: u64 = 4_000_000;
+/// Balanced's ceiling under the viewer's 60 fps limit.
+const CEILING_FPS: u64 = 60;
+/// The synthetic encoder's latency, and when an output left in it is lost.
+const ENCODE_TIME: Duration = Duration::from_millis(8);
+const ENCODER_EXPIRY: Duration = Duration::from_millis(250);
+const FEEDBACK: &str = "pb_mapper_desktop::feedback";
+
+/// One host stats interval, as `desktop_feedback_interval` traced it.
+#[derive(Clone, Copy, Debug)]
+struct Interval {
+    at: Instant,
+    feedback: bool,
+    /// The delay controller's fps, before the viewer cap clamps the pace.
+    fps: u64,
+    pace_fps: u64,
+    /// Bits per frame × pace.
+    bitrate: u64,
+    encoder_bitrate: u64,
+    viewer_cap: Option<u64>,
+    window_clamped: bool,
+    unresponsive: bool,
+    timestamp_model: bool,
+    skipped_ticks: u64,
+}
+impl Interval {
+    fn new(at: Instant) -> Self {
+        Self {
+            at,
+            feedback: false,
+            fps: 0,
+            pace_fps: 0,
+            bitrate: 0,
+            encoder_bitrate: 0,
+            viewer_cap: None,
+            window_clamped: false,
+            unresponsive: false,
+            timestamp_model: false,
+            skipped_ticks: 0,
         }
-        drop(send);
-        Ok::<_, std::io::Error>(())
-    };
-    let outgoing = async {
-        while let Some((due, bytes)) = receive.recv().await {
-            tokio::time::sleep_until(due).await;
-            write.write_all(&bytes).await?;
+    }
+}
+impl tracing::field::Visit for Interval {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "event" {
+            self.feedback = value == "desktop_feedback_interval";
         }
-        write.shutdown().await
-    };
-    tokio::try_join!(incoming, outgoing)?;
-    Ok(())
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        match field.name() {
+            "fps" => self.fps = value,
+            "pace_fps" => self.pace_fps = value,
+            "bitrate" => self.bitrate = value,
+            "encoder_bitrate" => self.encoder_bitrate = value,
+            "viewer_cap" => self.viewer_cap = Some(value),
+            "skipped_ticks" => self.skipped_ticks = value,
+            _ => {}
+        }
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        match field.name() {
+            "window_clamped" => self.window_clamped = value,
+            "unresponsive" => self.unresponsive = value,
+            _ => {}
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "rate_model" {
+            self.timestamp_model = format!("{value:?}") == "Timestamp";
+        }
+    }
 }
 
-async fn delayed_relay(
-    relay: std::net::SocketAddr,
-    roundtrip_ms: u64,
-) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+/// The host's feedback trace of one case.
+#[derive(Clone, Default)]
+struct Trace(Arc<Mutex<Vec<Interval>>>);
+impl Trace {
+    fn last(&self) -> Interval {
+        *self.0.lock().unwrap().last().unwrap()
+    }
+    /// The intervals traced in `from..to`.
+    fn between(&self, from: Instant, to: Instant) -> Vec<Interval> {
+        let intervals = self.0.lock().unwrap();
+        intervals
+            .iter()
+            .filter(|interval| (from..to).contains(&interval.at))
+            .copied()
+            .collect()
+    }
+}
+impl<S: tracing::Subscriber> Layer<S> for Trace {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut interval = Interval::new(Instant::now());
+        event.record(&mut interval);
+        if interval.feedback {
+            self.0.lock().unwrap().push(interval);
+        }
+    }
+}
+
+/// Run one case on its own runtime, every thread of which traces the host's
+/// feedback into the case's `Trace`. The cases measure timing, so they never
+/// share the machine with one another.
+fn traced<F: Future<Output = ()>>(case: impl FnOnce(Trace) -> F) {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let trace = Trace::default();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry().with(
+            trace
+                .clone()
+                .with_filter(Targets::new().with_target(FEEDBACK, tracing::Level::DEBUG)),
+        ),
+    );
+    let threads = dispatch.clone();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        // The default lasts as long as the thread, and the runtime's threads
+        // end with the runtime.
+        .on_thread_start(move || std::mem::forget(tracing::dispatcher::set_default(&threads)))
+        .build()
+        .unwrap();
+    tracing::dispatcher::with_default(&dispatch, || runtime.block_on(case(trace)));
+}
+
+/// How the viewer's link to the relay is shaped, in both directions alike.
+#[derive(Default)]
+struct Shape {
+    /// Every byte is held this long.
+    delay_ms: AtomicU64,
+    /// Bytes per second; 0 is unlimited.
+    rate: AtomicU64,
+}
+
+/// A TCP hop in front of the relay, shaped by `shape` while connections run.
+/// The host's send credit bounds what is in flight, so the queue here stays
+/// bounded too.
+async fn shaped_link(relay: SocketAddr, shape: Arc<Shape>) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let join = tokio::spawn(async move {
-        let mut peers = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    let Ok((client, _)) = accepted else { return };
-                    peers.spawn(async move {
-                        let server = tokio::net::TcpStream::connect(relay).await?;
-                        client.set_nodelay(true)?;
-                        server.set_nodelay(true)?;
-                        let (client_read, client_write) = client.into_split();
-                        let (server_read, server_write) = server.into_split();
-                        let delay = Duration::from_micros(roundtrip_ms * 500);
-                        tokio::try_join!(delayed_copy(client_read, server_write, delay), delayed_copy(server_read, client_write, delay))?;
-                        Ok::<_, std::io::Error>(())
-                    });
-                }
-                Some(_) = peers.join_next(), if !peers.is_empty() => {}
-            }
+    tokio::spawn(async move {
+        while let Ok((near, _)) = listener.accept().await {
+            let Ok(far) = tokio::net::TcpStream::connect(relay).await else {
+                return;
+            };
+            near.set_nodelay(true).unwrap();
+            far.set_nodelay(true).unwrap();
+            let (near_read, near_write) = near.into_split();
+            let (far_read, far_write) = far.into_split();
+            tokio::spawn(shaped_copy(near_read, far_write, shape.clone()));
+            tokio::spawn(shaped_copy(far_read, near_write, shape.clone()));
         }
     });
-    (addr, join)
+    addr
 }
 
-const FRAME_BYTES: usize = 64 * 1024;
+async fn shaped_copy(mut read: OwnedReadHalf, mut write: OwnedWriteHalf, shape: Arc<Shape>) {
+    let (send, mut receive) = tokio::sync::mpsc::channel::<(tokio::time::Instant, Vec<u8>)>(256);
+    let incoming = async move {
+        loop {
+            let mut bytes = vec![0; 16 * 1024];
+            match read.read(&mut bytes).await {
+                Ok(0) | Err(_) => break,
+                Ok(size) => bytes.truncate(size),
+            }
+            if send
+                .send((tokio::time::Instant::now(), bytes))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    let outgoing = async move {
+        // When the link is free to carry the next packet.
+        let mut free = tokio::time::Instant::now();
+        while let Some((read_at, bytes)) = receive.recv().await {
+            let delay = Duration::from_millis(shape.delay_ms.load(Ordering::Relaxed));
+            tokio::time::sleep_until(read_at + delay).await;
+            for packet in bytes.chunks(4096) {
+                let rate = shape.rate.load(Ordering::Relaxed);
+                if rate > 0 {
+                    free = free.max(tokio::time::Instant::now());
+                    tokio::time::sleep_until(free).await;
+                    free += Duration::from_secs_f64(packet.len() as f64 / rate as f64);
+                }
+                if write.write_all(packet).await.is_err() {
+                    return;
+                }
+            }
+        }
+        let _ = write.shutdown().await;
+    };
+    tokio::join!(incoming, outgoing);
+}
+
 #[derive(Default)]
 struct Probe {
-    frames: AtomicU32,
-    read_bytes: AtomicU64,
+    captures: AtomicU64,
+    configured: AtomicU32,
+    expired: AtomicU32,
     held: AtomicBool,
-    changed: Notify,
 }
-struct SyntheticVideo {
+
+/// A synthetic asynchronous H.264 encoder at 1080p, run as thread C runs the
+/// Windows MFT: each capture submits one picture, whose output is ready
+/// `ENCODE_TIME` later and must be drained; an output left in it longer than
+/// `ENCODER_EXPIRY` is lost. A picture spends the per-frame budget
+/// `bitrate / nominal_fps`, an IDR four times that, unless `fixed` sets its
+/// size. No decoder reads the bytes.
+struct SyntheticEncoder {
     probe: Arc<Probe>,
-    next: Instant,
-    adaptive: Option<VideoPreferences>,
-}
-
-/// Models an asynchronous encoder: completed outputs still need polling, and
-/// holding one for 250 ms loses predictive references like the Windows MFT.
-struct AsyncVideo {
-    source: SyntheticVideo,
+    fixed: Option<usize>,
+    nominal_fps: u32,
+    frames: u64,
     pending: VecDeque<(Instant, EncodedFrame)>,
-    expired: Arc<AtomicU32>,
-    independent: bool,
 }
-impl Backend for AsyncVideo {
+impl SyntheticEncoder {
+    fn ready(&mut self) -> Option<EncodedFrame> {
+        while let Some((submitted, _)) = self.pending.front() {
+            let age = submitted.elapsed();
+            if age < ENCODE_TIME {
+                return None;
+            }
+            let (_, frame) = self.pending.pop_front()?;
+            if age <= ENCODER_EXPIRY {
+                return Some(frame);
+            }
+            self.probe.expired.fetch_add(1, Ordering::Relaxed);
+        }
+        None
+    }
+}
+impl Backend for SyntheticEncoder {
     fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
-        self.source.configure_video(limits, nominal_fps)
-    }
-    fn display(&mut self) -> Result<Display> {
-        self.source.display()
-    }
-    fn capture(&mut self) -> Result<Vec<u8>> {
-        self.source.capture()
-    }
-    fn capture_video(
-        &mut self,
-        expected: &DesktopContext,
-        codec: VideoCodec,
-        keyframe: bool,
-        rate: VideoRate,
-    ) -> Result<Option<EncodedFrame>> {
-        let ready = self.drain_video(expected, Duration::ZERO)?;
-        if self.pending.len() < 2
-            && let Some(frame) =
-                self.source
-                    .capture_video(expected, codec, keyframe || self.independent, rate)?
-        {
-            self.pending.push_back((Instant::now(), frame));
-        }
-        Ok(ready)
-    }
-    fn drain_video(&mut self, _: &DesktopContext, _: Duration) -> Result<Option<EncodedFrame>> {
-        if self
-            .pending
-            .front()
-            .is_none_or(|(at, _)| at.elapsed() < Duration::from_millis(20))
-        {
-            return Ok(None);
-        }
-        let (at, frame) = self.pending.pop_front().unwrap();
-        if at.elapsed() > Duration::from_millis(250) {
-            self.expired.fetch_add(1, Ordering::Relaxed);
-            self.independent = true;
-            return Ok(None);
-        }
-        if self.independent && !frame.format.keyframe {
-            return Ok(None);
-        }
-        self.independent = false;
-        Ok(Some(frame))
-    }
-    fn input(&mut self, event: &Input) -> Result<()> {
-        self.source.input(event)
-    }
-    fn release(&mut self) {
-        self.source.release();
-    }
-}
-
-/// Real relay/TLS and an asynchronous source, with independent feedback delay
-/// and consumer speed. These are pipeline observations, not real rendered FPS.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "explicit low/WAN delay and slow-consumer feedback acceptance"]
-async fn delayed_feedback_does_not_starve_async_encoder() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("pb_mapper_desktop::feedback=debug")
-        .try_init();
-    feedback_case("low_delay", 20, 0, 8).await;
-    feedback_case("fixed_wan", 350, 0, 16).await;
-    feedback_case("slow_consumer", 20, 67, 8).await;
-}
-
-async fn feedback_case(label: &str, roundtrip_ms: u64, consumer_ms: u64, seconds: u64) {
-    let relay = Relay::start("desktop-async-wan").await;
-    let client = Client::from_credential(
-        relay.addr().to_string(),
-        pb_mapper_testkit::admin_credential(),
-        true,
-        None,
-    );
-    let probe = Arc::new(Probe::default());
-    let expired = Arc::new(AtomicU32::new(0));
-    let source = probe.clone();
-    let failures = expired.clone();
-    let preferences = VideoPreferences {
-        bitrate: 4_000_000,
-        max_fps: 60,
-        ..Default::default()
-    };
-    let host = Host::start_with_backend(
-        &client,
-        HostOptions {
-            service: "desktop:async-wan".into(),
-            display_id: 1,
-            allow_control: false,
-            allow_direct: false,
-        },
-        Arc::new(move || {
-            Ok(Box::new(AsyncVideo {
-                source: SyntheticVideo {
-                    probe: source.clone(),
-                    next: Instant::now(),
-                    adaptive: Some(preferences),
-                },
-                pending: VecDeque::new(),
-                expired: failures.clone(),
-                independent: false,
-            }))
-        }),
-    )
-    .await
-    .unwrap();
-    let (delayed_addr, delayed) = delayed_relay(relay.addr(), roundtrip_ms).await;
-    let remote = Client::from_credential(
-        delayed_addr.to_string(),
-        pb_mapper_testkit::admin_credential(),
-        true,
-        None,
-    );
-    let viewer = Viewer::connect(
-        &remote,
-        host.invitation(),
-        ConnectOptions {
-            path: PathPolicy::RelayOnly,
-            ..Default::default()
-        },
-        ViewerConfig {
-            codecs: vec![VideoCodec::H264],
-            limits: preferences.limits(),
-            quality: QualityPreset::Balanced,
-            progress: None,
-        },
-    )
-    .await
-    .unwrap();
-    let consumer = viewer.video_sink().attach().unwrap();
-    let mut deferred = VecDeque::new();
-    let mut images = 0u32;
-    let mut keyframes = 0u32;
-    let mut peak = 0usize;
-    let start = Instant::now();
-    let mut next_consume = start;
-    let mut tick = tokio::time::interval(Duration::from_millis(5));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    while start.elapsed() < Duration::from_secs(seconds) {
-        tick.tick().await;
-        while Instant::now() >= next_consume
-            && let Pull::Unit(unit) = consumer.next(Duration::ZERO, wire::MAX_PAYLOAD)
-        {
-            next_consume = Instant::now() + Duration::from_millis(consumer_ms);
-            images += 1;
-            keyframes += u32::from(unit.keyframe);
-            deferred.push_back((Instant::now(), unit.generation, unit.frame_id));
-            peak = peak.max(deferred.len());
-        }
-        let mut newest = None;
-        while deferred
-            .front()
-            .is_some_and(|(due, _, _)| *due <= Instant::now())
-        {
-            newest = deferred.pop_front();
-        }
-        if let Some((_, generation, id)) = newest {
-            consumer.presented(generation, id);
-        }
-    }
-    let status = viewer.status();
-    viewer.stop().await.unwrap();
-    host.stop().await.unwrap();
-    delayed.abort();
-    let _ = delayed.await;
-    let expired = expired.load(Ordering::Relaxed);
-    println!(
-        "async_feedback case={label} roundtrip_ms={roundtrip_ms} consumer_ms={consumer_ms} source_fps=60 elapsed_s={:.3} consumed={images} keyframes={keyframes} expired_encoder_outputs={expired} peak_deferred_acks={peak} bitrate={} dropped={} state={:?}",
-        start.elapsed().as_secs_f64(),
-        status.stats.bitrate,
-        status.stats.dropped_frames,
-        status.state
-    );
-    assert_eq!(status.state, ViewerState::Streaming);
-    if consumer_ms == 0 {
-        assert_eq!(
-            status.stats.bitrate, preferences.bitrate,
-            "fixed propagation delay is not congestion"
-        );
-    } else {
-        assert!(
-            status.stats.bitrate < preferences.bitrate,
-            "actual consumer backlog must still apply backpressure"
-        );
-    }
-    assert!(peak <= crate::video_sink::SINK_MAX_UNITS);
-    assert_eq!(
-        expired, 0,
-        "network credit must not starve completed encoder output"
-    );
-}
-impl Backend for SyntheticVideo {
-    fn configure_video(&mut self, limits: VideoLimits, _nominal_fps: u32) -> Result<()> {
         limits.validate()?;
-        if self.adaptive.is_some() {
-            self.adaptive = Some(limits.into());
-        }
+        self.nominal_fps = nominal_fps;
+        self.probe.configured.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
     fn display(&mut self) -> Result<Display> {
@@ -305,12 +275,12 @@ impl Backend for SyntheticVideo {
             name: "synthetic transport load".into(),
             x: 0,
             y: 0,
-            width: 1280,
-            height: 720,
+            width: 1920,
+            height: 1080,
         })
     }
     fn capture(&mut self) -> Result<Vec<u8>> {
-        Err(error("synthetic backend requires the video transport path"))
+        Err(error("the synthetic encoder produces H.264 only"))
     }
     fn capture_video(
         &mut self,
@@ -319,501 +289,450 @@ impl Backend for SyntheticVideo {
         keyframe: bool,
         rate: VideoRate,
     ) -> Result<Option<EncodedFrame>> {
-        if Instant::now() < self.next {
-            return Ok(None);
-        }
-        let fps = self.adaptive.map_or(90, |prefs| prefs.max_fps);
-        self.next = Instant::now() + Duration::from_nanos(1_000_000_000 / u64::from(fps));
-        let id = self.probe.frames.fetch_add(1, Ordering::Relaxed) + 1;
-        self.probe.changed.notify_one();
-        // Opaque synthetic access units exercise predictive queue recovery.
-        // No decoder consumes them and they must not be used as codec fixtures.
-        Ok(Some(EncodedFrame {
+        let ready = self.ready();
+        self.frames += 1;
+        self.probe.captures.fetch_add(1, Ordering::Relaxed);
+        let budget = rate.bitrate as usize / self.nominal_fps.max(1) as usize / 8;
+        let bytes = self
+            .fixed
+            .unwrap_or(if keyframe { 4 * budget } else { budget })
+            .clamp(256, wire::MAX_PAYLOAD);
+        let frame = EncodedFrame {
             format: VideoFormat {
                 codec: VideoCodec::H264,
-                width: self
-                    .adaptive
-                    .map_or(1280, |prefs| prefs.max_width.min(1280)),
-                height: self.adaptive.map_or(720, |prefs| prefs.max_height.min(720)),
+                width: 1920,
+                height: 1080,
                 keyframe,
-                pts_us: u64::from(id) * 11_111,
-                duplicate: false,
-                encode_us: 0,
+                pts_us: self.frames * 16_667,
+                ..VideoFormat::default()
             },
-            bytes: vec![
-                0x65;
-                if self.adaptive.is_some() {
-                    (rate.bitrate as usize / fps as usize / 8 * if keyframe { 4 } else { 1 })
-                        .clamp(256, FRAME_BYTES)
-                } else {
-                    FRAME_BYTES
-                }
-            ],
-        }))
+            bytes: vec![0x65; bytes],
+        };
+        self.pending.push_back((Instant::now(), frame));
+        Ok(ready)
+    }
+    fn drain_video(&mut self, _: &DesktopContext, _: Duration) -> Result<Option<EncodedFrame>> {
+        Ok(self.ready())
+    }
+    fn pending_video(&self) -> usize {
+        self.pending.len()
     }
     fn input(&mut self, _: &Input) -> Result<()> {
         self.probe.held.store(true, Ordering::Release);
-        self.probe.changed.notify_one();
         Ok(())
     }
     fn release(&mut self) {
-        if self.probe.held.swap(false, Ordering::AcqRel) {
-            self.probe.changed.notify_one();
+        self.probe.held.store(false, Ordering::Release);
+    }
+}
+
+/// A simulated decoder on its own thread, as a native consumer runs: it pulls
+/// a unit, spends `decode` on it, then presents it.
+struct Decoder {
+    stop: Arc<AtomicBool>,
+    sizes: Arc<Mutex<BTreeSet<(u32, u32)>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Decoder {
+    fn start(viewer: &Viewer, decode: Duration) -> Self {
+        let consumer = viewer.video_sink().attach().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let sizes = Arc::new(Mutex::new(BTreeSet::new()));
+        let (done, seen) = (stop.clone(), sizes.clone());
+        let thread = std::thread::spawn(move || {
+            while !done.load(Ordering::Acquire) {
+                match consumer.next(Duration::from_millis(50), wire::MAX_PAYLOAD) {
+                    Pull::Unit(unit) => {
+                        seen.lock().unwrap().insert((unit.width, unit.height));
+                        std::thread::sleep(decode);
+                        consumer.presented(unit.generation, unit.frame_id);
+                    }
+                    Pull::Closed => break,
+                    _ => {}
+                }
+            }
+        });
+        Self {
+            stop,
+            sizes,
+            thread: Some(thread),
+        }
+    }
+    fn sizes(&self) -> Vec<(u32, u32)> {
+        self.sizes.lock().unwrap().iter().copied().collect()
+    }
+}
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
         }
     }
 }
 
-async fn observed(probe: &Probe, label: &str, predicate: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let notified = probe.changed.notified();
-            if predicate() {
-                break;
+/// A relay, a host of the synthetic encoder, and a viewer that reaches it
+/// through the relay, over a shaped link when there is a `shape`.
+struct Rig {
+    host: Host,
+    viewer: Viewer,
+    probe: Arc<Probe>,
+    _clients: [Client; 2],
+    _relay: Relay,
+}
+impl Rig {
+    async fn start(name: &str, shape: Option<Arc<Shape>>, fixed: Option<usize>) -> Self {
+        let relay = Relay::start(&format!("desktop-{name}")).await;
+        let client = |addr: SocketAddr| {
+            Client::from_credential(addr.to_string(), admin_credential(), true, None)
+        };
+        let local = client(relay.addr());
+        let probe = Arc::new(Probe::default());
+        let source = probe.clone();
+        let host = Host::start_with_backend(
+            &local,
+            HostOptions {
+                service: format!("desktop:{name}"),
+                display_id: 1,
+                allow_control: true,
+                allow_direct: false,
+            },
+            Arc::new(move || {
+                Ok(Box::new(SyntheticEncoder {
+                    probe: source.clone(),
+                    fixed,
+                    nominal_fps: 0,
+                    frames: 0,
+                    pending: VecDeque::new(),
+                }))
+            }),
+        )
+        .await
+        .unwrap();
+        let remote = client(match shape {
+            Some(shape) => shaped_link(relay.addr(), shape).await,
+            None => relay.addr(),
+        });
+        let viewer = Viewer::connect(
+            &remote,
+            host.invitation(),
+            ConnectOptions {
+                path: PathPolicy::RelayOnly,
+                ..Default::default()
+            },
+            ViewerConfig {
+                codecs: vec![VideoCodec::H264],
+                limits: VideoLimits::for_viewer(60.0),
+                quality: QualityPreset::Balanced,
+                progress: None,
+            },
+        )
+        .await
+        .unwrap();
+        Self {
+            host,
+            viewer,
+            probe,
+            _clients: [local, remote],
+            _relay: relay,
+        }
+    }
+    fn expired(&self) -> u32 {
+        self.probe.expired.load(Ordering::Relaxed)
+    }
+    async fn stop(&self) {
+        self.viewer.stop().await.unwrap();
+        self.host.stop().await.unwrap();
+    }
+}
+
+fn ms(since: Instant) -> f64 {
+    since.elapsed().as_secs_f64() * 1000.0
+}
+
+/// A fixed propagation delay is not congestion: the delay controller climbs
+/// to the ceiling, bits per frame never fall, and nothing rebuilds the
+/// encoder or changes its size.
+#[test]
+#[ignore = "explicit ~20-second 350 ms WAN acceptance over a real relay and TLS"]
+fn fixed_wan_keeps_full_rate_at_fixed_resolution() {
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape.delay_ms.store(175, Ordering::Relaxed);
+        let rig = Rig::start("fixed-wan", Some(shape), None).await;
+        let decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let status = rig.viewer.status();
+        let last = trace.last();
+        rig.stop().await;
+        let sizes = decoder.sizes();
+        let configured = rig.probe.configured.load(Ordering::Relaxed);
+        println!(
+            "fixed_wan roundtrip_ms=350 pace_fps={} bitrate={} encoder_bitrate={} presented_fps={:.1} received_fps={:.1} rtt_ms={:?} keyframes={} sizes={sizes:?} configured={configured} expired_encoder_outputs={} state={:?}",
+            last.pace_fps,
+            last.bitrate,
+            last.encoder_bitrate,
+            status.stats.presented_fps,
+            status.stats.received_fps,
+            status.stats.rtt_ms,
+            status.stats.keyframes,
+            rig.expired(),
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert_eq!(
+            last.pace_fps, CEILING_FPS,
+            "a fixed delay is not congestion"
+        );
+        assert!(last.bitrate >= START_BPS, "{last:?}");
+        assert_eq!(sizes, [(1920, 1080)]);
+        assert_eq!(configured, 1, "the encoder is never rebuilt");
+        assert_eq!(rig.expired(), 0);
+    });
+}
+
+/// A 1 Mbit/s link for 8 s, then an unlimited one: the delivery rate clamps
+/// the window at once, the probe lowers fps and bits per frame, and both
+/// recover once the link does. The encoder is drained throughout.
+#[test]
+#[ignore = "explicit ~45-second bandwidth limit and recovery acceptance"]
+fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        let rig = Rig::start("bandwidth", Some(shape.clone()), None).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let before = trace.last();
+        let limited = Instant::now();
+        shape.rate.store(125_000, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        shape.rate.store(0, Ordering::Relaxed);
+        let lifted = Instant::now();
+        let recovered = loop {
+            let recovered = trace
+                .between(lifted, Instant::now())
+                .into_iter()
+                .find(|interval| interval.bitrate * 5 >= START_BPS * 4);
+            if recovered.is_some() || lifted.elapsed() > Duration::from_secs(30) {
+                break recovered.map(|interval| interval.at - lifted);
             }
-            notified.await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        let status = rig.viewer.status();
+        rig.stop().await;
+        let limit = trace.between(limited, lifted);
+        let clamped = limit
+            .iter()
+            .find(|interval| interval.window_clamped)
+            .map(|interval| interval.at - limited);
+        let lowest = |value: fn(&Interval) -> u64| limit.iter().map(value).min().unwrap();
+        let lowest_pace = lowest(|interval| interval.pace_fps);
+        let lowest_bitrate = lowest(|interval| interval.bitrate);
+        let lowest_encoder = lowest(|interval| interval.encoder_bitrate);
+        println!(
+            "bandwidth_limit link_mbps=1 limit_s=8 before_pace={} before_bitrate={} clamped_after_ms={:?} lowest_pace={lowest_pace} lowest_bitrate={lowest_bitrate} lowest_encoder_bitrate={lowest_encoder} recovered_after_ms={:?} final_pace={} final_bitrate={} expired_encoder_outputs={} state={:?}",
+            before.pace_fps,
+            before.bitrate,
+            clamped.map(|after| after.as_millis()),
+            recovered.map(|after| after.as_millis()),
+            status.stats.pace_fps,
+            status.stats.bitrate,
+            rig.expired(),
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        // The trace samples once a second, so this is "within 1 s" to its
+        // resolution.
+        assert!(
+            clamped.is_some_and(|after| after <= Duration::from_secs(1) + session::STATS_INTERVAL),
+            "the window must clamp within 1 s of the limit: {clamped:?}"
+        );
+        assert!(lowest_pace <= 15, "{lowest_pace}");
+        assert!(lowest_encoder < START_BPS, "bits per frame must fall");
+        assert!(
+            recovered.is_some(),
+            "the bitrate must recover to 80% of the start within 30 s"
+        );
+        assert_eq!(
+            rig.expired(),
+            0,
+            "a full window must never starve the encoder"
+        );
+    });
+}
+
+/// A decoder that takes 67 ms per frame: the viewer's fps cap brings the host
+/// down to what it presents, while the host's own controller, its bits per
+/// frame and its rate model stay where the network puts them.
+#[test]
+#[ignore = "explicit ~20-second slow presenter acceptance"]
+fn slow_presenter_is_capped_by_fps_cap_not_host_backpressure() {
+    traced(|trace| async move {
+        let rig = Rig::start("slow-presenter", None, None).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::from_millis(67));
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let measured = Instant::now();
+        let status = rig.viewer.status();
+        rig.stop().await;
+        let steady = trace.between(measured - Duration::from_secs(10), measured);
+        let mean_pace = steady.iter().map(|interval| interval.pace_fps).sum::<u64>() as f64
+            / steady.len() as f64;
+        let last = *steady.last().unwrap();
+        println!(
+            "slow_presenter decode_ms=67 mean_pace_fps={mean_pace:.1} caps={:?} fps={} encoder_bitrate={} presented_fps={:.1} backlog_drops={} keyframes_requested={} expired_encoder_outputs={} state={:?}",
+            steady
+                .iter()
+                .map(|interval| interval.viewer_cap)
+                .collect::<Vec<_>>(),
+            last.fps,
+            last.encoder_bitrate,
+            status.stats.presented_fps,
+            status.stats.backlog_drops,
+            status.stats.keyframes_requested,
+            rig.expired(),
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert!(
+            steady.iter().all(|interval| interval.viewer_cap.is_some()),
+            "the fps cap must hold the host down"
+        );
+        assert!((10.0..=16.0).contains(&mean_pace), "{mean_pace}");
+        assert_eq!(last.fps, CEILING_FPS, "the network is not congested");
+        assert!(
+            last.encoder_bitrate >= START_BPS && !last.timestamp_model,
+            "a slow presenter must not lower the host's bitrate: {last:?}"
+        );
+        assert!(steady.iter().all(|interval| !interval.unresponsive));
+        assert_eq!(rig.expired(), 0);
+    });
+}
+
+/// Poll `condition` for up to one second.
+async fn observed(label: &str, mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
     .unwrap_or_else(|_| panic!("{label} was not observed within one second"));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "30-second explicit slow TLS transport acceptance; no GPU or real input"]
-async fn sustained_slow_tls_reader() {
-    let relay = Relay::start("desktop-sustained-slow-tls").await;
-    let (key_id, credential) = relay
-        .issue_credential(Duration::from_secs(120), "slow-tls-acceptance")
-        .await;
-    let client = Client::from_credential(relay.addr().to_string(), credential, true, None);
-    let probe = Arc::new(Probe::default());
-    let backend_probe = probe.clone();
-    let host = Host::start_with_backend(
-        &client,
-        HostOptions {
-            service: "desktop:slow-tls".into(),
-            display_id: 1,
-            allow_control: true,
-            allow_direct: false,
-        },
-        Arc::new(move || {
-            Ok(Box::new(SyntheticVideo {
-                probe: backend_probe.clone(),
-                next: Instant::now(),
-                adaptive: None,
-            }))
-        }),
-    )
-    .await
-    .unwrap();
-    let (socket, connection) = client
-        .connect_tcp(
-            host.invitation().service.clone(),
-            ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let mut tls = security::client(host.invitation().fingerprint)
-        .unwrap()
-        .connect(
-            quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
-            socket,
-        )
-        .await
-        .unwrap();
-    wire::write_json(
-        &mut tls,
-        &Command::Authenticate {
-            token: host.invitation().token_text(),
-            codecs: vec![VideoCodec::H264],
-            video: Some(VideoPreferences::default()),
-            presentation_feedback: false,
-        },
-    )
-    .await
-    .unwrap();
-    let (mut read, mut write) = tokio::io::split(tls);
-    let read_probe = probe.clone();
-    let reader = tokio::spawn(async move {
-        // Throttle the actual TLS reader. Unlike a slow Viewer::next_frame
-        // consumer, nothing in the background drains and discards this stream.
-        // 256 KiB/s is well below the synthetic source, while allowing TCP
-        // window updates to complete within the production 3-second I/O limit.
-        let mut tick = tokio::time::interval(Duration::from_micros(62_500));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut bytes = [0; 16 * 1024];
-        loop {
-            tick.tick().await;
-            let count = read.read(&mut bytes).await.unwrap();
-            assert!(count > 0, "slow transport disconnected before local stop");
-            read_probe
-                .read_bytes
-                .fetch_add(count as u64, Ordering::Relaxed);
-        }
-    });
-    let start = Instant::now();
-    let mut tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_secs(1),
-        Duration::from_secs(1),
-    );
-    let mut control_ms = 0.0;
-    let mut release_ms = 0.0;
-    let mut revoke_ms = 0.0;
-    let mut halfway_frames = 0;
-    for second in 1..=30 {
-        tick.tick().await;
-        assert!(!reader.is_finished(), "TLS reader failed");
-        tokio::time::timeout(
+/// 30 s on a 256 KiB/s link far below the 64 KiB pictures at the pace: the
+/// session stays up, capture holds back instead of queueing, control and
+/// input never wait behind video, and a local stop is prompt.
+#[test]
+#[ignore = "explicit 30-second slow TLS transport acceptance; no GPU or real input"]
+fn sustained_slow_tls_reader() {
+    const FRAME_BYTES: usize = 64 * 1024;
+    const LINK_BYTES_PER_SECOND: u64 = 256 * 1024;
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape.rate.store(LINK_BYTES_PER_SECOND, Ordering::Relaxed);
+        let rig = Rig::start("slow-tls", Some(shape), Some(FRAME_BYTES)).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        let (host, viewer, probe) = (&rig.host, &rig.viewer, &rig.probe);
+        let start = Instant::now();
+        let mut tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(1),
             Duration::from_secs(1),
-            wire::write_json(&mut write, &Command::Ping),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let state = host.v1_status();
-        assert_eq!(
-            state.state, "streaming",
-            "host must remain active for all 30 seconds"
         );
-        if second == 15 {
-            halfway_frames = probe.frames.load(Ordering::Relaxed);
-            assert!(
-                state.dropped_frames > 0,
-                "reader must exert real backpressure"
+        let mut control_ms = 0.0;
+        let mut release_ms = 0.0;
+        let mut revoke_ms = 0.0;
+        let mut halfway = 0;
+        for second in 1..=30 {
+            tick.tick().await;
+            let status = viewer.status();
+            assert_eq!(
+                (host.status().state, status.state),
+                (HostState::Streaming, ViewerState::Streaming),
+                "the session must stay up for all 30 seconds: {}",
+                status.message
             );
-            let at = Instant::now();
-            wire::write_json(&mut write, &Command::Control { enabled: true })
-                .await
-                .unwrap();
-            observed(&probe, "control enabled", || host.v1_status().controlling).await;
-            control_ms = at.elapsed().as_secs_f64() * 1000.0;
-            let generation_frame = host.v1_status().frame_id;
-            observed(&probe, "new control generation's first frame", || {
-                host.v1_status().frame_id > generation_frame
-            })
-            .await;
-            for sequence in 1..=2 {
-                // The synthetic backend injects no OS input. Use a known fresh
-                // host frame to isolate command responsiveness from staleness.
-                let state = host.v1_status();
-                wire::write_json(
-                    &mut write,
-                    &Command::Input {
-                        event: InputEvent {
-                            generation: state.generation,
-                            frame_id: state.frame_id,
-                            sequence,
-                            input: Input::Button {
-                                button: Button::Left,
-                                down: true,
-                                drag_start: false,
-                            },
-                        },
-                    },
-                )
-                .await
-                .unwrap();
-                observed(&probe, "synthetic input", || {
-                    probe.held.load(Ordering::Acquire)
-                })
-                .await;
+            if second == 15 {
+                halfway = probe.captures.load(Ordering::Relaxed);
+                assert!(
+                    trace.last().skipped_ticks > 0,
+                    "the slow link must hold capture back"
+                );
                 let at = Instant::now();
-                if sequence == 1 {
-                    wire::write_json(&mut write, &Command::Release)
-                        .await
-                        .unwrap();
-                } else {
-                    host.set_control_allowed(false);
-                }
-                observed(&probe, "release or revoke", || {
-                    !probe.held.load(Ordering::Acquire)
+                viewer.request_control(true).unwrap();
+                observed("control enabled", || {
+                    host.status()
+                        .viewer
+                        .is_some_and(|viewer| viewer.controlling)
                 })
                 .await;
-                if sequence == 1 {
-                    release_ms = at.elapsed().as_secs_f64() * 1000.0;
-                } else {
-                    revoke_ms = at.elapsed().as_secs_f64() * 1000.0;
+                control_ms = ms(at);
+                for revoke in [false, true] {
+                    // The synthetic backend injects no OS input.
+                    let fresh = tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            let status = viewer.status();
+                            if status.controlling && status.fresh {
+                                return status;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let press = Input::Button {
+                        button: Button::Left,
+                        down: true,
+                        drag_start: false,
+                    };
+                    viewer.input(fresh.generation, &[press]).unwrap();
+                    observed("synthetic input", || probe.held.load(Ordering::Acquire)).await;
+                    let at = Instant::now();
+                    if revoke {
+                        host.set_control_allowed(false);
+                    } else {
+                        viewer.release_input().unwrap();
+                    }
+                    observed("release or revoke", || !probe.held.load(Ordering::Acquire)).await;
+                    if revoke {
+                        revoke_ms = ms(at);
+                    } else {
+                        release_ms = ms(at);
+                    }
                 }
             }
-        }
-        if second % 10 == 0 {
-            println!(
-                "slow_tls seconds={second} captured={} dropped={} read_bytes={}",
-                probe.frames.load(Ordering::Relaxed),
-                state.dropped_frames,
-                probe.read_bytes.load(Ordering::Relaxed)
-            );
-        }
-    }
-    let state = host.v1_status();
-    let elapsed = start.elapsed().as_secs_f64();
-    assert!(
-        probe.frames.load(Ordering::Relaxed) > halfway_frames + 300,
-        "capture must continue after control revocation"
-    );
-    assert!(state.dropped_frames > 0);
-    assert!(!state.controlling);
-    let stopping = Instant::now();
-    tokio::time::timeout(Duration::from_secs(1), host.stop())
-        .await
-        .unwrap()
-        .unwrap();
-    let stop_ms = stopping.elapsed().as_secs_f64() * 1000.0;
-    reader.abort();
-    let _ = reader.await;
-    connection.stop().await.unwrap();
-    relay.revoke(key_id).await;
-    println!(
-        "slow_tls elapsed_s={elapsed:.3} reader_kib_s={:.2} captured={} dropped={} queue_limit_frames={} queue_limit_bytes={} synthetic_frame_bytes={FRAME_BYTES} control_ms={control_ms:.3} release_ms={release_ms:.3} revoke_ms={revoke_ms:.3} stop_ms={stop_ms:.3}",
-        probe.read_bytes.load(Ordering::Relaxed) as f64 / elapsed / 1024.0,
-        probe.frames.load(Ordering::Relaxed),
-        state.dropped_frames,
-        crate::media::MAX_QUEUED_FRAMES,
-        crate::media::MAX_QUEUED_BYTES
-    );
-}
-
-struct PacedRead {
-    start: Instant,
-    next: tokio::time::Instant,
-    bytes: u64,
-}
-impl PacedRead {
-    async fn exact(
-        &mut self,
-        reader: &mut (impl tokio::io::AsyncRead + Unpin),
-        mut bytes: &mut [u8],
-    ) -> Result<()> {
-        while !bytes.is_empty() {
-            let length = bytes.len().min(4096);
-            let count = reader.read(&mut bytes[..length]).await?;
-            if count == 0 {
-                return Err(error("feedback test stream ended"));
+            if second % 10 == 0 {
+                let last = trace.last();
+                println!(
+                    "slow_tls seconds={second} captured={} skipped_ticks={} pace_fps={} received_kbit_s={}",
+                    probe.captures.load(Ordering::Relaxed),
+                    last.skipped_ticks,
+                    last.pace_fps,
+                    status.stats.received_bitrate / 1000
+                );
             }
-            self.bytes += count as u64;
-            if self.start.elapsed() < Duration::from_secs(8) {
-                self.next += Duration::from_secs_f64(count as f64 / (100.0 * 1024.0));
-                tokio::time::sleep_until(self.next).await;
-            } else {
-                self.next = tokio::time::Instant::now();
-            }
-            bytes = &mut bytes[count..];
         }
-        Ok(())
-    }
-    async fn message(
-        &mut self,
-        reader: &mut (impl tokio::io::AsyncRead + Unpin),
-        limit: usize,
-    ) -> Result<Vec<u8>> {
-        let mut length = [0; 4];
-        self.exact(reader, &mut length).await?;
-        let length = u32::from_be_bytes(length) as usize;
-        if length > limit {
-            return Err(error("oversized feedback test packet"));
-        }
-        let mut bytes = vec![0; length];
-        self.exact(reader, &mut bytes).await?;
-        Ok(bytes)
-    }
-}
-
-/// The renderer is a deliberately delayed test stand-in; no claim of real GPU
-/// presentation is made. ACKs occur only after the full synthetic access unit
-/// has traversed the actual TLS reader and the simulated presentation deadline.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "explicit ~35-second low-bandwidth/slow-presentation recovery acceptance"]
-async fn presentation_feedback_recovers_after_slow_tls_and_renderer() {
-    let relay = Relay::start("desktop-presentation-feedback").await;
-    let (key_id, credential) = relay
-        .issue_credential(Duration::from_secs(120), "feedback-acceptance")
-        .await;
-    let client = Client::from_credential(relay.addr().to_string(), credential, true, None);
-    let probe = Arc::new(Probe::default());
-    let source = probe.clone();
-    let host = Host::start_with_backend(
-        &client,
-        HostOptions {
-            service: "desktop:feedback".into(),
-            display_id: 1,
-            allow_control: false,
-            allow_direct: false,
-        },
-        Arc::new(move || {
-            Ok(Box::new(SyntheticVideo {
-                probe: source.clone(),
-                next: Instant::now(),
-                adaptive: Some(VideoPreferences::default()),
-            }))
-        }),
-    )
-    .await
-    .unwrap();
-    let (socket, connection) = client
-        .connect_tcp(
-            host.invitation().service.clone(),
-            ConnectOptions {
-                path: PathPolicy::RelayOnly,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let mut tls = security::client(host.invitation().fingerprint)
-        .unwrap()
-        .connect(
-            quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
-            socket,
-        )
-        .await
-        .unwrap();
-    wire::write_json(
-        &mut tls,
-        &Command::Authenticate {
-            token: host.invitation().token_text(),
-            codecs: vec![VideoCodec::H264],
-            video: Some(VideoPreferences::default()),
-            presentation_feedback: true,
-        },
-    )
-    .await
-    .unwrap();
-    let (mut read, write) = tokio::io::split(tls);
-    let write = Arc::new(tokio::sync::Mutex::new(write));
-    let (received, newest) = tokio::sync::watch::channel((0u64, 0u64));
-    let observed = Arc::new(parking_lot::Mutex::new(SessionStatus::default()));
-    let observation = observed.clone();
-    let start = Instant::now();
-    let reader = tokio::spawn(async move {
-        let mut pace = PacedRead {
-            start,
-            next: tokio::time::Instant::now(),
-            bytes: 0,
-        };
-        loop {
-            let state: SessionStatus =
-                serde_json::from_slice(&pace.message(&mut read, wire::MAX_JSON).await?)
-                    .map_err(error)?;
-            let image = pace.message(&mut read, wire::MAX_FRAME).await?;
-            if state.state == "stopped" {
-                return Ok::<_, std::io::Error>((state, pace.bytes));
-            }
-            if !image.is_empty() {
-                received.send_replace((state.generation, state.frame_id));
-            }
-            *observation.lock() = state;
-        }
-    });
-    let acknowledgment_write = write.clone();
-    let acknowledgments = tokio::spawn(async move {
-        let mut last = (0, 0);
-        loop {
-            let elapsed = start.elapsed();
-            let delay = if elapsed < Duration::from_secs(8) {
-                100
-            } else if elapsed < Duration::from_secs(12) {
-                600
-            } else {
-                20
-            };
-            tokio::time::sleep(Duration::from_millis(delay)).await;
-            let current = *newest.borrow();
-            if current == last || current.1 == 0 {
-                continue;
-            }
-            wire::write_json(
-                &mut *acknowledgment_write.lock().await,
-                &Command::Presented {
-                    generation: current.0,
-                    frame_id: current.1,
-                },
-            )
-            .await?;
-            last = current;
-        }
-        #[allow(unreachable_code)]
-        Ok::<(), std::io::Error>(())
-    });
-    let mut tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_secs(1),
-        Duration::from_secs(1),
-    );
-    let mut minimum_bitrate = u32::MAX;
-    let mut maximum_ack_ms = 0f32;
-    for second in 1..=30 {
-        tick.tick().await;
+        let elapsed = start.elapsed().as_secs_f64();
+        let captured = probe.captures.load(Ordering::Relaxed);
         assert!(
-            !reader.is_finished(),
-            "feedback session ended before recovery: {:?}",
-            host.v1_status()
+            captured > halfway + 30,
+            "capture must continue after control revocation"
         );
-        assert!(!acknowledgments.is_finished());
-        wire::write_json(&mut *write.lock().await, &Command::Ping)
+        assert!(
+            host.status()
+                .viewer
+                .is_some_and(|viewer| !viewer.controlling)
+        );
+        let stopping = Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), host.stop())
             .await
+            .unwrap()
             .unwrap();
-        let state = observed.lock().clone();
-        if state.bitrate > 0 {
-            minimum_bitrate = minimum_bitrate.min(state.bitrate);
-        }
-        maximum_ack_ms = maximum_ack_ms.max(state.frame_ack_ms);
-        if [8, 12, 20, 30].contains(&second) {
-            println!(
-                "presentation_feedback second={second} bitrate={} video={}x{} source_fps={:.2} ack_ms={:.2} frame={} dropped={}",
-                state.bitrate,
-                state.video.width,
-                state.video.height,
-                state.capture_fps,
-                state.frame_ack_ms,
-                state.frame_id,
-                state.dropped_frames
-            );
-        }
-        if second == 8 {
-            assert!(
-                minimum_bitrate < 1_000_000,
-                "must react to 100KiB/s before socket buffers fill"
-            );
-        }
-    }
-    let recovered = observed.lock().clone();
-    assert!(
-        recovered.bitrate >= 4_000_000,
-        "fast presentation must recover quality: {recovered:?}"
-    );
-    assert!(recovered.video.width >= 960);
-    assert!(recovered.frame_ack_ms < 350.0);
-    acknowledgments.abort();
-    let _ = acknowledgments.await;
-    // A renderer which stops presenting must end with an explicit reason. It
-    // must neither receive an unbounded video backlog nor freeze forever.
-    let no_ack = Instant::now();
-    let finished = tokio::time::timeout(Duration::from_secs(6), async {
-        loop {
-            if reader.is_finished() {
-                break;
-            }
-            wire::write_json(&mut *write.lock().await, &Command::Ping)
-                .await
-                .unwrap();
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        reader.await.unwrap().unwrap()
-    })
-    .await
-    .unwrap();
-    assert_eq!(finished.0.state, "stopped");
-    assert!(!finished.0.message.is_empty());
-    assert!(no_ack.elapsed() < Duration::from_secs(6));
-    host.stop().await.unwrap();
-    connection.stop().await.unwrap();
-    relay.revoke(key_id).await;
-    println!(
-        "presentation_feedback accepted minimum_bitrate={minimum_bitrate} recovered_bitrate={} max_valid_ack_ms={maximum_ack_ms:.2} no_ack_stop_ms={:.2} tls_bytes={} final_reason={}",
-        recovered.bitrate,
-        no_ack.elapsed().as_secs_f64() * 1000.0,
-        finished.1,
-        finished.0.message
-    );
+        let stop_ms = ms(stopping);
+        viewer.stop().await.unwrap();
+        println!(
+            "slow_tls elapsed_s={elapsed:.3} link_kib_s={} frame_bytes={FRAME_BYTES} captured={captured} skipped_ticks={} control_ms={control_ms:.3} release_ms={release_ms:.3} revoke_ms={revoke_ms:.3} stop_ms={stop_ms:.3}",
+            LINK_BYTES_PER_SECOND / 1024,
+            trace.last().skipped_ticks
+        );
+    });
 }
