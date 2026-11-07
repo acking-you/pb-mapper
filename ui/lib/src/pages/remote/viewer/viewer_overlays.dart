@@ -5,7 +5,10 @@ import 'package:flutter/material.dart';
 
 import '../../../../l10n/app_localizations.dart';
 import '../../../common/l10n_extension.dart';
+import '../../../shell/app_scope.dart';
 import '../../../state/desktop_store.dart';
+import '../../../state/remote_computers.dart'
+    show ComputerPresence, listedPresence;
 import '../../../theme/app_icons.dart';
 import '../../../theme/fonts.dart';
 import '../../../theme/motion.dart';
@@ -507,7 +510,8 @@ class ConnectSteps extends StatelessWidget {
 
 /// The overlays over the picture, by phase (ui §7.3), plus the view-only
 /// pill, the notice pill and, on desktop, the degraded pill. Listens to the
-/// session only; the degraded pill alone reads the stats.
+/// session; the degraded pill alone reads the stats, and a retry or an end
+/// alone reads, through [AppScope], whether the relay lists the computer.
 class ViewerOverlayLayer extends StatelessWidget {
   const ViewerOverlayLayer({
     super.key,
@@ -589,6 +593,24 @@ class ViewerOverlayLayer extends StatelessWidget {
       label: l10n.cancel,
       onPressed: actions.onDisconnect,
     );
+    // Whether the relay answers without listing the computer, read again as
+    // its services change: AppScope notifies only when its store changes.
+    Widget presence(Widget Function(bool notSharing) build) {
+      final scope = AppScope.maybeOf(context);
+      if (scope == null) return build(false);
+      return ListenableBuilder(
+        listenable: scope.store,
+        builder: (context, _) => build(!busy && _notSharing(scope)),
+      );
+    }
+
+    // A retry pill's second line, the same while waiting and while trying.
+    String retryReason(bool notSharing) => busy
+        ? l10n.viewerBusy
+        : notSharing
+        ? l10n.remoteOfflineToast(title)
+        : l10n.viewerInputPaused;
+
     switch (kind) {
       case ViewerOverlayKind.none:
         return const [];
@@ -609,43 +631,53 @@ class ViewerOverlayLayer extends StatelessWidget {
         return [
           const ViewerScrim.translucent(),
           centred(
-            ViewerCard(
-              leading: const ViewerSpinner(size: 20),
-              title: l10n.viewerConnecting(title),
-              actions: [
-                cancel,
-                if (waiting)
-                  ViewerButton(
-                    label: l10n.viewerRetryNow,
-                    filled: true,
-                    onPressed: actions.desktop.retryNow,
+            presence(
+              (notSharing) => ViewerCard(
+                leading: const ViewerSpinner(size: 20),
+                title: l10n.viewerConnecting(title),
+                actions: [
+                  cancel,
+                  if (waiting)
+                    ViewerButton(
+                      label: l10n.viewerRetryNow,
+                      filled: true,
+                      onPressed: actions.desktop.retryNow,
+                    ),
+                ],
+                children: [
+                  _RetryCountdown(
+                    session: s,
+                    builder: (context, line) =>
+                        _quiet(line, ViewerPalette.text),
                   ),
-              ],
-              children: [
-                _RetryCountdown(
-                  session: s,
-                  builder: (context, line) => _quiet(line, ViewerPalette.text),
-                ),
-                if (busy) _quiet(l10n.viewerBusy),
-              ],
+                  if (busy) _quiet(l10n.viewerBusy),
+                  if (notSharing)
+                    KeyedSubtree(
+                      key: const Key('viewer-retry-not-sharing'),
+                      child: _quiet(l10n.remoteOfflineToast(title)),
+                    ),
+                ],
+              ),
             ),
           ),
         ];
       case ViewerOverlayKind.retryWaiting:
         return [
           centred(
-            _RetryCountdown(
-              session: s,
-              builder: (context, line) => ViewerPill(
-                height: 48,
-                tint: ViewerPalette.panel,
-                leading: const ViewerSpinner(size: 16),
-                text: line,
-                secondary: busy ? l10n.viewerBusy : l10n.viewerInputPaused,
-                trailing: ViewerButton(
-                  label: l10n.viewerRetryNow,
-                  filled: true,
-                  onPressed: actions.desktop.retryNow,
+            presence(
+              (notSharing) => _RetryCountdown(
+                session: s,
+                builder: (context, line) => ViewerPill(
+                  height: 48,
+                  tint: ViewerPalette.panel,
+                  leading: const ViewerSpinner(size: 16),
+                  text: line,
+                  secondary: retryReason(notSharing),
+                  trailing: ViewerButton(
+                    label: l10n.viewerRetryNow,
+                    filled: true,
+                    onPressed: actions.desktop.retryNow,
+                  ),
                 ),
               ),
             ),
@@ -655,12 +687,14 @@ class ViewerOverlayLayer extends StatelessWidget {
         return [
           IgnorePointer(
             child: centred(
-              ViewerPill(
-                height: 48,
-                tint: ViewerPalette.panel,
-                leading: const ViewerSpinner(size: 16),
-                text: l10n.viewerReconnecting(s.reconnectAttempt),
-                secondary: l10n.viewerInputPaused,
+              presence(
+                (notSharing) => ViewerPill(
+                  height: 48,
+                  tint: ViewerPalette.panel,
+                  leading: const ViewerSpinner(size: 16),
+                  text: l10n.viewerReconnecting(s.reconnectAttempt),
+                  secondary: retryReason(notSharing),
+                ),
               ),
             ),
           ),
@@ -737,11 +771,34 @@ class ViewerOverlayLayer extends StatelessWidget {
           ),
         ];
       case ViewerOverlayKind.ended:
-        return [const ViewerScrim.opaque(), centred(_ended(context, s))];
+        return [
+          const ViewerScrim.opaque(),
+          centred(presence((notSharing) => _ended(context, s, notSharing))),
+        ];
     }
   }
 
-  Widget _ended(BuildContext context, DesktopSessionView s) {
+  /// The relay answers and does not list the service the open computer
+  /// shares under: it is not sharing, as `presenceOf` decides (D22). Of a
+  /// computer opened through another relay or credential than this
+  /// computer's now, that relay's list says nothing.
+  static bool _notSharing(AppScope scope) {
+    final open = scope.remote.sharing;
+    final store = scope.store;
+    return open != null &&
+        listedPresence(
+              service: open.service,
+              relay: open.relay,
+              namespace: open.namespace,
+              relayState: store.relayState,
+              relayAddress: store.relayAddress,
+              credentialKeyId: store.credentialKeyId,
+              desktopServices: store.desktopServiceNames,
+            ) ==
+            ComputerPresence.notSharing;
+  }
+
+  Widget _ended(BuildContext context, DesktopSessionView s, bool notSharing) {
     final l10n = context.l10n;
     final end = s.end;
     final code = s.failure?.code;
@@ -753,6 +810,12 @@ class ViewerOverlayLayer extends StatelessWidget {
       DesktopEndReason.denied => l10n.viewerDenied,
       DesktopEndReason.invalidInvitation => l10n.addInvalid,
       DesktopEndReason.decoderFailed => l10n.viewerEndedDecoder,
+      DesktopEndReason.unreachable when code == 'HOST_BUSY' =>
+        l10n.viewerEndedBusy,
+      DesktopEndReason.unreachable when notSharing => l10n.remoteOfflineToast(
+        title,
+      ),
+      DesktopEndReason.unreachable => l10n.viewerEndedUnreachable,
       _ when code == 'VAULT_UNAVAILABLE' || code == 'NOT_FOUND' =>
         l10n.viewerVaultUnavailable,
       _ => switch (s.failure?.message) {

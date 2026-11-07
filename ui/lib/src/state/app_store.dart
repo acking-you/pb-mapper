@@ -35,8 +35,8 @@ enum RelayState {
 ///
 /// Freshness comes from the Rust change stream (a tunnel's state moving, a
 /// terminal command, a config edit), a slow relay check, since nothing on this
-/// side is told when another computer registers a key, and a periodic read of
-/// this computer's tunnels, without which the stream would go quiet (see
+/// side is told when another computer registers a key, and, while one of this
+/// computer's tunnels runs, a periodic read of what its events leave out (see
 /// [tunnelInterval]).
 class AppStore extends ChangeNotifier {
   DesktopStore? _desktop;
@@ -74,10 +74,12 @@ class AppStore extends ChangeNotifier {
   /// How often the relay is asked what it holds while nothing else asks.
   final Duration relayInterval;
 
-  /// How often this computer's tunnels are read again. The Rust side probes a
-  /// tunnel's health only when its cached status is read and has gone stale,
-  /// and only a probe that sees a transition sends a change event; with no
-  /// reads, a tunnel that fails after it settled would stay drawn as running.
+  /// How often this computer's tunnels are read again while one runs. Their
+  /// change events say when a tunnel's state or the paths its sessions take
+  /// change, but not its session counts or the message a failing one
+  /// carries; this read keeps those fresh. A stopped tunnel's read never
+  /// changes, and starting one is always announced, so with none running
+  /// nothing is read.
   final Duration tunnelInterval;
 
   ConfigStatus config = const ConfigStatus(
@@ -104,7 +106,7 @@ class AppStore extends ChangeNotifier {
   ChangeSubscription? _subscription;
   Timer? _relayTimer;
   Timer? _tunnelTimer;
-  final Completer<void> _firstRead = Completer<void>();
+  final Completer<bool> _firstRead = Completer<bool>();
 
   String get relayAddress => config.serverAddress.trim();
 
@@ -214,8 +216,9 @@ class AppStore extends ChangeNotifier {
       );
 
   /// Completes once [start]'s first read of the config and the tunnels is in,
-  /// without waiting for the relay to answer.
-  Future<void> get ready => _firstRead.future;
+  /// without waiting for the relay to answer, with whether every read
+  /// succeeded.
+  Future<bool> get ready => _firstRead.future;
 
   /// Begin reading and listening. Safe to call more than once.
   Future<void> start() async {
@@ -228,7 +231,9 @@ class AppStore extends ChangeNotifier {
       StateChangeKind.config,
     }, _onChange);
     _relayTimer = Timer.periodic(relayInterval, (_) => checkRelay());
-    _tunnelTimer = Timer.periodic(tunnelInterval, (_) => _loadTunnels());
+    _tunnelTimer = Timer.periodic(tunnelInterval, (_) {
+      if (tunnels.any((t) => t.isLive)) unawaited(_loadTunnels());
+    });
     unawaited(computers.load());
     await refresh(force: true);
     if (!_disposed) unawaited(desktop.restoreOnStartup());
@@ -254,9 +259,9 @@ class AppStore extends ChangeNotifier {
   /// Read everything again; [force] makes the relay answer now rather than
   /// from the Rust side's cache.
   Future<void> refresh({bool force = false}) async {
-    await Future.wait([_loadConfig(), _loadTunnels()]);
+    final read = await Future.wait([_loadConfig(), _loadTunnels()]);
     loaded = true;
-    if (!_firstRead.isCompleted) _firstRead.complete();
+    if (!_firstRead.isCompleted) _firstRead.complete(read.every((ok) => ok));
     _notify();
     await checkRelay(force: force);
   }
@@ -321,16 +326,21 @@ class AppStore extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> _loadConfig() async {
+  // Each read says whether it succeeded, and keeps what it had when not.
+
+  Future<bool> _loadConfig() async {
     try {
       config = await api.fetchConfig();
+      return true;
     } catch (_) {
       // Keep what was there: a failed read is not a cleared config.
+      return false;
+    } finally {
+      _notify();
     }
-    _notify();
   }
 
-  Future<void> _loadShares() async {
+  Future<bool> _loadShares() async {
     try {
       final next =
           (await api.getServiceConfigs()).map(Tunnel.fromService).toList()
@@ -339,10 +349,13 @@ class AppStore extends ChangeNotifier {
         shares = next;
         _notify();
       }
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  Future<void> _loadConnections() async {
+  Future<bool> _loadConnections() async {
     try {
       final next =
           (await api.getClientConfigs()).map(Tunnel.fromClient).toList()
@@ -351,12 +364,16 @@ class AppStore extends ChangeNotifier {
         connections = next;
         _notify();
       }
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  Future<void> _loadTunnels() async {
-    if (_disposed) return;
-    await Future.wait([_loadShares(), _loadConnections()]);
+  Future<bool> _loadTunnels() async {
+    if (_disposed) return false;
+    final read = await Future.wait([_loadShares(), _loadConnections()]);
+    return read.every((ok) => ok);
   }
 
   Future<void> _reload(TunnelKind kind) =>

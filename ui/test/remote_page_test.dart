@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
+import 'package:pb_mapper_ui/src/ffi/relay_models.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
 import 'package:pb_mapper_ui/src/pages/remote/remote_page.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/viewer_screen.dart';
@@ -569,5 +570,53 @@ void main() {
       await finish(tester);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    "a viewer retrying a computer the relay stops listing says it isn't "
+    'sharing, and says nothing under another credential',
+    (tester) async {
+      final api = FakePbMapperApi(serverServices: ['desktop:lab']);
+      const lab = RemoteComputer(
+        id: '0123456789abcdef0123456789abcdef',
+        name: 'Lab',
+        service: 'desktop:lab',
+        fingerprint: 'FFFF-0000-FFFF-0000',
+        relay: 'lb7666.top:7666',
+        namespace: 0,
+      );
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await pumpApp(
+        tester,
+        api,
+        page: AppPage.remote,
+        vault: FakeRemoteComputerVault()..records.add(lab),
+        viewerPrefs: prefs,
+      );
+      api.desktop.failNext('connect', 'IO');
+      await _tapIn(tester, _key('computer-open-${lab.id}'));
+      // The viewer's spinner never settles.
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(_key('viewer-overlay-connectRetry'), findsOneWidget);
+      expect(_key('viewer-retry-not-sharing'), findsNothing);
+
+      api.serverServices = [];
+      final store = AppScope.of(
+        tester.element(find.byType(RemoteViewerScreen)),
+      ).store;
+      await store.checkRelay(force: true);
+      await tester.pump();
+      expect(_key('viewer-retry-not-sharing'), findsOneWidget);
+
+      // Under another credential, this relay's list says nothing of it.
+      api.identity = const RelayIdentity(role: RelayRole.temporary, keyId: 7);
+      await store.checkRelay(force: true);
+      await tester.pump();
+      expect(_key('viewer-retry-not-sharing'), findsNothing);
+      await finish(tester);
+    },
   );
 }

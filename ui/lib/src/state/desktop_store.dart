@@ -20,6 +20,16 @@ export 'desktop_models.dart';
 const kSequenceMax = 16;
 
 const _backoffSeconds = [1, 2, 4, 8, 15];
+
+/// How long a run of failed attempts goes on before the session ends as
+/// [DesktopEndReason.unreachable]: a host that is off or not sharing, a
+/// hand-off (`restarting`) that never completes, a host that stays busy.
+/// What comes back by itself does so well inside it: a host that lost the
+/// relay tries to register again at least every 2 s, and a refused
+/// registration after at most 80 s
+/// (`PB_MAPPER_REGISTRATION_REJECT_BACKOFF_MAX`), so with one 15 s backoff
+/// step and an attempt's setup budget it is found again in under two minutes.
+const _retryWindow = Duration(minutes: 2);
 const _protocolRetryLimit = 3;
 const _noVideoReconnectMs = 5000;
 const _statusVisible = Duration(milliseconds: 500);
@@ -31,6 +41,9 @@ const _moveInterval = Duration(milliseconds: 4);
 const _snapshotBound = Duration(milliseconds: 300);
 const _controlRetry = Duration(seconds: 1);
 const _statsInterval = Duration(seconds: 1);
+
+/// The host's 1 s `STOP_WRITE_TIMEOUT`, plus a worker isolate's spawn.
+const _shutdownBound = Duration(milliseconds: 1500);
 
 /// Stop reasons that reconnect with backoff; `protocol` does too, a bounded
 /// number of times in a row.
@@ -140,9 +153,9 @@ class DesktopStore {
   static final _framed = <DesktopStore>{};
   static bool _frameHooked = false;
 
-  /// [DesktopDemand.page] polls the host every second; [DesktopDemand.viewer]
-  /// is a viewer on screen: the session resumes while it is held and the
-  /// app is visible, and pauses otherwise (D13).
+  /// [DesktopDemand.page] polls the host every second where this device can
+  /// host; [DesktopDemand.viewer] is a viewer on screen: the session resumes
+  /// while it is held and the app is visible, and pauses otherwise (D13).
   ///
   /// Widgets take and give back demand in `initState` and `dispose`, inside
   /// a frame, so the session's change is published after that frame.
@@ -215,7 +228,7 @@ class DesktopStore {
   bool get _viewPolling => _visible && _sessionActive;
 
   void _schedulePolling() {
-    final hostEvery = _disposed || _restarting
+    final hostEvery = _disposed || _restarting || _cannotHost
         ? null
         : _pageDemand > 0
         ? _hostWithPage
@@ -290,7 +303,12 @@ class DesktopStore {
 
   bool _hostCurrent(int serial) => !_disposed && serial == _hostSerial;
 
+  /// The page already says this device cannot host. The capability is
+  /// fixed at build time, so nothing about the host can change.
+  bool get _cannotHost => _hostView.value.loaded && !_hostView.value.supported;
+
   Future<void> _onPageDemand() async {
+    if (_cannotHost) return;
     // An unreadable grant is read again on each visit, never on a timer.
     if (_hostView.value.loaded && _trustError == null) {
       try {
@@ -354,7 +372,14 @@ class DesktopStore {
       final snapshot = await _api.hostStatus();
       if (_disposed || read <= _hostApplied) return;
       _hostApplied = read;
-      _host = snapshot;
+      // A lifecycle call holds the host, so it is unknown, not gone: keep
+      // the one this store has until a read that is not busy.
+      _host = snapshot.busy
+          ? DesktopHostSnapshot(
+              host: _host?.host,
+              background: snapshot.background,
+            )
+          : snapshot;
       _hostStatusRead = true;
     } catch (_) {
       // A failed poll keeps the last state; actions report their own errors.
@@ -746,6 +771,9 @@ class DesktopStore {
   Timer? _retryTimer;
   DateTime? _retryAt;
 
+  /// When the current run of failed attempts began; null between runs.
+  DateTime? _failingSince;
+
   /// Running for a second after control was asked for; no second request
   /// goes out meanwhile.
   Timer? _controlCooldown;
@@ -770,8 +798,7 @@ class DesktopStore {
         previous.computerId == target.computerId;
     _cancelRetry();
     _target = target;
-    _reconnectAttempt = 0;
-    _protocolStops = 0;
+    _resetRetries();
     _end = null;
     _failure = null;
     _identityChanged = false;
@@ -905,6 +932,13 @@ class DesktopStore {
       _publishSession();
       return;
     }
+    final now = _now();
+    if (now.difference(_failingSince ??= now) >= _retryWindow) {
+      // Nothing came back by itself: say why, and leave the next try to
+      // the user.
+      _endSession(DesktopEndReason.unreachable, failure);
+      return;
+    }
     _reconnectAttempt++;
     final serial = _serial;
     if (immediate) {
@@ -914,7 +948,7 @@ class DesktopStore {
     final delay = Duration(
       seconds: _backoffSeconds[math.min(_reconnectAttempt - 1, 4)],
     );
-    _retryAt = _now().add(delay);
+    _retryAt = now.add(delay);
     _retryTimer = Timer(delay, () {
       _retryTimer = null;
       _retryAt = null;
@@ -928,6 +962,14 @@ class DesktopStore {
     _retryTimer?.cancel();
     _retryTimer = null;
     _retryAt = null;
+  }
+
+  /// A new run: on a connect, a live picture, a disconnect, or a retry after
+  /// the end.
+  void _resetRetries() {
+    _reconnectAttempt = 0;
+    _protocolStops = 0;
+    _failingSince = null;
   }
 
   void _handleStop(String code, String message, {bool resumed = false}) {
@@ -995,8 +1037,7 @@ class DesktopStore {
           _controlWanted = false;
         }
         if (_phase() == DesktopPhase.live) {
-          _reconnectAttempt = 0;
-          _protocolStops = 0;
+          _resetRetries();
           _failure = null;
           _setup = null;
         }
@@ -1229,6 +1270,9 @@ class DesktopStore {
       _cancelRetry();
       _stoppedWhileHidden = _failure?.code ?? 'transport';
     }
+    // Nothing retries while hidden: a run's window starts again when the
+    // viewer shows.
+    _failingSince = null;
   }
 
   void _onVisible() {
@@ -1425,8 +1469,7 @@ class DesktopStore {
     _identityChanged = false;
     _hasPicture = false;
     _stopHandled = false;
-    _reconnectAttempt = 0;
-    _protocolStops = 0;
+    _resetRetries();
     _controlWanted = false;
     _controlSuppressed = false;
     _cancelControlCooldown();
@@ -1517,8 +1560,7 @@ class DesktopStore {
     } else if (_end != null) {
       _end = null;
       _failure = null;
-      _reconnectAttempt = 0;
-      _protocolStops = 0;
+      _resetRetries();
       unawaited(_attempt(_serial));
     }
   }
@@ -1702,6 +1744,27 @@ class DesktopStore {
 
   // ------------------------------------------------------------- dispose
 
+  /// Quitting: ends this app's sessions so each far side hears why — a
+  /// viewer of the in-app host is told `host_stopped`, and the host this app
+  /// views sees a clean close. The service's background host is not this
+  /// app's to stop. Bounded, so a wedged native call cannot hold the exit.
+  Future<void> shutdown() async {
+    // The session ends here, as on dispose: no status read may take the
+    // closing viewer for a lost one, and no retry may connect again.
+    _serial++;
+    _target = null;
+    _cancelRetry();
+    _schedulePolling();
+    try {
+      await Future.wait([
+        _disconnectNative(),
+        _api.stopHost(onExit: true).catchError((Object _) {}),
+      ]).timeout(_shutdownBound);
+    } on TimeoutException {
+      // Exit anyway: the far side then sees the transport close.
+    }
+  }
+
   void dispose() {
     if (_disposed) return;
     _cancelHostResume();
@@ -1725,8 +1788,7 @@ class DesktopStore {
       unawaited(texture.dispose().catchError((Object _) {}));
     }
     _jpegImage.value?.dispose();
-    unawaited(_api.disconnect().catchError((Object _) {}));
-    unawaited(_api.stopHost(onExit: true).catchError((Object _) {}));
+    unawaited(shutdown());
     _hostView.dispose();
     _session.dispose();
     _geometry.dispose();

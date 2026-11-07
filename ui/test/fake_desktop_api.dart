@@ -61,6 +61,9 @@ class FakeDesktopApi implements DesktopApiClient {
   /// connect fail as cancelled, as the FFI does.
   Completer<void>? connectGate;
 
+  /// While set, every `connect` fails with this code: a host that stays away.
+  String? failConnects;
+
   final _failures = <String, String>{};
   int _sources = 0, _epoch = 0;
   StreamController<DesktopJpegFrame>? _jpeg;
@@ -456,7 +459,7 @@ class FakeDesktopApi implements DesktopApiClient {
         'refresh_hz': refreshHz,
       },
     ));
-    final failure = _failures.remove('connect');
+    final failure = _failures.remove('connect') ?? failConnects;
     final gate = connectGate;
     if (gate != null) {
       connectGate = null;

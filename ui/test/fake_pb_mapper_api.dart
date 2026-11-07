@@ -42,6 +42,16 @@ class FakePbMapperApi implements PbMapperApiClient {
   /// before it arrives.
   Duration configDelay = Duration.zero;
 
+  /// Make reading the config fail.
+  bool configFails = false;
+
+  /// Holds a forced relay check until it completes, standing in for a relay
+  /// that has not answered yet. The Rust side holds its one state lock for
+  /// the whole check, so while one waits here, reading the config or the
+  /// tunnels waits behind it.
+  Completer<void>? relayGate;
+  Future<void>? _relayHeld;
+
   /// Every call that changes something, in order, so a test can assert what
   /// the view asked for rather than only what it drew.
   final List<String> calls = [];
@@ -60,7 +70,9 @@ class FakePbMapperApi implements PbMapperApiClient {
 
   @override
   Future<ConfigStatus> fetchConfig() async {
+    if (_relayHeld case final held?) await held;
     if (configDelay > Duration.zero) await Future<void>.delayed(configDelay);
+    if (configFails) throw StateError('reading the config failed');
     return config;
   }
 
@@ -180,8 +192,13 @@ class FakePbMapperApi implements PbMapperApiClient {
       link ?? RelayLink(transport: config.relayTransport);
 
   @override
-  Future<ServerStatusDetail> forceRefreshServerStatus() async =>
-      getServerStatusDetail();
+  Future<ServerStatusDetail> forceRefreshServerStatus() async {
+    if (relayGate case final gate? when !gate.isCompleted) {
+      await (_relayHeld = gate.future);
+      _relayHeld = null;
+    }
+    return getServerStatusDetail();
+  }
 
   /// What the relay is holding, keyed by service. Absent means none.
   Map<String, List<ServiceConnInfo>> conns;
@@ -191,7 +208,10 @@ class FakePbMapperApi implements PbMapperApiClient {
       conns[serviceKey] ?? const [];
 
   @override
-  Future<List<ServiceConfigInfo>> getServiceConfigs() async => services;
+  Future<List<ServiceConfigInfo>> getServiceConfigs() async {
+    if (_relayHeld case final held?) await held;
+    return services;
+  }
 
   @override
   Future<ServiceStatusSignal> getServiceStatus(String serviceKey) async =>
@@ -261,7 +281,10 @@ class FakePbMapperApi implements PbMapperApiClient {
   }
 
   @override
-  Future<List<ClientConfigInfo>> getClientConfigs() async => clients;
+  Future<List<ClientConfigInfo>> getClientConfigs() async {
+    if (_relayHeld case final held?) await held;
+    return clients;
+  }
 
   @override
   Future<ClientStatusSignal> getClientStatus(String serviceKey) async =>

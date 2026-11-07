@@ -519,12 +519,34 @@ ComputerPresence presenceOf(
         session.phase != DesktopPhase.idle &&
         session.phase != DesktopPhase.ended
     ? ComputerPresence.viewing
-    : credentialKeyId == null
+    : listedPresence(
+        service: c.service,
+        relay: c.relay,
+        namespace: c.namespace,
+        relayState: relay,
+        relayAddress: relayAddress,
+        credentialKeyId: credentialKeyId,
+        desktopServices: desktopServices,
+      );
+
+/// How a computer sharing [service] on [relay] under the credential
+/// [namespace] stands, as the relay this computer uses lists it: what
+/// [presenceOf] says apart from viewing, and what the viewer says of the
+/// computer it shows.
+ComputerPresence listedPresence({
+  required String service,
+  required String relay,
+  required int namespace,
+  required RelayState relayState,
+  required String relayAddress,
+  required int? credentialKeyId,
+  required Set<String> desktopServices,
+}) => credentialKeyId == null
     ? ComputerPresence.unknown
-    : c.relay != relayAddress || c.namespace != credentialKeyId
+    : relay != relayAddress || namespace != credentialKeyId
     ? ComputerPresence.otherRelay
-    : relay != RelayState.online
+    : relayState != RelayState.online
     ? ComputerPresence.unknown
-    : desktopServices.contains(c.service)
+    : desktopServices.contains(service)
     ? ComputerPresence.online
     : ComputerPresence.notSharing;

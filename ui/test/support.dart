@@ -28,11 +28,12 @@ final changes = StreamController<StateChange>.broadcast();
 /// computers live in [vault], an in-memory one unless a test passes its own,
 /// and their last pictures in [thumbnails], a fresh temporary directory
 /// unless a test passes its own (it must exist: a widget test's clock never
-/// finishes creating one).
+/// finishes creating one). A null [needsSetup] leaves first-run setup for
+/// the app to decide from what [api] holds.
 Future<void> pumpApp(
   WidgetTester tester,
   FakePbMapperApi api, {
-  bool needsSetup = false,
+  bool? needsSetup = false,
   AppPage page = AppPage.overview,
   Size size = const Size(1280, 820),
   ThemeMode themeMode = ThemeMode.light,

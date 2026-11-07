@@ -775,6 +775,14 @@ mod configuration;
 mod runtime;
 mod status;
 
+/// This computer's credential, or `INVALID_ARGUMENT` saying it has none,
+/// which no retry can mend.
+pub(crate) fn process_credential() -> Result<Credential, CtlError> {
+    get_process_credential().map_err(|error| {
+        CtlError::invalid_argument(format!("This computer has no usable credential: {error}"))
+    })
+}
+
 /// Registers a service, holding the state lock only for the bookkeeping.
 ///
 /// Three phases. The middle one is the point: resolving addresses and dialling

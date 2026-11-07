@@ -37,6 +37,17 @@ void _lifecycle(WidgetTester tester, List<AppLifecycleState> states) {
   }
 }
 
+/// A host whose stop never returns until [wedge] completes.
+class _WedgedStopApi extends FakeDesktopApi {
+  final wedge = Completer<void>();
+
+  @override
+  Future<void> stopHost({bool onExit = false}) async {
+    await super.stopHost(onExit: onExit);
+    await wedge.future;
+  }
+}
+
 void main() {
   testWidgets(
     'input is sent with the geometry generation only and dropped when not live',
@@ -193,6 +204,24 @@ void main() {
     await tester.pump(const Duration(seconds: 10));
     expect(api.calls, isEmpty);
     store.dispose();
+
+    // A device that cannot host loads once, then polls nothing, on a timer
+    // or on the next visit.
+    final phoneApi = FakeDesktopApi()
+      ..available = const DesktopCapabilities(host: false);
+    final phone = DesktopStore(phoneApi);
+    var phonePage = phone.demand(DesktopDemand.page);
+    await tester.pump();
+    expect(phone.hostView.value.loaded, isTrue);
+    expect(phone.hostView.value.supported, isFalse);
+    phoneApi.calls.clear();
+    await tester.pump(const Duration(seconds: 10));
+    phonePage.dispose();
+    phonePage = phone.demand(DesktopDemand.page);
+    await tester.pump(const Duration(seconds: 2));
+    expect(phoneApi.calls, isEmpty);
+    phonePage.dispose();
+    phone.dispose();
   });
 
   testWidgets('a sharing or configured host always has its invitation', (
@@ -225,6 +254,12 @@ void main() {
       allowControl: true,
       ordinaryOnly: true,
     );
+    expect(view().sharing, isTrue);
+    expect(view().invitation, FakeDesktopApi.localInvitation);
+    // A poll while a lifecycle call holds the host keeps it; the next read
+    // that is not busy says what became of it.
+    api.hostSnapshot = const DesktopHostSnapshot(busy: true);
+    await tester.pump(const Duration(seconds: 1));
     expect(view().sharing, isTrue);
     expect(view().invitation, FakeDesktopApi.localInvitation);
     await store.stopHost();
@@ -273,6 +308,29 @@ void main() {
       );
       next.dispose();
     }
+  });
+
+  testWidgets('quitting stops only this app\'s host and session, bounded', (
+    tester,
+  ) async {
+    final api = _WedgedStopApi();
+    final store = DesktopStore(api);
+    final viewer = store.demand(DesktopDemand.viewer);
+    await _live(tester, store, api);
+    var done = false;
+    unawaited(store.shutdown().then((_) => done = true));
+    await tester.pump(const Duration(milliseconds: 1500));
+    expect(done, isTrue);
+    expect(api.argsOf('host_stop'), [
+      {'on_exit': true},
+    ]);
+    expect(api.ops, contains('disconnect'));
+    // The closed viewer is not taken for a lost one while the app exits.
+    await tester.pump(const Duration(seconds: 5));
+    expect(api.argsOf('connect'), hasLength(1));
+    api.wedge.complete();
+    viewer.dispose();
+    store.dispose();
   });
 
   testWidgets('a second connect during an attempt connects the new target', (

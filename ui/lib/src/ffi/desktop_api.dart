@@ -180,9 +180,12 @@ class DesktopBackground {
 
 /// `host_status`: the local host, if one runs, and the background service.
 class DesktopHostSnapshot {
-  const DesktopHostSnapshot({this.host, this.background});
+  const DesktopHostSnapshot({this.host, this.background, this.busy = false});
   final DesktopHostStatus? host;
   final DesktopBackground? background;
+
+  /// A lifecycle call held the host, so [host] is unknown, not absent.
+  final bool busy;
 }
 
 class DesktopTrustedHost {
@@ -554,6 +557,7 @@ class DesktopApi implements DesktopApiClient {
               invitation: host['invitation'] as String?,
             ),
       background: _background(data['background']),
+      busy: data['busy'] == true,
     );
   }
 

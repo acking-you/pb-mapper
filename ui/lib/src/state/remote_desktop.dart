@@ -6,9 +6,10 @@ import 'desktop_store.dart';
 import 'remote_computers.dart';
 import 'viewer_prefs.dart';
 
-/// A session left in the background by Back ends after this: a paused
-/// session still holds the host's only viewer slot, so every other viewer
-/// would get `HOST_BUSY` until this one came back.
+/// An open session that stays paused (Back, a hidden or minimised window,
+/// the app in the background) ends after this. A paused session still holds
+/// the host's only viewer slot, so every other viewer would get `HOST_BUSY`
+/// until this one came back.
 const kPausedSessionTimeout = Duration(minutes: 10);
 
 /// Whether the viewer is on screen. The app shows the viewer instead of the
@@ -91,11 +92,17 @@ class _Target {
     required this.name,
     required this.service,
     required this.fingerprint,
+    required this.relay,
+    required this.namespace,
     required this.relayOnly,
     this.replaceId,
     this.onRememberFailed,
   });
   final String id, name, service, fingerprint;
+
+  /// The relay and credential it was opened through.
+  final String relay;
+  final int namespace;
   final bool relayOnly;
   final String? replaceId;
   final ValueChanged<RememberFailure>? onRememberFailed;
@@ -117,7 +124,6 @@ class RemoteDesktop {
        _credentialKeyId = credentialKeyId,
        _now = now ?? DateTime.now {
     desktop.session.addListener(_onSession);
-    viewer.addListener(_onViewer);
   }
 
   final DesktopStore desktop;
@@ -154,6 +160,18 @@ class RemoteDesktop {
     if (target == null) return '';
     return rememberedComputer?.name ?? target.name;
   }
+
+  /// Where the open or opening computer shares, for the viewer's presence
+  /// line (D22): under which service, on which relay, for which credential.
+  ({String service, String relay, int namespace})? get sharing =>
+      switch (_current) {
+        final current? => (
+          service: current.service,
+          relay: current.relay,
+          namespace: current.namespace,
+        ),
+        null => null,
+      };
 
   /// The remembered computer the session is, as the list stands now: one
   /// added with Remember on is from its first picture. A session connected
@@ -193,6 +211,8 @@ class RemoteDesktop {
       name: c.name,
       service: c.service,
       fingerprint: c.fingerprint,
+      relay: c.relay,
+      namespace: c.namespace,
       relayOnly: c.relayOnly,
     );
     _rememberPending = false;
@@ -229,6 +249,8 @@ class RemoteDesktop {
       name: result.name,
       service: result.info.service,
       fingerprint: result.info.fingerprint,
+      relay: _relayAddress(),
+      namespace: _credentialKeyId(),
       relayOnly: result.relayOnly,
       replaceId: result.replaceId,
       onRememberFailed: onRememberFailed,
@@ -274,7 +296,7 @@ class RemoteDesktop {
   }
 
   /// Leaves the picture and keeps the session, paused (D13): back to the
-  /// list. A session left like this ends after [kPausedSessionTimeout].
+  /// list. Like any paused session, it ends after [kPausedSessionTimeout].
   void back() {
     final session = desktop.session.value;
     final id = rememberedComputer?.id;
@@ -290,13 +312,6 @@ class RemoteDesktop {
       );
     }
     viewer.close();
-    if (session.target != null) {
-      _cancelPausedTimer();
-      _pausedTimer = Timer(kPausedSessionTimeout, () {
-        _pausedTimer = null;
-        unawaited(disconnect());
-      });
-    }
   }
 
   /// Ends the session, with its last picture (D23), and closes the viewer.
@@ -353,6 +368,17 @@ class RemoteDesktop {
 
   void _onSession() {
     final session = desktop.session.value;
+    // However it was left, a paused session holds the host's only slot. The
+    // timer is not restarted while the session stays paused. One whose
+    // host's identity changed holds none, and keeps its card for the user.
+    if (hasOpenSession && session.paused) {
+      _pausedTimer ??= Timer(kPausedSessionTimeout, () {
+        _pausedTimer = null;
+        unawaited(disconnect());
+      });
+    } else {
+      _cancelPausedTimer();
+    }
     final key = _key(session.target);
     if (key == null) return;
     if (_liveKey == key) return;
@@ -426,10 +452,6 @@ class RemoteDesktop {
       ? RememberFailure.full
       : null;
 
-  void _onViewer() {
-    if (viewer.showing) _cancelPausedTimer();
-  }
-
   void _cancelPausedTimer() {
     _pausedTimer?.cancel();
     _pausedTimer = null;
@@ -438,6 +460,5 @@ class RemoteDesktop {
   void dispose() {
     _cancelPausedTimer();
     desktop.session.removeListener(_onSession);
-    viewer.removeListener(_onViewer);
   }
 }

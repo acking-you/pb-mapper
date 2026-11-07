@@ -11,6 +11,7 @@ use crate::{
     error::{CtlError, ErrorCode},
     handle::PbMapperHandle,
     response::{err_ctl, err_null_handle, ok_data, parse_c_string},
+    state::process_credential,
 };
 use pb_mapper::{
     Client, ConnectOptions, PathPolicy,
@@ -20,7 +21,9 @@ use pb_mapper::{
         VideoLimits, Viewer, ViewerConfig,
     },
 };
-use pb_mapper_core::checksum::{Credential, get_process_credential};
+#[cfg(windows)]
+use pb_mapper_core::checksum::Credential;
+use pb_mapper_core::checksum::get_process_credential;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::ffi::c_char;
@@ -482,21 +485,6 @@ fn inspection(invitation: &Invitation) -> Value {
     })
 }
 
-/// A client of the configured relay.
-fn relay_client(
-    config: &crate::state::AppConfig,
-    credential: Credential,
-) -> Result<Client, CtlError> {
-    Client::from_credential(
-        &config.server_address,
-        credential,
-        config.keep_alive_enabled,
-        None,
-    )
-    .with_relay_transport(config.relay_transport)
-    .map_err(err)
-}
-
 fn background_configured(snapshot: &Value) -> bool {
     snapshot["configured"].as_bool().unwrap_or(false)
 }
@@ -859,16 +847,22 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
         }
         Request::HostStatus => {
             let background = state.background_status(handle.runtime.handle());
-            // A slow helper management call holds the host lifecycle lock, but
-            // must never delay a status poll. The invitation stays beside the
-            // status, so nothing that serialises a status carries the secret.
-            let host = state.host.try_lock().ok().and_then(|slot| {
-                slot.as_ref().map(|host| {
-                    let invitation = host.invitation();
-                    json!({"status": host.status(), "service": invitation.service, "invitation": invitation.encode()})
-                })
-            });
-            return Ok(json!({"host": host, "background": background}));
+            // A lifecycle call (a display switch, a rename, a helper action
+            // waiting on UAC) holds the host lock, but must never delay a
+            // status poll. `busy` says the host is then unknown, not absent.
+            // The invitation stays beside the status, so nothing that
+            // serialises a status carries the secret.
+            let (host, busy) = match state.host.try_lock() {
+                Ok(slot) => (
+                    slot.as_ref().map(|host| {
+                        let invitation = host.invitation();
+                        json!({"status": host.status(), "service": invitation.service, "invitation": invitation.encode()})
+                    }),
+                    false,
+                ),
+                Err(_) => (None, true),
+            };
+            return Ok(json!({"host": host, "busy": busy, "background": background}));
         }
         Request::BackgroundAction { action } => return background_action(handle, action).await,
         Request::HostEnable {
@@ -1076,8 +1070,7 @@ async fn connect(
             };
             // Configuration can wait behind other app operations. Keep that
             // wait inside the registered, cancellable attempt.
-            let relay = handle.state.lock().await.get_config_status().await;
-            let client = relay_client(&relay, get_process_credential().map_err(err)?)?;
+            let client = handle.state.lock().await.relay_client()?;
             let options = ConnectOptions {
                 path: if relay_only {
                     PathPolicy::RelayOnly
@@ -1120,7 +1113,7 @@ async fn start_background(handle: &PbMapperHandle, start: HostStart) -> Result<V
             let state = handle.state.lock().await;
             (state.desktop_config_dir(), state.get_config_status().await)
         };
-        let credential = get_process_credential().map_err(err)?;
+        let credential = process_credential()?;
         let namespace = credential.key_id();
         let credential = credential_text(credential)?;
         // Keep the old identity for an explicit restore, but never allow a
@@ -1199,17 +1192,22 @@ async fn start_local(handle: &PbMapperHandle, start: Start) -> Result<Value, Ctl
             }
         }));
     }
-    let (directory, config) = {
+    // Read under the same lock as the relay settings the trust scope records,
+    // so the two cannot disagree. The client is the window's cached one.
+    let (directory, config, client) = {
         let state = handle.state.lock().await;
-        (state.desktop_config_dir(), state.get_config_status().await)
+        (
+            state.desktop_config_dir(),
+            state.get_config_status().await,
+            state.relay_client()?,
+        )
     };
-    let credential = get_process_credential().map_err(err)?;
+    let credential = process_credential()?;
     let scope = trust::Scope {
         directory,
         relay: config.server_address.clone(),
         namespace: credential.key_id(),
     };
-    let client = relay_client(&config, credential)?;
     let (settings, remember, saved) = match start {
         Start::Fresh(start) => {
             if start.auto_start && !start.remember {
@@ -1347,14 +1345,16 @@ async fn restart_host(
         .identity
         .invitation(settings.service.clone())
         .map_err(|failure| CtlError::invalid_argument(failure.to_string()))?;
-    let config = handle.state.lock().await.get_config_status().await;
-    let credential = get_process_credential().map_err(err)?;
+    let (config, client) = {
+        let state = handle.state.lock().await;
+        (state.get_config_status().await, state.relay_client()?)
+    };
+    let credential = process_credential()?;
     if config.server_address != local.scope.relay || credential.key_id() != local.scope.namespace {
         return Err(err(
             "the relay settings changed since sharing started; stop sharing and share again",
         ));
     }
-    let client = relay_client(&config, credential)?;
     let persisted = local
         .remembered
         .then(|| trust::Saved::new(&local.scope, settings.clone(), &local.identity))
@@ -1419,7 +1419,7 @@ async fn enable_host(
         let state = handle.state.lock().await;
         (state.desktop_config_dir(), state.get_config_status().await)
     };
-    let credential = get_process_credential().map_err(err)?;
+    let credential = process_credential()?;
     let scope = trust::Scope {
         directory: directory.clone(),
         relay: config.server_address.clone(),
@@ -2066,13 +2066,15 @@ mod tests {
             snapshot["enabled"] = json!(true);
             handle.desktop.cache_background(snapshot.clone());
             // A blocked service mutation cannot hold up host status, which
-            // still shows the pending background grant.
+            // reads the held lock as busy and still shows the pending
+            // background grant.
             let status =
                 tokio::time::timeout(Duration::from_secs(1), call(&handle, Request::HostStatus))
                     .await
                     .unwrap()
                     .unwrap();
             assert!(status["host"].is_null());
+            assert_eq!(status["busy"], true);
             assert_eq!(status["background"]["enabled"], true);
             drop(lifecycle);
 
@@ -2460,6 +2462,30 @@ mod tests {
             assert!(handle.desktop.viewer.read().is_none());
             assert!(handle.desktop.connecting.lock().is_none());
         });
+    }
+
+    /// Without a credential no retry can succeed: the attempt ends with a
+    /// reason the person can act on, not an IO failure the viewer retries.
+    #[test]
+    fn connect_without_a_credential_ends_the_attempt() {
+        let handle = test_handle("no-credential");
+        let _credential_guard =
+            pb_mapper_core::test_support::PROCESS_CREDENTIAL_TEST_LOCK.blocking_lock();
+        pb_mapper_core::checksum::set_process_msg_header_key(None).unwrap();
+        let failure = handle
+            .runtime
+            .block_on(call(
+                &handle,
+                Request::Connect {
+                    invitation: Some(invitation().encode()),
+                    computer_id: None,
+                    relay_only: false,
+                    quality: QualityPreset::Balanced,
+                    refresh_hz: 60.0,
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(failure.code(), ErrorCode::InvalidArgument);
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 import 'package:pb_mapper_ui/src/state/remote_computers.dart';
@@ -25,7 +26,8 @@ void main() {
     'a new computer is remembered only after its first picture; leaving the '
     'picture releases the viewer demand and Back to picture takes it again; '
     'an identity change never touches the saved computer, nor does its new '
-    'invitation unless remembered; a session left paused is ended',
+    'invitation unless remembered; a session left paused, by Back or a '
+    'hidden window, is ended, unless its identity changed',
     (tester) async {
       final api = FakeDesktopApi();
       final desktop = DesktopStore(api);
@@ -81,10 +83,11 @@ void main() {
       expect(computers.byId(id)?.lastConnectedAt, isNotNull);
       expect(remote.title, 'home');
 
-      // Leaving the picture pauses the session; going back resumes it.
+      // Leaving the picture pauses the session; going back resumes it, and
+      // the time it spent paused stops counting.
       api.calls.clear();
       remote.back();
-      await tester.pump();
+      await tester.pump(const Duration(minutes: 5));
       expect(viewer.showing, isFalse);
       expect(api.ops, contains('pause'));
       expect(api.ops, isNot(contains('disconnect')));
@@ -109,6 +112,15 @@ void main() {
       await tester.pump();
       expect(api.argsOf('connect').last, containsPair('computer_id', id));
       expect(desktop.session.value.phase, DesktopPhase.identityChanged);
+      // Hidden, it holds no slot to give up: its card waits for the user.
+      api.calls.clear();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await tester.pump(kPausedSessionTimeout);
+      expect(api.ops, isNot(contains('disconnect')));
+      expect(viewer.showing, isTrue);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await remote.disconnect();
       await tester.pump();
       expect(vaultOps(), isEmpty);
@@ -147,8 +159,16 @@ void main() {
         allOf(containsPair('id', reissued), containsPair('replace_id', id)),
       );
       expect(computers.computers.map((c) => c.id), [reissued]);
-      await remote.disconnect();
-      await tester.pump();
+
+      // A hidden window pauses it the same way, and it ends in the end too.
+      api.calls.clear();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await tester.pump(kPausedSessionTimeout);
+      expect(api.ops, contains('disconnect'));
+      expect(viewer.showing, isFalse);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
 
       remote.dispose();
       viewer.dispose();
