@@ -14,7 +14,10 @@
 //! - when the head waited longer than `BACKLOG_AGE` behind enough units, or
 //!   the queue overflows, the consumer fell behind: the queue drops to the
 //!   next IDR, one is asked for, and the fps cap learns of it. No such drop
-//!   comes within `IDR_GRACE` of handing out an IDR, whose decode may be slow.
+//!   comes within `IDR_GRACE` of handing out an IDR, whose decode may be slow,
+//!   nor before the consumer took its first: until then the wait is the
+//!   hand-off to a consumer still attaching, so only overflow drops, and the
+//!   fps cap is not judged.
 //!
 //! Keyframe requests go through the viewer's recovery state machine and its
 //! limiter, and the viewer tick runs the fps cap and the stall watchdog here.
@@ -212,11 +215,11 @@ impl SinkState {
         self.queue.push_back(unit);
     }
     /// The consumer fell behind: the head waited longer than `BACKLOG_AGE`
-    /// with at least `BACKLOG_MIN_UNITS` queued (counting `arriving`), and no
-    /// IDR was handed out within `IDR_GRACE`.
+    /// with at least `BACKLOG_MIN_UNITS` queued (counting `arriving`), and the
+    /// consumer last took an IDR at least `IDR_GRACE` ago.
     fn backlogged(&self, now: Instant, arriving: usize) -> bool {
         self.idr_pulled_at
-            .is_none_or(|at| now.saturating_duration_since(at) >= IDR_GRACE)
+            .is_some_and(|at| now.saturating_duration_since(at) >= IDR_GRACE)
             && self.queue.len() + arriving >= BACKLOG_MIN_UNITS
             && self
                 .queue
@@ -365,14 +368,16 @@ impl VideoSink {
     }
 
     /// The consumer fell behind: drop the queue, wait for the next IDR and
-    /// ask for one, and let the fps cap know.
+    /// ask for one, and let the fps cap know once the consumer took an IDR.
     fn drop_to_idr(&self, state: &mut SinkState, cause: Backlog, now: Instant) {
         let units = state.restart();
         match cause {
             Backlog::Age => state.backlog_drops += 1,
             Backlog::Overflow => state.overflow_drops += 1,
         }
-        state.fps_cap.on_backlog_drop();
+        if state.idr_pulled_at.is_some() {
+            state.fps_cap.on_backlog_drop();
+        }
         tracing::debug!(
             target: "pb_mapper_desktop::frames",
             ?cause,
@@ -432,8 +437,8 @@ impl VideoSink {
 
     /// The viewer tick (every 250 ms). Returns the fps the host should be
     /// capped at, when that changes; it is judged only while the session
-    /// streams and is not paused. Also re-requests an awaited IDR on its
-    /// backoff, and runs the stall watchdog.
+    /// streams and is not paused, once the consumer took an IDR. Also
+    /// re-requests an awaited IDR on its backoff, and runs the stall watchdog.
     pub(crate) fn tick(
         &self,
         now: Instant,
@@ -447,7 +452,7 @@ impl VideoSink {
         let paused = self.paused.load(Ordering::Acquire);
         let mut guard = self.state.lock();
         let state = &mut *guard;
-        let cap = if streaming && !paused {
+        let cap = if streaming && !paused && state.idr_pulled_at.is_some() {
             let presented_fps = state.present.presented_fps(now);
             state
                 .fps_cap
@@ -942,5 +947,50 @@ mod tests {
         assert!(pull_at(14_800).is_none());
         assert_eq!(backlog_drops(), 2);
         assert_eq!(requested(), 7);
+    }
+
+    /// The session streams before its consumer is attached: that wait is the
+    /// hand-off, not a decoder falling behind.
+    #[test]
+    fn a_consumer_still_attaching_has_no_backlog() {
+        let sink = VideoSink::detached_for_test();
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+        // 60 fps from an IDR at 0 ms.
+        let push = |frame_id: u64, keyframe: bool| {
+            let millis = (frame_id - 1) * 16;
+            sink.push_at(video(1, frame_id, keyframe, at(millis)), at(millis));
+        };
+        let tick = |millis: u64| sink.tick(at(millis), true, true, QualityPreset::Balanced);
+        let backlog_drops = || sink.snapshot(start).backlog_drops;
+
+        // However old and long the queue, nothing is dropped for age and the
+        // fps cap is not judged.
+        sink.on_state_at(1, true, at(0));
+        for frame_id in 1..=16 {
+            push(frame_id, frame_id == 1);
+        }
+        assert_eq!(tick(250), None);
+        for frame_id in 17..=32 {
+            push(frame_id, false);
+        }
+        assert_eq!(tick(500), None);
+        assert_eq!(backlog_drops(), 0);
+
+        // The bound still holds, but its drop is not the consumer's either.
+        push(33, false);
+        assert_eq!(backlog_drops(), 1);
+        push(34, true);
+        let consumer = sink.attach().unwrap();
+        let first = consumer.pull_at(at(530), 1 << 20);
+        assert!(matches!(
+            first,
+            Some(Pull::Unit(VideoUnit {
+                frame_id: 34,
+                discontinuity: true,
+                ..
+            }))
+        ));
+        assert_eq!(tick(750), None);
     }
 }

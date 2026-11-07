@@ -24,7 +24,8 @@ const BACKLOG_HIGH: usize = 2;
 const BACKLOG_LOW: usize = 1;
 
 /// Owned by the sink. `tick` runs every viewer tick while the session
-/// streams and is not paused; otherwise `freeze` keeps the cap as it is.
+/// streams and is not paused, once the consumer took an IDR; otherwise
+/// `freeze` keeps the cap as it is.
 pub(crate) struct FpsCap {
     /// The session's `limits.max_fps`. The host clears its cap for any value
     /// at or above it, so this is what removing the cap sends: the preset's
