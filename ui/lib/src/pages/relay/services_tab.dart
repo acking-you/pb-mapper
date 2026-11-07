@@ -176,6 +176,10 @@ class _ServiceRowState extends State<_ServiceRow> {
         label: l10n.openAt(connection.localAddress),
         shrinks: true,
       );
+    } else if (remote.isDesktop) {
+      // A tunnel to a remote desktop's service is useless: it is viewed
+      // from Remote desktop (D26).
+      trailing = const SizedBox.shrink();
     } else {
       trailing = FilledButton.tonal(
         key: Key('connect-${row.id}'),

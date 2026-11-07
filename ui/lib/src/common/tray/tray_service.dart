@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:pb_mapper_ui/src/state/desktop_models.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -12,12 +13,31 @@ class TrayStatus {
   final int registeredServices;
   final int connectedClients;
 
+  /// This computer as a remote desktop host, while it shares; null when it
+  /// does not.
+  final DesktopHostView? host;
+
   const TrayStatus({
     required this.serverAvailable,
     required this.activeConnections,
     required this.registeredServices,
     required this.connectedClients,
+    this.host,
   });
+
+  /// Someone is connected to this computer's desktop (D15).
+  bool get viewed => host?.viewer != null;
+
+  /// What sharing this computer amounts to right now, or null when it is
+  /// not shared.
+  String? hostLine(TrayStrings strings) {
+    final host = this.host;
+    if (host == null) return null;
+    final viewer = host.viewer;
+    if (viewer == null) return strings.hostSharing;
+    if (viewer.paused) return strings.hostPaused;
+    return viewer.controlling ? strings.hostControlled : strings.hostViewed;
+  }
 
   bool get hasConnections =>
       activeConnections > 0 || registeredServices > 0 || connectedClients > 0;
@@ -50,6 +70,12 @@ class TrayStrings {
     required this.open,
     required this.refresh,
     required this.quit,
+    required this.hostSharing,
+    required this.hostViewed,
+    required this.hostControlled,
+    required this.hostPaused,
+    required this.disconnectViewer,
+    required this.stopSharing,
   });
 
   final String offline;
@@ -59,6 +85,12 @@ class TrayStrings {
   final String open;
   final String refresh;
   final String quit;
+  final String hostSharing;
+  final String hostViewed;
+  final String hostControlled;
+  final String hostPaused;
+  final String disconnectViewer;
+  final String stopSharing;
 }
 
 class TrayService with TrayListener {
@@ -79,28 +111,36 @@ class TrayService with TrayListener {
   Future<TrayStatus> Function()? _statusProvider;
   VoidCallback? _showApp;
   VoidCallback? _quitApp;
+  VoidCallback? _disconnectViewer;
+  VoidCallback? _stopSharing;
   bool _iconSupported = true;
   bool _toolTipSupported = true;
   bool _contextMenuSupported = true;
   TrayStrings? _strings;
+  // Windows can deliver WM_COMMAND after the popup has returned. Every item
+  // is retained, and each menu is built from these same instances, so a
+  // closing click still resolves to the same action.
   final _statusItem = MenuItem(key: 'status', disabled: true);
+  final _hostItem = MenuItem(key: 'host', disabled: true);
+  final _disconnectViewerItem = MenuItem(key: 'disconnect-viewer');
+  final _stopSharingItem = MenuItem(key: 'stop-sharing');
   final _openItem = MenuItem(key: 'open');
   final _refreshItem = MenuItem(key: 'refresh');
   final _quitItem = MenuItem(key: 'quit');
-  // Windows can deliver WM_COMMAND after the popup has returned. Retain IDs
-  // across renders so that a closing click still resolves to the same action.
-  late final _menu = Menu(
-    items: [
-      _statusItem,
-      MenuItem.separator(),
-      _openItem,
-      _refreshItem,
-      MenuItem.separator(),
-      _quitItem,
-    ],
-  );
+  final _separators = [MenuItem.separator(), MenuItem.separator()];
+  final _menu = Menu();
   String? _renderedIcon, _renderedToolTip;
-  (String, String, String, String)? _renderedMenu;
+  ({
+    String status,
+    String? host,
+    bool viewed,
+    String disconnectViewer,
+    String stopSharing,
+    String open,
+    String refresh,
+    String quit,
+  })?
+  _renderedMenu;
   Future<void>? _rendering;
   bool _dirty = false, _menuOpen = false;
   int _statusRequest = 0, _lifecycle = 0;
@@ -118,23 +158,23 @@ class TrayService with TrayListener {
     required Future<TrayStatus> Function() statusProvider,
     required VoidCallback showApp,
     required VoidCallback quitApp,
+    required VoidCallback onDisconnectViewer,
+    required VoidCallback onStopSharing,
     required TrayStrings strings,
   }) async {
     if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) {
       return;
     }
     _strings = strings;
-    if (_initialized) {
-      _statusProvider = statusProvider;
-      _showApp = showApp;
-      _quitApp = quitApp;
-      await refreshStatus();
-      return;
-    }
-
     _statusProvider = statusProvider;
     _showApp = showApp;
     _quitApp = quitApp;
+    _disconnectViewer = onDisconnectViewer;
+    _stopSharing = onStopSharing;
+    if (_initialized) {
+      await refreshStatus();
+      return;
+    }
 
     _trayManager.addListener(this);
     _initialized = true;
@@ -231,12 +271,24 @@ class TrayService with TrayListener {
     }
     final lifecycle = _lifecycle;
     final statusText = _status.displayText(strings);
+    final hostLine = _status.hostLine(strings);
+    final viewed = _status.viewed;
+    // Someone watching this computer is the first thing the tray says.
+    final toolTip = hostLine == null
+        ? statusText
+        : viewed
+        ? '$hostLine · $statusText'
+        : '$statusText · $hostLine';
     final iconPath = _iconFor(_status);
     final menuLabels = (
-      statusText,
-      strings.open,
-      strings.refresh,
-      strings.quit,
+      status: statusText,
+      host: hostLine,
+      viewed: viewed,
+      disconnectViewer: strings.disconnectViewer,
+      stopSharing: strings.stopSharing,
+      open: strings.open,
+      refresh: strings.refresh,
+      quit: strings.quit,
     );
     if (_iconSupported && _renderedIcon != iconPath) {
       await _invokeTrayMethod(
@@ -252,20 +304,36 @@ class TrayService with TrayListener {
       if (!_initialized || lifecycle != _lifecycle) return;
       _renderedIcon = iconPath;
     }
-    if (_toolTipSupported && _renderedToolTip != statusText) {
+    if (_toolTipSupported && _renderedToolTip != toolTip) {
       await _invokeTrayMethod(
-        action: () => _trayManager.setToolTip(statusText),
+        action: () => _trayManager.setToolTip(toolTip),
         onUnsupported: () => _toolTipSupported = false,
         methodName: 'setToolTip',
       );
       if (!_initialized || lifecycle != _lifecycle) return;
-      _renderedToolTip = statusText;
+      _renderedToolTip = toolTip;
     }
     if (_contextMenuSupported && _renderedMenu != menuLabels) {
       _statusItem.label = statusText;
+      _hostItem.label = hostLine;
+      _disconnectViewerItem.label = strings.disconnectViewer;
+      _stopSharingItem.label = strings.stopSharing;
       _openItem.label = strings.open;
       _refreshItem.label = strings.refresh;
       _quitItem.label = strings.quit;
+      _menu.items = [
+        _statusItem,
+        if (hostLine != null) ...[
+          _hostItem,
+          if (viewed) _disconnectViewerItem,
+          _stopSharingItem,
+        ],
+        _separators[0],
+        _openItem,
+        _refreshItem,
+        _separators[1],
+        _quitItem,
+      ];
       await _invokeTrayMethod(
         action: () => _trayManager.setContextMenu(_menu),
         onUnsupported: () => _contextMenuSupported = false,
@@ -305,6 +373,11 @@ class TrayService with TrayListener {
   }
 
   String _iconFor(TrayStatus status) {
+    // Being watched outranks the rest: a shared computer's window is usually
+    // hidden in the tray, so this is where it shows (D15).
+    if (status.viewed) {
+      return _assetPath('assets/tray/tray_active');
+    }
     if (!status.serverAvailable) {
       return _assetPath('assets/tray/tray_offline');
     }
@@ -397,6 +470,12 @@ class TrayService with TrayListener {
         break;
       case 'quit':
         _quitApp?.call();
+        break;
+      case 'disconnect-viewer':
+        _disconnectViewer?.call();
+        break;
+      case 'stop-sharing':
+        _stopSharing?.call();
         break;
     }
   }

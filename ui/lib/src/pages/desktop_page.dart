@@ -4,15 +4,9 @@ import 'package:flutter/services.dart';
 import '../common/l10n_extension.dart';
 import '../shell/app_scope.dart';
 import '../state/desktop_store.dart';
-import 'desktop_viewer.dart';
 
-void openDesktop(BuildContext context) {
-  final store = AppScope.of(context).store.desktop;
-  Navigator.of(
-    context,
-  ).push(MaterialPageRoute<void>(builder: (_) => DesktopPage(store: store)));
-}
-
+/// The body of the transitional Remote page; the viewer it opens is the
+/// app's one viewer, shown in place of the shell.
 class DesktopPage extends StatefulWidget {
   const DesktopPage({super.key, required this.store});
   final DesktopStore store;
@@ -25,7 +19,7 @@ class _DesktopPageState extends State<DesktopPage> {
   final _invitation = TextEditingController();
   late final DesktopDemandHandle _demand;
   int? _display;
-  bool _relayOnly = false, _viewerOpen = false;
+  bool _relayOnly = false;
 
   @override
   void initState() {
@@ -56,9 +50,10 @@ class _DesktopPageState extends State<DesktopPage> {
       final error = host.error ?? session.failure?.toString();
       final fullyEnabled =
           host.sharing && host.background && host.controlAllowed;
-      return Scaffold(
-        appBar: AppBar(title: Text(l.desktopTitle)),
-        body: SafeArea(
+      return Material(
+        type: MaterialType.transparency,
+        child: SafeArea(
+          top: false,
           child: Align(
             alignment: Alignment.topCenter,
             child: ConstrainedBox(
@@ -143,11 +138,11 @@ class _DesktopPageState extends State<DesktopPage> {
                       spacing: 8,
                       children: [
                         FilledButton(
-                          onPressed: () => _viewer(context),
+                          onPressed: AppScope.of(context).remote.viewer.open,
                           child: Text(l.desktopOpen),
                         ),
                         TextButton(
-                          onPressed: store.disconnect,
+                          onPressed: AppScope.of(context).remote.disconnect,
                           child: Text(l.desktopDisconnect),
                         ),
                       ],
@@ -176,12 +171,12 @@ class _DesktopPageState extends State<DesktopPage> {
                                 store.connect(
                                   DesktopTarget(
                                     invitation: _invitation.text.trim(),
-                                    name: l.desktopTitle,
+                                    name: l.navRemoteDesktop,
                                     relayOnly: _relayOnly,
                                   ),
                                 ),
                               );
-                              _viewer(context);
+                              AppScope.of(context).remote.viewer.open();
                             },
                       icon: const Icon(Icons.desktop_windows_outlined),
                       label: Text(l.desktopConnect),
@@ -279,53 +274,4 @@ class _DesktopPageState extends State<DesktopPage> {
       ),
     ];
   }
-
-  Future<void> _viewer(BuildContext context) async {
-    if (_viewerOpen) return;
-    _viewerOpen = true;
-    final route = MaterialPageRoute<void>(
-      builder: (_) => DesktopViewer(store: widget.store),
-    );
-    try {
-      await Navigator.of(context).push(route);
-      await route.completed;
-    } finally {
-      _viewerOpen = false;
-    }
-  }
-}
-
-/// Persistent local stop, including while another page is open.
-class DesktopSharingBanner extends StatelessWidget {
-  const DesktopSharingBanner({super.key, required this.store});
-  final DesktopStore store;
-  @override
-  Widget build(BuildContext context) => ValueListenableBuilder(
-    valueListenable: store.hostView,
-    builder: (context, host, _) => host.sharing
-        ? Material(
-            color: Theme.of(context).colorScheme.secondaryContainer,
-            child: SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 4,
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.screen_share_outlined),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(context.l10n.desktopSharing)),
-                    TextButton(
-                      onPressed: store.stopHost,
-                      child: Text(context.l10n.desktopStop),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          )
-        : const SizedBox.shrink(),
-  );
 }
