@@ -216,7 +216,10 @@ statements stay until the owner accepts fluidity.
    - F: decoder hints on versus off: A, then A again with `deployed … serve
      --no-decoder-hints`, which writes `decoder_hints: false` into
      `controller.json`; no rebuild. The report's `decoder_hints` is the arm
-     asked for and each sample's `native.lowLatency` the one that ran.
+     asked for and each sample's `native.lowLatency` the one that ran. A
+     hinted start that fails for any reason is retried once without the hint,
+     so a false `lowLatency` on the hints-on arm needs logcat's
+     `PbDesktopVideo` warning to say why.
    - G: UAC prompt, lock screen and Win+L through the helper.
    - H: RustDesk side by side.
    - I: `video_bench --pace 60,30,15,5` and `video_bench 60 60` on each host

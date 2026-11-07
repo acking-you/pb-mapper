@@ -429,7 +429,8 @@ class DesktopVideo(messenger: BinaryMessenger, private val textures: TextureRegi
             } catch (e: Exception) {
                 try { next.release() } catch (_: Exception) {}
                 if (!lowLatency) throw e
-                Log.w(TAG, "$decoderName rejected the low-latency hint", e)
+                // Any failure retries once, so this need not be the hint.
+                Log.w(TAG, "$decoderName failed to start with the low-latency hint; retrying without it", e)
                 next = MediaCodec.createByCodecName(decoderName)
                 try {
                     start(next, unit, parameterSets, false)
