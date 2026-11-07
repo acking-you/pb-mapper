@@ -251,12 +251,13 @@ statements stay until the owner accepts fluidity.
    page's title bar; its hover red reaches both edges with no fringe, no
    backdrop shows around the three buttons, and the glyphs are crisp. With a
    dialog open the buttons stay undimmed and still respond; switching pages
-   never moves or fades them; their glyphs dim while another window is
-   active. At the narrowest window (720 px) while viewed, the capsule's dot
-   menu opens over the buttons, no hover grey paints over it, and Disconnect
-   viewer responds right up to its top edge. A restored window resizes from
-   its top edge, over the buttons too, and still drags just below it. The
-   icons look right on every page.
+   never moves or fades them, and neither does finishing first-run setup or
+   moving the window to a monitor of another scale; their glyphs dim while
+   another window is active. At the narrowest window (720 px) while viewed,
+   the capsule's dot menu opens over the buttons, no hover grey paints over
+   it, and Disconnect viewer responds right up to its top edge. A restored
+   window resizes from its top edge, over the buttons too, and still drags
+   just below it. The icons look right on every page.
 3. Navigation: six rail entries; five bar entries on the phone; Logs is
    reachable from Settings, and its back button returns.
 4. Host (Windows):
@@ -291,6 +292,14 @@ statements stay until the owner accepts fluidity.
      credential, no tunnels and no remembered computers.
 6. Desktop viewer:
    - the toolbar pins, and unpinned it collapses 2 s after the pointer leaves;
+   - full screen, entered from a restored window and from a maximised one:
+     the viewer's title bar and the caption buttons hide together, and come
+     back together on leaving it. `window_manager` 0.5.1 on Windows reports
+     entering full screen only from a maximised window (`WM_SIZE` with
+     `SIZE_MAXIMIZED`), so from a restored one both may stay over the
+     picture; if they do, record it, and the fix is one full-screen state
+     that the viewer sets after `setFullScreen` and the title bar, the
+     caption buttons and the fallback layer all read;
    - Display: fit or original, quality presets live, no reconnect;
    - Shortcuts: Win+D, Alt+Tab, Ctrl+Shift+Esc, Win; Win+L locks;
      Ctrl+Alt+Del is shown as unsupported;

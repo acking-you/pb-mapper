@@ -97,9 +97,10 @@ merged code does:
   `kViewerTitleBarHeight` 36 in `CaptionTone.viewer`
   (`V/viewer_title_bar.dart`), `kCaptionButtonHeight` 32 while loading and on
   the setup screen. Each plate's width and height are rounded to whole device
-  pixels. `WindowControls` alone listens to `window_manager`: maximised (the
-  middle glyph), full screen (it hides) and focus (an inactive window's idle
-  glyphs are the tone's ink at 36 %). The page bar keeps
+  pixels and set at once, never tweened; only the hover and press washes ease
+  over 90 ms. `WindowControls` alone listens to `window_manager`: maximised
+  (the middle glyph), full screen (it hides) and focus (an inactive window's
+  idle glyphs are the tone's ink at 36 %). The page bar keeps
   `kCaptionButtonsWidth + 16` clear at its end; the viewer's bar ends with
   `SizedBox(width: kCaptionButtonsWidth)` after its 12 px gap, end padding 0;
   the setup screen's card is centred and keeps nothing. On Windows only, a
@@ -122,8 +123,10 @@ merged code does:
   still has no tooltips or menus.
 - §14.1 (T6): `T/title_bar_test.dart` — on Windows, `caption-close` flush
   in the window's corner and as tall as the bar within a device pixel,
-  restored at 1.25 and maximised at 1.0, then compact, in the viewer and on
-  the setup screen; the window's corner pixel closes a maximised window and
+  restored at 1.25 and maximised at 1.0, with the window's corner pixel
+  drawn in the sheet's colour; then compact, widened to the rail (the taller
+  bar's height in the next frame, with motion on), in the viewer and on the
+  setup screen; the window's corner pixel closes a maximised window and
   resizes a restored one, which closes just below the band, where the bar
   still drags beside the buttons; with `confirmDestructive` open a click on
   the close still reaches it; at 720 × 560 while viewed, a click at the top

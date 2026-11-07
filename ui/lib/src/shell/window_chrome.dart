@@ -383,13 +383,16 @@ class _CaptionButtonState extends State<_CaptionButton> {
             onTapUp: (_) => _press(false),
             onTapCancel: () => _press(false),
             onTap: widget.onTap,
-            child: AnimatedContainer(
-              duration: Motion.of(context, const Duration(milliseconds: 90)),
-              width: widget.size.width,
-              height: widget.size.height,
-              color: bg,
-              child: Center(
-                child: CaptionGlyphIcon(glyph: widget.glyph, color: fg),
+            // A new bar's height or a new scale is taken at once; only the
+            // hover and press washes ease.
+            child: SizedBox.fromSize(
+              size: widget.size,
+              child: AnimatedContainer(
+                duration: Motion.of(context, const Duration(milliseconds: 90)),
+                color: bg,
+                child: Center(
+                  child: CaptionGlyphIcon(glyph: widget.glyph, color: fg),
+                ),
               ),
             ),
           ),

@@ -92,6 +92,43 @@ bool _reaches(WidgetTester tester, Offset at, Finder finder) {
   return false;
 }
 
+/// The window's top-right device pixel, as drawn.
+Future<Color> _cornerPixel(WidgetTester tester) async {
+  final boundary = tester.renderObject<RenderRepaintBoundary>(
+    find.byKey(appRootKey),
+  );
+  final pixel = await tester.runAsync(() async {
+    final image = await boundary.toImage(
+      pixelRatio: tester.view.devicePixelRatio,
+    );
+    try {
+      final rgba = (await image.toByteData())!;
+      final at = (image.width - 1) * 4;
+      return Color.fromARGB(
+        rgba.getUint8(at + 3),
+        rgba.getUint8(at),
+        rgba.getUint8(at + 1),
+        rgba.getUint8(at + 2),
+      );
+    } finally {
+      image.dispose();
+    }
+  });
+  return pixel!;
+}
+
+/// The page sheet's own colour.
+Color _sheetColor(WidgetTester tester) => tester
+    .widget<Material>(
+      find
+          .descendant(
+            of: find.byType(ContentSheet),
+            matching: find.byType(Material),
+          )
+          .first,
+    )
+    .color!;
+
 /// The opacity [finder]'s ancestors multiply into it.
 double _opacityOver(WidgetTester tester, Finder finder) {
   var alpha = 1.0;
@@ -116,9 +153,9 @@ void main() {
           await _pump(tester, size: size, dpr: dpr);
           final at = 'dpr $dpr, ${maximized ? 'maximised' : 'restored'}';
           _expectInCorner(tester, size, kPageBarHeight, reason: at);
-          // No backdrop shows around them: the sheet reaches the corner.
-          final sheet = tester.getRect(find.byType(ContentSheet));
-          expect(sheet.topRight, Offset(size.width, 0), reason: at);
+          // No backdrop shows around them: the sheet, square there, paints
+          // the window's corner pixel.
+          expect(await _cornerPixel(tester), _sheetColor(tester), reason: at);
 
           // The window's very corner closes a maximised window. A restored
           // one resizes from its top edge there, as Windows' own does, and
@@ -149,16 +186,21 @@ void main() {
   );
 
   testWidgets("a compact window, the viewer and setup each have them in the "
-      "corner at their own bar's height", (tester) async {
+      "corner at their own bar's height, taken at once", (tester) async {
     await _onWindows(() async {
       _maximized(tester, false);
       const compact = Size(640, 760);
-      await _pump(tester, size: compact);
+      await _pump(tester, size: compact, reducedMotion: false);
       expect(find.byType(ContentSheet), findsNothing);
       _expectInCorner(tester, compact, kCompactPageBarHeight);
+      // Widened past the rail's breakpoint, they take the taller bar in the
+      // next frame: Windows' buttons never grow into a new size.
+      const window = Size(1180, 780);
+      tester.view.physicalSize = window;
+      await tester.pump();
+      _expectInCorner(tester, window, kPageBarHeight);
       await finish(tester);
 
-      const window = Size(1180, 780);
       await _pump(tester, size: window);
       AppScope.of(
         tester.element(find.byType(TunnelsPage)),
