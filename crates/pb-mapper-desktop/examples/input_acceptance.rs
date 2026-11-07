@@ -23,8 +23,8 @@ fn main() {
 mod windows_test {
     use pb_mapper_client::sdk::{Client, ClientConfig, ConnectOptions, PathPolicy, RelayTransport};
     use pb_mapper_desktop::{
-        Backend, Button, DesktopContext, Display, Host, HostOptions, Input, InputEvent, Result,
-        Viewer,
+        Backend, Button, DesktopContext, Display, Host, HostOptions, Input, Pull, QualityPreset,
+        Result, VideoLimits, Viewer, ViewerConfig,
     };
     use pb_mapper_testkit::Relay;
     use std::{
@@ -456,18 +456,29 @@ mod windows_test {
         }
         state.check()
     }
-    async fn send(viewer: &Viewer, state: &State, sequence: &mut u64, input: Input) -> Result<()> {
+    async fn send(viewer: &Viewer, state: &State, input: Input) -> Result<()> {
         state.check()?;
-        let frame = viewer
-            .latest_frame()
-            .ok_or_else(|| failure("no received native desktop frame"))?;
-        *sequence += 1;
-        viewer.input(InputEvent {
-            generation: frame.status.generation,
-            frame_id: frame.status.frame_id,
-            sequence: *sequence,
-            input,
-        })
+        // The viewer stamps the presented frame and the sequence.
+        viewer
+            .input(viewer.status().generation, &[input])
+            .map_err(failure)
+    }
+    /// The native renderer's part: present every unit at once, until the
+    /// session's video ends.
+    fn present(viewer: &Viewer) -> Result<()> {
+        let consumer = viewer.video_sink().attach().map_err(failure)?;
+        std::thread::spawn(move || {
+            loop {
+                match consumer.next(Duration::from_millis(100), 4 << 20) {
+                    Pull::Unit(unit) => {
+                        consumer.presented(unit.generation, unit.frame_id);
+                    }
+                    Pull::Closed => break,
+                    _ => {}
+                }
+            }
+        });
+        Ok(())
     }
     pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let display = pb_mapper_desktop::displays()?
@@ -515,17 +526,17 @@ mod windows_test {
             // Use the product's native GPU path with a small input-acceptance
             // workload. Debug JPEG resizing can block the input worker for a
             // second per frame and deliberately trips the stale-input guard.
-            let connected = Viewer::connect_with_video_preferences(&consumer, host.invitation().clone(), ConnectOptions { path: PathPolicy::RelayOnly, ..Default::default() }, vec![pb_mapper_desktop::VideoCodec::H264], pb_mapper_desktop::VideoPreferences { max_width: 1280, max_height: 720, max_fps: 30, bitrate: 2_000_000 }).await;
+            let connected = Viewer::connect(&consumer, host.invitation(), ConnectOptions { path: PathPolicy::RelayOnly, ..Default::default() }, ViewerConfig { codecs: vec![pb_mapper_desktop::VideoCodec::H264], limits: VideoLimits { max_width: 1280, max_height: 720, max_fps: 30 }, quality: QualityPreset::Balanced, progress: None }).await;
             let viewer = match connected {
                 Ok(viewer) => viewer,
-                Err(error) => { let _ = host.stop().await; return Err(error); }
+                Err(error) => { let _ = host.stop().await; return Err(failure(error)); }
             };
             let result = async {
-                wait_for(&state, "first native frame", || viewer.latest_frame().is_some_and(|f| !f.bytes.is_empty())).await?;
+                present(&viewer)?;
+                wait_for(&state, "first native frame", || viewer.status().presented.is_some()).await?;
                 viewer.request_control(true)?;
-                wait_for(&state, "authorized current control frame", || viewer.latest_frame().is_some_and(|f| f.status.controlling && !f.bytes.is_empty())).await?;
-                let mut sequence = 0;
-                send(&viewer, &state, &mut sequence, Input::Text { text: TEXT.into() }).await?;
+                wait_for(&state, "authorized current control frame", || { let status = viewer.status(); status.controlling && status.fresh }).await?;
+                send(&viewer, &state, Input::Text { text: TEXT.into() }).await?;
                 if let Err(e) = wait_for(&state, "Unicode text in owned EDIT", || state.text() == TEXT).await {
                     eprintln!("native input diagnostics: last_capture_ms={} viewer_state={:?} host_state={:?}", state.capture_ms.load(Ordering::Acquire), viewer.status(), host.status());
                     return Err(e);
@@ -533,13 +544,13 @@ mod windows_test {
                 let point = state.client_point(320, 220)?;
                 if point.x < display.x || point.y < display.y || point.x >= display.x + display.width as i32 || point.y >= display.y + display.height as i32 { return Err(failure("owned target outside selected physical monitor")); }
                 let applied = state.applied.load(Ordering::Acquire);
-                send(&viewer, &state, &mut sequence, Input::Move { x: (point.x - display.x) as u32, y: (point.y - display.y) as u32 }).await?;
+                send(&viewer, &state, Input::Move { x: (point.x - display.x) as u32, y: (point.y - display.y) as u32 }).await?;
                 wait_for(&state, "native pointer move", || state.applied.load(Ordering::Acquire) > applied).await?;
-                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: true, drag_start: false }).await?;
+                send(&viewer, &state, Input::Button { button: Button::Left, down: true, drag_start: false }).await?;
                 wait_for(&state, "native button down", || state.downs.load(Ordering::Acquire) == 1 && state.held.load(Ordering::Acquire)).await?;
-                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: false, drag_start: false }).await?;
+                send(&viewer, &state, Input::Button { button: Button::Left, down: false, drag_start: false }).await?;
                 wait_for(&state, "native button up", || state.ups.load(Ordering::Acquire) == 1 && !state.held.load(Ordering::Acquire)).await?;
-                send(&viewer, &state, &mut sequence, Input::Button { button: Button::Left, down: true, drag_start: false }).await?;
+                send(&viewer, &state, Input::Button { button: Button::Left, down: true, drag_start: false }).await?;
                 wait_for(&state, "held button before disconnect", || state.downs.load(Ordering::Acquire) == 2 && state.held.load(Ordering::Acquire)).await?;
                 let at = Instant::now();
                 viewer.stop().await?;

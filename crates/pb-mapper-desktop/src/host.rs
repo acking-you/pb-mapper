@@ -479,22 +479,31 @@ mod trust_tests {
         )
         .await
         .unwrap();
+        let config = || crate::ViewerConfig {
+            codecs: vec![crate::VideoCodec::Jpeg],
+            limits: crate::VideoLimits::for_viewer(60.0),
+            quality: crate::QualityPreset::Balanced,
+            progress: None,
+        };
         let viewer = crate::Viewer::connect(
             &client,
-            invitation.clone(),
+            &invitation,
             pb_mapper_client::sdk::ConnectOptions {
                 path: pb_mapper_client::sdk::PathPolicy::RelayOnly,
                 ..Default::default()
             },
+            config(),
         )
         .await
         .unwrap();
-        let mut frames = viewer.frames();
-        tokio::time::timeout(Duration::from_secs(5), frames.changed())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!frames.borrow().as_ref().unwrap().status.control_allowed);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while viewer.status().state != crate::ViewerState::Streaming {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!viewer.status().control_allowed);
         viewer.stop().await.unwrap();
         resumed.stop().await.unwrap();
         let replacement = Host::start_with_backend_and_identity(
@@ -509,11 +518,12 @@ mod trust_tests {
         assert!(
             crate::Viewer::connect(
                 &client,
-                invitation,
+                &invitation,
                 pb_mapper_client::sdk::ConnectOptions {
                     path: pb_mapper_client::sdk::PathPolicy::RelayOnly,
                     ..Default::default()
-                }
+                },
+                config(),
             )
             .await
             .is_err()
