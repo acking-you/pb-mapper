@@ -9,7 +9,9 @@ static EPOCH: AtomicU64 = AtomicU64::new(1);
 // SessionIdentity::check is an RPC to the session manager (~120 µs), and one
 // helper request checks several times. An answer stands this long while no
 // desktop switch is seen and the console session is still ours: lock, unlock
-// and UAC switch desktops, and a logoff and a new login take far longer.
+// and UAC switch desktops, and a logoff and a new login take far longer. Not
+// on the Winlogon desktop: UAC and the lock UI share it, so a lock there may
+// raise no switch and the console state is the only signal.
 const CONSOLE_REUSE: std::time::Duration = std::time::Duration::from_millis(4);
 // SendInput requires journal-playback access on the bound desktop handle.
 // READ/WRITEOBJECTS alone allows SetCursorPos but rejects buttons and keys,
@@ -133,13 +135,16 @@ impl BindingState {
 #[derive(Default)]
 struct ConsoleMemo(std::cell::Cell<Option<(u64, std::time::Instant, os::ConsoleState)>>);
 impl ConsoleMemo {
+    /// `desktop` is the bound desktop's name: on Winlogon every check asks.
     fn get(
         &self,
+        desktop: &str,
         epoch: u64,
         now: std::time::Instant,
         query: impl FnOnce() -> Result<os::ConsoleState>,
     ) -> Result<os::ConsoleState> {
-        if let Some((asked, at, console)) = self.0.get()
+        if desktop != "winlogon"
+            && let Some((asked, at, console)) = self.0.get()
             && asked == epoch
             && now.saturating_duration_since(at) < CONSOLE_REUSE
         {
@@ -210,7 +215,7 @@ impl DesktopBinding {
             // Checking an inactive session fails before any RPC.
             return self.checked.fresh(epoch, now, check);
         }
-        self.checked.get(epoch, now, check)
+        self.checked.get(&self.state.name, epoch, now, check)
     }
     pub fn generation(&self) -> u64 {
         self.state.generation
@@ -705,23 +710,37 @@ mod tests {
     }
 
     #[test]
-    fn a_console_answer_stands_only_within_one_epoch_and_window() {
+    fn a_console_answer_stands_only_within_one_epoch_and_window_off_winlogon() {
         use os::ConsoleState::{Locked, Unlocked};
         let memo = ConsoleMemo::default();
+        let ordinary = "default";
         let t0 = std::time::Instant::now();
         let soon = t0 + std::time::Duration::from_millis(3);
-        assert_eq!(memo.get(1, t0, || Ok(Unlocked)).unwrap(), Unlocked);
         assert_eq!(
-            memo.get(1, soon, || panic!("asked again")).unwrap(),
+            memo.get(ordinary, 1, t0, || Ok(Unlocked)).unwrap(),
+            Unlocked
+        );
+        assert_eq!(
+            memo.get(ordinary, 1, soon, || panic!("asked again"))
+                .unwrap(),
             Unlocked
         );
         // A desktop switch asks again inside the window, and so does age.
-        assert_eq!(memo.get(2, soon, || Ok(Locked)).unwrap(), Locked);
+        assert_eq!(memo.get(ordinary, 2, soon, || Ok(Locked)).unwrap(), Locked);
         let later = soon + CONSOLE_REUSE;
-        assert_eq!(memo.get(2, later, || Ok(Unlocked)).unwrap(), Unlocked);
+        assert_eq!(
+            memo.get(ordinary, 2, later, || Ok(Unlocked)).unwrap(),
+            Unlocked
+        );
         // A forced check replaces the answer, and a failure is never kept.
         assert!(memo.fresh(2, later, || Err(error("logged off"))).is_err());
-        assert_eq!(memo.get(2, later, || Ok(Locked)).unwrap(), Locked);
+        assert_eq!(memo.get(ordinary, 2, later, || Ok(Locked)).unwrap(), Locked);
+        // UAC and the lock UI share Winlogon, where a lock may raise no switch:
+        // the answer kept just now must not hide one.
+        assert_eq!(
+            memo.get("winlogon", 2, later, || Ok(Unlocked)).unwrap(),
+            Unlocked
+        );
     }
 
     #[test]
