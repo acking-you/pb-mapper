@@ -694,6 +694,8 @@ impl Engine {
         if format.keyframe {
             self.shared.idr.lock().on_emitted(at);
             self.keyframe = false;
+            // A new encoder's first unit is an IDR: its GOP is known by then.
+            self.state.gop = self.backend.video_gop().unwrap_or(0);
         }
         self.frame_id += 1;
         self.shared.auth.lock().on_produced(self.frame_id, at);

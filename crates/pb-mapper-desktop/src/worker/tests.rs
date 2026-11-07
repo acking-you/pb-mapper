@@ -124,6 +124,9 @@ impl Backend for Fake {
     fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
         *self.guard.lock()
     }
+    fn video_gop(&self) -> Option<u32> {
+        Some(u32::MAX)
+    }
 }
 
 fn session(allowed: bool) -> Arc<SessionShared> {
@@ -421,6 +424,8 @@ fn fps_and_preset_changes_never_reconfigure_the_encoder() {
     let mut h = Harness::new(true, None);
     h.run(Duration::from_millis(100), true);
     let generation = h.state().generation;
+    // The encoder's read-back GOP reaches the state, and so `Stats`.
+    assert_eq!(h.state().gop, u32::MAX);
     // QoS pace and bitrate changes, and a preset switch, are rates only.
     for (pace_fps, bitrate) in [(30, 2_000_000), (15, 8_000_000), (60, 6_000_000)] {
         let targets = &h.shared.targets;

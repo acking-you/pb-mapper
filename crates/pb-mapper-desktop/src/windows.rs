@@ -345,6 +345,12 @@ impl Backend for Desktop {
             .as_ref()
             .map_or(0, |(_, encoder)| encoder.pending_len())
     }
+    fn video_gop(&self) -> Option<u32> {
+        self.encoder
+            .as_ref()
+            .map(|(_, encoder)| encoder.statistics().gop)
+            .filter(|&gop| gop > 0)
+    }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;
         self.input_in_context(&context, event)

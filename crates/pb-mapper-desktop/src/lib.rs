@@ -410,6 +410,11 @@ pub trait Backend: 'static {
     fn pending_video(&self) -> usize {
         0
     }
+    /// The GOP length the current encoder read back when it was built. `None`
+    /// without an encoder, or when it reports none.
+    fn video_gop(&self) -> Option<u32> {
+        None
+    }
     fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
         if &self.context()? != expected {
             return Err(error("desktop changed before capture"));
