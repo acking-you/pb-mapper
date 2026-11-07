@@ -7,16 +7,9 @@
 //! Input is authorised only by `AuthLedger`, which only a validated
 //! presentation advances. Capture, receipts and cursor sampling renew nothing.
 
-// The host spawns thread C once its v2 session lands; until then only the
-// tests here run it, and the v1 host runs on `v1::Worker`.
-#![cfg_attr(not(test), allow(dead_code))]
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
-mod v1;
-
-pub(crate) use v1::Worker;
 
 use crate::{
     Backend, Button, ControlAdmission, ControlLease, DesktopContext, EncodedFrame, Input,
@@ -701,6 +694,8 @@ impl Engine {
         if format.keyframe {
             self.shared.idr.lock().on_emitted(at);
             self.keyframe = false;
+            // A new encoder's first unit is an IDR: its GOP is known by then.
+            self.state.gop = self.backend.video_gop().unwrap_or(0);
         }
         self.frame_id += 1;
         self.shared.auth.lock().on_produced(self.frame_id, at);

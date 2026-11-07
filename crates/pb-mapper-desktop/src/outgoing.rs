@@ -124,6 +124,7 @@ impl Outgoing {
         })
     }
 
+    #[cfg(test)]
     pub fn pop(&self) -> Option<HostUnit> {
         self.q.lock().pop_front()
     }

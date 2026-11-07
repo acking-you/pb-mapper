@@ -164,7 +164,6 @@ pub(crate) enum HandshakeFailure {
 }
 
 /// Classify a failed TLS connect or accept (tokio-rustls wraps the rustls error).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn handshake_failure(failure: &io::Error) -> Option<HandshakeFailure> {
     use rustls::{AlertDescription, CertificateError, Error};
     match failure.get_ref()?.downcast_ref::<Error>()? {

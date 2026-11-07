@@ -38,9 +38,7 @@ impl Pacer {
         self.last = Some(now);
     }
 
-    // Thread C bounds its encoder polls by the next tick; the v1 worker,
-    // which runs until the host spawns thread C, does not.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The next tick, which bounds thread C's encoder polls.
     pub fn next(&self) -> Instant {
         self.next
     }

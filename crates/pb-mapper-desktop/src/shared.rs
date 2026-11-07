@@ -93,16 +93,13 @@ pub(crate) struct Targets {
     pub pace_fps: AtomicU32,
     pub encoder_bps: AtomicU32,
     pub paused: AtomicBool,
-    /// `limits.max_fps`, constant for the session.
-    pub nominal_fps: u32,
 }
 impl Targets {
-    pub fn new(nominal_fps: u32, pace_fps: u32, encoder_bps: u32) -> Self {
+    pub fn new(pace_fps: u32, encoder_bps: u32) -> Self {
         Self {
             pace_fps: AtomicU32::new(pace_fps),
             encoder_bps: AtomicU32::new(encoder_bps),
             paused: AtomicBool::new(false),
-            nominal_fps,
         }
     }
 }
@@ -123,6 +120,8 @@ pub(crate) struct EngineState {
     pub capture_fps: f32,
     pub skipped_ticks: u64,
     pub dropped_frames: u64,
+    /// `Backend::video_gop` at the last keyframe; 0 when unknown (JPEG, or a
+    /// backend that does not report it).
     pub gop: u32,
     /// `(code, message, serial)`; B-send writes each serial once.
     pub notice: Option<(NoticeCode, String, u64)>,

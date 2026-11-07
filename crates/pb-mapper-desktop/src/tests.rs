@@ -4,7 +4,10 @@ use crate::protocol::{HostMessage, ViewerMessage};
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
 use pb_mapper_testkit::{Relay, admin_credential};
 use std::{
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncReadExt, sync::Notify};

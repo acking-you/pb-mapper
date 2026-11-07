@@ -124,6 +124,13 @@ pub(super) fn displays() -> Result<Vec<Display>> {
         .map(describe)
         .collect()
 }
+/// The encoder's limits until `configure_video`, which every session calls
+/// before it captures.
+const UNCONFIGURED: crate::VideoLimits = crate::VideoLimits {
+    max_width: 1920,
+    max_height: 1080,
+    max_fps: 60,
+};
 pub(super) fn create(id: u32) -> Result<Box<dyn Backend>> {
     available()?;
     Ok(Box::new(Desktop {
@@ -134,7 +141,7 @@ pub(super) fn create(id: u32) -> Result<Box<dyn Backend>> {
         keys: HashSet::new(),
         secure: None,
         encoder: None,
-        video_limits: crate::VideoPreferences::default().limits(),
+        video_limits: UNCONFIGURED,
     }))
 }
 struct Desktop {
@@ -337,6 +344,12 @@ impl Backend for Desktop {
         self.encoder
             .as_ref()
             .map_or(0, |(_, encoder)| encoder.pending_len())
+    }
+    fn video_gop(&self) -> Option<u32> {
+        self.encoder
+            .as_ref()
+            .map(|(_, encoder)| encoder.statistics().gop)
+            .filter(|&gop| gop > 0)
     }
     fn input(&mut self, event: &Input) -> Result<()> {
         let context = self.context()?;
@@ -557,7 +570,7 @@ pub(crate) fn create_privileged(
         keys: HashSet::new(),
         secure: Some(binding),
         encoder: None,
-        video_limits: crate::VideoPreferences::default().limits(),
+        video_limits: UNCONFIGURED,
     }))
 }
 impl Drop for Desktop {

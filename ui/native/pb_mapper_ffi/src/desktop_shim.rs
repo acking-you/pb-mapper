@@ -13,11 +13,11 @@ use crate::{
     handle::PbMapperHandle,
 };
 use pb_mapper::desktop::{
-    self, CursorPosition, DesktopKind, DesktopView, HostStatus, Invitation, KeyframeReason, Pull,
-    QualityPreset, SessionStatus, VideoCodec, VideoFormat, VideoLimits, VideoUnit, Viewer,
+    self, CursorPosition, DesktopKind, DesktopView, HostPath, HostState, HostStatus, Invitation,
+    KeyframeReason, Pull, QualityPreset, VideoCodec, VideoFormat, VideoLimits, VideoUnit, Viewer,
     ViewerConfig, ViewerReason, ViewerState,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// The largest unit the wire carries.
@@ -38,6 +38,52 @@ struct Shown {
     generation: u64,
     frame_id: u64,
     format: VideoFormat,
+}
+
+/// The v1 status the old Dart reads, for the host and per frame. It leaves
+/// out what the old core filled and this one cannot (`frames`, `bytes`, the
+/// direct path's stage); the old Dart defaults them.
+#[derive(Default, Serialize)]
+struct LegacyStatus {
+    state: String,
+    message: String,
+    control_allowed: bool,
+    controlling: bool,
+    generation: u64,
+    frame_id: u64,
+    display: Option<desktop::Display>,
+    path: String,
+    desktop: String,
+    video: VideoFormat,
+    capture_fps: f32,
+    receive_fps: f32,
+    dropped_frames: u64,
+    bitrate: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<CursorPosition>,
+    frame_ack_ms: f32,
+}
+
+/// The v1 `connect` limits. The bitrate ceiling is accepted and ignored: the
+/// host's QoS sets the rate.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyVideo {
+    max_width: u32,
+    max_height: u32,
+    max_fps: u32,
+    #[serde(rename = "bitrate")]
+    _bitrate: u32,
+}
+impl Default for LegacyVideo {
+    fn default() -> Self {
+        Self {
+            max_width: 1920,
+            max_height: 1080,
+            max_fps: 90,
+            _bitrate: 0,
+        }
+    }
 }
 
 /// The v1 shapes the old Dart sends.
@@ -64,7 +110,7 @@ enum Request {
         #[serde(default)]
         native_video: bool,
         #[serde(default)]
-        video: Option<desktop::VideoPreferences>,
+        video: Option<LegacyVideo>,
     },
     HostEnable {
         service: String,
@@ -194,10 +240,7 @@ fn status(handle: &PbMapperHandle) -> Value {
         .host
         .try_lock()
         .ok()
-        .and_then(|slot| {
-            slot.as_ref()
-                .map(|host| json!(desktop::legacy_host_status(&host.status())))
-        })
+        .and_then(|slot| slot.as_ref().map(|host| json!(legacy_host(&host.status()))))
         .or_else(|| background.as_ref().and_then(background_host));
     let viewer = state.viewer().map(|viewer| {
         let shown = state
@@ -210,20 +253,56 @@ fn status(handle: &PbMapperHandle) -> Value {
     json!({"host": host, "viewer": viewer, "background": background})
 }
 
+/// The host card's status in the legacy shape.
+fn legacy_host(status: &HostStatus) -> LegacyStatus {
+    let viewer = status.viewer.as_ref();
+    LegacyStatus {
+        state: match status.state {
+            HostState::Waiting => "waiting",
+            HostState::Connecting => "connecting",
+            HostState::Streaming => "streaming",
+            HostState::Paused => "paused",
+            HostState::CaptureUnavailable => "capture_unavailable",
+            HostState::Stopped => "stopped",
+        }
+        .into(),
+        message: status.message.clone(),
+        control_allowed: status.control_allowed,
+        controlling: viewer.is_some_and(|viewer| viewer.controlling),
+        display: status.display.clone(),
+        path: match viewer.map(|viewer| viewer.path) {
+            Some(HostPath::Direct) => "direct",
+            Some(HostPath::Relay) => "relay",
+            Some(HostPath::Unknown) | None => "",
+        }
+        .into(),
+        desktop: legacy_desktop(status.desktop),
+        ..LegacyStatus::default()
+    }
+}
+
+fn legacy_desktop(desktop: DesktopKind) -> String {
+    match desktop {
+        DesktopKind::Ordinary => "ordinary",
+        DesktopKind::Secure => "secure",
+    }
+    .into()
+}
+
 fn background_host(snapshot: &Value) -> Option<Value> {
     if !background_enabled(snapshot) {
         return None;
     }
     // The helper's IPC v2 reports a `HostStatus`, its v1 the legacy shape.
     if let Ok(status) = serde_json::from_value::<HostStatus>(snapshot["host"].clone()) {
-        return Some(json!(desktop::legacy_host_status(&status)));
+        return Some(json!(legacy_host(&status)));
     }
     if !snapshot["host"].is_null() {
         return Some(snapshot["host"].clone());
     }
     // The service may be waiting for a console session or retrying the relay.
     // It still owns an enabled grant, so the global Stop action must stay live.
-    Some(json!(SessionStatus {
+    Some(json!(LegacyStatus {
         state: "waiting".into(),
         message: snapshot["message"].as_str().unwrap_or_default().into(),
         control_allowed: snapshot["settings"]["allow_control"]
@@ -235,7 +314,7 @@ fn background_host(snapshot: &Value) -> Option<Value> {
 
 /// The per-frame status the old Dart reads: the viewer's status, the cursor
 /// from its view, and the last unit handed out.
-fn legacy_status(viewer: &Viewer, shown: Option<Shown>) -> SessionStatus {
+fn legacy_status(viewer: &Viewer, shown: Option<Shown>) -> LegacyStatus {
     let status = viewer.status();
     let view = viewer.view();
     // The v1 host put this prefix on input failures; the old store drops its
@@ -245,7 +324,7 @@ fn legacy_status(viewer: &Viewer, shown: Option<Shown>) -> SessionStatus {
     } else {
         status.message
     };
-    SessionStatus {
+    LegacyStatus {
         state: match status.state {
             ViewerState::Connecting => "connecting",
             ViewerState::Streaming => "streaming",
@@ -261,11 +340,7 @@ fn legacy_status(viewer: &Viewer, shown: Option<Shown>) -> SessionStatus {
         frame_id: shown.as_ref().map_or(0, |shown| shown.frame_id),
         display: status.display,
         path: status.stats.path,
-        desktop: match status.desktop {
-            DesktopKind::Ordinary => "ordinary",
-            DesktopKind::Secure => "secure",
-        }
-        .into(),
+        desktop: legacy_desktop(status.desktop),
         video: shown.map(|shown| shown.format).unwrap_or_default(),
         capture_fps: status.stats.capture_fps,
         receive_fps: status.stats.received_fps,
@@ -277,14 +352,13 @@ fn legacy_status(viewer: &Viewer, shown: Option<Shown>) -> SessionStatus {
             visible: view.flags & DesktopView::FLAG_CURSOR_VISIBLE != 0,
         }),
         frame_ack_ms: status.stats.picture_latency_ms.map_or(0.0, |ms| ms as f32),
-        ..SessionStatus::default()
     }
 }
 
 /// The next unit with its legacy status. Without one, a status alone when
 /// the cursor moved, as the v1 host sent it, so the old viewer's pointer
 /// follows a still picture.
-fn next_frame(handle: &PbMapperHandle, wait_ms: u32) -> Option<(SessionStatus, Option<VideoUnit>)> {
+fn next_frame(handle: &PbMapperHandle, wait_ms: u32) -> Option<(LegacyStatus, Option<VideoUnit>)> {
     let state = &handle.desktop;
     let viewer = state.viewer()?;
     let consumer = state.shim.lock().as_ref()?.consumer;
@@ -378,7 +452,7 @@ pub unsafe extern "C" fn pb_mapper_desktop_wait_frame(
     })
 }
 
-fn export_frame(frame: Option<(SessionStatus, Option<VideoUnit>)>) -> *mut DesktopBuffer {
+fn export_frame(frame: Option<(LegacyStatus, Option<VideoUnit>)>) -> *mut DesktopBuffer {
     let Some((status, unit)) = frame else {
         return std::ptr::null_mut();
     };

@@ -1,10 +1,8 @@
-use crate::{InputEvent, Result, VideoCodec, error};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use crate::{Result, error};
+use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub(crate) const MAX_JSON: usize = 8192;
-pub(crate) const MAX_FRAME: usize = 4 * 1024 * 1024;
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Protocol v2 records are `u32 BE len | bytes`: a JSON header of at most
@@ -66,7 +64,12 @@ pub(crate) async fn read_header<R: AsyncRead + Unpin, T: DeserializeOwned>(
             return Ok(None);
         }
         r.read_exact(&mut length[1..]).await?;
-        let bytes = read_body(r, u32::from_be_bytes(length) as usize, MAX_HEADER).await?;
+        let len = u32::from_be_bytes(length) as usize;
+        if len > MAX_HEADER {
+            return Err(error("desktop message too large"));
+        }
+        let mut bytes = vec![0; len];
+        r.read_exact(&mut bytes).await?;
         serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|_| error("invalid desktop message"))
@@ -76,7 +79,6 @@ pub(crate) async fn read_header<R: AsyncRead + Unpin, T: DeserializeOwned>(
 }
 
 /// The payload record that follows a `Video` header, read without a copy.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn read_payload<R: AsyncRead + Unpin>(r: &mut R) -> Result<bytes::Bytes> {
     let len = tokio::time::timeout(IO_TIMEOUT, r.read_u32())
         .await
@@ -94,73 +96,6 @@ pub(crate) async fn read_payload<R: AsyncRead + Unpin>(r: &mut R) -> Result<byte
     })
     .await
     .map_err(|_| timed_out())?
-}
-
-/// The v1 viewer request, deleted with the v1 pipeline at G1.
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Command {
-    Authenticate {
-        token: String,
-        #[serde(default)]
-        codecs: Vec<VideoCodec>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        video: Option<crate::VideoPreferences>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        presentation_feedback: bool,
-    },
-    Control {
-        enabled: bool,
-    },
-    Input {
-        event: InputEvent,
-    },
-    Release,
-    Ping,
-    Probe {
-        nonce: u64,
-    },
-    Keyframe,
-    Presented {
-        generation: u64,
-        frame_id: u64,
-    },
-}
-
-pub(crate) async fn write_json<W: AsyncWrite + Unpin, T: Serialize>(
-    io: &mut W,
-    value: &T,
-) -> Result<()> {
-    let bytes = serde_json::to_vec(value).map_err(error)?;
-    write_bytes(io, &bytes, MAX_JSON).await
-}
-pub(crate) async fn read_json<R: AsyncRead + Unpin, T: DeserializeOwned>(io: &mut R) -> Result<T> {
-    let bytes = read_bytes(io, MAX_JSON).await?;
-    serde_json::from_slice(&bytes).map_err(|_| error("invalid desktop message"))
-}
-pub(crate) async fn write_bytes<W: AsyncWrite + Unpin>(
-    io: &mut W,
-    bytes: &[u8],
-    limit: usize,
-) -> Result<()> {
-    if bytes.len() > limit {
-        return Err(error("desktop message too large"));
-    }
-    io.write_u32(bytes.len() as u32).await?;
-    io.write_all(bytes).await?;
-    io.flush().await
-}
-pub(crate) async fn read_bytes<R: AsyncRead + Unpin>(io: &mut R, limit: usize) -> Result<Vec<u8>> {
-    let len = io.read_u32().await? as usize;
-    read_body(io, len, limit).await
-}
-async fn read_body<R: AsyncRead + Unpin>(io: &mut R, len: usize, limit: usize) -> Result<Vec<u8>> {
-    if len > limit {
-        return Err(error("desktop message too large"));
-    }
-    let mut bytes = vec![0; len];
-    io.read_exact(&mut bytes).await?;
-    Ok(bytes)
 }
 
 #[cfg(test)]

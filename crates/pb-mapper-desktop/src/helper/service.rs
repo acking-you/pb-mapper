@@ -148,7 +148,7 @@ async fn session(
     stop: CancellationToken,
     sessions: &SessionEvents,
 ) -> Result<()> {
-    let request: Request = tokio::time::timeout(TIMEOUT, crate::wire::read_json(&mut caller))
+    let request: Request = tokio::time::timeout(TIMEOUT, ipc::read_json(&mut caller))
         .await
         .map_err(error)??;
     let Request::Start { display_id } = request else {
@@ -184,7 +184,7 @@ async fn session(
         display_id,
         session: session.clone(),
     };
-    tokio::time::timeout(TIMEOUT, crate::wire::write_json(&mut private, &attached))
+    tokio::time::timeout(TIMEOUT, ipc::write_json(&mut private, &attached))
         .await
         .map_err(error)??;
     let watch = async {

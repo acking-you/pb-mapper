@@ -270,6 +270,9 @@ mod windows_test {
         fn pending_video(&self) -> usize {
             self.inner.pending_video()
         }
+        fn video_gop(&self) -> Option<u32> {
+            self.inner.video_gop()
+        }
         fn input(&mut self, input: &Input) -> Result<()> {
             let context = self.context()?;
             self.input_in_context(&context, input)

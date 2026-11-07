@@ -85,9 +85,9 @@ impl RemoteBackend {
                     .pipe
                     .as_mut()
                     .ok_or_else(|| error("helper disconnected"))?;
-                crate::wire::write_json(pipe, &request).await?;
-                let response: Response = crate::wire::read_json(pipe).await?;
-                let image = crate::wire::read_bytes(pipe, crate::wire::MAX_FRAME).await?;
+                ipc::write_json(pipe, &request).await?;
+                let response: Response = ipc::read_json(pipe).await?;
+                let image = ipc::read_bytes(pipe, ipc::MAX_FRAME).await?;
                 self.pending = response.pending as usize;
                 if let Some(reason) = response.error {
                     self.context = None;
