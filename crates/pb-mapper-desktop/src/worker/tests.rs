@@ -32,6 +32,9 @@ struct Fake {
     clock: Clock,
     width: Arc<AtomicU32>,
     fail_input: Arc<AtomicBool>,
+    fail_lock: Arc<AtomicBool>,
+    /// The OS double-click time and box; `None` never holds a press.
+    guard: Arc<Mutex<Option<crate::DoubleClickGuard>>>,
     /// How long a capture call takes, in real time.
     delay: Duration,
     /// Told when a capture call starts.
@@ -44,6 +47,8 @@ impl Fake {
             clock,
             width: Arc::new(AtomicU32::new(10)),
             fail_input: Arc::default(),
+            fail_lock: Arc::default(),
+            guard: Arc::default(),
             delay: Duration::ZERO,
             started: None,
         }
@@ -105,7 +110,9 @@ impl Backend for Fake {
         }))
     }
     fn input(&mut self, event: &Input) -> Result<()> {
-        if self.fail_input.load(Ordering::SeqCst) {
+        if self.fail_input.load(Ordering::SeqCst)
+            || matches!(event, Input::Lock {}) && self.fail_lock.load(Ordering::SeqCst)
+        {
             return Err(error("native injection rejected"));
         }
         self.log.lock().inputs.push(((self.clock)(), event.clone()));
@@ -113,6 +120,9 @@ impl Backend for Fake {
     }
     fn release(&mut self) {
         self.log.lock().releases += 1;
+    }
+    fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
+        *self.guard.lock()
     }
 }
 
@@ -578,4 +588,140 @@ fn observation_never_acquires_write_admission_and_revocation_releases_it() {
     assert_eq!(writers.load(Ordering::SeqCst), 1);
     drop(h);
     assert_eq!(writers.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn lock_is_control_gated_and_failure_keeps_control() {
+    let mut h = Harness::new(false, None);
+    // View-only: the lock never reaches the backend.
+    h.present();
+    h.input(Input::Lock {});
+    h.step();
+    assert_eq!(h.inputs(), 0);
+    assert!(h.state().notice.is_none());
+
+    h.shared.policy.set(true);
+    h.send(LaneCommand::Control { enabled: true });
+    h.step();
+    h.present();
+    h.fake.fail_lock.store(true, Ordering::SeqCst);
+    h.input(Input::Lock {});
+    h.step();
+    let failed = h.state();
+    assert!(failed.controlling, "a failed lock held nothing down");
+    let (code, message, serial) = failed.notice.unwrap();
+    assert_eq!(code, NoticeCode::LockFailed);
+    assert!(message.contains("rejected"));
+    // The notice shows for 5 s.
+    h.run(Duration::from_millis(4900), true);
+    assert_eq!(h.state().notice.map(|notice| notice.2), Some(serial));
+    h.run(Duration::from_millis(200), true);
+    assert!(h.state().notice.is_none());
+    assert!(h.state().controlling);
+
+    h.fake.fail_lock.store(false, Ordering::SeqCst);
+    h.present();
+    h.input(Input::Lock {});
+    h.step();
+    let (code, _, locked) = h.state().notice.unwrap();
+    assert_eq!(code, NoticeCode::Locked);
+    assert!(locked > serial);
+    assert_eq!(h.inputs(), 1);
+}
+
+#[test]
+fn drag_start_press_waits_out_the_double_click_time() {
+    fn left(down: bool, drag_start: bool) -> Input {
+        Input::Button {
+            button: crate::Button::Left,
+            down,
+            drag_start,
+        }
+    }
+    /// Control, a fresh presentation, a click, and 100 ms later a drag start
+    /// and a move, which are held.
+    fn hold(h: &mut Harness) -> usize {
+        if !h.state().controlling {
+            h.send(LaneCommand::Control { enabled: true });
+            h.step();
+        }
+        h.present();
+        h.input(MOVE);
+        h.input(left(true, false));
+        h.input(left(false, false));
+        h.step();
+        *h.now.lock() += Duration::from_millis(100);
+        let injected = h.inputs();
+        h.input(left(true, true));
+        h.input(Input::Move { x: 4, y: 4 });
+        h.step();
+        assert_eq!(h.inputs(), injected);
+        injected
+    }
+    let ms = Duration::from_millis;
+    let mut h = Harness::new(true, None);
+    *h.fake.guard.lock() = Some(crate::DoubleClickGuard {
+        time_ms: 500,
+        half_box: (2, 2),
+    });
+    h.send(LaneCommand::Control { enabled: true });
+    h.step();
+    h.present();
+
+    // A click at t0, and a drag that starts at t0 + 200 ms: the press waits
+    // until t0 + 520 ms, and the move queued after it follows it.
+    h.input(MOVE);
+    h.input(left(true, false));
+    h.input(left(false, false));
+    h.step();
+    let t0 = h.now();
+    *h.now.lock() = t0 + ms(200);
+    h.input(left(true, true));
+    h.input(Input::Move { x: 4, y: 4 });
+    let deadline = h.step();
+    assert_eq!(h.inputs(), 3);
+    assert!(deadline <= t0 + ms(520));
+    h.run(ms(400), true);
+    {
+        let log = h.fake.log.lock();
+        assert_eq!(log.inputs.len(), 5);
+        let (pressed, press) = &log.inputs[3];
+        assert!(*pressed >= t0 + ms(520));
+        assert!(matches!(press, Input::Button { down: true, .. }));
+        let (moved, motion) = &log.inputs[4];
+        assert!(moved >= pressed);
+        assert!(matches!(motion, Input::Move { x: 4, y: 4 }));
+    }
+
+    // A press without the flag is never held.
+    h.input(left(false, false));
+    h.input(left(true, false));
+    h.input(left(false, false));
+    h.step();
+    *h.now.lock() += ms(100);
+    let injected = h.inputs();
+    h.input(left(true, false));
+    h.step();
+    assert_eq!(h.inputs(), injected + 1);
+    h.input(left(false, false));
+    h.step();
+
+    // A release, a policy change or a stale presentation during the hold:
+    // nothing held is injected, ever.
+    let injected = hold(&mut h);
+    h.send(LaneCommand::Release);
+    h.run(ms(700), true);
+    assert_eq!(h.inputs(), injected);
+
+    let injected = hold(&mut h);
+    h.shared.policy.set(true);
+    h.run(ms(700), true);
+    assert_eq!(h.inputs(), injected);
+    assert!(!h.state().controlling);
+
+    let injected = hold(&mut h);
+    let (generation, now) = (h.state().generation, h.now());
+    assert!(!h.shared.auth.lock().on_presented(generation, u64::MAX, now));
+    h.run(ms(700), true);
+    assert_eq!(h.inputs(), injected);
 }

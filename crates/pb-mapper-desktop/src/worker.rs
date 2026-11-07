@@ -19,17 +19,18 @@ mod v1;
 pub(crate) use v1::Worker;
 
 use crate::{
-    Backend, ControlAdmission, ControlLease, DesktopContext, EncodedFrame, InputEvent, Result,
-    VideoCodec, VideoLimits, VideoRate, error,
+    Backend, Button, ControlAdmission, ControlLease, DesktopContext, EncodedFrame, Input,
+    InputEvent, Result, VideoCodec, VideoLimits, VideoRate, error,
     idr::IdrReason,
-    lane::LaneCommand,
+    lane::{LANE_CAPACITY, LaneCommand},
     outgoing::{HostUnit, Push},
     pacer::Pacer,
-    protocol::{DesktopKind, SessionState, StateReason, VideoSize},
+    protocol::{DesktopKind, NoticeCode, SessionState, StateReason, VideoSize},
     scheduler::Waiter,
     shared::{CursorUpdate, EngineState, InputWaitStats, SessionShared},
 };
 use std::{
+    collections::VecDeque,
     io,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
@@ -53,6 +54,12 @@ const CURSOR_INTERVAL: Duration = Duration::from_millis(16);
 const STATS_WINDOW: Duration = Duration::from_secs(1);
 /// Input wait samples kept per window; the maximum is exact beyond it.
 const WAIT_SAMPLES: usize = 4096;
+/// How long a lock notice stays in the published state.
+const NOTICE_TTL: Duration = Duration::from_secs(5);
+/// A held drag-start press waits this much past the double-click time...
+const DRAG_GUARD_MARGIN: Duration = Duration::from_millis(20);
+/// ...but never longer than this.
+const DRAG_GUARD_MAX: Duration = Duration::from_millis(600);
 
 /// What a session's thread C is started with.
 pub(crate) struct WorkerConfig {
@@ -205,6 +212,9 @@ struct Engine {
     /// A sticky backend link failure: the session ends.
     fatal: Option<String>,
     window: Window,
+    hold: DragHold,
+    notice_serial: u64,
+    notice_until: Option<Instant>,
 }
 
 impl Engine {
@@ -248,6 +258,9 @@ impl Engine {
             stale_released: false,
             fatal: None,
             window: Window::new(now),
+            hold: DragHold::default(),
+            notice_serial: 0,
+            notice_until: None,
         })
     }
 
@@ -264,19 +277,17 @@ impl Engine {
         }
         self.state.control_allowed = shared.policy.allowed();
         if shared.lane.take_overflow() {
-            // A full lane means input is late beyond repair: end control
-            // rather than inject a burst the user no longer expects.
             drop(shared.lane.drain());
-            self.release_control();
-            self.control_note = Some((
-                StateReason::InputCongestion,
-                "input arrived faster than the host could apply it; request control again".into(),
-            ));
+            self.congested();
         }
         if shared.auth.lock().take_stale() {
             self.backend.release();
+            self.hold.drop_held();
         }
         self.release_if_stale(now);
+        if self.hold.until.is_some_and(|until| now >= until) && !self.release_hold() {
+            return Step::Exit(WorkerExit::Cancelled);
+        }
         if !self.drain_lane() {
             return Step::Exit(WorkerExit::Cancelled);
         }
@@ -292,8 +303,22 @@ impl Engine {
         let now = (self.clock)();
         self.sample_cursor(now);
         self.window.roll(now, &mut self.state);
+        if self.notice_until.is_some_and(|until| now >= until) {
+            self.notice_until = None;
+            self.state.notice = None;
+        }
         self.publish();
         Step::Wait(self.deadline(now))
+    }
+
+    /// A full lane means input is late beyond repair: end control rather than
+    /// inject a burst the user no longer expects.
+    fn congested(&mut self) {
+        self.release_control();
+        self.control_note = Some((
+            StateReason::InputCongestion,
+            "input arrived faster than the host could apply it; request control again".into(),
+        ));
     }
 
     /// Execute every queued command in order. False when cancelled: the rest
@@ -311,12 +336,83 @@ impl Engine {
     }
 
     fn execute(&mut self, command: LaneCommand, now: Instant) {
+        if self.hold.until.is_some() {
+            if !matches!(
+                command,
+                LaneCommand::Release
+                    | LaneCommand::EndControl
+                    | LaneCommand::Control { enabled: false }
+            ) {
+                if !self.hold.push(command) {
+                    self.congested();
+                }
+                return;
+            }
+            // Ending control drops the whole hold: nothing in it was injected.
+            self.hold.drop_held();
+        }
         match command {
             LaneCommand::Control { enabled } => self.control(enabled),
             LaneCommand::Release => self.backend.release(),
             LaneCommand::EndControl => self.release_control(),
-            LaneCommand::Input(event) => self.input(event, now),
+            LaneCommand::Input(event) => match self.drag_guard(&event, now) {
+                Some(until) => {
+                    self.hold.until = Some(until);
+                    self.hold.push(LaneCommand::Input(event));
+                }
+                None => self.input(event, now),
+            },
         }
+    }
+
+    /// When an admitted left press that starts a drag follows a click within
+    /// the OS double-click time and box, it must wait until the returned time
+    /// so the two never merge into a double click.
+    fn drag_guard(&mut self, event: &InputEvent, now: Instant) -> Option<Instant> {
+        let Input::Button {
+            button: Button::Left,
+            down: true,
+            drag_start: true,
+        } = event.input
+        else {
+            return None;
+        };
+        if !self.state.controlling
+            || !self.allowed()
+            || !self
+                .shared
+                .auth
+                .lock()
+                .admits(event.generation, event.frame_id, now)
+        {
+            return None;
+        }
+        let guard = self.backend.double_click_guard()?;
+        self.hold.until(guard, now)
+    }
+
+    /// The hold ended: each held command runs the full input path now, as if
+    /// it had just left the lane. False when cancelled.
+    fn release_hold(&mut self) -> bool {
+        let held = self.hold.release();
+        for (index, command) in held.into_iter().enumerate() {
+            if self.shared.cancel.is_cancelled() {
+                return false;
+            }
+            let now = (self.clock)();
+            match command {
+                // The press that started the hold has waited it out.
+                LaneCommand::Input(event) if index == 0 => self.input(event, now),
+                command => self.execute(command, now),
+            }
+        }
+        true
+    }
+
+    fn notice(&mut self, code: NoticeCode, message: String, now: Instant) {
+        self.notice_serial += 1;
+        self.state.notice = Some((code, message, self.notice_serial));
+        self.notice_until = Some(now + NOTICE_TTL);
     }
 
     fn allowed(&self) -> bool {
@@ -381,16 +477,30 @@ impl Engine {
         let Some(context) = self.context.clone() else {
             return;
         };
-        if let Err(failure) = self.backend.input_in_context(&context, &event.input) {
-            if failure.kind() == io::ErrorKind::NotConnected {
-                self.fatal = Some(failure.to_string());
+        let lock = matches!(event.input, Input::Lock {});
+        match self.backend.input_in_context(&context, &event.input) {
+            Ok(()) if lock => self.notice(
+                NoticeCode::Locked,
+                "The remote computer is locked".into(),
+                now,
+            ),
+            Ok(()) => self.hold.injected(&event.input, now),
+            Err(failure) => {
+                if failure.kind() == io::ErrorKind::NotConnected {
+                    self.fatal = Some(failure.to_string());
+                }
+                if lock {
+                    // Nothing was held down, so control stays.
+                    self.notice(NoticeCode::LockFailed, failure.to_string(), now);
+                    return;
+                }
+                // A live picture is not proof of working control. End the
+                // grant and keep the failure until the viewer asks for control
+                // again; queued presses are never replayed.
+                self.release_control();
+                self.control_note =
+                    Some((StateReason::InputFailed, format!("input_failed: {failure}")));
             }
-            // A live picture is not proof of working control. End the grant
-            // and keep the failure until the viewer asks for control again;
-            // queued presses are never replayed.
-            self.release_control();
-            self.control_note =
-                Some((StateReason::InputFailed, format!("input_failed: {failure}")));
         }
     }
 
@@ -398,6 +508,7 @@ impl Engine {
     /// is admitted again until a fresh presentation, so one release suffices.
     fn release_if_stale(&mut self, now: Instant) {
         if self.state.controlling && !self.shared.auth.lock().fresh(now) {
+            self.hold.drop_held();
             if !self.stale_released {
                 self.backend.release();
                 self.stale_released = true;
@@ -435,6 +546,7 @@ impl Engine {
     /// admits input, older units are not sent, and the next unit is an IDR.
     fn invalidate(&mut self) {
         self.backend.release();
+        self.hold.drop_held();
         self.state.generation += 1;
         let generation = self.state.generation;
         self.shared.auth.lock().on_invalidate(generation);
@@ -677,10 +789,13 @@ impl Engine {
         });
     }
 
-    /// The earliest of the next tick, cursor sample, context check and encoder
-    /// poll; every wait also ends on a wake.
+    /// The earliest of the next tick, cursor sample, context check, encoder
+    /// poll, hold end and notice expiry; every wait also ends on a wake.
     fn deadline(&self, now: Instant) -> Instant {
-        let deadline = now + CONTEXT_CHECK_INTERVAL;
+        let deadline = [self.hold.until, self.notice_until]
+            .into_iter()
+            .flatten()
+            .fold(now + CONTEXT_CHECK_INTERVAL, Instant::min);
         if self.unavailable.is_some() && !self.paused {
             return deadline.min(self.context_due);
         }
@@ -701,6 +816,88 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.backend.release();
+    }
+}
+
+/// A left press that starts a drag right after a click would merge with it
+/// into a double click on the host. It waits out the OS double-click time
+/// instead, with every later command behind it. The hold only delays: held
+/// commands carry no authorisation of their own, each runs the full input path
+/// when the hold ends, and anything that ends control or changes the
+/// generation drops them all, since none was injected yet.
+#[derive(Default)]
+struct DragHold {
+    /// In order, with consecutive moves coalesced to the newest.
+    held: VecDeque<LaneCommand>,
+    /// Held commands other than moves.
+    presses: usize,
+    until: Option<Instant>,
+    /// The last injected pointer position, in input space.
+    pointer: Option<(u32, u32)>,
+    /// The last injected left press, and where the pointer was.
+    left_down: Option<(Instant, (u32, u32))>,
+}
+impl DragHold {
+    /// When a drag-start press at `now` must wait: within the double-click
+    /// time and box of the last left press.
+    fn until(&self, guard: crate::DoubleClickGuard, now: Instant) -> Option<Instant> {
+        let (pressed, (x, y)) = self.left_down?;
+        let (px, py) = self.pointer?;
+        let time = Duration::from_millis(guard.time_ms.into());
+        let until = (pressed + time + DRAG_GUARD_MARGIN).min(now + DRAG_GUARD_MAX);
+        (now.saturating_duration_since(pressed) < time
+            && px.abs_diff(x) <= guard.half_box.0
+            && py.abs_diff(y) <= guard.half_box.1
+            && until > now)
+            .then_some(until)
+    }
+
+    /// Hold `command` behind the press. False when that would hold more than
+    /// a lane of commands.
+    fn push(&mut self, command: LaneCommand) -> bool {
+        let is_move = |command: &LaneCommand| {
+            matches!(
+                command,
+                LaneCommand::Input(InputEvent {
+                    input: Input::Move { .. },
+                    ..
+                })
+            )
+        };
+        if is_move(&command) {
+            if let Some(last) = self.held.back_mut().filter(|last| is_move(last)) {
+                *last = command;
+                return true;
+            }
+        } else if self.presses == LANE_CAPACITY {
+            return false;
+        } else {
+            self.presses += 1;
+        }
+        self.held.push_back(command);
+        true
+    }
+
+    fn release(&mut self) -> VecDeque<LaneCommand> {
+        self.until = None;
+        self.presses = 0;
+        std::mem::take(&mut self.held)
+    }
+
+    fn drop_held(&mut self) {
+        drop(self.release());
+    }
+
+    fn injected(&mut self, input: &Input, now: Instant) {
+        match *input {
+            Input::Move { x, y } => self.pointer = Some((x, y)),
+            Input::Button {
+                button: Button::Left,
+                down: true,
+                ..
+            } => self.left_down = self.pointer.map(|pointer| (now, pointer)),
+            _ => {}
+        }
     }
 }
 
