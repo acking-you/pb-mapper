@@ -44,6 +44,16 @@ class DecoderRulesTest {
     }
 
     @Test
+    fun aCodecThatFailsWithTheHintsLosesThemAlone() {
+        // A failed H.265 session falls back to H.264 on the same texture.
+        val hints = DecoderHints(requested = true)
+        hints.failed(hevc = true)
+        assertFalse(hints.on(hevc = true))
+        assertTrue(hints.on(hevc = false))
+        assertFalse(DecoderHints(requested = false).on(hevc = false))
+    }
+
+    @Test
     fun aKeyFramesParameterSetsConfigureTheDecoder() {
         fun unit(vararg nals: ByteArray) = nals.fold(ByteArray(0)) { all, nal -> all + START + nal }
         fun config(bytes: ByteArray, hevc: Boolean) = DecoderRules.codecConfig(ByteBuffer.wrap(bytes), bytes.size, hevc)

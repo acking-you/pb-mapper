@@ -1311,9 +1311,11 @@ realtime `KEY_PRIORITY` 0, `KEY_OPERATING_RATE` at `Short.MAX_VALUE` and
 between pictures. A hinted start that fails for any reason retries the same
 decoder once without them, and a hinted codec that fails or stalls before its
 first picture has its successor start without them; either way they stay off
-for that texture. `lowLatency` in the native stats says whether they ran
-(Android 11 and later, which have the low-latency hint), and the acceptance
-tool's case F turns them all off.
+for that codec on that texture. The other codec keeps them: a texture runs
+H.265 and then the H.264 a failed H.265 session falls back to, whose decoder
+never failed with them. `lowLatency` in the native stats says whether the codec
+configured last ran with them (Android 11 and later, which have the low-latency
+hint), and the acceptance tool's case F turns them all off.
 
 While a texture has a source attached that is not paused, the window asks for
 the display's fastest mode at its current resolution (`preferredDisplayModeId`):
