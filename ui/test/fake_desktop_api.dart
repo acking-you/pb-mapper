@@ -116,6 +116,9 @@ class FakeDesktopApi implements DesktopApiClient {
   static const localInvitation = 'pbd1.fake-local-invitation';
   static const backgroundInvitation = 'pbd1.fake-background-invitation';
 
+  /// The background service's invitation once it moved to the current relay.
+  static const movedInvitation = 'pbd1.fake-moved-invitation';
+
   // ---------------------------------------------------------------- host
 
   DesktopBackground get _background =>
@@ -146,6 +149,7 @@ class FakeDesktopApi implements DesktopApiClient {
       allowControl: b.allowControl,
       host: host,
       message: b.message,
+      matchesRelay: b.matchesRelay,
     );
   }
 
@@ -389,15 +393,25 @@ class FakeDesktopApi implements DesktopApiClient {
     return false;
   }
 
+  /// `start` resumes the service's host on the current relay, `test`, as the
+  /// FFI configures it from the settings: from another relay, with a new
+  /// invitation.
   @override
   Future<DesktopBackground> backgroundAction(String action) async {
     _log('background_action', {'action': action});
     if (action == 'start') {
+      final b = _background;
       _set(
-        background: () => _backgroundWith(
+        background: () => DesktopBackground(
+          configured: true,
           enabled: true,
+          service: b.service,
+          server: 'test',
+          invitation: b.matchesRelay ? b.invitation : movedInvitation,
           autoStart: true,
-          host: DesktopHostStatus(controlAllowed: _background.allowControl),
+          displayId: b.displayId,
+          allowControl: b.allowControl,
+          host: DesktopHostStatus(controlAllowed: b.allowControl),
         ),
       );
     }

@@ -63,6 +63,9 @@ enum Command {
     // Struct variants throughout: serde ignores extra fields on an internally
     // tagged unit variant, which would undo `deny_unknown_fields`.
     Status {},
+    /// The saved grant started again with the relay it was saved with. The
+    /// application no longer sends it, since a resume configures from its
+    /// current settings, but it stays part of `HELPER_PROTOCOL`'s pipe.
     Start {},
     Stop {},
     /// End the connected viewer's session; hosting continues.
@@ -125,11 +128,6 @@ pub async fn configure_with_identity(
 }
 pub async fn status() -> Result<Snapshot> {
     call(Command::Status {}).await
-}
-/// Restore the saved grant and automatic startup. A renderer still requests
-/// control only after presenting the current desktop.
-pub async fn start() -> Result<Snapshot> {
-    call(Command::Start {}).await
 }
 /// Disconnect the viewer; the background host keeps sharing.
 pub async fn end_session() -> Result<Snapshot> {

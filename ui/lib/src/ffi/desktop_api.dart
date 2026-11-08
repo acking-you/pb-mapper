@@ -63,7 +63,8 @@ class DesktopCapabilities {
 }
 
 /// A host's `HostStatus`. The local host's also carries its [service] and
-/// [invitation], which `HostStatus` itself never holds.
+/// [invitation], which `HostStatus` itself never holds, and where it is
+/// published.
 class DesktopHostStatus {
   const DesktopHostStatus({
     this.state = 'waiting',
@@ -76,11 +77,15 @@ class DesktopHostStatus {
     this.capabilities = const [],
     this.service,
     this.invitation,
+    this.server,
+    this.matchesRelay = true,
   });
   factory DesktopHostStatus.fromJson(
     Map<String, dynamic> status, {
     String? service,
     String? invitation,
+    String? server,
+    bool matchesRelay = true,
   }) => DesktopHostStatus(
     state: status['state'] as String? ?? 'waiting',
     reason: status['reason'] as String?,
@@ -102,6 +107,8 @@ class DesktopHostStatus {
     ],
     service: service,
     invitation: invitation,
+    server: server,
+    matchesRelay: matchesRelay,
   );
 
   /// `waiting`, `connecting`, `streaming`, `paused`, `capture_unavailable`
@@ -115,6 +122,13 @@ class DesktopHostStatus {
   final String desktop;
   final List<String> capabilities;
   final String? service, invitation;
+
+  /// The relay the local host is published on.
+  final String? server;
+
+  /// False when the settings now name another relay or credential than
+  /// [server] and its namespace, as Rust compares them; true while unknown.
+  final bool matchesRelay;
 
   DesktopHostStatus copyWith({
     bool? controlAllowed,
@@ -133,6 +147,8 @@ class DesktopHostStatus {
     capabilities: capabilities,
     service: service ?? this.service,
     invitation: invitation ?? this.invitation,
+    server: server,
+    matchesRelay: matchesRelay,
   );
 }
 
@@ -149,6 +165,7 @@ class DesktopBackground {
     this.allowControl = false,
     this.host,
     this.message = '',
+    this.matchesRelay = true,
   });
   factory DesktopBackground.fromJson(Map<String, dynamic> data) {
     final settings = data['settings'] is Map
@@ -169,13 +186,20 @@ class DesktopBackground {
             )
           : null,
       message: data['message'] as String? ?? '',
+      matchesRelay: data['matches_relay'] != false,
     );
   }
   final bool configured, enabled, autoStart, allowControl;
+
+  /// [server] is the relay its host is published on.
   final String? service, server, invitation;
   final int? displayId;
   final DesktopHostStatus? host;
   final String message;
+
+  /// False when the settings now name another relay or credential than the
+  /// one it is published on, as Rust compares them; true while unknown.
+  final bool matchesRelay;
 }
 
 /// `host_status`: the local host, if one runs, and the background service.
@@ -469,6 +493,10 @@ abstract interface class DesktopApiClient {
   /// True only after installation and an unelevated restart hand-off are
   /// ready.
   Future<bool> helperAction(String action);
+
+  /// `status` asks the service; `start` resumes its saved host on the relay
+  /// and credential the settings name now, with a new invitation when they
+  /// are not the ones it was published on.
   Future<DesktopBackground> backgroundAction(String action);
 
   /// Throws [DesktopCallException] `SETUP_STRING` or `INVALID_INVITATION`.
@@ -555,6 +583,8 @@ class DesktopApi implements DesktopApiClient {
               Map<String, dynamic>.from(host['status'] as Map),
               service: host['service'] as String?,
               invitation: host['invitation'] as String?,
+              server: host['server'] as String?,
+              matchesRelay: host['matches_relay'] != false,
             ),
       background: _background(data['background']),
       busy: data['busy'] == true,

@@ -103,6 +103,24 @@ pub(crate) struct DesktopState {
     // while its host lives so ownership can move to the service unchanged.
     host_identity: tokio::sync::Mutex<Option<LocalIdentity>>,
     background: Arc<parking_lot::Mutex<BackgroundCache>>,
+    /// The settings' relay scope as last read, for a status poll that finds
+    /// the settings locked: it never waits for them.
+    relay: parking_lot::Mutex<Option<RelayScope>>,
+}
+/// The relay and credential namespace the settings name: where a host
+/// started now is published, and what `matches_relay` compares with.
+#[derive(Clone)]
+struct RelayScope {
+    server: String,
+    namespace: Option<u64>,
+}
+impl RelayScope {
+    /// A host published on `server` under `namespace` is where the settings
+    /// publish: the same address, compared as the service and the remembered
+    /// grant compare it, and the same namespace.
+    fn holds(&self, server: &str, namespace: Option<u64>) -> bool {
+        self.namespace.is_some() && self.namespace == namespace && self.server == server
+    }
 }
 /// The running local host's identity and settings: what a restart on another
 /// display or under another service, and the background handoff, start from.
@@ -154,6 +172,25 @@ impl DesktopState {
             });
         }
         snapshot
+    }
+
+    /// The settings' relay scope without waiting for the settings lock: the
+    /// last one read while another call holds it, none before the first.
+    async fn relay_scope(
+        &self,
+        settings: &tokio::sync::Mutex<crate::state::PbMapperState>,
+    ) -> Option<RelayScope> {
+        let Ok(state) = settings.try_lock() else {
+            return self.relay.lock().clone();
+        };
+        let scope = RelayScope {
+            server: state.get_config_status().await.server_address,
+            namespace: get_process_credential()
+                .ok()
+                .map(|credential| credential.key_id()),
+        };
+        *self.relay.lock() = Some(scope.clone());
+        Some(scope)
     }
 
     pub(crate) fn current_invitation(&self) -> Option<Invitation> {
@@ -375,7 +412,8 @@ enum HelperVerb {
     Uninstall,
 }
 
-/// The service's state, or its saved grant started again.
+/// The service's state, or its saved host resumed where the settings name
+/// now (`resume_background`).
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum BackgroundVerb {
@@ -494,6 +532,20 @@ fn background_enabled(snapshot: &Value) -> bool {
     snapshot["enabled"].as_bool().unwrap_or(false)
 }
 
+/// `snapshot` with `matches_relay`: whether the background host it describes
+/// is published where the settings in `current` name. Null while they have
+/// not been read; with nothing configured, nothing is elsewhere.
+fn with_relay_match(mut snapshot: Value, current: Option<&RelayScope>) -> Value {
+    let matches = current.map(|current| {
+        !background_configured(&snapshot)
+            || snapshot["server"]
+                .as_str()
+                .is_some_and(|server| current.holds(server, snapshot["namespace"].as_u64()))
+    });
+    snapshot["matches_relay"] = json!(matches);
+    snapshot
+}
+
 fn unavailable_background(message: impl Into<String>) -> Value {
     json!({"configured": false, "enabled": false, "host": null,
         "invitation": null, "settings": null, "server": null, "namespace": null,
@@ -598,27 +650,67 @@ async fn background_action(
     handle: &PbMapperHandle,
     verb: BackgroundVerb,
 ) -> Result<Value, CtlError> {
-    match verb {
-        BackgroundVerb::Status => {
-            Ok(discover_background(&handle.desktop, query_background()).await)
-        }
+    let snapshot = match verb {
+        BackgroundVerb::Status => discover_background(&handle.desktop, query_background()).await,
         #[cfg(windows)]
-        BackgroundVerb::Start => {
-            let slot = handle.desktop.host.lock().await;
-            if slot.is_some() {
-                return Err(err(
-                    "stop local desktop sharing before starting the background host",
-                ));
-            }
-            disable_legacy_startup(handle).await?;
-            let snapshot = desktop::helper::background::start().await.map_err(err)?;
-            Ok(handle
-                .desktop
-                .cache_background(serde_json::to_value(snapshot).map_err(err)?))
-        }
+        BackgroundVerb::Start => resume_background(handle).await?,
         #[cfg(not(windows))]
-        BackgroundVerb::Start => Err(err("background hosting requires Windows")),
+        BackgroundVerb::Start => return Err(err("background hosting requires Windows")),
+    };
+    let relay = handle.desktop.relay_scope(&handle.state).await;
+    Ok(with_relay_match(snapshot, relay.as_ref()))
+}
+
+/// An explicit resume of the service's saved host: configured again from
+/// the settings, never started with the relay it was saved with, which the
+/// owner may have left. On the same relay and namespace the service keeps
+/// its identity, and an unchanged configuration only starts it again;
+/// anywhere else it makes a new one, so the invitation changes.
+#[cfg(windows)]
+async fn resume_background(handle: &PbMapperHandle) -> Result<Value, CtlError> {
+    // As `enable_host`: the host slot, then the settings.
+    let slot = handle.desktop.host.lock().await;
+    if slot.is_some() {
+        return Err(err(
+            "stop local desktop sharing before starting the background host",
+        ));
     }
+    let config = handle.state.lock().await.get_config_status().await;
+    let credential = credential_text(process_credential()?)?;
+    let saved = handle.desktop.cache_background(query_background().await?);
+    let options = resume_options(&saved, config, credential)?;
+    disable_legacy_startup(handle).await?;
+    let snapshot = desktop::helper::background::configure(options)
+        .await
+        .map_err(err)?;
+    Ok(handle
+        .desktop
+        .cache_background(serde_json::to_value(snapshot).map_err(err)?))
+}
+
+/// What resuming the service's `saved` host configures: the service, display
+/// and permissions it saved, published through the relay, credential and
+/// carrier the settings name now, and restored at startup again.
+#[cfg(windows)]
+fn resume_options(
+    saved: &Value,
+    config: crate::state::AppConfig,
+    credential: String,
+) -> Result<desktop::helper::background::Options, CtlError> {
+    let settings: desktop::helper::background::Settings =
+        serde_json::from_value(saved["settings"].clone())
+            .ok()
+            .filter(|_| background_configured(saved))
+            .ok_or_else(|| err("no saved background host to resume"))?;
+    Ok(desktop::helper::background::Options {
+        server: config.server_address,
+        credential,
+        relay_transport: config.relay_transport,
+        settings: desktop::helper::background::Settings {
+            auto_start: true,
+            ..settings
+        },
+    })
 }
 
 async fn stop_background(state: &DesktopState) -> Result<(), CtlError> {
@@ -846,7 +938,12 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
             revoke_trust_with_background(handle, revoke_background(handle)).await?;
         }
         Request::HostStatus => {
-            let background = state.background_status(handle.runtime.handle());
+            // Each host says whether it is published where the settings
+            // name (`matches_relay`), and where it is (`server`).
+            let relay = state.relay_scope(&handle.state).await;
+            let background = state
+                .background_status(handle.runtime.handle())
+                .map(|snapshot| with_relay_match(snapshot, relay.as_ref()));
             // A lifecycle call (a display switch, a rename, a helper action
             // waiting on UAC) holds the host lock, but must never delay a
             // status poll. `busy` says the host is then unknown, not absent.
@@ -856,7 +953,17 @@ async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlErr
                 Ok(slot) => (
                     slot.as_ref().map(|host| {
                         let invitation = host.invitation();
-                        json!({"status": host.status(), "service": invitation.service, "invitation": invitation.encode()})
+                        let mut value = json!({"status": host.status(), "service": invitation.service, "invitation": invitation.encode()});
+                        // Set beside the host, under the lock held here.
+                        if let Ok(local) = state.host_identity.try_lock()
+                            && let Some(scope) = local.as_ref().map(|local| &local.scope)
+                        {
+                            value["server"] = json!(scope.relay);
+                            value["matches_relay"] = json!(relay.as_ref().map(|current| {
+                                current.holds(&scope.relay, Some(scope.namespace))
+                            }));
+                        }
+                        value
                     }),
                     false,
                 ),
@@ -2115,6 +2222,67 @@ mod tests {
         reply.send(unavailable_background("")).unwrap();
         assert_eq!(discovery.await, configured);
         assert_eq!(state.background.lock().snapshot.as_ref(), Some(&configured));
+    }
+
+    #[test]
+    fn a_host_matches_the_settings_only_on_their_relay_and_namespace() {
+        let current = RelayScope {
+            server: "relay:7666".into(),
+            namespace: Some(1),
+        };
+        assert!(current.holds("relay:7666", Some(1)));
+        assert!(!current.holds("old-relay:7666", Some(1)));
+        assert!(!current.holds("relay:7666", Some(2)));
+        // The background service's host says so; until the settings are
+        // read, it says nothing.
+        let mut elsewhere = unavailable_background("");
+        elsewhere["configured"] = json!(true);
+        elsewhere["server"] = json!("old-relay:7666");
+        elsewhere["namespace"] = json!(1);
+        assert_eq!(
+            with_relay_match(elsewhere.clone(), Some(&current))["matches_relay"],
+            false
+        );
+        assert_eq!(
+            with_relay_match(elsewhere, None)["matches_relay"],
+            Value::Null
+        );
+    }
+
+    /// Resuming publishes the saved host where the settings name now: the
+    /// bug was a resume that kept publishing on the relay the owner had left.
+    #[cfg(windows)]
+    #[test]
+    fn resume_configures_the_saved_host_from_the_current_settings() {
+        use desktop::helper::background::{Options, Settings};
+        use pb_mapper_client::sdk::RelayTransport;
+        let config = crate::state::AppConfig {
+            server_address: "new-relay:7666".into(),
+            relay_transport: RelayTransport::Quic,
+            ..Default::default()
+        };
+        let nothing = unavailable_background("");
+        assert!(resume_options(&nothing, config.clone(), "key".into()).is_err());
+        let mut saved = unavailable_background("");
+        saved["configured"] = json!(true);
+        saved["server"] = json!("old-relay:7666");
+        saved["settings"] = json!({"service": "desktop:study", "display_id": 2,
+            "allow_control": true, "allow_direct": false, "auto_start": false});
+        assert_eq!(
+            resume_options(&saved, config, "new-key".into()).unwrap(),
+            Options {
+                server: "new-relay:7666".into(),
+                credential: "new-key".into(),
+                relay_transport: RelayTransport::Quic,
+                settings: Settings {
+                    service: "desktop:study".into(),
+                    display_id: 2,
+                    allow_control: true,
+                    allow_direct: false,
+                    auto_start: true,
+                },
+            }
+        );
     }
 
     #[cfg(windows)]

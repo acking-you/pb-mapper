@@ -472,6 +472,46 @@ void main() {
   });
 
   testWidgets(
+    'a host on another relay offers, after asking, to share on the current '
+    'one; on the current relay it resumes as it is',
+    (tester) async {
+      for (final elsewhere in [false, true]) {
+        final api = FakePbMapperApi();
+        api.desktop.hostSnapshot = DesktopHostSnapshot(
+          background: DesktopBackground(
+            configured: true,
+            service: 'desktop:here',
+            server: elsewhere ? 'old-relay:7666' : 'test',
+            invitation: FakeDesktopApi.backgroundInvitation,
+            displayId: 1,
+            matchesRelay: !elsewhere,
+          ),
+        );
+        await pumpApp(tester, api, page: AppPage.remote);
+        expect(
+          _key('host-other-relay'),
+          elsewhere ? findsOneWidget : findsNothing,
+        );
+        expect(_key('host-start'), elsewhere ? findsNothing : findsOneWidget);
+        if (elsewhere) {
+          await _tapIn(tester, _key('host-other-relay-move'));
+          await settle(tester);
+          expect(api.desktop.argsOf('background_action'), [
+            {'action': 'status'},
+          ]);
+          await tester.tap(_key('confirm-destructive'));
+          await settle(tester);
+          expect(api.desktop.argsOf('background_action').last, {
+            'action': 'start',
+          });
+          expect(_key('host-other-relay'), findsNothing);
+        }
+        await finish(tester);
+      }
+    },
+  );
+
+  testWidgets(
     'the invitation QR shows only on request and hides when the page is left '
     'or the app goes inactive',
     (tester) async {

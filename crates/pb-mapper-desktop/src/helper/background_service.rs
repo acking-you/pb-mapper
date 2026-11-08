@@ -131,8 +131,10 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
                 match result.map_err(error).and_then(|result| result) {
                     Ok(host) => {
                         state.host = Some(host);
-                        state.message.clear();
-                        os::record_service_event("background_registered", "Desktop registration is ready");
+                        // Which relay: the settings may name another by now.
+                        let relay = state.saved.as_ref().map(|saved| saved.options.server.as_str()).unwrap_or_default();
+                        state.message = format!("Desktop registration is ready on {relay}");
+                        os::record_service_event("background_registered", &state.message);
                     },
                     Err(failure) => {
                         state.message = format!("Background hosting will retry in {} s: {failure}", state.retry_delay.as_secs());

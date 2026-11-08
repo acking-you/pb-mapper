@@ -547,6 +547,8 @@ class _SharingCard extends StatelessWidget {
               : notSharingPill(context),
         ),
         if (v.error != null) _HostError(v),
+        if (v.otherRelay case final relay?)
+          _OtherRelayNotice(relay: relay, busy: v.enabling, desktop: desktop),
         if (sharing && viewer != null)
           ViewerPanel(
             viewer: viewer,
@@ -639,7 +641,8 @@ class _SharingCard extends StatelessWidget {
                 onPressed: desktop.stopHost,
                 child: Text(l10n.hostStop),
               )
-            else
+            // On another relay, starting again moves it: the notice asks.
+            else if (v.otherRelay == null)
               FilledButton.icon(
                 key: const Key('host-start'),
                 style: FilledButton.styleFrom(
@@ -686,6 +689,90 @@ class _SharingCard extends StatelessWidget {
       action: l10n.hostDisplaySwitchAction,
     );
     if (yes) await desktop.setHostDisplay(id);
+  }
+}
+
+/// This computer is shared, or paused, on another relay than the settings
+/// name: it stays there until moved. Moving it changes its invitation, so
+/// the action asks first.
+class _OtherRelayNotice extends StatelessWidget {
+  const _OtherRelayNotice({
+    required this.relay,
+    required this.busy,
+    required this.desktop,
+  });
+
+  final String relay;
+  final bool busy;
+  final DesktopStore desktop;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final caution = cautionColor(Theme.of(context).colorScheme);
+    return Container(
+      key: const Key('host-other-relay'),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+      decoration: BoxDecoration(
+        color: caution.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(kRowRadius),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Icon(
+                  AppIcons.relay,
+                  size: AppIconSize.inline,
+                  color: caution,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  l10n.hostOtherRelay(relay),
+                  style: const TextStyle(fontSize: 13, height: 1.5),
+                ),
+              ),
+            ],
+          ),
+          // Under the words, past the icon.
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 28),
+            child: TextButton(
+              key: const Key('host-other-relay-move'),
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(0, 36),
+                textStyle: buttonLabel(context, 13, weight: FontWeight.w600),
+              ),
+              onPressed: busy
+                  ? null
+                  : () => unawaited(_shareOnCurrentRelay(context, desktop)),
+              child: Text(l10n.hostOtherRelayMove),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static Future<void> _shareOnCurrentRelay(
+    BuildContext context,
+    DesktopStore desktop,
+  ) async {
+    final l10n = context.l10n;
+    final yes = await confirmDestructive(
+      context,
+      title: l10n.hostOtherRelayConfirmTitle,
+      body: l10n.hostOtherRelayConfirmBody,
+      action: l10n.hostOtherRelayConfirmAction,
+    );
+    if (yes) await desktop.shareOnCurrentRelay();
   }
 }
 
