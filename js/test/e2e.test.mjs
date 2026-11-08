@@ -395,7 +395,13 @@ test.skipIf(!hasRelay)(
           } while (Date.now() < deadline);
           expect(observations.some((s) => s.service === "direct")).toBe(true);
         } else {
-          expect(connection.diagnostics().direct ?? null).toBe(null);
+          // Relay-only sessions count too, on the relay.
+          const direct = connection.diagnostics().direct;
+          expect([direct.relaySessions, direct.directSessions]).toEqual([1, 0]);
+          const metrics = connection.subscribeMetrics(1000);
+          expect((await metrics.next(READY_MS)).sessions.relay).toBe(1);
+          metrics.close();
+          expect(await metrics.next()).toBe(null);
         }
       }
     } finally {
