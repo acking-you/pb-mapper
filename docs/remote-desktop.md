@@ -972,6 +972,57 @@ geometry, statistics and the latest cursor, through the per-frame view leaf.
 Other platforms, and Windows without Media Foundation, take JPEG, which Dart
 decodes off the UI isolate. Video bytes never become JSON or base64.
 
+### Android presentation and decoder
+
+The codec worker releases a decoded picture to the `SurfaceTexture` while the
+surface has a credit, and it has two: at most two pictures released and not yet
+consumed. The texture's queue is FIFO and Flutter's `updateTexImage` latches the
+oldest, one per frame. Its frame-consumed callback carries the latched
+timestamp, unique per decoded picture, so each consumption returns that
+picture's credit and is reported to Rust as presented. While a credit is free,
+pictures go to the surface in decode order; only with both in use does a newer
+decoded picture supersede the one waiting. A phone's loop from release to latch
+is longer than a vsync: the release must reach Flutter's scheduler before the
+frame begins, and the latch comes during that frame's raster. With one credit,
+each picture waited for the previous one's latch, so at 60 Hz the loop alone
+held a 60 FPS stream to 30. Replaying measured 60 FPS arrivals through both
+rules at 60 Hz, with 8 ms before the vsync and 10 ms after it, gave 30.1
+presented FPS with one credit and 59.9 with two, and 8.6 ms less mean latency.
+Where the loop fits in a vsync, the second credit added 3.5 ms; in steady
+streaming it can add at most one frame.
+
+Flutter folds every frame request made before a frame begins into that frame,
+so a second picture released before the frame that latches the first would
+wait for the next announcement. A consumption that leaves a picture queued
+therefore asks the engine for another frame. `FlutterRenderer` has no public
+way to ask; `TextureFrames.kt` sits in its package to reach the package-private
+method its texture entries use, so a Flutter upgrade that changes it fails the
+build. A latched timestamp also returns the credits of older pictures, which
+the surface can then never latch; they count as dropped. The decoder never
+drops a rendered picture (`KEY_ALLOW_FRAME_DROP` 0), and a newest picture that
+something else drops is caught by the 2 s watchdog on the oldest released one,
+which recovers at a keyframe.
+
+The decoder is configured with hints: `KEY_LOW_LATENCY` (API 30 and later),
+realtime `KEY_PRIORITY` 0, `KEY_OPERATING_RATE` at `Short.MAX_VALUE` and
+`KEY_FRAME_RATE` 60, so a decoder sized for playback does not idle its clocks
+between pictures. A hinted start that fails for any reason retries the same
+decoder once without them, and a hinted codec that fails or stalls before its
+first picture has its successor start without them; either way they stay off
+for that texture. `lowLatency` in the native stats says whether they ran
+(Android 11 and later, which have the low-latency hint), and the acceptance
+tool's case F turns them all off.
+
+While a texture has a source attached that is not paused, the window asks for
+the display's fastest mode at its current resolution (`preferredDisplayModeId`):
+at 120 Hz a picture released just after a frame began waits half as long for
+the next one. The window's own
+preference returns when the last such texture is paused or disposed. It costs
+battery only while video shows. The `stats` method of the
+`pb_mapper/desktop_video` channel reports `credits` and `surfacePending` (both
+the pictures released and not yet consumed) and `refreshHz` (the mode asked
+for while viewing, otherwise the display's current one).
+
 ## Measurements and remaining acceptance
 
 Development environment: Windows 11 Enterprise 10.0.26300, Ryzen 9 9950X,
