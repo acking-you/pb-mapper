@@ -207,15 +207,18 @@ class DesktopVideo(
         private var codec: MediaCodec? = null
         // Whether the running codec has decoded a picture yet.
         private var codecDecoded = false
-        // The decoder hints go into configure while this holds: KEY_LOW_LATENCY
-        // (API 30+), realtime priority, the highest operating rate and 60 fps.
-        // A decoder may reject one: on AOSP's OMX path ACodec::setLowLatency
+        // Which codecs start with the decoder hints: KEY_LOW_LATENCY (API
+        // 30+), realtime priority, the highest operating rate and 60 fps. A
+        // decoder may reject one: on AOSP's OMX path ACodec::setLowLatency
         // fails configure, and realtime priority at an operating rate a decoder
         // cannot hold may fail configure or the running codec. So configure
         // retries the same decoder without them, and a hinted codec that fails
         // or stalls before its first picture has its successor start without
-        // them. Either way they stay off for this texture.
-        private var hinted = decoderHints
+        // them. Either way only that codec loses them ([DecoderHints]).
+        private val hints = DecoderHints(decoderHints)
+        // Whether the codec configured last started with the hints (before the
+        // first, whether it will): the stats' lowLatency.
+        private var codecHinted = decoderHints
         private var active: VideoFormat? = null
         // The size of the picture last released to the surface, which is what
         // a snapshot reads. It outlives the codec that drew it.
@@ -379,7 +382,7 @@ class DesktopVideo(
                     "lastPresentedFrameId" to lastPresentedFrameId,
                     "dropped" to dropped.get() + feed.dropped.get(), "decoder" to decoderName,
                     "configurations" to configurations.get(),
-                    "lowLatency" to (hinted && Build.VERSION.SDK_INT >= 30),
+                    "lowLatency" to (codecHinted && Build.VERSION.SDK_INT >= 30),
                     "recoveries" to recoveries.get(), "lastRecovery" to lastRecovery,
                     "queued" to feed.size,
                     "decoding" to waitingOutputs, "outputs" to outputs.size,
@@ -468,8 +471,9 @@ class DesktopVideo(
         }
 
         private fun fail(message: String, ask: () -> Unit) {
-            if (hinted && codec != null && !codecDecoded) {
-                hinted = false
+            val running = active
+            if (running != null && codecHinted && !codecDecoded) {
+                hints.failed(running.hevc)
                 Log.w(TAG, "$decoderName failed before its first picture; its successor starts without decoder hints")
             }
             releaseCodec()
@@ -495,6 +499,7 @@ class DesktopVideo(
             entry.surfaceTexture().setDefaultBufferSize(unit.width, unit.height)
             var next = MediaCodec.createDecoderByType(mime(unit))
             decoderName = next.name
+            var hinted = hints.on(unit.hevc)
             try {
                 start(next, unit, codecConfig, hinted)
             } catch (e: Exception) {
@@ -509,11 +514,13 @@ class DesktopVideo(
                     try { next.release() } catch (_: Exception) {}
                     throw retry
                 }
+                hints.failed(unit.hevc)
                 hinted = false
             }
             // Callbacks reach this worker only after configure returns.
             codec = next
             codecDecoded = false
+            codecHinted = hinted
             active = VideoFormat(unit.width, unit.height, unit.hevc)
             configurations.incrementAndGet()
             api.report(consumer, next.name, DecoderProbe.hardware(next.codecInfo))
@@ -736,6 +743,23 @@ class DesktopVideo(
 
 /** What a running codec was configured for. */
 internal data class VideoFormat(val width: Int, val height: Int, val hevc: Boolean)
+
+/**
+ * Whether a codec starts with the decoder hints: while the viewer asks for
+ * them, until that codec fails with them on this texture. One texture runs
+ * H.265 and then the H.264 a failed H.265 session falls back to, whose
+ * decoder never failed with them, so each codec answers for its own.
+ */
+internal class DecoderHints(private val requested: Boolean) {
+    private var h264Failed = false
+    private var h265Failed = false
+
+    fun on(hevc: Boolean) = requested && !(if (hevc) h265Failed else h264Failed)
+
+    fun failed(hevc: Boolean) {
+        if (hevc) h265Failed = true else h264Failed = true
+    }
+}
 
 /** The codec thread's decisions about the head unit, pure so the JVM tests hold them. */
 internal object DecoderRules {
