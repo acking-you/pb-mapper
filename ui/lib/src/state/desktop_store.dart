@@ -45,6 +45,10 @@ const _statsInterval = Duration(seconds: 1);
 /// The host's 1 s `STOP_WRITE_TIMEOUT`, plus a worker isolate's spawn.
 const _shutdownBound = Duration(milliseconds: 1500);
 
+/// How long a connect waits for the decoder probe (I4), which enumerates
+/// in driver code and may never answer.
+const _decoderProbeBound = Duration(seconds: 2);
+
 /// Stop reasons that reconnect with backoff; `protocol` does too, a bounded
 /// number of times in a row.
 const _retryableStops = {
@@ -254,8 +258,8 @@ class DesktopStore {
   DesktopCursor get cursor => _cursor;
 
   /// What this device decodes natively, probed once, at the first connect
-  /// (I4); null until then. H.265 leaves it for the rest of the run once a
-  /// picture failed to decode as H.265 (D5).
+  /// (I4); null until the probe answers. H.265 leaves it for the rest of the
+  /// run once a picture failed to decode as H.265 (D5).
   ValueListenable<DesktopDecoders?> get decoders => _decoders;
 
   /// The highest frame rate this display shows: what the probe reported,
@@ -1277,14 +1281,18 @@ class DesktopStore {
   }
 
   /// The decoders the first connect probes; later ones reuse the answer
-  /// ([decoders]) without waiting.
-  Future<DesktopDecoders> _probeDecoders() async {
-    final probed = await (_probing ??= _api.decoders().catchError(
-      (Object _) => DesktopDecoders.h264Only,
-    ));
-    if (_disposed) return probed;
-    return _decoders.value ??= probed;
-  }
+  /// ([decoders]) without waiting. Until a probe that has not answered
+  /// within [_decoderProbeBound] (a wedged driver) does, attempts are H.264
+  /// only and none waits again; the platform is asked once, and its answer,
+  /// however late, is kept.
+  Future<DesktopDecoders> _probeDecoders() => _probing ??= _api
+      .decoders()
+      .catchError((Object _) => DesktopDecoders.h264Only)
+      .then((probed) {
+        if (_disposed) return probed;
+        return _decoders.value ??= probed;
+      })
+      .timeout(_decoderProbeBound, onTimeout: () => DesktopDecoders.h264Only);
 
   /// D6, and what this computer answered: H.265 is offered when the device
   /// would offer it and the computer has not declined it.

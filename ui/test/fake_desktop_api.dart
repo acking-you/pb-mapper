@@ -60,9 +60,12 @@ class FakeDesktopApi implements DesktopApiClient {
   /// The host encodes H.265: a `connect` that offers it reports `h265`.
   bool hostH265 = false;
 
-  /// What `decoders` answers, and how often it was asked.
+  /// What `decoders` answers, and how often it was asked. While
+  /// [decodersGate] is set, the answer waits for it, as behind a wedged
+  /// driver.
   DesktopDecoders decodersValue = DesktopDecoders.h264Only;
   int decodersProbed = 0;
+  Completer<void>? decodersGate;
 
   /// While set, `connect` waits for it. A `disconnect` meanwhile makes that
   /// connect fail as cancelled, as the FFI does.
@@ -528,6 +531,7 @@ class FakeDesktopApi implements DesktopApiClient {
   @override
   Future<DesktopDecoders> decoders() async {
     decodersProbed++;
+    await decodersGate?.future;
     return decodersValue;
   }
 

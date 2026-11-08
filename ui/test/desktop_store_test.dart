@@ -739,6 +739,42 @@ void main() {
   );
 
   testWidgets(
+    'a decoder probe that does not answer holds the first connect only so '
+    'long, as H.264 alone, and none after it; its late answer is kept',
+    (tester) async {
+      final api = FakeDesktopApi()
+        ..codec = 'h264'
+        ..hostH265 = true
+        ..decodersGate = Completer()
+        ..decodersValue = const DesktopDecoders(
+          h264: DesktopDecoderLimit.largest,
+          h265: DesktopDecoderLimit.largest,
+        );
+      final store = DesktopStore(api, textures: FakeTextures().create);
+      final viewer = store.demand(DesktopDemand.viewer);
+
+      unawaited(store.connect(_target));
+      await tester.pump(const Duration(milliseconds: 1900));
+      expect(api.argsOf('connect'), isEmpty);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(api.argsOf('connect').single, containsPair('h265', false));
+      store.setMaxFps(60);
+      await tester.pump();
+      expect(api.argsOf('connect'), hasLength(2));
+
+      api.decodersGate!.complete();
+      await tester.pump();
+      store.setMaxFps(0);
+      await tester.pump();
+      expect(api.argsOf('connect').last, containsPair('h265', true));
+      expect(api.decodersProbed, 1);
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
     "the decoder's figures are read only while shown: a listener swapped in "
     'one frame keeps them, the last one leaving stops the timings, and a '
     'read answered after its timer stopped is dropped',
