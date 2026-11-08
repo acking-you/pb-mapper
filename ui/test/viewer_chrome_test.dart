@@ -630,6 +630,89 @@ void main() {
   );
 
   testWidgets(
+    'beside a cutout the picture fits between the gutters, and zoomed in it '
+    'pans clear of them',
+    (tester) async {
+      _size(tester, const Size(851, 393));
+      tester.view.padding = const FakeViewPadding(left: 29);
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setGestureSheetSeen(true);
+      await tester.pumpWidget(
+        _app(
+          TouchViewer(
+            desktop: store,
+            prefs: prefs,
+            title: 'Office',
+            onBack: () {},
+          ),
+        ),
+      );
+      await tester.pump(kHintDuration);
+      final viewport = tester
+          .widget<RemoteSurface>(find.byType(RemoteSurface))
+          .viewport;
+      Rect picture() => Rect.fromPoints(
+        viewport.toLocal(Offset.zero),
+        viewport.toLocal(const Offset(1, 1)),
+      );
+
+      // Fitted, the picture sits between the controls.
+      for (final control in [
+        'touch-back',
+        'touch-quality',
+        'touch-mode-toggle',
+        'touch-keyboard',
+        'touch-shortcuts',
+        'touch-right-click',
+        'touch-more',
+      ]) {
+        final rect = tester.getRect(find.byKey(Key(control)));
+        expect(
+          rect.deflate(0.01).overlaps(picture()),
+          isFalse,
+          reason: control,
+        );
+      }
+
+      // Pinched in, then pushed right as far as it goes: its left edge
+      // comes to rest at the left strip's, not under it.
+      final centre = picture().center;
+      final a = await tester.startGesture(centre - const Offset(30, 0));
+      final b = await tester.startGesture(centre + const Offset(30, 0));
+      await tester.pump(kNavigateStart);
+      for (var i = 0; i < 5; i++) {
+        await a.moveBy(const Offset(-15, 0));
+        await b.moveBy(const Offset(15, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(viewport.scale, greaterThan(2));
+      for (var i = 0; i < 10; i++) {
+        await a.moveBy(const Offset(90, 0));
+        await b.moveBy(const Offset(90, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await a.up();
+      await b.up();
+      final strip = tester.getRect(find.byKey(const Key('touch-gutter-lead')));
+      expect(strip.left, 0);
+      expect(picture().left, moreOrLessEquals(strip.right));
+      expect(api.argsOf('input'), isEmpty);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets(
     'a trackpad stroke repaints the cursor and the ring alone, and a pan the '
     'stage and the minimap alone',
     (tester) async {

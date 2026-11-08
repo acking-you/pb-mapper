@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/foundation.dart';
@@ -300,6 +301,7 @@ class _TouchViewerState extends State<TouchViewer> {
 
   void _touched(PointerDownEvent e) {
     if (e.kind == PointerDeviceKind.mouse) return;
+    if (!_viewport.visibleRect.contains(e.localPosition)) return;
     final n = _viewport.toNormalized(e.localPosition);
     if (n != null) _lastTouch = n;
   }
@@ -368,14 +370,18 @@ class _TouchViewerState extends State<TouchViewer> {
   Widget _layers(Size size, EdgeInsets padding, double aspect) {
     final prefs = widget.prefs;
     final gutters = gutterLayoutFor(size, aspect, padding);
+    // Kept while the keyboard hides the gutters: it only occludes.
+    final frame = gutters.frame(size);
+    _viewport.setFrame(frame);
     final occluded = _inset + kModifierBarHeight;
     // Where hints, the minimap and panels go: between the gutters, or
-    // above the keyboard while it is up.
+    // within the frame above the keyboard while it is up.
+    final framed = frame.deflateRect(Offset.zero & size);
     final content = _keyboard
         ? Rect.fromLTRB(
-            padding.left,
-            padding.top,
-            size.width - padding.right,
+            math.max(padding.left, framed.left),
+            math.max(padding.top, framed.top),
+            math.min(size.width - padding.right, framed.right),
             size.height - occluded,
           )
         : gutters.content(size);
@@ -383,6 +389,7 @@ class _TouchViewerState extends State<TouchViewer> {
       fit: StackFit.expand,
       children: [
         _stage,
+        ..._strips(gutters, size),
         if (!_keyboard) ..._gutters(gutters),
         Positioned(
           top: content.top + 10,
@@ -448,6 +455,27 @@ class _TouchViewerState extends State<TouchViewer> {
           ),
       ],
     );
+  }
+
+  /// The dark strips under side gutters and bars, over what a zoomed
+  /// picture has under them; kept while the keyboard hides the controls,
+  /// since the picture keeps its frame. They let touches through, so a
+  /// trackpad stroke or a pinch can start on them; painted always, they
+  /// never repaint with a pan.
+  List<Widget> _strips(GutterLayout layout, Size size) {
+    final strips = layout.strips(size);
+    if (strips == null) return const [];
+    Widget strip(Key key, Rect rect) => Positioned.fromRect(
+      key: key,
+      rect: rect,
+      child: const IgnorePointer(
+        child: ColoredBox(color: ViewerPalette.gutter),
+      ),
+    );
+    return [
+      strip(const Key('touch-gutter-lead'), strips.lead),
+      strip(const Key('touch-gutter-trail'), strips.trail),
+    ];
   }
 
   /// Back, quality and mode lead; the keyboard, shortcuts, right click
