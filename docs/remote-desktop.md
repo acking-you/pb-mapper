@@ -674,9 +674,12 @@ ended streaming), a resume, a viewer's request, or a hand-off queue that
 overflowed or went stale. Requests other than a resume or a new generation
 wait until 300 ms after the previous IDR. A request is answered once its IDR
 is handed to the encoder, so an IDR still being encoded is never asked for
-twice. Encoder output more than 250 ms late is discarded, and output resumes
-at the next IDR. Nothing periodic, and no frame rate, bitrate, preset or
-congestion change, produces an IDR.
+twice. Encoder output that took more than 250 ms is discarded, and output
+resumes at the next IDR. The time counts from the unit's submit or from the
+output before it, whichever is later: the encoder serves units in order, so a
+unit is not late for waiting behind the others the gate admits, and a slow
+encoder delivers fewer frames rather than none. Nothing periodic, and no frame
+rate, bitrate, preset or congestion change, produces an IDR.
 
 In a process with no visible window, which is the background service and the
 app when hidden, Windows 11 fires every timer on its 15.6 ms tick and ignores

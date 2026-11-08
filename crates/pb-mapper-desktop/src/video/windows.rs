@@ -34,6 +34,10 @@ use windows_capture::{
 /// Thread C's encoder bound decides how deep the pipeline runs; this only
 /// keeps a caller without it from queueing more.
 const MAX_IN_FLIGHT: usize = crate::worker::ENCODER_DEPTH;
+/// An output that took longer than this is discarded, and output resumes at
+/// the next IDR. A unit's time counts from when the encoder could start it:
+/// see `late`.
+const LATE_OUTPUT: Duration = Duration::from_millis(250);
 const MAX_ACCESS_UNIT: usize = 4 * 1024 * 1024;
 /// A static desktop still submits a verified repeat this often, which keeps a
 /// presented frame fresh enough to authorise input.
@@ -142,6 +146,8 @@ pub struct Encoder {
     latest: Option<ID3D11Texture2D>,
     latest_pending: bool,
     pending: VecDeque<(u64, Instant, bool)>,
+    /// When the last output was collected, discarded or not.
+    last_output: Option<Instant>,
     width: u32,
     height: u32,
     fps: u32,
@@ -254,6 +260,7 @@ impl Encoder {
             latest: None,
             latest_pending: false,
             pending: VecDeque::with_capacity(MAX_IN_FLIGHT),
+            last_output: None,
             width,
             height,
             fps,
@@ -321,8 +328,10 @@ impl Encoder {
                 }
                 let bytes = sample_bytes(&sample)?;
                 let (bytes, keyframe) = self.codec.annex_b(bytes)?;
+                let now = Instant::now();
+                let previous = self.last_output.replace(now);
                 // A genuinely late codec output is not a newly captured picture.
-                if at.elapsed() > Duration::from_millis(250) {
+                if late(at, previous, now) {
                     self.wait_independent_output = true;
                     self.force_keyframe = true;
                 } else if self.wait_independent_output && !keyframe {
@@ -334,7 +343,7 @@ impl Encoder {
                     self.stats.encoded += 1;
                     self.stats.unique_encoded += u64::from(!duplicate);
                     self.stats.bytes += bytes.len() as u64;
-                    let encode_us = at.elapsed().as_micros();
+                    let encode_us = now.saturating_duration_since(at).as_micros();
                     self.stats.encode_time_us += encode_us as u64;
                     ready = Some(Encoded {
                         bytes,
@@ -495,6 +504,18 @@ impl Encoder {
     fn frame_period(&self) -> Duration {
         Duration::from_nanos(1_000_000_000 / u64::from(self.fps))
     }
+}
+
+/// Whether an output collected at `now`, of a unit submitted at `submitted`,
+/// is later than `LATE_OUTPUT`. The encoder serves units in order, so one
+/// queued behind others starts no earlier than the output before it, at
+/// `previous`. The wait behind them, which thread C's `ENCODER_DEPTH` sets, is
+/// not lateness: measured from the submit, a throughput-limited encoder at
+/// that depth would be late on every unit, its IDRs included, and its picture
+/// would freeze.
+fn late(submitted: Instant, previous: Option<Instant>, now: Instant) -> bool {
+    let started = previous.map_or(submitted, |previous| previous.max(submitted));
+    now.saturating_duration_since(started) > LATE_OUTPUT
 }
 
 fn scaled_size(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
@@ -1217,6 +1238,28 @@ mod tests {
         assert_eq!(scaled_size(1280, 720, 1920, 1080), (1280, 720));
         assert_eq!(scaled_size(3440, 1440, 1920, 1080), (1920, 802));
         assert_eq!(scaled_size(1080, 1920, 1920, 1080), (606, 1080));
+    }
+    #[test]
+    fn a_unit_queued_behind_a_slow_encoder_is_not_late() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        // A serial encoder takes 70 ms a unit. Thread C fills it at 60 fps,
+        // then submits one as each comes out: from its submit, every unit
+        // after the first four takes 280 ms.
+        let mut queued: VecDeque<u64> = [0, 17, 33, 50].into();
+        assert_eq!(queued.len(), crate::worker::ENCODER_DEPTH);
+        let mut previous = None;
+        for unit in 1..=20 {
+            let out = 70 * unit;
+            let submitted = queued.pop_front().unwrap();
+            assert!(!late(at(submitted), previous, at(out)), "unit {unit}");
+            previous = Some(at(out));
+            queued.push_back(out);
+        }
+        // A stuck encoder is still late, behind another unit or not.
+        let submitted = queued.pop_front().unwrap();
+        assert!(late(at(submitted), previous, at(70 * 20 + 251)));
+        assert!(late(at(5_000), previous, at(5_251)));
     }
     #[test]
     fn gop_is_trusted_only_when_read_back_unchanged() {
