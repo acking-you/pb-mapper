@@ -366,6 +366,28 @@ async fn encrypted_desktop_direct_and_relay_enforce_grants_and_owned_teardown() 
                 "relay"
             }
         );
+        // A direct path's link reaches the status, under the names the app
+        // reads; the relay has none.
+        let stats = serde_json::to_value(&viewed.stats).unwrap();
+        let link = &stats["link"];
+        if path == PathPolicy::Auto {
+            for key in [
+                "kind",
+                "family",
+                "via",
+                "peer",
+                "rtt_ms",
+                "min_rtt_ms",
+                "setup_ms",
+            ] {
+                assert!(!link[key].is_null(), "{key} missing: {link}");
+            }
+            for key in ["local_ip", "same_lan"] {
+                assert!(link.get(key).is_some(), "{key} missing: {link}");
+            }
+        } else {
+            assert!(link.is_null(), "{link}");
+        }
         assert!(matches!(
             viewer.input(viewed.generation, &SHIFT),
             Err(InputError::NotControlling)
