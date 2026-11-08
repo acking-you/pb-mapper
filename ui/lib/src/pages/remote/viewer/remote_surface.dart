@@ -10,6 +10,7 @@ import 'package:flutter/widgets.dart';
 import '../../../state/desktop_input.dart';
 import '../../../state/viewer_prefs.dart';
 import '../../../theme/motion.dart';
+import '../../../theme/viewer_palette.dart';
 import 'remote_input.dart';
 import 'remote_viewport.dart';
 import 'touch_gestures.dart';
@@ -283,76 +284,168 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
   );
 }
 
-/// Where the finger is in trackpad mode: a 44 px ring that fades when the
-/// last finger lifts. Its own layer, like the cursor's: it moves with every
-/// stroke and repaints nothing around it.
+/// Where the finger is in trackpad mode, a 44 px ring, and a long press's
+/// joystick in either mode; each fades when the last finger lifts. Its own
+/// layer, like the cursor's: it moves with every stroke and repaints nothing
+/// around it. Both carry a light and a dark edge, so they show over a white
+/// page, a black one and anything between.
 class TouchIndicator extends StatelessWidget {
   const TouchIndicator({super.key, required this.machine});
 
   final TouchGestureMachine machine;
 
-  static const _size = 44.0;
-
   @override
   Widget build(BuildContext context) => RepaintBoundary(
     child: IgnorePointer(
-      child: _LastPoint(
-        point: machine.indicatorPoint,
-        builder: (context, at, visible) => Stack(
-          children: [
-            Positioned(
-              left: at.dx - _size / 2,
-              top: at.dy - _size / 2,
-              width: _size,
-              height: _size,
-              child: AnimatedOpacity(
-                opacity: visible ? 1 : 0,
-                duration: visible
-                    ? Duration.zero
-                    : Motion.of(context, kTouchIndicatorFade),
-                child: const DecoratedBox(
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Color.fromRGBO(255, 255, 255, 0.22),
-                    border: Border.fromBorderSide(
-                      BorderSide(
-                        color: Color.fromRGBO(255, 255, 255, 0.8),
-                        width: 1.5,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          _Fading(
+            value: machine.indicatorPoint,
+            painter: (at) => _FingerPainter(at),
+          ),
+          _Fading(
+            value: machine.joystick,
+            painter: (stick) => _JoystickPainter(stick),
+          ),
+        ],
       ),
     ),
   );
 }
 
-/// Keeps the last non-null point, so the indicator fades where it was.
-class _LastPoint extends StatefulWidget {
-  const _LastPoint({required this.point, required this.builder});
+/// Keeps the last non-null value, so what it draws fades where it was.
+class _Fading<T extends Object> extends StatefulWidget {
+  const _Fading({required this.value, required this.painter});
 
-  final ValueListenable<Offset?> point;
-  final Widget Function(BuildContext context, Offset at, bool visible) builder;
+  final ValueListenable<T?> value;
+  final CustomPainter Function(T value) painter;
 
   @override
-  State<_LastPoint> createState() => _LastPointState();
+  State<_Fading<T>> createState() => _FadingState<T>();
 }
 
-class _LastPointState extends State<_LastPoint> {
-  Offset? _last;
+class _FadingState<T extends Object> extends State<_Fading<T>> {
+  T? _last;
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder(
-    valueListenable: widget.point,
-    builder: (context, point, _) {
-      if (point != null) _last = point;
-      final at = _last;
-      if (at == null) return const SizedBox.shrink();
-      return widget.builder(context, at, point != null);
+    valueListenable: widget.value,
+    builder: (context, value, _) {
+      if (value != null) _last = value;
+      final last = _last;
+      if (last == null) return const SizedBox.shrink();
+      return AnimatedOpacity(
+        opacity: value != null ? 1 : 0,
+        duration: value != null
+            ? Duration.zero
+            : Motion.of(context, kTouchIndicatorFade),
+        child: CustomPaint(painter: widget.painter(last)),
+      );
     },
   );
+}
+
+const _light = Color(0xFFFFFFFF);
+const _dark = Color(0xFF000000);
+
+/// A soft shadow under a circle.
+void _shadow(Canvas canvas, Offset at, double radius, double sigma) =>
+    canvas.drawCircle(
+      at,
+      radius,
+      Paint()
+        ..color = _dark.withValues(alpha: 0.32)
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, sigma),
+    );
+
+void _edge(Canvas canvas, Offset at, double radius, Color color, double w) =>
+    canvas.drawCircle(
+      at,
+      radius,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = w
+        ..color = color,
+    );
+
+/// The trackpad finger: a translucent 44 px ring over the cursor, its white
+/// edge ringed in black.
+class _FingerPainter extends CustomPainter {
+  const _FingerPainter(this.at);
+
+  final Offset at;
+
+  static const _radius = 22.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawCircle(
+      at,
+      _radius,
+      Paint()..color = _light.withValues(alpha: 0.22),
+    );
+    _edge(canvas, at, _radius - 0.75, _light.withValues(alpha: 0.85), 1.5);
+    _edge(canvas, at, _radius + 0.5, _dark.withValues(alpha: 0.45), 1);
+  }
+
+  @override
+  bool shouldRepaint(_FingerPainter old) => old.at != at;
+}
+
+/// The joystick: a dark translucent ring with a light edge and four
+/// chevrons at the press point, and a light ball with a dark edge under
+/// the finger. The edge takes the signal blue while it scrolls.
+class _JoystickPainter extends CustomPainter {
+  const _JoystickPainter(this.stick);
+
+  final TouchJoystick stick;
+
+  static const _ball = 22.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = stick.centre;
+    const r = kJoystickRadius;
+    _shadow(canvas, c, r, 8);
+    canvas.drawCircle(c, r, Paint()..color = _dark.withValues(alpha: 0.38));
+    _edge(
+      canvas,
+      c,
+      r - 0.75,
+      stick.active ? ViewerPalette.signal : _light.withValues(alpha: 0.75),
+      1.5,
+    );
+    final chevron = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..color = _light.withValues(alpha: 0.7);
+    for (var quarter = 0; quarter < 4; quarter++) {
+      final a = quarter * math.pi / 2;
+      final dir = Offset(math.cos(a), math.sin(a));
+      final side = Offset(-dir.dy, dir.dx);
+      final tip = c + dir * (r - 9);
+      final left = tip - dir * 5 + side * 5, right = tip - dir * 5 - side * 5;
+      canvas.drawPath(
+        Path()
+          ..moveTo(left.dx, left.dy)
+          ..lineTo(tip.dx, tip.dy)
+          ..lineTo(right.dx, right.dy),
+        chevron,
+      );
+    }
+    final b = stick.ball;
+    _shadow(canvas, b, _ball, 4);
+    canvas.drawCircle(
+      b,
+      _ball,
+      Paint()..color = _light.withValues(alpha: 0.92),
+    );
+    _edge(canvas, b, _ball - 0.75, _dark.withValues(alpha: 0.5), 1.5);
+  }
+
+  @override
+  bool shouldRepaint(_JoystickPainter old) => old.stick != stick;
 }

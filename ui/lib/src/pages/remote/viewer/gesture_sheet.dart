@@ -14,6 +14,7 @@ enum GestureGlyphKind {
   slide,
   tap,
   longPress,
+  joystick,
   doubleTapHold,
   threeFinger,
   twoFingerMove,
@@ -67,6 +68,11 @@ class GestureSheet extends StatelessWidget {
         GestureGlyphKind.longPress,
         l10n.gestureLongPress,
         l10n.gestureLongPressResult,
+      ),
+      (
+        GestureGlyphKind.joystick,
+        l10n.gestureJoystick,
+        l10n.gestureJoystickResult,
       ),
       if (!direct)
         (
@@ -368,6 +374,12 @@ class GestureGlyphPainter extends CustomPainter {
         dot(12, 12, 3);
         ring(12, 12, 6.5);
         ring(12, 12, 9.5, opacity: 0.4);
+      case GestureGlyphKind.joystick:
+        // The ring, its ball pushed up, and the way it scrolls.
+        ring(12, 12, 10);
+        dot(12, 9, 3);
+        line(const [Offset(10, 5.5), Offset(12, 3.5), Offset(14, 5.5)]);
+        line(const [Offset(10, 16.5), Offset(12, 18.5), Offset(14, 16.5)]);
       case GestureGlyphKind.doubleTapHold:
         dot(7, 16, 3);
         dashed(7, 16, 5.5, 2, 2.5);
