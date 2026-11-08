@@ -282,7 +282,7 @@ mismatch stops automatic retries and never replaces the pinned identity.
 | Action | Result |
 | --- | --- |
 | Turn on remote control | Starts the service-owned host with input and automatic restoration enabled; reuses its invitation; a viewer of the app's own sharing reconnects by itself when the service is ready (installed, running, current and verified for this installed app, so nothing needs installing or updating) and takes over the same invitation (the same relay, namespace and service); otherwise it ends with sharing stopped |
-| Stop sharing | Closes sessions and disables automatic sharing; the same invitation resumes on the next explicit Start sharing |
+| Stop sharing | Closes sessions and disables automatic sharing; the same invitation resumes on the next explicit Start sharing, while Settings name the same relay and namespace (see [Changing the relay](#changing-the-relay)) |
 | Close the app | Stops its viewer; service-owned sharing continues |
 | Upgrade legacy app-owned sharing | Transfers the saved identity if no same-scope service identity exists; an existing service identity remains authoritative |
 | Revoke invitation and stop sharing | Deletes remembered trust, closes the current host, and requires a new invitation for future sharing; its viewer is told the invitation was revoked, whether the app or the service hosts |
@@ -341,6 +341,24 @@ retaining the saved authorization. Waking from sleep is different from remote in
 S3/S4 cannot serve video while suspended, and no Wake-on-LAN facility or power
 policy change is included. Real service-restart, sleep/resume and locked-session
 password entry remain acceptance requirements, not consequences of unit tests.
+
+### Changing the relay
+
+Changing the relay or credential in Settings does not move a host that is
+already published. A sharing or paused host stays on the relay and namespace
+it was published on until it is moved; the service, which restores its host
+when Windows starts, restores it there too, and the app's own startup never
+resumes a host on another relay. While Settings name another relay or
+credential, the host card names the relay the host is on and offers **Share on
+the current relay**, which asks first. Moving configures the service again with
+the same service name, display and permissions through the relay, credential
+and carrier now in Settings (an app-owned host starts again the same way). The
+invitation is never reused on another relay or namespace, so moving creates a
+new one, and computers that saved the old one must add this computer again.
+**Start sharing** always configures the service from the current settings: on
+the same relay and namespace it keeps the invitation, and also takes a changed
+carrier or a renewed credential. When the service registers, its status and
+`service.log` name the relay it registered on.
 
 ## Windows helper and UAC boundary
 
