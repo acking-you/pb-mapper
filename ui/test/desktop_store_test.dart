@@ -505,6 +505,22 @@ void main() {
     store.dispose();
   });
 
+  test("a JPEG session's ceiling is the host's JPEG rate, whatever the "
+      'preset', () {
+    const h264 = DesktopStats(
+      codec: 'h264',
+      preset: DesktopQuality.balanced,
+      maxFps: 60,
+    );
+    const jpeg = DesktopStats(
+      codec: 'jpeg',
+      preset: DesktopQuality.smooth,
+      maxFps: 120,
+    );
+    expect(h264.ceilingFps, 60);
+    expect(jpeg.ceilingFps, DesktopStats.jpegMaxFps);
+  });
+
   testWidgets(
     'metrics do not notify session or hostView listeners, and AppStore is never notified',
     (tester) async {

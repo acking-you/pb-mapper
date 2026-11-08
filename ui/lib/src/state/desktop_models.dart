@@ -679,13 +679,19 @@ class DesktopStats {
   /// The direct path stays on one LAN.
   bool get lan => link?.lan == true;
 
+  /// The host's rate for a JPEG session, whatever the preset (`qos.rs`
+  /// `JPEG_MAX_FPS`).
+  static const jpegMaxFps = 8;
+
   /// The highest rate this session can reach: the preset's ceiling, within
-  /// the viewer's display limit.
+  /// the viewer's display limit and, for JPEG, [jpegMaxFps].
   int? get ceilingFps {
-    final ceiling = preset?.ceilingFps;
+    var ceiling = preset?.ceilingFps;
+    if (ceiling == null) return null;
     final limit = maxFps;
-    if (ceiling == null || limit == null || limit <= 0) return ceiling;
-    return ceiling < limit ? ceiling : limit;
+    if (limit != null && limit > 0 && limit < ceiling) ceiling = limit;
+    if (codec == 'jpeg' && jpegMaxFps < ceiling) ceiling = jpegMaxFps;
+    return ceiling;
   }
 
   @override
