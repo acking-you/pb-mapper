@@ -752,6 +752,7 @@ mod windows_test {
                         max_height: 720,
                         max_fps: 30,
                     },
+                    fps_override: false,
                     quality: QualityPreset::Balanced,
                     progress: None,
                 };

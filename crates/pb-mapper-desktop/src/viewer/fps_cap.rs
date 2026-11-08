@@ -31,6 +31,9 @@ pub(crate) struct FpsCap {
     /// at or above it, so this is what removing the cap sends: the preset's
     /// ceiling would outlive a switch to a faster preset.
     max_fps: u32,
+    /// `max_fps` is the user's own choice, the host's ceiling for every
+    /// preset (`fps_override`), and so the cap's.
+    fps_override: bool,
     cap: Option<u32>,
     last_change: Option<Instant>,
     /// Consecutive ticks with more than `BACKLOG_HIGH` units queued.
@@ -41,9 +44,10 @@ pub(crate) struct FpsCap {
     dropped: bool,
 }
 impl FpsCap {
-    pub fn new(max_fps: u32) -> Self {
+    pub fn new(max_fps: u32, fps_override: bool) -> Self {
         Self {
             max_fps,
+            fps_override,
             cap: None,
             last_change: None,
             high_ticks: 0,
@@ -75,7 +79,11 @@ impl FpsCap {
         direct: bool,
         quality: QualityPreset,
     ) -> Option<u32> {
-        let ceiling = ceiling_fps(quality).min(self.max_fps);
+        let ceiling = if self.fps_override {
+            self.max_fps
+        } else {
+            ceiling_fps(quality).min(self.max_fps)
+        };
         let dropped = std::mem::take(&mut self.dropped);
         self.high_ticks = if backlog > BACKLOG_HIGH {
             self.high_ticks.saturating_add(1)
@@ -150,7 +158,7 @@ mod tests {
     fn fps_cap_lowers_only_under_backlog_and_probes_up() {
         let start = Instant::now();
         let mut ticks = Ticks {
-            cap: FpsCap::new(120),
+            cap: FpsCap::new(120, false),
             now: start,
         };
 
@@ -198,8 +206,13 @@ mod tests {
 
         // The preset's ceiling is what a cap lowers from: 90% of 40 is above
         // Quality's 30, so nothing changes.
-        let mut cap = FpsCap::new(120);
+        let mut cap = FpsCap::new(120, false);
         cap.on_backlog_drop();
         assert_eq!(cap.tick(start, 40.0, 0, true, Quality), None);
+        // Unless the user chose the session's rate, which is every preset's
+        // ceiling then.
+        let mut cap = FpsCap::new(120, true);
+        cap.on_backlog_drop();
+        assert_eq!(cap.tick(start, 40.0, 0, true, Quality), Some(60));
     }
 }

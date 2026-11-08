@@ -179,6 +179,7 @@ fn config(codec: VideoCodec) -> ViewerConfig {
     ViewerConfig {
         codecs: vec![codec],
         limits: VideoLimits::for_viewer(60.0),
+        fps_override: false,
         quality: QualityPreset::Balanced,
         progress: None,
     }
