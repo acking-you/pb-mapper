@@ -320,8 +320,8 @@ class TunnelLink {
 
 /// How a running tunnel's sessions travel: each TCP connection or UDP flow
 /// through it goes direct or through the relay, decided as it opens. A
-/// connection counts both and its attempts; a share counts only the
-/// sessions that reach it directly.
+/// connection and a share both count every session on each path; a
+/// connection also counts its direct attempts, which a share does not make.
 @immutable
 class TunnelPath {
   const TunnelPath({
