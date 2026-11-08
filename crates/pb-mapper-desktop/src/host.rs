@@ -220,13 +220,16 @@ impl Host {
             capabilities,
         }
     }
-    /// The one viewer's path, sampled from the registration's sessions.
+    /// The one viewer's path, sampled from the registration's sessions,
+    /// which it counts on the relay as well as direct.
     fn path(&self) -> HostPath {
-        match self.registration.diagnostics().direct {
-            None => HostPath::Relay,
-            Some(paths) if paths.active_direct > 0 => HostPath::Direct,
-            Some(paths) if paths.active_relay > 0 => HostPath::Relay,
-            Some(_) => HostPath::Unknown,
+        let sessions = self.registration.metrics().sessions;
+        if sessions.active_direct > 0 {
+            HostPath::Direct
+        } else if sessions.active_relay > 0 {
+            HostPath::Relay
+        } else {
+            HostPath::Unknown
         }
     }
     /// "Disconnect": end the connected viewer's session; it hears
