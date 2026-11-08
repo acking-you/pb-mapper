@@ -12,6 +12,11 @@
 //! - `presented_fps`: accepted presentations per second.
 //! - `received_fps`: non-duplicate `Video` records per second.
 //! - `present_interval`: intervals between accepted presentations.
+//! - `speed_rx_bps`, `speed_tx_bps`: the session's whole transfer rate each
+//!   way, in bytes per second over the last second, as RustDesk's Speed:
+//!   what its tunnel carried, TLS and every message included. A session over
+//!   a test stream has no tunnel: it reports the video payload it received,
+//!   and nothing sent.
 use super::ConnectStage;
 use crate::{
     Display, QualityPreset, VideoCodec,
@@ -189,7 +194,11 @@ pub struct ViewerStats {
     /// What the host expects to send: bits per frame × pace.
     pub bitrate: u32,
     pub encoder_bitrate: u32,
+    /// The video payload received, in bits per second.
     pub received_bitrate: u32,
+    /// Bytes per second the session received, and sent; see the module docs.
+    pub speed_rx_bps: u64,
+    pub speed_tx_bps: u64,
     pub width: u32,
     pub height: u32,
     pub codec: VideoCodec,
@@ -232,6 +241,8 @@ impl Default for ViewerStats {
             bitrate: 0,
             encoder_bitrate: 0,
             received_bitrate: 0,
+            speed_rx_bps: 0,
+            speed_tx_bps: 0,
             width: 0,
             height: 0,
             codec: VideoCodec::default(),
@@ -499,6 +510,13 @@ pub(crate) struct HostStats {
     pub rate_model: RateModel,
 }
 
+/// Bytes a session's tunnel carried so far, each way.
+#[derive(Clone, Copy)]
+pub(crate) struct Traffic {
+    pub sent: u64,
+    pub received: u64,
+}
+
 /// Received video and the host's last `Stats`. The read task records; the
 /// write task's tick rolls the rates up once a second.
 pub(crate) struct ViewerStatsAcc {
@@ -513,6 +531,10 @@ pub(crate) struct ViewerStatsAcc {
     window_bytes: u64,
     pub received_fps: f32,
     pub received_bitrate: u32,
+    /// The tunnel's traffic at the last roll, and when.
+    traffic: Option<(Instant, Traffic)>,
+    speed_rx_bps: u64,
+    speed_tx_bps: u64,
     /// Encoder submit to socket write on the host, in ms.
     host_ms: VecDeque<(Instant, u32)>,
     pub last_video_at: Option<Instant>,
@@ -535,6 +557,9 @@ impl ViewerStatsAcc {
             window_bytes: 0,
             received_fps: 0.0,
             received_bitrate: 0,
+            traffic: None,
+            speed_rx_bps: 0,
+            speed_tx_bps: 0,
             host_ms: VecDeque::new(),
             last_video_at: None,
             last_video_size: None,
@@ -620,17 +645,21 @@ impl ViewerStatsAcc {
         stats.picture_latency_ms = self.picture_latency(now, viewer_ms);
         stats.received_fps = self.received_fps;
         stats.received_bitrate = self.received_bitrate;
+        stats.speed_rx_bps = self.speed_rx_bps;
+        stats.speed_tx_bps = self.speed_tx_bps;
         stats.degraded = self.degraded;
     }
 
-    /// Once a second: the received rates and `degraded`, which is judged only
-    /// while the picture should be moving.
+    /// Once a second: the received rates, the speed from the tunnel's
+    /// `traffic` (`None` without a tunnel), and `degraded`, which is judged
+    /// only while the picture should be moving.
     pub fn roll(
         &mut self,
         now: Instant,
         streaming: bool,
         presented_fps: f32,
         viewer_ms: Option<u32>,
+        traffic: Option<Traffic>,
     ) {
         let elapsed = now
             .saturating_duration_since(self.window_start)
@@ -638,6 +667,26 @@ impl ViewerStatsAcc {
         if elapsed > 0.0 {
             self.received_fps = self.window_frames as f32 / elapsed;
             self.received_bitrate = (self.window_bytes as f32 * 8.0 / elapsed) as u32;
+        }
+        match traffic {
+            Some(total) => {
+                // The first sample is the baseline.
+                if let Some((at, last)) = self.traffic.replace((now, total)) {
+                    let seconds = now.saturating_duration_since(at).as_secs_f64();
+                    if seconds > 0.0 {
+                        let rate = |now: u64, last: u64| {
+                            (now.saturating_sub(last) as f64 / seconds) as u64
+                        };
+                        self.speed_rx_bps = rate(total.received, last.received);
+                        self.speed_tx_bps = rate(total.sent, last.sent);
+                    }
+                }
+            }
+            None if elapsed > 0.0 => {
+                self.speed_rx_bps = (self.window_bytes as f64 / f64::from(elapsed)) as u64;
+                self.speed_tx_bps = 0;
+            }
+            None => {}
         }
         self.window_start = now;
         self.window_frames = 0;
@@ -664,5 +713,37 @@ impl ViewerStatsAcc {
         if now.saturating_duration_since(*since.get_or_insert(now)) >= DEGRADED_HOLD {
             self.degraded = poor;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Speed is what the tunnel carried each way per second; a session with
+    /// no tunnel reports the video it received.
+    #[test]
+    fn speed_follows_the_tunnel_or_else_the_video() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let speed = |acc: &mut ViewerStatsAcc, now| {
+            let mut stats = ViewerStats::default();
+            acc.fill(now, None, &mut stats);
+            (stats.speed_rx_bps, stats.speed_tx_bps)
+        };
+        let traffic = |sent, received| Some(Traffic { sent, received });
+
+        let mut tunnel = ViewerStatsAcc::new(start, 60);
+        tunnel.roll(at(1), true, 0.0, None, traffic(1_000, 50_000));
+        assert_eq!(speed(&mut tunnel, at(1)), (0, 0));
+        // The tunnel's count already holds the video, and its framing.
+        tunnel.on_video(at(2), 20_000, false, (1920, 1080), 0);
+        tunnel.roll(at(3), true, 0.0, None, traffic(3_000, 450_000));
+        assert_eq!(speed(&mut tunnel, at(3)), (200_000, 1_000));
+
+        let mut test_stream = ViewerStatsAcc::new(start, 60);
+        test_stream.on_video(at(1), 300_000, false, (1920, 1080), 0);
+        test_stream.roll(at(2), true, 0.0, None, None);
+        assert_eq!(speed(&mut test_stream, at(2)), (150_000, 0));
     }
 }

@@ -44,7 +44,7 @@ use pb_mapper_client::sdk::{
     RelayTransport, TunnelMetrics, TunnelMetricsStream,
 };
 use serde::Serialize;
-use status::{CursorSlot, HostStats, ViewerStatsAcc, millis};
+use status::{CursorSlot, HostStats, Traffic, ViewerStatsAcc, millis};
 use std::{
     io,
     sync::Arc,
@@ -1098,13 +1098,17 @@ impl Writer<'_> {
     }
 
     /// Every `VIEWER_TICK`: the fps cap, keyframe retries and the stall
-    /// watchdog; once a second also the path and the stats roll-up. Why the
-    /// decoder failed, once it failed for good.
+    /// watchdog; once a second also the path, the tunnel's traffic and the
+    /// stats roll-up. Why the decoder failed, once it failed for good.
     fn tick(&mut self, now: Instant) -> Option<String> {
         let second = self.ticks.is_multiple_of(TICKS_PER_SECOND);
         self.ticks += 1;
-        if second && let Some(connection) = self.connection {
-            let (route, link) = route(&connection.metrics());
+        let tunnel = self
+            .connection
+            .filter(|_| second)
+            .map(|connection| connection.metrics());
+        if let Some(metrics) = &tunnel {
+            let (route, link) = route(metrics);
             let changed = {
                 let mut state = self.shared.state.lock();
                 state.link = link;
@@ -1127,12 +1131,26 @@ impl Writer<'_> {
         }
         if second {
             let sink = self.sink.snapshot(now);
-            self.shared
-                .stats
-                .lock()
-                .roll(now, streaming, sink.presented_fps, sink.viewer_ms);
+            self.shared.stats.lock().roll(
+                now,
+                streaming,
+                sink.presented_fps,
+                sink.viewer_ms,
+                tunnel.as_ref().map(traffic),
+            );
         }
         self.sink.decoder_failure()
+    }
+}
+
+/// What the session's tunnel carried so far, on every path: TLS and every
+/// message, each way. A viewer's tunnel carries this one session.
+fn traffic(metrics: &TunnelMetrics) -> Traffic {
+    let paths = metrics.traffic;
+    // `direct` includes `lan`.
+    Traffic {
+        sent: paths.relay.sent.saturating_add(paths.direct.sent),
+        received: paths.relay.received.saturating_add(paths.direct.received),
     }
 }
 
