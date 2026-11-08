@@ -46,8 +46,12 @@ struct Fake {
     /// How long a picture stays in the encoder, at the engine's clock; zero
     /// returns it from the capture call itself.
     latency: Arc<Mutex<Duration>>,
-    /// Submitted pictures, with when each is ready to drain.
-    encoding: Arc<Mutex<VecDeque<(Instant, EncodedFrame)>>>,
+    /// Submitted pictures, with when each was submitted and is ready to drain.
+    encoding: Arc<Mutex<VecDeque<(Instant, Instant, EncodedFrame)>>>,
+    /// While set, every other capture call drops the oldest picture rather
+    /// than return anything, as the Windows encoder discards a late output in
+    /// the call that submits the next: the encoder holds as many as before.
+    discard: Arc<AtomicBool>,
 }
 impl Fake {
     fn new(clock: Clock) -> Self {
@@ -63,18 +67,21 @@ impl Fake {
             started: None,
             latency: Arc::default(),
             encoding: Arc::default(),
+            discard: Arc::default(),
         }
     }
 
-    /// The oldest picture the encoder has finished, if any.
+    /// The oldest picture the encoder has finished, if any, with its submit
+    /// to output time as the Windows encoder measures it.
     fn finished(&self) -> Option<EncodedFrame> {
         let now = (self.clock)();
         let mut encoding = self.encoding.lock();
-        encoding
-            .front()
-            .is_some_and(|(ready, _)| *ready <= now)
-            .then(|| encoding.pop_front().map(|(_, frame)| frame))
-            .flatten()
+        if encoding.front().is_none_or(|(_, ready, _)| *ready > now) {
+            return None;
+        }
+        let (submitted, _, mut frame) = encoding.pop_front()?;
+        frame.format.encode_us = u32::try_from((now - submitted).as_micros()).unwrap();
+        Some(frame)
     }
 }
 impl Backend for Fake {
@@ -118,10 +125,11 @@ impl Backend for Fake {
             let _ = notify.try_send(());
         }
         std::thread::sleep(self.delay);
-        self.log
-            .lock()
-            .captures
-            .push((started, (self.clock)(), keyframe, rate));
+        let calls = {
+            let mut log = self.log.lock();
+            log.captures.push((started, (self.clock)(), keyframe, rate));
+            log.captures.len()
+        };
         if self.fail_capture.load(Ordering::SeqCst) {
             return Err(error("no compatible hardware encoder"));
         }
@@ -141,8 +149,15 @@ impl Backend for Fake {
             return Ok(Some(frame));
         }
         // As the Windows encoder: drain what is finished, then submit.
-        let finished = self.finished();
-        self.encoding.lock().push_back((started + latency, frame));
+        let finished = if self.discard.load(Ordering::SeqCst) && calls % 2 == 0 {
+            self.encoding.lock().pop_front();
+            None
+        } else {
+            self.finished()
+        };
+        self.encoding
+            .lock()
+            .push_back((started, started + latency, frame));
         Ok(finished)
     }
     fn drain_video(&mut self, _: &DesktopContext, _: Duration) -> Result<Option<EncodedFrame>> {
@@ -466,13 +481,26 @@ fn pacing_is_even_and_skips_ticks_without_bursts() {
     assert_eq!(h.state().record.state, SessionState::Streaming);
 
     // An encoder that holds each unit for 45 ms, nearly three periods: no
-    // tick is skipped for it, and its dwell is published.
+    // tick is skipped for it.
     *h.fake.latency.lock() = Duration::from_millis(45);
     let (before, skipped) = (h.captures().len(), h.state().skipped_ticks);
     h.run(Duration::from_millis(2100), true);
     let slow = h.captures().len() - before;
     assert!((125..=127).contains(&slow), "{slow}");
     assert_eq!(h.state().skipped_ticks, skipped);
+}
+
+#[test]
+fn the_encoder_dwell_stays_true_when_the_encoder_drops_units() {
+    let mut h = Harness::new(true, None);
+    // An encoder that holds each unit for 45 ms never runs empty at 60 fps.
+    // It drops units in calls that also submit, so it holds as many as
+    // before: which unit a later call returns cannot be told from the count.
+    *h.fake.latency.lock() = Duration::from_millis(45);
+    h.run(Duration::from_millis(500), true);
+    h.fake.discard.store(true, Ordering::SeqCst);
+    // Two windows, so the published one began after the drops did.
+    h.run(Duration::from_millis(2100), true);
     let dwell = h.state().encoder_dwell.unwrap();
     assert!(
         (Duration::from_millis(45)..=Duration::from_millis(47)).contains(&dwell),

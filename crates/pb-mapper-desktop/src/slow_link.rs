@@ -194,8 +194,10 @@ impl SyntheticEncoder {
             if age < self.latency {
                 return None;
             }
-            let (_, frame) = self.pending.pop_front()?;
+            let (_, mut frame) = self.pending.pop_front()?;
             if age <= ENCODER_EXPIRY {
+                // Submit to output, as the Windows encoder reports it.
+                frame.format.encode_us = u32::try_from(age.as_micros()).unwrap_or(u32::MAX);
                 return Some(frame);
             }
             self.probe.expired.fetch_add(1, Ordering::Relaxed);

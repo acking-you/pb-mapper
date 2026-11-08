@@ -179,8 +179,8 @@ pub struct ViewerStats {
     /// Host capture ticks skipped per second, for transport backpressure or
     /// a full encoder.
     pub skipped_per_s: f32,
-    /// The host's median time a unit stays in its encoder, or the helper,
-    /// from submit to drain. `None` from a host that reports none.
+    /// The host's median time a unit stays in its encoder, from submit to
+    /// output. `None` from a host that reports none.
     pub encoder_dwell_ms: Option<u32>,
     /// What the host sent, in bits per second.
     pub sent_bitrate: u32,

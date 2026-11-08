@@ -208,9 +208,6 @@ struct Engine {
     cursor: Option<CursorUpdate>,
     /// When to poll the encoder again while it holds units.
     drain_due: Instant,
-    /// When each unit the encoder holds was submitted, oldest first, in step
-    /// with `pending_video`.
-    submitted: VecDeque<Instant>,
     /// Held while this session captures.
     timer: Option<TimerResolution>,
     last_lease: Option<Instant>,
@@ -262,7 +259,6 @@ impl Engine {
             cursor_due: now,
             cursor: None,
             drain_due: now,
-            submitted: VecDeque::new(),
             timer: None,
             last_lease: None,
             stale_released: false,
@@ -612,8 +608,6 @@ impl Engine {
                 self.invalidate();
             }
             self.keyframe = true;
-            // A new encoder holds nothing.
-            self.submitted.clear();
             if let Err(failure) = self.backend.configure_video(self.limits, self.nominal_fps) {
                 self.fail(failure, now);
                 return false;
@@ -665,11 +659,12 @@ impl Engine {
                 && let Some(context) = &self.context
             {
                 let result = self.backend.drain_video(context, Duration::ZERO);
-                let done = (self.clock)();
-                self.drain_due = done + DRAIN_POLL;
-                self.track_encoder(now, matches!(result, Ok(Some(_))), done);
+                self.drain_due = (self.clock)() + DRAIN_POLL;
                 match result {
-                    Ok(Some(_)) => self.state.dropped_frames += 1,
+                    Ok(Some(frame)) => {
+                        self.window.dwell(frame.format.encode_us);
+                        self.state.dropped_frames += 1;
+                    }
                     Ok(None) => {}
                     Err(failure) => self.fail(failure, now),
                 }
@@ -716,7 +711,6 @@ impl Engine {
                 }
                 let done = (self.clock)();
                 self.drain_due = done + DRAIN_POLL;
-                self.track_encoder(now, matches!(result, Ok(Some(_))), done);
                 self.produced(result, done);
             } else {
                 // Transport backpressure or a full encoder, never
@@ -738,25 +732,7 @@ impl Engine {
                 } else {
                     done + DRAIN_POLL
                 };
-            self.track_encoder(now, drained, done);
             self.produced(result, done);
-        }
-    }
-
-    /// Keep `submitted` in step with the encoder after a video call made at
-    /// `called`. The encoder is first in, first out: a unit drained is the
-    /// oldest submitted, and its dwell is sampled; one it dropped leaves from
-    /// the front unsampled; one the call submitted joins at the back.
-    fn track_encoder(&mut self, called: Instant, drained: bool, done: Instant) {
-        if drained && let Some(submitted) = self.submitted.pop_front() {
-            self.window.dwell(done.saturating_duration_since(submitted));
-        }
-        let pending = self.backend.pending_video();
-        while self.submitted.len() > pending {
-            self.submitted.pop_front();
-        }
-        while self.submitted.len() < pending {
-            self.submitted.push_back(called);
         }
     }
 
@@ -772,6 +748,7 @@ impl Engine {
             Err(failure) => return self.fail(failure, at),
         };
         let format = frame.format;
+        self.window.dwell(format.encode_us);
         if format.keyframe {
             self.shared.idr.lock().answered(at);
         }
@@ -997,7 +974,7 @@ struct Window {
     unique: u64,
     waits: Vec<u32>,
     max_wait: u32,
-    /// Submit to drain of each unit drained.
+    /// The encoder's own submit to output time of each unit it returned.
     dwells: Vec<Duration>,
 }
 impl Window {
@@ -1019,9 +996,13 @@ impl Window {
         }
     }
 
-    fn dwell(&mut self, dwell: Duration) {
-        if self.dwells.len() < WAIT_SAMPLES {
-            self.dwells.push(dwell);
+    /// A unit's `VideoFormat::encode_us`, which the encoder measures itself:
+    /// thread C cannot tell which unit a call returned, nor see one the
+    /// encoder discards in the call that submits the next. Zero is no sample:
+    /// JPEG, or a backend that measures none.
+    fn dwell(&mut self, encode_us: u32) {
+        if encode_us > 0 && self.dwells.len() < WAIT_SAMPLES {
+            self.dwells.push(Duration::from_micros(encode_us.into()));
         }
     }
 

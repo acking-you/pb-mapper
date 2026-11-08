@@ -633,8 +633,9 @@ two, an encoder that kept each unit 40 ms delivered 40 FPS at a pace of 60, and
 one that kept it 60 ms delivered 30. Four cover a latency of nearly four
 periods, and a fast encoder never holds more than one, so it adds no latency.
 The bound is fixed rather than derived from the measured dwell, because a
-queueing encoder's dwell grows with its depth. Thread C measures each unit's
-dwell, from submit to drain, and reports the median of the last second as
+queueing encoder's dwell grows with its depth. The encoder measures each
+unit's dwell, from submit to output (the `encode_us` it returns with the
+unit), and thread C reports the median of the last second as
 `encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
 duplicate, which unique-frame rates exclude. The hand-off queue holds at most
 six units and 8 MiB, which both bounds together never reach; when its oldest
@@ -933,7 +934,7 @@ numbers the UI, the acceptance tool and these docs use:
 | `received_fps` | Non-duplicate video records per second |
 | `preset`, `max_fps` | The preset this session asked for, and its `limits.max_fps`, which bounds every preset's ceiling |
 | `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder |
-| `encoder_dwell_ms` | The host's median time a unit stays in its encoder or helper, from submit to drain, over the last second; null from a host that reports none |
+| `encoder_dwell_ms` | The host's median time a unit stays in its encoder, or the helper's, from submit to output as the encoder measures it, over the last second; null from a host that reports none |
 | `sent_bitrate` | What the host sent over the last second, in bit/s |
 | `ack_queue_ms` | The host's receipt-based queue delay (the ack queue under send credit) |
 | `present_interval` | p50/p95/p99/max of the intervals between accepted presentations over the last 60 s, with the gaps over 100 and 250 ms |
