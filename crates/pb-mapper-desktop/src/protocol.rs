@@ -20,7 +20,6 @@ pub(crate) const CAPABILITY_ENCODER_DWELL: &str = "encoder_dwell";
 pub(crate) const CAPABILITY_H265: &str = "h265";
 /// From a viewer: `limits.max_fps` is a frame rate its user chose, which
 /// replaces every quality preset's own ceiling for the session.
-#[allow(dead_code)] // Read once the host and viewer packages land.
 pub(crate) const CAPABILITY_FPS_OVERRIDE: &str = "fps_override";
 const MAX_CAPABILITIES: usize = 16;
 

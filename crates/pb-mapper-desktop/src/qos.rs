@@ -55,12 +55,16 @@ pub(crate) const LATCH_PACE_RATIO: f64 = 0.75;
 /// The startup pace cap after `Accepted` and after `Resume`.
 pub(crate) const STARTUP_HOLD: Duration = Duration::from_secs(1);
 pub(crate) const JPEG_MAX_FPS: u32 = 8;
+/// The encoder bitrate's bounds, which the encoder and the helper check too.
 pub(crate) const ENCODER_BITRATE_MIN: u32 = 256_000;
-pub(crate) const ENCODER_BITRATE_MAX: u32 = 40_000_000;
-const PIXEL_SCALE_MIN: f64 = 0.25;
-const PIXEL_SCALE_MAX: f64 = 4.0;
-/// Preset bits per frame are given at 1080p.
+pub(crate) const ENCODER_BITRATE_MAX: u32 = 80_000_000;
+/// Preset bits per frame are given at 1080p. Another encoded size scales them
+/// by its pixels relative to 1080p to this power, within these bounds: a
+/// picture's bits grow slower than its pixels.
 const FULL_HD_PIXELS: f64 = 1920.0 * 1080.0;
+const PIXEL_SCALE_EXPONENT: f64 = 0.75;
+const PIXEL_SCALE_MIN: f64 = 0.4;
+const PIXEL_SCALE_MAX: f64 = 3.0;
 /// The most one window may raise the expected bitrate, in bit/s.
 const BPF_RAISE_MAX_BPS: f64 = 150_000.0;
 
@@ -102,10 +106,18 @@ fn preset(quality: QualityPreset) -> Preset {
     }
 }
 
-/// A preset's fps ceiling, before the viewer's `limits.max_fps`. The viewer's
-/// fps cap is bounded by it too.
+/// A preset's fps ceiling, before the viewer's `limits.max_fps`, which
+/// replaces it when the viewer lists `fps_override`. The viewer's fps cap is
+/// bounded by it too.
 pub(crate) fn ceiling_fps(quality: QualityPreset) -> u32 {
     preset(quality).ceiling_fps
+}
+
+/// Bits per frame at `width` × `height` relative to 1080p.
+fn pixel_scale(width: u32, height: u32) -> f64 {
+    (f64::from(width) * f64::from(height) / FULL_HD_PIXELS)
+        .powf(PIXEL_SCALE_EXPONENT)
+        .clamp(PIXEL_SCALE_MIN, PIXEL_SCALE_MAX)
 }
 
 /// What thread C is asked for, published after every change.
@@ -164,6 +176,8 @@ impl RatioWindow {
 pub(crate) struct Qos {
     limits: VideoLimits,
     codec: VideoCodec,
+    /// `limits.max_fps` is every preset's ceiling: the viewer's user chose it.
+    fps_override: bool,
     preset: QualityPreset,
     min_fps: u32,
     normal_fps: u32,
@@ -205,18 +219,20 @@ impl Qos {
         limits: VideoLimits,
         codec: VideoCodec,
         quality: QualityPreset,
+        fps_override: bool,
         now: Instant,
     ) -> Self {
-        let pixels = f64::from(limits.max_width) * f64::from(limits.max_height);
         let mut qos = Self {
             limits,
             codec,
+            fps_override,
             preset: quality,
             min_fps: 1,
             normal_fps: 1,
             ceiling_fps: 1,
             scale: 1.0,
-            pixel_scale: (pixels / FULL_HD_PIXELS).clamp(PIXEL_SCALE_MIN, PIXEL_SCALE_MAX),
+            // Until the first unit says what the encoded size is.
+            pixel_scale: pixel_scale(limits.max_width, limits.max_height),
             fps: 1,
             quick: 0,
             increase: 0,
@@ -250,7 +266,11 @@ impl Qos {
     fn apply_preset(&mut self, quality: QualityPreset) {
         let p = preset(quality);
         self.preset = quality;
-        self.ceiling_fps = p.ceiling_fps.min(self.limits.max_fps);
+        self.ceiling_fps = if self.fps_override {
+            self.limits.max_fps
+        } else {
+            p.ceiling_fps.min(self.limits.max_fps)
+        };
         self.normal_fps = p.normal_fps.min(self.ceiling_fps);
         self.min_fps = p.min_fps;
         self.scale = (f64::from(self.ceiling_fps) / 30.0).max(1.0);
@@ -297,8 +317,7 @@ impl Qos {
 
     /// A new encoded size: bits per frame keep their 1080p-relative level.
     pub fn set_video_size(&mut self, width: u32, height: u32) {
-        let pixels = f64::from(width) * f64::from(height);
-        let scale = (pixels / FULL_HD_PIXELS).clamp(PIXEL_SCALE_MIN, PIXEL_SCALE_MAX);
+        let scale = pixel_scale(width, height);
         if scale != self.pixel_scale {
             self.bpf *= scale / self.pixel_scale;
             self.pixel_scale = scale;
@@ -677,6 +696,17 @@ mod tests {
         }
     }
 
+    /// An H.264 session on Balanced at 1080p60, its preset's own ceiling.
+    fn balanced(now: Instant) -> Qos {
+        Qos::new(
+            limits(60),
+            VideoCodec::H264,
+            QualityPreset::Balanced,
+            false,
+            now,
+        )
+    }
+
     /// One probe round trip of `rtt_ms`, sent at `at`, with the receipts'
     /// queue at its echo.
     fn sample_with(qos: &mut Qos, at: Instant, rtt_ms: u64, tainted: bool, ack_queue_ms: u64) {
@@ -725,7 +755,7 @@ mod tests {
     fn balanced_paces_at_its_ceiling_within_two_seconds_of_a_short_path() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut qos = balanced(t0);
         // Balanced at 60: 45 fps, capped at 15 × 2 for the first second.
         assert_eq!((qos.fps, qos.pace(t0)), (45, 30));
         // A flat 20 ms link: the first echo lifts fps to the ceiling, which
@@ -738,7 +768,7 @@ mod tests {
         assert_eq!(qos.probe_due_at(at(1800)), Some(at(2000)));
 
         // A long path starts where Balanced always did, probed once a second.
-        let mut far = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut far = balanced(t0);
         sample(&mut far, t0, 120, false);
         assert_eq!(far.fps, 45);
         assert_eq!(far.probe_due_at(at(500)), Some(at(1000)));
@@ -747,7 +777,7 @@ mod tests {
     #[test]
     fn a_stalled_probe_never_more_than_halves_fps() {
         let t0 = Instant::now();
-        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut qos = balanced(t0);
         // A 600 ms stall that delays the receipts as well as the probe ...
         let stall = (600, 580);
         let mut script: Vec<_> = calm(8).collect();
@@ -778,7 +808,7 @@ mod tests {
     #[test]
     fn a_sustained_queue_reaches_the_floor_within_two_samples() {
         let t0 = Instant::now();
-        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut qos = balanced(t0);
         let fps = probes(&mut qos, t0, &[(20, 0); 8]);
         assert_eq!(fps.last(), Some(&60));
         // 250 ms of queueing that no receipt reports: two probes in a row
@@ -799,7 +829,7 @@ mod tests {
     fn tainted_probes_unresponsiveness_baseline_and_output_clamps() {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
-        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut qos = balanced(t0);
         sample(&mut qos, s(1), 20, false);
         qos.fps = 40;
 
@@ -844,7 +874,7 @@ mod tests {
 
         // The baseline is the minimum over the last 60 s, and a new path
         // resets it.
-        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut qos = balanced(t0);
         sample(&mut qos, s(1), 5, false);
         assert_eq!(qos.base_rtt(), Some(DELAY_FLOOR));
         for n in 0..RTT_WINDOW.as_secs() {
@@ -874,7 +904,13 @@ mod tests {
         assert_eq!(qos.pace(s(73)), qos.fps);
 
         // A JPEG session never paces above 8 fps.
-        let jpeg = Qos::new(limits(60), VideoCodec::Jpeg, QualityPreset::Smooth, t0);
+        let jpeg = Qos::new(
+            limits(60),
+            VideoCodec::Jpeg,
+            QualityPreset::Smooth,
+            false,
+            t0,
+        );
         assert_eq!(jpeg.pace(s(2)), JPEG_MAX_FPS);
     }
 
@@ -882,10 +918,26 @@ mod tests {
     fn bits_per_frame_steps_and_one_way_latch() {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
-        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut qos = balanced(t0);
         // 4 Mbit/s at 60 fps; the per-frame-budget encoder gets bpf × nominal.
         assert_eq!(qos.bpf, 66_667.0);
         assert_eq!(qos.targets(s(2)).encoder_bps, 4_000_020);
+        // Bits per frame follow the encoded pixels to the power 0.75, within
+        // 0.4 and 3: a 4K picture gets 2.83 times 1080p's. Quality at a frame
+        // rate the user chose has that rate for its ceiling, and its encoder
+        // gets more than the 40 Mbit/s an encoder was once clamped at.
+        let uhd = VideoLimits {
+            max_width: 3840,
+            max_height: 2160,
+            max_fps: 120,
+        };
+        let chosen = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, true, t0);
+        assert!((chosen.bpf - 200_000.0 * 4f64.powf(0.75)).abs() < 1.0);
+        assert_eq!(chosen.ceiling_fps, 120);
+        assert!(chosen.targets(s(2)).encoder_bps > 67_000_000);
+        let auto = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, false, t0);
+        assert_eq!(auto.ceiling_fps, 30);
+        assert_eq!((pixel_scale(7680, 4320), pixel_scale(640, 360)), (3.0, 0.4));
         let produced = |unique: u64, non_idr_frames: u64, non_idr_bytes: u64| ProducedSnapshot {
             frames: unique,
             unique,
@@ -957,7 +1009,7 @@ mod tests {
         assert!(qos.window.max_delay.is_none());
 
         // The latch: at full pace an overshoot is no evidence ...
-        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut qos = balanced(t0);
         let bpf = qos.bpf;
         let window = |n: u64, frames: u64, ratio: f64| {
             produced(
@@ -971,7 +1023,7 @@ mod tests {
         }
         assert_eq!(qos.rate_model, RateModel::Nominal);
         // ... nor is a per-frame budget at a lower pace ...
-        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let mut qos = balanced(t0);
         for n in 1..=3 {
             qos.tick(s(3 * n), &idle(), window(n, 90, 1.0));
         }

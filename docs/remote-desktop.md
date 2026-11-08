@@ -494,7 +494,8 @@ may be H.265, which a protocol 5 helper cannot parse; `Request::H265` asks the
 worker whether it encodes H.265 on its display, which it probes in the
 interactive session; and the worker answers each input with the pointer as
 the input left it, so the host never reports the controller's own move back
-(see [Input and cursor](#input-and-cursor)). Protocol 5 added the background host's `lan_first`,
+(see [Input and cursor](#input-and-cursor)). The worker accepts an encoder
+bitrate up to 80 Mbit/s. Protocol 5 added the background host's `lan_first`,
 the app's *Try the local network first* when sharing started, written only
 when off, so a grant saved with the default stays readable by an older
 helper.
@@ -852,8 +853,10 @@ scales bits per frame by
 the window's worst delay: ×1.15, ×1.10 or ×1.05 below 50, 100 or 150 ms when
 the picture changed (at least six unique frames), and ×0.95, ×0.90, ×0.85 or
 ×0.80 below 200, 300 or 500 ms or above. An increase adds at most 150 kbit/s.
-The result stays between the preset's floor and maximum, scaled by the encoded
-size relative to 1080p (0.25 to 4).
+The result stays between the preset's floor and maximum. Every bits-per-frame
+figure is given at 1080p and scaled by the encoded pixels relative to 1080p
+to the power 0.75, within 0.4 and 3: 0.54 at 720p, 1.54 at 1440p and 2.83 at
+4K, since a picture's bits grow slower than its pixels.
 
 | Preset | Frame rate (min / start / ceiling) | Bits per frame at 1080p (start / max / floor) | At 60 FPS (30 for Quality) |
 | --- | --- | --- | --- |
@@ -861,9 +864,12 @@ size relative to 1080p (0.25 to 4).
 | Balanced (default) | 10 / 45 / 60 | 66 667 / 133 333 / 16 667 | 4 Mbit/s, up to 8, floor 1 |
 | Smooth | 12 / 50 / 120 | 50 000 / 100 000 / 12 500 | 3 Mbit/s, up to 6, floor 0.75 |
 
-The ceiling is also bounded by the viewer's `max_fps`. The pace the host
-captures at is the controller's frame rate, bounded by the ceiling and the
-viewer's fps cap. It is held to `min(start, 15 × scale)` for 1 s after the
+The ceiling is also bounded by the viewer's `max_fps`. A viewer that lists
+the `fps_override` capability chose that `max_fps` itself: it is then every
+preset's ceiling, Quality's included, while each preset keeps its own start
+and minimum. The pace the host captures at is the controller's frame rate,
+bounded by the ceiling and the viewer's fps cap. It is held to
+`min(start, 15 × scale)` for 1 s after the
 session starts and after a resume, to 2 FPS while the viewer is unresponsive,
 and to 8 FPS for JPEG. A viewer is unresponsive while its probe echo, or a
 receipt it owes, is more than 2 s late. That cuts only the output pace and
@@ -880,8 +886,10 @@ An encoder that budgets per second would overspend at a reduced pace. When two
 consecutive 3 s windows at no more than 0.75 × the nominal rate produce more
 than 1.3 × the expected bits, the session latches to the `timestamp` model
 (`bits per frame × pace`) for good and traces `desktop_rate_model_latched`. The
-encoder bitrate stays between 256 kbit/s and 40 Mbit/s, and nothing raises it
-because the frame rate was cut.
+encoder bitrate stays between 256 kbit/s and 80 Mbit/s, which the encoder and
+the helper check too, and nothing raises it because the frame rate was cut.
+At 4K, Quality's maximum bits per frame give the encoder 68 Mbit/s at a
+nominal 60 FPS, and the 80 Mbit/s bound at 120.
 
 ### Encoder rate model per GPU
 
@@ -1045,7 +1053,7 @@ Windows cursor bitmap, and observing it never renews input authorisation.
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
 | Cursor | sampled every 16 ms; the controller's own move never reported |
-| Codec | `Accepted` waits at most 3 s for the backend's H.265 answer; one probe per GPU and process |
+| Codec | `Accepted` waits at most 3 s for the backend's H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
 
 ### Diagnostics
 
@@ -1060,7 +1068,7 @@ numbers the UI, the acceptance tool and these docs use:
 | `picture_latency_ms` | Median over 2 s of host time (encoder submit to socket write) + `rtt_ms / 2` + viewer time (network receipt to compositor consumption). Each side uses its own clock and the network leg is an estimate; only a camera measures glass to glass. |
 | `presented_fps` | Accepted presentations per second |
 | `received_fps` | Non-duplicate video records per second |
-| `preset`, `max_fps` | The preset this session asked for, and its `limits.max_fps`, which bounds every preset's ceiling |
+| `preset`, `max_fps` | The preset this session asked for, and its `limits.max_fps`, which bounds every preset's ceiling, or replaces it with `fps_override` |
 | `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder, between the last two `Stats`: over at least the host's 1 s interval, however close together they arrive, and never above `max_fps` |
 | `encoder_dwell_ms` | The host's median time a unit stays in its encoder, or the helper's, from submit to output as the encoder measures it, over the last second; null from a host that reports none |
 | `sent_bitrate` | What the host sent over the last second, in bit/s |
@@ -1075,9 +1083,9 @@ build rejects a field it does not know. A viewer reads its absence as null.
 Where the frame rate goes is then one comparison at a time: a capture rate
 below the pace is the host's source or its gate (`skipped_per_s`,
 `encoder_dwell_ms`); a pace below `max_fps` is the controller, the viewer's cap
-or the preset's ceiling (Quality's is 30); received below capture is the
-transport (`ack_queue_ms`); presented below received is the viewer's decoder or
-display.
+or the preset's ceiling (Quality's is 30 unless the viewer chose a frame
+rate); received below capture is the transport (`ack_queue_ms`); presented
+below received is the viewer's decoder or display.
 
 The host traces each second as `desktop_feedback_interval` on
 `pb_mapper_desktop::feedback` (debug): `action`, `fps`, `pace_fps`,
@@ -1135,7 +1143,8 @@ left out; while the connection is down the core rows show dashes.
   and keyframes with those the viewer asked for.
 - **Host**: the preset with its ceiling (Quality stays at 30 by design, so a
   30 under it is expected; Balanced reaches 60, Smooth 120, each within the
-  viewer's display limit; a JPEG session stops at 8 whatever the preset, so
+  viewer's display limit; a maximum frame rate the viewer chose is every
+  preset's ceiling instead; a JPEG session stops at 8 whatever the preset, so
   its pace stays under a higher target), pace and target with any viewer
   cap, capture ticks skipped a second, the encoder's dwell, its target
   bitrate and rate model, and the adaptation.

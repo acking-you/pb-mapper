@@ -121,7 +121,9 @@ pub enum VideoCodec {
 }
 
 /// What a viewer asks the host to favour. Each preset maps to bitrate and
-/// fps targets on the host; changing it mid-session never reconnects.
+/// fps targets on the host; changing it mid-session never reconnects. A
+/// viewer listing `fps_override` makes its `limits.max_fps` every preset's
+/// ceiling.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QualityPreset {

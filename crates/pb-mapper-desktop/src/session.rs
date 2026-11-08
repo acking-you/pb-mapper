@@ -12,7 +12,8 @@ use crate::{
     lane::LaneCommand,
     outgoing::OUTGOING_MAX_AGE,
     protocol::{
-        CAPABILITY_ENCODER_DWELL, HostMessage, StateReason, StateRecord, StopReason, ViewerMessage,
+        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, HostMessage, StateReason, StateRecord,
+        StopReason, ViewerMessage,
     },
     qos::{QOS_TICK, Qos, TargetValues},
     shared::{CursorReport, EngineState, Policy, SessionShared, Targets},
@@ -96,7 +97,8 @@ impl Session {
         capabilities: &[String],
     ) -> Arc<Self> {
         let now = Instant::now();
-        let qos = Qos::new(limits, codec, quality, now);
+        let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
+        let qos = Qos::new(limits, codec, quality, listed(CAPABILITY_FPS_OVERRIDE), now);
         let targets = qos.targets(now);
         Arc::new(Self {
             shared: Arc::new(SessionShared::new(
@@ -105,9 +107,7 @@ impl Session {
                 Targets::new(targets.pace_fps, targets.encoder_bps),
             )),
             codec,
-            encoder_dwell: capabilities
-                .iter()
-                .any(|capability| capability == CAPABILITY_ENCODER_DWELL),
+            encoder_dwell: listed(CAPABILITY_ENCODER_DWELL),
             started_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| {
