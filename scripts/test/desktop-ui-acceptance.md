@@ -162,10 +162,12 @@ One JSON object:
   `adaptation`, `rate_model`, `fps_cap`, `keyframes`, `keyframes_requested`,
   `backlog_drops`, `present_interval` with its p50/p95/p99/max and the session
   totals `gaps_100`/`gaps_250`, and `decoder`), `native` (the native
-  decoder's own counters, where there is one) and `flutter`: the frame
-  timings Flutter reported in that second (it batches them about once a
-  second), with the frames whose build or raster took longer than one
-  refresh interval as `over_budget`.
+  decoder's own counters, where there is one; on Android also `credits`, the
+  pictures released to the texture and not yet consumed, at most two, and
+  `refreshHz`, the display mode the window asks for while video shows) and
+  `flutter`: the frame timings Flutter reported in that second (it batches
+  them about once a second), with the frames whose build or raster took
+  longer than one refresh interval as `over_budget`.
 - `events`: each phase change (with its failure code), each app lifecycle
   change, and after each return from the background `resume_picture_ms`, the
   time to the first new presented picture read from the view leaf (null
@@ -235,13 +237,16 @@ statements stay until the owner accepts fluidity.
      5 min. Without a freeze: a picture within 1 s and no reconnect. After a
      freeze: one immediate reconnect and a picture within 3 s. Always at most
      two IDRs per resume, and no input replay.
-   - F: decoder hints on versus off: A, then A again with `deployed … serve
+   - F: decoder hints (low latency, realtime priority, the highest operating
+     rate, 60 fps) on versus off: A, then A again with `deployed … serve
      --no-decoder-hints`, which writes `decoder_hints: false` into
      `controller.json`; no rebuild. The report's `decoder_hints` is the arm
-     asked for and each sample's `native.lowLatency` the one that ran. A
-     hinted start that fails for any reason is retried once without the hint,
-     so a false `lowLatency` on the hints-on arm needs logcat's
-     `PbDesktopVideo` warning to say why.
+     asked for and each sample's `native.lowLatency` the one that ran (always
+     false before Android 11, which has no low-latency hint). A hinted start
+     that fails for any reason is retried once without the hints, and a
+     hinted decoder that fails before its first picture leaves them off for
+     its successor, so a false `lowLatency` on the hints-on arm needs
+     logcat's `PbDesktopVideo` warning to say why.
    - G: UAC prompt, lock screen and Win+L through the helper.
    - H: RustDesk side by side.
    - I: `video_bench --pace 60,30,15,5` and `video_bench 60 60` on each host
