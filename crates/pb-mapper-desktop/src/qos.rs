@@ -14,7 +14,7 @@ use crate::{
     QualityPreset, VideoCodec, VideoLimits,
     credit::{ACK_QUEUE_LIMIT, CreditView},
     outgoing::ProducedSnapshot,
-    protocol::{Adaptation, RateModel, VideoSize},
+    protocol::{Adaptation, RateModel},
     wire::IO_TIMEOUT,
 };
 use std::{
@@ -241,12 +241,11 @@ pub(crate) struct Qos {
     adaptation: Adaptation,
 }
 impl Qos {
-    /// `video` is the size the encoder is expected to produce (`scaled_size`
-    /// of the display), so that the first IDR has the session's budget; the
-    /// first unit's size corrects it through `set_video_size`.
+    /// Bits per frame start at the viewer's bounds, until `set_video_size`
+    /// says what the encoder produces: the host's expectation before the first
+    /// unit, then each unit's own size.
     pub fn new(
         limits: VideoLimits,
-        video: VideoSize,
         codec: VideoCodec,
         quality: QualityPreset,
         fps_override: bool,
@@ -261,7 +260,7 @@ impl Qos {
             normal_fps: 1,
             ceiling_fps: 1,
             scale: 1.0,
-            pixel_scale: pixel_scale(video.width, video.height),
+            pixel_scale: pixel_scale(limits.max_width, limits.max_height),
             fps: 1,
             quick: 0,
             increase: 0,
@@ -725,16 +724,10 @@ mod tests {
         }
     }
 
-    const FULL_HD: VideoSize = VideoSize {
-        width: 1920,
-        height: 1080,
-    };
-
     /// An H.264 session on Balanced at 1080p60, its preset's own ceiling.
     fn balanced(now: Instant) -> Qos {
         Qos::new(
             limits(60),
-            FULL_HD,
             VideoCodec::H264,
             QualityPreset::Balanced,
             false,
@@ -941,7 +934,6 @@ mod tests {
         // A JPEG session never paces above 8 fps.
         let jpeg = Qos::new(
             limits(60),
-            FULL_HD,
             VideoCodec::Jpeg,
             QualityPreset::Smooth,
             false,
@@ -975,43 +967,26 @@ mod tests {
             max_height: 2160,
             max_fps: 120,
         };
-        let on = |width, height| {
-            let (width, height) = scaled_size(width, height, uhd.max_width, uhd.max_height);
-            VideoSize { width, height }
-        };
-        let chosen = Qos::new(
-            uhd,
-            on(3840, 2160),
-            VideoCodec::H265,
-            QualityPreset::Quality,
-            true,
-            t0,
-        );
+        let chosen = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, true, t0);
         assert!((chosen.bpf - 200_000.0 * 4f64.powf(0.75)).abs() < 1.0);
         assert_eq!(chosen.ceiling_fps, 120);
         assert!(chosen.targets(s(2)).encoder_bps > 67_000_000);
-        let auto = Qos::new(
-            uhd,
-            on(3840, 2160),
-            VideoCodec::H265,
-            QualityPreset::Quality,
-            false,
-            t0,
-        );
+        let auto = Qos::new(uhd, VideoCodec::H265, QualityPreset::Quality, false, t0);
         assert_eq!(auto.ceiling_fps, 30);
         assert_eq!((pixel_scale(7680, 4320), pixel_scale(640, 360)), (3.0, 0.4));
-        // The same bounds on a 1080p display encode 1080p, and the first IDR
-        // is budgeted for that, not for the bounds; a first unit of another
-        // size still corrects the budget.
+        // The same bounds on a 1080p display encode 1080p: told so before the
+        // first unit, the first IDR is budgeted for that, not for the bounds,
+        // and a first unit of another size still corrects the budget.
         let mut native = Qos::new(
             VideoLimits { max_fps: 60, ..uhd },
-            on(1920, 1080),
             VideoCodec::H264,
             QualityPreset::Balanced,
             false,
             t0,
         );
-        assert_eq!(native.targets(s(2)).encoder_bps, 4_000_020);
+        let (width, height) = scaled_size(1920, 1080, uhd.max_width, uhd.max_height);
+        native.set_video_size(width, height);
+        assert!((native.bpf - 66_667.0).abs() < 1.0);
         native.set_video_size(3840, 2160);
         assert!((native.bpf - 66_667.0 * 4f64.powf(0.75)).abs() < 1.0);
         let produced = |unique: u64, non_idr_frames: u64, non_idr_bytes: u64| ProducedSnapshot {

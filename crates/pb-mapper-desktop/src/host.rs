@@ -458,10 +458,10 @@ impl Acceptor {
             self.cancel.child_token(),
             codec,
             request.limits,
-            video,
             request.quality,
             &request.capabilities,
         );
+        session.expect_video_size(video);
         *self.session.lock() = Some(session.clone());
         let mut worker = prepared.start(
             session.shared.clone(),

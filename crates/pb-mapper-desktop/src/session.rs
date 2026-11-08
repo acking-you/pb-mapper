@@ -88,20 +88,17 @@ pub(crate) struct Session {
     ending: Mutex<Option<End>>,
 }
 impl Session {
-    /// `video` is the size the encoder is expected to produce: see `Qos::new`.
     pub fn new(
         policy: Arc<Policy>,
         cancel: CancellationToken,
         codec: VideoCodec,
         limits: VideoLimits,
-        video: VideoSize,
         quality: QualityPreset,
         capabilities: &[String],
     ) -> Arc<Self> {
         let now = Instant::now();
         let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
-        let fps_override = listed(CAPABILITY_FPS_OVERRIDE);
-        let qos = Qos::new(limits, video, codec, quality, fps_override, now);
+        let qos = Qos::new(limits, codec, quality, listed(CAPABILITY_FPS_OVERRIDE), now);
         let targets = qos.targets(now);
         Arc::new(Self {
             shared: Arc::new(SessionShared::new(
@@ -161,6 +158,15 @@ impl Session {
     /// The preset the viewer chose last.
     pub fn quality(&self) -> QualityPreset {
         self.qos.lock().preset()
+    }
+
+    /// The size the encoder is expected to produce, told before thread C
+    /// starts: the first IDR gets that size's budget rather than the viewer's
+    /// bounds', and the first unit's size corrects it, as every later one does.
+    pub fn expect_video_size(&self, video: VideoSize) {
+        self.update_qos(Instant::now(), |qos| {
+            qos.set_video_size(video.width, video.height);
+        });
     }
 
     /// Change the controller and publish its targets to C. The targets are
@@ -936,10 +942,6 @@ mod tests {
             CancellationToken::new(),
             VideoCodec::H264,
             VideoLimits::for_viewer(60.0),
-            VideoSize {
-                width: 1920,
-                height: 1080,
-            },
             QualityPreset::Balanced,
             &[],
         );
@@ -1049,10 +1051,6 @@ mod tests {
             CancellationToken::new(),
             VideoCodec::Jpeg,
             VideoLimits::for_viewer(60.0),
-            VideoSize {
-                width: 1920,
-                height: 1080,
-            },
             QualityPreset::Balanced,
             &[],
         );
