@@ -299,12 +299,16 @@ async fn sdk_relay_sessions_count_with_their_bytes_on_both_ends() {
     .expect("the share's stream reports the session it opened");
     drop(stream);
 
-    let closed =
-        |metrics: &TunnelMetrics| (metrics.sessions.relay, metrics.sessions.active_relay) == (1, 0);
+    // Each end also times its exchanges with the relay: the connection its
+    // status probe, the share its heartbeat (every 2 s) by the pong's seq.
+    let settled = |metrics: &TunnelMetrics| {
+        (metrics.sessions.relay, metrics.sessions.active_relay) == (1, 0)
+            && metrics.relay.rtt_ms.is_some()
+    };
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     let (connected, shared) = loop {
         let both = (connection.metrics(), registration.metrics());
-        if closed(&both.0) && closed(&both.1) {
+        if settled(&both.0) && settled(&both.1) {
             break both;
         }
         assert!(tokio::time::Instant::now() < deadline, "{both:?}");
@@ -315,6 +319,8 @@ async fn sdk_relay_sessions_count_with_their_bytes_on_both_ends() {
         assert_eq!((traffic.relay.sent, traffic.relay.received), (1000, 1000));
         assert_eq!(traffic.direct.sent + traffic.direct.received, 0);
     }
+    // Shared by every tunnel of this client's relay endpoint.
+    assert!(client.relay_diagnostics().await.control_rtt_ms.is_some());
     connection.stop().await.unwrap();
     registration.stop().await.unwrap();
 }

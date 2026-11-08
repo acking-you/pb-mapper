@@ -208,6 +208,15 @@ async fn blocked_quic_selects_relay_and_dials_backend_once() {
     .unwrap()
     .unwrap();
     assert!(matches!(prepared.path, DataPath::Relay { .. }));
+    // The fallback pauses direct: the next session goes to the relay at once.
+    let next = consumer
+        .prepare("fallback", Instant::now() + Duration::from_secs(8))
+        .await
+        .unwrap();
+    assert!(next.is_none());
+    let paused = diagnostics.metrics(RelayTransport::Tcp);
+    assert!(paused.direct_cooldown_ms.is_some());
+    assert_eq!(paused.cooldown_skips, 1);
     // A reconnect snapshot can include more retained reports than the control
     // channel can hold. Every authenticated observation must eventually arrive.
     let mut report_ids = std::collections::HashSet::new();
