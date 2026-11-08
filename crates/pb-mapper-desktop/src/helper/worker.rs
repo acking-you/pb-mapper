@@ -499,6 +499,9 @@ fn serve(
         // still `expected`.
         backend.input_in_context(&expected, &input)?;
         *last_input = std::time::Instant::now();
+        // The pointer as the input left it, so that the host's thread C knows
+        // its own move when it comes back. The input stands without it.
+        response.cursor = backend.cursor(&expected).ok().flatten();
         // The host keeps the desktop each answer reports: this is the one the
         // input reached.
         response.context = Some(expected);

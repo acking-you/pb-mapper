@@ -36,8 +36,8 @@ pub(crate) fn record_input_failure(detail: &str) {
 /// Any change to a request or a response bumps it, with both pipe names.
 /// 3: `VideoFormat` carries the encoder's GOP. 4: `Request::Input` carries
 /// the whole expected desktop. 5: the background host's `Options` carry
-/// `lan_first`. 6: video may be H.265, and `Request::H265` asks the worker
-/// whether it encodes it.
+/// `lan_first`. 6: video may be H.265, `Request::H265` asks the worker
+/// whether it encodes it, and an applied input answers with the pointer.
 pub const HELPER_PROTOCOL: u32 = 6;
 
 const SERVICE: &str = "PbMapperDesktop";
@@ -301,7 +301,9 @@ enum Request {
     /// Includes `Input::Lock`. A `drag_start` press is held by the host's
     /// thread C before it gets here; the helper ignores the flag. `expected`
     /// is the desktop the host admitted it on: the worker injects only while
-    /// the bound desktop is still that one, display included.
+    /// the bound desktop is still that one, display included. The answer
+    /// carries the pointer as the input left it, when the worker could read
+    /// it.
     Input {
         expected: DesktopContext,
         sequence: u64,

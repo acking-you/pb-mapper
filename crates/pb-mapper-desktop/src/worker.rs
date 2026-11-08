@@ -20,7 +20,7 @@ use crate::{
     pacer::Pacer,
     protocol::{DesktopKind, NoticeCode, SessionState, StateReason, VideoSize},
     scheduler::Waiter,
-    shared::{CursorUpdate, EngineState, InputWaitStats, SessionShared},
+    shared::{CursorReport, CursorUpdate, EngineState, InputWaitStats, SessionShared},
     timer::TimerResolution,
 };
 use std::{
@@ -270,7 +270,7 @@ struct Engine {
     /// The next context check, or the next retry while unavailable.
     context_due: Instant,
     cursor_due: Instant,
-    cursor: Option<CursorUpdate>,
+    cursor: CursorEcho,
     /// When to poll the encoder again while it holds units.
     drain_due: Instant,
     /// Held while this session captures.
@@ -321,7 +321,7 @@ impl Engine {
             pace_fps,
             context_due: now,
             cursor_due: now,
-            cursor: None,
+            cursor: CursorEcho::default(),
             drain_due: now,
             timer: None,
             last_lease: None,
@@ -565,7 +565,12 @@ impl Engine {
                 "The remote computer is locked".into(),
                 now,
             ),
-            Ok(()) => self.hold.injected(&event.input, now),
+            Ok(()) => {
+                self.hold.injected(&event.input, now);
+                if let Input::Move { x, y } = event.input {
+                    self.cursor.injected(x, y);
+                }
+            }
             Err(failure) => {
                 if failure.kind() == io::ErrorKind::NotConnected {
                     self.fatal = Some(failure.to_string());
@@ -636,6 +641,7 @@ impl Engine {
     fn invalidate(&mut self) {
         self.backend.release();
         self.hold.drop_held();
+        self.cursor.invalidate();
         self.state.record.generation += 1;
         let generation = self.state.record.generation;
         self.shared.auth.lock().on_invalidate(generation);
@@ -861,7 +867,8 @@ impl Engine {
     }
 
     /// Every `CURSOR_INTERVAL` while capturing; never while paused or
-    /// unavailable. Published only when it changes.
+    /// unavailable. Reported when it changes, unless it is the echo of the
+    /// controller's own move.
     fn sample_cursor(&mut self, now: Instant) {
         if self.paused || self.unavailable.is_some() || now < self.cursor_due {
             return;
@@ -878,9 +885,8 @@ impl Engine {
                     y: position.y,
                     visible: position.visible,
                 });
-                if cursor != self.cursor {
-                    self.cursor = cursor;
-                    self.shared.cursor.send_replace(cursor);
+                if let Some(report) = self.cursor.sample(cursor) {
+                    self.shared.cursor.send_replace(Some(report));
                 }
             }
             Err(failure) => self.fail(failure, now),
@@ -1024,6 +1030,54 @@ impl DragHold {
             } => self.left_down = self.pointer.map(|pointer| (now, pointer)),
             _ => {}
         }
+    }
+}
+
+/// What C reports of the pointer: every change it samples, at once, except the
+/// controller's own move coming back. The viewer draws its own pointer where
+/// the controller put it; an echo of that move, late behind the video, would
+/// drag it back. A sample at the position C last injected, in the same
+/// display pixels, is that echo, as long as the pointer showed before and has
+/// not been seen anywhere else since: then the next return there is someone
+/// else's move. A backend observes the pointer after every input it applied
+/// (see `Backend::cursor`), so the helper's, observed during a capture call,
+/// is never older than the last injection.
+#[derive(Default)]
+struct CursorEcho {
+    /// The last sample, reported or not.
+    sampled: Option<CursorUpdate>,
+    /// Where the last move in this generation put the pointer, until a sample
+    /// finds it elsewhere.
+    injected: Option<(u32, u32)>,
+    serial: u64,
+}
+impl CursorEcho {
+    fn injected(&mut self, x: u32, y: u32) {
+        self.injected = Some((x, y));
+    }
+
+    /// A new generation: nothing in it was injected yet.
+    fn invalidate(&mut self) {
+        self.injected = None;
+    }
+
+    /// The report to send for `cursor`, if any.
+    fn sample(&mut self, cursor: Option<CursorUpdate>) -> Option<CursorReport> {
+        let previous = std::mem::replace(&mut self.sampled, cursor);
+        let cursor = cursor.filter(|cursor| previous != Some(*cursor))?;
+        let at = (u32::try_from(cursor.x).ok(), u32::try_from(cursor.y).ok());
+        let echo = cursor.visible
+            && previous.is_some_and(|previous| previous.visible)
+            && self.injected.is_some_and(|(x, y)| at == (Some(x), Some(y)));
+        if echo {
+            return None;
+        }
+        self.injected = None;
+        self.serial += 1;
+        Some(CursorReport {
+            serial: self.serial,
+            cursor,
+        })
     }
 }
 

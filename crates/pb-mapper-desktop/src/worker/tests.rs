@@ -39,6 +39,9 @@ struct Fake {
     fail_capture: Arc<AtomicBool>,
     /// The OS double-click time and box; `None` never holds a press.
     guard: Arc<Mutex<Option<crate::DoubleClickGuard>>>,
+    /// Where the pointer is: where the last move put it, or where the test
+    /// moved it.
+    pointer: Arc<Mutex<(i32, i32)>>,
     /// How long a capture call takes, in real time.
     delay: Duration,
     /// Told when a capture call starts.
@@ -63,6 +66,7 @@ impl Fake {
             fail_lock: Arc::default(),
             fail_capture: Arc::default(),
             guard: Arc::default(),
+            pointer: Arc::new(Mutex::new((3, 3))),
             delay: Duration::ZERO,
             started: None,
             latency: Arc::default(),
@@ -107,9 +111,10 @@ impl Backend for Fake {
         if &self.context()? != expected {
             return Err(error("fake desktop changed"));
         }
+        let (x, y) = *self.pointer.lock();
         Ok(Some(CursorPosition {
-            x: 3,
-            y: 3,
+            x,
+            y,
             visible: true,
         }))
     }
@@ -171,6 +176,9 @@ impl Backend for Fake {
             || matches!(event, Input::Lock {}) && self.fail_lock.load(Ordering::SeqCst)
         {
             return Err(error("native injection rejected"));
+        }
+        if let Input::Move { x, y } = *event {
+            *self.pointer.lock() = (x as i32, y as i32);
         }
         self.log.lock().inputs.push(((self.clock)(), event.clone()));
         Ok(())
@@ -661,6 +669,46 @@ fn input_requires_control_current_geometry_and_unique_sequence() {
     assert!(!h.state().record.controlling);
     assert!(!h.state().record.control_allowed);
     assert_eq!(h.inputs(), 2);
+}
+
+#[test]
+fn the_cursor_reports_every_change_but_the_controllers_own_move() {
+    let mut h = Harness::new(true, None);
+    let reported = |h: &Harness| {
+        h.shared.cursor.borrow().map(|report| {
+            let cursor = report.cursor;
+            (report.serial, cursor.generation, cursor.x, cursor.y)
+        })
+    };
+    h.send(LaneCommand::Control { enabled: true });
+    h.step();
+    h.present();
+    // The first sample of a generation is reported.
+    let (first, generation, ..) = reported(&h).unwrap();
+    assert_eq!(reported(&h), Some((first, generation, 3, 3)));
+    // The controller's own moves come back at each sample: none is reported.
+    for x in 4..8 {
+        h.input(Input::Move { x, y: 3 });
+        h.run(Duration::from_millis(20), true);
+    }
+    assert_eq!(h.inputs(), 4);
+    assert_eq!(reported(&h), Some((first, generation, 3, 3)));
+    // Someone else moves it: reported at the next sample, without a hold;
+    // and back to where the controller left it, which is their move too.
+    for (x, serial) in [(1, first + 1), (7, first + 2)] {
+        *h.fake.pointer.lock() = (x, 3);
+        h.run(Duration::from_millis(20), true);
+        assert_eq!(reported(&h), Some((serial, generation, x, 3)));
+    }
+    // A new generation reports where the pointer is, though it did not move.
+    h.input(Input::Move { x: 5, y: 5 });
+    h.run(Duration::from_millis(20), true);
+    assert_eq!(reported(&h), Some((first + 2, generation, 7, 3)));
+    h.fake.width.store(11, Ordering::SeqCst);
+    h.run(Duration::from_millis(300), true);
+    let (serial, moved, x, y) = reported(&h).unwrap();
+    assert!(serial > first + 2 && moved > generation);
+    assert_eq!((x, y), (5, 5));
 }
 
 #[test]

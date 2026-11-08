@@ -83,9 +83,11 @@ impl RemoteBackend {
     /// call with `NotConnected`, which ends the session: a reinstalled or
     /// crashed helper never leaves a viewer waiting. The desktop and pointer
     /// the helper last reported stay until a response reports others: Release
-    /// and Close report no desktop, only Context, Capture and Video observe
-    /// the pointer, and an error answers the request, not the desktop. The
-    /// engine's own context checks notice a desktop change.
+    /// and Close report no desktop; Context, Capture and Video observe the
+    /// pointer, and so does an applied input when the worker could read it,
+    /// so the pointer is never older than the last input; and an error
+    /// answers the request, not the desktop. The engine's own context checks
+    /// notice a desktop change.
     fn call(&mut self, request: Request) -> Result<Vec<u8>> {
         if self.failed {
             return Err(disconnected("helper disconnected; restart desktop sharing"));
@@ -95,6 +97,7 @@ impl RemoteBackend {
             request,
             Request::Context {} | Request::Capture {} | Request::Video { .. }
         );
+        let applies = matches!(request, Request::Input { .. });
         let result = self.runtime.block_on(async {
             tokio::time::timeout(TIMEOUT, async {
                 let pipe = self
@@ -112,7 +115,7 @@ impl RemoteBackend {
                 if reports {
                     self.context = response.context;
                 }
-                if observes {
+                if observes || (applies && response.cursor.is_some()) {
                     self.cursor = response.cursor;
                 }
                 self.video = response.video;

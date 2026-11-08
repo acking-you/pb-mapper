@@ -424,8 +424,11 @@ pub trait Backend: 'static {
     }
     fn capture(&mut self) -> Result<Vec<u8>>;
     /// Report a pointer for the expected desktop, including when no video frame
-    /// changed. A desktop transition must fail instead of reporting another
-    /// desktop's pointer. Backends without pointer metadata return `None`.
+    /// changed, as it stands after every input this backend applied: thread C
+    /// takes a report at the position it last injected for the controller's
+    /// own move coming back, and never sends it. A desktop transition must
+    /// fail instead of reporting another desktop's pointer. Backends without
+    /// pointer metadata return `None`.
     fn cursor(&mut self, _expected: &DesktopContext) -> Result<Option<CursorPosition>> {
         Ok(None)
     }

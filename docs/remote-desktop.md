@@ -490,9 +490,11 @@ and the host resumes there. The app's startup restore never installs or asks.
 
 Protocol 6 is the current one, with the pipes
 `pb-mapper.desktop-helper.v6` and `pb-mapper.desktop-background.v6`. Its video
-may be H.265, which a protocol 5 helper cannot parse, and `Request::H265`
-asks the worker whether it encodes H.265 on its display, which it probes in
-the interactive session. Protocol 5 added the background host's `lan_first`,
+may be H.265, which a protocol 5 helper cannot parse; `Request::H265` asks the
+worker whether it encodes H.265 on its display, which it probes in the
+interactive session; and the worker answers each input with the pointer as
+the input left it, so the host never reports the controller's own move back
+(see [Input and cursor](#input-and-cursor)). Protocol 5 added the background host's `lan_first`,
 the app's *Try the local network first* when sharing started, written only
 when off, so a grant saved with the default stays readable by an older
 helper.
@@ -554,7 +556,8 @@ does not require Flutter or a POCOX runtime.
   by the helper reports it as well. `encodes_h265` says whether
   `capture_video` can encode H.265 on the backend's display; the host asks a
   session's backend right after building it, before it answers a viewer that
-  decodes H.265, and the default says no. A sticky link failure returns
+  decodes H.265, and the default says no. `cursor` reports the pointer as the
+  inputs the backend applied left it. A sticky link failure returns
   `NotConnected`, which ends the session instead of retrying.
 - `ControlAdmission::acquire` provides an optional embedder-controlled write
   lease. POCOX can pause its Computer Use writer when a human explicitly requests
@@ -1010,12 +1013,20 @@ most 600 ms) after a click on the same spot, so the two never merge into a
 double click. Held commands are re-authorised when they are released.
 
 The desktop-bound thread samples the cursor every 16 ms while capturing (never
-while paused or unavailable) and publishes it when it changes. The writer sends
-it outside the video queue, except that it holds the position back from a
-controlling viewer for 300 ms after that viewer's last pointer input and then
-sends the final one; a new generation's cursor always passes. Cursor metadata is
-a generic position, not the Windows cursor bitmap, and observing it never renews
-input authorisation.
+while paused or unavailable) and reports each change at once, except the
+controlling viewer's own move coming back: the viewer draws its pointer where
+it put it, and an echo arriving behind the video would drag it back. A sample
+at the position the thread last injected, in the same display pixels, is that
+echo, while the pointer showed before and has not been seen anywhere else
+since; a later return to that spot is someone else's move, and is reported.
+Nothing is held back and sent late. A backend reports the pointer as every
+input it applied left it: the helper's worker, which observes it during the
+capture call, also answers each input with the pointer, so its report is
+never older than the last move. A new generation, a display change included,
+always reports where the pointer is, and a viewer that does not control sees
+every change. The writer sends each report once, outside the video queue,
+after its generation's `State`. Cursor metadata is a generic position, not the
+Windows cursor bitmap, and observing it never renews input authorisation.
 
 ### Constants
 
@@ -1033,7 +1044,7 @@ input authorisation.
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
-| Cursor | sampled every 16 ms; echo held for 300 ms |
+| Cursor | sampled every 16 ms; the controller's own move never reported |
 | Codec | `Accepted` waits at most 3 s for the backend's H.265 answer; one probe per GPU and process |
 
 ### Diagnostics
