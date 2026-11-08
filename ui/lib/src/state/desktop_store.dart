@@ -1981,7 +1981,8 @@ class DesktopStore {
   /// The newest move refused because the picture was not fresh, or held
   /// back as it went stale, with the geometry epoch it belongs to. It goes
   /// with the next fresh picture, so the last position always reaches the
-  /// host (D12); whatever else ends input drops it.
+  /// host (D12). The release after a refused sequence keeps it; whatever
+  /// else ends input drops it.
   (DesktopMove, int)? _keptMove;
 
   /// The presented frame the kept move was refused at: only a newer fresh
@@ -2134,11 +2135,15 @@ class DesktopStore {
 
   /// [inputs] go in one atomic, ordered batch, or not at all: on a refusal
   /// everything held is released, so no key stays down on the host (D16).
+  /// A pending or kept move goes first, unless [inputs] start with a move.
   bool sendSequence(List<DesktopInput> inputs, {required int geometryEpoch}) {
     assert(inputs.isNotEmpty && inputs.length <= kSequenceMax);
     if (inputs.isEmpty || inputs.length > kSequenceMax) return false;
     if (!_accepts(geometryEpoch)) return false;
-    final move = _takeMove();
+    final unsent = _takeMove();
+    // A sequence that puts the pointer somewhere is newer than any move not
+    // sent yet.
+    final move = inputs.first is DesktopMove ? null : unsent;
     if (move != null && inputs.length == kSequenceMax) {
       if (!_deliver(move)) return false;
     }
@@ -2147,7 +2152,12 @@ class DesktopStore {
       ...inputs,
     ];
     if (_deliver(batch)) return true;
+    // A refusal releases what the batch would have held, but the position it
+    // carried is not held input: a move kept as not fresh still goes with
+    // the next fresh picture (D12).
+    final kept = _keptMove;
     release();
+    if (kept != null) _keep(kept.$1, kept.$2);
     return false;
   }
 

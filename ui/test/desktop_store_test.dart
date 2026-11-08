@@ -144,6 +144,33 @@ void main() {
       expect(api.inputs.where((e) => e['x'] == 7), hasLength(2));
       expect(api.inputs.last, {'kind': 'move', 'x': 7, 'y': 7});
 
+      // So is a tap's: the refusal releases what it would hold, and the next
+      // fresh picture carries its move alone.
+      api.failNext('input', 'NOT_FRESH');
+      expect(
+        store.sendSequence([
+          DesktopInput.move(9, 9),
+          DesktopInput.button(RemoteButton.left, true),
+          DesktopInput.button(RemoteButton.left, false),
+        ], geometryEpoch: epoch),
+        isFalse,
+      );
+      expect(api.ops.last, 'release');
+      api.viewValue = const DesktopView(
+        generation: 3,
+        presentedFrameId: 3,
+        displayWidth: 1920,
+        displayHeight: 1080,
+        state: 2,
+        controlling: true,
+        controlAllowed: true,
+        fresh: true,
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(api.argsOf('input').last['inputs'], [
+        {'kind': 'move', 'x': 9, 'y': 9},
+      ]);
+
       // Lost control ends it locally at once.
       api.failNext('input', 'NOT_CONTROLLING');
       expect(
