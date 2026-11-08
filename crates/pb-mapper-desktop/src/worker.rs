@@ -21,6 +21,7 @@ use crate::{
     protocol::{DesktopKind, NoticeCode, SessionState, StateReason, VideoSize},
     scheduler::Waiter,
     shared::{CursorUpdate, EngineState, InputWaitStats, SessionShared},
+    timer::TimerResolution,
 };
 use std::{
     collections::VecDeque,
@@ -32,8 +33,16 @@ use std::{
 pub(crate) type Factory = Arc<dyn Fn() -> Result<Box<dyn Backend>> + Send + Sync>;
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
-/// Units in the hand-off plus units in the encoder at which a tick is skipped.
-const SUBMIT_GATE: usize = 2;
+/// Units waiting in the hand-off for send credit at which a tick is skipped:
+/// transport backpressure.
+pub(crate) const TRANSPORT_GATE: usize = 2;
+/// Units in the encoder, or in the helper, at which a tick is skipped. A unit
+/// stays there for the encoder's latency, so this many cover a latency of
+/// nearly four periods without lowering the rate; a fast encoder never holds
+/// more than one, so it adds no latency. Fixed rather than derived from the
+/// measured dwell: a queueing encoder's dwell grows with its depth, and a
+/// bound that followed it would deepen its own queue.
+pub(crate) const ENCODER_DEPTH: usize = 4;
 /// The least time between two helper lease renewals.
 const LEASE_RENEW_MIN: Duration = Duration::from_millis(250);
 const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
@@ -199,6 +208,11 @@ struct Engine {
     cursor: Option<CursorUpdate>,
     /// When to poll the encoder again while it holds units.
     drain_due: Instant,
+    /// When each unit the encoder holds was submitted, oldest first, in step
+    /// with `pending_video`.
+    submitted: VecDeque<Instant>,
+    /// Held while this session captures.
+    timer: Option<TimerResolution>,
     last_lease: Option<Instant>,
     /// Held input was released for a presentation gone stale; nothing new is
     /// admitted until a fresh one arrives.
@@ -248,6 +262,8 @@ impl Engine {
             cursor_due: now,
             cursor: None,
             drain_due: now,
+            submitted: VecDeque::new(),
+            timer: None,
             last_lease: None,
             stale_released: false,
             fatal: None,
@@ -297,6 +313,12 @@ impl Engine {
         let now = (self.clock)();
         self.sample_cursor(now);
         self.window.roll(now, &mut self.state);
+        // Fine process timers while capturing serve the network tasks too;
+        // a paused or unavailable session gives them back.
+        let capturing = !self.paused && self.unavailable.is_none();
+        if capturing != self.timer.is_some() {
+            self.timer = capturing.then(TimerResolution::hold);
+        }
         if self.notice_until.is_some_and(|until| now >= until) {
             self.notice_until = None;
             self.state.notice = None;
@@ -590,6 +612,8 @@ impl Engine {
                 self.invalidate();
             }
             self.keyframe = true;
+            // A new encoder holds nothing.
+            self.submitted.clear();
             if let Err(failure) = self.backend.configure_video(self.limits, self.nominal_fps) {
                 self.fail(failure, now);
                 return false;
@@ -641,7 +665,9 @@ impl Engine {
                 && let Some(context) = &self.context
             {
                 let result = self.backend.drain_video(context, Duration::ZERO);
-                self.drain_due = (self.clock)() + DRAIN_POLL;
+                let done = (self.clock)();
+                self.drain_due = done + DRAIN_POLL;
+                self.track_encoder(now, matches!(result, Ok(Some(_))), done);
                 match result {
                     Ok(Some(_)) => self.state.dropped_frames += 1,
                     Ok(None) => {}
@@ -671,7 +697,9 @@ impl Engine {
             self.pacer.set_pace(pace_fps, now);
         }
         if retry || self.pacer.due(now) {
-            if self.shared.outgoing.len() + self.backend.pending_video() < SUBMIT_GATE {
+            if self.shared.outgoing.len() < TRANSPORT_GATE
+                && self.backend.pending_video() < ENCODER_DEPTH
+            {
                 let keyframe = self.keyframe || self.shared.idr.lock().take_due(now);
                 let rate = VideoRate {
                     bitrate: targets.encoder_bps.load(Ordering::Acquire),
@@ -688,9 +716,11 @@ impl Engine {
                 }
                 let done = (self.clock)();
                 self.drain_due = done + DRAIN_POLL;
+                self.track_encoder(now, matches!(result, Ok(Some(_))), done);
                 self.produced(result, done);
             } else {
-                // Transport backpressure, never presentation: skip the tick.
+                // Transport backpressure or a full encoder, never
+                // presentation: skip the tick.
                 self.state.skipped_ticks += 1;
             }
             self.pacer.consume(now);
@@ -698,17 +728,35 @@ impl Engine {
             let wait = HELPER_DRAIN_WAIT_MAX.min(self.pacer.next().saturating_duration_since(now));
             let result = self.backend.drain_video(&context, wait);
             let done = (self.clock)();
+            let drained = matches!(result, Ok(Some(_)));
             // The ordinary backend returns at once: poll it again shortly. A
             // helper that waited the whole time is polled again at once, and so
             // is a backend that just returned a unit.
-            self.drain_due = if matches!(result, Ok(Some(_)))
-                || (!wait.is_zero() && done.saturating_duration_since(now) >= wait)
-            {
-                done
-            } else {
-                done + DRAIN_POLL
-            };
+            self.drain_due =
+                if drained || (!wait.is_zero() && done.saturating_duration_since(now) >= wait) {
+                    done
+                } else {
+                    done + DRAIN_POLL
+                };
+            self.track_encoder(now, drained, done);
             self.produced(result, done);
+        }
+    }
+
+    /// Keep `submitted` in step with the encoder after a video call made at
+    /// `called`. The encoder is first in, first out: a unit drained is the
+    /// oldest submitted, and its dwell is sampled; one it dropped leaves from
+    /// the front unsampled; one the call submitted joins at the back.
+    fn track_encoder(&mut self, called: Instant, drained: bool, done: Instant) {
+        if drained && let Some(submitted) = self.submitted.pop_front() {
+            self.window.dwell(done.saturating_duration_since(submitted));
+        }
+        let pending = self.backend.pending_video();
+        while self.submitted.len() > pending {
+            self.submitted.pop_front();
+        }
+        while self.submitted.len() < pending {
+            self.submitted.push_back(called);
         }
     }
 
@@ -942,12 +990,15 @@ fn unavailable_reason(failure: &io::Error) -> StateReason {
     }
 }
 
-/// The published one-second rates: unique captures and input wait.
+/// The published one-second rates: unique captures, input wait and the
+/// encoder's dwell.
 struct Window {
     started: Instant,
     unique: u64,
     waits: Vec<u32>,
     max_wait: u32,
+    /// Submit to drain of each unit drained.
+    dwells: Vec<Duration>,
 }
 impl Window {
     fn new(now: Instant) -> Self {
@@ -956,6 +1007,7 @@ impl Window {
             unique: 0,
             waits: Vec::new(),
             max_wait: 0,
+            dwells: Vec::new(),
         }
     }
 
@@ -967,12 +1019,21 @@ impl Window {
         }
     }
 
+    fn dwell(&mut self, dwell: Duration) {
+        if self.dwells.len() < WAIT_SAMPLES {
+            self.dwells.push(dwell);
+        }
+    }
+
     fn roll(&mut self, now: Instant, state: &mut EngineState) {
         let elapsed = now.saturating_duration_since(self.started);
         if elapsed < STATS_WINDOW {
             return;
         }
         state.capture_fps = self.unique as f32 / elapsed.as_secs_f32();
+        let middle = self.dwells.len() / 2;
+        state.encoder_dwell =
+            (!self.dwells.is_empty()).then(|| *self.dwells.select_nth_unstable(middle).1);
         self.waits.sort_unstable();
         let at = |quantile: usize| {
             self.waits

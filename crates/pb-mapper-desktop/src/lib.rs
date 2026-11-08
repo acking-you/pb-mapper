@@ -28,6 +28,7 @@ mod shared;
 mod slow_link;
 #[cfg(test)]
 mod tests;
+mod timer;
 mod video_sink;
 mod viewer;
 mod wire;
@@ -147,12 +148,15 @@ impl VideoLimits {
         Ok(())
     }
     /// The one place a viewer's limits are derived: 1920x1080 at the display's
-    /// refresh rate, at most 60 fps on Android and 120 elsewhere. A refresh
+    /// refresh rate, at most 120 fps. Android always asks for 60: the mode a
+    /// phone reports at connect may be a power-saving 30 or 48 Hz, and its
+    /// presenter asks for the highest mode while the viewer shows. A refresh
     /// rate that is not finite and positive counts as 60 Hz.
     pub fn for_viewer(refresh_hz: f64) -> Self {
-        let ceiling = if cfg!(target_os = "android") { 60 } else { 120 };
-        let fps = if refresh_hz.is_finite() && refresh_hz > 0.0 {
-            refresh_hz.round().clamp(30.0, f64::from(ceiling)) as u32
+        let fps = if cfg!(target_os = "android") {
+            60
+        } else if refresh_hz.is_finite() && refresh_hz > 0.0 {
+            refresh_hz.round().clamp(30.0, 120.0) as u32
         } else {
             60
         };

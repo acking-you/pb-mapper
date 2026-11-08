@@ -427,7 +427,9 @@ service and removes its authorization configuration. Upgrade preserves files
 used by an older open UI until the next normal reboot; uninstall deletes what
 it can and schedules in-use binaries for that reboot. Unique release paths keep
 those delayed deletes separate from a later reinstall. No restart is initiated.
-Bounded protected `installation.log`/`service.log` diagnostics may remain.
+Bounded protected `installation.log`/`service.log`/`service-host.log`
+diagnostics may remain; the last is the background host's own log
+([Diagnostics](#diagnostics)).
 
 Required UAC acceptance still includes both administrator consent and a
 standard-user credential prompt, with OS version, account type, helper state,
@@ -484,7 +486,9 @@ does not require Flutter or a POCOX runtime.
   returns once the host accepted, or fails with a typed `ConnectError`: identity
   changed, version mismatch, busy, denied, invalid request, cancelled, transport
   or protocol. `VideoLimits::for_viewer(refresh_hz)` derives the limits:
-  1920×1080 at the refresh rate, at most 60 FPS on Android and 120 elsewhere.
+  1920×1080 at the refresh rate, up to 120 FPS, and 60 FPS on Android whatever
+  mode the phone reports at connect (it may be a power-saving 30 or 48 Hz; the
+  presenter asks for the highest mode while the viewer shows).
   These are requested limits, not measured delivery or display guarantees.
   `set_quality` switches the preset live without reconnecting, and `pause` and
   `resume` stop and restart video while the viewer is hidden. The private
@@ -542,11 +546,12 @@ where that fits. Seven rules carry it:
    the network and the screen (FFI, Dart, decoder, compositor) holds credit
    back.
 2. **Capture runs on an even grid at the QoS pace.** It never pauses or resumes
-   as flow control. A tick is skipped only while two units are already buffered
-   on the host (hand-off queue plus encoder in flight).
+   as flow control. A tick is skipped only while two units wait for send credit
+   or the encoder holds four.
 3. **QoS changes frame rate and bitrate only, from probe delay.** A probe once a
-   second is answered by the viewer's network task. Resolution never adapts: it
-   changes only with a new session, a display switch or an explicit choice.
+   second, four a second on a short path, is answered by the viewer's network
+   task. Resolution never adapts: it changes only with a new session, a display
+   switch or an explicit choice.
 4. **Infinite GOP.** IDRs are sent only on demand and are rate-limited on both
    sides. Requests are deferred and coalesced, never dropped.
 5. **The viewer owns presentation lag.** Its sink keeps only the newest
@@ -574,12 +579,21 @@ drains the lane again. Capture is paced on a grid at the QoS pace: a tick is
 consumed whether it fires or is skipped, the grid keeps its long-run rate (120
 FPS on a 165 Hz display is not rounded down), and after a stall two captures
 are never closer than three quarters of a period. A tick is skipped (and
-counted in `skipped_ticks`) only while the hand-off queue plus the encoder's
-pending units reach two: transport backpressure, never presentation. A static
-screen is resubmitted about every 250 ms as a duplicate, which unique-frame
-rates exclude. The hand-off queue holds at most four units and 8 MiB; when its
-oldest unit has waited more than a second, the queue is dropped and replaced
-by an IDR. The wait counts from when the unit was ready or from the last IDR
+counted in `skipped_ticks`) only while two units in the hand-off queue wait for
+send credit, which is transport backpressure, or while the encoder (or the
+helper) holds four, never for presentation. The two bounds are separate
+because a unit stays in the encoder for its latency: with one shared bound of
+two, an encoder that kept each unit 40 ms delivered 40 FPS at a pace of 60, and
+one that kept it 60 ms delivered 30. Four cover a latency of nearly four
+periods, and a fast encoder never holds more than one, so it adds no latency.
+The bound is fixed rather than derived from the measured dwell, because a
+queueing encoder's dwell grows with its depth. Thread C measures each unit's
+dwell, from submit to drain, and reports the median of the last second as
+`encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
+duplicate, which unique-frame rates exclude. The hand-off queue holds at most
+six units and 8 MiB, which both bounds together never reach; when its oldest
+unit has waited more than a second, the queue is dropped and replaced by an
+IDR. The wait counts from when the unit was ready or from the last IDR
 receipt, whichever is later, and time spent behind an IDR still in flight
 never counts, since that IDR is already the resync. The desktop context is
 checked at most every 100 ms and inside each capture; the injection boundary
@@ -618,6 +632,19 @@ twice. Encoder output more than 250 ms late is discarded, and output resumes
 at the next IDR. Nothing periodic, and no frame rate, bitrate, preset or
 congestion change, produces an IDR.
 
+In a process with no visible window, which is the background service and the
+app when hidden, Windows 11 fires every timer on its 15.6 ms tick and ignores
+`timeBeginPeriod` unless the process first opts out of power throttling for
+timer resolution. That is every tokio timer: the writer's credit recheck and
+QUIC's pacing and ACK timers. While a session captures, its thread C holds a
+process-wide guard that opts out of timer and execution-speed throttling and
+asks for 1 ms; the helper's capture worker holds one while the host asks it
+for video. The last guard released restores the earlier throttling state and
+the period, so a paused or idle host costs no power, and a failed call only
+leaves timers coarse. Measured here, a 2 ms tokio sleep took 15.7 ms, 3.5 ms
+under the guard and 15.6 ms after it. Thread C paces on its own
+high-resolution waitable timer either way.
+
 ### Send credit
 
 The host admits a unit against a window computed before each admission:
@@ -654,21 +681,31 @@ takes a sequence number.
 
 ### QoS: frame rate and bits per frame
 
-The host writes a probe once a second, in stream order between video messages,
-so it measures downstream queueing; one is outstanding at a time. The base RTT
-is the minimum of the last 60 samples from the first sample on, and it resets
-when the viewer reports a path change. A probe written behind an IDR in flight
-is tainted: it updates the RTT but never the frame rate. A 3 s window with
-only tainted samples may step bits per frame down on their worst delay, never
-up. The queue delay is the mean of the last three untainted RTTs minus the
-base RTT.
+The host writes a probe in stream order between video messages, so it measures
+downstream queueing; one is outstanding at a time. It writes one a second, and
+one every 250 ms while the base RTT is under 100 ms (a short path). The base
+RTT is the minimum over the last 60 s, and it resets when the viewer reports a
+path change. A probe written behind an IDR in flight is tainted: it updates
+the RTT but never the frame rate. A 3 s window with only tainted samples may
+step bits per frame down on their worst delay, never up. The queue delay is
+the median of the last three untainted RTTs (of two, the lower) minus the base
+RTT, so one probe that a Wi-Fi stall held moves it not at all.
 
-Frame rate follows RustDesk's delay steps, scaled by `max(1, ceiling / 30)`.
-Below 50 ms it climbs, with a quick step after three good samples. From 50 to
-150 ms it climbs only slowly or holds. From 150 ms it falls to
-`fps × 150 / delay`, but not below the preset's minimum; from 200 ms it falls
-to the minimum or below. The controller works in bits per frame, so a
-frame-rate cut sheds bandwidth at once. Every 3 s it scales bits per frame by
+Frame rate follows RustDesk's delay steps on that delay, scaled by
+`max(1, ceiling / 30)`. Below 50 ms it climbs, with a quick step after three
+good samples, or at every sample on a short path, so a cut there recovers in
+about a second. From 50 to 150 ms it climbs only slowly or holds. From 150 ms
+it falls to `fps × 150 / delay`, but not below the preset's minimum; from
+200 ms it falls to the minimum or below. A cut needs evidence beyond the
+probes' median: either this probe and the one before both saw 150 ms or more,
+and then RustDesk's step applies in full, so a sustained queue reaches the
+floor at its second sample; or the receipts witness a standing queue (the ack
+queue below is 100 ms or more), and then a cut at most halves the frame rate.
+Without either it holds. Balanced starts at its ceiling instead of its start
+value when the first probe after the preset is applied returns within 50 ms;
+the startup cap still holds the pace for its second. The controller works in
+bits per frame, so a frame-rate cut sheds bandwidth at once. Every 3 s it
+scales bits per frame by
 the window's worst delay: ×1.15, ×1.10 or ×1.05 below 50, 100 or 150 ms when
 the picture changed (at least six unique frames), and ×0.95, ×0.90, ×0.85 or
 ×0.80 below 200, 300 or 500 ms or above. An increase adds at most 150 kbit/s.
@@ -822,9 +859,10 @@ input authorisation.
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
-| Host hand-off | 4 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 buffered |
-| Probe / unresponsive | every 1 s / after 2 s, pace 2 FPS |
-| QoS | delay history 3; RTT window 60; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
+| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
+| Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
+| QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
+| Process timers | 1 ms, with power throttling opted out, while a session captures |
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
@@ -839,12 +877,28 @@ numbers the UI, the acceptance tool and these docs use:
 | Name | Definition |
 | --- | --- |
 | `rtt_ms` | The last probe round trip, transport only |
-| `queue_delay_ms` | The mean of the last three untainted probe RTTs minus the base RTT |
+| `queue_delay_ms` | The median of the last three untainted probe RTTs minus the base RTT |
 | `picture_latency_ms` | Median over 2 s of host time (encoder submit to socket write) + `rtt_ms / 2` + viewer time (network receipt to compositor consumption). Each side uses its own clock and the network leg is an estimate; only a camera measures glass to glass. |
 | `presented_fps` | Accepted presentations per second |
 | `received_fps` | Non-duplicate video records per second |
+| `preset`, `max_fps` | The preset this session asked for, and its `limits.max_fps`, which bounds every preset's ceiling |
+| `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder |
+| `encoder_dwell_ms` | The host's median time a unit stays in its encoder or helper, from submit to drain, over the last second; null from a host that reports none |
+| `sent_bitrate` | What the host sent over the last second, in bit/s |
+| `ack_queue_ms` | The host's receipt-based queue delay (the ack queue under send credit) |
 | `present_interval` | p50/p95/p99/max of the intervals between accepted presentations over the last 60 s, with the gaps over 100 and 250 ms |
 | `degraded` | For 3 s: queue delay ≥ 150 ms, picture latency ≥ 250 ms, or (at a pace of 10 or more) fewer than half the pace presented |
+
+The host writes `encoder_dwell_ms` in its `Stats` only to a viewer that listed
+the `encoder_dwell` capability in `Authenticate`: a strict viewer of an older
+build rejects a field it does not know. A viewer reads its absence as null.
+
+Where the frame rate goes is then one comparison at a time: a capture rate
+below the pace is the host's source or its gate (`skipped_per_s`,
+`encoder_dwell_ms`); a pace below `max_fps` is the controller, the viewer's cap
+or the preset's ceiling (Quality's is 30); received below capture is the
+transport (`ack_queue_ms`); presented below received is the viewer's decoder or
+display.
 
 The host traces each second as `desktop_feedback_interval` on
 `pb_mapper_desktop::feedback` (debug): `action`, `fps`, `pace_fps`,
@@ -852,7 +906,8 @@ The host traces each second as `desktop_feedback_interval` on
 `sent_bitrate`, `rate_model`, `rtt_ms`, `baseline_ms`, `delay_ms`, `tainted`,
 `ack_queue_ms`, `window_frames`, `window_bytes`, `window_clamped`,
 `outstanding_frames`, `outstanding_bytes`, `idr_inflight`, `skipped_ticks`,
-`keyframes`, `gop`, `input_wait_p50_us`, `input_wait_p99_us` and
+`encoder_dwell_ms`, `keyframes`, `gop`, `input_wait_p50_us`,
+`input_wait_p99_us` and
 `input_wait_max_us`. The presentation-credit fields `quality`, `waiting`,
 `recovering`, `desired_window_bytes` and `last_ack_*` are gone. Each written
 unit is traced as `desktop_frame` on `pb_mapper_desktop::frames` (trace level),
@@ -868,8 +923,18 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 failure is warned as `desktop_decoder_error` on `pb_mapper_desktop::frames`
 with its text as the detail. Each line names itself in an `event` field, and
 free text is Debug-formatted so that a newline in it cannot split the line.
-No line carries a token, invitation or fingerprint, and the background
-service's sessions are not logged.
+No line carries a token, invitation or fingerprint.
+
+The background service writes its host's lines to `service-host.log`, beside
+`service.log` in the protected installation root (SYSTEM and administrators
+write it, users may read it): `pb_mapper_desktop::session`,
+`pb_mapper_desktop::feedback` and `pb_mapper_client::direct` at info, which
+are the session lifecycle above, `desktop_rate_model_latched`, and
+`session_path_selected` with the path, the service and the peer address. No
+other target is written; none of these logs an invitation, a key or a
+credential. The once-a-second `desktop_feedback_interval` is debug and is not
+written; the viewer's statistics carry those numbers. At 1 MiB the file
+becomes `service-host.log.1`, replacing the previous one.
 
 ### The app's video path
 
@@ -924,17 +989,26 @@ default, never exceeds 60 FPS, so only a Smooth run on a Windows viewer above
 The ignored `slow_link` cases
 (`cargo test -p pb-mapper-desktop -- --ignored --nocapture slow_link`) use a
 real relay and TLS, a shaped viewer link, a synthetic asynchronous H.264 encoder
-(8 ms latency, output lost after 250 ms, a per-frame budget of
+(8 ms latency unless stated, output lost after 250 ms, a per-frame budget of
 `bitrate / nominal`) and a simulated decoder. They observe the pipeline, not a
-GPU or real rendering. One debug-build run on this machine, with other builds
-running:
+GPU or real rendering. One release-build run on this machine, with other builds
+running, and the timer guard held by each session; "before" is the same case
+on the build before the split capture gate, the median delay and the guard:
 
 | Case | Result |
 | --- | --- |
-| Fixed 350 ms RTT | Pace 60 (the ceiling); bitrate 4.91 Mbit/s from a 4.0 start; 59 presented and 60 received FPS; one keyframe; one size (1920×1080); the encoder configured once |
-| 1 Mbit/s for 8 s after 6 s unlimited | Window clamped at the first trace interval after the limit (990 ms; 1001–1016 ms in three other runs); lowest pace 3; lowest expected bitrate 194 kbit/s; back to at least 3.2 Mbit/s 8.05 s after the limit lifted (8.0–11.1 s over eight later runs: recovery moves in whole trace intervals) |
-| Decoder taking 67 ms a frame | Host pace held at a mean 12.5 FPS (14.3 in another run) by the viewer's fps cap, while the delay controller stayed at 60 FPS and the encoder bitrate at 8 Mbit/s: presentation lag never reaches congestion control |
-| 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (498 skipped ticks) instead of queueing; control 61 ms, release 47 ms, revoke 15.7 ms, host stop under 1 ms (252 and 266 ms in two later runs, probably because a stop now waits for the viewer to read `Stopped`, at most 1 s; not measured separately) |
+| 18 ms one way, unlimited (`lan_rtt_keeps_60`) | Pace at the ceiling 0.98 s after connecting (5.97 s before); 59.9 received FPS over the following 10 s; RTT 39 ms (52 ms before, when the shaped link's own timers ran at 15.6 ms) |
+| Three 600 ms stalls 6 s apart on that link (`isolated_stall_does_not_collapse_fps`) | The pace stayed at 60 through each (before: 60 → 5, 24 → 5 and 12 → 6, never back at 55 within 6 s) |
+| Encoder holding each picture 45 ms (`encoder_latency_of_45ms_keeps_60`) | 60.0 received FPS, 0 skipped ticks (before: 40.0 received FPS at a pace of 60, 332 ticks skipped) |
+| Fixed 350 ms RTT | Pace 60 (the ceiling); bitrate 4.91 Mbit/s from a 4.0 start; 60 presented and 59.8 received FPS; one keyframe; one size (1920×1080); the encoder configured once |
+| 1 Mbit/s for 8 s after 6 s unlimited | Window clamped 1.0 s after the limit; lowest pace 10; lowest expected bitrate 645 kbit/s; back to at least 3.2 Mbit/s 1.0 s after the limit lifted (8.0–11.1 s before, when fps recovered by a quick step every three seconds) |
+| 1 Mbit/s with IDRs of 162 KiB | One keyframe, none requested; the encoder bitrate fell to 2.77 Mbit/s; 19.9 received FPS |
+| Decoder taking 67 ms a frame | Host pace held at a mean 13.4 FPS by the viewer's fps cap, while the delay controller stayed at 60 FPS and the encoder bitrate at 7.9 Mbit/s: presentation lag never reaches congestion control |
+| 256 KiB/s link, 64 KiB frames, 30 s | Streaming throughout at both ends; capture held back (575 skipped ticks) instead of queueing, the link full at 2.09 Mbit/s received; control 8 ms, release 9 ms, revoke 3.5 ms (61, 47 and 15.7 ms before the timer guard); host stop 348 ms, which includes waiting for the viewer to read `Stopped` |
+
+`video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
+59.7 unique capture and encode FPS at a mean 1.7 ms encode with one unit in
+flight, and 58.2 FPS through the full backend (`--backend`).
 
 Proposed phone criteria, which the owner decides: on a 60 Hz phone over direct
 Wi-Fi with Balanced, presented FPS p50 ≥ 55; present interval p95 ≤ 25 ms and

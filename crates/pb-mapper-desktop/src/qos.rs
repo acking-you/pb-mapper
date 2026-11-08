@@ -4,9 +4,15 @@
 //! follow each 3 s window. Resolution never adapts, and no fps, bitrate or
 //! preset change rebuilds the encoder: the encoder runs at the session's
 //! nominal fps, and capture skips ticks to the pace published here.
+//!
+//! Unlike RustDesk, one stalled probe moves nothing: Wi-Fi holds a packet for
+//! hundreds of milliseconds now and then without any queue behind it. The
+//! delay is the median of the last three samples, a cut needs the receipts to
+//! show a standing queue too unless two probes in a row saw one, and a cut
+//! the receipts alone confirm at most halves fps.
 use crate::{
     QualityPreset, VideoCodec, VideoLimits,
-    credit::CreditView,
+    credit::{ACK_QUEUE_LIMIT, CreditView},
     outgoing::ProducedSnapshot,
     protocol::{Adaptation, RateModel},
     wire::IO_TIMEOUT,
@@ -17,15 +23,24 @@ use std::{
 };
 
 pub(crate) const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+/// The probe interval on a short path, where recovery may be quick.
+pub(crate) const FAST_PROBE_INTERVAL: Duration = Duration::from_millis(250);
+/// A base RTT below this is a short path.
+pub(crate) const FAST_PATH_RTT: Duration = Duration::from_millis(100);
+/// Balanced starts at its ceiling when the first probe after the preset is
+/// applied comes back within this.
+pub(crate) const FAST_START_RTT: Duration = Duration::from_millis(50);
+/// A delay from which fps falls.
+const CUT_DELAY: u32 = 150;
 /// A probe or receipt owed this long marks the viewer unresponsive.
 pub(crate) const UNRESPONSIVE_AFTER: Duration = Duration::from_secs(2);
 /// The output pace while the viewer is unresponsive.
 pub(crate) const UNRESPONSIVE_FPS: u32 = 2;
 pub(crate) const DELAY_FLOOR: Duration = Duration::from_millis(10);
-/// Untainted samples averaged into the delay.
+/// Untainted samples whose median is the delay.
 pub(crate) const DELAY_HISTORY: usize = 3;
-/// Samples whose minimum is the RTT baseline.
-pub(crate) const RTT_WINDOW: usize = 60;
+/// How long a sample counts toward the RTT baseline, its minimum.
+pub(crate) const RTT_WINDOW: Duration = Duration::from_secs(60);
 pub(crate) const QOS_TICK: Duration = Duration::from_millis(250);
 /// The bits-per-frame window.
 pub(crate) const RATIO_INTERVAL: Duration = Duration::from_secs(3);
@@ -160,6 +175,10 @@ pub(crate) struct Qos {
     quick: u32,
     increase: u32,
     last_delay: Option<u32>,
+    /// The last untainted sample's own delay, before the median.
+    last_raw: Option<u32>,
+    /// Balanced may jump to its ceiling at the next untainted sample.
+    start_high: bool,
     /// Bits per frame at the encoded size.
     bpf: f64,
     rate_model: RateModel,
@@ -170,7 +189,8 @@ pub(crate) struct Qos {
     next_nonce: u64,
     outstanding: Option<Probe>,
     last_probe: Option<Instant>,
-    rtt: VecDeque<Duration>,
+    /// `(echoed at, rtt)` over the last `RTT_WINDOW`.
+    rtt: VecDeque<(Instant, Duration)>,
     last_rtt: Option<Duration>,
     history: VecDeque<Duration>,
     tainted: bool,
@@ -201,6 +221,8 @@ impl Qos {
             quick: 0,
             increase: 0,
             last_delay: None,
+            last_raw: None,
+            start_high: false,
             bpf: 0.0,
             rate_model: RateModel::Nominal,
             overshoot: 0,
@@ -209,7 +231,7 @@ impl Qos {
             next_nonce: 1,
             outstanding: None,
             last_probe: None,
-            rtt: VecDeque::with_capacity(RTT_WINDOW),
+            rtt: VecDeque::new(),
             last_rtt: None,
             history: VecDeque::with_capacity(DELAY_HISTORY),
             tainted: false,
@@ -223,7 +245,8 @@ impl Qos {
         qos
     }
 
-    /// The fps and bits per frame a preset starts from.
+    /// The fps and bits per frame a preset starts from. Balanced starts at its
+    /// ceiling instead when the next probe finds a short, empty path.
     fn apply_preset(&mut self, quality: QualityPreset) {
         let p = preset(quality);
         self.preset = quality;
@@ -232,6 +255,7 @@ impl Qos {
         self.min_fps = p.min_fps;
         self.scale = (f64::from(self.ceiling_fps) / 30.0).max(1.0);
         self.fps = self.normal_fps;
+        self.start_high = quality == QualityPreset::Balanced;
         self.bpf = p.bpf_start * self.pixel_scale;
     }
 
@@ -260,6 +284,7 @@ impl Qos {
         self.unresponsive = false;
         self.startup_until = now + STARTUP_HOLD;
         self.history.clear();
+        self.last_raw = None;
     }
 
     /// A new viewer path: the old baseline means nothing. fps and bits per
@@ -267,6 +292,7 @@ impl Qos {
     pub fn reset_baseline(&mut self) {
         self.rtt.clear();
         self.history.clear();
+        self.last_raw = None;
     }
 
     /// A new encoded size: bits per frame keep their 1080p-relative level.
@@ -287,18 +313,34 @@ impl Qos {
 
     /// The nonce of the probe to write now, if one is due.
     pub fn probe_due(&self, now: Instant) -> Option<u64> {
+        let interval = self.probe_interval();
         (self.outstanding.is_none()
             && self
                 .last_probe
-                .is_none_or(|last| now.saturating_duration_since(last) >= PROBE_INTERVAL))
+                .is_none_or(|last| now.saturating_duration_since(last) >= interval))
         .then_some(self.next_nonce)
     }
 
     /// When the next probe is due; `None` while one is outstanding.
     pub fn probe_due_at(&self, now: Instant) -> Option<Instant> {
-        self.outstanding
-            .is_none()
-            .then(|| self.last_probe.map_or(now, |last| last + PROBE_INTERVAL))
+        self.outstanding.is_none().then(|| {
+            self.last_probe
+                .map_or(now, |last| last + self.probe_interval())
+        })
+    }
+
+    /// A short path is probed four times as often, so fps recovers in about
+    /// a second after a cut rather than in ten.
+    fn probe_interval(&self) -> Duration {
+        if self.short_path() {
+            FAST_PROBE_INTERVAL
+        } else {
+            PROBE_INTERVAL
+        }
+    }
+
+    fn short_path(&self) -> bool {
+        self.base_rtt().is_some_and(|base| base < FAST_PATH_RTT)
     }
 
     /// `tainted`: the probe went out behind an IDR in flight, so its RTT
@@ -314,7 +356,9 @@ impl Qos {
     }
 
     /// An echo of the outstanding probe; any other nonce is ignored.
-    pub fn on_probe_echo(&mut self, nonce: u64, now: Instant) {
+    /// `ack_queue` is the receipts' queue delay at the echo, the witness a cut
+    /// needs unless the probes' own delay persists.
+    pub fn on_probe_echo(&mut self, nonce: u64, now: Instant, ack_queue: Option<Duration>) {
         let Some(probe) = self.outstanding.take_if(|probe| probe.nonce == nonce) else {
             return;
         };
@@ -325,21 +369,23 @@ impl Qos {
         }
         let rtt = elapsed.max(DELAY_FLOOR);
         self.last_rtt = Some(rtt);
-        if self.rtt.len() == RTT_WINDOW {
+        while self
+            .rtt
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > RTT_WINDOW)
+        {
             self.rtt.pop_front();
         }
-        self.rtt.push_back(rtt);
+        self.rtt.push_back((now, rtt));
         self.tainted = probe.tainted;
+        let Some(base) = self.base_rtt() else {
+            return;
+        };
+        let raw = millis(rtt.saturating_sub(base));
         if probe.tainted {
             // Kept apart, for a window that has nothing else to go on.
-            if let Some(base) = self.base_rtt() {
-                let delay = rtt
-                    .saturating_sub(base)
-                    .as_millis()
-                    .min(u128::from(u32::MAX)) as u32;
-                let max = &mut self.window.max_tainted;
-                *max = Some(max.map_or(delay, |max| max.max(delay)));
-            }
+            let max = &mut self.window.max_tainted;
+            *max = Some(max.map_or(raw, |max| max.max(raw)));
             return;
         }
         if self.history.len() == DELAY_HISTORY {
@@ -349,7 +395,11 @@ impl Qos {
         let Some(delay) = self.delay_ms() else {
             return;
         };
-        self.control_fps(delay);
+        if std::mem::take(&mut self.start_high) && rtt < FAST_START_RTT {
+            self.fps = self.ceiling_fps;
+        }
+        let witnessed = ack_queue.is_some_and(|queue| queue >= ACK_QUEUE_LIMIT);
+        self.control_fps(delay, raw, witnessed);
         if !self.sampled {
             // As RustDesk: the first delay also sets bits per frame at once,
             // which can only lower them.
@@ -395,7 +445,7 @@ impl Qos {
     }
 
     pub fn base_rtt(&self) -> Option<Duration> {
-        self.rtt.iter().min().copied()
+        self.rtt.iter().map(|(_, rtt)| *rtt).min()
     }
 
     pub fn preset(&self) -> QualityPreset {
@@ -453,31 +503,36 @@ impl Qos {
         pace.max(1)
     }
 
-    /// The mean of the recent untainted RTTs above the baseline.
+    /// The median of the recent untainted RTTs above the baseline; of two,
+    /// the lower. One stalled probe among them moves it not at all.
     fn delay_ms(&self) -> Option<u32> {
         let base = self.base_rtt()?;
-        if self.history.is_empty() {
-            return None;
+        let mut recent = [Duration::ZERO; DELAY_HISTORY];
+        for (slot, rtt) in recent.iter_mut().zip(&self.history) {
+            *slot = *rtt;
         }
-        let mean = self.history.iter().sum::<Duration>() / self.history.len() as u32;
-        Some(
-            mean.saturating_sub(base)
-                .as_millis()
-                .min(u128::from(u32::MAX)) as u32,
-        )
+        let recent = recent.get_mut(..self.history.len())?;
+        recent.sort_unstable();
+        let median = recent.get(recent.len().checked_sub(1)? / 2)?;
+        Some(millis(median.saturating_sub(base)))
     }
 
-    /// RustDesk's `user_network_delay`, with its steps scaled to the ceiling.
-    fn control_fps(&mut self, delay: u32) {
+    /// RustDesk's `user_network_delay` on the median delay, with its steps
+    /// scaled to the ceiling. A cut needs the receipts to witness a standing
+    /// queue, or this probe and the one before to have seen one (`raw` is
+    /// this probe's own delay); until the probes persist it at most halves
+    /// fps. A short path takes the quick step at every sample.
+    fn control_fps(&mut self, delay: u32, raw: u32, witnessed: bool) {
         let small = (self.scale.round() as u32).max(1);
         let quick_step = (5.0 * self.scale).round() as u32;
+        let persisted = raw >= CUT_DELAY && self.last_raw.is_some_and(|last| last >= CUT_DELAY);
         let (min_fps, before) = (self.min_fps, self.fps);
         let mut fps = self.fps;
         match delay {
             0..50 => {
                 self.quick += 1;
                 let mut step = if fps < self.normal_fps { small } else { 0 };
-                if self.quick >= 3 {
+                if self.quick >= 3 || self.short_path() {
                     self.quick = 0;
                     step = quick_step;
                 }
@@ -488,18 +543,26 @@ impl Qos {
                     fps += small;
                 }
             }
-            100..150 => fps = min_fps.max(fps),
+            100..CUT_DELAY => fps = min_fps.max(fps),
+            // Only the probes saw it, and not twice in a row: a stall on
+            // their way, not a queue.
+            _ if !persisted && !witnessed => {}
             _ => {
                 let divided = (fps * 150).div_ceil(delay);
-                fps = match delay {
+                let target = match delay {
                     150..200 => min_fps.max(divided),
                     200..300 => min_fps.min(divided),
                     300..600 => 150 * min_fps / delay,
                     _ => (150 * min_fps / delay).min(divided),
                 };
+                fps = if persisted {
+                    target
+                } else {
+                    target.max(fps.div_ceil(2))
+                };
             }
         }
-        if delay < 150 {
+        if delay < CUT_DELAY {
             self.increase += 1;
             if self.increase >= 3 {
                 self.increase = 0;
@@ -513,6 +576,7 @@ impl Qos {
         }
         self.fps = fps.clamp(1, self.ceiling_fps);
         self.last_delay = Some(delay);
+        self.last_raw = Some(raw);
         self.window.max_delay = Some(self.window.max_delay.map_or(delay, |max| max.max(delay)));
         self.adaptation = match self.fps.cmp(&before) {
             std::cmp::Ordering::Greater => Adaptation::Raising,
@@ -597,6 +661,10 @@ impl Qos {
     }
 }
 
+fn millis(duration: Duration) -> u32 {
+    duration.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,11 +677,39 @@ mod tests {
         }
     }
 
-    /// One probe round trip of `rtt_ms`, sent at `at`.
-    fn sample(qos: &mut Qos, at: Instant, rtt_ms: u64, tainted: bool) {
+    /// One probe round trip of `rtt_ms`, sent at `at`, with the receipts'
+    /// queue at its echo.
+    fn sample_with(qos: &mut Qos, at: Instant, rtt_ms: u64, tainted: bool, ack_queue_ms: u64) {
         let nonce = qos.probe_due(at).unwrap_or(qos.next_nonce);
         qos.probe_sent(nonce, at, tainted);
-        qos.on_probe_echo(nonce, at + Duration::from_millis(rtt_ms));
+        qos.on_probe_echo(
+            nonce,
+            at + Duration::from_millis(rtt_ms),
+            Some(Duration::from_millis(ack_queue_ms)),
+        );
+    }
+
+    /// One probe round trip of `rtt_ms`, sent at `at`, with no receipt queue.
+    fn sample(qos: &mut Qos, at: Instant, rtt_ms: u64, tainted: bool) {
+        sample_with(qos, at, rtt_ms, tainted, 0);
+    }
+
+    /// `(rtt_ms, ack_queue_ms)` probes every 250 ms from `t0`; fps after each.
+    fn probes(qos: &mut Qos, t0: Instant, script: &[(u64, u64)]) -> Vec<u32> {
+        let mut at = t0;
+        script
+            .iter()
+            .map(|&(rtt, queue)| {
+                sample_with(qos, at, rtt, false, queue);
+                at += FAST_PROBE_INTERVAL;
+                qos.fps
+            })
+            .collect()
+    }
+
+    /// A 20 to 40 ms link with no queue, for `count` probes.
+    fn calm(count: usize) -> impl Iterator<Item = (u64, u64)> {
+        (0..count as u64).map(|n| (20 + 5 * (n % 5), 0))
     }
 
     fn idle() -> CreditView {
@@ -626,36 +722,85 @@ mod tests {
     }
 
     #[test]
-    fn delay_controller_follows_rustdesk_steps() {
+    fn balanced_paces_at_its_ceiling_within_two_seconds_of_a_short_path() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        // Balanced at 60: 45 fps, capped at 15 × 2 for the first second.
+        assert_eq!((qos.fps, qos.pace(t0)), (45, 30));
+        // A flat 20 ms link: the first echo lifts fps to the ceiling, which
+        // the startup cap still holds back for its second.
+        let fps = probes(&mut qos, t0, &[(20, 0); 8]);
+        assert!(fps.iter().all(|fps| *fps == 60), "{fps:?}");
+        assert_eq!(qos.pace(at(999)), 30);
+        assert_eq!(qos.pace(at(1000)), 60);
+        // Such a path is probed every 250 ms.
+        assert_eq!(qos.probe_due_at(at(1800)), Some(at(2000)));
+
+        // A long path starts where Balanced always did, probed once a second.
+        let mut far = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        sample(&mut far, t0, 120, false);
+        assert_eq!(far.fps, 45);
+        assert_eq!(far.probe_due_at(at(500)), Some(at(1000)));
+    }
+
+    #[test]
+    fn a_stalled_probe_never_more_than_halves_fps() {
+        let t0 = Instant::now();
+        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        // A 600 ms stall that delays the receipts as well as the probe ...
+        let stall = (600, 580);
+        let mut script: Vec<_> = calm(8).collect();
+        let single = script.len();
+        script.push(stall);
+        script.extend(calm(4));
+        // ... and two of them one probe apart.
+        let pair = script.len();
+        script.extend([stall, (30, 0), stall]);
+        let after = script.len();
+        script.extend(calm(12));
+        let fps = probes(&mut qos, t0, &script);
+
+        assert_eq!(fps[single - 1], 60);
+        // One moves nothing, though the receipts queued behind it.
+        assert!(fps[single..pair].iter().all(|fps| *fps == 60), "{fps:?}");
+        // Two move it, by half at most ...
+        assert!(fps[pair..after].contains(&30), "{fps:?}");
+        assert!(fps[pair..].iter().all(|fps| *fps >= 30), "{fps:?}");
+        // ... and fps is back at the ceiling within 3 s.
+        let back = fps[after..].iter().position(|fps| *fps == 60).unwrap();
+        assert!(
+            FAST_PROBE_INTERVAL * back as u32 <= Duration::from_secs(3),
+            "{fps:?}"
+        );
+    }
+
+    #[test]
+    fn a_sustained_queue_reaches_the_floor_within_two_samples() {
+        let t0 = Instant::now();
+        let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
+        let fps = probes(&mut qos, t0, &[(20, 0); 8]);
+        assert_eq!(fps.last(), Some(&60));
+        // 250 ms of queueing that no receipt reports: two probes in a row
+        // are evidence enough, and the second is at Balanced's floor ...
+        let start = t0 + FAST_PROBE_INTERVAL * 8;
+        let fps = probes(&mut qos, start, &[(270, 0), (270, 0)]);
+        assert_eq!(fps, [60, 10]);
+        // ... and 600 ms takes it below, as RustDesk's steps do.
+        let fps = probes(
+            &mut qos,
+            start + FAST_PROBE_INTERVAL * 2,
+            &[(620, 0), (620, 0)],
+        );
+        assert_eq!(fps, [6, 2]);
+    }
+
+    #[test]
+    fn tainted_probes_unresponsiveness_baseline_and_output_clamps() {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
         let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
-        // Balanced at 60: start at 45 fps, capped at 15 × 2 for the first second.
-        assert_eq!((qos.fps, qos.pace(t0)), (45, 30));
-        assert_eq!(qos.pace(t0 + Duration::from_millis(999)), 30);
-        assert_eq!(qos.pace(s(1)), 45);
-
-        // A flat 20 ms link ramps to the ceiling in scaled steps: +10 every
-        // third sample and +2 for every three under 150 ms.
-        let mut fps = vec![];
-        for n in 1..=6 {
-            sample(&mut qos, s(n), 20, false);
-            fps.push(qos.fps);
-        }
-        assert_eq!(fps, [45, 45, 57, 57, 57, 60]);
-        assert_eq!(qos.pace(s(7)), 60);
-
-        // Delays of 150 ms and more divide fps; RustDesk's bands as given.
-        qos.control_fps(180);
-        assert_eq!(qos.fps, 50);
-        qos.control_fps(250);
-        assert_eq!(qos.fps, 10);
-        qos.fps = 60;
-        qos.control_fps(300);
-        assert_eq!(qos.fps, 5);
-        qos.fps = 60;
-        qos.control_fps(600);
-        assert_eq!(qos.fps, 2);
+        sample(&mut qos, s(1), 20, false);
         qos.fps = 40;
 
         // Tainted samples move the RTT window, never the controller.
@@ -681,7 +826,7 @@ mod tests {
         qos.tick(s(13), &idle(), ProducedSnapshot::default());
         assert!(qos.unresponsive);
         let samples = qos.rtt.len();
-        qos.on_probe_echo(nonce, s(13));
+        qos.on_probe_echo(nonce, s(13), None);
         assert!(!qos.unresponsive && qos.rtt.len() == samples);
         // Receipts owed for 2 s count too; a receipt owed briefly does not.
         let owed = |since| CreditView {
@@ -694,15 +839,15 @@ mod tests {
         qos.tick(s(14), &owed(s(11)), ProducedSnapshot::default());
         assert!(qos.unresponsive);
         // A nonce that is not outstanding is ignored.
-        qos.on_probe_echo(99, s(14));
+        qos.on_probe_echo(99, s(14), None);
         assert!(qos.unresponsive);
 
-        // The baseline is the minimum of the last 60 samples, and a new path
+        // The baseline is the minimum over the last 60 s, and a new path
         // resets it.
         let mut qos = Qos::new(limits(60), VideoCodec::H264, QualityPreset::Balanced, t0);
         sample(&mut qos, s(1), 5, false);
         assert_eq!(qos.base_rtt(), Some(DELAY_FLOOR));
-        for n in 0..RTT_WINDOW as u64 {
+        for n in 0..RTT_WINDOW.as_secs() {
             sample(&mut qos, s(2 + n), 40, false);
         }
         assert_eq!(qos.base_rtt(), Some(Duration::from_millis(40)));
@@ -773,7 +918,7 @@ mod tests {
         assert_eq!(qos.bpf, held);
         // 250 ms of queueing: ×0.90, moving content or not.
         sample(&mut qos, s(10), 20, false);
-        qos.control_fps(250);
+        qos.control_fps(250, 250, true);
         qos.tick(s(12), &idle(), produced(200, 0, 0));
         assert!((qos.bpf - held * 0.90).abs() < 1e-6);
         // Only probes behind IDRs: a quick IDR holds, even with moving
@@ -789,14 +934,14 @@ mod tests {
         assert!((qos.bpf - lowered * 0.80).abs() < 1e-6, "{}", qos.bpf);
         // The preset floor and max bound every step.
         for n in 0..40 {
-            qos.control_fps(900);
+            qos.control_fps(900, 900, true);
             qos.tick(s(21 + 3 * n), &idle(), produced(400, 0, 0));
         }
         assert_eq!(qos.bpf, 16_667.0);
         let mut unique = 400;
         for n in 0..400 {
             unique += 100;
-            qos.control_fps(0);
+            qos.control_fps(0, 0, false);
             qos.tick(s(200 + 3 * n), &idle(), produced(unique, 0, 0));
         }
         assert_eq!(qos.bpf, 133_333.0);

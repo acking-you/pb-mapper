@@ -17,7 +17,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -110,6 +110,10 @@ pub(crate) struct EngineState {
     /// What `State` carries.
     pub record: StateRecord,
     pub capture_fps: f32,
+    /// Median submit to drain of the units the encoder returned in the last
+    /// second; `None` when it returned none, or returns each from the call
+    /// that submits it.
+    pub encoder_dwell: Option<Duration>,
     pub skipped_ticks: u64,
     pub dropped_frames: u64,
     /// The last unit's `VideoFormat::gop`; 0 when unknown (JPEG, or an
@@ -136,6 +140,7 @@ impl EngineState {
                 video: None,
             },
             capture_fps: 0.0,
+            encoder_dwell: None,
             skipped_ticks: 0,
             dropped_frames: 0,
             gop: 0,

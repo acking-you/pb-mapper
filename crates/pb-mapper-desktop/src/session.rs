@@ -11,7 +11,9 @@ use crate::{
     idr::IdrReason,
     lane::LaneCommand,
     outgoing::OUTGOING_MAX_AGE,
-    protocol::{HostMessage, StateReason, StateRecord, StopReason, ViewerMessage},
+    protocol::{
+        CAPABILITY_ENCODER_DWELL, HostMessage, StateReason, StateRecord, StopReason, ViewerMessage,
+    },
     qos::{QOS_TICK, Qos, TargetValues},
     shared::{CursorUpdate, EngineState, Policy, SessionShared, Targets},
     wire::{self, MAX_PAYLOAD},
@@ -73,6 +75,8 @@ enum End {
 pub(crate) struct Session {
     pub shared: Arc<SessionShared>,
     codec: VideoCodec,
+    /// The viewer reads the encoder's dwell in `Stats`.
+    encoder_dwell: bool,
     /// When the session was accepted, for display only.
     pub started_unix_ms: u64,
     /// Send credit and QoS, shared by B-recv and B-send only.
@@ -91,6 +95,7 @@ impl Session {
         codec: VideoCodec,
         limits: VideoLimits,
         quality: QualityPreset,
+        capabilities: &[String],
     ) -> Arc<Self> {
         let now = Instant::now();
         let qos = Qos::new(limits, codec, quality, now);
@@ -102,6 +107,9 @@ impl Session {
                 Targets::new(targets.pace_fps, targets.encoder_bps),
             )),
             codec,
+            encoder_dwell: capabilities
+                .iter()
+                .any(|capability| capability == CAPABILITY_ENCODER_DWELL),
             started_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| {
@@ -214,7 +222,11 @@ impl Session {
                 self.credit_changed.notify_one();
             }
             ViewerMessage::ProbeEcho { nonce } => {
-                self.update_qos(now, |qos| qos.on_probe_echo(nonce, now));
+                // The receipts' own queue, which a cut needs as its witness
+                // unless the probes' delay persists.
+                let base = self.qos.lock().base_rtt();
+                let ack_queue = base.map(|base| self.credit.lock().ack_queue(base, now));
+                self.update_qos(now, |qos| qos.on_probe_echo(nonce, now, ack_queue));
             }
             ViewerMessage::Presented {
                 generation,
@@ -793,6 +805,10 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             base_rtt_ms: qos.base_rtt.map(ms),
             queue_delay_ms: qos.delay_ms,
             ack_queue_ms: ms(ack_queue),
+            encoder_dwell_ms: engine
+                .encoder_dwell
+                .filter(|_| session.encoder_dwell)
+                .map(ms),
             dropped_frames: engine.dropped_frames + self.counters.dropped,
             skipped_ticks: engine.skipped_ticks,
             keyframes: produced.keyframes,
@@ -828,6 +844,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             outstanding_bytes = credit.outstanding_bytes,
             idr_inflight = credit.idr_inflight,
             skipped_ticks = engine.skipped_ticks,
+            encoder_dwell_ms = engine.encoder_dwell.map(ms),
             keyframes = produced.keyframes,
             gop = engine.gop,
             input_wait_p50_us = engine.input_wait.p50_us,
@@ -923,6 +940,7 @@ mod tests {
             }),
             ..engine.record
         };
+        engine.encoder_dwell = Some(Duration::from_millis(3));
         engine
     }
 
@@ -1020,6 +1038,7 @@ mod tests {
             VideoCodec::H264,
             VideoLimits::for_viewer(60.0),
             QualityPreset::Balanced,
+            &[],
         );
         let shared = session.shared.clone();
         shared.state.send_replace(streaming(1));
@@ -1051,12 +1070,15 @@ mod tests {
         let HostMessage::Stats {
             dropped_frames,
             frames,
+            encoder_dwell_ms,
             ..
         } = viewer.stats().await
         else {
             unreachable!()
         };
         assert_eq!((dropped_frames, frames), (2, 3));
+        // A viewer that did not list `encoder_dwell` would reject the field.
+        assert_eq!(encoder_dwell_ms, None);
 
         // A receipt for video never sent is a protocol error, and the viewer
         // hears so before the close.
@@ -1097,6 +1119,7 @@ mod tests {
             VideoCodec::Jpeg,
             VideoLimits::for_viewer(60.0),
             QualityPreset::Balanced,
+            &[],
         );
         let cancel = session.shared.cancel.clone();
         let running = tokio::spawn(run(session.clone(), host, async move {

@@ -1,14 +1,17 @@
 //! The hand-off from thread C to B-send: encoded units waiting for send credit.
-//! The submit gate keeps it at two units plus the encoder's in-flight ones, so
-//! an overflow is a bug path; it never discards an IDR it was handed.
-use crate::VideoCodec;
+//! The submit gate keeps it below two units plus the encoder's in-flight ones,
+//! so an overflow is a bug path; it never discards an IDR it was handed.
+use crate::{
+    VideoCodec,
+    worker::{ENCODER_DEPTH, TRANSPORT_GATE},
+};
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
-pub(crate) const OUTGOING_CAPACITY: usize = 4;
+pub(crate) const OUTGOING_CAPACITY: usize = TRANSPORT_GATE + ENCODER_DEPTH;
 pub(crate) const OUTGOING_BYTES: usize = 8 * 1024 * 1024;
 /// A head older than this is cleared and replaced by a requested IDR. Time it
 /// waits behind an IDR in flight does not count (`CreditLedger::aging_since`).
@@ -201,33 +204,39 @@ mod tests {
     #[tokio::test]
     async fn overflow_keeps_only_an_idr_and_invalidate_drops_old_generations() {
         let outgoing = Outgoing::new();
-        for frame in 1..=OUTGOING_CAPACITY as u64 {
+        let full = OUTGOING_CAPACITY as u64;
+        for frame in 1..=full {
             assert_eq!(outgoing.push(unit(1, frame, frame == 1, 10)), Push::Queued);
         }
         // A push that was not awaited yet still wakes B-send.
         outgoing.notified().await;
         assert_eq!(
-            outgoing.push(unit(1, 5, false, 10)),
-            Push::Overflow { dropped: 5 }
+            outgoing.push(unit(1, full + 1, false, 10)),
+            Push::Overflow {
+                dropped: OUTGOING_CAPACITY + 1
+            }
         );
         assert_eq!(outgoing.len(), 0);
         assert_eq!(
-            outgoing.push(unit(1, 6, true, OUTGOING_BYTES)),
+            outgoing.push(unit(1, full + 2, true, OUTGOING_BYTES)),
             Push::Queued
         );
         assert_eq!(
-            outgoing.push(unit(1, 7, true, 1)),
+            outgoing.push(unit(1, full + 3, true, 1)),
             Push::Overflow { dropped: 1 }
         );
         let head = outgoing.peek_meta().unwrap();
         assert!(head.keyframe && head.len == 1);
 
-        outgoing.push(unit(2, 8, true, 10));
+        outgoing.push(unit(2, full + 4, true, 10));
         assert_eq!(outgoing.retain_generation(2), 1);
-        assert_eq!(outgoing.pop().map(|unit| unit.frame_id), Some(8));
+        assert_eq!(outgoing.pop().map(|unit| unit.frame_id), Some(full + 4));
         assert_eq!(outgoing.clear(), 0);
         let produced = outgoing.produced();
-        assert_eq!((produced.frames, produced.keyframes), (8, 4));
-        assert_eq!((produced.non_idr_frames, produced.non_idr_bytes), (4, 40));
+        assert_eq!((produced.frames, produced.keyframes), (full + 4, 4));
+        assert_eq!(
+            (produced.non_idr_frames, produced.non_idr_bytes),
+            (full, 10 * full)
+        );
     }
 }

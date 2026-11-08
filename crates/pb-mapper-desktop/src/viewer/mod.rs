@@ -30,8 +30,8 @@ pub use status::{
 use crate::{
     Input, Invitation, KeyframeReason, QualityPreset, Result, VideoCodec, VideoLimits, error,
     protocol::{
-        DesktopKind, HostMessage, NoticeCode, RejectReason, Route, SessionState, StateRecord,
-        VideoSize, ViewerMessage, valid_capabilities,
+        CAPABILITY_ENCODER_DWELL, DesktopKind, HostMessage, NoticeCode, RejectReason, Route,
+        SessionState, StateRecord, VideoSize, ViewerMessage, valid_capabilities,
     },
     security, valid_service,
     video_sink::{VideoSink, VideoUnit},
@@ -383,7 +383,7 @@ impl Viewer {
                 stopped: None,
                 entered_streaming: now,
             }),
-            stats: Mutex::new(ViewerStatsAcc::new(now)),
+            stats: Mutex::new(ViewerStatsAcc::new(now, config.limits.max_fps)),
             cursor: Mutex::new(CursorSlot::default()),
             outbound: Outbound::new(),
         });
@@ -441,6 +441,7 @@ impl Viewer {
         };
         stats.path = path.into();
         stats.relay_transport = relay_transport.map(Into::into);
+        stats.preset = state.quality;
         stats.presented_fps = sink.presented_fps;
         stats.width = video.map_or(0, |video| video.width);
         stats.height = video.map_or(0, |video| video.height);
@@ -680,7 +681,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
         codecs: config.codecs.clone(),
         limits: config.limits,
         quality: config.quality,
-        capabilities: Vec::new(),
+        capabilities: vec![CAPABILITY_ENCODER_DWELL.into()],
     };
     wire::write_message(stream, &authenticate, None)
         .await
@@ -971,30 +972,39 @@ impl Reader<'_> {
                 fps_cap,
                 bitrate,
                 encoder_bitrate,
+                sent_bitrate,
                 rtt_ms,
                 base_rtt_ms,
                 queue_delay_ms,
+                ack_queue_ms,
+                encoder_dwell_ms,
                 dropped_frames,
+                skipped_ticks,
                 keyframes,
                 adaptation,
                 rate_model,
                 ..
             } => {
-                self.shared.stats.lock().host = Some(HostStats {
+                let host = HostStats {
                     capture_fps,
                     pace_fps,
                     target_fps,
                     fps_cap,
                     bitrate,
                     encoder_bitrate,
+                    sent_bitrate,
                     rtt_ms,
                     base_rtt_ms,
                     queue_delay_ms,
+                    ack_queue_ms,
+                    encoder_dwell_ms,
                     dropped_frames,
+                    skipped_ticks,
                     keyframes,
                     adaptation,
                     rate_model,
-                });
+                };
+                self.shared.stats.lock().on_host(Instant::now(), host);
             }
             HostMessage::Notice { code, message } => {
                 self.shared.state.lock().notice = Some((code, message, Instant::now()));
@@ -1274,7 +1284,7 @@ mod tests {
         };
         assert_eq!(token, TOKEN);
         assert_eq!(codecs, [VideoCodec::H264]);
-        assert!(capabilities.is_empty());
+        assert_eq!(capabilities, [CAPABILITY_ENCODER_DWELL]);
 
         // Receipts and probe echoes need no consumer at all.
         send(&mut host, state(1, false), None).await;
@@ -1406,6 +1416,55 @@ mod tests {
         let due = Instant::now();
         viewer.resume();
         age_within(due);
+        drop(host);
+        viewer.stop().await.unwrap();
+    }
+
+    /// The host's figures reach the status the quality sheet reads: its
+    /// skipped ticks as a rate, what it sent, its encoder dwell and receipt
+    /// queue, beside the preset and ceiling the session asked for.
+    #[tokio::test]
+    async fn host_stats_reach_the_viewer_status() {
+        let (viewer, mut host, _) = connect(accepted()).await;
+        let viewer = viewer.unwrap();
+        let stats = |skipped_ticks| HostMessage::Stats {
+            capture_fps: 59.5,
+            pace_fps: 60,
+            target_fps: 60,
+            fps_cap: 0,
+            bitrate: 4_000_000,
+            encoder_bitrate: 4_000_000,
+            sent_bitrate: 3_900_000,
+            rtt_ms: Some(40),
+            base_rtt_ms: Some(38),
+            queue_delay_ms: Some(2),
+            ack_queue_ms: 12,
+            encoder_dwell_ms: Some(3),
+            dropped_frames: 0,
+            skipped_ticks,
+            keyframes: 1,
+            frames: 60,
+            bytes: 500_000,
+            adaptation: crate::Adaptation::Steady,
+            rate_model: crate::RateModel::Nominal,
+            gop: u32::MAX,
+        };
+        let skipped = || viewer.status().stats.skipped_per_s;
+        send(&mut host, stats(10), None).await;
+        eventually(|| viewer.status().stats.sent_bitrate > 0).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // 30 more in at least 500 ms.
+        send(&mut host, stats(40), None).await;
+        eventually(|| skipped() <= 60.5).await;
+        let json = serde_json::to_value(viewer.status().stats).unwrap();
+        assert!(skipped() >= 30.0, "{}", skipped());
+        assert_eq!(json["preset"], "balanced");
+        assert_eq!(json["max_fps"], 60);
+        assert_eq!(json["sent_bitrate"], 3_900_000);
+        assert_eq!(json["encoder_dwell_ms"], 3);
+        assert_eq!(json["ack_queue_ms"], 12);
+        viewer.set_quality(QualityPreset::Smooth);
+        assert_eq!(viewer.status().stats.preset, QualityPreset::Smooth);
         drop(host);
         viewer.stop().await.unwrap();
     }
