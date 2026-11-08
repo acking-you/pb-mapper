@@ -96,7 +96,7 @@ pub(crate) struct Consumer {
     network: OnceCell<Arc<Network>>,
     diagnostics: Diagnostics,
     cooldown: std::sync::Mutex<Cooldown>,
-    port_mapping: crate::sdk::PortMapping,
+    policy: crate::sdk::DirectPolicy,
 }
 impl Consumer {
     pub fn new(
@@ -106,7 +106,7 @@ impl Consumer {
         is_datagram: bool,
         keep_alive: bool,
         diagnostics: Diagnostics,
-        port_mapping: crate::sdk::PortMapping,
+        policy: crate::sdk::DirectPolicy,
     ) -> Arc<Self> {
         let control = Arc::new(Mutex::new(None::<Arc<Control>>));
         let reports = Arc::new(reports::Latest::default());
@@ -132,7 +132,7 @@ impl Consumer {
             network: OnceCell::new(),
             diagnostics,
             cooldown: std::sync::Mutex::default(),
-            port_mapping,
+            policy,
         })
     }
     fn cooldown(&self) -> std::sync::MutexGuard<'_, Cooldown> {
@@ -216,7 +216,7 @@ impl Consumer {
             let network = self
                 .network
                 .get_or_try_init(|| async {
-                    Network::new(false, self.port_mapping, &self.diagnostics)
+                    Network::new(false, self.policy.port_mapping, &self.diagnostics)
                 })
                 .await?
                 .clone();
@@ -282,7 +282,11 @@ impl Consumer {
             id: grant.id,
             completed: false,
         };
-        let lan = Assessment::new(discovered.local.clone(), &grant.provider.candidates);
+        let lan = Assessment::new(
+            discovered.local.clone(),
+            &grant.provider.candidates,
+            self.policy.lan_first,
+        );
         if let Some(evidence) = lan.evidence {
             self.diagnostics.lan_detected(evidence);
         }

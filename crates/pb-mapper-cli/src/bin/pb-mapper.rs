@@ -160,6 +160,14 @@ struct RegisterArgs {
         conflicts_with = "relay_only"
     )]
     port_mapping: PortMappingArg,
+    /// Probe a consumer's addresses in the order it offered them, rather than
+    /// those on a local network shared with it first.
+    #[arg(
+        long = "no-lan-first",
+        action = clap::ArgAction::SetFalse,
+        conflicts_with = "relay_only"
+    )]
+    lan_first: bool,
     /// Transport used by the local service.
     #[arg(value_enum)]
     transport: Transport,
@@ -202,6 +210,14 @@ struct ConnectArgs {
         conflicts_with = "relay_only"
     )]
     port_mapping: PortMappingArg,
+    /// Dial every direct path as soon as it answers, rather than trying a
+    /// local network shared with the publisher first.
+    #[arg(
+        long = "no-lan-first",
+        action = clap::ArgAction::SetFalse,
+        conflicts_with = "relay_only"
+    )]
+    lan_first: bool,
     /// Transport exposed by the local listener.
     #[arg(value_enum)]
     transport: Transport,
@@ -504,6 +520,7 @@ async fn run_register(args: RegisterArgs) -> Result<(), Box<dyn Error>> {
             RegisterOptions {
                 allow_direct: !args.relay_only && RegisterOptions::default().allow_direct,
                 port_mapping: args.port_mapping.into(),
+                lan_first: args.lan_first,
                 ..Default::default()
             },
         )
@@ -532,6 +549,7 @@ async fn run_connect(args: ConnectArgs) -> Result<(), Box<dyn Error>> {
                     (false, PathArg::Auto) => PathPolicy::default(),
                 },
                 port_mapping: args.port_mapping.into(),
+                lan_first: args.lan_first,
             },
         )
         .await?;
@@ -765,10 +783,23 @@ mod tests {
             panic!("expected register command");
         };
         assert!(!defaults.relay_only);
+        assert!(defaults.lan_first);
         assert_eq!(defaults.relay.relay_transport, RelayTransportArg::Tcp);
         assert!(
             Cli::try_parse_from(register.iter().chain(&["--allow-direct"])).is_ok(),
             "0.7 opt-in flag is accepted"
+        );
+        let Command::Register(lan_first_off) =
+            Cli::try_parse_from(register.iter().chain(&["--no-lan-first"]))
+                .unwrap()
+                .command
+        else {
+            panic!("expected register command");
+        };
+        assert!(!lan_first_off.lan_first);
+        assert!(
+            Cli::try_parse_from(register.iter().chain(&["--relay-only", "--no-lan-first"]))
+                .is_err()
         );
         let Command::Register(opted_out) =
             Cli::try_parse_from(register.iter().chain(&["--relay-only"]))
@@ -810,6 +841,18 @@ mod tests {
         assert_eq!(mapping(&["--port-mapping", "off"]), PortMappingArg::Off);
         assert_eq!(mapping(&["--port-mapping"]), PortMappingArg::Always);
         assert_eq!(mapping(&["--port-mapping", "auto"]), PortMappingArg::Auto);
+        assert!(defaults.lan_first);
+        let Command::Connect(lan_first_off) =
+            Cli::try_parse_from(connect.iter().chain(&["--no-lan-first"]))
+                .unwrap()
+                .command
+        else {
+            panic!("expected connect command");
+        };
+        assert!(!lan_first_off.lan_first);
+        assert!(
+            Cli::try_parse_from(connect.iter().chain(&["--relay-only", "--no-lan-first"])).is_err()
+        );
     }
 
     #[test]

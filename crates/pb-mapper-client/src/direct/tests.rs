@@ -133,7 +133,10 @@ impl Share {
             false,
             true,
             diagnostics,
-            PortMapping::Off,
+            crate::sdk::DirectPolicy {
+                port_mapping: PortMapping::Off,
+                lan_first: true,
+            },
         );
         consumer
             .network

@@ -629,6 +629,11 @@ pub struct JsRegisterRequest {
     /// port: "auto" once punching through fails (default), "always", or "off".
     /// Ignored when direct is not allowed.
     pub port_mapping: Option<String>,
+    /// Probe a consumer's addresses on a local network shared with it first,
+    /// and again 20 and 50 ms later (default `true`). `false` probes them in
+    /// the order the consumer offered them. Ignored when direct is not
+    /// allowed.
+    pub lan_first: Option<bool>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -659,6 +664,11 @@ pub struct JsConnectRequest {
     /// port: "auto" once punching through fails (default), "always", or "off".
     /// Ignored on the relay-only path.
     pub port_mapping: Option<String>,
+    /// Try a local network shared with the publisher first (default `true`):
+    /// probe its addresses there first, and once that network is known to be
+    /// there, hold other paths back up to 150 ms for it. `false` dials every
+    /// path as soon as it answers. Ignored on the relay-only path.
+    pub lan_first: Option<bool>,
     pub key: String,
     pub local_addr: String,
     pub transport: String,
@@ -895,6 +905,7 @@ impl Client {
         let options = sdk::RegisterOptions {
             allow_direct: request.allow_direct.unwrap_or(true),
             port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
+            lan_first: request.lan_first.unwrap_or(true),
             ..Default::default()
         };
         let registration = self
@@ -924,6 +935,7 @@ impl Client {
             allow_direct: request.allow_direct.unwrap_or(true),
             idle_timeout: Some(Duration::from_millis(idle_timeout_ms as u64)),
             port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
+            lan_first: request.lan_first.unwrap_or(true),
         };
         let registration = self
             .inner
@@ -951,6 +963,7 @@ impl Client {
                 sdk::ConnectOptions {
                     path,
                     port_mapping: parse_port_mapping(request.port_mapping.as_deref())?,
+                    lan_first: request.lan_first.unwrap_or(true),
                 },
             )
             .await

@@ -26,7 +26,7 @@ use super::admin::Admin;
 use super::error::{AddressSnafu, Result, StatusSnafu};
 use super::handle::{Connection, LiveTunnel, Registration};
 use super::types::{RemoteId, ServiceConnection, Transport, TunnelStatus};
-use super::{ConnectOptions, PathPolicy, PortMapping, RegisterOptions};
+use super::{ConnectOptions, DirectPolicy, PathPolicy, PortMapping, RegisterOptions};
 use crate::client::run_client_side_cli_recovering_with_path;
 use crate::client::status::get_status_with_credential;
 use crate::server::{ServerTunnelOptions, StatusCallback, run_server_side_cli_recovering};
@@ -277,6 +277,7 @@ impl Client {
             allow_direct,
             idle_timeout,
             port_mapping,
+            lan_first,
         } = options;
         if request.key.trim().is_empty() {
             return Err(Error::invalid_config("service key is required"));
@@ -292,11 +293,14 @@ impl Client {
             .prepare_worker(&request.key, &request.local_addr)
             .await?;
         let credential = self.credential();
-        let port_mapping = worker.port_mapping(if allow_direct {
-            port_mapping
-        } else {
-            PortMapping::Off
-        });
+        let direct = worker.direct_policy(
+            if allow_direct {
+                port_mapping
+            } else {
+                PortMapping::Off
+            },
+            lan_first,
+        );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_server_side_cli_recovering::<TcpStreamProvider>(
@@ -310,7 +314,7 @@ impl Client {
                     context.diagnostics,
                     idle_timeout,
                     allow_direct,
-                    port_mapping,
+                    direct,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -325,7 +329,7 @@ impl Client {
                     context.diagnostics,
                     idle_timeout,
                     allow_direct,
-                    port_mapping,
+                    direct,
                 )
             }),
         };
@@ -388,10 +392,13 @@ impl Client {
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
-        let port_mapping = worker.port_mapping(match options.path {
-            PathPolicy::Auto => options.port_mapping,
-            PathPolicy::RelayOnly => PortMapping::Off,
-        });
+        let policy = worker.direct_policy(
+            match options.path {
+                PathPolicy::Auto => options.port_mapping,
+                PathPolicy::RelayOnly => PortMapping::Off,
+            },
+            options.lan_first,
+        );
         let handle = worker.spawn(move |context| async move {
             context.remote_addr.start();
             #[cfg(feature = "p2p")]
@@ -403,11 +410,11 @@ impl Client {
                     false,
                     keep_alive,
                     context.diagnostics.clone(),
-                    port_mapping,
+                    policy,
                 )
             });
             #[cfg(not(feature = "p2p"))]
-            let _ = port_mapping;
+            let _ = policy;
             let (events, mut ready) = mpsc::channel(1);
             let Ok(permit) = Arc::new(Semaphore::new(1)).acquire_owned().await else {
                 return;
@@ -466,10 +473,13 @@ impl Client {
         let credential = self.credential();
         let keep_alive = self.inner.keep_alive;
         let namespace = self.inner.namespace;
-        let port_mapping = worker.port_mapping(match options.path {
-            PathPolicy::Auto => options.port_mapping,
-            PathPolicy::RelayOnly => PortMapping::Off,
-        });
+        let direct = worker.direct_policy(
+            match options.path {
+                PathPolicy::Auto => options.port_mapping,
+                PathPolicy::RelayOnly => PortMapping::Off,
+            },
+            options.lan_first,
+        );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
                 run_client_side_cli_recovering_with_path::<TcpListenerProvider>(
@@ -484,7 +494,7 @@ impl Client {
                     context.diagnostics,
                     options.path,
                     is_datagram,
-                    port_mapping,
+                    direct,
                 )
             }),
             Transport::Udp => worker.spawn(move |context| {
@@ -500,7 +510,7 @@ impl Client {
                     context.diagnostics,
                     options.path,
                     is_datagram,
-                    port_mapping,
+                    direct,
                 )
             }),
         };
@@ -712,19 +722,25 @@ struct TunnelWorker {
 }
 
 impl TunnelWorker {
-    /// How this tunnel maps its direct endpoint's port, noted in its
-    /// diagnostics from the start when it may.
-    fn port_mapping(&self, mode: PortMapping) -> PortMapping {
-        let mode = if cfg!(feature = "port-mapping") {
-            mode
+    /// How this tunnel's direct setups go: how it maps its direct endpoint's
+    /// port, noted in its diagnostics from the start when it may, and whether
+    /// it tries a shared local network first.
+    fn direct_policy(&self, port_mapping: PortMapping, lan_first: bool) -> DirectPolicy {
+        let port_mapping = if cfg!(feature = "port-mapping") {
+            port_mapping
         } else {
             PortMapping::Off
         };
-        if mode != PortMapping::Off {
-            self.diagnostics
-                .port_mapping_requested(mode, crate::network::NetworkHints::shared().generation());
+        if port_mapping != PortMapping::Off {
+            self.diagnostics.port_mapping_requested(
+                port_mapping,
+                crate::network::NetworkHints::shared().generation(),
+            );
         }
-        mode
+        DirectPolicy {
+            port_mapping,
+            lan_first,
+        }
     }
 
     fn spawn<F, Fut>(self, start: F) -> LiveTunnel

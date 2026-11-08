@@ -17,6 +17,7 @@ pub use admin::{
 pub use client::{Client, ClientConfig, ConnectRequest, RegisterRequest};
 pub use error::{Error, Result};
 pub use handle::{Connection, Registration};
+pub(crate) use types::DirectPolicy;
 pub use types::{
     ConnectOptions, LegacyProtocol, PathPolicy, PortMapping, RegisterOptions, RemoteId,
     ServiceConnection, Transport, TunnelStatus,

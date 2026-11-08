@@ -197,17 +197,45 @@ impl Local {
     }
 }
 
-/// A setup's view of the peer, given this end's networks.
+/// A setup's view of the peer, given this end's networks, and whether this
+/// end acts on it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Assessment {
     pub local: Arc<Local>,
+    /// What the peer's offer showed of a shared network, reported whether
+    /// or not this end prefers it.
     pub evidence: Option<LanEvidence>,
+    /// LAN-first: whether this end tries a shared network first.
+    prefer: bool,
 }
 
 impl Assessment {
-    pub fn new(local: Arc<Local>, peer: &[SocketAddr]) -> Self {
+    pub fn new(local: Arc<Local>, peer: &[SocketAddr], prefer: bool) -> Self {
         let evidence = local.assess(peer);
-        Self { local, evidence }
+        Self {
+            local,
+            evidence,
+            prefer,
+        }
+    }
+
+    /// Whether this end tries a shared network first.
+    pub fn prefers(&self) -> bool {
+        self.prefer
+    }
+
+    /// The evidence this end acts on: none when it does not prefer the LAN.
+    pub fn preferred(&self) -> Option<LanEvidence> {
+        self.evidence.filter(|_| self.prefer)
+    }
+
+    /// Whether paths off the LAN wait for it, given whether a path on it has
+    /// answered an authenticated probe: only when this end prefers the LAN,
+    /// and the LAN is known to be there, by strong evidence or by that
+    /// answer. A private subnet that merely collides with the peer's never
+    /// answers, so it holds nothing back.
+    pub fn holds(&self, lan_answered: bool) -> bool {
+        self.prefer && (lan_answered || self.evidence.is_some_and(LanEvidence::strong))
     }
 
     /// Whether a peer address is on one of this end's local networks.
@@ -215,9 +243,13 @@ impl Assessment {
         self.local.interfaces.network_of(peer.ip()).is_some()
     }
 
-    /// The peer's candidates, those on a local network first, each order
-    /// kept.
+    /// The peer's candidates in the order they are probed: those on a local
+    /// network first when this end prefers it, each order kept; else as the
+    /// peer offered them.
     pub fn order(&self, peer: &[SocketAddr]) -> Vec<SocketAddr> {
+        if !self.prefer {
+            return peer.to_vec();
+        }
         let (mut lan, rest): (Vec<_>, Vec<_>) =
             peer.iter().copied().partition(|addr| self.is_lan(*addr));
         lan.extend(rest);
@@ -615,6 +647,21 @@ mod tests {
             None
         );
         assert_eq!(pc.assess(&[at("203.0.113.9")]), None);
+    }
+
+    /// LAN-first off changes what this end does, not what it sees: the
+    /// evidence is still reported, but nothing acts on it.
+    #[test]
+    fn lan_first_off_keeps_the_evidence_and_the_offered_order() {
+        let pc = Arc::new(this_pc());
+        let offered = [at("203.0.113.9"), at("192.168.21.100")];
+        let on = Assessment::new(pc.clone(), &offered, true);
+        assert_eq!(on.order(&offered), [offered[1], offered[0]]);
+        assert_eq!(on.preferred(), Some(LanEvidence::PublicIpSubnet));
+        let off = Assessment::new(pc, &offered, false);
+        assert_eq!(off.evidence, Some(LanEvidence::PublicIpSubnet));
+        assert_eq!(off.preferred(), None);
+        assert_eq!(off.order(&offered), offered);
     }
 
     #[test]

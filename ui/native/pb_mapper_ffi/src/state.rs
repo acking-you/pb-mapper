@@ -950,6 +950,7 @@ pub async fn register_service(
                 allow_direct,
                 idle_timeout: None,
                 port_mapping,
+                ..Default::default()
             },
         )
         .await
@@ -1050,6 +1051,7 @@ pub async fn connect_service(
                     PathPolicy::RelayOnly
                 },
                 port_mapping,
+                ..Default::default()
             },
         )
         .await
